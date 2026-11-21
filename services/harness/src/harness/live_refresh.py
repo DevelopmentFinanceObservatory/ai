@@ -36,6 +36,9 @@ One refresh (`LiveRefresh._refresh`):
    under the key the next refresh looks up.
 5. Otherwise replays the recipe (`harness.recipe_replay.replay_recipe`), which
    mints the roots, runs the verbs, and publishes the frame with its recipe.
+   The replay serves the website, where the share is viewed, so its dfo-apis
+   calls name the `website` surface with no caller: each run is shared work
+   (`common.caller.shared_work_context`), joined by every request for the card.
    The replayer reads the replay key once more before it publishes, under the
    key of the recipe it built, so a frame another instance published while this
    one replayed is not sent twice.
@@ -72,6 +75,7 @@ from typing import Any, Final
 
 from common import live_apis
 from common.apis_auth import apis_auth_provider
+from common.caller import WEBSITE_SURFACE, shared_work_context
 from common.live_apis import (
     DatasetVersion,
     FramePair,
@@ -515,7 +519,13 @@ class LiveRefresh:
             if self._in_flight >= self._max_in_flight:
                 return _pending(IN_FLIGHT_RETRY_AFTER_S, reason="in_flight")
             self._in_flight += 1
-            run = asyncio.create_task(self._run(component_id=component_id, revision=revision))
+            # Every request for the card joins the run, so it names no caller
+            # and serves the website, where the share is viewed: its root mints,
+            # reads and replay name `x-dfo-surface: website` to dfo-apis.
+            run = asyncio.create_task(
+                self._run(component_id=component_id, revision=revision),
+                context=shared_work_context(surface=WEBSITE_SURFACE),
+            )
             self._runs[key] = run
             run.add_done_callback(lambda _: self._release(key))
         # Shielded, so a caller that goes away leaves the run to the others
@@ -608,7 +618,7 @@ class LiveRefresh:
         )
         target = None if key is None else await self._apis.find_replay(replay_key=key)
         if target is None:
-            replayed = await self.replay(recipe, deadline=deadline)
+            replayed = await self.replay(recipe, deadline=deadline, surface=WEBSITE_SURFACE)
             if isinstance(replayed, Pending | Refused):
                 return _answer_of(replayed)
             if key is not None:
@@ -747,9 +757,11 @@ class LiveRefresh:
         recipe: Mapping[str, Any],
         *,
         deadline: CallDeadline,
+        surface: str,
         populations: Sequence[Mapping[str, Any]] | None = None,
     ) -> Replayed | Pending | Refused:
-        """Replay `recipe` with this refresh's clients, publisher, and row budget.
+        """Replay `recipe` with this refresh's clients, publisher, and row budget,
+        for `surface` (`harness.recipe_replay.replay_recipe`).
 
         A dataset that moved between a root's mint and its fetch refuses
         `upstream_version_changed`. The replay runs once more, and a second such
@@ -771,6 +783,7 @@ class LiveRefresh:
                 apis=self._apis,
                 publish=self.publish,
                 row_budget=self.row_budget,
+                surface=surface,
                 populations=populations,
             )
             if not (

@@ -21,6 +21,7 @@ from common.apis_auth import TOKEN_HEADER
 from common.caller import (
     CALLER_HEADER,
     CALLER_PRINCIPAL_HEADER,
+    SURFACE_HEADER,
     TURN_HEADER,
     set_supplied_caller,
     set_supplied_turn,
@@ -1428,17 +1429,29 @@ def test_continuing_method_reads_the_trace(trace: dict[str, Any], method: str | 
 
 
 _CONVERSATION_A = "conversation:" + "a" * 32
+_ADDRESS_A = "ip:" + "a" * 32
 _TURN_A = "tr_" + "a" * 16
 
 
-@pytest.mark.parametrize("named_by", ["header", "supplied"])
+@pytest.mark.parametrize(
+    ("named_by", "caller", "turn", "surface"),
+    [
+        ("header", _CONVERSATION_A, _TURN_A, "studio"),
+        ("supplied", _CONVERSATION_A, _TURN_A, "studio"),
+        ("header", _ADDRESS_A, None, "mcp"),
+    ],
+    ids=["studio-header", "studio-supplied", "public-mcp-client"],
+)
 async def test_a_shared_fetch_names_neither_the_caller_nor_the_turn_that_started_it(
-    named_by: str,
+    named_by: str, caller: str, turn: str | None, surface: str
 ) -> None:
     """Every read missing the table joins one fetch, so the fetch's dfo-apis calls
-    name no caller and no turn, whether conversation A's request named them in its
-    headers or the process supplied them. The control: a dfo-apis call conversation
-    A's request makes itself names both."""
+    name no caller and no turn, whether the starting request named them in its
+    headers or the process supplied them. They carry the principal and the
+    surface of the request that started the fetch: Studio for a conversation,
+    MCP for a public client the website named by address, as the public
+    `get_data` tool's statistics read is. The control: a dfo-apis call the
+    request makes itself names its caller."""
     clear_series_statistics_cache()
     data = _parquet_bytes([_row(stat_var="dcid:VarA")])
     digest = _digest_for(data)
@@ -1453,24 +1466,21 @@ async def test_a_shared_fetch_names_neither_the_caller_nor_the_turn_that_started
         seen.append(request)
         return httpx2.Response(200, content=data)
 
+    named = [(CALLER_HEADER, caller), (TURN_HEADER, turn)]
     inbound = Request(
         {
             "type": "http",
-            "headers": [
-                (CALLER_HEADER.encode(), _CONVERSATION_A.encode()),
-                (TURN_HEADER.encode(), _TURN_A.encode()),
-            ],
+            "headers": [(k.encode(), v.encode()) for k, v in named if v is not None],
         }
     )
     settings = _settings(dfo_caller_principal="caller-principal-secret")
-    identity = (CALLER_PRINCIPAL_HEADER, CALLER_HEADER, TURN_HEADER)
     async with _client(snapshot_handler, settings=settings) as upstream:
         client_holder.set_client(upstream)
 
-        async def as_conversation_a() -> None:
+        async def as_the_caller() -> None:
             if named_by == "supplied":
-                set_supplied_caller(_CONVERSATION_A)
-                set_supplied_turn(_TURN_A)
+                set_supplied_caller(caller)
+                set_supplied_turn(turn)
             await upstream.request("GET", "/api/control", route="/api/control")
             await fetch_series_statistics_table(
                 subject_id=_SPEC_ID,
@@ -1483,15 +1493,68 @@ async def test_a_shared_fetch_names_neither_the_caller_nor_the_turn_that_started
 
         if named_by == "header":
             with set_http_request(inbound):
-                await as_conversation_a()
+                await as_the_caller()
         else:
-            await asyncio.create_task(as_conversation_a())
+            await asyncio.create_task(as_the_caller())
 
     control, *shared = seen
-    assert (control.headers[CALLER_HEADER], control.headers[TURN_HEADER]) == (
-        _CONVERSATION_A,
-        _TURN_A,
-    )
+    assert (control.headers[CALLER_HEADER], control.headers.get(TURN_HEADER)) == (caller, turn)
     assert len(shared) == 2  # the link and the GET
     for request in shared:
-        assert not set(identity) & set(request.headers.keys()), request.url
+        assert not {CALLER_HEADER, TURN_HEADER} & set(request.headers.keys()), request.url
+        assert (request.headers[CALLER_PRINCIPAL_HEADER], request.headers[SURFACE_HEADER]) == (
+            "caller-principal-secret",
+            surface,
+        ), request.url
+
+
+async def test_reads_of_two_surfaces_never_join_one_fetch() -> None:
+    """A Studio read and a public MCP read of one table, both in flight at once,
+    each fetch through a flight of their own, so neither's dfo-apis calls log
+    under the other's surface."""
+    clear_series_statistics_cache()
+    data = _parquet_bytes([_row(stat_var="dcid:VarA")])
+    digest = _digest_for(data)
+    artifact = _manifest(rendering={"statistics": "series"}, artifact_digest=digest).artifacts[0]
+    gets: list[httpx2.Request] = []
+    release = asyncio.Event()
+
+    def snapshot_handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
+
+    async def get_handler(request: httpx2.Request) -> httpx2.Response:
+        gets.append(request)
+        await release.wait()
+        return httpx2.Response(200, content=data)
+
+    transport = httpx2.MockTransport(get_handler)
+    settings = _settings(dfo_caller_principal="caller-principal-secret")
+    async with _client(snapshot_handler, settings=settings) as upstream:
+        client_holder.set_client(upstream)
+
+        def read_as(caller: str) -> asyncio.Task[pa.Table]:
+            inbound = Request(
+                {"type": "http", "headers": [(CALLER_HEADER.encode(), caller.encode())]}
+            )
+            with set_http_request(inbound):
+                return asyncio.create_task(
+                    fetch_series_statistics_table(
+                        subject_id=_SPEC_ID,
+                        content_version=_CONTENT_VERSION,
+                        artifact=artifact,
+                        expected_series=1,
+                        continuing=None,
+                        transport=transport,
+                    )
+                )
+
+        reads = [read_as(_CONVERSATION_A), read_as(_ADDRESS_A)]
+        # A shared flight would send one GET and hold it; poll rather than wait
+        # on an event the failing case never sets.
+        async with asyncio.timeout(5):
+            while len(gets) < 2:
+                await asyncio.sleep(0.01)
+        release.set()
+        await asyncio.gather(*reads)
+
+    assert sorted(request.headers[SURFACE_HEADER] for request in gets) == ["mcp", "studio"]

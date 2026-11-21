@@ -54,7 +54,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from .replay_support import REPORTERS, SPEC, STAT_VAR, reporter_frame, reporter_rows, yearly
-from .test_recipe_replay import Scene
+from .test_recipe_replay import SHARED_WIRE, Scene, Wire, wire_identity
 
 FRANCE, BRITAIN, AMERICA = REPORTERS
 # The growth frame's view: one row for each reporter.
@@ -129,21 +129,27 @@ async def scene() -> AsyncIterator[Scene]:
 
 
 class Replays:
-    """`RollingCards`' replay interface over the scene, keeping each call's populations."""
+    """`RollingCards`' replay interface over the scene, keeping each call's populations
+    and surface."""
 
     def __init__(self, scene: Scene) -> None:
         self._scene = scene
         self.populations: list[Sequence[Mapping[str, Any]]] = []
+        self.surfaces: list[str] = []
 
     async def __call__(
         self,
         recipe: Mapping[str, Any],
         *,
         deadline: CallDeadline,
+        surface: str,
         populations: Sequence[Mapping[str, Any]],
     ) -> Replayed | Pending | Refused:
         self.populations.append(populations)
-        return await self._scene.replay(recipe, deadline=deadline, populations=populations)
+        self.surfaces.append(surface)
+        return await self._scene.replay(
+            recipe, deadline=deadline, surface=surface, populations=populations
+        )
 
 
 class Platform:
@@ -307,12 +313,13 @@ async def test_a_replay_a_conversation_starts_names_neither_its_caller_nor_its_t
 ) -> None:
     """Another conversation's card may join the replay, so its dfo-apis calls,
     in process and through the harness's MCP clients alike, name no conversation
-    and no turn."""
+    and no turn. They name the Studio surface on the MCP hop and on dfo-apis
+    reads, and nothing on dfo-apis writes."""
     ref, _ = await scene.rolling()
     replays = Replays(scene)
-    seen: list[tuple[str | None, str | None, CallerTurn]] = []
+    seen: list[tuple[str | None, str | None, CallerTurn, Wire]] = []
     scene.tools.after = lambda _name: seen.append(
-        (current_caller(), current_turn(), current_caller_turn())
+        (current_caller(), current_turn(), current_caller_turn(), wire_identity())
     )
     caller, turn = conversation_caller("user-1/conv-a"), "tr_" + "1" * 16
     current_conversation_id.set("user-1/conv-a")
@@ -331,8 +338,9 @@ async def test_a_replay_a_conversation_starts_names_neither_its_caller_nor_its_t
     )
 
     assert len(replays.populations) == 1
+    assert replays.surfaces == ["studio"]
     assert seen
-    assert set(seen) == {(None, None, CallerTurn(None, None))}
+    assert set(seen) == {(None, None, CallerTurn(None, None, "studio"), SHARED_WIRE)}
 
 
 async def test_a_replay_a_conversation_starts_records_nothing_on_its_turns_trace(
@@ -627,11 +635,14 @@ async def test_a_replay_cut_at_its_deadline_is_tried_again_from_the_steps_in_the
     ran_out = Clock()
 
     class CutAfterTheVerb(Replays):
-        async def __call__(self, recipe: Any, *, deadline: Any, populations: Any) -> Any:
+        async def __call__(
+            self, recipe: Any, *, deadline: Any, surface: str, populations: Any
+        ) -> Any:
             del deadline
             return await super().__call__(
                 recipe,
                 deadline=CallDeadline(expires_at=50.0, clock=ran_out),
+                surface=surface,
                 populations=populations,
             )
 
