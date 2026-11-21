@@ -633,6 +633,64 @@ async def test_the_statvars_a_summed_read_added_up_reach_the_result_and_the_dige
     assert identity.startswith("frame reference:")
 
 
+# A CRS purpose code as dfo-apis' `POST /api/graph/nodes` answers it.
+_PURPOSE_NODE = {
+    "ref": "CRSPurposeCode15220",
+    "kind": "code",
+    "label": "civilian peace-building, conflict prevention and resolution (CRS Purpose)",
+    "code": {
+        "code": "15220",
+        "property": "crsPurpose",
+        "code_system": {"ref": "CRSPurposeCodeEnum", "label": "CRS Purpose"},
+    },
+}
+
+
+async def test_a_digest_names_a_breakdown_code_cell_by_its_label_and_keeps_a_label_cell(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    body = _recorded_ready("aggregate")
+    summary = body["summary"]
+    groups = summary["result"]["group_summaries"]
+    keyed = [
+        {**group, "group_key": [["stat_var_crsPurpose", cell]]}
+        for group, cell in zip(groups, ["CRSPurposeCode15220", "agriculture"], strict=True)
+    ]
+    answer = {
+        **body,
+        "summary": {
+            **summary,
+            "parameters": {**summary["parameters"], "group_by": ["stat_var_crsPurpose"]},
+            "result": {**summary["result"], "group_summaries": keyed},
+        },
+    }
+
+    def reply(request: dict[str, Any]) -> httpx2.Response:
+        if "dcids" in request:
+            held = [
+                _PURPOSE_NODE
+                if dcid == _PURPOSE_NODE["ref"]
+                else {"ref": dcid, "status": "not_held"}
+                for dcid in request["dcids"]
+            ]
+            return httpx2.Response(200, json={"nodes": held})
+        return httpx2.Response(200, json=answer)
+
+    runner = _install(reply)
+
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    assert result.is_error is False, result.content
+    text = result.content[0].text
+    assert "stat_var_crsPurpose=civilian peace-building, conflict prevention and resolution" in text
+    assert "stat_var_crsPurpose=agriculture" in text
+    assert "CRSPurposeCode15220" not in text
+    reads = [request for request in runner.requests if request.url.path == "/api/graph/nodes"]
+    assert [json.loads(request.content) for request in reads] == [
+        {"dcids": ["CRSPurposeCode15220", "agriculture"]}
+    ]
+
+
 async def test_an_answer_whose_summed_reads_do_not_fit_refuses_as_outside_the_contract(
     store: InMemoryMaterialisationStore,
 ) -> None:

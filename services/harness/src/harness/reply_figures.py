@@ -10,6 +10,10 @@ The platform's fact summary lists at most twelve of a card's series, so no
 count, extreme or value here is read from it. It supplies only identity,
 where the payload carries none: a stat card's series id, and the coordinates
 of the series it lists, which a series is named by.
+
+A breakdown cell (`stat_var_<axis>`) may hold a code's dcid. `labelled` names a
+table's series by the labels of its cells, and a name matches a coordinate by
+its value or by its label (`common.breakdown_labels`).
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from analysis_mcp.coordinates import coordinate_text
+from common.breakdown_labels import NO_LABELS, Cell, CellLabels
 from dfo_frame_grammar.grammar import (
     FACET_IDENTITY_COLUMNS,
     STAT_VAR_COLUMN,
@@ -46,13 +51,15 @@ class DrawnSeries:
     """One series a card draws. `points` are its observed points, each a
     period and a value, in drawn order, which need not be period order
     (`series_ends`); a point with no value is left out. `coordinates` are
-    None when nothing states them."""
+    None when nothing states them. `cells` are the dimension cells a table's
+    series label joins, empty for a series the platform labels itself."""
 
     id: str | None
     label: str
     unit: Any
     points: tuple[Point, ...]
     coordinates: Mapping[str, str] | None = None
+    cells: tuple[Cell, ...] = ()
 
 
 def drawn_series(component: Mapping[str, Any], summary: Mapping[str, Any]) -> list[DrawnSeries]:
@@ -164,20 +171,39 @@ def _table_series(rows: Sequence[Mapping[str, Any]]) -> list[DrawnSeries]:
     series = []
     for key, members in groups.items():
         dimensions = members[0].get("dimensions") or {}
-        entities = [
-            str(dimensions[name])
+        entities = tuple(
+            (name, str(dimensions[name]))
             for name in sorted(names)
             if name not in _UNLABELLED_DIMENSIONS and dimensions.get(name) is not None
-        ]
+        )
         series.append(
             DrawnSeries(
                 id=key if by_id else None,
-                label=" / ".join(entities) or str(dimensions.get(STAT_VAR_COLUMN) or ""),
+                label=_joined(entities, NO_LABELS) or str(dimensions.get(STAT_VAR_COLUMN) or ""),
                 unit=members[0].get("unit"),
                 points=_observed(members),
+                cells=entities,
             )
         )
     return series
+
+
+def _joined(cells: Sequence[Cell], labels: CellLabels) -> str:
+    """A table series' label: its cells' texts (`CellLabels.text`), joined."""
+    return " / ".join(labels.text(name, value) for name, value in cells)
+
+
+def series_cells(series: Sequence[DrawnSeries]) -> list[Cell]:
+    """Every cell `series` are labelled or named by: a table series' dimension
+    cells and each series' coordinates, whose breakdown cells `labelled` and
+    `card_result` read labels for."""
+    return [cell for one in series for cell in (*one.cells, *(one.coordinates or {}).items())]
+
+
+def labelled(series: Sequence[DrawnSeries], labels: CellLabels) -> list[DrawnSeries]:
+    """`series` with each table series labelled by its cells' `labels`; a
+    series the platform labels keeps its label."""
+    return [replace(one, label=_joined(one.cells, labels)) if one.cells else one for one in series]
 
 
 def _identified(
@@ -212,12 +238,14 @@ def _coordinates(entry: Mapping[str, Any]) -> dict[str, str] | None:
     return held or None
 
 
-def unplaced_names(series: Sequence[DrawnSeries], names: Sequence[str]) -> list[str]:
+def unplaced_names(
+    series: Sequence[DrawnSeries], names: Sequence[str], *, labels: CellLabels = NO_LABELS
+) -> list[str]:
     """The `names` matching no series of a card some of whose series state no
     coordinates, since a name among them may be one of those series."""
     if all(one.coordinates is not None for one in series):
         return []
-    return [name for name in names if not _named(series, name)]
+    return [name for name in names if not _named(series, name, labels)]
 
 
 def with_coordinates(
@@ -272,6 +300,7 @@ def card_result(
     state_period: str | None = None,
     on_canvas: Collection[str] = (),
     cut: TopMembers | None = None,
+    labels: CellLabels = NO_LABELS,
 ) -> dict[str, Any]:
     """What `make_charts` returns of a drawn card beside its title.
 
@@ -296,7 +325,8 @@ def card_result(
       is a new card.
 
     A name matches a series on its label or on the value of a coordinate
-    that tells the card's series apart, whatever its case. A name matching
+    that tells the card's series apart, or that value's label in `labels`,
+    whatever its case. A name matching
     none is listed under `not_in_card`, or under `not_matched` while a series
     of the card states no coordinates, since it may be that series. A stated
     series with no value at `state_period`, or with no value to give at all,
@@ -306,7 +336,7 @@ def card_result(
     chosen: list[DrawnSeries] = []
     unmatched: list[str] = []
     for name in state_values_for:
-        named = _named(series, name)
+        named = _named(series, name, labels)
         if not named:
             unmatched.append(name)
         chosen += [one for one in named if one not in chosen]
@@ -395,9 +425,12 @@ def card_holds(series: Sequence[DrawnSeries], *, cut: TopMembers | None = None) 
     return holds
 
 
-def _named(series: Sequence[DrawnSeries], name: str) -> list[DrawnSeries]:
+def _named(
+    series: Sequence[DrawnSeries], name: str, labels: CellLabels = NO_LABELS
+) -> list[DrawnSeries]:
     """The series `name` names: those labelled it, or holding it as the value
-    of a coordinate that not every series of the card holds at that value."""
+    of a coordinate, or as that value's label in `labels`, that not every
+    series of the card holds at that value."""
     wanted = name.strip().casefold()
     placed = [one.coordinates for one in series if one.coordinates is not None]
 
@@ -409,7 +442,8 @@ def _named(series: Sequence[DrawnSeries], name: str) -> list[DrawnSeries]:
         for one in series
         if wanted == one.label.casefold()
         or any(
-            wanted == value.casefold() and tells_apart(key, value)
+            wanted in {value.casefold(), labels.text(key, value).casefold()}
+            and tells_apart(key, value)
             for key, value in (one.coordinates or {}).items()
         )
     ]

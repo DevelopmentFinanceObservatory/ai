@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from common.breakdown_labels import NO_LABELS, CellLabels
 from common.materialisation import FrameRef
 from common.period_note import period_note
 from data_mcp.frame_materialisation import DegradedReason, MaterialisationOutcome
@@ -1164,6 +1165,7 @@ def _family_digest(
     series_entities: list[list[dict[str, str]]] | None = None,
     citation_sources: list[dict[str, Any]] | None = None,
     breakdown: BreakdownLevel | None = None,
+    cell_labels: CellLabels = NO_LABELS,
 ) -> str:
     """A described family's digest, each series labelled `dcid:<spec_id>`, rendered as
     the sum `summed` describes."""
@@ -1190,6 +1192,7 @@ def _family_digest(
         ],
         summed=summed,
         breakdown=breakdown,
+        cell_labels=cell_labels,
     )
 
 
@@ -1296,6 +1299,30 @@ def test_a_sector_breakdown_reads_per_entity_and_code() -> None:
             "recipient country/KEN · unit dcid:USDollar\n"
         ) in digest
     assert "Summed total of" not in digest
+
+
+def test_a_sector_breakdown_names_a_code_cell_by_its_label_and_keeps_a_label_cell() -> None:
+    peace = "civilian peace-building, conflict prevention and resolution"
+    digest = _family_digest(
+        warnings=[_STAT_VARS_SUMMED_WARNING],
+        dimensions=[
+            {"label": "recipient", "count": 1, "axis": "destination"},
+            {"label": "stat_var_crsPurpose", "count": 2},
+        ],
+        series_entities=[
+            [
+                {"role": "recipient", "ref": "country/KEN"},
+                {"role": "stat_var_crsPurpose", "ref": cell},
+            ]
+            for cell in ("CRSPurposeCode15220", "Humanitarian aid")
+        ],
+        breakdown=BreakdownLevel(code_system="crsPurpose", level=0),
+        cell_labels=CellLabels({("stat_var_crsPurpose", "CRSPurposeCode15220"): peace}),
+    )
+
+    for sector in (peace, "Humanitarian aid"):
+        assert f"Sum of the OECD DAC2a family within crsPurpose code {sector} · " in digest
+    assert "CRSPurposeCode15220" not in digest
 
 
 def test_a_summed_subject_family_reads_per_entity() -> None:

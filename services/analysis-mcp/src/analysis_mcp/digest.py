@@ -30,8 +30,10 @@ Each renderer's `_truncation_note` call names which rule it used.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from typing import Any
 
+from common.breakdown_labels import NO_LABELS, Cell, CellLabels
 from common.echoed_text import truncate_value
 from common.time_grain import span_label
 from common.unit_refs import PERCENT_UNIT
@@ -109,13 +111,19 @@ def _unit_text(unit: UnitCell | None) -> str:
     return truncate_value(unit_name(unit))
 
 
+# How `_key_text` names a key's cell, `render_summary_digest`'s labels while it renders.
+_cell_text: ContextVar[Callable[[str, str], str]] = ContextVar("cell_text", default=NO_LABELS.text)
+
+
 def _key_text(key: Sequence[tuple[str, str]]) -> str:
-    """The `column=value, ...` text for an entity/group key tuple. Each
-    value is capped (`truncate_value`); each column name is not, since a
+    """The `column=value, ...` text for an entity/group key tuple, each
+    breakdown cell named by its label where one was read (`_cell_text`).
+    Each value is capped (`truncate_value`); each column name is not, since a
     column name is schema, not a per-row data value."""
     if not key:
         return "(all rows)"
-    return ", ".join(f"{column}={truncate_value(value)}" for column, value in key)
+    text = _cell_text.get()
+    return ", ".join(f"{column}={truncate_value(text(column, value))}" for column, value in key)
 
 
 # How a flow party role's pooled parties are named in a sum's private-party line, one and
@@ -1592,14 +1600,44 @@ def _summed_line(summed: Sequence[StatVarsSummed]) -> str:
     return f"summed: {reads}."
 
 
-def render_summary_digest(summary: VerbSummary, *, heading: str | None = None) -> str:
+def digest_cells(summary: VerbSummary, *, heading: str | None = None) -> list[Cell]:
+    """The `(column, value)` cells of every key `render_summary_digest` names, in the
+    order it names them: the cells whose labels the digest can show
+    (`common.breakdown_labels.label_cells`), and no cell of a key the list caps leave
+    out."""
+    named: list[Cell] = []
+
+    def record(column: str, value: str) -> str:
+        named.append((column, value))
+        return value
+
+    token = _cell_text.set(record)
+    try:
+        _render_summary_digest(summary, heading=heading)
+    finally:
+        _cell_text.reset(token)
+    return named
+
+
+def render_summary_digest(
+    summary: VerbSummary, *, heading: str | None = None, labels: CellLabels = NO_LABELS
+) -> str:
     """The digest of a verb call the runner `summary` states, rendered by its
     verb's `render_*_digest` from the summary's facts, canonical parameters,
     identity, derived marker, exclusions and time, with the latest year its
     relative periods were filled from (`_rolling_section`) and the StatVars each
     summed read added up (`_summed_line`) before the identity.
     `heading`, when given, opens a `sum_of` or `quotient_of` digest in the verb's
-    place."""
+    place. Every key's breakdown cell reads as its label in `labels`, else as its
+    value."""
+    token = _cell_text.set(labels.text)
+    try:
+        return _render_summary_digest(summary, heading=heading)
+    finally:
+        _cell_text.reset(token)
+
+
+def _render_summary_digest(summary: VerbSummary, *, heading: str | None) -> str:
     parameters = summary.parameters
     result = summary.result
     render: Callable[..., str]

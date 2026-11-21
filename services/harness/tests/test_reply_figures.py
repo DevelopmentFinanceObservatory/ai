@@ -6,8 +6,15 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from common.breakdown_labels import CellLabels
 from harness.chart_binding import TopMembers
-from harness.reply_figures import card_result, drawn_series, unplaced_names, with_coordinates
+from harness.reply_figures import (
+    DrawnSeries,
+    card_result,
+    drawn_series,
+    unplaced_names,
+    with_coordinates,
+)
 
 from . import drawn_cards
 from .resolved_revision import resolved_revision
@@ -481,3 +488,39 @@ def test_a_stat_card_of_a_series_on_the_canvas_gives_no_figure() -> None:
     result = _result(resolved_revision("stat_card"), ["country/ETH"], on_canvas=["s_eth"])
 
     assert result["reply_figures"] == []
+
+
+@pytest.mark.parametrize(
+    ("name", "label"),
+    [
+        ("Civilian peace-building, conflict prevention and resolution", "first"),
+        ("CRSPurposeCode15220", "first"),
+        ("basic education", "second"),
+    ],
+)
+def test_a_name_finds_a_breakdown_coordinate_by_its_value_or_its_label(
+    name: str, label: str
+) -> None:
+    """A coordinate holding a code dcid is named by the dcid or by its label,
+    and one holding a label by the label. The two series hold other units, so
+    the card states no extremes and the figures are the named series' alone."""
+    peace = "civilian peace-building, conflict prevention and resolution"
+    series = [
+        DrawnSeries(
+            id=f"s_{own}",
+            label=own,
+            unit=unit,
+            points=(("2024", 7.0),),
+            coordinates={"stat_var_crsPurpose": cell},
+        )
+        for own, cell, unit in (
+            ("first", "CRSPurposeCode15220", "USD"),
+            ("second", "basic education", "EUR"),
+        )
+    ]
+    labels = CellLabels({("stat_var_crsPurpose", "CRSPurposeCode15220"): peace})
+
+    result = card_result(series, state_values_for=[name], labels=labels)
+
+    assert [figure["series"] for figure in result["reply_figures"]] == [label]
+    assert "not_in_card" not in result

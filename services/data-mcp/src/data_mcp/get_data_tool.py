@@ -30,6 +30,7 @@ from typing import Annotated, Any, Literal
 
 import httpx2
 import pyarrow as pa
+from common.breakdown_labels import CellLabels, label_cells
 from common.caller import current_writer
 from common.materialisation import FrameRef, MintRecord
 from common.place_type import PARTY_ROLES, type_column
@@ -787,6 +788,35 @@ async def _fetch_warning_labels(manifest: Manifest, *, deadline: CallDeadline) -
     return labels
 
 
+async def _fetch_breakdown_labels(
+    series_stats: Sequence[SeriesStatisticsModel] | None, *, deadline: CallDeadline
+) -> CellLabels:
+    """The labels of the breakdown cells `series_stats` name (`stat_var_<axis>` entities),
+    read through `node_lookup.describe_nodes` (`common.breakdown_labels.label_cells`).
+
+    The read must end with `_STATISTICS_RESERVE_S` of `deadline` still left. A failed or
+    late read is logged and labels nothing, so the digest names those cells by their values.
+    """
+    cells = [
+        (entity.role, entity.ref) for series in series_stats or () for entity in series.entities
+    ]
+
+    async def read_nodes(dcids: list[str]) -> list[dict[str, Any]]:
+        try:
+            async with asyncio.timeout(deadline.reserving(_STATISTICS_RESERVE_S).remaining()):
+                outcomes = await node_lookup.describe_nodes(dcids)
+        except (UpstreamError, ValueError, TimeoutError) as exc:
+            logger.warning("get_data: could not label the breakdown cells: %s", exc)
+            return []
+        return [
+            node.model_dump(mode="json")
+            for node in outcomes.values()
+            if not isinstance(node, NotHeldEntry)
+        ]
+
+    return await label_cells(cells, read_nodes=read_nodes)
+
+
 def _mint_json_or_refusal(response: httpx2.Response) -> dict[str, Any] | ToolResult:
     """The mint response's parsed JSON body, or the refusal for one that does not parse."""
     try:
@@ -993,6 +1023,7 @@ async def _finish_mint_response(
         series_stats=series_stats,
         description=description,
     )
+    cell_labels = await _fetch_breakdown_labels(series_stats, deadline=deadline)
 
     # The digest and the returned manifest carry the same labelled warning messages.
     manifest = manifest.model_copy(
@@ -1012,6 +1043,7 @@ async def _finish_mint_response(
             breakdown=breakdown,
             description=description,
             summed=summed,
+            cell_labels=cell_labels,
         )
     except ValueError as exc:
         return to_tool_result(ToolRefusal.upstream_response_unusable(detail=str(exc)))

@@ -59,6 +59,8 @@ import httpx2
 import pyarrow as pa
 from analysis_mcp.frame_ref_resolution import read_derived_marker
 from analysis_mcp.identity import OP_SPEC_HASH_PREFIX
+from analysis_mcp.runner_client import read_graph_nodes
+from common.breakdown_labels import label_cells
 from common.materialisation import FrameRef
 from common.materialisation import get_store as get_frame_store
 from common.place_type import (
@@ -167,6 +169,8 @@ from harness.reply_figures import (
     DrawnSeries,
     card_result,
     drawn_series,
+    labelled,
+    series_cells,
     unplaced_names,
     with_coordinates,
 )
@@ -2323,7 +2327,9 @@ def build_orchestrator_tools(
         The rows of the frame the card draws (`_drawn_store_ref`) are read
         only for a name in `chart.state_values_for` that matches no series
         while some state no coordinates: the platform's summary lists the
-        coordinates of twelve."""
+        coordinates of twelve. The breakdown cells the series are labelled and
+        named by read as their labels (`common.breakdown_labels`), in one read
+        of their graph nodes; a select keeps binding the cell values."""
         payload = component.get("payload") or {}
         series = drawn_series(payload.get("component") or {}, component.get("fact_summary") or {})
         if unplaced_names(series, chart.state_values_for):
@@ -2332,13 +2338,15 @@ def build_orchestrator_tools(
                 functools.partial(_coordinate_rows, series=series),
             )
             series = placed or series
+        labels = await label_cells(series_cells(series), read_nodes=read_graph_nodes)
         return card_result(
-            series,
+            labelled(series, labels),
             state_values_for=chart.state_values_for,
             state_span=chart.state_span,
             state_period=chart.state_period,
             on_canvas=on_canvas,
             cut=cut,
+            labels=labels,
         )
 
     async def _stored_card(component_id: str) -> dict[str, Any] | None:

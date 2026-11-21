@@ -5,7 +5,9 @@ and computing it on dfo-apis' analysis runner (`run_on_runner`).
 The registered tools (`verbs`) compute in dfo-apis' analysis runner.
 `run_on_runner` sends a validated op-spec as a one-node tree
 (`runner_tree.verb_tree`) and turns the runner's summary into the reply, its
-`VerbResult` and its digest (`digest.render_summary_digest`).
+`VerbResult` and its digest (`digest.render_summary_digest`), whose breakdown
+cells read as their labels (`common.breakdown_labels`), read from the graph
+nodes of the cells the digest names (`digest.digest_cells`).
 
 On a public call (`rebuild_lost_frames`), a frame the runner no longer holds
 (`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_` frame
@@ -33,13 +35,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from common.breakdown_labels import label_cells
 from common.materialisation import FrameRef
 from common.refusal import REPOST_RECOVERS_CODES
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, ValidationError
 
-from analysis_mcp.digest import render_summary_digest
-from analysis_mcp.runner_client import Pair, replay_derived, run_tree
+from analysis_mcp.digest import digest_cells, render_summary_digest
+from analysis_mcp.runner_client import Pair, read_graph_nodes, replay_derived, run_tree
 from analysis_mcp.runner_tree import Tree, newest_ref, record_spec_reads, spec_root, verb_tree
 from analysis_mcp.summary import VerbSummary
 from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal, to_tool_result
@@ -255,7 +258,8 @@ async def run_on_runner(
         )
         if sentence is not None
     ]
-    digest = render_summary_digest(answer, heading=heading)
+    labels = await label_cells(digest_cells(answer, heading=heading), read_nodes=read_graph_nodes)
+    digest = render_summary_digest(answer, heading=heading, labels=labels)
     return ToolResult(
         content="\n\n".join([" ".join(sentences), digest]) if sentences else digest,
         structured_content=answer.verb_result().model_dump(mode="json"),

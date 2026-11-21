@@ -3268,6 +3268,60 @@ async def test_statistics_are_fetched_and_rendered_in_the_digest(
     assert "first 1.0k (2015)" in text_of(result)
 
 
+async def test_a_breakdown_code_cell_is_named_by_its_label_and_a_label_cell_stays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored = _stored_definition()
+    cells = ("CRSPurposeCode15220", "agriculture")
+
+    async def fake_fetch(**_kwargs: Any) -> list[SeriesStatisticsModel]:
+        point = {"value": 1000.0, "period": "2015"}
+        return [
+            SeriesStatisticsModel.model_validate(
+                {
+                    "stat_var": "dcid:MalariaGrantDisbursements",
+                    "entities": [
+                        {"role": "recipient", "ref": "country/KEN"},
+                        {"role": "stat_var_crsPurpose", "ref": cell},
+                    ],
+                    "facet": {"unit": "USD"},
+                    "observations": 1,
+                    **dict.fromkeys(("first", "latest", "minimum", "maximum"), point),
+                }
+            )
+            for cell in cells
+        ]
+
+    monkeypatch.setattr(get_data_tool, "fetch_series_statistics", fake_fetch)
+    code = load_node_fixture("node_code")
+    node_requests: list[list[str]] = []
+    mint = _manifest_response_with_statistics(spec_id=stored.spec_id, series_count=len(cells))
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            return httpx2.Response(200, json=mint)
+        if request.url.path == _NODES_PATH:
+            dcids = json.loads(request.content)["dcids"]
+            node_requests.append(dcids)
+            entries = [
+                code if dcid == code["ref"] else {"ref": dcid, "status": "not_held"}
+                for dcid in dcids
+            ]
+            return httpx2.Response(200, json={"nodes": entries})
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    result = await _call_get_data(handler, _StubStore(stored), {"spec_id": stored.spec_id})
+
+    assert result.is_error is False
+    text = text_of(result)
+    assert (
+        "stat_var_crsPurpose civilian peace-building, conflict prevention and resolution · " in text
+    )
+    assert "stat_var_crsPurpose agriculture · " in text
+    assert "CRSPurposeCode15220" not in text
+    assert node_requests == [list(cells)]
+
+
 async def test_a_statistics_fetch_failure_degrades_to_a_count_only_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
