@@ -129,7 +129,7 @@ _SUBSET_RULE = "display order"
 # turn that drew each card: this turn's cards on the canvas, the pinned cards,
 # the earlier cards still on the canvas, newest turn first, and then the cards
 # off the canvas, this turn's first and then newest turn first. The canvas
-# order, which the user changes, plays no part in the rank; each card on the
+# order, which the user changes, plays no part in the rank. Each card on the
 # canvas states its place in it. `_DIGEST_BLOCK_CAP` cards on the canvas come
 # in full, and past them each of the three on-canvas groups names up to
 # `_LISTING_COMPACT_CAP` cards compactly (`_compact_entry`: id, type and title
