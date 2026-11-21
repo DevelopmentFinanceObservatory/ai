@@ -704,7 +704,8 @@ def _surface_call_outcome(tool: str, result: ToolCallResult) -> dict[str, Any]:
     call has no summary, since its plan step's label already says what it
     did, and states the `rows` its result holds when its structured content
     counts them, as an analysis verb's does, with the `ranked_before_limit`
-    of a limited ranking. The digest text is written for the model and names
+    of a limited ranking, the rows it left out by reason (`_left_out`) and
+    the StatVars each summed reading added up (`_stat_vars_summed`). The digest text is written for the model and names
     dcids and dimension keys, so it never becomes the summary.
 
     A refusal carries `code`, `retry_mode`, `fix` and `message`, read off
@@ -725,11 +726,15 @@ def _surface_call_outcome(tool: str, result: ToolCallResult) -> dict[str, Any]:
             **({"period_note": note} if note else {}),
         }
     if not result.is_error:
-        counted: dict[str, int] = {}
+        counted: dict[str, Any] = {}
         if isinstance(body.get("rows"), int):
             counted["rows"] = body["rows"]
         if (ranked := declared_ranked_before_limit(body)) is not None:
             counted["ranked_before_limit"] = ranked
+        if left_out := _left_out(body):
+            counted["left_out"] = left_out
+        if summed := _stat_vars_summed(body):
+            counted["stat_vars_summed"] = summed
         return {"outcome": "ok", "frame_refs": [], "summary": None, **counted}
     return {
         "outcome": "refusal",
@@ -740,6 +745,53 @@ def _surface_call_outcome(tool: str, result: ToolCallResult) -> dict[str, Any]:
             "message": str(body.get("message") or result.text),
         },
     }
+
+
+# What a verb's left-out rows were, by `analysis_mcp.artifact.Exclusion`
+# reason, as a step's line names them. `beyond_limit` rows are the ranking's
+# own cut, which its kept count already states; `entity_not_selected` and
+# `period_unmatched` rows are ones the plan asked to drop, as the analysis
+# digest also leaves them unnamed.
+_LEFT_OUT_TEXT: dict[str, str] = {
+    "party_total": "of group totals",
+    "party_residual": "of unallocated amounts",
+    "non_finite": "with no finite value",
+    "outside_window": "outside the years asked for",
+    "endpoint_missing": "with no value in the first or last year",
+    "zero_or_sign_crossing_base": "with a zero or sign-crossing base",
+    "predicate": "that the filter removed",
+    "unmatched_key": "with no match on the other side",
+    "unit_unbound": "with no unit",
+    "unit_not_selected": "in another unit",
+    "zero_denominator": "with a zero denominator",
+}
+
+
+def _left_out(body: Mapping[str, Any]) -> list[tuple[str, int]]:
+    """The rows a verb's result left out, summed by reason in the order the
+    reasons first appear, for the reasons `_LEFT_OUT_TEXT` names. Each
+    reason pairs with the words a step's line says it in."""
+    rows: dict[str, int] = {}
+    for exclusion in body.get("exclusions") or ():
+        if not isinstance(exclusion, Mapping):
+            continue
+        reason, count = exclusion.get("reason"), exclusion.get("rows")
+        if reason in _LEFT_OUT_TEXT and isinstance(count, int) and count > 0:
+            rows[reason] = rows.get(reason, 0) + count
+    return [(_LEFT_OUT_TEXT[reason], count) for reason, count in rows.items()]
+
+
+def _stat_vars_summed(body: Mapping[str, Any]) -> list[int]:
+    """How many StatVars each dataset version a verb read summed over added
+    up (`analysis_mcp.result.VerbResult.stat_vars_summed`), in the order the
+    result lists them."""
+    return [
+        read["count"]
+        for read in body.get("stat_vars_summed") or ()
+        if isinstance(read, Mapping)
+        and isinstance(read.get("count"), int)
+        and not isinstance(read.get("count"), bool)
+    ]
 
 
 class _RecordingSurface:
@@ -1082,21 +1134,45 @@ def _facts(*facts: Any) -> str | None:
     return " \u00b7 ".join(str(fact) for fact in facts if fact)[:_STEP_DETAIL_CAP] or None
 
 
+def _listed(items: Sequence[str]) -> str:
+    """`items` as "a", "a and b" or "a, b and c"."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + f" and {items[-1]}"
+
+
+def _rows(count: int) -> str:
+    return f"{count:,} row" if count == 1 else f"{count:,} rows"
+
+
 def _rows_held(record: _ExecutorRecord) -> str | None:
     """How many rows the result of a recorded call other than a retrieval
     holds, when it counts them. A ranking's rows are the ones it keeps, of
-    the entries it ranked when a limit cut them. A retrieval's summary
-    states its own observations."""
+    the entries it ranked when a limit cut them. The rows the call left out
+    before it counted, such as a ranking's unallocated amounts, follow by
+    reason (`_left_out`), so the count adds up to the rows the step read. A
+    retrieval's summary states its own observations."""
     rows = record.result.get("rows")
     if record.tool == "get_data" or not isinstance(rows, int):
         return None
     ranked = declared_ranked_before_limit(record.result)
-    total = rows if ranked is None else ranked
-    counted = f"{rows:,}" if ranked is None else f"{rows:,} of {ranked:,}"
-    counted += " row" if total == 1 else " rows"
-    return (
-        f"The ranking keeps {counted}." if record.tool == "rank" else f"The result holds {counted}."
+    counted = _rows(rows) if ranked is None else f"{rows:,} of {_rows(ranked)}"
+    held = (
+        f"The ranking keeps {counted}" if record.tool == "rank" else f"The result holds {counted}"
     )
+    left_out = [f"{_rows(count)} {text}" for text, count in record.result.get("left_out") or ()]
+    if left_out:
+        held += f", leaving out {_listed(left_out)}"
+    return f"{held}."
+
+
+def _summed_held(record: _ExecutorRecord) -> str | None:
+    """How many StatVars the summed readings of a recorded analysis call
+    added up, as its result states them (`_stat_vars_summed`)."""
+    counts = record.result.get("stat_vars_summed") or []
+    if not counts:
+        return None
+    if len(counts) == 1:
+        return f"It adds up {counts[0]:,} StatVars."
+    return f"Its readings add up {_listed([f'{count:,}' for count in counts])} StatVars."
 
 
 def _record_detail(record: _ExecutorRecord) -> str | None:
@@ -1107,7 +1183,9 @@ def _record_detail(record: _ExecutorRecord) -> str | None:
     if record.tool == "write_component":
         return None
     result = record.result
-    return _facts(result.get("summary"), result.get("period_note"), _rows_held(record))
+    return _facts(
+        result.get("summary"), result.get("period_note"), _rows_held(record), _summed_held(record)
+    )
 
 
 def _refused_detail(record: _ExecutorRecord) -> str:
