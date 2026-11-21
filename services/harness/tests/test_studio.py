@@ -92,7 +92,7 @@ from harness.graph.state import (
 from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.plan_display import decision_option_id
-from harness.planner_adapter import PlannerAdapter
+from harness.planner_adapter import PlannerAdapter, _reading_pin_sources
 from harness.provenance import CARD_FRAME_KEY, ProvenanceStore
 from harness.scripted import SCRIPTED_SPEC, ScriptedPlannerModel, ScriptedSurface
 from harness.sentences import FAILURE_CLASS, StopCode, refusal_sentence
@@ -164,6 +164,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.requests import ClientDisconnect
+from submission.service import measure_choices
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .failure_text import classed_sentence, is_user_sentence
@@ -9341,7 +9342,9 @@ async def test_a_count_chip_fetches_the_other_count_as_the_answer_fetched_it() -
     net count, read as the gross count's other count. The same chip again is
     stale, since the part no longer reads the gross count. The net answer
     offers the gross count back, and clicking that reads the first spec_id
-    again, with the definition the first search recorded."""
+    again, with the definition the first search recorded, as the count
+    Search elected: it offers net again, and a plan pinning it from the
+    ledger states how it is counted, gross chosen beside net."""
     app, executor, search = _count_chip_app(_text("Net, it was less."), _text("Gross again."))
     gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
     async with _client(app) as client:
@@ -9351,7 +9354,9 @@ async def test_a_count_chip_fetches_the_other_count_as_the_answer_fetched_it() -
         again = await client.post("/api/studio/turn", json=_chip_body(chip), headers=AUTH)
         (back,) = _frame(applied, "suggestions")["items"]
         returned = await _stream(client, "/api/studio/turn", _chip_body(back))
-        turns = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        turns = conversation.turns
+        ledger = conversation.prior_ledger_state()
 
     assert chip == {
         "kind": "apply_choice",
@@ -9400,10 +9405,27 @@ async def test_a_count_chip_fetches_the_other_count_as_the_answer_fetched_it() -
     (reading,) = (SearchReading.model_validate(r) for r in turns[2]["readings"])
     assert (reading.spec_id, reading.other_count_of, reading.counted_as) == (
         gross,
-        FRANCE_KENYA_NET,
+        None,
         "gross disbursements",
     )
     assert turns[2]["applied_choice"]["spec_id"] == gross
+    assert [(c["choice_id"], c["option_id"]) for c in _frame(returned, "suggestions")["items"]] == [
+        (f"{gross}:count", FRANCE_KENYA_NET)
+    ]
+    # A plan pinning gross from the ledger, with the block Search answers for it.
+    pins = _reading_pin_sources(
+        ledger["readings"],
+        [gross],
+        blocks={gross: FRANCE_KENYA["parts"][0]["spec"]},
+        earlier=(),
+        warnings={},
+    )
+    assert (pins[gross].settled, pins[gross].other_count_of) == (True, None)
+    choice = measure_choices(pins)[gross]
+    assert (choice.options, choice.chosen) == (
+        ("gross disbursements", "net disbursements"),
+        "gross disbursements",
+    )
 
 
 @pytest.mark.parametrize(

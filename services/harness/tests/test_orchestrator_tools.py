@@ -10,7 +10,7 @@ import logging
 import math
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,7 +92,13 @@ from harness.tool_contracts import (
     reading_facts,
     resolver_digest,
 )
-from harness.turn_records import SearchReading, basis_line, loose_match_notes, render_readings
+from harness.turn_records import (
+    SearchReading,
+    basis_line,
+    loose_match_notes,
+    newest_per_spec_id,
+    render_readings,
+)
 from harness.wire import AddOp, CompositionActor, MutationOp, component_revised
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
@@ -4869,6 +4875,106 @@ async def test_a_fetch_of_a_count_an_earlier_turn_offered_reads_as_that_offer() 
         "net disbursements",
     )
     assert reading.fetch is not None and reading.fetch.summary == "64 observations"
+
+
+class _BySpecId:
+    """A data-mcp surface answering each `resolve_definition` with the
+    envelope `envelopes` holds for the spec_id it names."""
+
+    def __init__(self, envelopes: Mapping[str, dict[str, Any]]) -> None:
+        self.envelopes = envelopes
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(self, *, tool, arguments, on_progress=None) -> ToolCallResult:
+        envelope = self.envelopes[arguments["spec_id"]]
+        return ToolCallResult(is_error=False, **search_result_parts(envelope))
+
+
+def _later_turn(readings: Sequence[Mapping[str, Any]], turn: int) -> OrchestratorCall:
+    """A later turn that searched nothing, its ledger holding the newest reading of
+    each spec_id among `readings`, as `ConversationState.prior_ledger_state` keeps it."""
+    newest = newest_per_spec_id([SearchReading.model_validate(r) for r in readings])
+    ledger = {"readings": [r.model_dump(mode="json") for r in newest], "warnings": {}}
+    return OrchestratorCall(
+        state={"surface": "studio", ORCHESTRATOR_PRIOR_LEDGER_KEY: {**ledger, "spec_ids": []}},
+        turn_id=f"turn-{turn}",
+    )
+
+
+async def test_a_round_trip_through_another_count_reads_the_elected_count_as_elected() -> None:
+    """Gross fetched, then net in a later turn, then gross again in a third, all
+    with no search: gross is the count Search elected, so its third-turn reading
+    names no other count, and a plan pinning it from the ledger states how it is
+    counted, gross chosen beside net. Net stays the other count of gross."""
+    gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
+    surface = _BySpecId({gross: FRANCE_KENYA, FRANCE_KENYA_NET: _net_family_envelope()})
+    tools, first, _ = await _searched_france_kenya(surface)
+    await tools["fetch"](gross, first)
+    readings = list(first.state["orchestrator:searches"])
+    second = _later_turn(readings, 2)
+    await tools["fetch"](FRANCE_KENYA_NET, second)
+    readings += second.state["orchestrator:searches"]
+    third = _later_turn(readings, 3)
+
+    await tools["fetch"](gross, third)
+
+    readings += third.state["orchestrator:searches"]
+    (net,) = (SearchReading.model_validate(r) for r in second.state["orchestrator:searches"])
+    (again,) = (SearchReading.model_validate(r) for r in third.state["orchestrator:searches"])
+    assert (net.other_count_of, again.other_count_of, again.counted_as) == (
+        gross,
+        None,
+        "gross disbursements",
+    )
+    ledger = _later_turn(readings, 4).state[ORCHESTRATOR_PRIOR_LEDGER_KEY]["readings"]
+    pins = planner_adapter._reading_pin_sources(
+        ledger,
+        [gross],
+        blocks={gross: FRANCE_KENYA["parts"][0]["spec"]},
+        earlier=(),
+        warnings={},
+    )
+    choice = submission_service.measure_choices(pins)[gross]
+    assert (pins[gross].other_count_of, choice.chosen) == (None, "gross disbursements")
+    assert choice.options == ("gross disbursements", "net disbursements")
+
+
+async def test_this_turns_offer_of_another_count_outranks_an_earlier_turns_candidate() -> None:
+    """An earlier turn left the count open, listing gross and net as candidates.
+    This turn's search finds gross with net as another count, and a fetch of
+    net reads it as that offer: the other count of gross, in this turn's
+    words, not the earlier candidate's."""
+    gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
+    surface = _BySpecId({FRANCE_KENYA_NET: _net_family_envelope()})
+    open_count = SearchReading.from_part(
+        {
+            "variable": "earlier words",
+            "status": "candidates",
+            "candidates": [
+                {"spec_id": gross, "label": "gross disbursements"},
+                {"spec_id": FRANCE_KENYA_NET, "label": "net disbursements"},
+            ],
+            "asked_roles": ["recipient"],
+        }
+    )
+    tools, ctx, _ = await _searched_france_kenya(surface)
+    ctx.state[ORCHESTRATOR_PRIOR_LEDGER_KEY] = {
+        "readings": [open_count.model_dump(mode="json")],
+        "warnings": {},
+        "spec_ids": [],
+    }
+
+    await tools["fetch"](FRANCE_KENYA_NET, ctx)
+
+    offering, net = (SearchReading.model_validate(r) for r in ctx.state["orchestrator:searches"])
+    assert (net.other_count_of, net.counted_as, net.text, net.asked_roles) == (
+        gross,
+        "net disbursements",
+        offering.text,
+        offering.asked_roles,
+    )
 
 
 @pytest.mark.parametrize(
