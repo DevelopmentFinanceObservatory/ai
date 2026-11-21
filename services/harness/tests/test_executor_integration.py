@@ -38,7 +38,7 @@ from compiler.surface import (
 from data_mcp import client_holder, frame_materialisation
 from data_mcp.deadline import CallDeadline
 from data_mcp.definition_store import canonicalize, spec_id_for
-from data_mcp.frame_materialisation import DEFAULT_MINT_OPTIONS, KIND_COLUMNS, frame_ref_for
+from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
 from data_mcp.manifest import SeriesStatisticsModel
 from data_mcp.series_statistics import series_statistics_table
 from executor.completion import ResultPublisher
@@ -1624,6 +1624,7 @@ async def studio(
             recipe: Mapping[str, Any],
             *,
             deadline: CallDeadline,
+            surface: str,
             populations: Sequence[Mapping[str, Any]],
         ) -> Replayed | Pending | ReplayRefused:
             replays.append(populations)
@@ -1638,6 +1639,7 @@ async def studio(
                     apis=client,
                     publish=assembler.publish_frame,
                     row_budget=RowBudget(max_rows=100_000),
+                    surface=surface,
                     populations=populations,
                 )
 
@@ -2076,9 +2078,6 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
         if request.url.path == "/api/datasets":
             options.append(json.loads(request.content)["options"])
             return httpx2.Response(200, json=mint_response)
-        if request.url.path.endswith("/options"):
-            # The spec is not in the definition store, so `get_data` reads its identity here.
-            return httpx2.Response(200, json=mint_response)
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     client_holder.set_client(data_mcp_client(mint_handler))
@@ -2149,9 +2148,6 @@ def _serve_gdp_in_both_renderings(
         if request.url.path == "/api/datasets":
             typed = "enrichment" in json.loads(request.content)["options"]
             return httpx2.Response(200, json=renderings[typed])
-        if request.url.path.endswith("/options"):
-            # The spec is not in the definition store, so `get_data` reads its identity here.
-            return httpx2.Response(200, json=renderings[True])
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     serve_canonical_frames(monkeypatch, fake_fetch)
@@ -2505,11 +2501,6 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
     serve_canonical_frames(monkeypatch, fake_fetch)
 
     def mint_handler(request: httpx2.Request) -> httpx2.Response:
-        if request.url.path.endswith("/options"):
-            # The spec is not in the definition store, so `get_data` reads its identity here.
-            return httpx2.Response(
-                200, json=_kenya_donors_mint_response(cut=False, options=DEFAULT_MINT_OPTIONS)
-            )
         if request.url.path != "/api/datasets":
             raise AssertionError(f"unexpected call to {request.url.path}")
         options = json.loads(request.content)["options"]
@@ -2778,10 +2769,6 @@ def _serve_whole_totals(
                     ],
                 }
             return httpx2.Response(200, json=answer)
-        if request.url.path.endswith("/options"):
-            # The spec is not in the definition store, so `get_data` reads its identity here.
-            spec_id = request.url.path.split("/")[-2]
-            return httpx2.Response(200, json=renderings[spec_id, False])
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     serve_canonical_frames(monkeypatch, fake_fetch)

@@ -971,8 +971,9 @@ class PlatformAssembler:
         Returns the response whatever its status, or `transient_unavailable` for a
         call that got none. It names the caller and turn as analysis-mcp's own
         analysis calls do (`vouched_caller_headers`): an `ip:` caller with its
-        surface and user agent, or a Studio `conversation:` caller with its turn.
-        It waits as long as a whole presentation call may."""
+        surface, user agent and MCP client name, a Studio `conversation:` caller with its turn,
+        or the surface shared work serves. It waits as long as a whole
+        presentation call may."""
         try:
             headers = dict(await self._auth()) if self._auth else {}
         except ApisAuthError as exc:
@@ -1038,7 +1039,7 @@ class PlatformAssembler:
         dfo-apis exempts. An external write carries the caller principal and
         the caller the website named, when this process holds the principal
         and the request's `x-dfo-caller` is an `ip:` digest
-        (`vouched_caller_headers`, with the surface and user agent), so dfo-apis
+        (`vouched_caller_headers`, with the surface, user agent and MCP client name), so dfo-apis
         counts that client. Any other external write carries neither, and
         dfo-apis counts it against the address it sees for this service.
         """
@@ -1048,7 +1049,7 @@ class PlatformAssembler:
         named = current_caller()
         if named is None or not ADDRESS_CALLER.fullmatch(named):
             return {}
-        return vouched_caller_headers(self._caller_principal)
+        return vouched_caller_headers(self._caller_principal, caller_required=True)
 
     async def get_frame_view(
         self,

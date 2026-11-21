@@ -119,7 +119,12 @@ async def composed_app(
     app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     def transport(
-        url: str, *, caller: str | None, auth: str | None, turn: str | None = None
+        url: str,
+        *,
+        caller: str | None,
+        auth: str | None,
+        turn: str | None = None,
+        surface: str | None = None,
     ) -> StreamableHttpTransport:
         parts = urllib.parse.urlparse(url)
         return _asgi_transport(app, parts.path, caller=caller, host=parts.hostname or "")
