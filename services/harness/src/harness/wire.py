@@ -814,11 +814,12 @@ class Seed(_WireModel):
 
 class ApplyChoice(_WireModel):
     """A suggestion chip the user clicked (`ApplyChoiceSuggestion`), echoed
-    whole: the scope choice, the option it moves to, the conversation turn
+    whole: the choice, the option it moves to, the conversation turn
     whose answer offered the chip (`turn`, from 1), and the spec_id of the
     reading it switches (`spec_id`). The route refuses it 422
     `scope_choice_stale` when a later turn answered, or when the choice's
-    newest reading is no longer `spec_id`."""
+    newest reading is no longer `spec_id`, or for a count chip when the part
+    no longer reads the count of `spec_id`."""
 
     choice_id: str = Field(min_length=1)
     option_id: str = Field(min_length=1)
@@ -1170,7 +1171,10 @@ class PlanDecision(_WireModel):
     fields (`harness.plan_display.switchable_decision`) has `choice_id`
     `"decision/<slot>"` and option ids derived from each option's label
     (`harness.plan_display.decision_option_id`), the same on every plan
-    that offers that label.
+    that offers that label. The decision stating how a pinned source's flow
+    is counted has `choice_id` `"<requirement id>:count"`
+    (`harness.plan_display.count_choice_id`) and its options' ids derived
+    the same way.
     A decision without `choice_id` cannot be switched.
     """
 
@@ -1637,15 +1641,20 @@ class SuggestionItem(_WireModel):
 
 
 class ApplyChoiceSuggestion(_WireModel):
-    """A chip that moves one scope choice of the answer's readings to another
+    """A chip that moves one choice of the answer's readings to another
     option: a click sends a `TurnRequest` with `apply_choice {choice_id,
-    option_id, turn, spec_id}` and no message. `label` is the option's label,
-    such as "health, CRS 120 alone" on the sector axis or "including imputed
-    multilateral" on the provider axis, after the part's name
-    (`harness.turn_records.part_name`) and a colon when the answer's chips
-    span several parts; the client builds the chip's action text from it.
-    `turn` is the conversation turn whose answer offers the chip, counted
-    from 1, and `spec_id` the reading the chip switches."""
+    option_id, turn, spec_id}` and no message. A scope chip moves a scope
+    choice (`choice_id` `"<spec_id>:<axis>"`); a count chip
+    (`harness.turn_records.count_choice_id`, `choice_id`
+    `"<spec_id>:count"`) switches the part to another count Search offered,
+    whose spec_id is `option_id`. `label` is the option's label, such as
+    "health, CRS 120 alone" on the sector axis, "including imputed
+    multilateral" on the provider axis or "net disbursements" for another
+    count, after the part's name (`harness.turn_records.part_name`) and a
+    colon when the answer's chips span several parts; the client builds the
+    chip's action text from it. `turn` is the conversation turn whose answer
+    offers the chip, counted from 1, and `spec_id` the reading the chip
+    switches."""
 
     kind: Literal["apply_choice"]
     label: str
@@ -1657,8 +1666,9 @@ class ApplyChoiceSuggestion(_WireModel):
 
 class Suggestions(_WireModel):
     """Follow-up chips. Empty unless the answer used readings with scope
-    choices, which give one `ApplyChoiceSuggestion` per other option it can
-    serve (`harness.turn_records.scope_chips`)."""
+    choices or other counts, which give one `ApplyChoiceSuggestion` per
+    other option or count Search can serve
+    (`harness.turn_records.scope_chips`)."""
 
     event: Literal["suggestions"]
     seq: int = Field(ge=0)

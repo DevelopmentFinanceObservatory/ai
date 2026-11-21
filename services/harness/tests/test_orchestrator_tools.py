@@ -57,6 +57,7 @@ from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_PENDING_KEY,
+    ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
     PendingAsk,
     PendingPlan,
@@ -4840,6 +4841,34 @@ async def test_a_fetch_of_a_sibling_reads_its_own_block_and_gains_a_reading(offe
     rendered = render_readings([elected, chosen], budget=10_000).text.splitlines()
     for line in lines:
         assert line.format(gross=elected.spec_id, net=FRANCE_KENYA_NET) in rendered
+
+
+async def test_a_fetch_of_a_count_an_earlier_turn_offered_reads_as_that_offer() -> None:
+    """The net count an earlier turn's search offered, fetched in a later
+    turn that searched nothing, gains a reading linked to the earlier turn's
+    reading, as a fetch in the offering turn gives it."""
+    surface = FakeSurface(
+        ToolCallResult(is_error=False, **search_result_parts(_net_family_envelope()))
+    )
+    tools, earlier, _ = await _searched_france_kenya(surface)
+    (offering,) = earlier.state["orchestrator:searches"]
+    later = OrchestratorCall(
+        state={
+            "surface": "studio",
+            ORCHESTRATOR_PRIOR_LEDGER_KEY: {"readings": [offering], "warnings": {}, "spec_ids": []},
+        },
+        turn_id="turn-2",
+    )
+
+    await tools["fetch"](FRANCE_KENYA_NET, later)
+
+    (reading,) = (SearchReading.model_validate(r) for r in later.state["orchestrator:searches"])
+    assert (reading.spec_id, reading.other_count_of, reading.counted_as) == (
+        FRANCE_KENYA_NET,
+        offering["spec_id"],
+        "net disbursements",
+    )
+    assert reading.fetch is not None and reading.fetch.summary == "64 observations"
 
 
 @pytest.mark.parametrize(

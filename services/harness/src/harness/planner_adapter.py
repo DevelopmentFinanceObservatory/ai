@@ -303,10 +303,13 @@ class _RevisionSession(CallSession):
     The user has spoken since the plan it amends was recorded: their switch
     is the revision. A dataset that replaces one the user picked answering
     an ask (`inherits`, the new spec_id to the one it replaces) counts as
-    picked too, so the measure decision a pin of it states stays theirs.
+    picked too, so the measure decision a pin of it states stays theirs, and
+    so does one the switch itself picked (`picked`), another count chosen on
+    the card.
     """
 
     inherits: Mapping[str, str] = field(default_factory=dict)
+    picked: frozenset[str] = frozenset()
 
     def user_spoke_since(self, version: int) -> bool:
         """Always: the revision answers the user's own switch."""
@@ -314,9 +317,10 @@ class _RevisionSession(CallSession):
         return True
 
     def elected_spec_ids(self) -> frozenset[str]:
-        """The spec_ids the user picked, and each that replaces one of them."""
+        """The spec_ids the user picked, each that replaces one of them, and
+        each the switch picked."""
         elected = super().elected_spec_ids()
-        return elected | {new for new, old in self.inherits.items() if old in elected}
+        return elected | {new for new, old in self.inherits.items() if old in elected} | self.picked
 
 
 class PlannerAdapter:
@@ -627,6 +631,7 @@ class PlannerAdapter:
         prior_plan: dict[str, Any],
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],
+        picked: Collection[str] = (),
     ) -> dict[str, Any]:
         """Amend `prior_plan` with `evidence_requirements` and translate it, calling no model.
 
@@ -640,7 +645,8 @@ class PlannerAdapter:
         decisions that pin states and drops those of the one it left, which
         go with it. The proposal opens its own round count, as a planner
         entry does. `inherits` maps each new spec_id to the one it
-        replaces (`_RevisionSession`).
+        replaces, and `picked` holds those the user picked by the switch
+        (`_RevisionSession`).
 
         Returns `{"plan", "summary"}` once the revised plan awaits approval,
         or `{"refused": ...}` as `__call__` refuses, with `reason` beside
@@ -663,6 +669,7 @@ class PlannerAdapter:
                 prior_plan=prior_plan,
                 evidence_requirements=evidence_requirements,
                 inherits=inherits,
+                picked=frozenset(picked),
             )
 
     async def _revised(
@@ -672,6 +679,7 @@ class PlannerAdapter:
         prior_plan: dict[str, Any],
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],
+        picked: frozenset[str],
     ) -> dict[str, Any]:
         """`revise`'s answer, inside the turn's answers."""
         state = cast(SessionState, ctx.state)
@@ -679,7 +687,7 @@ class PlannerAdapter:
         save_plan(state, prior)
         save_plan_rounds(state, 0)
         call = SessionCall(ctx.transcript.records, state, None)
-        view = _RevisionSession(call=call, inherits=dict(inherits))
+        view = _RevisionSession(call=call, inherits=dict(inherits), picked=picked)
         proposal = Proposal(
             evidence_requirements=list(evidence_requirements), amends_version=prior.version
         )

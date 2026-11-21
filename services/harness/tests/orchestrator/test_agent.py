@@ -210,14 +210,15 @@ def test_the_instruction_has_search_elect_the_measure_and_asks_only_what_search_
         "A count search chose (`counted_as`) is settled too, even when it lists other counts "
         "under `alternatives`: go on with it and do not ask about the count" in text
     )
-    assert (
-        "No button offers the counts a part lists under `alternatives`: name those once, so "
-        "the user can ask for one" in text
-    )
     # The harness states the count basis after the reply (`turn_records.basis_line`)
-    # and offers the other options as chips (`turn_records.scope_chips`).
+    # and offers the other options and the other counts as chips
+    # (`turn_records.scope_chips`).
     assert f'"{turn_records._BASIS_LEAD}...", naming the sector, region, provider' in text
-    assert "buttons, so leave those out of the reply" in text
+    assert (
+        "and the other counts a part lists under `alternatives`, as buttons the user can "
+        "switch with, so leave those out of the reply" in text
+    )
+    assert "No button offers" not in text
     assert "name the source with that count" not in text
     assert "with the count search chose" not in text
     assert "switch to another count" not in text

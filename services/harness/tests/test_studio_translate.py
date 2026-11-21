@@ -14,6 +14,7 @@ import json
 import logging
 import ssl
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -518,6 +519,60 @@ def test_a_planner_decision_settling_fields_is_a_row_the_card_can_switch() -> No
         birth: "life expectancy at birth",
         healthy: "healthy life expectancy",
     }
+
+
+def test_the_row_stating_how_a_pin_is_counted_is_a_row_the_card_can_switch() -> None:
+    """The row admission wrote for total ODA to Kenya in the planner entry
+    eval's recorded run, gross beside net disbursements, on a plan whose
+    dataset pins that source. The card gives it the id
+    `"<requirement id>:count"`, each count as an available option by its
+    label's id, the chosen one active, and a switch may name it."""
+    recorded = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures/planner_runs/test_recorded_requests"
+            / "test_each_request_equals_its_stored_expectation"
+            / "aggregate-total-oda-kenya_reference.json"
+        ).read_text()
+    )
+    (counted,) = [
+        Decision.model_validate(d)
+        for d in recorded["plan"]["decisions"]
+        if d["slot"].startswith("source_")
+    ]
+    assert counted.fixes is not None
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    cited = dataset.model_copy(
+        update={
+            "decision_ids": (*dataset.decision_ids, counted.slot),
+            "source_spec_id": counted.fixes.source_spec_id,
+        }
+    )
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "decisions": [*plan.decisions, counted],
+            "evidence_requirements": [
+                cited if r.id == dataset.id else r for r in plan.evidence_requirements
+            ],
+        }
+    )
+    payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
+    translator = _translator()
+
+    (frame,) = translator._interrupt_frames(_card(payload))
+
+    row = {row.id: row for row in frame.decisions}[counted.slot]
+    gross, net = (decision_option_id(label) for label in counted.options)
+    assert (row.choice_id, row.active_option_id) == (f"{dataset.id}:count", gross)
+    assert row.options == [
+        PlanDecisionOption(option_id=gross, label="gross disbursements", status="available"),
+        PlanDecisionOption(option_id=net, label="net disbursements", status="available"),
+    ]
+    assert PlanAction.SWITCH in frame.actions
+    choices = translator._conversation.pending[frame.interrupt_id].choices
+    assert choices[f"{dataset.id}:count"].active == gross
 
 
 def test_a_planner_decision_option_keeps_its_id_when_a_replan_reorders_the_options() -> None:

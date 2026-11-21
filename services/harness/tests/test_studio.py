@@ -182,6 +182,7 @@ from .scripted_tools import (
 )
 from .store_clock import StoreClock
 from .studio_routes import AUTH, ScriptLlm, orchestrator_app, stream, studio_client, turn_body
+from .test_orchestrator_tools import FRANCE_KENYA, FRANCE_KENYA_NET, _net_family_envelope
 from .test_turn_records import _top_donors
 from .turn_driver import CONVERSATION
 
@@ -9310,6 +9311,125 @@ async def test_a_chip_is_shown_applied_and_kept_and_each_step_is_recorded(
         "scope_choice.chips_shown",
         "scope_choice.kept",
     ]
+
+
+def _count_chip_app(*script: types.Part) -> tuple[FastAPI, ScriptedExecutor, SearchStub]:
+    """An app whose first turn searches aid from France to Kenya, which Search
+    counts as gross disbursements and offers as net disbursements too, fetches
+    it over two years and answers, then runs `script`. Search answers the net
+    count's definition. Returns the app, the executor and the Search stub."""
+    executor = ScriptedExecutor()
+    gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
+    search = SearchStub(answer={FRANCE_KENYA_NET: _net_family_envelope(), gross: FRANCE_KENYA})
+    app = _app(
+        search_call("aid"),
+        fetch_call(gross, scope={"window": _TWO_YEARS}),
+        _text("France gave Kenya this much."),
+        *script,
+        resolver=CannedSearch(FRANCE_KENYA),
+        executor=executor,
+        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
+    )
+    return app, executor, search
+
+
+async def test_a_count_chip_fetches_the_other_count_as_the_answer_fetched_it() -> None:
+    """The answer counted gross disbursements and Search offered net ones, so
+    its first chip switches the count. Clicking it fetches the net count's
+    spec_id over the answer's years, resolving its definition on record with
+    no scope entries, and records the chip applied; the turn's reading is the
+    net count, read as the gross count's other count. The same chip again is
+    stale, since the part no longer reads the gross count. The net answer
+    offers the gross count back, and clicking that reads the first spec_id
+    again, with the definition the first search recorded."""
+    app, executor, search = _count_chip_app(_text("Net, it was less."), _text("Gross again."))
+    gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("aid from France to Kenya"))
+        chip = _frame(first, "suggestions")["items"][0]
+        applied = await _stream(client, "/api/studio/turn", _chip_body(chip))
+        again = await client.post("/api/studio/turn", json=_chip_body(chip), headers=AUTH)
+        (back,) = _frame(applied, "suggestions")["items"]
+        returned = await _stream(client, "/api/studio/turn", _chip_body(back))
+        turns = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+
+    assert chip == {
+        "kind": "apply_choice",
+        "label": "net disbursements",
+        "choice_id": f"{gross}:count",
+        "option_id": FRANCE_KENYA_NET,
+        "turn": 1,
+        "spec_id": gross,
+    }
+    entries = [entry for posted in search.posted for entry in posted["input"]["entries"]]
+    assert [spec_id_for(canonicalize(entry["identity"])) for entry in entries] == [
+        FRANCE_KENYA_NET,
+        gross,
+    ]
+    assert not any("scope_entries" in entry for entry in entries)
+    fetched = [call["args"] for call in executor.calls if call["tool"] == "get_data"]
+    assert [(args["spec_id"], args["scope"]) for args in fetched] == [
+        (gross, {"window": _TWO_YEARS}),
+        (FRANCE_KENYA_NET, {"window": _TWO_YEARS}),
+        (gross, {"window": _TWO_YEARS}),
+    ]
+    assert _frame(applied, "message.complete")["text"].startswith("Net, it was less.")
+    (reading,) = (SearchReading.model_validate(r) for r in turns[1]["readings"])
+    assert (reading.spec_id, reading.other_count_of, reading.counted_as) == (
+        FRANCE_KENYA_NET,
+        gross,
+        "net disbursements",
+    )
+    assert turns[1]["applied_choice"] == {
+        "choice_id": f"{gross}:count",
+        "option_id": FRANCE_KENYA_NET,
+        "from_option_id": gross,
+        "spec_id": FRANCE_KENYA_NET,
+    }
+    assert again.status_code == 422
+    assert again.json()["constraint_id"] == "scope_choice_stale"
+    assert back == {
+        "kind": "apply_choice",
+        "label": "gross disbursements",
+        "choice_id": f"{FRANCE_KENYA_NET}:count",
+        "option_id": gross,
+        "turn": 2,
+        "spec_id": FRANCE_KENYA_NET,
+    }
+    assert _frame(returned, "message.complete")["text"].startswith("Gross again.")
+    (reading,) = (SearchReading.model_validate(r) for r in turns[2]["readings"])
+    assert (reading.spec_id, reading.other_count_of, reading.counted_as) == (
+        gross,
+        FRANCE_KENYA_NET,
+        "gross disbursements",
+    )
+    assert turns[2]["applied_choice"]["spec_id"] == gross
+
+
+@pytest.mark.parametrize(
+    ("pick", "constraint"),
+    [
+        ({"option_id": "spec_" + "e" * 32}, "switch_option_unavailable"),
+        ({"spec_id": FRANCE_KENYA_NET}, "scope_choice_stale"),
+        ({"option_id": FRANCE_KENYA["parts"][0]["spec"]["spec_id"]}, "scope_choice_stale"),
+    ],
+    ids=["count-not-offered", "another-reading", "own-count"],
+)
+async def test_a_count_chip_that_cannot_apply_is_refused_with_its_constraint(
+    pick: dict[str, str], constraint: str
+) -> None:
+    """A count the part does not offer is unavailable; a chip naming a reading
+    the choice is not on, or the count the part already reads, is stale. Each
+    is a 422 before any stream, and Search is asked nothing."""
+    app, _, search = _count_chip_app()
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("aid from France to Kenya"))
+        chip = {**_frame(first, "suggestions")["items"][0], **pick}
+        refused = await client.post("/api/studio/turn", json=_chip_body(chip), headers=AUTH)
+
+    assert (refused.status_code, refused.json()["constraint_id"]) == (422, constraint)
+    assert refused.json()["pointer"] == "/apply_choice"
+    assert search.posted == []
 
 
 async def test_a_chip_search_refuses_is_recorded_as_not_applied(

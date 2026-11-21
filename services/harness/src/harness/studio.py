@@ -159,7 +159,7 @@ from harness.turn.store import (
     open_turn_on,
 )
 from harness.turn_budget import start_turn_budget
-from harness.turn_records import CHIP_STALE_NOTE, stored_choice
+from harness.turn_records import CHIP_STALE_NOTE, is_count_choice, stored_choice, stored_count
 from harness.wire import (
     MAX_TURN_REQUEST_BYTES,
     AddOp,
@@ -401,8 +401,12 @@ def _chip_label(conversation: ConversationState, pick: ApplyChoice) -> str | JSO
     later turn compiles a new reading of the same choice. The chip is stale
     too when its choice is already on its option. An option the choice does
     not offer, or one Search cannot serve, is refused 422
-    `switch_option_unavailable`, as a plan card's switch is. `detail` is copy
-    the client shows.
+    `switch_option_unavailable`, as a plan card's switch is. A count chip
+    (`harness.turn_records.is_count_choice`) is read the same way from its
+    count choice (`harness.turn_records.stored_count`): stale when the part
+    no longer reads the count of `ApplyChoice.spec_id`, since a later fetch
+    read one of its other counts, and its option is one of the other counts
+    that reading offers. `detail` is copy the client shows.
     """
     answered = [
         number
@@ -412,30 +416,13 @@ def _chip_label(conversation: ConversationState, pick: ApplyChoice) -> str | JSO
     readings = [reading for turn in conversation.turns for reading in turn.get("readings") or ()]
     if not conversation.turn_recorded:
         readings.extend(conversation.turn_readings)
-    found = stored_choice(readings, pick.choice_id)
-    reading, choice = found if found is not None else (None, None)
-    option = (
-        next((o for o in choice.options if o.option_id == pick.option_id), None)
-        if choice is not None
-        else None
-    )
-    if (
-        answered[-1:] != [pick.turn]
-        or reading is None
-        or choice is None
-        or reading.spec_id != pick.spec_id
-        or (option is not None and pick.option_id == choice.active)
-    ):
-        constraint, detail = "scope_choice_stale", CHIP_STALE_NOTE
-    elif option is None:
-        constraint, detail = "switch_option_unavailable", "That option is not offered here."
-    elif option.availability.status == "unavailable":
-        constraint, detail = (
-            "switch_option_unavailable",
-            f"{option.label} cannot be counted for this answer.",
-        )
+    if is_count_choice(pick.choice_id):
+        refused = _count_chip_refusal(readings, pick, latest=answered[-1:] == [pick.turn])
     else:
-        return option.label
+        refused = _scope_chip_refusal(readings, pick, latest=answered[-1:] == [pick.turn])
+    if isinstance(refused, str):
+        return refused
+    constraint, detail = refused
     return _tool_error_response(
         ToolError(
             error=ErrorCode.CONSTRAINT_VIOLATION,
@@ -446,6 +433,58 @@ def _chip_label(conversation: ConversationState, pick: ApplyChoice) -> str | JSO
         ),
         status_code=422,
     )
+
+
+def _scope_chip_refusal(
+    readings: list[dict[str, Any]], pick: ApplyChoice, *, latest: bool
+) -> str | tuple[str, str]:
+    """The label of the option a scope chip moves to, or its refusal's
+    constraint and detail (`_chip_label`). `latest` is whether the chip's
+    answer is the conversation's latest."""
+    found = stored_choice(readings, pick.choice_id)
+    reading, choice = found if found is not None else (None, None)
+    option = (
+        next((o for o in choice.options if o.option_id == pick.option_id), None)
+        if choice is not None
+        else None
+    )
+    if (
+        not latest
+        or reading is None
+        or choice is None
+        or reading.spec_id != pick.spec_id
+        or (option is not None and pick.option_id == choice.active)
+    ):
+        return "scope_choice_stale", CHIP_STALE_NOTE
+    if option is None:
+        return "switch_option_unavailable", "That option is not offered here."
+    if option.availability.status == "unavailable":
+        return (
+            "switch_option_unavailable",
+            f"{option.label} cannot be counted for this answer.",
+        )
+    return option.label
+
+
+def _count_chip_refusal(
+    readings: list[dict[str, Any]], pick: ApplyChoice, *, latest: bool
+) -> str | tuple[str, str]:
+    """The label of the other count a count chip moves to, or its refusal's
+    constraint and detail (`_chip_label`). `latest` is whether the chip's
+    answer is the conversation's latest."""
+    counted = stored_count(readings, pick.choice_id)
+    if (
+        not latest
+        or counted is None
+        or counted.reading.spec_id != pick.spec_id
+        or counted.current != pick.spec_id
+        or pick.option_id == pick.spec_id
+    ):
+        return "scope_choice_stale", CHIP_STALE_NOTE
+    other = next((o for o in counted.reading.alternatives if o.spec_id == pick.option_id), None)
+    if other is None:
+        return "switch_option_unavailable", "That option is not offered here."
+    return other.label
 
 
 def _turn_refusal_or_chip(

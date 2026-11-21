@@ -142,6 +142,7 @@ from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_PENDING_KEY,
+    ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
@@ -1709,15 +1710,18 @@ def _attach_fetch(
     (`harness.scope_choices.served_facts`), when it said, and `args`, the
     call's arguments that shape its frame (`FetchReading.args`).
 
-    A spec_id that no reading holds as its own, but one offered as a
-    candidate, as another count (`SearchReading.alternatives`) or as the
-    same count in other prices (`SearchReading.other_prices`), first gains
-    a reading of its own, read from its block (`chosen_part`) with the
+    A spec_id that no reading of this turn holds as its own, but one offered
+    as a candidate, as another count (`SearchReading.alternatives`) or as
+    the same count in other prices (`SearchReading.other_prices`), first
+    gains a reading of its own, read from its block (`chosen_part`) with the
     offering reading's text, skills and departures and asked parties and
-    its own warnings, else the offering reading's. A spec_id no reading
-    offers as a candidate is a sibling (`_offered_sibling`), and its reading
-    names the reading that offered it (`SearchReading.sibling_of`) and the
-    count it reads.
+    its own warnings, else the offering reading's. The offering reading is
+    this turn's, else the newest of the earlier turns'
+    (`ORCHESTRATOR_PRIOR_LEDGER_KEY`), so a fetch of what an earlier answer
+    offered, a count chip's included (`harness.graph.switch`), reads as
+    that offer. A spec_id no reading offers as a candidate is a sibling
+    (`_offered_sibling`), and its reading names the reading that offered it
+    (`SearchReading.sibling_of`) and the count it reads.
     """
     spec_id = result["spec_id"]
     state = call.state
@@ -1725,11 +1729,16 @@ def _attach_fetch(
         SearchReading.model_validate(stored)
         for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY)
     ]
+    earlier = [
+        SearchReading.model_validate(stored)
+        for stored in stored_mapping(state, ORCHESTRATOR_PRIOR_LEDGER_KEY).get("readings") or ()
+    ]
+    offering = [*searches, *reversed(earlier)]
     block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(spec_id)
     candidate_of = next(
-        (r for r in searches if any(c.spec_id == spec_id for c in r.candidates)), None
+        (r for r in offering if any(c.spec_id == spec_id for c in r.candidates)), None
     )
-    sibling = None if candidate_of else _offered_sibling(searches, spec_id)
+    sibling = None if candidate_of else _offered_sibling(offering, spec_id)
     offered = candidate_of or (sibling[0] if sibling else None)
     if block and offered is not None and all(r.spec_id != spec_id for r in searches):
         warnings = (state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {}).get(spec_id)
