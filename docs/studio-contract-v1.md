@@ -602,6 +602,32 @@ ignores it and an older harness omits it.
 
 `schema_version` stays 1.
 
+## Count chips and count rows on the plan card (delta 28, v1.13)
+
+- Answers offer count chips, `apply_choice` chips with `choice_id`
+  `"<spec_id>:count"` (`docs/frontend-interface.md` 4.1.2).
+- The row stating how a pinned source's flow is counted ("How the flow is
+  counted.", with options such as "gross disbursements" and "net
+  disbursements") carries `choice_id` `"<requirement id>:count"`,
+  `active_option_id` and `options`, as any switchable row does. The
+  requirement is the first pinning the source, so the id survives every
+  switch of the count. Each option's `option_id` is derived from its
+  label, as a planner decision's is (`"option_"` and the first 12 hex
+  digits of the label's SHA-256), and its `status` is `available`, since
+  Search offered each count beside the source.
+- A client switches it as it switches a scope row: `interrupt.response`
+  with `decision: "switch"` and `{choice_id, option_id}`. The harness
+  re-pins every requirement on the source to the other count, a dataset
+  Search already named, and offers the revised plan with no `moved`
+  entries; the row then holds the chosen count as the user's choice. A
+  switch to the count the row already holds is refused as any such switch
+  is, and the plan is re-offered with `switch_failed`.
+- `plan.approved.choices[]` carries the row under the same `choice_id`.
+  A client tells it from a scope row by the `:count` ending, where it
+  wants to word it apart.
+
+`schema_version` stays 1.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -711,3 +737,11 @@ Fixture values that are samples:
 1. `plan.proposed` gains an optional `new_plan`, `true` on a plan card that
    starts a new plan after an earlier plan in the same turn, so a first draft made after an
    earlier plan card in the turn reads as a new plan with its own `plan_version_id`.
+1. `suggestions` gains count chips: `apply_choice` chips whose `choice_id`
+   is `"<spec_id>:count"` and whose `option_id` is the spec_id of another
+   way of counting the part's flow that Search offered, such as net
+   disbursements beside gross. They take the shape and request of a scope
+   chip and run first (`docs/frontend-interface.md` 4.1.2). The plan card's
+   row stating how a pinned source is counted gains `choice_id`
+   `"<requirement id>:count"`, so a switch can name it (see "Count chips and
+   count rows on the plan card").

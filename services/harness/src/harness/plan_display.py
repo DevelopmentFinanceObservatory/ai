@@ -23,9 +23,11 @@ sentence what the answer counts, for whom, when and from which source;
 decision's words, and `FIXED_VALUE_WORDS` the words for an option the
 planner wrote as a value a decision fixes, and `place_level_words` the same
 words for the level of place a filter keeps on a role; `choice_id` gives a scope
-choice's row the id every switch keeps; and `switchable_decision`,
-`decision_choice_id` and `decision_option_id` give a planner decision the
-card offers to switch its row's id and its options' ids.
+choice's row the id every switch keeps; `count_choice_id` gives the row of
+how a pinned source's flow is counted its id, and `chosen_count_decision`
+finds that row again; and `switchable_decision`, `decision_choice_id` and
+`decision_option_id` give a planner decision the card offers to switch its
+row's id and its options' ids, the last a count row's options' ids too.
 
 In `step_rows`, which the plan record and the planner read, a step's `label`
 names the work a workflow step does and the entity it does
@@ -1699,6 +1701,47 @@ def pinned_choice_id(plan: Plan, pinned: Collection[str], axis: str) -> str | No
         None,
     )
     return f"{first.id}:{axis}" if first is not None else None
+
+
+# The axis a count row's id names (`count_choice_id`). No scope axis takes this
+# name, so a count row's id cannot equal a scope choice's.
+COUNT_AXIS = "count"
+
+
+def count_choice_id(plan: Plan, decision: Decision) -> str | None:
+    """The id the plan card gives the row of `decision` when it states how a
+    pinned source's flow is counted (`planner.plan.is_search_pin`) among at
+    least two counts: `"<requirement id>:count"`, the requirement the first of
+    `plan` citing it. `None` for any other decision, and for one no
+    requirement cites.
+
+    Admission writes the decision on the pin each requirement states
+    (`submission.service._measure_decisions`) and a switch re-pins those
+    requirements and keeps their ids, so the row keeps its id through every
+    switch of its count. Its options take `decision_option_id`.
+    """
+    if not is_search_pin(decision) or len(decision.options) < 2:
+        return None
+    first = next(
+        (
+            requirement
+            for requirement in plan.evidence_requirements
+            if isinstance(requirement, DatasetRequirement)
+            and decision.slot in requirement.decision_ids
+        ),
+        None,
+    )
+    return f"{first.id}:{COUNT_AXIS}" if first is not None else None
+
+
+def chosen_count_decision(plan: Plan, choice: str) -> Decision | None:
+    """The decision of `plan` whose count row has id `choice` (`count_choice_id`), if any."""
+    if not choice.endswith(f":{COUNT_AXIS}"):
+        return None
+    return next(
+        (decision for decision in plan.decisions if count_choice_id(plan, decision) == choice),
+        None,
+    )
 
 
 def chosen_scope_decision(plan: Plan, choice: str) -> Decision | None:
