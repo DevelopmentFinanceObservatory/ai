@@ -35,6 +35,7 @@ from executor.outcomes import (
     Refused,
     failed_step,
     permanent_transport_stop,
+    stop_step,
 )
 from executor.outcomes import RunOutcome as ExecutionOutcome
 from executor.run import (
@@ -330,8 +331,9 @@ def _mark_masked_step_failed(
     corrected. `mark_step_failed` is looked up via `getattr` (`tool_surface`
     is a bare `ToolSurface` in tests with no recorder around it, and a step
     whose own call already failed is a no-op there), the same duck-typed
-    opt-in `_RecordingExecutor.aclose` uses. Each stop's own `_failed_step`
-    supplies the `code`/`message` the step's record keeps for the trace,
+    opt-in `_RecordingExecutor.aclose` uses. Each stop's own
+    `executor.outcomes.stop_step` supplies the `code`/`message` the step's
+    record keeps for the trace, whatever stop decides the wave,
     naming the actual check that fired (e.g. `source_pin_mismatch`).
     """
     mark = getattr(tool_surface, "mark_step_failed", None)
@@ -340,7 +342,7 @@ def _mark_masked_step_failed(
     for stopped in (outcome, *outcome.also_stopped):
         if stopped.step_id is None:
             continue
-        failed = _failed_step(stopped)
+        failed = stop_step(stopped)
         # The step's record is the run's record of the stop, so a stop the
         # orchestrator is told of by its kind alone keeps its own detail there.
         by_kind = isinstance(stopped, Refused) and stopped.payload is None and not stopped.issues

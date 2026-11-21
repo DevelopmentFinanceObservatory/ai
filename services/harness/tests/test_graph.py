@@ -3075,7 +3075,7 @@ def test_mark_masked_step_failed_corrects_every_sibling_a_wave_surfaced() -> Non
     """A wave whose primary and one `also_stopped` sibling both passed their
     raw call but were refused by a post-call check (`_check_evidence`) each
     carry a distinct `step_id`. `_mark_masked_step_failed` corrects both
-    Activity feed records, not just the primary's."""
+    Activity feed records, each with its own stop's code, in either order."""
 
     class _RecorderStub:
         def __init__(self) -> None:
@@ -3109,21 +3109,29 @@ def test_mark_masked_step_failed_corrects_every_sibling_a_wave_surfaced() -> Non
         also_stopped=(sibling,),
     )
 
+    pin_record = {
+        "step_id": "fetch_gdp",
+        "code": "source_pin_mismatch",
+        "detail": "the requirement pins 'spec_a', the source found is 'spec_b'",
+    }
+    empty_record = {
+        "step_id": "fetch_population",
+        "code": "empty_answer",
+        "detail": "no rows matched",
+    }
+
     recorder = _RecorderStub()
     _mark_masked_step_failed(recorder, primary, tools={})
+    assert recorder.calls == [pin_record, empty_record]
 
-    assert recorder.calls == [
-        {
-            "step_id": "fetch_gdp",
-            "code": "source_pin_mismatch",
-            "detail": "the requirement pins 'spec_a', the source found is 'spec_b'",
-        },
-        {
-            "step_id": "fetch_population",
-            "code": "empty_answer",
-            "detail": "no rows matched",
-        },
-    ]
+    # The milder stop first: its record keeps its own code although the
+    # sibling decides the wave.
+    swapped = sibling.model_copy(
+        update={"also_stopped": (primary.model_copy(update={"also_stopped": ()}),)}
+    )
+    recorder = _RecorderStub()
+    _mark_masked_step_failed(recorder, swapped, tools={})
+    assert recorder.calls == [empty_record, pin_record]
 
 
 # --- the seed intake's wording ---------------------------------------------------

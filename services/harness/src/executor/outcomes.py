@@ -445,15 +445,16 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
     step, the code, the user's words and the remedy all name one stop: the
     stop itself whenever it is among them.
     """
-    stops = [_own_step(stop) for stop in (outcome, *outcome.also_stopped)]
+    stops = [stop_step(stop) for stop in (outcome, *outcome.also_stopped)]
     remedies = [stop_remedy(stop) for stop in stops]
     severity = list(Remedy)
     deciding = max(range(len(stops)), key=lambda index: severity.index(remedies[index]))
     return {**stops[deciding], "wave_remedy": remedies[deciding].value}
 
 
-def _own_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
-    """`failed_step` for `outcome` alone, without its wave's remedy."""
+def stop_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
+    """The step `outcome` itself stopped at, without its wave's siblings or remedy:
+    the record each stopped step keeps (`harness.graph.execute`)."""
     return {**_stopped_at(outcome), "cause": stop_cause(outcome).value}
 
 
