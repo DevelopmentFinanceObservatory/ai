@@ -5712,8 +5712,8 @@ def period_licences_held(
 
     `named` is the `across_years` of the `propose_plan` call that states
     `plan`, the steps whose years the user's own words, as the planner read
-    them, ask to combine. Only a call made where the planner reads those
-    words names any (`submission.service.admit`). A licence of `previous`,
+    them, ask to combine. `submission.service.admit` empties it for a call
+    made where the planner reads none of those words. A licence of `previous`,
     the plan the call amends, holds while `plan` states a step of its id and
     kind that combines its years with the licensed reduction
     (`_keeps_licence`), whatever years it reads: a replan that narrows the
@@ -5747,25 +5747,6 @@ def period_licences_held(
     }
     held.update((name, licence) for name, licence in granted.items() if licence is not None)
     return tuple(held[step_id] for step_id in steps if step_id in held)
-
-
-def licences_restated(
-    named: Sequence[str],
-    *,
-    requirements: Sequence[EvidenceRequirement],
-    previous: Plan | None,
-) -> frozenset[str]:
-    """The steps of `named` whose licence `previous` already holds, as `requirements` state them.
-
-    Naming such a step grants nothing `period_licences_held` would not
-    carry anyway.
-    """
-    held = set(previous.period_licences) if previous is not None else set()
-    return frozenset(
-        requirement.id
-        for requirement in requirements
-        if requirement.id in named and _licence_for(requirement) in held
-    )
 
 
 def _keeps_licence(step: EvidenceRequirement | None, licence: PeriodLicence) -> bool:

@@ -122,8 +122,7 @@ _PROPOSE_PLAN_ARGUMENTS = {
         "named once keeps that standing in later patches while its kind and `reduction` "
         "stay, and loses it when an `aggregate`'s `group_by` gains `period` or a `rank` "
         "sets `per_period`. Leave it empty for a step that answers an ask marked "
-        "(across years), and in every call, a first draft's included, whose brief does "
-        "not say the user asks for a change to the plan."
+        "(across years)."
     ),
     "amends_version": (
         "The `version` this call patches, as the last `propose_plan` call "

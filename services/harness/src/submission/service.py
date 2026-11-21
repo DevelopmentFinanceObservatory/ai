@@ -4,10 +4,10 @@
 it states (`_Patch`), which plan it means (`_resolve_intent`) and that plan
 as the model wrote it (`planner.plan.authored`), the pins it
 moves back from their windowed copies (`_unwindowed_pins`), requirements that
-read one another in a cycle (`planner.plan.check_acyclic`), the rules that
-read no pin and so refuse before any Search read (`across_years` the planner
-may not name, a referral the user has not answered, and drafts and
-requirements that do not name each other once each: `_across_years_unread`,
+read one another in a cycle (`planner.plan.check_acyclic`), the `across_years`
+it ignores outside an amendment entry (`_across_years_read`), the rules that
+read no pin and so refuse before any Search read (a referral the user has not
+answered, and drafts and requirements that do not name each other once each:
 `_referral_unanswered`, `_draft_unreferenced`), the inputs of each
 calculation put on one measure basis and provider scope (`_aligned_bases`), the decisions it
 settles (`planner.plan.settle_decisions`), the measure decisions and then the
@@ -189,7 +189,6 @@ from planner.plan import (
     is_scope_choice,
     is_search_pin,
     keep_years_admits,
-    licences_restated,
     load_ask_breakdowns,
     load_asks,
     load_asks_across_years,
@@ -467,9 +466,10 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     """Run the chain over `proposal`, answering the plan to record or the refusal that stops it.
 
     The planner reads the user's own words only in an entry the user's
-    amendment opened (`planner.plan.amendment_entry`). Only there may
-    `proposal.across_years` name a step, and each step it names takes a
-    licence to combine its years (`planner.plan.period_licences_held`).
+    amendment opened (`planner.plan.amendment_entry`). Only there does
+    `proposal.across_years` count: each step it names takes a licence to
+    combine its years (`planner.plan.period_licences_held`). Elsewhere it is
+    ignored (`_across_years_read`).
     `proposer` is the tool every refusal's `action` names. Writes nothing
     but an `unsupported` answer (`SessionView.record_unsupported`) and the
     asks a `PERIOD_REDUCTION_UNSTATED` refusal names
@@ -588,14 +588,9 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         )
     user_spoke = pick is None and (previous is None or view.user_spoke_since(previous.version))
     refused = refused_in_force(view.state, conversation_readings(view.state))
+    patch = _across_years_read(patch, in_amendment_entry=in_amendment_entry)
     blocked = (
-        _across_years_unread(
-            patch.across_years,
-            requirements=written,
-            previous=previous,
-            in_amendment_entry=in_amendment_entry,
-        )
-        or _removed_asks_refused(patch, previous, view)
+        _removed_asks_refused(patch, previous, view)
         or _refused_spec_pinned(written, refused)
         or _referral_unanswered(existing, referral, view)
         or _draft_unreferenced(
@@ -3040,33 +3035,17 @@ def _period_reduction_unstated(plan: Plan, view: SessionView) -> dict[str, objec
     )
 
 
-def _across_years_unread(
-    across_years: Sequence[str],
-    *,
-    requirements: Sequence[EvidenceRequirement],
-    previous: Plan | None,
-    in_amendment_entry: bool,
-) -> dict[str, object] | None:
-    """Return the `INVALID_PLAN` refusal of an `across_years` naming steps where the planner reads none of the user's own words, or `None`.
+def _across_years_read(patch: _Patch, *, in_amendment_entry: bool) -> _Patch:
+    """`patch` with its `across_years` emptied where the planner reads none of the user's own words.
 
     There the orchestrator holds them, and its (across years) mark on an ask
     is the only statement that the user asked for one figure over the years.
-    A step whose licence `previous` holds as `requirements` state it is a
-    restatement, which grants nothing (`planner.plan.licences_restated`).
+    A step that combines its years with no licence from such an ask, or from
+    the plan on record, is refused `PERIOD_REDUCTION_UNSTATED`.
     """
-    if in_amendment_entry:
-        return None
-    restated = licences_restated(across_years, requirements=requirements, previous=previous)
-    unread = [name for name in across_years if name not in restated]
-    if not unread:
-        return None
-    return _invalid_plan(
-        "`across_years` names the steps whose years the user's own words ask to combine, "
-        "and in this entry you read the orchestrator's brief, not the user's words. Take "
-        f"{', '.join(map(repr, unread))} out of `across_years`. A step the plan already "
-        "licenses keeps its licence without being named, and any other figure or ranking "
-        "over several years answers only an ask the brief marks (across years)."
-    )
+    if in_amendment_entry or not patch.across_years:
+        return patch
+    return patch.model_copy(update={"across_years": []})
 
 
 def _years_kept(aggregate: AggregateRequirement) -> tuple[GroupBy, ...]:
