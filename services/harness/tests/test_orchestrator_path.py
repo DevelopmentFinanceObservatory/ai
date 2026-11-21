@@ -17,7 +17,6 @@ from typing import Any, cast
 
 import pytest
 from analysis_mcp import digest as analysis_digest
-from analysis_mcp.execution_identity import current_execution_identity
 from common.materialisation import FrameRef
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp import get_data_digest
@@ -72,6 +71,7 @@ from .plan_turns import approve_answer, plan_nodes
 from .planner_host import FailingPlanner, RefusingPlanner
 from .scripted_genai import ScriptedGenai, call_part, reply, text_part
 from .scripted_tools import no_executor, no_resolver, scripted_orchestrator
+from .stored_verbs import EXECUTION_IDENTITY
 from .test_plan_path import (
     SCRIPTED_SPEC,
     AskingPlanner,
@@ -1246,7 +1246,7 @@ class _NoisySurface(ScriptedSurface):
                 analysis_digest._identity_block(
                     op_spec_hash="ops_" + "1" * 32,
                     content_version="ocv_" + "1" * 32,
-                    execution_identity=current_execution_identity(),
+                    execution_identity=EXECUTION_IDENTITY,
                 ),
                 "Coverage 1960-2023.",
             ]

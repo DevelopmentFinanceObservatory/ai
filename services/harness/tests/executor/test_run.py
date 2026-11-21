@@ -13,8 +13,9 @@ from __future__ import annotations
 import asyncio
 import random
 import ssl
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 import httpx2
@@ -86,7 +87,15 @@ from planner.plan import (
 from planner.workflow import SelectedSource, ToolId
 
 from ..unreachable_surface import unreachable_surface
-from .conftest import RESULT_FRAME, SPEC_KENYA, SPEC_POPULATION, ScriptedSurface, ok, refusal
+from .conftest import (
+    RESULT_FRAME,
+    SPEC_KENYA,
+    SPEC_POPULATION,
+    ScriptedSurface,
+    ok,
+    refusal,
+    runner_refused,
+)
 
 PlanFactory = Callable[..., Plan]
 ManifestFactory = Callable[..., dict[str, Any]]
@@ -850,27 +859,73 @@ async def test_a_definition_no_longer_held_sends_the_requirement_back_to_discove
     assert len(surface.calls) == 1
 
 
-async def test_a_rediscovery_on_a_step_bound_to_no_evidence_is_a_plain_refusal(
+async def test_a_runner_upstream_version_change_on_an_analysis_step_is_posted_once_more(
     approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
 ) -> None:
-    # No analysis verb answers `refresh_then_retry` today; the executor
-    # classifies by mode, so one that did would reach the aggregate step,
-    # which no `EvidenceBinding` names. There is nothing to rediscover, so
-    # the run stops on the step rather than instructing a rediscovery of
-    # nothing in particular.
-    surface = _surface(
-        real_schemas,
-        manifest(),
-        aggregate=[refusal("upstream_version_changed", "refresh_then_retry")],
+    """The runner answers `upstream_version_changed` when a root read at its newest
+    version met an upstream refresh mid-load. No `EvidenceBinding` names the aggregate
+    step, so there is nothing to rediscover; the same tree posted again reads the
+    refreshed version, so the step is called once more, at once."""
+    refused = await runner_refused(
+        status=503, code="upstream_version_changed", title="Upstream Version Changed"
     )
+    surface = _surface(real_schemas, manifest(), aggregate=[refused, ok(RESULT_FRAME)])
+    sleeps = _Sleeps()
+
+    outcome = await _run(approved_plan(), surface=surface, sleep=sleeps)
+
+    assert isinstance(outcome, Accepted), outcome
+    first, second = [arguments for tool, arguments in surface.calls if tool == "aggregate"]
+    assert first == second
+    assert sleeps.delays == [0.0]
+
+
+async def _definition_not_held() -> ToolCallResult:
+    return refusal(
+        "definition_not_held",
+        "correct_and_retry",
+        message="Definition Not Held: the run could not finish.",
+        fix={"definition_id": SPEC_KENYA, "next_step": "search"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "calls"),
+    [
+        pytest.param(
+            partial(
+                runner_refused,
+                status=503,
+                code="upstream_version_changed",
+                title="Upstream Version Changed",
+            ),
+            2,
+            id="upstream-version-changed-twice",
+        ),
+        # A code a second call cannot get past stops at the first refusal.
+        pytest.param(_definition_not_held, 1, id="definition-not-held"),
+    ],
+)
+async def test_a_rediscovery_on_a_step_bound_to_no_evidence_stops_with_the_refusals_message(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    answer: Callable[[], Awaitable[ToolCallResult]],
+    calls: int,
+) -> None:
+    result = await answer()
+    surface = _surface(real_schemas, manifest(), aggregate=[result])
 
     outcome = await _run(approved_plan(), surface=surface, sleep=_Sleeps())
 
     assert isinstance(outcome, Refused), outcome
     assert outcome.refusal is RefusalKind.STEP_REFUSED
     assert outcome.step_id == "totals"
-    assert outcome.payload is not None and outcome.payload.code == "upstream_version_changed"
+    assert outcome.payload is not None
+    assert outcome.payload.code == (result.structured_content or {})["code"]
+    assert outcome.detail.endswith("the run could not finish.")
     assert [step.step_id for step in outcome.completed] == ["debt"]
+    assert [tool for tool, _ in surface.calls].count("aggregate") == calls
 
 
 async def test_a_refused_steps_detail_carries_the_message_without_the_envelope_line(

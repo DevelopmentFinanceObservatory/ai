@@ -3,26 +3,13 @@ frame itself never leaks into the rendered text."""
 
 from __future__ import annotations
 
-import dataclasses
 from typing import Any
 
-import pyarrow as pa
 import pytest
 from analysis_mcp.artifact import Exclusion, Interval
-from analysis_mcp.digest import _absent_clause, _format_number
-from analysis_mcp.engine.aggregate import AggregateResult, GroupSummary, run_aggregate
-from analysis_mcp.engine.compare import CompareResult, PeriodComparison
-from analysis_mcp.engine.filter import FilterResult, FilterRowSummary
-from analysis_mcp.engine.growth import EntityGrowth, GrowthResult
-from analysis_mcp.engine.join import JoinResult, MatchedKey
-from analysis_mcp.engine.quotient_of import PeriodQuotient, run_quotient_of
-from analysis_mcp.engine.rank import EntityRank, RankResult, run_rank
-from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult, run_share_of
-from analysis_mcp.execution_identity import ExecutionIdentity
-from common.echoed_text import escape_control_chars, truncate_value
-from dfo_frame_grammar import Frame
-from digest_corpus import matched_keys_of, quotient_of_result, share_of_result
-from digest_facts import (
+from analysis_mcp.digest import (
+    _absent_clause,
+    _format_number,
     render_aggregate_digest,
     render_compare_digest,
     render_filter_digest,
@@ -32,6 +19,28 @@ from digest_facts import (
     render_rank_digest,
     render_share_of_digest,
 )
+from analysis_mcp.execution_identity import ExecutionIdentity
+from analysis_mcp.summary import (
+    AggregateFacts,
+    CompareFacts,
+    EntityGrowth,
+    EntityRank,
+    FilterFacts,
+    FilterRowSummary,
+    GroupSummary,
+    GrowthFacts,
+    JoinFacts,
+    MatchedKey,
+    PeriodComparison,
+    PeriodQuotient,
+    PeriodShare,
+    RankFacts,
+    ShareOfFacts,
+)
+from common.echoed_text import escape_control_chars, truncate_value
+from dfo_frame_grammar import Frame
+from digest_corpus import quotient_of_result, share_of_result
+from digest_facts import computed, facts
 from party_frames import (
     GROUP_TOTAL,
     OFFICIAL,
@@ -40,10 +49,11 @@ from party_frames import (
     PRIVATE_WHOLE,
     PROVIDER,
     provider_frame,
+    provider_frame_by_year,
 )
 
 
-def _result(*, group_summaries: tuple[GroupSummary, ...], **overrides: object) -> AggregateResult:
+def _result(*, group_summaries: tuple[GroupSummary, ...], **overrides: object) -> AggregateFacts:
     defaults: dict[str, object] = {
         "frame": None,
         "resolved_unit": "dcid:USDollar",
@@ -55,7 +65,7 @@ def _result(*, group_summaries: tuple[GroupSummary, ...], **overrides: object) -
         "present_cell_count": len(group_summaries),
     }
     defaults.update(overrides)
-    return AggregateResult(group_summaries=group_summaries, **defaults)  # type: ignore[arg-type]
+    return facts(AggregateFacts, group_summaries=group_summaries, **defaults)
 
 
 def _summary(
@@ -247,7 +257,8 @@ def test_ascending_rank_digest_shows_rank_one_not_the_largest_magnitude_entries(
             for i in range(1, 26)
         ],
     )
-    result = run_rank(
+    result = computed(
+        "rank",
         frame,
         rank_by=("reporter",),
         aggregation=None,
@@ -279,8 +290,11 @@ def test_labelled_digest_shows_a_groups_window_only_when_it_covers_less() -> Non
             for y in range(2018, 2021)
         ),
     ]
-    result = run_aggregate(
-        Frame.build(role_keys=["reporter"], rows=rows), group_by=("reporter",), aggregation="sum"
+    result = computed(
+        "aggregate",
+        Frame.build(role_keys=["reporter"], rows=rows),
+        group_by=("reporter",),
+        aggregation="sum",
     )
     digest = render_aggregate_digest(
         group_by=("reporter",),
@@ -298,7 +312,7 @@ def test_labelled_digest_shows_a_groups_window_only_when_it_covers_less() -> Non
 
 def test_digest_never_mentions_frame_or_rows_attributes() -> None:
     """The digest reads only `GroupSummary` values -- proof it never
-    touches `AggregateResult.frame` at all (constructed as `None` here,
+    touches `AggregateFacts.frame` at all (constructed as `None` here,
     which would raise if any code path tried to read from it)."""
     digest = render_aggregate_digest(
         group_by=("reporter",),
@@ -327,8 +341,10 @@ def test_growth_digest_carries_the_identity_block() -> None:
         window_start="2020",
         window_end="2023",
         entity_by=("reporter",),
-        result=GrowthResult(
-            frame=None,  # type: ignore[arg-type]
+        result=facts(
+            GrowthFacts,
+            change="relative",
+            frame=None,
             resolved_unit="dcid:USDollar",
             facet_selections=(),
             warnings=(),
@@ -356,9 +372,10 @@ def test_growth_digest_carries_the_identity_block() -> None:
 
 def _growth_result(
     *, change: str, resolved_unit: str | None, growth_rate: float, value_end: float | None = None
-) -> GrowthResult:
-    return GrowthResult(
-        frame=None,  # type: ignore[arg-type]
+) -> GrowthFacts:
+    return facts(
+        GrowthFacts,
+        frame=None,
         resolved_unit=resolved_unit,
         facet_selections=(),
         warnings=(),
@@ -582,8 +599,9 @@ def test_compare_digest_names_its_difference_and_carries_the_identity_block(
     """The label line names the result's own StatVar right side minus left,
     the order `delta` subtracts."""
     digest = render_compare_digest(
-        result=CompareResult(
-            frame=None,  # type: ignore[arg-type]
+        result=facts(
+            CompareFacts,
+            frame=None,
             stat_var="dcid:ops_" + "a" * 32,
             left_stat_vars=left_stat_vars,
             right_stat_vars=right_stat_vars,
@@ -621,8 +639,10 @@ def test_compare_digest_names_its_difference_and_carries_the_identity_block(
 def test_rank_digest_carries_the_identity_block() -> None:
     digest = render_rank_digest(
         rank_by=("reporter",),
-        result=RankResult(
-            frame=None,  # type: ignore[arg-type]
+        result=facts(
+            RankFacts,
+            per_period=False,
+            frame=None,
             resolved_unit="dcid:USDollar",
             facet_selections=(),
             warnings=(),
@@ -640,6 +660,7 @@ def test_rank_digest_carries_the_identity_block() -> None:
                     rank=1,
                     row_count=1,
                     coverage_fraction=1.0,
+                    time_period="2021",
                 ),
             ),
         ),
@@ -652,9 +673,10 @@ def test_rank_digest_carries_the_identity_block() -> None:
     assert "execution_identity: 0.1.0|1.0.0|0.1.0" in digest
 
 
-def _per_period_rank_result() -> RankResult:
-    return RankResult(
-        frame=None,  # type: ignore[arg-type]
+def _per_period_rank_result() -> RankFacts:
+    return facts(
+        RankFacts,
+        frame=None,
         resolved_unit="dcid:USDollar",
         facet_selections=(),
         warnings=(),
@@ -760,7 +782,7 @@ def test_rank_digest_header_names_no_limit_when_none_was_set() -> None:
 def test_rank_digest_header_states_the_limit_and_the_kept_count() -> None:
     digest = render_rank_digest(
         rank_by=("reporter",),
-        result=dataclasses.replace(_per_period_rank_result(), limit=1),
+        result=_per_period_rank_result().model_copy(update={"limit": 1}),
         op_spec_hash="ops_" + "a" * 32,
         content_version="ocv_" + "b" * 32,
         execution_identity=_EI,
@@ -775,7 +797,7 @@ def test_rank_digest_header_states_the_limit_and_the_kept_count() -> None:
     assert "#2 " not in digest
 
 
-def _share_of_digest(result: ShareOfResult, *, derived: dict[str, object] | None = None) -> str:
+def _share_of_digest(result: ShareOfFacts, *, derived: dict[str, object] | None = None) -> str:
     return render_share_of_digest(
         result=result,
         op_spec_hash="ops_" + "a" * 32,
@@ -1019,7 +1041,8 @@ def test_every_cell_a_keyed_quotient_leaves_out_is_named_by_one_left_out_line() 
         "E": {"2020": 0.0},
         "F": {"2020": 2.0, "2021": 0.0},
     }
-    result = run_quotient_of(
+    result = computed(
+        "quotient_of",
         _keyed_frame("dcid:Aid", "recipient", numerator),
         _keyed_frame("dcid:Count_Person", "observationAbout", denominator),
         stat_var="dcid:ops_" + "a" * 32,
@@ -1078,8 +1101,9 @@ def test_quotient_of_digest_has_no_pairs_line_when_no_key_holds_a_one_sided_peri
 
 def test_join_digest_carries_the_identity_block() -> None:
     digest = render_join_digest(
-        result=JoinResult(
-            frame=None,  # type: ignore[arg-type]
+        result=facts(
+            JoinFacts,
+            frame=None,
             left_resolved_unit="dcid:USDollar",
             right_resolved_unit="dcid:USDollar",
             left_facet_selections=(),
@@ -1087,7 +1111,7 @@ def test_join_digest_carries_the_identity_block() -> None:
             warnings=(),
             join_keys=("reporter",),
             right_key_columns=("reporter",),
-            matched_keys=matched_keys_of(
+            matched_keys=(
                 (
                     MatchedKey(
                         key=(("reporter", "dcid:USA"),),
@@ -1114,8 +1138,9 @@ def test_join_digest_carries_the_identity_block() -> None:
 def test_filter_digest_carries_the_identity_block() -> None:
     digest = render_filter_digest(
         predicate_count=1,
-        result=FilterResult(
-            frame=None,  # type: ignore[arg-type]
+        result=facts(
+            FilterFacts,
+            frame=None,
             total_row_count=1,
             kept_row_count=1,
             dropped_row_count=0,
@@ -1280,7 +1305,9 @@ def _identity() -> dict[str, Any]:
 
 
 def test_a_sum_over_donors_states_how_many_private_donors_it_holds_and_their_value() -> None:
-    result = run_aggregate(provider_frame(_DONORS), group_by=("time_period",), aggregation="sum")
+    result = computed(
+        "aggregate", provider_frame(_DONORS), group_by=("time_period",), aggregation="sum"
+    )
 
     digest = render_aggregate_digest(
         group_by=("time_period",), aggregation="sum", result=result, **_identity()
@@ -1315,7 +1342,9 @@ def test_a_sum_over_donors_states_how_many_private_donors_it_holds_and_their_val
 def test_a_sum_of_whole_totals_names_them_as_totals_with_the_private_ones(
     donors: dict[str, tuple[tuple[str, str, str], float]], line: str
 ) -> None:
-    result = run_aggregate(provider_frame(donors), group_by=("time_period",), aggregation="sum")
+    result = computed(
+        "aggregate", provider_frame(donors), group_by=("time_period",), aggregation="sum"
+    )
 
     digest = render_aggregate_digest(
         group_by=("time_period",), aggregation="sum", result=result, **_identity()
@@ -1337,8 +1366,11 @@ def test_a_sum_of_whole_totals_names_them_as_totals_with_the_private_ones(
 def test_a_digest_names_no_private_donors_where_the_sum_holds_none_or_cannot_tell(
     donors: dict[str, tuple[tuple[str, str, str], float]], aggregation: str, classes: bool
 ) -> None:
-    result = run_aggregate(
-        provider_frame(donors, classes=classes), group_by=("time_period",), aggregation=aggregation
+    result = computed(
+        "aggregate",
+        provider_frame(donors, classes=classes),
+        group_by=("time_period",),
+        aggregation=aggregation,
     )
 
     digest = render_aggregate_digest(
@@ -1364,8 +1396,11 @@ def test_a_digest_names_no_private_donors_where_the_sum_holds_none_or_cannot_tel
 def test_a_sum_over_several_years_states_the_private_value_over_them(
     donors: dict[str, tuple[tuple[str, str, str], float]], group_by: tuple[str, ...], line: str
 ) -> None:
-    result = run_aggregate(
-        provider_frame(donors, years=("2020", "2021")), group_by=group_by, aggregation="sum"
+    result = computed(
+        "aggregate",
+        provider_frame(donors, years=("2020", "2021")),
+        group_by=group_by,
+        aggregation="sum",
     )
 
     digest = render_aggregate_digest(
@@ -1376,7 +1411,8 @@ def test_a_sum_over_several_years_states_the_private_value_over_them(
 
 
 def test_a_rank_of_donors_tags_each_private_donor() -> None:
-    result = run_rank(
+    result = computed(
+        "rank",
         provider_frame(_DONORS),
         rank_by=(PROVIDER,),
         aggregation="sum",
@@ -1394,7 +1430,8 @@ def test_a_rank_of_donors_tags_each_private_donor() -> None:
 def _keyed_share_digest(
     donors: dict[str, tuple[tuple[str, str, str], float]],
 ) -> tuple[str, list[float]]:
-    result = run_share_of(
+    result = computed(
+        "share_of",
         provider_frame(donors),
         provider_frame(donors),
         stat_var="dcid:share",
@@ -1428,7 +1465,8 @@ def test_each_donors_share_divides_by_the_listed_sum_and_says_so(
 def test_a_share_of_one_donor_over_the_pooled_donors_names_the_denominators_private_donors() -> (
     None
 ):
-    result = run_share_of(
+    result = computed(
+        "share_of",
         provider_frame(_DONORS),
         provider_frame(_DONORS),
         stat_var="dcid:share",
@@ -1443,7 +1481,8 @@ def test_a_share_of_one_donor_over_the_pooled_donors_names_the_denominators_priv
 
 
 def test_a_quotient_over_the_pooled_donors_names_the_denominators_private_donors() -> None:
-    result = run_quotient_of(
+    result = computed(
+        "quotient_of",
         provider_frame(_DONORS),
         provider_frame(_DONORS),
         stat_var="dcid:ratio",
@@ -1457,23 +1496,21 @@ def test_a_quotient_over_the_pooled_donors_names_the_denominators_private_donors
 
 
 @pytest.mark.parametrize(
-    ("run", "render"),
-    [(run_quotient_of, render_quotient_of_digest), (run_share_of, render_share_of_digest)],
+    ("verb", "render"),
+    [("quotient_of", render_quotient_of_digest), ("share_of", render_share_of_digest)],
     ids=["quotient_of", "share_of"],
 )
-def test_a_private_donor_only_in_a_period_left_out_is_not_disclosed(run, render) -> None:
+def test_a_private_donor_only_in_a_period_left_out_is_not_disclosed(verb, render) -> None:
     # 2021 divides 20 by 40; the private donor's 100 sits in 2020, which the
     # denominator lacks, so it is no part of the figure.
-    numerator = provider_frame(
-        {"country/FRA": (OFFICIAL, 5.0), "GatesFoundation": (PRIVATE, 100.0)}, years=("2020",)
+    both_years = provider_frame_by_year(
+        {
+            "2020": {"country/FRA": (OFFICIAL, 5.0), "GatesFoundation": (PRIVATE, 100.0)},
+            "2021": {"country/FRA": (OFFICIAL, 10.0), "country/DEU": (OFFICIAL, 10.0)},
+        }
     )
-    numerator_2021 = provider_frame(
-        {"country/FRA": (OFFICIAL, 10.0), "country/DEU": (OFFICIAL, 10.0)}
-    )
-    both_years = Frame.from_table(
-        columns=numerator.columns, table=pa.concat_tables([numerator.table, numerator_2021.table])
-    )
-    result = run(
+    result = computed(
+        verb,
         both_years,
         provider_frame({"country/FRA": (OFFICIAL, 40.0)}),
         stat_var="dcid:ratio",

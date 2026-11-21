@@ -4,7 +4,7 @@ kept in the materialisation store as an object of its own.
 A rolling verb call names its periods relative to the latest period of the data
 and is sent the literal periods that stood for. The record is what those
 literals are checked against. It is written once, by the call that resolved the
-period (`analysis_mcp.rolling_tool.resolve_anchor`), and read by every rolling
+period (`analysis_mcp.verbs.resolve_anchor`), and read by every rolling
 verb call and by `common.recipe.recipe_anchor`.
 
 A record holds what was resolved from beside the result:

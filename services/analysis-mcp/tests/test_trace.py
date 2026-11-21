@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import pytest
 from analysis_mcp.artifact import Observation
-from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.identity import op_spec_hash_for
 from analysis_mcp.op_spec import AggregateOpSpec
 from analysis_mcp.steps import LeftOut, Step, VersionRef
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from common.materialisation import FrameRef, decode_trace, encode_trace
+from engine_identity import EXECUTION_IDENTITY
 from pydantic import ValidationError
 
 SNAPSHOT_REF = {"spec_id": "spec_" + "a" * 32, "content_version": "cv_" + "b" * 32}
@@ -20,7 +20,7 @@ def _minimal_trace() -> Trace:
         frame_ref=FrameRef(**SNAPSHOT_REF), group_by=("reporter",), aggregation="sum"
     )
     op_spec_hash = op_spec_hash_for(op_spec)
-    ei = current_execution_identity()
+    ei = EXECUTION_IDENTITY
     content_version = "ocv_" + "c" * 32
     return Trace(
         upstream_trace={"graph_revision": "rev1", "resolved_stat_vars": []},
@@ -65,7 +65,7 @@ def test_upstream_trace_is_carried_as_an_opaque_mapping() -> None:
         applied_policy=AppliedPolicy(),
         content_version="ocv_" + "c" * 32,
         input_content_versions=[SNAPSHOT_REF["content_version"]],
-        execution_identity=current_execution_identity(),
+        execution_identity=EXECUTION_IDENTITY,
     )
     assert trace.upstream_trace["graph_revision"] == "rev1"
 
@@ -93,7 +93,7 @@ def test_malformed_op_spec_hash_is_refused() -> None:
             applied_policy=AppliedPolicy(),
             content_version="ocv_" + "c" * 32,
             input_content_versions=[SNAPSHOT_REF["content_version"]],
-            execution_identity=current_execution_identity(),
+            execution_identity=EXECUTION_IDENTITY,
         )
 
 
@@ -109,7 +109,7 @@ def test_malformed_content_version_is_refused() -> None:
             applied_policy=AppliedPolicy(),
             content_version="cv_" + "c" * 32,  # frame-grammar's family, not the toolkit's ocv_
             input_content_versions=[SNAPSHOT_REF["content_version"]],
-            execution_identity=current_execution_identity(),
+            execution_identity=EXECUTION_IDENTITY,
         )
 
 
@@ -125,7 +125,7 @@ def test_malformed_input_content_version_is_refused() -> None:
             applied_policy=AppliedPolicy(),
             content_version="ocv_" + "c" * 32,
             input_content_versions=["not-a-content-version"],
-            execution_identity=current_execution_identity(),
+            execution_identity=EXECUTION_IDENTITY,
         )
 
 
@@ -141,7 +141,7 @@ def test_malformed_frame_content_version_is_refused() -> None:
             applied_policy=AppliedPolicy(),
             content_version="ocv_" + "c" * 32,
             input_content_versions=[SNAPSHOT_REF["content_version"]],
-            execution_identity=current_execution_identity(),
+            execution_identity=EXECUTION_IDENTITY,
         )
 
 

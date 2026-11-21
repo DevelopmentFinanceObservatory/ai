@@ -6,18 +6,16 @@ declared JSON Schema, and each verb's declared implementation version.
 verb's registration site. `-> ToolResult` stays the return annotation --
 `fastmcp` suppresses schema derivation for it on purpose -- so the schema
 is declared here, explicitly, from `VerbResult` itself, and
-`store_result_and_render` builds the returned `structured_content` from a
-real `VerbResult(...)` via `model_dump(mode="json")`, so the two can never
-drift apart. A refusal builds its own payload (`tool_errors.to_tool_result`)
+`tool_pipeline.run_on_runner` builds the returned `structured_content` from a
+real `VerbResult` (`summary.VerbSummary.verb_result`) via
+`model_dump(mode="json")`, so the two can never drift apart. A refusal builds its own payload (`tool_errors.to_tool_result`)
 and never goes through `VerbResult` -- the MCP client validates
 `structuredContent` against `outputSchema` on success only, so an output
 schema is declared safely for refusals too.
 
-`role_keys` and `stat_var_count` are read off the frame `store_result_and_render`
-already holds, via `observed_shape` below -- no verb signature changes.
-`dropped_key_count` and `right_dropped_key_count` are the shape facts a
-frame cannot state, the keys a verb left out of it, so the verb passes them
-to `store_result_and_render`.
+The analysis runner states every field, `role_keys` and `stat_var_count`
+included, and `dropped_key_count` and `right_dropped_key_count`, the keys a
+verb left out of its frame, which the frame cannot state.
 
 Every verb declares version "1" until the toolkit's first release. Until
 then a deploy ships the harness's capability pins and the servers together,
@@ -29,15 +27,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN
 from pydantic import BaseModel, ConfigDict, Field
 
 from analysis_mcp.artifact import Exclusion, Observation, Time
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-    from dfo_frame_grammar import Frame
 
 
 class VerbResult(BaseModel):
@@ -98,14 +93,3 @@ IMPLEMENTATION_VERSIONS: Mapping[str, str] = {
     "sum_of": "1",
     "quotient_of": "1",
 }
-
-
-def observed_shape(frame: Frame) -> tuple[tuple[str, ...], int]:
-    """`frame`'s own role columns and its distinct `stat_var` count, read off
-    the built frame. `grammar.derive_columns` pins the column order as
-    `stat_var`, the role columns, `time_period`, `value`, `unit`, the facet
-    columns, `status`, so the role columns are every column between the
-    first and `time_period`.
-    """
-    roles = frame.columns[1 : frame.columns.index(TIME_PERIOD_COLUMN)]
-    return roles, len(frame.table.column(0).unique())

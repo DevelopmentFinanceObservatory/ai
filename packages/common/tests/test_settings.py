@@ -88,26 +88,26 @@ def test_frame_rows_in_flight_max_refuses_a_budget_below_one_row(
         BaseServiceSettings()
 
 
-def test_the_default_budget_admits_a_two_input_verb_at_the_default_ceiling() -> None:
+def test_the_default_budget_admits_a_full_frame_at_the_default_ceiling() -> None:
     settings = FrameServiceSettings()
 
-    assert settings.frame_rows_in_flight_max >= 2 * settings.max_frame_rows
+    assert settings.frame_rows_in_flight_max >= settings.max_frame_rows
 
 
-def test_a_budget_of_exactly_two_inputs_at_the_ceiling_is_accepted(
+def test_a_budget_of_exactly_one_frame_at_the_ceiling_is_accepted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MAX_FRAME_ROWS", "300000")
-    monkeypatch.setenv("FRAME_ROWS_IN_FLIGHT_MAX", "600000")
+    monkeypatch.setenv("FRAME_ROWS_IN_FLIGHT_MAX", "300000")
 
-    assert FrameServiceSettings().frame_rows_in_flight_max == 600_000
+    assert FrameServiceSettings().frame_rows_in_flight_max == 300_000
 
 
-def test_a_budget_below_two_inputs_at_the_ceiling_fails_naming_both_fixes(
+def test_a_budget_below_one_frame_at_the_ceiling_fails_naming_both_fixes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MAX_FRAME_ROWS", "300000")
-    monkeypatch.setenv("FRAME_ROWS_IN_FLIGHT_MAX", "599999")
+    monkeypatch.setenv("FRAME_ROWS_IN_FLIGHT_MAX", "299999")
 
     with pytest.raises(ValueError, match=r"lower MAX_FRAME_ROWS or raise FRAME_ROWS_IN_FLIGHT_MAX"):
         FrameServiceSettings()

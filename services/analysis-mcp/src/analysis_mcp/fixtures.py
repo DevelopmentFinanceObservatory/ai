@@ -25,7 +25,7 @@ ODA disbursements, GNI, sized in the tens of rows) and is registered under a
 in for the trace a real `get_data` materialisation would carry.
 
 Policy language downstream should say "skips absent grid cells," not "skips
-nulls" -- `analysis_mcp.engine.aggregate` already states it that way, and
+nulls" -- `dfo_analysis_engine.engine.aggregate` already states it that way, and
 every later verb's coverage language should follow the same wording rather
 than the "null-bearing" framing above.
 """
@@ -183,29 +183,6 @@ def sparse_coverage_frame() -> Frame:
     )
 
 
-def unit_partially_declared_frame() -> Frame:
-    """Three donor/2022 ODA rows, two declaring `unit=dcid:USDollar` and one
-    leaving `unit` unbound entirely -- a shape no other fixture carries.
-    Models a row still awaiting currency normalisation upstream: the
-    observation itself exists, but its own `unit` cell was never populated.
-    Exercises `filter`'s own `category_match` narrowing exemption (see
-    `engine/filter.py`'s module docstring) against a real `None` cell,
-    rather than a frame where every row happens to declare a unit."""
-    return Frame.build(
-        role_keys=["reporter"],
-        rows=[
-            {
-                "stat_var": _STAT_VAR_ODA_DISBURSED,
-                "reporter": donor,
-                "time_period": "2022",
-                "value": _ODA_DISBURSED_BY_DONOR_YEAR[donor, "2022"],
-                **({"unit": _UNIT_USD} if donor != "dcid:FRA" else {}),
-            }
-            for donor in ("dcid:USA", "dcid:GBR", "dcid:FRA")
-        ],
-    )
-
-
 def join_compatible_frame_pair() -> tuple[Frame, Frame]:
     """Two frames sharing a `(reporter, time_period)` grain over different
     `stat_var`s -- ODA disbursed and GNI -- joinable on that shared grain,
@@ -305,132 +282,6 @@ def time_series_with_gap_year_frame() -> Frame:
                 "unit": _UNIT_USD,
             }
             for year, value in _ODA_SINGLE_REPORTER_TIME_SERIES.items()
-        ],
-    )
-
-
-def unit_disjoint_by_reporter_frame() -> Frame:
-    """USA reporting in USD across 2020-2021, GBR reporting in Percent over
-    the same two years -- each reporter internally unit-homogeneous, unlike
-    `multi_unit_frame` (where USA itself carries both units). A caller
-    narrowed to one reporter's own scope (comparing USA's 2020 against its
-    own 2021, say) resolves cleanly, though the frame at large is
-    heterogeneous."""
-    return Frame.build(
-        role_keys=["reporter"],
-        rows=[
-            {
-                "stat_var": _STAT_VAR_ODA_DISBURSED,
-                "reporter": "dcid:USA",
-                "time_period": year,
-                "value": value,
-                "unit": _UNIT_USD,
-            }
-            for year, value in (("2020", 44_170_000_000.0), ("2021", 47_805_000_000.0))
-        ]
-        + [
-            {
-                "stat_var": _STAT_VAR_ODA_DISBURSED,
-                "reporter": "dcid:GBR",
-                "time_period": year,
-                "value": value,
-                "unit": _UNIT_PERCENT,
-            }
-            for year, value in (("2020", 0.0070), ("2021", 0.0050))
-        ],
-    )
-
-
-def unit_disjoint_facet_leak_frame() -> Frame:
-    """USA in USD across 2021-2022 declaring `measurementMethod=dcid:M1`;
-    GBR in Percent over the same two years declaring `measurementMethod=dcid:M2`.
-    The same reporter-disjoint unit split as `unit_disjoint_by_reporter_frame`,
-    with a facet axis genuinely heterogeneous at the frame level (M1 vs M2).
-    When pinned to USA's unit, a resolver should exclude GBR's rows and thus
-    never expose M2 as a facet selection or raise a facet heterogeneity error."""
-    return Frame.build(
-        role_keys=["reporter"],
-        rows=[
-            {
-                "stat_var": _STAT_VAR_ODA_DISBURSED,
-                "reporter": "dcid:USA",
-                "time_period": year,
-                "value": value,
-                "unit": _UNIT_USD,
-                "measurementMethod": "dcid:M1",
-            }
-            for year, value in (("2021", 47_805_000_000.0), ("2022", 55_303_000_000.0))
-        ]
-        + [
-            {
-                "stat_var": _STAT_VAR_ODA_DISBURSED,
-                "reporter": "dcid:GBR",
-                "time_period": year,
-                "value": value,
-                "unit": _UNIT_PERCENT,
-                "measurementMethod": "dcid:M2",
-            }
-            for year, value in (("2021", 0.0055), ("2022", 0.0051))
-        ],
-    )
-
-
-def facet_disjoint_by_reporter_frame() -> Frame:
-    """USA and GBR, both in USD across 2021-2022, each declaring a different
-    `provenance` -- unlike the unit-disjoint fixtures, they agree on `unit`
-    entirely, so only a facet axis distinguishes them. Each reporter's own
-    slice resolves cleanly on its own (one `provenance` value apiece). A
-    two-sided verb pairing one reporter's slice against the other's must
-    refuse the pairing, since resolving either side alone never exposes the
-    other side's provenance."""
-    return Frame.build(
-        role_keys=["reporter"],
-        rows=[
-            {
-                "stat_var": _STAT_VAR_ODA_DISBURSED,
-                "reporter": "dcid:USA",
-                "time_period": year,
-                "value": value,
-                "unit": _UNIT_USD,
-                "provenance": "dcid:P1",
-            }
-            for year, value in (("2021", 47_805_000_000.0), ("2022", 55_303_000_000.0))
-        ]
-        + [
-            {
-                "stat_var": _STAT_VAR_ODA_DISBURSED,
-                "reporter": "dcid:GBR",
-                "time_period": year,
-                "value": value,
-                "unit": _UNIT_USD,
-                "provenance": "dcid:P2",
-            }
-            for year, value in (("2021", 15_688_000_000.0), ("2022", 15_694_000_000.0))
-        ],
-    )
-
-
-def unit_and_unitless_row_frame() -> Frame:
-    """One recipient declaring `unit=dcid:USDollar`, the other leaving
-    `unit` unbound entirely. Tests the unitless-row exclusion policy: an
-    unpinned computation excludes the unitless row from its arithmetic,
-    consistent with what pinning already does."""
-    return Frame.build(
-        role_keys=["recipient"],
-        rows=[
-            {
-                "stat_var": _STAT_VAR_ODA_RECEIVED,
-                "recipient": "dcid:KEN",
-                "time_period": "2023",
-                "value": 100.0,
-                "unit": _UNIT_USD,
-            },
-            {
-                "stat_var": _STAT_VAR_ODA_RECEIVED,
-                "recipient": "dcid:ETH",
-                "time_period": "2023",
-                "value": 5.0,
-            },
         ],
     )
 

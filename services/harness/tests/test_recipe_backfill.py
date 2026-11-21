@@ -1,8 +1,8 @@
 """`harness.recipe_backfill`: the walk of the materialisation store and what each
 derived frame ends as.
 
-The store is `InMemoryMaterialisationStore`, filled by real analysis-mcp verbs so
-the traces are the ones a deployment stores. apis is `FakeApis` behind
+The store is `InMemoryMaterialisationStore`, filled with the frames and traces
+analysis-mcp's in-process verbs stored (`stored_verbs`). apis is `FakeApis` behind
 `httpx2.MockTransport`: the recipe and versions routes, answering as apis'
 publish door does.
 """
@@ -18,9 +18,7 @@ from typing import Any
 
 import httpx2
 import pytest
-from analysis_mcp.aggregate_tool import aggregate
 from analysis_mcp.fixtures import plain_single_unit_frame
-from analysis_mcp.growth_tool import growth
 from common.live_apis import PRINCIPAL_HEADER, LiveApisClient, LiveApisError
 from common.materialisation import (
     FrameRef,
@@ -33,6 +31,8 @@ from common.recipe import build_recipe
 from data_mcp.frame_materialisation import frame_ref_for
 from harness import recipe_backfill
 from harness.recipe_backfill import FRAMES_IN_FLIGHT, BackfillReport, Reason, run_backfill
+
+from .stored_verbs import aggregate, growth
 
 PRINCIPAL = "datasets-principal-7f3a"
 SPEC = "spec_" + "a" * 32

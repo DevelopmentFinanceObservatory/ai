@@ -1,14 +1,14 @@
 """The tools `server` registers: the nine verbs and `resolve_anchor`, computed by
 dfo-apis' analysis runner.
 
-Each verb tool takes the arguments, signature and docstring of its in-process
-twin (`aggregate_tool.aggregate` and the rest), builds the same op-spec from
+Each verb tool takes the arguments, signature and docstring of its signature
+module (`aggregate_tool.aggregate` and the rest), builds the op-spec from
 them, and runs it on the runner (`tool_pipeline.run_on_runner`). An argument
 that forms no op-spec refuses `op_spec_invalid` before any call. A frame
 argument naming a `spec_` id alone is read at the Spec's newest version
 (`runner_tree.newest_ref`), and one naming any other id alone refuses
 `frame_ref_incomplete`. `rank`, `aggregate` and `share_of` also take
-`place_level`, which no in-process twin has: it filters each input to one level
+`place_level`, which no signature module has: it filters each input to one level
 of place on the runner (`runner_tree.verb_tree`). `compare`
 takes `sum_of`'s form under `operation="sum"`, and `share_of` takes
 `quotient_of`'s under `operation="quotient"`. The form picks the op-spec, so each
@@ -31,9 +31,6 @@ the record's, or when the runner read a root the record was not resolved over
 root frames over the populations, then stores the anchor record and returns its
 `anchor_key`. Its argument checks that read no frame run here first
 (`rolling_tool._too_many`, `rolling_tool._unmatched`).
-
-No registered tool calls the in-process tool bodies, the engine or the store
-reads behind them.
 """
 
 from __future__ import annotations
@@ -106,7 +103,7 @@ _SHARE_PLACE_LEVEL_DESCRIPTION = (
 
 def _place_level(description: str) -> inspect.Parameter:
     """The `place_level` argument `rank`, `aggregate` and `share_of` take beside their
-    twins' own."""
+    signature modules' own."""
     return inspect.Parameter(
         "place_level",
         inspect.Parameter.KEYWORD_ONLY,
@@ -248,18 +245,18 @@ def _followable(
 
 
 def _on_runner(
-    in_process: Tool,
+    signed: Tool,
     build: Callable[[Arguments], OpSpecVariant],
     *,
     refine: Refine | None = None,
     place_level_description: str | None = None,
 ) -> Tool:
-    """The registered tool for `in_process`. It keeps that tool's signature and
-    docstring, with `FOLLOWS_TREE` and `REBUILD_LOST_FRAMES` added, builds its op-spec
+    """The registered tool for the signature `signed`. It keeps that function's
+    signature and docstring, with `FOLLOWS_TREE` and `REBUILD_LOST_FRAMES` added, builds its op-spec
     with `build` from the bound arguments, and computes it on the runner. `refine`
     rewrites a runner refusal given the call's arguments. `place_level_description`,
     when given, adds `place_level` to the signature with that description."""
-    signature = inspect.signature(in_process)
+    signature = inspect.signature(signed)
     flags = [
         inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=False, annotation=kind)
         for name, kind in (
@@ -269,7 +266,7 @@ def _on_runner(
     ]
     signature = signature.replace(parameters=[*signature.parameters.values(), *flags])
 
-    @functools.wraps(in_process)
+    @functools.wraps(signed)
     async def tool(*args: Any, **kwargs: Any) -> ToolResult:
         place_level: PlaceLevel | None = (
             kwargs.pop("place_level", None) if place_level_description is not None else None
@@ -306,7 +303,7 @@ def _on_runner(
 
     listed = [*signature.parameters.values()]
     annotations = {
-        **in_process.__annotations__,
+        **signed.__annotations__,
         **{flag.name: flag.annotation for flag in flags},
     }
     if place_level_description is not None:

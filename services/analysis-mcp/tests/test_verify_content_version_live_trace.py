@@ -12,8 +12,7 @@ real `put`/`get` round trip.
 
 The fake `_StorageClient`/`_Bucket`/`_Blob` here duplicate
 `packages/common/tests/test_gcs_store.py`'s own fakes, since a service's
-tests don't import another package's own test module (see
-`test_frame_store_restart.py`'s own docstring).
+tests don't import another package's own test module.
 """
 
 from __future__ import annotations

@@ -8,8 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
-from analysis_mcp.engine.filter import run_filter
-from analysis_mcp.execution_identity import ExecutionIdentity, current_execution_identity
+from analysis_mcp.execution_identity import ExecutionIdentity
 from analysis_mcp.identity import (
     OP_SPEC_HASH_PATTERN,
     TOOLKIT_CONTENT_VERSION_PATTERN,
@@ -24,13 +23,14 @@ from analysis_mcp.identity import (
 from analysis_mcp.op_spec import (
     AggregateOpSpec,
     CategoryMatchPredicate,
+    FilterOpSpec,
     OpSpecAdapter,
     QuotientOfOpSpec,
     ShareOfOpSpec,
 )
 from common.materialisation import FrameRef
 from common.recipe import normal_form
-from dfo_frame_grammar import Frame
+from engine_identity import EXECUTION_IDENTITY
 from pydantic import ValidationError
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -72,30 +72,23 @@ def test_op_spec_hash_moves_when_the_op_spec_changes() -> None:
     assert a != b
 
 
-def test_nfd_category_match_matches_the_same_rows_as_its_nfc_form() -> None:
+def test_an_nfd_category_match_is_its_nfc_form() -> None:
     """`Frame.build` NFC-normalises every cell it stores, and
-    `CategoryMatchPredicate.values` normalises to NFC at construction too --
-    so an NFD-spelled predicate matches the identical rows its NFC form
-    does, rather than minting two different results against an NFC-stored
-    cell.
+    `CategoryMatchPredicate.values` normalises to NFC at construction too, so an
+    NFD-spelled predicate is the NFC one: the same values, and one op-spec hash,
+    rather than two results against an NFC-stored cell.
     """
     nfd = "café"
     nfc = "café"
-    frame = Frame.build(
-        role_keys=["reporter"],
-        rows=[
-            {"stat_var": "dcid:X", "reporter": nfc, "time_period": "2020", "value": 1.0},
-            {"stat_var": "dcid:X", "reporter": "dcid:OTHER", "time_period": "2020", "value": 2.0},
-        ],
+    nfd_predicate = CategoryMatchPredicate(column="reporter", values=(nfd,))
+    nfc_predicate = CategoryMatchPredicate(column="reporter", values=(nfc,))
+
+    assert nfd_predicate.values == nfc_predicate.values == (nfc,)
+    assert op_spec_hash_for(
+        FilterOpSpec(frame_ref=FrameRef(**SNAPSHOT_REF), predicates=(nfd_predicate,))
+    ) == op_spec_hash_for(
+        FilterOpSpec(frame_ref=FrameRef(**SNAPSHOT_REF), predicates=(nfc_predicate,))
     )
-    nfd_result = run_filter(
-        frame, predicates=(CategoryMatchPredicate(column="reporter", values=(nfd,)),)
-    )
-    nfc_result = run_filter(
-        frame, predicates=(CategoryMatchPredicate(column="reporter", values=(nfc,)),)
-    )
-    assert nfd_result.kept_row_count == nfc_result.kept_row_count == 1
-    assert nfd_result.frame == nfc_result.frame
 
 
 def test_duplicate_group_by_column_refuses() -> None:
@@ -137,11 +130,9 @@ def test_op_spec_hash_is_independent_of_denominator_by_key_order(
     model: type[ShareOfOpSpec | QuotientOfOpSpec],
 ) -> None:
     """Two calls differing only in `denominator_by`'s own key insertion
-    order mint one `op_spec_hash` and (via `frame_ref_resolution.
-    canonical_entity_binding`) execute over one order -- JCS sorts an
-    object's own members regardless of Python dict insertion order, so this
-    requires no explicit registration in `identity._normalise_parameters`,
-    unlike an array-shaped field."""
+    order mint one `op_spec_hash`. JCS sorts an object's own members regardless
+    of Python dict insertion order, so this needs no registration in
+    `identity._normalise_parameters`, as an array-shaped field does."""
     a = op_spec_hash_for(
         _two_sided_op_spec(
             model,
@@ -178,7 +169,7 @@ def test_toolkit_content_version_has_the_published_shape() -> None:
     content_version = mint_toolkit_content_version(
         op_spec_hash=op_spec_hash,
         input_content_versions=[SNAPSHOT_REF["content_version"]],
-        execution_identity=current_execution_identity(),
+        execution_identity=EXECUTION_IDENTITY,
     )
     assert TOOLKIT_CONTENT_VERSION_PATTERN.fullmatch(content_version)
 
@@ -186,7 +177,7 @@ def test_toolkit_content_version_has_the_published_shape() -> None:
 def test_toolkit_content_version_is_independent_of_input_order() -> None:
     op_spec_hash = op_spec_hash_for(_op_spec(group_by=("reporter",)))
     other_cv = "cv_" + "c" * 32
-    ei = current_execution_identity()
+    ei = EXECUTION_IDENTITY
     a = mint_toolkit_content_version(
         op_spec_hash=op_spec_hash,
         input_content_versions=[SNAPSHOT_REF["content_version"], other_cv],
@@ -228,14 +219,14 @@ def test_duplicate_input_content_version_refuses() -> None:
                 SNAPSHOT_REF["content_version"],
                 SNAPSHOT_REF["content_version"],
             ],
-            execution_identity=current_execution_identity(),
+            execution_identity=EXECUTION_IDENTITY,
         )
     assert exc_info.value.category == "duplicate_member"
 
 
 def test_recompute_toolkit_content_version_matches_mint() -> None:
     op_spec_hash = op_spec_hash_for(_op_spec(group_by=("reporter",)))
-    ei = current_execution_identity()
+    ei = EXECUTION_IDENTITY
     minted = mint_toolkit_content_version(
         op_spec_hash=op_spec_hash,
         input_content_versions=[SNAPSHOT_REF["content_version"]],
