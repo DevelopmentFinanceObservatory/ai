@@ -12,6 +12,7 @@ from harness.reply_figures import (
     DrawnSeries,
     card_result,
     drawn_series,
+    labelled,
     unplaced_names,
     with_coordinates,
 )
@@ -490,37 +491,48 @@ def test_a_stat_card_of_a_series_on_the_canvas_gives_no_figure() -> None:
     assert result["reply_figures"] == []
 
 
+_PEACE = "civilian peace-building, conflict prevention and resolution"
+
+
+@pytest.mark.parametrize("placed", [True, False], ids=["coordinates", "table cells"])
 @pytest.mark.parametrize(
     ("name", "label"),
     [
         ("Civilian peace-building, conflict prevention and resolution", "first"),
+        (f"{_PEACE} (CRSPurposeCode15220)", "first"),
         ("CRSPurposeCode15220", "first"),
         ("basic education", "second"),
     ],
 )
-def test_a_name_finds_a_breakdown_coordinate_by_its_value_or_its_label(
-    name: str, label: str
+def test_a_name_finds_a_breakdown_cell_by_its_value_or_its_label(
+    name: str, label: str, placed: bool
 ) -> None:
-    """A coordinate holding a code dcid is named by the dcid or by its label,
-    and one holding a label by the label. The two series hold other units, so
-    the card states no extremes and the figures are the named series' alone."""
-    peace = "civilian peace-building, conflict prevention and resolution"
+    """A cell holding a code dcid is named by the dcid, by its label or by both,
+    and one holding a label by the label: a coordinate of a placed series, or a
+    cell of a table series that states no coordinates, which `labelled` names by
+    its text. The two series hold other units, so the card states no extremes and
+    the figures are the named series' alone."""
+    labels = CellLabels({("stat_var_crsPurpose", "CRSPurposeCode15220"): _PEACE})
     series = [
         DrawnSeries(
             id=f"s_{own}",
-            label=own,
+            label=own if placed else cell,
             unit=unit,
             points=(("2024", 7.0),),
-            coordinates={"stat_var_crsPurpose": cell},
+            coordinates={"stat_var_crsPurpose": cell} if placed else None,
+            cells=() if placed else (("stat_var_crsPurpose", cell),),
         )
         for own, cell, unit in (
             ("first", "CRSPurposeCode15220", "USD"),
             ("second", "basic education", "EUR"),
         )
     ]
-    labels = CellLabels({("stat_var_crsPurpose", "CRSPurposeCode15220"): peace})
+    texts = {"first": f"{_PEACE} (CRSPurposeCode15220)", "second": "basic education"}
 
-    result = card_result(series, state_values_for=[name], labels=labels)
+    result = card_result(labelled(series, labels), state_values_for=[name], labels=labels)
 
-    assert [figure["series"] for figure in result["reply_figures"]] == [label]
+    assert [figure["series"] for figure in result["reply_figures"]] == [
+        label if placed else texts[label]
+    ]
     assert "not_in_card" not in result
+    assert "not_matched" not in result

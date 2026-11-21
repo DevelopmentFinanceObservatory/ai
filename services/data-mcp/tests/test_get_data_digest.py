@@ -1301,7 +1301,7 @@ def test_a_sector_breakdown_reads_per_entity_and_code() -> None:
     assert "Summed total of" not in digest
 
 
-def test_a_sector_breakdown_names_a_code_cell_by_its_label_and_keeps_a_label_cell() -> None:
+def test_a_sector_breakdown_names_a_code_cell_by_its_label_and_value() -> None:
     peace = "civilian peace-building, conflict prevention and resolution"
     digest = _family_digest(
         warnings=[_STAT_VARS_SUMMED_WARNING],
@@ -1320,9 +1320,8 @@ def test_a_sector_breakdown_names_a_code_cell_by_its_label_and_keeps_a_label_cel
         cell_labels=CellLabels({("stat_var_crsPurpose", "CRSPurposeCode15220"): peace}),
     )
 
-    for sector in (peace, "Humanitarian aid"):
+    for sector in (f"{peace} (CRSPurposeCode15220)", "Humanitarian aid"):
         assert f"Sum of the OECD DAC2a family within crsPurpose code {sector} · " in digest
-    assert "CRSPurposeCode15220" not in digest
 
 
 def test_a_summed_subject_family_reads_per_entity() -> None:

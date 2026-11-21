@@ -30,7 +30,7 @@ from typing import Annotated, Any, Literal
 
 import httpx2
 import pyarrow as pa
-from common.breakdown_labels import CellLabels, label_cells
+from common.breakdown_labels import NODES_READ_TIMEOUT_S, CellLabels, label_cells
 from common.caller import current_writer
 from common.materialisation import FrameRef, MintRecord
 from common.place_type import PARTY_ROLES, type_column
@@ -203,6 +203,11 @@ _DEFINITION_STORE_SERVICE_NAME = "the definition store"
 # reserve unspent.
 _STATISTICS_FLOOR_S = 8.0
 _STATISTICS_RESERVE_S = 3.0
+# The breakdown cells' label read runs after those, out of the statistics reserve: it
+# must end with `_LABELS_RENDER_FLOOR_S` left for rendering, and waits at most
+# `NODES_READ_TIMEOUT_S`, so a statistics read that spent its whole share still leaves
+# the labels about 2s.
+_LABELS_RENDER_FLOOR_S = 1.0
 
 # The clock a call's deadline reads. Tests replace it to move time without sleeping.
 _deadline_clock: Clock = time.monotonic
@@ -794,16 +799,18 @@ async def _fetch_breakdown_labels(
     """The labels of the breakdown cells `series_stats` name (`stat_var_<axis>` entities),
     read through `node_lookup.describe_nodes` (`common.breakdown_labels.label_cells`).
 
-    The read must end with `_STATISTICS_RESERVE_S` of `deadline` still left. A failed or
-    late read is logged and labels nothing, so the digest names those cells by their values.
+    The read waits at most `NODES_READ_TIMEOUT_S` and must end with
+    `_LABELS_RENDER_FLOOR_S` of `deadline` still left. A failed or late read is logged
+    and labels nothing, so the digest names those cells by their values.
     """
     cells = [
         (entity.role, entity.ref) for series in series_stats or () for entity in series.entities
     ]
 
     async def read_nodes(dcids: list[str]) -> list[dict[str, Any]]:
+        wait_s = min(NODES_READ_TIMEOUT_S, deadline.reserving(_LABELS_RENDER_FLOOR_S).remaining())
         try:
-            async with asyncio.timeout(deadline.reserving(_STATISTICS_RESERVE_S).remaining()):
+            async with asyncio.timeout(wait_s):
                 outcomes = await node_lookup.describe_nodes(dcids)
         except (UpstreamError, ValueError, TimeoutError) as exc:
             logger.warning("get_data: could not label the breakdown cells: %s", exc)

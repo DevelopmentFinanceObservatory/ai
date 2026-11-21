@@ -7,7 +7,8 @@ The registered tools (`verbs`) compute in dfo-apis' analysis runner.
 (`runner_tree.verb_tree`) and turns the runner's summary into the reply, its
 `VerbResult` and its digest (`digest.render_summary_digest`), whose breakdown
 cells read as their labels (`common.breakdown_labels`), read from the graph
-nodes of the cells the digest names (`digest.digest_cells`).
+nodes of the cells the digest names (`digest.digest_cells`). A digest with no
+cell labelled is rendered once.
 
 On a public call (`rebuild_lost_frames`), a frame the runner no longer holds
 (`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_` frame
@@ -258,8 +259,10 @@ async def run_on_runner(
         )
         if sentence is not None
     ]
-    labels = await label_cells(digest_cells(answer, heading=heading), read_nodes=read_graph_nodes)
-    digest = render_summary_digest(answer, heading=heading, labels=labels)
+    digest, cells = digest_cells(answer, heading=heading)
+    labels = await label_cells(cells, read_nodes=read_graph_nodes)
+    if labels.labels:
+        digest = render_summary_digest(answer, heading=heading, labels=labels)
     return ToolResult(
         content="\n\n".join([" ".join(sentences), digest]) if sentences else digest,
         structured_content=answer.verb_result().model_dump(mode="json"),

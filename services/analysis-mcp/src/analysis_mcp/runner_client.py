@@ -97,7 +97,7 @@ from typing import Annotated, Any
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider, apis_auth_provider
-from common.breakdown_labels import NODES_PATH
+from common.breakdown_labels import NODES_PATH, NODES_READ_TIMEOUT_S
 from common.caller import vouched_caller_headers
 from common.derived_replay import (
     ANALYSIS_PATH,
@@ -227,12 +227,12 @@ class RunnerClient:
         self._auth = auth
 
     async def post(
-        self, path: str, body: Mapping[str, Any], *, read: bool = False
+        self, path: str, body: Mapping[str, Any], *, timeout_s: float | None = None
     ) -> httpx2.Response | ToolRefusal:
         """POST `body` to `path`, or the retryable refusal for a call that got no answer.
-        A `read` waits the read timeout, as `get` does, in place of a compute call's."""
-        if read:
-            return await self._send("POST", path, json=body, timeout=self._read_timeout_s)
+        A `timeout_s` bounds this call in place of the compute call's timeout."""
+        if timeout_s is not None:
+            return await self._send("POST", path, json=body, timeout=timeout_s)
         return await self._send("POST", path, json=body)
 
     async def get(
@@ -803,9 +803,11 @@ def _derived_unread(answer: httpx2.Response | ToolRefusal) -> DerivedUnread:
 
 async def read_graph_nodes(dcids: list[str]) -> Sequence[Mapping[str, Any]]:
     """The entries `POST /api/graph/nodes` answers for one batch of `dcids`
-    (`common.breakdown_labels.ReadNodes`), or none when the read failed, which is
-    logged: a digest then names the cells by their values."""
-    answer = await runner_holder.get().post(NODES_PATH, {"dcids": dcids}, read=True)
+    (`common.breakdown_labels.ReadNodes`) within `NODES_READ_TIMEOUT_S`, or none when
+    the read failed, which is logged: a digest then names the cells by their values."""
+    answer = await runner_holder.get().post(
+        NODES_PATH, {"dcids": dcids}, timeout_s=NODES_READ_TIMEOUT_S
+    )
     if isinstance(answer, ToolRefusal) or not answer.is_success:
         status = "no answer" if isinstance(answer, ToolRefusal) else answer.status_code
         logger.warning("dfo-apis graph nodes read of %d dcids failed: %s", len(dcids), status)

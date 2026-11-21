@@ -3268,13 +3268,21 @@ async def test_statistics_are_fetched_and_rendered_in_the_digest(
     assert "first 1.0k (2015)" in text_of(result)
 
 
+@pytest.mark.parametrize("statistics_spent_their_share", [False, True])
 async def test_a_breakdown_code_cell_is_named_by_its_label_and_a_label_cell_stays(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, statistics_spent_their_share: bool
 ) -> None:
+    """A dcid cell reads as its label with the dcid after it, and a label cell as it
+    is. A statistics read that ran to its own deadline leaves the label read the
+    time the digest keeps beyond it."""
     stored = _stored_definition()
     cells = ("CRSPurposeCode15220", "agriculture")
+    clock = _FakeClock()
+    monkeypatch.setattr(get_data_tool, "_deadline_clock", clock)
 
-    async def fake_fetch(**_kwargs: Any) -> list[SeriesStatisticsModel]:
+    async def fake_fetch(*, deadline: CallDeadline, **_kwargs: Any) -> list[SeriesStatisticsModel]:
+        if statistics_spent_their_share:
+            clock.now = deadline.expires_at
         point = {"value": 1000.0, "period": "2015"}
         return [
             SeriesStatisticsModel.model_validate(
@@ -3315,10 +3323,10 @@ async def test_a_breakdown_code_cell_is_named_by_its_label_and_a_label_cell_stay
     assert result.is_error is False
     text = text_of(result)
     assert (
-        "stat_var_crsPurpose civilian peace-building, conflict prevention and resolution · " in text
+        "stat_var_crsPurpose civilian peace-building, conflict prevention and resolution "
+        "(CRSPurposeCode15220) · " in text
     )
     assert "stat_var_crsPurpose agriculture · " in text
-    assert "CRSPurposeCode15220" not in text
     assert node_requests == [list(cells)]
 
 

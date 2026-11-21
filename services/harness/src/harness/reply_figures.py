@@ -12,8 +12,9 @@ where the payload carries none: a stat card's series id, and the coordinates
 of the series it lists, which a series is named by.
 
 A breakdown cell (`stat_var_<axis>`) may hold a code's dcid. `labelled` names a
-table's series by the labels of its cells, and a name matches a coordinate by
-its value or by its label (`common.breakdown_labels`).
+table's series by the texts of its cells, a dcid cell as its label with the dcid
+after it, and a name matches a series or a coordinate by that text, by the label
+alone or by the cell value (`common.breakdown_labels`).
 """
 
 from __future__ import annotations
@@ -193,6 +194,24 @@ def _joined(cells: Sequence[Cell], labels: CellLabels) -> str:
     return " / ".join(labels.text(name, value) for name, value in cells)
 
 
+def _cell_names(column: str, value: str, labels: CellLabels) -> set[str]:
+    """What names the cell `value` of `column`, casefolded: its value, its text and
+    its label in `labels`."""
+    label = labels.label(column, value)
+    names = {value, labels.text(column, value), *(() if label is None else (label,))}
+    return {name.casefold() for name in names}
+
+
+def _series_names(series: DrawnSeries, labels: CellLabels) -> set[str]:
+    """What names `series` itself, casefolded: its label, and for a table series its
+    cells joined by their values or by their labels in `labels`."""
+    names = {series.label}
+    if series.cells:
+        names.add(_joined(series.cells, NO_LABELS))
+        names.add(" / ".join(labels.label(name, value) or value for name, value in series.cells))
+    return {name.casefold() for name in names}
+
+
 def series_cells(series: Sequence[DrawnSeries]) -> list[Cell]:
     """Every cell `series` are labelled or named by: a table series' dimension
     cells and each series' coordinates, whose breakdown cells `labelled` and
@@ -325,8 +344,8 @@ def card_result(
       is a new card.
 
     A name matches a series on its label or on the value of a coordinate
-    that tells the card's series apart, or that value's label in `labels`,
-    whatever its case. A name matching
+    that tells the card's series apart, or on the label in `labels` of a
+    cell it holds (`_named`), whatever its case. A name matching
     none is listed under `not_in_card`, or under `not_matched` while a series
     of the card states no coordinates, since it may be that series. A stated
     series with no value at `state_period`, or with no value to give at all,
@@ -428,9 +447,9 @@ def card_holds(series: Sequence[DrawnSeries], *, cut: TopMembers | None = None) 
 def _named(
     series: Sequence[DrawnSeries], name: str, labels: CellLabels = NO_LABELS
 ) -> list[DrawnSeries]:
-    """The series `name` names: those labelled it, or holding it as the value
-    of a coordinate, or as that value's label in `labels`, that not every
-    series of the card holds at that value."""
+    """The series `name` names: those it names itself (`_series_names`), or
+    holding it as the value, the text or the label in `labels` of a coordinate
+    (`_cell_names`) that not every series of the card holds at that value."""
     wanted = name.strip().casefold()
     placed = [one.coordinates for one in series if one.coordinates is not None]
 
@@ -440,10 +459,9 @@ def _named(
     return [
         one
         for one in series
-        if wanted == one.label.casefold()
+        if wanted in _series_names(one, labels)
         or any(
-            wanted in {value.casefold(), labels.text(key, value).casefold()}
-            and tells_apart(key, value)
+            wanted in _cell_names(key, value, labels) and tells_apart(key, value)
             for key, value in (one.coordinates or {}).items()
         )
     ]

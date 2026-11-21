@@ -1933,10 +1933,15 @@ async def test_a_redraw_of_a_series_on_the_canvas_as_the_turn_began_states_no_fi
 _PEACE = "civilian peace-building, conflict prevention and resolution"
 
 
-async def test_a_table_of_breakdown_codes_names_its_series_by_their_labels() -> None:
+@pytest.mark.parametrize("named", [_PEACE, "CRSPurposeCode15220"])
+async def test_a_table_of_breakdown_codes_names_its_series_by_their_labels(
+    monkeypatch: pytest.MonkeyPatch, named: str
+) -> None:
     """A table whose `stat_var_crsPurpose` cells hold a code dcid and a label
-    names each series by the label, read from the graph for the dcid alone,
-    and a name the model gives as the label finds the code's series."""
+    names the code's series by its label with the dcid after it, read from the
+    graph for the dcid alone, and the label cell's by the label. A name the
+    model gives as the label or as the dcid finds the code's series with no
+    read of the frame's rows."""
     envelope = resolved_revision("table")
     template = envelope["component"]["rows"][0]
     envelope["component"]["rows"] = [
@@ -1977,20 +1982,28 @@ async def test_a_table_of_breakdown_codes_names_its_series_by_their_labels() -> 
             transport=httpx2.MockTransport(graph),
         )
     )
+    frame_reads: list[object] = []
+
+    async def frame_work(ref: object, work: object) -> None:
+        frame_reads.append(ref)
+
+    monkeypatch.setattr(orchestrator_tools, "_frame_work", frame_work)
     tools, ctx = _tools(executor=executor)
     await tools["fetch"](SPEC_LIFE, ctx)
-    chart = _one_chart(frame_id_for(REF))[0] | {"state_values_for": [_PEACE]}
+    chart = _one_chart(frame_id_for(REF))[0] | {"state_values_for": [named]}
 
     (card,) = (await tools["make_charts"]([chart], ctx))["charts"]
 
-    assert card["holds"]["series"] == [_PEACE, "basic education"]
+    peace = f"{_PEACE} (CRSPurposeCode15220)"
+    assert card["holds"]["series"] == [peace, "basic education"]
     assert "not_matched" not in card
     assert "not_in_card" not in card
     assert _figures(card) == [
-        (_PEACE, 7.0, "2024", "largest"),
+        (peace, 7.0, "2024", "largest"),
         ("basic education", 3.0, "2024", "smallest"),
     ]
     assert asked == [["CRSPurposeCode15220"]]
+    assert frame_reads == []
 
 
 async def _no_token() -> dict[str, str]:

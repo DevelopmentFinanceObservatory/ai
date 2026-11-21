@@ -2,8 +2,10 @@
 
 A breakdown column `stat_var_<axis>` (`stat_var_crsPurpose`) holds the code each row sums
 within. dfo-apis writes that cell as the code's label (`civilian peace-building, conflict
-prevention and resolution`) or as the code's dcid (`CRSPurposeCode15220`). Text shows the
-label in both cases. A selection or a filter keeps binding the cell value itself.
+prevention and resolution`) or as the code's dcid (`CRSPurposeCode15220`). Text shows a
+dcid cell as its label with the dcid after it (`civilian peace-building, conflict prevention
+and resolution (CRSPurposeCode15220)`), so a reader still holds the value a selection or a
+filter binds, and a label cell as it is.
 
 `label_cells` reads the dcid cells through dfo-apis' `POST /api/graph/nodes`, in batches of
 `NODE_BATCH_DCIDS`, and keeps a label only from a `code` node of the cell's own axis
@@ -36,6 +38,10 @@ MAX_LABELLED_CELLS = 4 * NODE_BATCH_DCIDS
 
 NODES_PATH = "/api/graph/nodes"
 
+# How long one nodes read may take. A label only names a cell, so a slow graph costs the
+# labels and leaves the answer's own deadline to the answer.
+NODES_READ_TIMEOUT_S = 2.5
+
 type Cell = tuple[str, str]
 # Reads one batch of at most `NODE_BATCH_DCIDS` bare dcids, answering the node entries the
 # route returned, or none when the read failed.
@@ -55,9 +61,15 @@ class CellLabels:
 
     labels: Mapping[Cell, str] = field(default_factory=dict)
 
+    def label(self, column: str, value: str) -> str | None:
+        """The label read for a cell, or None for a cell with none."""
+        return self.labels.get((column, value))
+
     def text(self, column: str, value: str) -> str:
-        """The text a cell shows: its label where one was read, else its value."""
-        return self.labels.get((column, value), value)
+        """The text a cell shows: its label with its value after it where one was read
+        (`basic education (CRSPurposeCode11220)`), else its value."""
+        label = self.label(column, value)
+        return value if label is None else f"{label} ({value})"
 
 
 NO_LABELS = CellLabels()

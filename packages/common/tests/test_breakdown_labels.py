@@ -52,7 +52,8 @@ async def test_a_code_dcid_cell_reads_as_its_label_and_a_label_cell_stays() -> N
         read_nodes=graph.read,
     )
 
-    assert labels.text(column, "CRSPurposeCode15220") == _PEACE
+    assert labels.text(column, "CRSPurposeCode15220") == f"{_PEACE} (CRSPurposeCode15220)"
+    assert labels.label(column, "CRSPurposeCode15220") == _PEACE
     assert labels.text(column, "basic education") == "basic education"
     assert labels.text(column, "agriculture") == "agriculture"
     # Free text is no dcid, so it is never sent; a dcid-shaped label is, and stays.
