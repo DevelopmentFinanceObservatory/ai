@@ -81,6 +81,28 @@ SHARED_SURFACES = frozenset({STUDIO_SURFACE, WEBSITE_SURFACE, MCP_SURFACE})
 # dfo SDK client's label.
 USER_AGENT_HEADER = "x-dfo-user-agent"
 
+# Sent beside `USER_AGENT_HEADER` for an `ADDRESS_CALLER`: the name the MCP client
+# gave in its `clientInfo` (`current_mcp_client`), such as `Anthropic/ClaudeAI` or
+# `claude-code`. Distinct from x-dfo-client, which dfo-apis parses as a dfo SDK
+# client's `<name>/<version>` label. A call carries it only when the client's
+# `clientInfo` reaches the stateless server with the call (see
+# `current_mcp_client`); without it analytics reads `x-dfo-user-agent`.
+MCP_CLIENT_HEADER = "x-dfo-mcp-client"
+
+# The longest client-supplied name a combined MCP log line carries, and the
+# longest `MCP_CLIENT_NAME` keeps (`harness.combined_mcp._CLIENT_TEXT_LIMIT`).
+MCP_CLIENT_NAME_LIMIT = 128
+
+# The `clientInfo` names `current_mcp_client` keeps: printable ASCII with no
+# quote or backslash, at most `MCP_CLIENT_NAME_LIMIT` characters. The same rule
+# as dfo-apis's `dfo_platform.caller._MCP_CLIENT_NAME`. It keeps every client
+# name in the combined log since 2026-10-24, such as `openai-mcp (Codex)`.
+MCP_CLIENT_NAME = re.compile(rf"[ !#-\[\]-~]{{1,{MCP_CLIENT_NAME_LIMIT}}}")
+
+# What `current_mcp_client` returns for a name that fails `MCP_CLIENT_NAME`, so
+# a rejected name reads differently from a call that sent none.
+MCP_CLIENT_INVALID = "invalid"
+
 # The longest `User-Agent` `current_user_agent` keeps.
 MAX_USER_AGENT_CHARS = 256
 
@@ -182,6 +204,36 @@ def current_user_agent() -> str | None:
     return cleaned.strip()[:MAX_USER_AGENT_CHARS].strip() or None
 
 
+def current_mcp_client() -> str | None:
+    """The name the current MCP request's client gave in its `clientInfo`, or `None`.
+
+    Read from the request's MCP session, the source the combined server's log line
+    names the client from. On the stateless deployed server that is a 2026-07-28
+    client's per-request `_meta` envelope, and only when it carries `clientInfo`
+    with its capabilities; a 2025-11-25 client's tool calls arrive with no
+    `clientInfo`, so they name none, and analytics reads `x-dfo-user-agent` for them.
+    The stripped name is returned when it fully matches `MCP_CLIENT_NAME`, so the
+    value is always a valid header value, and `MCP_CLIENT_INVALID` when it does not.
+    `None` for a blank name, outside an MCP request and inside `shared_work_context`.
+    """
+    if _shared_work.get():
+        return None
+    # Imported here so that `import common` stays free of fastmcp, as in
+    # `_request_headers`.
+    from fastmcp.server.dependencies import get_context  # noqa: PLC0415
+
+    try:
+        params = get_context().session.client_params
+    except RuntimeError:  # no MCP request, or no session yet
+        return None
+    if params is None:
+        return None
+    name = params.client_info.name.strip()
+    if not name:
+        return None
+    return name if MCP_CLIENT_NAME.fullmatch(name) else MCP_CLIENT_INVALID
+
+
 def current_shared_surface() -> str | None:
     """The surface the current shared work serves, or `None` outside shared work.
 
@@ -233,10 +285,12 @@ def vouched_caller_headers(
     its first-party callers, and the caller has a form dfo-apis accepts beside
     it. For an `ADDRESS_CALLER`, an MCP client the website named by address:
     `CALLER_PRINCIPAL_HEADER`, `CALLER_HEADER`, `SURFACE_HEADER` as
-    `MCP_SURFACE`, and `USER_AGENT_HEADER` when `current_user_agent` finds one.
+    `MCP_SURFACE`, `USER_AGENT_HEADER` when `current_user_agent` finds one, and
+    `MCP_CLIENT_HEADER` when `current_mcp_client` finds the client's name (or
+    `invalid`), which only a call whose `clientInfo` reached the server carries.
     dfo-apis counts that client's allowance. For a `CONVERSATION_CALLER` from the
     harness: `CALLER_PRINCIPAL_HEADER` and `CALLER_HEADER`, and `TURN_HEADER`
-    when `current_turn` names the turn, with no surface and no user agent, since
+    when `current_turn` names the turn, with no surface, user agent or MCP client, since
     dfo-apis reads Studio from the caller's prefix and the User-Agent is the
     harness's own. For shared work (`current_shared_surface`):
     `CALLER_PRINCIPAL_HEADER` and `SURFACE_HEADER` as the shared surface, with
@@ -265,6 +319,8 @@ def vouched_caller_headers(
         headers[SURFACE_HEADER] = MCP_SURFACE
         if (user_agent := current_user_agent()) is not None:
             headers[USER_AGENT_HEADER] = user_agent
+        if (mcp_client := current_mcp_client()) is not None:
+            headers[MCP_CLIENT_HEADER] = mcp_client
     elif CONVERSATION_CALLER.fullmatch(caller):
         if (turn := current_turn()) is not None:
             headers[TURN_HEADER] = turn
@@ -326,7 +382,7 @@ def shared_work_context(*, surface: str | None) -> Context:
     neither the caller nor the turn that happened to start it. The supplied
     caller and turn are cleared, and `current_caller`, `current_turn` and
     `current_user_agent` read no header of the MCP request in flight
-    (`in_shared_work`). Its dfo-apis calls name `surface`
+    (`in_shared_work`), and `current_mcp_client` names no client. Its dfo-apis calls name `surface`
     (`vouched_caller_headers`), so name only a surface every request that can
     join the work belongs to: key work requests of several surfaces can join
     by surface, and pass the starter's `current_surface`.
