@@ -33,6 +33,8 @@ from executor.outcomes import (
     remedy,
     save_outcome,
     stop_cause,
+    stop_remedy,
+    wave_remedy,
 )
 from harness.sentences import FAILURE_CLASS, FailureClass
 from planner.records import EvidenceIssue, EvidenceIssueCode, Period, Severity
@@ -340,8 +342,8 @@ _GET_DATA = ToolId(server="data-mcp", name="get_data")
             Remedy.SYSTEM,
             id="upstream-response-unusable",
         ),
-        # A stored frame that failed its integrity check meets every plan
-        # reading the same scope.
+        # A stored frame that failed its integrity check: a narrower scope
+        # mints another.
         pytest.param(
             _tool_stop(
                 _served(
@@ -350,7 +352,7 @@ _GET_DATA = ToolId(server="data-mcp", name="get_data")
                     )
                 )
             ),
-            Remedy.SYSTEM,
+            Remedy.REPLAN,
             id="frame-integrity-failed",
         ),
         # A definition the platform refused, which another spec avoids.
@@ -459,10 +461,37 @@ def test_a_stopped_runs_remedy_follows_its_cause_its_disposition_and_its_code(
     assert remedy(failed_step(stop)) is past
 
 
-def test_a_failed_step_with_no_cause_is_the_systems() -> None:
-    """A failed step with no cause is the system's: it gives no second plan and
-    never tells the user the question was at fault."""
+def test_a_failed_step_with_no_wave_remedy_is_the_systems() -> None:
+    """A failed step with no wave remedy is the system's, and so is a stop with
+    no cause: neither gives a second plan or tells the user the question was
+    at fault."""
     stored = failed_step(_issue_stop(EvidenceIssueCode.UNIT_MISMATCH))
-    del stored["cause"]
-
+    assert remedy(stored) is Remedy.REPLAN
+    del stored["wave_remedy"]
     assert remedy(stored) is Remedy.SYSTEM
+    del stored["cause"]
+    assert stop_remedy(stored) is Remedy.SYSTEM
+
+
+@pytest.mark.parametrize(
+    ("primary", "sibling"),
+    [
+        (EvidenceIssueCode.WINDOW_SHORT, EvidenceIssueCode.UNIT_MISMATCH),
+        (EvidenceIssueCode.UNIT_MISMATCH, EvidenceIssueCode.WINDOW_SHORT),
+    ],
+    ids=["user-primary", "replan-primary"],
+)
+def test_a_waves_remedy_is_its_most_severe_stops(
+    primary: EvidenceIssueCode, sibling: EvidenceIssueCode
+) -> None:
+    """A new plan gets past a wave only when it gets past every stop in it, so a
+    stop the user has to accept outweighs one another plan avoids, whichever
+    the run raised."""
+    wave = _issue_stop(primary).model_copy(update={"also_stopped": (_issue_stop(sibling),)})
+
+    assert {stop_remedy(failed_step(stop)) for stop in (wave, *wave.also_stopped)} == {
+        Remedy.USER,
+        Remedy.REPLAN,
+    }
+    assert wave_remedy(wave) is Remedy.USER
+    assert remedy(failed_step(wave)) is Remedy.USER

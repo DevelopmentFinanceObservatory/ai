@@ -216,6 +216,11 @@ class FacetIssue:
     detail: str | None = None
 
 
+# The `fix.kind` of an `upstream_error` that is a definition dfo-apis refused to
+# register (`ToolRefusal.spec_not_registered`), and no failure of the service.
+SPEC_NOT_REGISTERED = "spec_not_registered"
+
+
 @dataclass(frozen=True, kw_only=True)
 class ToolRefusal:
     """A tool's structured refusal, built by one of its typed factories."""
@@ -728,7 +733,9 @@ class ToolRefusal:
         """dfo-apis refused to register the definition of `spec_id`, which `tool` was
         passed alone (`definition_registration`). Its message names `tool`, whose
         caller never asked for a registration. The same id reaches the same refusal, so
-        it names no delay."""
+        it names no delay. It shares `upstream_error` with an upstream service's own
+        failures, and `fix.kind` (`SPEC_NOT_REGISTERED`) tells it apart: another
+        definition gets past it, which waiting on the service does not."""
         return cls(
             code=ToolErrorCode.UPSTREAM_ERROR,
             message=(
@@ -736,7 +743,7 @@ class ToolRefusal:
                 f"({upstream_code or 'unclassified'}): {detail}. This spec_id cannot be read, "
                 "and repeating the call reaches the same refusal."
             ),
-            fix={"tool": tool, "problems": [f"{spec_id}: {detail}"]},
+            fix={"kind": SPEC_NOT_REGISTERED, "tool": tool, "problems": [f"{spec_id}: {detail}"]},
             upstream_code=upstream_code,
         )
 

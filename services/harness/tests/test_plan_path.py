@@ -25,6 +25,7 @@ from compiler.surface import ToolCallResult
 from data_mcp.tool_errors import ToolErrorCode as DataCode
 from data_mcp.tool_errors import ToolRefusal as DataRefusal
 from dfo_frame_grammar import Frame
+from executor import classify as classify_module
 from executor.ledger import (
     Attempt,
     InMemoryRunLedger,
@@ -570,7 +571,7 @@ async def test_a_system_fault_ends_the_turn_worded_as_the_systems_fault(
     assert "do not ask the user to change the question" in after_plan
     # The tool's remedy is for a question at fault, and none is.
     assert advice not in after_plan
-    assert "as the failed step's remedy says it" not in after_plan
+    assert "what they can do about it" not in after_plan
 
 
 @pytest.mark.parametrize(
@@ -621,11 +622,11 @@ async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_fai
     # The second stop leaves no note, since the turn's one new plan is spent.
     assert ended.cursor.state.get(ORCHESTRATOR_RETRY_NOTE_KEY) is None
     first, last = (agent_read(request) for request in models.orchestrator.requests[1:])
-    told = "as the failed step's remedy says it"
+    told = "Tell the user what they can do about it"
     assert told not in first
     if "remedy" in fix:
         assert failure_cause(code, fix) in last
-        assert told in last
+        assert f"{told}: {fix['remedy']}" in last
     else:
         assert sentence in last
 
@@ -683,7 +684,7 @@ def test_a_retry_note_survives_a_card_it_cannot_draw_and_words_a_stop_at_no_step
 
     monkeypatch.setattr(plan_done_module.plan_display, "card_rows", undrawable)
     plan = cast("Plan", SimpleNamespace(translation=object(), workflow=object()))
-    failed = {"step_id": "retrieve", "code": "facet_not_available", "cause": "data"}
+    failed = {"step_id": "retrieve", "code": "facet_not_available", "wave_remedy": "replan"}
     cause = failure_cause("facet_not_available")
 
     assert _retry_note(plan, failed).startswith(f"The approved plan stopped at a step. {cause} ")
@@ -1107,12 +1108,19 @@ class _RefusingReplanner(ScriptedPlannerModel):
         ),
         # A result the run cannot use is the system's fault, which no brief avoids.
         (_UnusableGetDataSurface(), False),
+        # A service that did not answer is waited out, not planned around.
+        (RefusingGetDataSurface("service_unavailable"), False),
     ],
-    ids=["method-choice", "system-fault"],
+    ids=["method-choice", "system-fault", "wait"],
 )
 async def test_a_planner_refusal_after_a_stop_gives_the_plan_back_only_when_a_new_plan_remedies_it(
-    surface: ScriptedSurface, given_back: bool, pg_engine: AsyncEngine
+    surface: ScriptedSurface,
+    given_back: bool,
+    pg_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The run retries a service that did not answer with no backoff between.
+    monkeypatch.setattr(classify_module, "BACKOFF_SECONDS", 0.0)
     models = _planned("It could not be computed.")
     driver = _driver(pg_engine, models, planner=_RefusingReplanner(), tool_surface=surface)
 
@@ -1123,3 +1131,6 @@ async def test_a_planner_refusal_after_a_stop_gives_the_plan_back_only_when_a_ne
     assert "The planner could not make a plan" in after_plan
     assert bool(ran.cursor.state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")) is given_back
     assert ("may be planned once more" in after_plan) is given_back
+    if isinstance(surface, RefusingGetDataSurface) and surface.retry_mode == "retry_after_delay":
+        assert "A data service did not answer" in after_plan
+        assert failure_sentence("transport_failed", "retry_after_delay") in after_plan

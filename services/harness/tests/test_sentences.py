@@ -15,6 +15,7 @@ from analysis_mcp.tool_errors import ToolErrorCode as AnalysisCode
 from compiler.compile import CompileIssueCode
 from data_mcp.tool_errors import CeilingKind
 from data_mcp.tool_errors import ToolErrorCode as DataCode
+from data_mcp.tool_errors import ToolRefusal as DataRefusal
 from executor.classify import (
     COMPILER_PROVABLE_CODES,
     METHOD_CHOICE_CODES,
@@ -446,6 +447,18 @@ def test_a_fill_in_reads_only_the_member_its_code_names() -> None:
     assert "Kenya" in failure_sentence("binding_invalid", fix=fix)
     assert "2023" not in failure_sentence("binding_invalid", fix=fix)
     assert failure_sentence("schema_invalid", fix=fix) == failure_sentence("schema_invalid")
+    # A definition the platform refused reads as no failure of the service.
+    refused = DataRefusal.spec_not_registered(
+        tool="get_data", spec_id="spec_" + "0" * 32, upstream_code="bad", detail="bad"
+    )
+    assert failure_sentence(refused.code, refused.retry_mode, refused.fix).startswith(
+        "The platform refused this definition"
+    )
+    assert failure_sentence(refused.code, refused.retry_mode) != failure_sentence(
+        refused.code, refused.retry_mode, refused.fix
+    )
+    # A stored frame that failed its check is the data's to read again narrower.
+    assert FAILURE_CLASS["frame_integrity_failed"] is not FailureClass.SYSTEM_FAULT
     # The user is told the latest year the series reach, not the one the plan counted from.
     behind = {"anchor": "2022", "planned_anchor": "2023", "remedy": "Ask again."}
     cause = failure_cause(ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN, behind)

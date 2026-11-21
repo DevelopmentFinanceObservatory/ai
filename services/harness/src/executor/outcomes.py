@@ -436,14 +436,19 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
     tool's refusal also carries that refusal's `retry_mode` and `fix`, which
     word the user's sentence for it (`harness.sentences.failure_sentence`),
     and the `disposition` `classify_refusal` gave it. Every stop carries its
-    `cause` (`stop_cause`), which `remedy` reads with the code and the
-    disposition.
+    `cause` (`stop_cause`), and the `wave_remedy` of the stops its wave made
+    (`wave_remedy`), which `remedy` reads.
     """
+    return {**_own_step(outcome), "wave_remedy": wave_remedy(outcome).value}
+
+
+def _own_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
+    """`failed_step` for `outcome` alone, without its wave's remedy."""
     return {**_stopped_at(outcome), "cause": stop_cause(outcome).value}
 
 
 def _stopped_at(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
-    """`failed_step` without its `cause`."""
+    """`failed_step` without its `cause` and its wave's remedy."""
     if isinstance(outcome, MethodChoiceNeeded):
         return {
             "step_id": outcome.step_id,
@@ -534,7 +539,7 @@ def _refused_step(*, step_id: str | None, failure: ToolFailure) -> dict[str, Any
 
 
 class Remedy(StrEnum):
-    """What gets past a stopped run's failure (`remedy`)."""
+    """What gets past a stopped run's failure (`remedy`), least severe first."""
 
     # A plan drafted afresh, from another brief or approved again.
     REPLAN = "replan"
@@ -582,8 +587,8 @@ _DATA_STOP_REMEDY: dict[str, Remedy] = {
     "over_ceiling": Remedy.USER,
     "capability_unavailable": Remedy.USER,
     "entity_not_found": Remedy.USER,
-    # Only data-mcp's `spec_not_registered`, a definition the platform refused,
-    # which another spec avoids (`is_upstream_fault`).
+    # Only a definition the platform refused to register, which another spec
+    # avoids (`is_upstream_fault`).
     "upstream_error": Remedy.REPLAN,
     # Tools no workflow step calls (`compiler.capabilities.EXCLUDED_TOOLS`).
     "skill_not_found": Remedy.USER,
@@ -594,6 +599,9 @@ _DATA_STOP_REMEDY: dict[str, Remedy] = {
     # analysis-mcp: a frame, unit, join or method a different plan avoids.
     "stat_var_unresolved": Remedy.REPLAN,
     "frame_too_large": Remedy.REPLAN,
+    # A stored frame that failed its integrity check: a narrower scope mints
+    # another content version, which gets past it.
+    "frame_integrity_failed": Remedy.REPLAN,
     "non_finite_result": Remedy.REPLAN,
     "frame_not_held": Remedy.REPLAN,
     "frame_expired": Remedy.REPLAN,
@@ -661,16 +669,41 @@ _DATA_STOP_REMEDY: dict[str, Remedy] = {
 }
 
 
+# The remedies from least to most severe. A wave's is its most severe stop's.
+_SEVERITY = (Remedy.REPLAN, Remedy.WAIT, Remedy.USER, Remedy.SYSTEM)
+
+
 def remedy(failed: Mapping[str, object]) -> Remedy:
-    """What gets past the failure `failed`, a stopped run's `failed_step`, names.
+    """What gets past the stopped run `failed`, its `failed_step`, names: the
+    `wave_remedy` it carries. A failed step that carries none is the system's.
+
+    `REPLAN`: a plan drafted afresh, so the turn's plan call is given back once.
+    `WAIT`: a service did not answer, so no plan is given back and the user is
+    told to try again shortly. `USER`: the user accepts a fact of the data or
+    changes the question. `SYSTEM`: the fault is the system's, and the user is
+    not asked to change the question.
+    """
+    stated = failed.get("wave_remedy")
+    return Remedy(stated) if isinstance(stated, str) and stated in set(Remedy) else Remedy.SYSTEM
+
+
+def wave_remedy(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> Remedy:
+    """The most severe remedy (`_SEVERITY`) of `outcome`'s stop and of each
+    stop in `outcome.also_stopped`, so a new plan gets past the wave only when
+    it gets past every stop in it (`stop_remedy`)."""
+    stops = (outcome, *outcome.also_stopped)
+    return max((stop_remedy(_own_step(stop)) for stop in stops), key=_SEVERITY.index)
+
+
+def stop_remedy(failed: Mapping[str, object]) -> Remedy:
+    """What gets past one stop, `failed` as `failed_step` states it alone.
 
     Read in order: a transient stop waits, and a stop of the harness's own is
     the system's, except an approval a fresh plan gets past
     (`LAPSED_APPROVAL_KINDS`). A data stop a method choice or a rediscovery
     settles (`Disposition`) is re-planned. Any other is decided by its code
     (`_DATA_STOP_REMEDY`), and an unplaced code is the user's, so it never
-    costs the user a second approval. A failed step with no cause is the
-    system's.
+    costs the user a second approval. A stop with no cause is the system's.
     """
     cause = failed.get("cause")
     code = failed.get("code")

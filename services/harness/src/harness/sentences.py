@@ -50,7 +50,7 @@ from enum import StrEnum
 from typing import Any
 
 from compiler.compile import CompileIssueCode
-from data_mcp.tool_errors import ToolErrorCode
+from data_mcp.tool_errors import SPEC_NOT_REGISTERED, ToolErrorCode
 from executor.classify import ExecutorCode
 from planner.plan import MAX_PLAN_ROUNDS, UnsupportedOperation
 from planner.tool_results import ProblemCode
@@ -826,6 +826,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
     FailureClass.SOURCE_GONE: frozenset(
         {
             "frame_expired",
+            "frame_integrity_failed",
             "frame_not_held",
             "frame_unavailable",
             "definition_not_held",
@@ -902,7 +903,6 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "filter_predicate_type_mismatch",
             "share_of_key_unknown",
             "place_levels_mixed",
-            "frame_integrity_failed",
             "share_id_taken",
             ExecutorCode.MALFORMED_REFUSAL,
             HarnessCode.UNKNOWN_TOOL,
@@ -990,6 +990,11 @@ _MODEL_MAY_CORRECT = FailureText(
 
 # The text of a code the user can act on, read in place of its class's.
 CODE_SENTENCES: Mapping[str, FailureText] = {
+    # The stored copy reads back wrong, and a narrower request mints another.
+    "frame_integrity_failed": FailureText(
+        "The stored copy of this data failed a check",
+        "so ask about fewer places or a shorter period",
+    ),
     "operation_still_processing": FailureText(
         "The data is still being prepared", "and asking again in a moment may pick it up"
     ),
@@ -1202,16 +1207,34 @@ def failure_cause(code: object, fix: Mapping[str, object] | None = None) -> str:
 
 
 def _failure_text(code: object, fix: Mapping[str, object] | None) -> FailureText | None:
-    """The text a failure `code` reads: its own, its ceiling's, or its class's;
-    None for a code in no class."""
+    """The text a failure `code` reads: its kind's, its own, its ceiling's, or
+    its class's; None for a code in no class."""
     failure_class = FAILURE_CLASS.get(code) if isinstance(code, str) else None
     if failure_class is None:
         return None
     return (
-        CODE_SENTENCES.get(str(code))
+        _kind_text(str(code), fix)
+        or CODE_SENTENCES.get(str(code))
         or _ceiling_text(str(code), fix)
         or FAILURE_SENTENCES[failure_class]
     )
+
+
+# The text of an `upstream_error` by the `fix.kind` that says it is no failure
+# of the service.
+KIND_SENTENCES: Mapping[str, FailureText] = {
+    SPEC_NOT_REGISTERED: FailureText(
+        "The platform refused this definition of the data", "so ask for it from another source"
+    ),
+}
+
+
+def _kind_text(code: str, fix: Mapping[str, object] | None) -> FailureText | None:
+    """The text of the `fix.kind` an `upstream_error` refusal names, when it names one."""
+    kind = (fix or {}).get("kind")
+    if code != ToolErrorCode.UPSTREAM_ERROR or not isinstance(kind, str):
+        return None
+    return KIND_SENTENCES.get(kind)
 
 
 def _ceiling_text(code: str, fix: Mapping[str, object] | None) -> FailureText | None:

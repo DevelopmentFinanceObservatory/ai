@@ -115,6 +115,7 @@ from collections.abc import Callable, Mapping
 from enum import StrEnum
 from typing import cast
 
+from data_mcp.tool_errors import SPEC_NOT_REGISTERED
 from planner.records import StrictModel
 from pydantic import Field, JsonValue, ValidationError
 
@@ -354,19 +355,16 @@ class ExecutorCode(StrEnum):
 
 # The codes that say the harness wrote a call wrong or a server failed of
 # itself, so nothing the user asked for is wrong. They are a compiler-provable
-# code, a payload that did not parse, an internal error (the run's own,
-# `executor.run._Run._anchor_fault`, or a server's), and a stored frame that
-# failed its integrity check. The frame store is content-addressed, so every
-# plan reading the same scope meets the same corrupted object.
+# code, a payload that did not parse, and an internal error, the run's own
+# (`executor.run._Run._anchor_fault`) or a server's.
 HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
     ExecutorCode.MALFORMED_REFUSAL,
     ExecutorCode.INTERNAL_ERROR,
-    "frame_integrity_failed",
 }
 
-# data-mcp's code for an upstream call that failed. Its `spec_not_registered`
-# shares it, for a definition the platform refused to register, and is the
-# only one whose `fix` lists the definition's `problems`.
+# data-mcp's code for an upstream call that failed. A definition the platform
+# refused to register shares it, told apart by its `fix.kind`
+# (`data_mcp.tool_errors.SPEC_NOT_REGISTERED`).
 UPSTREAM_ERROR = "upstream_error"
 
 
@@ -468,12 +466,12 @@ def is_anchor_fault(failure: ToolFailure) -> bool:
 def is_upstream_fault(failure: ToolFailure) -> bool:
     """Whether `failure` says an upstream service failed of itself.
 
-    Every `upstream_error` does, except data-mcp's `spec_not_registered`, which
-    names the definition the platform refused (`fix.problems`) and which
-    another spec avoids. One that names a wait is transient before it is
-    anyone's fault (`executor.outcomes.stop_cause`).
+    Every `upstream_error` does, except a definition the platform refused to
+    register (`fix.kind` `SPEC_NOT_REGISTERED`), which another spec avoids.
+    One that names a wait is transient before it is anyone's fault
+    (`executor.outcomes.stop_cause`).
     """
-    return failure.code == UPSTREAM_ERROR and "problems" not in failure.fix
+    return failure.code == UPSTREAM_ERROR and failure.fix.get("kind") != SPEC_NOT_REGISTERED
 
 
 def is_harness_fault(failure: ToolFailure) -> bool:

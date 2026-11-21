@@ -2028,14 +2028,16 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
         "fix": {"candidates": ["country/KEN", "country/KEN-old"]},
         "disposition": "method_choice",
         "cause": "data",
+        "wave_remedy": "replan",
     }
     # get_data ran and completed before the refusal; its frame is kept.
     assert executed["frame_refs"] == [REF_A]
     assert [step["digest"] for step in executed["step_summaries"]] == ["fetched"]
     _, body = handed_back(model)
     # The refusal's retry mode and `fix` word the user's sentence, and its
-    # cause and disposition decide its remedy; the agent reads the rest.
-    hidden = ("retry_mode", "fix", "disposition", "cause")
+    # cause, disposition and wave's remedy decide what follows; the agent
+    # reads the rest.
+    hidden = ("retry_mode", "fix", "disposition", "cause", "wave_remedy")
     shown = {k: v for k, v in executed["failed_step"].items() if k not in hidden}
     assert body["failed_step"] == shown
 
@@ -2088,6 +2090,7 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
         "fix": {"detail": "too many series"},
         "disposition": "stop",
         "cause": "data",
+        "wave_remedy": "user",
     }
     assert executed["frame_refs"] == [REF_A]
     _, body = handed_back(model)
@@ -2151,6 +2154,7 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
         },
         "disposition": "stop",
         "cause": "data",
+        "wave_remedy": "user",
     }
     _, body = handed_back(model)
     assert (body["failed_step"]["step_id"], body["failed_step"]["code"]) == (
@@ -2243,6 +2247,7 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
         "fix": {"remedy": remedy},
         "disposition": "stop",
         "cause": "data",
+        "wave_remedy": "user",
         "remedy": remedy,
     }
     assert executed["frame_refs"] == []
@@ -2544,6 +2549,7 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "fix": {},
         "disposition": "method_choice",
         "cause": "data",
+        "wave_remedy": "replan",
     }
 
     rediscovery = RediscoveryNeeded(
@@ -2585,6 +2591,7 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "fix": {},
         "disposition": "rediscover",
         "cause": "data",
+        "wave_remedy": "replan",
     }
 
     refused = Refused(
@@ -2631,6 +2638,7 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "fix": {},
         "disposition": "stop",
         "cause": "data",
+        "wave_remedy": "user",
     }
 
     # A `REQUIREMENT_UNMET` stop carries `check_evidence`'s own findings as
@@ -2671,6 +2679,7 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "code": "source_pin_mismatch",
         "message": "the requirement pins 'spec_a', the source found is 'spec_b'",
         "cause": "data",
+        "wave_remedy": "user",
     }
 
     # No ERROR-severity issue at all (every finding a caveat) falls back to
@@ -2699,6 +2708,7 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "code": "source_unverified",
         "message": "the source states no provenance",
         "cause": "data",
+        "wave_remedy": "replan",
     }
 
     # A stop with every donor named missing. The failed step carries what the
@@ -2730,6 +2740,7 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "message": "the source resolves no entity named 'United States'; the source "
         "resolves no entity named 'Germany'",
         "cause": "data",
+        "wave_remedy": "user",
     }
 
 
