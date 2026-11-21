@@ -292,6 +292,25 @@ def test_warnings_and_a_partial_period_reach_the_footer() -> None:
     assert "Warning, coverage gap: 2018 is not reported." in projection
 
 
+@pytest.mark.parametrize(
+    ("partial_periods", "worded"),
+    [
+        ([{"source": "provenance/OECDCreditorReportingSystem", "period": "2025"}], True),
+        ([], False),
+        (None, False),
+    ],
+)
+def test_a_described_card_words_the_partial_period_its_description_states(
+    partial_periods: list[dict[str, str]] | None, worded: bool
+) -> None:
+    envelope = resolved_revision("line_chart_description")
+    envelope["description"]["freshness"]["partial_periods"] = partial_periods
+
+    projection = text_projection(envelope)
+
+    assert (", the last period partial" in projection) is worded
+
+
 def test_a_non_https_source_url_is_left_out() -> None:
     envelope = resolved_revision("source_card")
     envelope["provenance"]["sources"][0]["url"] = "http://stats.oecd.org/"
