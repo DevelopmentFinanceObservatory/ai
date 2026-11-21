@@ -63,7 +63,13 @@ from harness.graph.state import (
     stored_mapping,
     stored_sequence,
 )
-from harness.sentences import DECLINE_REASONS, FAILURE_CLASS, FailureClass, failure_sentence
+from harness.sentences import (
+    DECLINE_REASONS,
+    FAILURE_CLASS,
+    FailureClass,
+    failure_cause,
+    failure_sentence,
+)
 from harness.turn.node import Next, Node, NodeCtx
 from harness.turn_records import AlignedBasis, PlanAsk, PlanRecord, aligned_basis
 
@@ -291,33 +297,46 @@ def _system_fault(code: object) -> bool:
     return kind is not None and STOP_CAUSES[kind] is StopCause.HARNESS
 
 
+def _worded_as(failed: Mapping[str, Any]) -> tuple[object, Mapping[str, object] | None]:
+    """The code and `fix` the user's words for `failed`, a run's
+    `failed_step`, are read from: its own, or `internal_error` and none for a
+    fault of the system (`_system_fault`), whatever its code's class, so the
+    user is never told their question caused it."""
+    code = failed.get("code")
+    if _system_fault(code):
+        return ExecutorCode.INTERNAL_ERROR.value, None
+    fix = failed.get("fix")
+    return code, fix if isinstance(fix, Mapping) else None
+
+
 def _user_sentence(failed: Mapping[str, Any]) -> str:
     """The sentence the user reads for `failed`, a run's `failed_step`
     (`harness.sentences.failure_sentence`), worded from its code and, where
-    a tool refused, the refusal's `retry_mode` and `fix`. A fault of the system
-    (`_system_fault`) reads the system fault's sentence whatever its code's
-    class, so the user is never told their question caused it."""
-    code = failed.get("code")
-    if _system_fault(code):
-        return failure_sentence(ExecutorCode.INTERNAL_ERROR.value, failed.get("retry_mode"))
-    fix = failed.get("fix")
-    return failure_sentence(
-        code, failed.get("retry_mode"), fix if isinstance(fix, Mapping) else None
-    )
+    a tool refused, the refusal's `retry_mode` and `fix` (`_worded_as`)."""
+    code, fix = _worded_as(failed)
+    return failure_sentence(code, failed.get("retry_mode"), fix)
 
 
-def _retry_note(plan: Plan | None, failed: Mapping[str, Any], sentence: str) -> str:
+def _user_cause(failed: Mapping[str, Any]) -> str:
+    """What happened at `failed`, a run's `failed_step`, without the
+    sentence's advice (`harness.sentences.failure_cause`)."""
+    code, fix = _worded_as(failed)
+    return failure_cause(code, fix)
+
+
+def _retry_note(plan: Plan | None, failed: Mapping[str, Any]) -> str:
     """What the next plan card says before it, once `plan` stopped on `failed`
     and the plan call was given back: the step it stopped at, by the label
-    its card showed, the user's `sentence` for the failure, and that the new
-    plan needs approving."""
+    its card showed, what happened there (`_user_cause`), and that the new
+    plan needs approving. The new plan is the way past the failure, so the
+    note gives no advice of its own."""
     label = None
     if plan is not None and plan.translation is not None and plan.workflow is not None:
         rows = plan_display.card_rows(plan)
         label = next((row["label"] for row in rows if row["id"] == failed.get("step_id")), None)
     where = f"the step “{label}”" if label else "a step"
     return (
-        f"The approved plan stopped at {where}. {sentence} This new plan is drafted to get "
+        f"The approved plan stopped at {where}. {_user_cause(failed)} This new plan is drafted to get "
         "past it, so it needs your approval."
     )
 
@@ -989,7 +1008,9 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
                 if failed.get(key)
             }
             partial = _partial_result(result.get("asks"), frames=bool(result["frames"]))
-            sentence = _user_sentence(failed)
+            remedy = "remedy" in result["failed_step"]
+            # A remedy says what the user can do, so the sentence keeps only its cause.
+            sentence = _user_cause(failed) if remedy else _user_sentence(failed)
             fix = failed.get("fix")
             avoidable = brief_can_avoid(
                 failed.get("code"), fix=fix if isinstance(fix, Mapping) else None
@@ -1013,17 +1034,17 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
                     "why, in the user's terms."
                 )
             if given_back:
-                ctx.state[ORCHESTRATOR_RETRY_NOTE_KEY] = _retry_note(plan, failed, sentence)
+                ctx.state[ORCHESTRATOR_RETRY_NOTE_KEY] = _retry_note(plan, failed)
                 lead += " A brief that avoids the failure may be planned once more."
+            elif avoidable:
+                lead += f" The turn's one new plan is spent. Tell the user: {sentence}"
             else:
-                # No other brief gets past the failure, or the turn's one
-                # retry is spent, so the turn ends on the user's sentence.
                 lead += f" No other plan this turn gets past it. Tell the user: {sentence}"
                 if _system_fault(failed.get("code")):
                     lead += (
                         " The fault is the system's: do not ask the user to change the question."
                     )
-            if "remedy" in result["failed_step"]:
+            if remedy:
                 lead += (
                     " Tell the user what they can do about it, as the failed step's remedy says it."
                 )

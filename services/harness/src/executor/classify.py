@@ -380,8 +380,8 @@ HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
 # as it was, and facts of the data the user has to accept or change the
 # question for: a party not in the data, a named party with no series, and a
 # period the data does not reach or confirm. An approval a changed plan or
-# tool surface made stale is avoidable: a plan drafted and approved afresh
-# gets past it.
+# tool surface made stale, or that expired, is avoidable: a plan drafted and
+# approved afresh gets past it.
 BRIEF_AVOIDABLE_CODES = frozenset(
     {
         *METHOD_CHOICE_CODES,
@@ -412,13 +412,17 @@ BRIEF_AVOIDABLE_CODES = frozenset(
         "quotient_of_side_unit_unsupported",
         "rendering_not_recorded",
         "rolling_grain_unsupported",
+        # The frame no longer reads back as stored; a different frame is a
+        # different plan.
+        "frame_integrity_failed",
         # The run's own stops on the data it read.
         "requirement_unmet",
         "empty_answer",
-        # An approval the plan or the tool surface moved past.
+        # An approval the plan or the tool surface moved past, or that expired.
         "not_approved",
         "stale_revision",
         "surface_changed",
+        "authorisation_expired",
         # The evidence check's findings on what a retrieval holds.
         "no_data_at_source",
         "data_unverified",
@@ -451,7 +455,6 @@ BRIEF_UNAVOIDABLE_CODES = frozenset(
         *(code.value for code in ExecutorCode),
         "capability_unavailable",
         "entity_not_found",
-        "frame_integrity_failed",
         "rolling_anchor_unresolved",
         # Tools no workflow step calls (`compiler.capabilities.EXCLUDED_TOOLS`).
         "skill_not_found",
@@ -467,7 +470,6 @@ BRIEF_UNAVOIDABLE_CODES = frozenset(
         "step_result_unusable",
         "shape_mismatch",
         "column_unbound",
-        "authorisation_expired",
         "manifest_outside_authorisation",
         "authorisation_mismatch",
         "run_abandoned",

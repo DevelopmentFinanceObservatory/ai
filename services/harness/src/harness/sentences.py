@@ -1164,15 +1164,10 @@ def failure_sentence(
     """
     known = isinstance(retry_mode, str) and retry_mode in set(RetryMode)
     mode = RetryMode(retry_mode) if known else None
-    failure_class = FAILURE_CLASS.get(code) if isinstance(code, str) else None
-    if failure_class is None:
+    text = _failure_text(code, fix)
+    if text is None:
         logger.warning("no failure sentence for code %r (retry_mode %r)", code, retry_mode)
         return RETRY_MODE_SENTENCES[mode] if mode else f"{_NO_CAUSE}."
-    text = (
-        CODE_SENTENCES.get(str(code))
-        or _ceiling_text(str(code), fix)
-        or FAILURE_SENTENCES[failure_class]
-    )
     advice = text.advice or (_RETRY_ADVICE[mode] if mode else None)
     tail = f", {advice}." if advice else "."
     fill = _fill(str(code), fix)
@@ -1181,6 +1176,37 @@ def failure_sentence(
         if len(filled) <= MAX_SENTENCE_CHARS:
             return filled
     return text.cause + tail
+
+
+def failure_cause(code: object, fix: Mapping[str, object] | None = None) -> str:
+    """What happened for a failure `code`, as one sentence without advice.
+
+    The cause `failure_sentence` opens with, for a caller that offers its own
+    way past the failure, such as a new plan. A code in no class reads the
+    cause no class names.
+    """
+    text = _failure_text(code, fix)
+    if text is None:
+        return f"{_NO_CAUSE}."
+    fill = _fill(str(code), fix)
+    if text.filled and fill:
+        filled = text.filled.format(fill=fill) + "."
+        if len(filled) <= MAX_SENTENCE_CHARS:
+            return filled
+    return text.cause + "."
+
+
+def _failure_text(code: object, fix: Mapping[str, object] | None) -> FailureText | None:
+    """The text a failure `code` reads: its own, its ceiling's, or its class's;
+    None for a code in no class."""
+    failure_class = FAILURE_CLASS.get(code) if isinstance(code, str) else None
+    if failure_class is None:
+        return None
+    return (
+        CODE_SENTENCES.get(str(code))
+        or _ceiling_text(str(code), fix)
+        or FAILURE_SENTENCES[failure_class]
+    )
 
 
 def _ceiling_text(code: str, fix: Mapping[str, object] | None) -> FailureText | None:

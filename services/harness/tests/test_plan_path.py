@@ -14,8 +14,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from datetime import UTC, datetime
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from analysis_mcp.digest import render_rank_digest
@@ -40,9 +39,8 @@ from harness.graph.plan_done import (
     StepSummary,
     _ask_status,
     _partial_result,
-    _retry_note,
     _stop_causes,
-    _user_sentence,
+    _system_fault,
 )
 from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
@@ -54,7 +52,7 @@ from harness.graph.state import (
 from harness.plan_display import card_rows
 from harness.run_ledger import StudioRunLedger
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
-from harness.sentences import DECLINE_REASONS, failure_sentence
+from harness.sentences import DECLINE_REASONS, failure_cause, failure_sentence
 from harness.studio_state import ConversationState, SegmentLost
 from harness.turn.events import NodeDone, Paused
 from harness.turn.loop import Outcome, run_segment
@@ -538,7 +536,6 @@ async def test_a_stopped_plan_gives_the_plan_call_back_only_for_a_failure_a_brie
     missing = code == "capability_unavailable"
     assert (SCRIPTED_SPEC in (state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {})) is missing
     after_plan = agent_read(models.orchestrator.requests[-1])
-    assert ("planned once more" in after_plan) is given_back
     assert (failure_sentence(code) in after_plan) is not given_back
 
 
@@ -555,10 +552,10 @@ async def test_a_system_fault_ends_the_turn_worded_as_the_systems_fault(
     ran = await approve_turn(driver, _QUESTION)
 
     assert ran.outcome is Outcome.DONE
+    assert not ran.cursor.state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")
     after_plan = agent_read(models.orchestrator.requests[-1])
     assert failure_sentence("internal_error") in after_plan
     assert failure_sentence("composed_unit_sum_unsupported") not in after_plan
-    assert "planned once more" not in after_plan
 
 
 @pytest.mark.parametrize(
@@ -573,8 +570,9 @@ async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_fai
     code: str, fix: dict[str, Any], pg_engine: AsyncEngine
 ) -> None:
     """The plan given back drafts a new card that says which step the
-    approved plan stopped at and why, in the sentence the refusal's code,
-    retry mode and `fix` word; its run stopping the same way ends the turn,
+    approved plan stopped at and what happened there, the cause the
+    refusal's code and `fix` word, with the new plan as the way past it; its
+    run stopping the same way ends the turn on the user's whole sentence,
     with no third card."""
     models = scripted_models(
         orchestrator=[
@@ -594,25 +592,28 @@ async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_fai
     (failed,) = (row for row in card_rows(plan) if row["id"] == "retrieve")
     note = card.payload["refusal_note"]
     assert f"“{failed['label']}”" in note
-    assert sentence in note
+    assert failure_cause(code, fix) in note
+    assert sentence not in note
+    assert second.cursor.state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")
     assert second.cursor.state.get(ORCHESTRATOR_RETRY_NOTE_KEY) is None
 
     ended = await driver.answer(approve_answer(card.payload["revision"]), to=card)
 
     assert ended.outcome is Outcome.DONE
-    # The request holds both hand-backs: the first offered the new plan, the
-    # second carries the user's sentence and offers none.
-    after_plan = agent_read(models.orchestrator.requests[-1])
-    assert after_plan.count("planned once more") == 1
-    assert sentence in after_plan
+    # The second stop leaves no note, since the turn's one new plan is spent.
+    assert ended.cursor.state.get(ORCHESTRATOR_RETRY_NOTE_KEY) is None
+    assert sentence in agent_read(models.orchestrator.requests[-1])
 
 
 @pytest.mark.parametrize(
     ("code", "fix"),
     [
-        # Narrowing the topic is the user's call. The sentence names the
-        # ceiling the refusal's `fix` names.
-        ("over_ceiling", {"ceiling_kind": "member_cardinality"}),
+        # Narrowing the topic is the user's call. The words name the ceiling
+        # the refusal's `fix` names, and data-mcp's remedy gives the advice.
+        (
+            "over_ceiling",
+            {"ceiling_kind": "member_cardinality", "remedy": "Ask about one sector."},
+        ),
         ("place_levels_mixed", {}),
     ],
 )
@@ -621,7 +622,8 @@ async def test_an_unavoidable_failure_ends_the_turn_on_its_sentence_with_no_seco
 ) -> None:
     """The agent's second plan call is refused for its budget, so the turn
     ends without another card, and the hand-back carries the user's
-    sentence for the failure."""
+    sentence for the failure, or only its cause where a remedy gives the
+    advice."""
     models = scripted_models(
         orchestrator=[
             reply(plan_call(_BRIEF)),
@@ -636,38 +638,30 @@ async def test_an_unavoidable_failure_ends_the_turn_on_its_sentence_with_no_seco
     assert ran.outcome is Outcome.DONE
     assert not ran.cursor.state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")
     after_plan = agent_read(models.orchestrator.requests[-1])
-    assert failure_sentence(code, "do_not_retry", fix) in after_plan
-    assert "planned once more" not in after_plan
-
-
-def test_the_retry_note_quotes_the_failed_steps_label_as_the_card_shows_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    label = "Fetch official development assistance for Côte d'Ivoire"
-    rows = [{"id": "retrieve", "label": label}, {"id": "totals", "label": "Total it"}]
-    monkeypatch.setattr(plan_done_module.plan_display, "card_rows", lambda plan: rows)
-    # `card_rows` is replaced, so the plan only has to state both compiled parts.
-    plan = cast(Plan, SimpleNamespace(translation=object(), workflow=object()))
-
-    note = _retry_note(plan, {"step_id": "retrieve"}, "The data holds indicators.")
-
-    assert f"“{label}”" in note
+    sentence = failure_sentence(code, "do_not_retry", fix)
+    if "remedy" in fix:
+        assert failure_cause(code, fix) in after_plan
+        assert sentence not in after_plan
+    else:
+        assert sentence in after_plan
 
 
 @pytest.mark.parametrize(
     ("code", "system"),
     [
-        ("frame_integrity_failed", True),
+        ("place_levels_mixed", True),
+        ("publication_error", True),
         ("binding_invalid", True),
-        # A fresh plan, approved again, gets past a changed tool surface.
+        # A fresh plan gets past each of these: a different frame, or an
+        # approval given again.
+        ("frame_integrity_failed", False),
         ("surface_changed", False),
         ("stale_revision", False),
+        ("authorisation_expired", False),
     ],
 )
 def test_only_a_fault_of_the_system_reads_as_one(code: str, system: bool) -> None:
-    internal = failure_sentence("internal_error", "do_not_retry")
-
-    assert (_user_sentence({"code": code, "retry_mode": "do_not_retry"}) == internal) is system
+    assert _system_fault(code) is system
 
 
 async def test_a_plan_whose_frames_cannot_be_described_hands_back_the_reason_not_a_frame(
