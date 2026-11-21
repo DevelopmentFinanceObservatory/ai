@@ -1881,8 +1881,8 @@ def _wire_provenance(
     lineage stays keyed by its frame key.
 
     `freshness.partial_period` is `partial_period`, which the card's own
-    resolved revision states (`_envelope_partial_period`): the manifests carry
-    a per-frame record, not a judgement of the rows the card draws.
+    resolved revision states (`_envelope_partial_period`). The manifests carry
+    only a per-frame record, which says nothing of the rows the card draws.
     """
     now = datetime.now(UTC)
     served = {(member.spec_id, member.content_version): member.served_ref for member in lineage}
