@@ -729,6 +729,49 @@ def test_the_digest_counts_the_blocks_its_cap_leaves_out():
     assert "blocks_not_shown" not in one
 
 
+def test_the_canvas_views_name_a_pinned_card_older_than_their_caps():
+    """A pinned card stays whatever the model removes, so every view names it,
+    flagged, however many newer cards push it past the caps; the summary
+    counts the pinned cards."""
+    full, compact = studio_state._DIGEST_BLOCK_CAP, studio_state._LISTING_COMPACT_CAP
+    state = _canvas({f"cmp_{n:03d}": _entry(f"Card {n}", None) for n in range(full + compact + 5)})
+    assert state.composition is not None
+    state.composition.blocks[0].pinned = True
+
+    digest = state.canvas_digest_state()
+    listing = state.canvas_listing_state()
+    summary = state.canvas_summary_state()
+
+    assert digest is not None
+    assert len(digest["blocks"]) == full
+    assert (digest["blocks"][0]["component_id"], digest["blocks"][0]["pinned"]) == ("cmp_000", True)
+    assert len(listing["on_canvas_older"]) == compact
+    assert listing["on_canvas_older"][0] == {
+        "component_id": "cmp_000",
+        "type": "line_chart",
+        "title": "Card 0",
+        "pinned": True,
+    }
+    assert "pinned" not in listing["on_canvas_older"][1]
+    assert listing["on_canvas_not_shown"] == 5
+    assert summary == {"cards_on_canvas": full + compact + 5, "cards_pinned": 1, "cards_hidden": 0}
+
+
+def test_a_focus_card_past_the_cap_keeps_the_pinned_cards_in_the_digest():
+    cap = studio_state._DIGEST_BLOCK_CAP
+    state = _canvas({f"cmp_{n:02d}": _entry(f"Card {n}", None) for n in range(cap + 3)})
+    assert state.composition is not None
+    state.composition.blocks[0].pinned = True
+
+    digest = state.canvas_digest_state(focus="cmp_01")
+
+    assert digest is not None
+    ids = [block["component_id"] for block in digest["blocks"]]
+    assert len(ids) == cap
+    assert ids[0] == "cmp_00"
+    assert ids[-1] == "cmp_01"
+
+
 def test_the_digest_with_every_block_pinned_and_some_cut_stays_under_its_maximum():
     title = "t" * (studio_state._TITLE_BYTE_CAP - 2)
     summary = "s" * (studio_state._FACT_SUMMARY_BYTE_CAP - 2)
@@ -925,9 +968,9 @@ def test_removing_cards_takes_the_named_blocks_off_and_reports_the_rest():
     state = _canvas({f"cmp_0{n}": _entry("Aid", None) for n in (1, 2, 3)})
     before = state.composition
 
-    removed, missing = remove_cards(state, ["cmp_02", "cmp_99"], all_cards=False)
+    removal = remove_cards(state, ["cmp_02", "cmp_99"], all_cards=False)
 
-    assert (removed, missing) == (["cmp_02"], ["cmp_99"])
+    assert removal == (["cmp_02"], ["cmp_99"], [])
     assert state.composition is not None and before is not None
     assert [b.component_id for b in state.composition.blocks] == ["cmp_01", "cmp_03"]
     assert state.composition.revision == before.revision + 1
@@ -937,23 +980,54 @@ def test_removing_cards_takes_the_named_blocks_off_and_reports_the_rest():
     assert state.take_unreported_removal() is False
 
 
+@pytest.mark.parametrize(
+    ("named", "all_cards"),
+    [(["cmp_01", "cmp_02"], False), ([], True)],
+    ids=["named", "all-cards"],
+)
+def test_removing_cards_leaves_pinned_ones_and_names_them(named: list[str], all_cards: bool):
+    """Only the user unpins a card, so a pinned block stays whether the call
+    names it or takes every card, and the call says which stayed."""
+    state = _canvas({f"cmp_0{n}": _entry("Aid", None) for n in (1, 2, 3)})
+    assert state.composition is not None
+    state.composition.blocks[0].pinned = True
+
+    removal = remove_cards(state, named, all_cards=all_cards)
+
+    assert removal.kept_pinned == ["cmp_01"]
+    assert "cmp_01" not in removal.removed
+    assert state.composition.blocks[0].component_id == "cmp_01"
+    assert state.composition.blocks[0].pinned is True
+
+
+def test_a_call_naming_only_pinned_cards_changes_nothing():
+    state = _canvas({"cmp_01": _entry("Aid", None)})
+    assert state.composition is not None
+    state.composition.blocks[0].pinned = True
+    before = state.composition.revision
+
+    assert remove_cards(state, ["cmp_01"], all_cards=False) == ([], [], ["cmp_01"])
+    assert state.composition.revision == before
+    assert state.take_unreported_removal() is False
+
+
 def test_a_card_already_off_the_canvas_is_not_reported_missing():
     state = _canvas({"cmp_01": _entry("Aid", None)})
     state.components["cmp_hidden"] = _entry("Hidden", None)
 
-    assert remove_cards(state, ["cmp_hidden"], all_cards=False) == ([], [])
+    assert remove_cards(state, ["cmp_hidden"], all_cards=False) == ([], [], [])
     assert state.take_unreported_removal() is False
 
 
 def test_removing_every_card_leaves_an_empty_canvas_the_digest_states():
     state = _canvas({f"cmp_0{n}": _entry("Aid", None) for n in (1, 2)})
 
-    removed, missing = remove_cards(state, [], all_cards=True)
+    removal = remove_cards(state, [], all_cards=True)
 
-    assert (removed, missing) == (["cmp_01", "cmp_02"], [])
+    assert removal == (["cmp_01", "cmp_02"], [], [])
     digest = state.canvas_digest_state()
     assert digest is not None and digest["blocks"] == []
-    assert remove_cards(state, [], all_cards=True) == ([], [])
+    assert remove_cards(state, [], all_cards=True) == ([], [], [])
 
 
 def test_a_focus_that_names_no_stored_component_stays_out_of_the_digest():
@@ -3059,7 +3133,7 @@ async def test_a_card_write_commits_only_the_fields_its_change_made(new_store) -
     remove = studio_state.make_remove_cards(store)
     token = current_conversation_key.set(("principal", CONVERSATION))
     try:
-        assert await remove(component_ids=["cmp_two"], all_cards=False) == (["cmp_two"], [])
+        assert await remove(component_ids=["cmp_two"], all_cards=False) == (["cmp_two"], [], [])
     finally:
         current_conversation_key.reset(token)
 
@@ -3468,7 +3542,7 @@ async def test_a_removal_whose_commit_lost_its_acknowledgement_reports_the_cards
         current_conversation_key.reset(token)
 
     assert faults == [1]
-    assert result == (["cmp_two"], [])
+    assert result == (["cmp_two"], [], [])
     assert state.take_unreported_removal() is True
     assert state.composition is not None and state.composition.blocks == []
     reloaded = await new_store().load("principal", CONVERSATION)
@@ -3552,7 +3626,7 @@ async def test_a_retried_removal_of_every_card_keeps_a_card_the_user_added_meanw
     result = await _remove_all(store_a)
 
     assert faults == [1]
-    assert result == (["cmp_two"], [])
+    assert result == (["cmp_two"], [], [])
     assert state.take_unreported_removal() is True
     reloaded = await new_store().load("principal", CONVERSATION)
     assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
@@ -3601,7 +3675,7 @@ async def test_overlapping_canvas_changes_each_land_once_when_the_first_lost_its
 
     assert faults == [1]
     assert landing[0].done()
-    assert result == (["cmp_two"], [])
+    assert result == (["cmp_two"], [], [])
     reloaded = await new_store().load("principal", CONVERSATION)
     assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
     assert state.composition == reloaded.composition

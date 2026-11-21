@@ -145,6 +145,20 @@ def test_the_instruction_says_what_the_canvas_digests_focus_card_is():
     assert "focus_component_id" in INSTRUCTION
 
 
+def test_the_instruction_says_when_cards_come_off_and_that_pinned_ones_stay():
+    """Cards accumulate across turns; the model takes them off when the user
+    asks or the conversation changes subject, and pinned cards stay."""
+    text = " ".join(INSTRUCTION.split())
+    assert "each turn's cards join the ones already on the canvas" in text
+    assert "when the conversation turns to another subject" in text
+    assert "remove_cards leaves pinned cards on the canvas and names them as kept_pinned" in text
+
+
+def test_the_instruction_keeps_a_measures_creditor_scope_in_the_reply():
+    text = " ".join(INSTRUCTION.split())
+    assert 'debt service "owed to all creditors" is reported in those words' in text
+
+
 def test_the_instruction_lets_a_reply_about_dfo_state_the_figures_explain_dfo_gives():
     assert "stating only the figures it gives" in INSTRUCTION
     text = " ".join(INSTRUCTION.split())
@@ -184,7 +198,12 @@ def test_the_instruction_has_search_elect_the_measure_and_asks_with_its_alternat
     )
     assert "ask about each with ask_user, one question per choice, all in one call" in text
     assert (
-        "The count search chose is the first option of the count question, and the other counts "
+        "A count search chose (`counted_as`) is settled too, even when it lists other counts: "
+        "go on with it, do not ask" in text
+    )
+    assert "Search leaves a choice open when a part lists `candidates` or `open_prices`" in text
+    assert (
+        "In a count question, the count search chose is the first option, and the other counts "
         "the result names follow" in text
     )
     assert (

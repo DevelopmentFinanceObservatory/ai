@@ -28,7 +28,7 @@ import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from common.telemetry import end_turn_segment, start_turn_segment
 from compiler.sources import alternative_definitions, source_from_spec_block
@@ -125,9 +125,10 @@ _BLOCK_SHOWS_BYTES = (
 _SUBSET_RULE = "display order"
 _DIGEST_WRAPPER_BYTES = 160
 # `recall(part="canvas")`'s listing (`canvas_listing_state`): per list, the
-# newest `_DIGEST_BLOCK_CAP` cards in full (with up to `_VIEW_FLAG_BYTES` of
-# pinned / on_canvas flags each) and `_LISTING_COMPACT_CAP` older ones as
-# compact entries, plus the keys and counts in `_LISTING_WRAPPER_BYTES`.
+# newest `_DIGEST_BLOCK_CAP` cards in full and `_LISTING_COMPACT_CAP` older
+# ones as compact entries, pinned ones first, each with up to
+# `_VIEW_FLAG_BYTES` of pinned / on_canvas flags, plus the keys and counts in
+# `_LISTING_WRAPPER_BYTES`.
 _LISTING_COMPACT_CAP = 48
 _VIEW_FLAG_BYTES = 40
 _LISTING_WRAPPER_BYTES = 256
@@ -162,7 +163,13 @@ CANVAS_LISTING_MAX_BYTES = _LISTING_WRAPPER_BYTES + 2 * (
         + _BLOCK_SHOWS_BYTES
     )
     + _LISTING_COMPACT_CAP
-    * (_HIDDEN_FRAME_BYTES + _BLOCK_ID_BYTES + _BLOCK_TYPE_BYTES + _TITLE_BYTE_CAP)
+    * (
+        _HIDDEN_FRAME_BYTES
+        + _VIEW_FLAG_BYTES
+        + _BLOCK_ID_BYTES
+        + _BLOCK_TYPE_BYTES
+        + _TITLE_BYTE_CAP
+    )
 )
 # The conversation digest's bounds: newest turns, each with its ask whole,
 # an older turn's answer cut to whole sentences, its plans each as one line
@@ -612,21 +619,22 @@ class ConversationState:
 
     def _canvas_view(self, focus: str | None = None) -> _CanvasView:
         """The cards a canvas view names: the composed blocks the cap keeps,
-        in canvas order, with the focus card kept whatever its age in place of
-        the oldest; which blocks are pinned; how many composed blocks the cap
-        left out; and the conversation's other cards, oldest first."""
+        pinned ones first (`_pinned_first`), in canvas order, with the focus
+        card kept whatever its age; which blocks are pinned; how many
+        composed blocks the cap left out; and the conversation's other
+        cards, oldest first."""
         composed: list[str] = []
         pinned: set[str] = set()
         if self.composition is not None:
             composed = [block.component_id for block in self.composition.blocks]
             pinned = {block.component_id for block in self.composition.blocks if block.pinned}
-        # Bounded: the last blocks in canvas order win on a very large canvas,
-        # the rest are counted, and `_digest_block` cuts each block's fields,
-        # so a view stays within `CANVAS_DIGEST_MAX_BYTES` however long the
-        # conversation runs.
-        ordered = composed[-_DIGEST_BLOCK_CAP:]
+        # Bounded: pinned blocks, then the last blocks in canvas order, win on
+        # a very large canvas, the rest are counted, and `_digest_block` cuts
+        # each block's fields, so a view stays within `CANVAS_DIGEST_MAX_BYTES`
+        # however long the conversation runs.
+        ordered = _pinned_first(composed, pinned, _DIGEST_BLOCK_CAP)
         if focus and focus in self.components and focus not in ordered:
-            ordered = [*ordered, focus][-_DIGEST_BLOCK_CAP:]
+            ordered = [*_pinned_first(composed, pinned, _DIGEST_BLOCK_CAP - 1), focus]
         return _CanvasView(
             ordered=[cid for cid in ordered if cid in self.components],
             composed=set(composed),
@@ -648,10 +656,11 @@ class ConversationState:
         """The graph engine's digest: composed blocks in canvas order (plus
         the focused card for a card-scoped follow-up), titles and fact
         summaries only -- references and digests, never rows. A pinned block
-        says so; a canvas whose blocks were all removed is `{"blocks": []}`,
-        and None means the conversation has no canvas yet. `hidden` names the
-        conversation's other cards (a new turn hid them, or they were
-        removed), id, type and title only: the user can put one back."""
+        says so, and pinned blocks take the cap's places first; a canvas
+        whose blocks were all removed is `{"blocks": []}`, and None means the
+        conversation has no canvas yet. `hidden` names the conversation's
+        cards taken off the canvas, id, type and title only: the user can put
+        one back."""
         view = self._canvas_view(focus)
         blocks = [self._view_block(view, cid) for cid in view.ordered]
         hidden = [
@@ -675,17 +684,17 @@ class ConversationState:
 
     def canvas_summary_state(self, *, focus: str | None = None) -> dict[str, Any] | None:
         """The orchestrator's always-on canvas line: how many cards are on
-        the canvas and how many are hidden. The cards themselves are a
-        `recall(part="canvas")` away. A card-scoped follow-up's focus card
-        comes whole, with its id (#348). None when the conversation has no
-        cards yet."""
+        the canvas, how many of those the user pinned (when any), and how
+        many are hidden. The cards themselves are a `recall(part="canvas")`
+        away. A card-scoped follow-up's focus card comes whole, with its id
+        (#348). None when the conversation has no cards yet."""
         if self.composition is None and not self.components:
             return None
         view = self._canvas_view(focus)
-        summary: dict[str, Any] = {
-            "cards_on_canvas": len(view.composed),
-            "cards_hidden": len(view.hidden),
-        }
+        summary: dict[str, Any] = {"cards_on_canvas": len(view.composed)}
+        if view.pinned:
+            summary["cards_pinned"] = len(view.pinned)
+        summary["cards_hidden"] = len(view.hidden)
         if focus in self.components:
             summary["focus_component_id"] = _cut_text(str(focus), _BLOCK_ID_BYTES)
             summary["blocks"] = [self._view_block(view, str(focus))]
@@ -695,10 +704,10 @@ class ConversationState:
         """`recall(part="canvas")`'s listing: the cards on the canvas, in
         canvas order, then the conversation's hidden cards. The newest
         `_DIGEST_BLOCK_CAP` of each come in full (id, type, title, fact
-        summary, pinned); the next `_LISTING_COMPACT_CAP` older ones by id,
-        type and title (`<list>_older`), so each can still be recalled or
-        removed by id; the rest are counted (`<list>_not_shown`). Bounded by
-        `CANVAS_LISTING_MAX_BYTES`."""
+        summary, pinned); `_LISTING_COMPACT_CAP` older ones by id, type and
+        title (`<list>_older`), pinned ones first and flagged, so each can
+        still be recalled or removed by id; the rest are counted
+        (`<list>_not_shown`). Bounded by `CANVAS_LISTING_MAX_BYTES`."""
         view = self._canvas_view()
         composed = (
             [block.component_id for block in self.composition.blocks] if self.composition else []
@@ -709,11 +718,13 @@ class ConversationState:
             ("hidden", view.hidden),
         ):
             full = ids[-_DIGEST_BLOCK_CAP:]
-            older = ids[:-_DIGEST_BLOCK_CAP][-_LISTING_COMPACT_CAP:]
+            older = _pinned_first(ids[:-_DIGEST_BLOCK_CAP], view.pinned, _LISTING_COMPACT_CAP)
             listing[name] = [self._view_block(view, cid) for cid in full]
             if older:
                 listing[f"{name}_older"] = [
-                    _hidden_entry(cid, self.components[cid]) for cid in older
+                    _hidden_entry(cid, self.components[cid])
+                    | ({"pinned": True} if cid in view.pinned else {})
+                    for cid in older
                 ]
             if rest := len(ids) - len(full) - len(older):
                 listing[f"{name}_not_shown"] = rest
@@ -1303,13 +1314,13 @@ def make_remove_cards(store: StudioStore) -> Any:
     the turn's segment as lost, whether it finds the lease gone or cannot
     reach the database before the lease's deadline."""
 
-    async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
+    async def remove(*, component_ids: list[str], all_cards: bool) -> CardRemoval:
         key = current_conversation_key.get()
         conversation = store.current(*key) if key is not None else None
         if key is None or conversation is None:
-            return [], list(component_ids)
+            return CardRemoval([], list(component_ids), [])
 
-        def change(work: ConversationState) -> tuple[list[str], list[str]]:
+        def change(work: ConversationState) -> CardRemoval:
             return remove_cards(work, component_ids, all_cards=all_cards)
 
         try:
@@ -1791,6 +1802,15 @@ def _next_manifest(
     )
 
 
+def _pinned_first(ids: list[str], pinned: set[str], cap: int) -> list[str]:
+    """At most `cap` of `ids`, in their order: the newest pinned ones take
+    the places first, then the newest of the rest."""
+    newest = list(reversed(ids))
+    ranked = [cid for cid in newest if cid in pinned] + [cid for cid in newest if cid not in pinned]
+    kept = set(ranked[: max(cap, 0)])
+    return [cid for cid in ids if cid in kept]
+
+
 def _block_ids(composition: CompositionManifest | None) -> list[str]:
     return [block.component_id for block in composition.blocks] if composition else []
 
@@ -1869,19 +1889,33 @@ def land_component(
     return "created"
 
 
+class CardRemoval(NamedTuple):
+    """What `remove_cards` did: the ids it took off, in canvas order; the
+    named ids the conversation never held; and the pinned ids it left on
+    the canvas, in canvas order."""
+
+    removed: list[str]
+    missing: list[str]
+    kept_pinned: list[str]
+
+
 def remove_cards(
     conversation: ConversationState, component_ids: list[str], *, all_cards: bool
-) -> tuple[list[str], list[str]]:
-    """Take blocks off `conversation`'s canvas: the named ones, or every
-    block when `all_cards`. Returns the ids removed, in canvas order, and the
-    named ids the conversation never held. A card already off the canvas is
-    neither. A removal marks the stream as owing a report
+) -> CardRemoval:
+    """Take unpinned blocks off `conversation`'s canvas: the named ones, or
+    every unpinned block when `all_cards`. A pinned block stays, since only
+    the user unpins a card, and is named back in `kept_pinned` when the call
+    named it or set `all_cards`. A card already off the canvas is neither
+    removed nor missing. A removal marks the stream as owing a report
     (`ConversationState.take_unreported_removal`). `make_remove_cards` runs
     it inside the store's canvas write, on the canvas as stored."""
     previous = conversation.composition
-    present = _block_ids(previous)
+    blocks_now = previous.blocks if previous is not None else []
     named = set(component_ids)
-    removed = [cid for cid in present if all_cards or cid in named]
+    targeted = [b for b in blocks_now if all_cards or b.component_id in named]
+    removed = [b.component_id for b in targeted if not b.pinned]
+    kept_pinned = [b.component_id for b in targeted if b.pinned]
+    present = _block_ids(previous)
     missing = [
         cid for cid in component_ids if cid not in present and cid not in conversation.components
     ]
@@ -1893,7 +1927,7 @@ def remove_cards(
         ]
         conversation.composition = _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
         conversation._removal_unreported = True
-    return removed, missing
+    return CardRemoval(removed, missing, kept_pinned)
 
 
 def _replace_block(

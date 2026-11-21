@@ -518,7 +518,7 @@
   }
  },
  "remove_cards": {
-  "description": "Take cards off the user's canvas.\n\n`component_ids` names the cards to take off, by the component ids the\ncanvas lists; set `all_cards` to take off every card instead. Returns\nthe ids taken off; a named card already off the canvas needs nothing,\nand an id this conversation never held is named back.",
+  "description": "Take cards off the user's canvas, when the conversation has moved to\nanother subject or the user asks for cards to go.\n\n`component_ids` names the cards to take off, by the component ids the\ncanvas lists; set `all_cards` to take off every card the user has\nnot pinned. A pinned card stays on the canvas, since only the user\nunpins it. Returns the ids taken off and, as `kept_pinned`, the\npinned cards left in place; a named card already off the canvas\nneeds nothing, and an id this conversation never held is named back.",
   "name": "remove_cards",
   "parameters_json_schema": {
    "properties": {

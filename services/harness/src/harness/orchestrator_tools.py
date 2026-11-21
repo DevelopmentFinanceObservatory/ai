@@ -172,7 +172,7 @@ from harness.reply_figures import (
 )
 from harness.rolling_cards import named_year
 from harness.scope_choices import PartScope, carried_entries
-from harness.studio_state import RecallPart, RecallRefusedError
+from harness.studio_state import CardRemoval, RecallPart, RecallRefusedError
 from harness.tool_contracts import (
     HarnessCode,
     ResolverError,
@@ -1895,7 +1895,7 @@ def build_orchestrator_tools(
     recall_part: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     canvas_series: Callable[[], list[str]] | None = None,
     canvas_cards: Callable[[], list[dict[str, Any]]] | None = None,
-    remove_cards: Callable[..., Awaitable[tuple[list[str], list[str]]]] | None = None,
+    remove_cards: Callable[..., Awaitable[CardRemoval]] | None = None,
 ) -> list[Any]:
     """The orchestrator's tools, bound to this server's resolver, executor and tool surface.
 
@@ -2988,12 +2988,15 @@ def build_orchestrator_tools(
         component_ids: list[str] | None = None,
         all_cards: bool = False,
     ) -> dict[str, Any]:
-        """Take cards off the user's canvas.
+        """Take cards off the user's canvas, when the conversation has moved to
+        another subject or the user asks for cards to go.
 
         `component_ids` names the cards to take off, by the component ids the
-        canvas lists; set `all_cards` to take off every card instead. Returns
-        the ids taken off; a named card already off the canvas needs nothing,
-        and an id this conversation never held is named back.
+        canvas lists; set `all_cards` to take off every card the user has
+        not pinned. A pinned card stays on the canvas, since only the user
+        unpins it. Returns the ids taken off and, as `kept_pinned`, the
+        pinned cards left in place; a named card already off the canvas
+        needs nothing, and an id this conversation never held is named back.
         """
         spent = _spend(call, "remove_cards")
         if spent:
@@ -3009,23 +3012,25 @@ def build_orchestrator_tools(
             )
         _canvas_series(call)
         async with _canvas_lock(call):
-            removed, missing = await remove_cards(
+            removed, missing, kept_pinned = await remove_cards(
                 component_ids=component_ids or [], all_cards=all_cards
             )
             _forget_drawn(call, removed)
-        if not removed and missing and len(missing) == len(component_ids or []):
+        if not removed and not kept_pinned and missing and len(missing) == len(component_ids or []):
             return _failed(
                 HarnessCode.CARD_NOT_FOUND,
                 "No card of this conversation has those ids. Nothing changed.",
             )
+        kept = {"kept_pinned": kept_pinned} if kept_pinned else {}
         if not removed:
-            note = (
-                "The canvas was already empty."
-                if all_cards
-                else "Those cards were already off the canvas."
-            )
-            return {"removed": [], "note": note}
-        return {"removed": removed} | ({"not_in_conversation": missing} if missing else {})
+            if kept_pinned:
+                note = "The user pinned these cards, so they stay on the canvas."
+            elif all_cards:
+                note = "The canvas was already empty."
+            else:
+                note = "Those cards were already off the canvas."
+            return {"removed": [], **kept, "note": note}
+        return {"removed": removed} | kept | ({"not_in_conversation": missing} if missing else {})
 
     remove_cards_tool.__name__ = "remove_cards"
 

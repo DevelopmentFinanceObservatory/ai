@@ -76,6 +76,7 @@ from harness.rolling_cards import CardWithheld, RollingCards
 from harness.scope_choices import served_facts
 from harness.studio_edit import _record_revision
 from harness.studio_state import (
+    CardRemoval,
     ConversationState,
     _apply_operations,
     _next_manifest,
@@ -5482,7 +5483,7 @@ def _recall_callable(state: ConversationState):
 
 
 def _remove_callable(state: ConversationState):
-    async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
+    async def remove(*, component_ids: list[str], all_cards: bool) -> CardRemoval:
         return remove_cards(state, component_ids, all_cards=all_cards)
 
     return remove
@@ -5520,6 +5521,21 @@ async def test_remove_cards_clears_the_canvas_and_refuses_a_call_that_names_noth
     assert _stated(nothing) == ("tool_arguments_invalid", "correct_and_retry")
     assert cleared == {"removed": ["cmp_01", "cmp_02"]}
     assert again == {"removed": [], "note": "The canvas was already empty."}
+
+
+async def test_remove_cards_leaves_a_pinned_card_and_names_it():
+    state = _two_card_canvas()
+    assert state.composition is not None
+    state.composition.blocks[0].pinned = True
+    tools, ctx = _tools(remove_cards=_remove_callable(state))
+
+    pinned_only = await tools["remove_cards"](ctx, ["cmp_01"])
+    cleared = await tools["remove_cards"](ctx, all_cards=True)
+
+    assert pinned_only["removed"] == []
+    assert pinned_only["kept_pinned"] == ["cmp_01"]
+    assert cleared == {"removed": ["cmp_02"], "kept_pinned": ["cmp_01"]}
+    assert [b.component_id for b in state.composition.blocks] == ["cmp_01"]
 
 
 async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
