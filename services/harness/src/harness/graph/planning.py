@@ -40,6 +40,7 @@ from harness.graph.state import (
     UNREADABLE_PLAN_UNPLANNED_NOTE,
     conversation_readings,
     readable_plan,
+    resume_answers,
 )
 from harness.graph.switch import SwitchFailedError
 from harness.sentences import StopCode
@@ -250,7 +251,12 @@ async def _draft(
         )
     if refused is not None:
         return _refused_entry(
-            ctx, refused, existing=existing, amendment=amendment, unreadable=unreadable
+            ctx,
+            refused,
+            existing=existing,
+            amendment=amendment,
+            latest=_typed_answer(answer) or amendment,
+            unreadable=unreadable,
         )
     planner_plan = PlannerPlan.model_validate(drafted["plan"])
     ctx.state["plan"] = planner_plan.model_dump_json()
@@ -285,15 +291,20 @@ def _refused_entry(
     *,
     existing: PlannerPlan | None,
     amendment: Any,
+    latest: Any,
     unreadable: bool,
 ) -> Next:
     """Where an entry the planner refused goes (`_draft`): `new_question`
     for an amendment read as a different question, `pending_refusal` to
-    offer the plan still awaiting approval again, else `refused`."""
+    offer the plan still awaiting approval again, else `refused`. `latest`
+    is the user's latest words on the entry: the amendment, or the text
+    the user typed in answer to a question the planner asked while
+    amending, which is what the planner then read as a new question."""
     if refused.get("code") == ProblemCode.QUESTION_FIXED and amendment:
-        # The user typed a different question on the plan card. The turn
-        # ends here, and the client sends the words as the next turn.
-        ctx.state[NEW_QUESTION_KEY] = str(amendment)
+        # The user typed a different question on the plan card, or in
+        # answer to the planner's question about the amendment. The turn
+        # ends here, and the client sends those words as the next turn.
+        ctx.state[NEW_QUESTION_KEY] = str(latest)
         return Next("new_question")
     text = str(refused.get("text", ""))
     if existing is not None and existing.status is PlanStatus.PENDING_APPROVAL:
@@ -322,6 +333,18 @@ def _refused_entry(
         "refused",
         {"text": text, "final": bool(refused.get("final")), "code": refused.get("code")},
     )
+
+
+def _typed_answer(answer: Mapping[str, Any] | None) -> str | None:
+    """The text the user typed in `answer`, the resume value of a question
+    the planner asked (`resume_answers`), or `None` when the answer typed
+    none: no answer, a skip, or a pick of an option."""
+    typed = [
+        str(reply["text"])
+        for reply in (resume_answers(answer) or {}).values()
+        if isinstance(reply, Mapping) and reply.get("kind") == "text" and reply.get("text")
+    ]
+    return " ".join(typed) or None
 
 
 def _pick(payload: dict[str, Any]) -> DecisionPick | None:

@@ -3548,6 +3548,53 @@ async def test_a_new_question_typed_on_the_plan_card_ends_the_turn_and_hands_it_
     assert "ended_by" not in reloaded.turns[1]
 
 
+class _AskingThenRestartRefusingPlanner(_RestartRefusingPlanner):
+    """`_RestartRefusingPlanner`, whose amendment entry first asks the user a
+    question and reads the answer as a different question."""
+
+    async def __call__(self, *, question: str, **kwargs: Any) -> dict[str, Any]:
+        if self.calls > 0 and kwargs.get("answer") is None:
+            return {"asked": {"call_id": "amend_ask", "args": {"message": "Which years?"}}}
+        return await super().__call__(question=question, **kwargs)
+
+
+async def test_a_new_question_answered_to_the_planner_on_an_amendment_is_handed_back(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The user amends the plan card, the planner asks which years, and the
+    user answers with a different question, which the planner reads as one
+    (`QUESTION_FIXED`). `done` hands back the answer, the user's latest
+    words, and the amendment is not sent as a question."""
+    app = _app(
+        *_plan("kenya debt"),
+        planner=_AskingThenRestartRefusingPlanner(schemas=real_schemas),
+        tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
+    )
+    typed = "Actually, what is Ghana's GDP?"
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("kenya debt"))
+        plan = _frame(first, "plan.proposed")
+        asked = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(plan["interrupt_id"], "amend", "show it for Kenya instead"),
+        )
+        question = _frame(asked, "elicitation.request")
+        answered = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(
+                question["interrupt_id"],
+                "answer",
+                answers={"q1": {"kind": "text", "text": typed}},
+            ),
+        )
+
+    assert question["questions"][0]["question"] == "Which years?"
+    assert answered[-1]["event"] == "done"
+    assert answered[-1]["new_question"] == typed
+
+
 async def test_a_set_aside_turn_whose_closing_write_failed_keeps_its_question(
     real_schemas: list[ToolSchema],
 ) -> None:

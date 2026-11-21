@@ -666,7 +666,7 @@ a loop:
    `switch_cancelled`.
 1. `reject` ends the turn. The stream sends `message.complete` and `done`.
    Nothing was computed.
-1. When the planner reads the `amend` text as a new question, the turn ends with the plan set aside unapproved. The stream sends a `message.complete` saying so, then `done` with `new_question`, the text as sent, and no new card. Close the card as "Taken as a new question" and send `new_question` as a new `turn.request`. An answer to the closed card's `interrupt_id` gets 404.
+1. When the planner reads the `amend` text as a new question, the turn ends with the plan set aside unapproved. The stream sends a `message.complete` saying so, then `done` with `new_question`, the user's latest words as sent (the `amend` text, or the text answering a question the planner asked about it), and no new card. Close the card as "Taken as a new question" and send `new_question` as a new `turn.request`. An answer to the closed card's `interrupt_id` gets 404.
 
 A new `turn.request` on a paused conversation abandons the pause.
 

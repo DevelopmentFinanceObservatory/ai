@@ -1910,6 +1910,7 @@ async def _replay_pause(
     hold: LockHold,
     settings: Settings,
     turn: ConversationState | None,
+    stale: JSONResponse | None = None,
 ) -> Response:
     """Stream the later pause the paused `cursor` holds to a retry of the
     answer to `interrupt_id` (`_replays_later_pause`), under the segment
@@ -1918,13 +1919,17 @@ async def _replay_pause(
     `segment_id` and saved first, so the stream's closing write drops it
     and stores the replayed pause's entry, which the next answer answers. A
     closing write that fails, or a client that leaves, keeps the entry
-    resuming, for the same retry to replay the pause again."""
+    resuming, for the same retry to replay the pause again. A save that
+    finds the conversation moved answers `stale`, the caller's 409, or else
+    an `/interrupt` answer's."""
     if (answered := work.pending.get(interrupt_id)) is not None:
         answered.resuming_segment = segment_id
     try:
         await studio.store.save(principal, conversation_id, work)
     except ConversationStale:
         await _release_claim(studio.store, principal, conversation_id, hold, segment_id, turn=turn)
+        if stale is not None:
+            return stale
         return _tool_error_response(
             ToolError(
                 error=ErrorCode.EDIT_CONFLICT,
@@ -3055,6 +3060,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         claiming: ConversationState | None = None
         segment_id: str | None = None
         saving: str | None = None
+        # The answer a client left before the turn took it, carried on as a
+        # retry of it once this request let go of the conversation.
+        carry: InterruptResponse | None = None
         try:
             conversation = await studio.store.load(principal, conversation_id)
             if conversation is None:
@@ -3083,76 +3091,72 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 assert cursor is not None and cursor.pause is not None
                 found = pause_entry(conversation.pending, cursor.pause.interrupt_id)
                 assert found is not None
+                carry = _answer_again(conversation_id, *found)
                 hold.release()
-                return await interrupt(
-                    _answer_again(conversation_id, *found),
-                    authorization=authorization,
-                    x_dfo_account=x_dfo_account,
-                    x_dfo_caller=x_dfo_caller,
+            else:
+                refusal = (
+                    _resume_refusal(standing, body.turn_index)
+                    if body.turn_index == conversation.turn_index
+                    else _not_open_turn_response(body.turn_index)
                 )
-            refusal = (
-                _resume_refusal(standing, body.turn_index)
-                if body.turn_index == conversation.turn_index
-                else _not_open_turn_response(body.turn_index)
-            )
-            if refusal is not None:
-                hold.release()
-                return refusal
-            work = studio.store.draft(principal, conversation_id)
-            try:
-                segment_id = studio.store.claim_segment(principal, conversation_id, work)
-            except SegmentBusy as exc:
-                return await _unclaimed(
-                    studio.store,
-                    principal,
-                    conversation_id,
-                    hold,
-                    _streaming_conflict_response(
-                        "another request is streaming on this conversation",
-                        retry_after_seconds=exc.retry_after_seconds,
-                    ),
+                if refusal is not None:
+                    hold.release()
+                    return refusal
+                work = studio.store.draft(principal, conversation_id)
+                try:
+                    segment_id = studio.store.claim_segment(principal, conversation_id, work)
+                except SegmentBusy as exc:
+                    return await _unclaimed(
+                        studio.store,
+                        principal,
+                        conversation_id,
+                        hold,
+                        _streaming_conflict_response(
+                            "another request is streaming on this conversation",
+                            retry_after_seconds=exc.retry_after_seconds,
+                        ),
+                    )
+                claiming = work
+                # The resumed turn keeps who asked it, and names its own id, as
+                # an `/interrupt` resume does.
+                current_conversation_id.set(ledger_conversation_id(principal, conversation_id))
+                current_conversation_key.set((principal, conversation_id))
+                current_turn_id.set(work.trace_id)
+                set_supplied_caller(current_conversation_caller())
+                set_supplied_turn(work.trace_id)
+                surface = cursor.state.get("surface") if cursor is not None else None
+                work.take_identity(
+                    account=account,
+                    visitor=visitor,
+                    caller=current_conversation_caller(),
+                    surface=surface if isinstance(surface, str) else None,
                 )
-            claiming = work
-            # The resumed turn keeps who asked it, and names its own id, as
-            # an `/interrupt` resume does.
-            current_conversation_id.set(ledger_conversation_id(principal, conversation_id))
-            current_conversation_key.set((principal, conversation_id))
-            current_turn_id.set(work.trace_id)
-            set_supplied_caller(current_conversation_caller())
-            set_supplied_turn(work.trace_id)
-            surface = cursor.state.get("surface") if cursor is not None else None
-            work.take_identity(
-                account=account,
-                visitor=visitor,
-                caller=current_conversation_caller(),
-                surface=surface if isinstance(surface, str) else None,
-            )
-            saving = segment_id
-            try:
-                await studio.store.save(principal, conversation_id, work)
-            except StopPending:
+                saving = segment_id
+                try:
+                    await studio.store.save(principal, conversation_id, work)
+                except StopPending:
+                    saving = None
+                    return await _answer_after_stop(
+                        studio,
+                        principal,
+                        conversation_id,
+                        hold,
+                        _not_open_turn_response(body.turn_index),
+                        turn=claiming,
+                    )
+                except ConversationStale:
+                    saving = None
+                    return await _unclaimed(
+                        studio.store,
+                        principal,
+                        conversation_id,
+                        hold,
+                        _streaming_conflict_response(
+                            "another request is streaming on this conversation"
+                        ),
+                        turn=claiming,
+                    )
                 saving = None
-                return await _answer_after_stop(
-                    studio,
-                    principal,
-                    conversation_id,
-                    hold,
-                    _not_open_turn_response(body.turn_index),
-                    turn=claiming,
-                )
-            except ConversationStale:
-                saving = None
-                return await _unclaimed(
-                    studio.store,
-                    principal,
-                    conversation_id,
-                    hold,
-                    _streaming_conflict_response(
-                        "another request is streaming on this conversation"
-                    ),
-                    turn=claiming,
-                )
-            saving = None
         except BaseException as exc:
             # As in `/interrupt`: a claim save that raised once it committed
             # handed its segment to the live state, and one the live state
@@ -3176,6 +3180,15 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
             raise
 
+        if carry is not None:
+            # The retry claims the conversation itself, outside this
+            # request's cleanup, which holds no claim of its own here.
+            return await interrupt(
+                carry,
+                authorization=authorization,
+                x_dfo_account=x_dfo_account,
+                x_dfo_caller=x_dfo_caller,
+            )
         assert segment_id is not None
         try:
             claimed = await studio.turns.open_cursor(principal, conversation_id)
@@ -3215,6 +3228,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     hold=hold,
                     settings=settings,
                     turn=claiming,
+                    stale=_resume_conflict("the conversation changed before this resume was saved"),
                 )
             if left:
                 try:
@@ -3223,15 +3237,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     await _release_claim(
                         studio.store, principal, conversation_id, hold, segment_id, turn=claiming
                     )
-                    return _tool_error_response(
-                        ToolError(
-                            error=ErrorCode.EDIT_CONFLICT,
-                            retry=RetryMode.REFRESH_THEN_RETRY,
-                            detail="the conversation changed before this resume was saved",
-                            fix="read the conversation's state and follow what it shows",
-                        ),
-                        status_code=409,
-                    )
+                    return _resume_conflict("the conversation changed before this resume was saved")
             else:
                 studio.store.drop_draft(principal, conversation_id)
             conversation = studio.store.current(principal, conversation_id)

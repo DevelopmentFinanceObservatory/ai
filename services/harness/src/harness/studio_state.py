@@ -459,7 +459,7 @@ NEW_QUESTION = "new_question"
 # `done.new_question` still shows.
 SET_ASIDE_REPLY = "The plan was set aside, since your message asks a new question."
 # What the conversation digest says of such a turn (`_history_turn`).
-_SET_ASIDE = "The user set this plan aside unapproved and asked a new question in the next turn."
+_SET_ASIDE = "The user set this plan aside unapproved and asked a new question."
 
 
 @dataclass
