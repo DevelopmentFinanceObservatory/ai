@@ -78,6 +78,7 @@ from typing import Literal, NamedTuple, cast
 import pyarrow as pa
 import pyarrow.compute as pc
 from common.price_basis import price_basis_reading
+from data_mcp.dcid import bare_dcid, is_dcid
 from data_mcp.manifest import Manifest
 from data_mcp.series_statistics import continuing_method, series_index
 from dfo_frame_grammar.columnar import array_kernel, scalar_kernel, unit_codes
@@ -1654,7 +1655,7 @@ def read_unit_dcid(ref: str | None) -> UnitReading:
     """The currency and price basis a unit id's own structure names."""
     if ref is None:
         return UnitReading()
-    dcid = ref.removeprefix("dcid:")
+    dcid = bare_dcid(ref)
     if dcid in _PPP_DCIDS or _PPP in _LETTER_RUNS.findall(dcid):
         return UnitReading(currency=_PPP)
     if match := _CURRENCY_DCID.fullmatch(dcid):
@@ -2233,7 +2234,7 @@ def _pinned_stat_var(approved: SelectedSource) -> set[str] | None:
     shape, and one with no `shape` at all, falls through to the digest.
     """
     dcid = pinned_stat_var(approved.identity)
-    return {_bare_dcid(dcid)} if dcid is not None else None
+    return {bare_dcid(dcid)} if dcid is not None else None
 
 
 def _membership_issues(
@@ -2343,7 +2344,7 @@ def _binding_comparison_issues(
     retrieved = evidence.resolved_stat_vars
     if retrieved is None:
         return [_membership_unverified(requirement, found=None, required=sorted(approved_set))]
-    retrieved_set = {_bare_dcid(v) for v in retrieved}
+    retrieved_set = {bare_dcid(v) for v in retrieved}
     if approved_set == retrieved_set:
         return []
     return [
@@ -2376,6 +2377,17 @@ def _membership_unverified(
 
 
 # The findings that name one retrieved series (`EvidenceIssue.entities`).
+# A frame's decoded code axis is a `stat_var_<code_system>` column holding the code's label, so
+# an entity under such a role has its label for a ref, not a dcid (dfo-apis
+# `materialise.render._KEPT_AXIS_PREFIX`; `decode_code_systems` in `datasets_api.capabilities`).
+_LABEL_ROLE_PREFIX = "stat_var_"
+
+
+def _names_itself(entity: SeriesEntity) -> bool:
+    """Whether `entity`'s ref is its own label: it sits in a decoded code axis's column."""
+    return entity.role.startswith(_LABEL_ROLE_PREFIX)
+
+
 _SERIES_CODES = frozenset({EvidenceIssueCode.WINDOW_SHORT, EvidenceIssueCode.COVERAGE_GAPS})
 
 
@@ -2394,8 +2406,12 @@ def series_rank(finding: EvidenceIssue) -> tuple[bool, float, str, tuple[str, ..
 
 
 def unlabelled_series_refs(findings: Iterable[EvidenceIssue], *, limit: int) -> list[str]:
-    """The refs, at most `limit`, of the entities the series findings among
+    """The dcids, at most `limit`, of the entities the series findings among
     `findings` name with no label, the largest series' first (`series_rank`).
+
+    An entity under a label column (`_names_itself`, a breakdown's sector) keeps its ref as
+    its label and takes no slot, even where that label equals a held dcid. Any other ref is
+    looked up only if the nodes route accepts it once its `dcid:` marker is stripped.
 
     An answer names the largest series that fall short
     (`harness.graph.answer`), so a lookup bounded this way still labels the
@@ -2408,22 +2424,29 @@ def unlabelled_series_refs(findings: Iterable[EvidenceIssue], *, limit: int) -> 
         for entity in finding.entities:
             if len(refs) == limit:
                 return list(refs)
-            if entity.label is None:
-                refs.setdefault(entity.ref)
+            if (
+                entity.label is None
+                and not _names_itself(entity)
+                and is_dcid(dcid := bare_dcid(entity.ref))
+            ):
+                refs.setdefault(dcid)
     return list(refs)
 
 
 def with_series_labels(
     findings: Iterable[EvidenceIssue], labels: Mapping[str, str]
 ) -> list[EvidenceIssue]:
-    """`findings` with each series entity that has no label labelled by its ref in `labels`."""
+    """`findings` with each series entity that has no label labelled by its dcid in `labels`
+    (the ref without its `dcid:` marker)."""
     return [
         finding.model_copy(
             update={
                 "entities": tuple(
                     entity
-                    if entity.label is not None or entity.ref not in labels
-                    else entity.model_copy(update={"label": labels[entity.ref]})
+                    if entity.label is not None
+                    or _names_itself(entity)
+                    or bare_dcid(entity.ref) not in labels
+                    else entity.model_copy(update={"label": labels[bare_dcid(entity.ref)]})
                     for entity in finding.entities
                 )
             }
@@ -2487,7 +2510,9 @@ def _series_issues(
     issues: list[EvidenceIssue] = []
     period = requirement.period
     held = _held_period(requirement, evidence)
-    labels = {one.ref: one.label for one in approved.entities} if approved is not None else {}
+    labels = (
+        {bare_dcid(one.ref): one.label for one in approved.entities} if approved is not None else {}
+    )
     for one in _series_off_period(evidence.series, held, labels=labels):
         reach = Period(start=one.first_year, end=one.latest_year)
         if not reach.covers(held):
@@ -2552,11 +2577,6 @@ def _series_issues(
 # --- Manifest: reading a `get_data` result into evidence ----------------------
 
 
-def _bare_dcid(ref: str) -> str:
-    """A stat_var as the graph names it, without the `dcid:` a frame cell carries."""
-    return ref.removeprefix("dcid:")
-
-
 def _resolved_stat_vars(trace: Mapping[str, object]) -> tuple[str, ...] | None:
     """The dcids `trace.resolved_stat_vars` binds this spec to, or `None` when the key is absent.
 
@@ -2570,7 +2590,7 @@ def _resolved_stat_vars(trace: Mapping[str, object]) -> tuple[str, ...] | None:
     if not isinstance(raw, list):
         return None
     return tuple(
-        _bare_dcid(str(ref))
+        bare_dcid(str(ref))
         for entry in raw
         if isinstance(entry, Mapping) and (ref := entry.get("ref")) is not None
     )
@@ -2639,7 +2659,7 @@ def _years(periods: pa.Array) -> pa.Array:
 def _series_stat_vars(series: pa.Table) -> tuple[str, ...]:
     """The distinct stat_vars `series` carries, bare and sorted."""
     distinct = array_kernel("unique", _column(series, "stat_var")).to_pylist()
-    return tuple(sorted({_bare_dcid(one) for one in distinct}))
+    return tuple(sorted({bare_dcid(one) for one in distinct}))
 
 
 def _series_entities(series: pa.Table) -> tuple[ResolvedEntity, ...]:
@@ -2739,7 +2759,7 @@ def _series_off_period(
     held to the period as one. A series with a first or last period that
     names no year is left out, since neither check can run on it. The rest
     are selected column by column, and only the selected series become
-    `SeriesEvidence`, each entity labelled by `labels`, keyed by ref.
+    `SeriesEvidence`, each entity labelled by `labels`, keyed by bare dcid.
     """
     unskipped = pc.ScalarAggregateOptions(skip_nulls=False)
     folded = (
@@ -2794,10 +2814,14 @@ def _series_off_period(
     )
     for row in selected.to_pylist():
         yield SeriesEvidence(
-            stat_var=_bare_dcid(row["stat_var"]),
+            stat_var=bare_dcid(row["stat_var"]),
             entities=tuple(
                 SeriesEntity(
-                    role=entity["role"], ref=entity["ref"], label=labels.get(entity["ref"])
+                    role=entity["role"],
+                    ref=entity["ref"],
+                    label=None
+                    if entity["role"].startswith(_LABEL_ROLE_PREFIX)
+                    else labels.get(bare_dcid(entity["ref"])),
                 )
                 for entity in row["entities"]
             ),

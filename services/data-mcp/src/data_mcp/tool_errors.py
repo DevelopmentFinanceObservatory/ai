@@ -50,6 +50,7 @@ from common.refusal import refusal_meta, refusal_text
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from fastmcp.tools import ToolResult
 
+from data_mcp.dcid import ENTITY_DCID_MARKER
 from data_mcp.errors import UpstreamError, UpstreamSurfaceUnavailable, UpstreamTransportError
 
 logger = logging.getLogger(__name__)
@@ -153,10 +154,6 @@ TOOL_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
 # Five keeps `entity_ambiguous` payloads bounded without starving the model
 # of real choices.
 ENTITY_CANDIDATE_CAP = 5
-
-# The marker `entity_ambiguous` puts before each candidate's dcid, and that `get_data`
-# reads as "a dcid, not a name to resolve" in `scope.entities`.
-ENTITY_DCID_MARKER = "dcid:"
 
 # The ceilings `over_ceiling`'s `fix.ceiling_kind` can name, each by the unit
 # its `count` and `cap` measure. `_UPSTREAM_CEILING_KINDS` maps apis' own
