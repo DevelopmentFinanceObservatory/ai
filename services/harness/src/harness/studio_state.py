@@ -76,7 +76,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The canvas digest's bounds: up to `_DIGEST_BLOCK_CAP` cards in full, each
+# The canvas views' bounds: up to `_DIGEST_BLOCK_CAP` cards in full, each
 # with a capped id, type, title and fact summary, and a focus id that names a
 # stored component. Caps are serialised JSON bytes (`json.dumps`, so a
 # non-ASCII character counts as its escape). A cut field ends in `_CUT_MARKER`.
@@ -124,25 +124,27 @@ _BLOCK_SHOWS_BYTES = (
 # The rule that chooses which items a cut list keeps: its leading items, in the
 # order the card displays them.
 _SUBSET_RULE = "display order"
-# The canvas views (`ConversationState._canvas_named`) name cards in the
-# order `ConversationState._canvas_rank` ranks them by the turn that drew each
-# card: the focus card, this turn's cards, the pinned cards, and the rest
-# counted by turn. The canvas order, which the user changes, plays no part.
-# `_DIGEST_BLOCK_CAP` cards come in full, and past them each group names up to
+# `recall(part="canvas")`'s listing (`ConversationState.canvas_listing_state`)
+# names cards in the order `ConversationState._canvas_rank` ranks them by the
+# turn that drew each card: the focus card, this turn's cards, the pinned cards,
+# then the earlier cards still on the canvas, newest turn first. The canvas
+# order, which the user changes, plays no part. `_DIGEST_BLOCK_CAP` cards come
+# in full, and past them each of the three groups names up to
 # `_LISTING_COMPACT_CAP` cards compactly (`_compact_entry`: id, type and title
 # inside `_COMPACT_FRAME_BYTES` of keys). A full or compact entry carries up to
 # `_VIEW_FLAG_BYTES` of pinned / on_canvas / turn flags. A turn draws at most
 # `BUDGETS["make_charts"] * MAX_CHARTS_PER_CALL` cards (40), fewer than
 # `_DIGEST_BLOCK_CAP + _LISTING_COMPACT_CAP`, so every card of this turn is
-# named. The counts by turn hold the newest `_EARLIER_TURN_CAP` turns, each
-# within `_EARLIER_ENTRY_BYTES`, and one more entry for older cards. The keys
-# and counts around the lists take up to `_DIGEST_WRAPPER_BYTES`.
+# named. The cards left, those off the canvas and any on it past the caps, are
+# counted by turn: the newest `_EARLIER_TURN_CAP` turns, each within
+# `_EARLIER_ENTRY_BYTES`, and one more entry for the rest. The keys and counts
+# around the lists take up to `_LISTING_WRAPPER_BYTES`.
 _LISTING_COMPACT_CAP = 48
-_COMPACT_FRAME_BYTES = 64
-_VIEW_FLAG_BYTES = 64
+_COMPACT_FRAME_BYTES = 48
+_VIEW_FLAG_BYTES = 56
 _EARLIER_TURN_CAP = 16
 _EARLIER_ENTRY_BYTES = 80
-_DIGEST_WRAPPER_BYTES = 256
+_LISTING_WRAPPER_BYTES = 256
 _FULL_ENTRY_BYTES = (
     _BLOCK_FRAME_BYTES
     + _VIEW_FLAG_BYTES
@@ -154,17 +156,17 @@ _FULL_ENTRY_BYTES = (
 _COMPACT_ENTRY_BYTES = (
     _COMPACT_FRAME_BYTES + _VIEW_FLAG_BYTES + _BLOCK_ID_BYTES + _BLOCK_TYPE_BYTES + _TITLE_BYTE_CAP
 )
-_EARLIER_COUNT_BYTES = (_EARLIER_TURN_CAP + 1) * _EARLIER_ENTRY_BYTES
-# The digest names this turn's cards and the pinned ones; `recall(part="canvas")`'s
-# listing (`canvas_listing_state`) adds the cards of the newest earlier turns
-# that fit one more `_LISTING_COMPACT_CAP` of compact entries.
-CANVAS_DIGEST_MAX_BYTES = (
-    _DIGEST_WRAPPER_BYTES
+CANVAS_LISTING_MAX_BYTES = (
+    _LISTING_WRAPPER_BYTES
     + _DIGEST_BLOCK_CAP * _FULL_ENTRY_BYTES
-    + 2 * _LISTING_COMPACT_CAP * _COMPACT_ENTRY_BYTES
-    + _EARLIER_COUNT_BYTES
+    + 3 * _LISTING_COMPACT_CAP * _COMPACT_ENTRY_BYTES
+    + (_EARLIER_TURN_CAP + 1) * _EARLIER_ENTRY_BYTES
 )
-CANVAS_LISTING_MAX_BYTES = CANVAS_DIGEST_MAX_BYTES + _LISTING_COMPACT_CAP * _COMPACT_ENTRY_BYTES
+# The canvas summary every turn opens with (`ConversationState.canvas_summary_state`):
+# three counts and, for a card-scoped follow-up, the focus card's id and the
+# card in full, the counts and keys within `_SUMMARY_WRAPPER_BYTES`.
+_SUMMARY_WRAPPER_BYTES = 192
+CANVAS_SUMMARY_MAX_BYTES = _SUMMARY_WRAPPER_BYTES + _BLOCK_ID_BYTES + _FULL_ENTRY_BYTES
 # The conversation digest's bounds: newest turns, each with its ask whole,
 # an older turn's answer cut to whole sentences, its plans each as one line
 # cut by characters, its cards by count and title bytes, and its error by
@@ -294,18 +296,19 @@ class _CanvasRank:
     """The conversation's cards as `ConversationState._canvas_rank` ranks them
     for the canvas views. `this_turn` holds the cards the open turn drew, in
     the order it drew them; `pinned` the other pinned cards, newest drawing
-    turn first; `earlier` every other card grouped by the turn that drew it,
-    newest turn first, with the cards of no recorded turn last under `None`.
+    turn first; `on_canvas` the other cards on the canvas, newest drawing turn
+    first and each turn's in the order it drew them, with the cards of no
+    recorded turn last; `off_canvas` every other card, in the same order.
     `turn_of` maps a card to the turn that last drew or revised it."""
 
     focus: str | None
     this_turn: list[str]
     pinned: list[str]
-    earlier: list[tuple[int | None, list[str]]]
+    on_canvas: list[str]
+    off_canvas: list[str]
     turn_of: dict[str, int]
     composed: set[str]
     pinned_ids: set[str]
-    hidden: int
 
 
 @dataclass(frozen=True)
@@ -638,38 +641,36 @@ class ConversationState:
                     drawn_in.pop(card_id, None)
                     drawn_in[card_id] = number
         open_turn = len(self.turns) + 1 if not self.turn_recorded else None
-        newest_first = [
-            *(cid for cid in reversed(drawn_in) if cid in self.components),
-            *(cid for cid in reversed(self.components) if cid not in drawn_in),
-        ]
         composed: set[str] = set()
         pinned_ids: set[str] = set()
         if self.composition is not None:
             composed = {block.component_id for block in self.composition.blocks}
             pinned_ids = {block.component_id for block in self.composition.blocks if block.pinned}
         focused = focus if focus is not None and focus in self.components else None
-        rest = [cid for cid in newest_first if cid != focused]
-        this_turn = [
-            cid
-            for cid in reversed(rest)
-            if open_turn is not None and drawn_in.get(cid) == open_turn
+        # Newest turn first, each turn's cards in the order it drew them, then
+        # the cards of no recorded turn, newest stored first.
+        by_turn: dict[int, list[str]] = {}
+        for cid, turn in drawn_in.items():
+            if cid in self.components and cid != focused:
+                by_turn.setdefault(turn, []).append(cid)
+        ranked = [cid for turn in sorted(by_turn, reverse=True) for cid in by_turn[turn]]
+        ranked += [
+            cid for cid in reversed(self.components) if cid not in drawn_in and cid != focused
         ]
-        named = set(this_turn)
-        pinned = [cid for cid in rest if cid in pinned_ids and cid not in named]
-        named.update(pinned)
-        earlier: dict[int | None, list[str]] = {}
-        for cid in rest:
-            if cid not in named:
-                earlier.setdefault(drawn_in.get(cid), []).insert(0, cid)
+        this_turn = by_turn.get(open_turn, []) if open_turn is not None else []
+        drawn_now = set(this_turn)
+        rest = [cid for cid in ranked if cid not in drawn_now]
+        pinned = [cid for cid in rest if cid in pinned_ids]
+        unpinned = [cid for cid in rest if cid not in pinned_ids]
         return _CanvasRank(
             focus=focused,
             this_turn=this_turn,
             pinned=pinned,
-            earlier=sorted(earlier.items(), key=lambda group: (group[0] is None, -(group[0] or 0))),
+            on_canvas=[cid for cid in unpinned if cid in composed],
+            off_canvas=[cid for cid in unpinned if cid not in composed],
             turn_of=drawn_in,
             composed=composed,
             pinned_ids=pinned_ids,
-            hidden=sum(1 for cid in self.components if cid not in composed),
         )
 
     def _view_flags(self, rank: _CanvasRank, component_id: str) -> dict[str, Any]:
@@ -699,98 +700,76 @@ class ConversationState:
             "title": _cut_text(str(entry.get("title")), _TITLE_BYTE_CAP),
         } | self._view_flags(rank, component_id)
 
-    def _canvas_named(self, rank: _CanvasRank, *, list_earlier: bool) -> dict[str, Any]:
-        """The cards a canvas view names, in `rank`'s order. The focus card,
-        this turn's cards and then the pinned ones take the
-        `_DIGEST_BLOCK_CAP` full places (`blocks`). Past them this turn's cards
-        and the pinned ones are each named compactly up to
-        `_LISTING_COMPACT_CAP` (`titles`) and the rest counted
-        (`this_turn_not_shown`, `pinned_not_shown`). With `list_earlier`, the
-        newest earlier turns whose cards all fit another `_LISTING_COMPACT_CAP`
-        are named compactly too (`earlier_cards`). Every other card is counted
-        by the turn that drew it (`earlier`: turn, cards, and off_canvas for
-        those not on the canvas), the newest `_EARLIER_TURN_CAP` turns apart and
-        the rest, older turns' cards and those of no recorded turn, in one
-        count (`earlier_rest`). No group is sampled: each is named whole or
-        counted."""
-        places = _DIGEST_BLOCK_CAP - (0 if rank.focus is None else 1)
-        full_turn = rank.this_turn[:places]
-        full_pinned = rank.pinned[: places - len(full_turn)]
-        titled_turn = rank.this_turn[len(full_turn) :][:_LISTING_COMPACT_CAP]
-        titled_pinned = rank.pinned[len(full_pinned) :][:_LISTING_COMPACT_CAP]
-        full = [*([rank.focus] if rank.focus else []), *full_turn, *full_pinned]
-        named: dict[str, Any] = {"blocks": [self._view_block(rank, cid) for cid in full]}
-        if titled := [*titled_turn, *titled_pinned]:
-            named["titles"] = [self._compact_entry(rank, cid) for cid in titled]
-        if unnamed := len(rank.this_turn) - len(full_turn) - len(titled_turn):
-            named["this_turn_not_shown"] = unnamed
-        if unnamed := len(rank.pinned) - len(full_pinned) - len(titled_pinned):
-            named["pinned_not_shown"] = unnamed
-        groups = list(rank.earlier)
-        listed: list[str] = []
-        while list_earlier and groups and len(listed) + len(groups[0][1]) <= _LISTING_COMPACT_CAP:
-            listed += groups.pop(0)[1]
-        if listed:
-            named["earlier_cards"] = [self._compact_entry(rank, cid) for cid in listed]
-        by_turn = [group for group in groups if group[0] is not None]
-        if counted := [
-            {"turn": turn} | self._earlier_count(rank, ids)
-            for turn, ids in by_turn[:_EARLIER_TURN_CAP]
-        ]:
-            named["earlier"] = counted
-        older = [*by_turn[_EARLIER_TURN_CAP:], *(group for group in groups if group[0] is None)]
-        if rest := [cid for _turn, ids in older for cid in ids]:
-            named["earlier_rest"] = self._earlier_count(rank, rest)
-        return named
-
-    @staticmethod
-    def _earlier_count(rank: _CanvasRank, ids: list[str]) -> dict[str, Any]:
-        """How many of `ids` there are, and how many are off the canvas when any."""
-        count: dict[str, Any] = {"cards": len(ids)}
-        if off := sum(1 for cid in ids if cid not in rank.composed):
-            count["off_canvas"] = off
-        return count
-
-    def canvas_digest_state(self, *, focus: str | None = None) -> dict[str, Any] | None:
-        """The canvas digest: the cards `_canvas_named` names, titles and fact
-        summaries only -- references and digests, never rows -- with the focus
-        card first for a card-scoped follow-up. None when the conversation has
-        no canvas and no cards yet. Bounded by `CANVAS_DIGEST_MAX_BYTES`."""
-        if self.composition is None and not self.components:
-            return None
-        rank = self._canvas_rank(focus)
-        digest = self._canvas_named(rank, list_earlier=False)
-        # `focus` is the client's `component_ref.component_id`, an unbounded
-        # string that need not name anything, so only a stored component's id
-        # is named, and cut like the block that carries it.
-        if rank.focus is not None:
-            digest["focus_component_id"] = _cut_text(rank.focus, _BLOCK_ID_BYTES)
-        return digest
-
     def canvas_summary_state(self, *, focus: str | None = None) -> dict[str, Any] | None:
-        """The orchestrator's always-on canvas line: how many cards are on
-        the canvas, how many of those the user pinned (when any), and how
-        many are hidden. The cards themselves are a `recall(part="canvas")`
-        away. A card-scoped follow-up's focus card comes whole, with its id
-        (#348). None when the conversation has no cards yet."""
+        """The canvas line every turn opens with: how many cards are on the
+        canvas, how many of those the user pinned (when any), and how many are
+        hidden. The cards themselves are a `recall(part="canvas")` away. A
+        card-scoped follow-up's focus card comes whole, with its id (#348).
+        None when the conversation has no cards yet. Bounded by
+        `CANVAS_SUMMARY_MAX_BYTES`."""
         if self.composition is None and not self.components:
             return None
         rank = self._canvas_rank(focus)
         summary: dict[str, Any] = {"cards_on_canvas": len(rank.composed)}
         if rank.pinned_ids:
             summary["cards_pinned"] = len(rank.pinned_ids)
-        summary["cards_hidden"] = rank.hidden
+        summary["cards_hidden"] = sum(1 for cid in self.components if cid not in rank.composed)
+        # `focus` is the client's `component_ref.component_id`, an unbounded
+        # string that need not name anything, so only a stored component's id
+        # is named, and cut like the block that carries it.
         if rank.focus is not None:
             summary["focus_component_id"] = _cut_text(rank.focus, _BLOCK_ID_BYTES)
             summary["blocks"] = [self._view_block(rank, rank.focus)]
         return summary
 
     def canvas_listing_state(self) -> dict[str, Any]:
-        """`recall(part="canvas")`'s listing: what the digest names, and the
-        cards of the newest earlier turns that fit, each by id, type and title,
-        so it can be recalled or removed by id (`_canvas_named`). Bounded by
-        `CANVAS_LISTING_MAX_BYTES`."""
-        return self._canvas_named(self._canvas_rank(), list_earlier=True)
+        """`recall(part="canvas")`'s listing, in `_canvas_rank`'s order. This
+        turn's cards, the pinned ones and then the earlier cards still on the
+        canvas take the `_DIGEST_BLOCK_CAP` full places (`blocks`). Past them
+        each of the three groups is named compactly up to `_LISTING_COMPACT_CAP`
+        (`titles`), so a card can be recalled or removed by id. Past that this
+        turn's and the pinned cards are counted (`this_turn_not_shown`,
+        `pinned_not_shown`), and every other card, off the canvas or past the
+        caps, is counted by the turn that drew it (`earlier`: turn, on_canvas,
+        off_canvas), the newest `_EARLIER_TURN_CAP` turns apart and the rest,
+        older turns' cards and those of no recorded turn, in one count
+        (`earlier_rest`). Bounded by `CANVAS_LISTING_MAX_BYTES`."""
+        rank = self._canvas_rank()
+        places = _DIGEST_BLOCK_CAP
+        full: list[str] = []
+        titled: list[str] = []
+        unnamed: list[int] = []
+        for group in (rank.this_turn, rank.pinned, rank.on_canvas):
+            in_full = group[:places]
+            places -= len(in_full)
+            in_titles = group[len(in_full) :][:_LISTING_COMPACT_CAP]
+            full += in_full
+            titled += in_titles
+            unnamed.append(len(group) - len(in_full) - len(in_titles))
+        listing: dict[str, Any] = {"blocks": [self._view_block(rank, cid) for cid in full]}
+        if titled:
+            listing["titles"] = [self._compact_entry(rank, cid) for cid in titled]
+        if unnamed[0]:
+            listing["this_turn_not_shown"] = unnamed[0]
+        if unnamed[1]:
+            listing["pinned_not_shown"] = unnamed[1]
+        named = {*full, *titled}
+        counted: dict[int | None, dict[str, int]] = {}
+        for cid in [*rank.on_canvas, *rank.off_canvas]:
+            if cid not in named:
+                where = "on_canvas" if cid in rank.composed else "off_canvas"
+                count = counted.setdefault(rank.turn_of.get(cid), {})
+                count[where] = count.get(where, 0) + 1
+        turns = sorted((turn for turn in counted if turn is not None), reverse=True)
+        if newest := turns[:_EARLIER_TURN_CAP]:
+            listing["earlier"] = [{"turn": turn} | counted[turn] for turn in newest]
+        rest: dict[str, int] = {}
+        for turn in [*turns[_EARLIER_TURN_CAP:], *([None] if None in counted else [])]:
+            for where, number in counted[turn].items():
+                rest[where] = rest.get(where, 0) + number
+        if rest:
+            listing["earlier_rest"] = rest
+        return listing
 
     def awaited_runs(self) -> set[str]:
         """The run ids of the stored plan records that state `EXECUTING`,
@@ -1507,7 +1486,7 @@ def _bounded_fact_summary(summary: Any) -> Any:
 
 
 def _digest_block(component_id: str, entry: dict[str, Any]) -> dict[str, Any]:
-    """One block of the canvas digest: the stored entry with its id, type,
+    """One card of a canvas view in full: the stored entry with its id, type,
     title, fact summary and what it shows bounded. An `entities` list
     shorter than the names the card draws carries an `entities_truncated`
     label. The stored entry stays whole for `recall_part`
@@ -1720,7 +1699,7 @@ _DRAWN_CARD = "drawn_card"
 
 def _digest_entry(component: dict[str, Any]) -> dict[str, Any]:
     """The stored entry of a component: the per-component slice of the
-    models' canvas digest, and the ids of the series it draws
+    models' canvas views, and the ids of the series it draws
     (`drawn_series_ids`). The digest slice states what the card is and what
     it shows, as names only, no rows: the entities it draws and the span it
     covers. The resolved revision in `payload` contributes only its title
@@ -1884,7 +1863,7 @@ def land_component(
 
     Always records the component's digest entry
     (`conversation.components`), so a card is findable by `recall` and the
-    canvas digest whether or not it lands a block, and for a card
+    canvas views whether or not it lands a block, and for a card
     `make_charts` wrote from `intent`, that intent with the revision it
     was drawn as (`canvas_cards`). `auto_add=False` means
     there is no block to append: the component still streams to the

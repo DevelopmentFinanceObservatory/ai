@@ -101,7 +101,8 @@ from harness.planner_adapter import (
 from harness.prefix_cache import prefix_key
 from harness.settings import Settings
 from harness.studio_state import (
-    CANVAS_DIGEST_MAX_BYTES,
+    CANVAS_LISTING_MAX_BYTES,
+    CANVAS_SUMMARY_MAX_BYTES,
     CONVERSATION_DIGEST_MAX_BYTES,
     ConversationState,
 )
@@ -1400,21 +1401,24 @@ def _canvas_state(*, title: str, fact_summary: Any) -> ConversationState:
     return state
 
 
-def _canvas_digest(*, title: str, fact_summary: Any, focus: str | None = None) -> dict[str, Any]:
-    digest = _canvas_state(title=title, fact_summary=fact_summary).canvas_digest_state(focus=focus)
-    assert digest is not None
-    return digest
+def _canvas_summary(*, title: str, fact_summary: Any, focus: str | None = None) -> dict[str, Any]:
+    """The canvas summary a turn opens with, for a follow-up from `focus`
+    (the open turn's first card when None)."""
+    state = _canvas_state(title=title, fact_summary=fact_summary)
+    summary = state.canvas_summary_state(focus=focus or state.turn_components[0]["component_id"])
+    assert summary is not None
+    return summary
 
 
-def _largest_canvas_digest() -> dict[str, Any]:
-    """The largest digest: every block's fact summary just inside its cap.
+def _largest_canvas_summary() -> dict[str, Any]:
+    """The largest summary: its focus card's fact summary just inside its cap.
 
-    The titles are 100,000 characters, so they come out cut to their cap. A
+    The title is 100,000 characters, so it comes out cut to its cap. A
     summary any longer than the cap is replaced by a short stub, so the largest
-    digest is the one whose summaries fit.
+    is the one whose fact summary fits.
     """
     summary = "s" * (studio_state._FACT_SUMMARY_BYTE_CAP - 2)
-    return _canvas_digest(title="t" * _BIG, fact_summary=summary)
+    return _canvas_summary(title="t" * _BIG, fact_summary=summary)
 
 
 def _conversation_digest() -> dict[str, Any]:
@@ -1448,31 +1452,43 @@ def _section_ceiling(title: str, body_bytes: int) -> int:
     return len(f"\n{title}:\n\n") + body_bytes
 
 
-CANVAS_SECTION_CEILING = _section_ceiling(_CANVAS_TITLE, CANVAS_DIGEST_MAX_BYTES)
+CANVAS_SECTION_CEILING = _section_ceiling(_CANVAS_TITLE, CANVAS_SUMMARY_MAX_BYTES)
 CONVERSATION_SECTION_CEILING = _section_ceiling(_CONVERSATION_TITLE, CONVERSATION_DIGEST_MAX_BYTES)
 
 
 @pytest.mark.parametrize(
-    "digest",
+    "summary",
     [
         pytest.param(
-            lambda: _canvas_digest(title="t" * _BIG, fact_summary={"series": ["x" * _BIG]}),
+            lambda: _canvas_summary(title="t" * _BIG, fact_summary={"series": ["x" * _BIG]}),
             id="canvas-inputs-100kb",
         ),
-        pytest.param(_largest_canvas_digest, id="canvas-largest-digest"),
-        pytest.param(
-            lambda: _canvas_digest(title="t", fact_summary="s", focus="F" * 1_000_000),
-            id="canvas-focus-names-no-component",
-        ),
+        pytest.param(_largest_canvas_summary, id="canvas-largest-summary"),
     ],
 )
-def test_the_canvas_digest_holds_its_maximum_however_large_its_inputs(
-    digest: Callable[[], dict[str, Any]],
+def test_the_canvas_summary_holds_its_maximum_however_large_its_inputs(
+    summary: Callable[[], dict[str, Any]],
 ) -> None:
-    built = digest()
+    built = summary()
 
-    assert len(built["blocks"]) == studio_state._DIGEST_BLOCK_CAP
-    assert len(json.dumps(built)) <= CANVAS_DIGEST_MAX_BYTES
+    assert len(built["blocks"]) == 1
+    assert len(json.dumps(built)) <= CANVAS_SUMMARY_MAX_BYTES
+
+
+def test_a_summary_whose_focus_names_no_card_carries_only_counts() -> None:
+    built = _canvas_summary(title="t", fact_summary="s", focus="F" * 1_000_000)
+
+    assert "blocks" not in built
+    assert len(json.dumps(built)) <= CANVAS_SUMMARY_MAX_BYTES
+
+
+def test_the_canvas_listing_holds_its_maximum_however_large_its_inputs() -> None:
+    """`recall(part="canvas")`'s listing, which the orchestrator reads, at its caps."""
+    summary = "s" * (studio_state._FACT_SUMMARY_BYTE_CAP - 2)
+    listing = _canvas_state(title="t" * _BIG, fact_summary=summary).canvas_listing_state()
+
+    assert len(listing["blocks"]) == studio_state._DIGEST_BLOCK_CAP
+    assert len(json.dumps({"part": "canvas", **listing})) <= CANVAS_LISTING_MAX_BYTES
 
 
 def test_the_conversation_digest_holds_its_maximum_however_large_its_inputs() -> None:
@@ -1484,20 +1500,21 @@ def test_the_conversation_digest_holds_its_maximum_however_large_its_inputs() ->
 
 
 def test_the_digest_maxima_fail_when_the_digest_is_not_bounded() -> None:
-    """The control: a digest as the state stored it, uncut, is past both maxima.
+    """The control: the views as the state stored them, uncut, are past their maxima.
 
-    The canvas digest is what `canvas_digest_state` returns for a state whose
-    block fields are each 100,000 characters, but without `_digest_block`'s
-    cut. This is the unbounded digest, and it has to exceed the maxima the
-    bounded one is held to.
+    The canvas summary and listing are what `canvas_summary_state` and
+    `canvas_listing_state` return for a state whose card fields are each
+    100,000 characters, but without `_digest_block`'s cut. These are the
+    unbounded views, and they have to exceed the maxima the bounded ones are
+    held to.
     """
     state = _canvas_state(title="t" * _BIG, fact_summary="s" * _BIG)
-    uncut = {
-        "blocks": [{"component_id": cid, **entry} for cid, entry in state.components.items()][
-            : studio_state._DIGEST_BLOCK_CAP
-        ]
-    }
-    assert len(json.dumps(uncut)) > CANVAS_DIGEST_MAX_BYTES
+    uncut = [{"component_id": cid, **entry} for cid, entry in state.components.items()]
+    assert len(json.dumps({"blocks": uncut[:1]})) > CANVAS_SUMMARY_MAX_BYTES
+    assert (
+        len(json.dumps({"blocks": uncut[: studio_state._DIGEST_BLOCK_CAP]}))
+        > CANVAS_LISTING_MAX_BYTES
+    )
 
     turns = [{"user": "u" * _BIG, "assistant": "a" * _BIG}]
     assert len(json.dumps({"turns": turns, "total_turns": 1})) > CONVERSATION_DIGEST_MAX_BYTES
@@ -1596,7 +1613,7 @@ def _maximal_brief_parts(ask: str) -> dict[str, str]:
     cut_question = _BRIEF_QUESTION[: MAX_QUESTION_CHARS - len(CUT_MARKER)] + CUT_MARKER
     return {
         "readings": _readings_section(_maximal_readings()),
-        "canvas digest": _section(_CANVAS_TITLE, _largest_canvas_digest()),
+        "canvas summary": _section(_CANVAS_TITLE, _largest_canvas_summary()),
         "conversation digest": _section(_CONVERSATION_TITLE, _conversation_digest()),
         "plan": _plan_context(_legal_maximum_plan_record()),
         "question": f"\nQuestion: {cut_question}\n",
@@ -1654,7 +1671,7 @@ def _maximal_brief_ceilings(ask: str) -> dict[str, int]:
         )
     return {
         "readings": READINGS_SECTION_CEILING,
-        "canvas digest": CANVAS_SECTION_CEILING,
+        "canvas summary": CANVAS_SECTION_CEILING,
         "conversation digest": CONVERSATION_SECTION_CEILING,
         "plan": LEGAL_MAXIMUM_PLAN_SECTION_CEILING,
         "question": len("\nQuestion: \n") + MAX_QUESTION_CHARS,
@@ -1680,7 +1697,7 @@ def test_the_largest_legal_brief_is_within_the_sum_of_its_parts_maxima(ask: str)
     brief = _planner_brief(
         readings=_maximal_readings(),
         prior_plan=_legal_maximum_plan_record(),
-        canvas_digest=_largest_canvas_digest(),
+        canvas_digest=_largest_canvas_summary(),
         conversation_digest=_conversation_digest(),
         question=_BRIEF_QUESTION,
         **_ask_kwargs(ask),
@@ -1744,7 +1761,7 @@ def _bounded_context() -> dict[str, Any]:
     """What `PlannerAdapter.__call__` is handed besides the plan and the question."""
     return {
         "readings": _maximal_readings(),
-        "canvas_digest": _largest_canvas_digest(),
+        "canvas_digest": _largest_canvas_summary(),
         "conversation_digest": _conversation_digest(),
     }
 
@@ -1779,9 +1796,12 @@ def test_the_bounded_production_context_stays_under_its_derived_ceilings(
     brief = bucket_chars(planner, BRIEF_BUCKET)
     contents = planner["contents"]["total_chars"]
 
-    assert brief > CANVAS_DIGEST_MAX_BYTES * 0.9, (
-        f"the bounded-context brief is {brief:,} chars, less than the canvas digest alone "
-        f"({CANVAS_DIGEST_MAX_BYTES:,} max): the scenario is not carrying its digests"
+    carried = len(_section(_CANVAS_TITLE, _largest_canvas_summary())) + len(
+        _section(_CONVERSATION_TITLE, _conversation_digest())
+    )
+    assert brief > carried, (
+        f"the bounded-context brief is {brief:,} chars, less than its two digest sections "
+        f"({carried:,}): the scenario is not carrying its digests"
     )
     assert brief <= BOUNDED_CONTEXT_BRIEF_CEILING, (
         f"the bounded-context planner brief is {brief:,} chars, past {BOUNDED_CONTEXT_BRIEF_CEILING:,} "

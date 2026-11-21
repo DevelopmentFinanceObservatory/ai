@@ -2972,10 +2972,12 @@ def build_orchestrator_tools(
         `part`: "plan" for the plan records of a turn, "readings" for the
         search readings of a turn, "canvas" for the conversation's cards, or,
         with `component_id`, that one card's stored entry. The canvas listing
-        names this turn's cards and the pinned ones, then the cards of the
-        newest earlier turns that fit, each with its id, title, type and the
-        turn that drew it, the first in full with their facts; every other
-        card is counted by the turn that drew it. For a plan or readings, `turn` is the turn's number as the
+        takes this turn's cards, then the pinned ones, then the other cards
+        on the canvas, newest turn first. The first come in full with their
+        facts under `blocks`, the next of each group by id, title and type
+        under `titles`, and each names the turn that drew it. Cards off the
+        canvas, and any past those, are counted by turn under `earlier`.
+        For a plan or readings, `turn` is the turn's number as the
         conversation digest counts them; leave it out for the newest turn
         that has the part. A target that does not exist is refused with the
         values that do.

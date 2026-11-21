@@ -205,12 +205,13 @@ def test_the_instruction_has_search_elect_the_measure_and_asks_only_what_search_
         "under `alternatives`: go on with it and do not ask about the count" in text
     )
     assert (
-        "Name the other counts in a part's `alternatives` once, so the user can ask for one" in text
+        "No button offers the counts a part lists under `alternatives`: name only those, once, "
+        "with the count search chose" in text
     )
     # The harness states the count basis after the reply (`turn_records.basis_line`)
     # and offers the other options as chips (`turn_records.scope_chips`).
     assert f'"{turn_records._BASIS_LEAD}...", naming the sector, region, provider' in text
-    assert "leave the count and those options out of the reply" in text
+    assert "buttons, so leave those out of the reply" in text
     assert "name the source with that count" not in text
     assert "switch to another count" not in text
     assert "Search leaves a count open only when a part lists `candidates`" in text
