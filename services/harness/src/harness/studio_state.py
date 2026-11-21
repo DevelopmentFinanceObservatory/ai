@@ -124,9 +124,9 @@ _BLOCK_SHOWS_BYTES = (
 # order the card displays them.
 _SUBSET_RULE = "display order"
 _DIGEST_WRAPPER_BYTES = 160
-# `recall(part="canvas")`'s listing (`canvas_listing_state`): per list, the
-# newest `_DIGEST_BLOCK_CAP` cards in full and `_LISTING_COMPACT_CAP` older
-# ones as compact entries, pinned ones first, each with up to
+# `recall(part="canvas")`'s listing (`canvas_listing_state`): per list,
+# `_DIGEST_BLOCK_CAP` cards in full and `_LISTING_COMPACT_CAP` others as
+# compact entries, pinned ones first in both, each with up to
 # `_VIEW_FLAG_BYTES` of pinned / on_canvas flags, plus the keys and counts in
 # `_LISTING_WRAPPER_BYTES`.
 _LISTING_COMPACT_CAP = 48
@@ -702,11 +702,12 @@ class ConversationState:
 
     def canvas_listing_state(self) -> dict[str, Any]:
         """`recall(part="canvas")`'s listing: the cards on the canvas, in
-        canvas order, then the conversation's hidden cards. The newest
-        `_DIGEST_BLOCK_CAP` of each come in full (id, type, title, fact
-        summary, pinned); `_LISTING_COMPACT_CAP` older ones by id, type and
-        title (`<list>_older`), pinned ones first and flagged, so each can
-        still be recalled or removed by id; the rest are counted
+        canvas order, then the conversation's hidden cards. `_DIGEST_BLOCK_CAP`
+        of each come in full (id, type, title, fact summary, pinned), pinned
+        ones first and then the newest (`_pinned_first`), as the digest
+        chooses them; `_LISTING_COMPACT_CAP` of the others by id, type and
+        title (`<list>_older`), chosen the same way and flagged pinned, so
+        each can still be recalled or removed by id; the rest are counted
         (`<list>_not_shown`). Bounded by `CANVAS_LISTING_MAX_BYTES`."""
         view = self._canvas_view()
         composed = (
@@ -717,8 +718,11 @@ class ConversationState:
             ("on_canvas", [cid for cid in composed if cid in self.components]),
             ("hidden", view.hidden),
         ):
-            full = ids[-_DIGEST_BLOCK_CAP:]
-            older = _pinned_first(ids[:-_DIGEST_BLOCK_CAP], view.pinned, _LISTING_COMPACT_CAP)
+            full = _pinned_first(ids, view.pinned, _DIGEST_BLOCK_CAP)
+            shown = set(full)
+            older = _pinned_first(
+                [cid for cid in ids if cid not in shown], view.pinned, _LISTING_COMPACT_CAP
+            )
             listing[name] = [self._view_block(view, cid) for cid in full]
             if older:
                 listing[f"{name}_older"] = [

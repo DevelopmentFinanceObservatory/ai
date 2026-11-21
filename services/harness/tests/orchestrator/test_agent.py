@@ -186,31 +186,32 @@ def test_the_instruction_tells_the_agent_to_state_the_years_an_event_period_read
     text = " ".join(INSTRUCTION.split())
     assert "names a period by an event or an administration" in text
     assert "say the data ends earlier and answer with what it holds" in text
-    assert "ask a count or prices still open in one more ask_user call" in text
+    assert "ask about candidates or prices search left open in one more ask_user call" in text
     assert "the reading search chose" not in text
 
 
-def test_the_instruction_has_search_elect_the_measure_and_asks_with_its_alternatives():
+def test_the_instruction_has_search_elect_the_measure_and_asks_only_what_search_left_open():
     text = " ".join(INSTRUCTION.split())
     assert (
         "Put a word for how a flow is counted into `variable` only when the user said it, "
         "and let search elect the rest" in text
     )
-    assert "ask about each with ask_user, one question per choice, all in one call" in text
     assert (
-        "A count search chose (`counted_as`) is settled too, even when it lists other counts: "
-        "go on with it, do not ask" in text
-    )
-    assert "Search leaves a choice open when a part lists `candidates` or `open_prices`" in text
-    assert (
-        "In a count question, the count search chose is the first option, and the other counts "
-        "the result names follow" in text
+        "A count search chose (`counted_as`) is settled too, even when it lists other counts "
+        "under `alternatives`: go on with it, do not ask about the count" in text
     )
     assert (
-        "A part that lists `open_prices` leaves its prices open, so prices get a question of "
-        "their own, with `prices_of` set to the part's spec_id. Its options are then the "
-        "`open_prices` entries" in text
+        "In the reply, name the other counts search offers for the part (its `alternatives`), "
+        "so the user can ask for one" in text
     )
+    assert "switch to another count" not in text
+    assert "Search leaves a count open only when a part lists `candidates`" in text
+    assert (
+        "ask about them with ask_user, one question per part, all in one call, with `prices_of` "
+        "set to the part's spec_id and the `open_prices` entries as the options" in text
+    )
+    assert "count question" not in text
+    assert "a count or prices still open" not in text
     assert "even when the result lists no `other_prices`" not in text
     assert (
         "When they pick prices the result does not name, search again with that unit on the "
@@ -221,6 +222,9 @@ def test_the_instruction_has_search_elect_the_measure_and_asks_with_its_alternat
         "goes to plan straight after search, without ask_user. The planner asks how to combine "
         "them" in text
     )
-    assert "in the user's words, except a count or prices, whose options are set out below" in text
+    assert (
+        "in the user's words, except a part's candidates or open prices, whose options are set "
+        "out in their own paragraphs" in text
+    )
     assert "takes one question a turn" not in text
     assert "gross or net" not in text

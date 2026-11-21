@@ -955,13 +955,13 @@ def test_a_fetched_two_choice_reading_offers_a_chip_per_option_search_can_serve(
 
     assert chips == [
         ScopeChip(
-            label="Show health (CRS 120) and population and reproductive health (CRS 130)",
+            label="health (CRS 120) and population and reproductive health (CRS 130)",
             choice_id=f"{scope['id']}:sector",
             option_id="sector:120+130",
             spec_id=searched.spec_id,
         ),
         ScopeChip(
-            label="Show grant equivalents",
+            label="grant equivalents",
             choice_id=f"{scope['id']}:measure_basis",
             option_id="measure_basis:grant_equivalent",
             spec_id=searched.spec_id,
@@ -1019,7 +1019,7 @@ def test_chips_run_by_axis_name_their_part_when_several_offer_them_and_stop_at_f
 
     chips = scope_chips([health, education], specs={})
 
-    assert [(chip.label.rsplit(" for ", 1)[1], chip.option_id, chip.spec_id) for chip in chips] == [
+    assert [(chip.label.split(":")[0], chip.option_id, chip.spec_id) for chip in chips] == [
         ('"health aid"', "sector:120+130", health["spec_id"]),
         ('"education aid"', "sector:120+130", "spec_edu"),
         ('"health aid"', "region:members_and_residuals", health["spec_id"]),
@@ -1054,7 +1054,7 @@ def test_chips_name_their_part_only_when_the_chips_offered_span_several_parts() 
     chips = scope_chips([_fetched(health), _fetched(education)], specs={})
 
     assert {chip.spec_id for chip in chips} == {health["spec_id"]}
-    assert [chip.label for chip in chips][1] == "Show CRS 121"
+    assert [chip.label for chip in chips][1] == "CRS 121"
 
 
 @pytest.mark.parametrize(

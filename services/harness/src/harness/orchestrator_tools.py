@@ -1885,6 +1885,35 @@ def _search_context(state: SessionState) -> SearchContext:
     )
 
 
+def _nothing_removed_note(
+    component_ids: Sequence[str],
+    *,
+    kept_pinned: Collection[str],
+    missing: Collection[str],
+    all_cards: bool,
+) -> str:
+    """What a `remove_cards` call that took nothing off met, a sentence per
+    outcome: cards the user pinned, named cards already off the canvas, ids
+    this conversation never held, and, for `all_cards`, a canvas with no
+    card left to take off."""
+    off = [cid for cid in component_ids if cid not in kept_pinned and cid not in missing]
+    sentences: list[str] = []
+    if kept_pinned:
+        sentences.append("The user pinned the cards in kept_pinned, so they stay on the canvas.")
+    if off:
+        sentences.append(
+            "Those cards were already off the canvas."
+            if len(off) == len(component_ids)
+            else f"{len(off)} of the named cards {'was' if len(off) == 1 else 'were'} already "
+            "off the canvas."
+        )
+    if missing:
+        sentences.append("No card of this conversation has the ids in not_in_conversation.")
+    if all_cards and not kept_pinned:
+        sentences.append("The canvas was already empty.")
+    return " ".join(sentences)
+
+
 def build_orchestrator_tools(
     *,
     resolver: Resolver,
@@ -2996,7 +3025,9 @@ def build_orchestrator_tools(
         not pinned. A pinned card stays on the canvas, since only the user
         unpins it. Returns the ids taken off and, as `kept_pinned`, the
         pinned cards left in place; a named card already off the canvas
-        needs nothing, and an id this conversation never held is named back.
+        needs nothing, and an id this conversation never held is named back
+        as `not_in_conversation`. When nothing came off, `note` says what
+        each named id met (`_nothing_removed_note`).
         """
         spent = _spend(call, "remove_cards")
         if spent:
@@ -3021,16 +3052,19 @@ def build_orchestrator_tools(
                 HarnessCode.CARD_NOT_FOUND,
                 "No card of this conversation has those ids. Nothing changed.",
             )
-        kept = {"kept_pinned": kept_pinned} if kept_pinned else {}
+        answer: dict[str, Any] = {"removed": removed}
+        if kept_pinned:
+            answer["kept_pinned"] = kept_pinned
+        if missing:
+            answer["not_in_conversation"] = missing
         if not removed:
-            if kept_pinned:
-                note = "The user pinned these cards, so they stay on the canvas."
-            elif all_cards:
-                note = "The canvas was already empty."
-            else:
-                note = "Those cards were already off the canvas."
-            return {"removed": [], **kept, "note": note}
-        return {"removed": removed} | kept | ({"not_in_conversation": missing} if missing else {})
+            answer["note"] = _nothing_removed_note(
+                component_ids or [],
+                kept_pinned=kept_pinned,
+                missing=missing,
+                all_cards=all_cards,
+            )
+        return answer
 
     remove_cards_tool.__name__ = "remove_cards"
 

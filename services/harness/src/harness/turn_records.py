@@ -1388,14 +1388,14 @@ def basis_line(
 # The order chips take by axis, and how many an answer offers.
 _CHIP_AXES: tuple[str, ...] = ("sector", "region", "provider", "measure_basis")
 MAX_SCOPE_CHIPS = 4
-# The verb an `apply_choice` chip's label opens with.
-_CHIP_VERB = "Show"
 
 
 class ScopeChip(NamedTuple):
     """One other option of a scope choice the answer's figures were counted
     on, and the spec_id of the reading that holds the choice. `label` is the
-    action the chip takes ("Show gross disbursements, current USD")."""
+    option's label, such as "health, CRS 120 alone" on the sector axis,
+    after the part's quoted words and a colon when the answer's chips span
+    several parts."""
 
     label: str
     choice_id: str
@@ -1415,10 +1415,8 @@ def scope_chips(
     holding it (`stored_choice`), the one a chip applies to, so a reading a
     switch compiled again offers none on the choices it shares. Each choice
     offers every option other than its active one that Search can serve
-    (`available` or `partial`), labelled as the action of showing the
-    option's label (`_CHIP_VERB`), with the part's name (`part_name`) after
-    it when the chips offered span several parts, so the chip does not read
-    as how the answer was counted. Chips run by axis (`_CHIP_AXES`), then part, then option. A choice
+    (`available` or `partial`), labelled with the option's label, after the
+    part's name (`part_name`) when the chips offered span several parts. Chips run by axis (`_CHIP_AXES`), then part, then option. A choice
     whose options bind entities (a region's members) offers none when the
     fetch named its own places (`entities` in the scope of any of
     `FetchReading.args`). The chip refetches with those places, which replace
@@ -1463,10 +1461,9 @@ def scope_chips(
     return [
         ScopeChip(
             label=(
-                f"{_CHIP_VERB} {option.label} for "
-                f"{part_name(reading, specs.get(reading.spec_id or ''))}"
+                f"{part_name(reading, specs.get(reading.spec_id or ''))}: {option.label}"
                 if several
-                else f"{_CHIP_VERB} {option.label}"
+                else option.label
             ),
             choice_id=choice.id,
             option_id=option.option_id,

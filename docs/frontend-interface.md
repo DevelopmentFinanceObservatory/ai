@@ -233,9 +233,8 @@ hold up to four chips of kind `apply_choice`:
 scope choice of the data the answer used (the sector's codes, a region's
 members, the provider scope or the measure basis) to another option
 Search can serve, such as "health, CRS 120 alone" or "including imputed
-multilateral". `label` names the chip's action: "Show" and the option's
-label ("Show health, CRS 120 alone"), followed by "for" and the part's
-quoted words when the answer used several parts. Chips run sector first, then
+multilateral". `label` is the option's label, quoted after the part's
+words when the answer used several parts. Chips run sector first, then
 region, provider and measure basis. An option Search cannot serve has no
 chip, and an answer from a plan has none: its card carries the switch.
 `turn` is the number of the conversation turn whose answer offers the

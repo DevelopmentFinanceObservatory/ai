@@ -5531,11 +5531,18 @@ async def test_remove_cards_leaves_a_pinned_card_and_names_it():
 
     pinned_only = await tools["remove_cards"](ctx, ["cmp_01"])
     cleared = await tools["remove_cards"](ctx, all_cards=True)
+    mixed = await tools["remove_cards"](ctx, ["cmp_01", "cmp_02", "cmp_99"])
 
     assert pinned_only["removed"] == []
     assert pinned_only["kept_pinned"] == ["cmp_01"]
     assert cleared == {"removed": ["cmp_02"], "kept_pinned": ["cmp_01"]}
     assert [b.component_id for b in state.composition.blocks] == ["cmp_01"]
+    assert {key: value for key, value in mixed.items() if key != "note"} == {
+        "removed": [],
+        "kept_pinned": ["cmp_01"],
+        "not_in_conversation": ["cmp_99"],
+    }
+    assert "1 of the named cards was already off the canvas" in mixed["note"]
 
 
 async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():

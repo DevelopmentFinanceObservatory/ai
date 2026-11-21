@@ -745,14 +745,10 @@ def test_the_canvas_views_name_a_pinned_card_older_than_their_caps():
     assert digest is not None
     assert len(digest["blocks"]) == full
     assert (digest["blocks"][0]["component_id"], digest["blocks"][0]["pinned"]) == ("cmp_000", True)
+    assert len(listing["on_canvas"]) == full
+    assert listing["on_canvas"][0] == digest["blocks"][0]
     assert len(listing["on_canvas_older"]) == compact
-    assert listing["on_canvas_older"][0] == {
-        "component_id": "cmp_000",
-        "type": "line_chart",
-        "title": "Card 0",
-        "pinned": True,
-    }
-    assert "pinned" not in listing["on_canvas_older"][1]
+    assert not any("pinned" in entry for entry in listing["on_canvas_older"])
     assert listing["on_canvas_not_shown"] == 5
     assert summary == {"cards_on_canvas": full + compact + 5, "cards_pinned": 1, "cards_hidden": 0}
 

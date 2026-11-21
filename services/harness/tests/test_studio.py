@@ -9290,7 +9290,7 @@ async def test_a_chip_is_shown_applied_and_kept_and_each_step_is_recorded(
     ]
     assert chip == {
         "kind": "apply_choice",
-        "label": "Show health (CRS 120) and population and reproductive health (CRS 130)",
+        "label": "health (CRS 120) and population and reproductive health (CRS 130)",
         "choice_id": f"{scope['id']}:sector",
         "option_id": "sector:120+130",
         "turn": 1,
@@ -9300,9 +9300,7 @@ async def test_a_chip_is_shown_applied_and_kept_and_each_step_is_recorded(
     assert len(app.state.model.requests) == 5  # search, fetch, answer; the chip; thanks
     text = _frame(applied, "message.complete")["text"]
     assert text.startswith("Now with population.\n\nCounted as: ")
-    assert turns[1]["user"] == (
-        "count health (CRS 120) and population and reproductive health (CRS 130)"
-    )
+    assert turns[1]["user"] == "count " + chip["label"]
     assert turns[1]["applied_choice"]["spec_id"] == new_pin
     events = [event.name for span in otlp_spans.get_finished_spans() for event in span.events]
     assert [name for name in events if name.startswith("scope_choice.")] == [
