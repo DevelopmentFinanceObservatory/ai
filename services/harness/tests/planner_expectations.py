@@ -30,8 +30,8 @@ the same tests again without the variable to check them:
 
 A write run writes only a file whose JSON value it changes, and keeps each key of a
 stored expectation that its test names `unread` (`expect`), so a run moves
-exactly the files its change moves. It deletes nothing: the file of a test
-that no longer runs stays until it is removed by hand.
+exactly the files its change moves. It deletes nothing, so the file of a
+test that has gone stays until it is removed by hand.
 `test_planner_expectations.py` checks that this list names every test module
 that stores an expectation.
 
@@ -180,7 +180,7 @@ _ABSENT = object()
 def _stored_value(path: Path) -> Any:
     """The JSON value `path` holds, or `_ABSENT` when there is no such file.
 
-    A write run compares values, not text, so a file holding the produced value
+    A write run compares values, so a file holding the produced value
     under another key order or layout is left as it is."""
     return json.loads(path.read_text()) if path.exists() else _ABSENT
 

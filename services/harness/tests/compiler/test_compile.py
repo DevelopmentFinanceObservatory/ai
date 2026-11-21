@@ -6161,7 +6161,7 @@ def test_a_rank_with_no_reduction_over_an_open_party_it_does_not_keep_is_refused
     recipients: int | None,
 ) -> None:
     # Each named donor holds one row per recipient a year, which analysis-mcp's
-    # rank refuses at run time; the refusal comes before approval instead.
+    # rank refuses at run time. The compiler refuses it before approval.
     result = _rank_named_donors_with_destination_open(
         build, decision, source, recipients, reduction=None
     )
@@ -6210,7 +6210,7 @@ def test_humanitarian_aid_by_dac_donor_ranks_only_with_a_reduction(
     codes: list[Code],
 ) -> None:
     # The plan the Studio recorded for "humanitarian aid by DAC donor in 2019 and
-    # 2023", over dev `search`'s own block: the DAC group binds `origin` and the
+    # 2023", over dev `search`'s own block. The DAC group binds `origin` and the
     # 163 recipients stay open on `destination`, so each donor holds one row per
     # recipient a year until the rank sums them.
     block = json.loads(_DAC_HUMANITARIAN_BLOCK.read_text())["spec"]
@@ -6280,7 +6280,7 @@ def test_a_rank_of_recipients_beside_one_named_donor_needs_no_reduction_only_for
     codes: list[Code],
 ) -> None:
     # "The top ten recipients of IDA's disbursements in 2022" over `search`'s own
-    # block: IDA binds `origin` alone, so each recipient holds one row. The DAC
+    # block. IDA binds `origin` alone, so each recipient holds one row. The DAC
     # block binds the group's 32 members there, so each recipient holds 32.
     if donor.startswith("International"):
         (search,) = json.loads(_IDA_RECORDING.read_text())["searches"]

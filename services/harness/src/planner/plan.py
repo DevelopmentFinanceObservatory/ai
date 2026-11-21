@@ -3424,7 +3424,7 @@ def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -
     state, then one open dimension per `across` word, then the breakdown's.
 
     A role phrase one entity states alone, not as a set's members, is
-    `single`: the plan cannot tell whether Search binds the name to one party,
+    `single`. The plan cannot tell whether Search binds the name to one party,
     so `submission.service._rank_roles_expand` and the compiler check it.
 
     Its years run on past `period` with `period_end_open`, and start at

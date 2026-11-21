@@ -1224,7 +1224,7 @@ def test_an_entity_role_outside_the_party_words_is_refused_and_records_nothing(
 def test_a_first_draft_stating_no_answer_mode_takes_the_one_its_requirements_define(
     decision: DecisionFactory, requirements: RequirementPair, lone: bool, mode: AnswerMode
 ) -> None:
-    """A dataset nothing reads is the answer, a series; a calculation reading
+    """A dataset nothing reads is the answer, a series. A calculation reading
     every dataset gives a computed answer."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()

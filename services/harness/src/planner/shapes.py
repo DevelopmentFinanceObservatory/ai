@@ -148,8 +148,8 @@ class RoleDimension:
     entities named with no role, or an `across` of the place party
     (`place_role`). A place word names it (`roles_named`). `single` marks a
     role holding one value, so a rank over another role reads one row per
-    entity: in a plan, a role one entity is named under, not as a set's
-    members; in a compiled shape, a column its source binds one party on.
+    entity. In a plan it is a role one entity is named under, not as a set's
+    members. In a compiled shape it is a column its source binds one party on.
     """
 
     role: str | None

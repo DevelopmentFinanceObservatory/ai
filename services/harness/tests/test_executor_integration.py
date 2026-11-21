@@ -1222,7 +1222,7 @@ def _apart_mint_response() -> dict[str, Any]:
 
 def _years_apart_approved_plan(decision: Callable[..., Decision], schemas: dict[str, Any]) -> Plan:
     """The top three donors in 2019 and in 2023, as `planner.plan.FilterRequirement`'s
-    `predicates` describe years asked for apart: the dataset reads 2019 to 2023 and
+    `predicates` describe years asked for apart. The dataset reads 2019 to 2023 and
     a filter takes out each year between. Translated, compiled and approved."""
     source = SelectedSource(
         spec_id=APART_SPEC,

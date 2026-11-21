@@ -934,8 +934,8 @@ class _Build:
         names or covers with `across` (`compiler.shapes`). An open axis
         outside those, holding several members or an uncounted number,
         repeats each kept entity once per member of it. Empty when `op_id`
-        reads no retrieval through filters alone: an aggregate, a growth or a
-        two-sided step leaves one row per key.
+        reads no retrieval through filters alone, since an aggregate, a growth
+        or a two-sided step leaves one row per key.
         """
         retrieve_id = self._through_filters(op_id)
         source = self.sources.get(retrieve_id)

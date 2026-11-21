@@ -168,7 +168,7 @@ def test_a_rank_beside_a_role_holding_several_parties_states_a_reduction(
 ) -> None:
     """One name on the other role, but Search reads "DAC countries" as its 32
     members, and the Malawi source holds every donor open beside the two the
-    rank orders: each ranked entity keeps several rows."""
+    rank orders. Each ranked entity keeps several rows."""
     block = _block(task)
 
     result, ctx = _propose(
