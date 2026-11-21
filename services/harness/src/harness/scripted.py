@@ -81,6 +81,8 @@ _FACT_SUMMARY = {
 }
 
 
+# The replayed cards state no partial period: no dfo-apis mint stands behind them
+# to say so (a minted card states `freshness.partial_period`).
 _PROVENANCE = {
     "inputs": [_FRAME_REF],
     "sources": [

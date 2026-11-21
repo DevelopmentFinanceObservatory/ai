@@ -369,7 +369,7 @@ def _described_facts(description: Mapping[str, Any]) -> CardFacts:
         ),
         freshness=Freshness(
             data_through=freshness.get("latest_period"),
-            partial_period=False,
+            partial_period=bool(freshness.get("partial_periods")),
             last_refreshed=freshness.get("source_downloaded_at_mint"),
             next_expected=freshness.get("next_release"),
             newer_download=freshness.get("source_downloaded_since"),
