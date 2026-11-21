@@ -42,7 +42,7 @@ references are `Binding`s. No proposal carries a tool name, a column name, a
 dcid, or a frame reference.
 
 **A retrieval names a source discovery recorded.** A retrieval's `spec_id` has
-to be what discovery recorded for *its own* requirement -- naming a real
+to be what discovery recorded for _its own_ requirement -- naming a real
 `spec_id` discovered for a different requirement is `source_not_discovered_ for_requirement` just the same as naming one nothing discovered. A requirement
 whose `source_spec_id` pins one exact definition refuses any other with
 `source_pin_violated`. The `SelectedSource` the workflow keeps is copied from
@@ -154,7 +154,11 @@ reviewed change here, which is the point.
 
 **The six analysis verbs beyond aggregate, growth and compare.** `rank`
 orders `RankRequirement`'s entities and writes the requirement's own role
-columns as `rank_by`; `sum_of`, `share_of`, `quotient_of` and `join` are two-sided
+columns as `rank_by`. A rank stating no `reduction` over a retrieval, read
+directly or through filters, whose source leaves open an axis the rank's input
+keeps no column of, holding several members or an uncounted number, is
+`rank_reduction_required`: each entity holds one row per member of that axis in
+each period, which `rank` refuses at run time without an `aggregation`. `sum_of`, `share_of`, `quotient_of` and `join` are two-sided
 like a comparison, writing
 `{role_column: ref}` entity bindings the same way and, for `join`, every key
 explicitly: `join_keys` in the left frame's names and `right_keys` mapping each

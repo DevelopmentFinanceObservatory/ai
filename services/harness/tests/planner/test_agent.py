@@ -16831,6 +16831,27 @@ def test_only_a_reader_rolling_from_its_start_retrieves_every_year_the_dataset_h
     assert stored_plan(ctx.state[PLAN_STATE_KEY], state_key=PLAN_STATE_KEY) == plan
 
 
+def test_a_rank_proposed_without_among_records_the_population_its_axis_admits() -> None:
+    """No filter narrows the donors, so the rank is over every donor, and the
+    decision fixing `among` reads that value off it."""
+    ctx = _FakeToolContext()
+
+    result = _propose_split(
+        ctx,
+        [_aid_to_kenya(), _top_donor(among=None)],
+        asks=_SERIES_AND_TOP[1:],
+        answered=[AskAnswer(ask=0, outputs=("top",))],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.requirement("top").among is RankAmong.POPULATION  # type: ignore[union-attr]
+    (population,) = (decision for decision in plan.decisions if decision.slot == "population")
+    assert population.fixes is not None
+    assert population.fixes.among is RankAmong.POPULATION
+
+
 def test_a_stored_plan_reading_a_whole_history_with_no_first_year_is_planned_again() -> None:
     """A plan stored before plans recorded their first years holds none, so the
     whole-history read it states has no year to start at and it loads as no plan."""

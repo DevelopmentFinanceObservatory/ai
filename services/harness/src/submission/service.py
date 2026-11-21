@@ -206,6 +206,7 @@ from planner.plan import (
     pin_slot_moves,
     pin_sources,
     predicate_key,
+    ranks_among_settled,
     reached,
     read_fixes,
     repinned,
@@ -561,6 +562,10 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         check_acyclic({requirement.id: requirement for requirement in written})
     except ValueError as exc:
         return _invalid_data(exc, proposer)
+    # A rank stating no `among` takes the one its input admits, before any
+    # decision reads its value off it.
+    evidence_requirements = ranks_among_settled(evidence_requirements, graph=written)
+    written = _requirements_after(previous, evidence_requirements, removed_evidence_requirements)
     # The refusals that hold whatever the requirements pin come before the
     # Search reads alignment asks for, so a plan they refuse costs none, and
     # everything after alignment reads the pins the reads settle. Alignment

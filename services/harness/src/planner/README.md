@@ -505,7 +505,9 @@ its `fixes` states, `source_spec_id` aside (`fix_disagreements`). The plan
 record says whether the planner assumed a period, and the answer says a summed
 reading was the user's. A rank's `among='population'` and a `share_of`'s
 `denominator_scope='pooled'` each cite a decision whose `fixes` states the
-claim. Code writes `fixes.source_spec_id`.
+claim. A rank stating no `among` takes the one value its input admits before any
+decision reads it (`ranks_among_settled`): 'named' over an axis a filter
+narrowed, else 'population'. Code writes `fixes.source_spec_id`.
 `propose_plan` sets it on the measure decision it writes for a pin of a measure
 a settled source offers (`_measure_decisions`) and moves it with the pin. A
 source a pending referral offers in place of a pin counts as settled, so a

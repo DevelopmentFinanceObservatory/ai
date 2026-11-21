@@ -1239,7 +1239,8 @@ class AggregateRequirement(TaggedModel):
             "entities named, plus a breakdown's codes when the input has them; an `across` "
             "party is summed), breakdown (its codes alone), or two of them. Without period, "
             "the years reduce to one figure per group. Empty reduces every row to one figure, "
-            "over every year, party and code."
+            "over every year, party and code. Over an input naming no entity, `entity` keeps "
+            "nothing: rank that input, or group by period alone."
         ),
     )
 
@@ -1424,13 +1425,15 @@ class RankRequirement(TaggedModel):
     direction: RankDirection = Field(
         description="Which end of the ranking comes first: the highest value or the lowest."
     )
-    among: RankAmong = Field(
+    among: RankAmong | None = Field(
+        default=None,
         description=(
             "Who this rank compares an entity against: 'named' for exactly the entities a "
             "filter has narrowed to, 'population' for every entity the retrieved definition "
             "holds: every member of the party its `across` states, or, where entities are "
-            "named, those entities as the focus among the rest."
-        )
+            "named, those entities as the focus among the rest. Unset takes the one value "
+            "the input admits: 'named' over an axis a filter narrowed, else 'population'."
+        ),
     )
     axis: str | None = Field(
         default=None,
@@ -1443,7 +1446,9 @@ class RankRequirement(TaggedModel):
         description=(
             "How to collapse an entity's rows to one value first. Required when the input "
             "carries more than one role, to collapse the other role's rows, and required "
-            "when the window leaves an entity more than one row."
+            "when the window leaves an entity more than one row. A dataset requirement "
+            "naming an entity on one side of a flow and stating `across` for the other "
+            "carries both roles."
         ),
     )
     window_start: Year | None = Field(
@@ -1691,7 +1696,11 @@ class FilterRequirement(TaggedModel):
     predicates: tuple[Predicate, ...] = Field(
         min_length=1,
         max_length=MAX_PREDICATES,
-        description="The conditions a row has to satisfy, all of them, to survive this filter.",
+        description=(
+            "The conditions a row has to satisfy, all of them, to survive this filter. For "
+            "years asked for apart, as 2019 and 2023, the dataset's `period` runs from the "
+            "first to the last and a `period_threshold` of op 'ne' drops each year between."
+        ),
     )
 
     @model_validator(mode="after")
@@ -3580,6 +3589,11 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
     axis_role = _selected_role(input_shape.roles, requirement.axis)
+    if requirement.among is None:
+        raise ValueError(
+            f"{requirement.id!r} states no `among`, and axis {axis_role.role!r} admits only "
+            f"among={_admitted_among(axis_role).value!r}; state it"
+        )
     if requirement.among is RankAmong.NAMED and not axis_role.narrowed:
         raise ValueError(
             f"{requirement.id!r} states among='named', but axis {axis_role.role!r} carries no "
@@ -3598,6 +3612,69 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
         rolling=requirement.rolling,
         step_id=requirement.id,
     )
+
+
+def _admitted_among(axis_role: RoleDimension) -> RankAmong:
+    """The one `among` a rank over `axis_role` may state.
+
+    A filter that narrowed the axis to named entities leaves only them to
+    rank, so the rank is 'named', and `_rank_shape` refuses 'named' over an
+    axis no filter narrowed. Over any other axis the rank is 'population',
+    which `planner.shapes.rejects` refuses over a narrowed one.
+    """
+    return RankAmong.NAMED if axis_role.narrowed else RankAmong.POPULATION
+
+
+def ranks_among_settled(
+    requirements: Sequence[EvidenceRequirement], *, graph: Sequence[EvidenceRequirement]
+) -> list[EvidenceRequirement]:
+    """`requirements`, each rank stating no `among` given the one its input admits.
+
+    `graph` is every requirement the plan will state, which a rank's input
+    chain is read from. The input's shape is built from the requirements
+    that chain reads alone (`_build_shapes`) and gives `_admitted_among` the
+    axis the rank keeps. A rank whose input shape cannot be built, or whose
+    axis names no role of it, keeps `among` unset, and `Plan` validation
+    refuses the fault that stops it.
+    """
+    by_id = {requirement.id: requirement for requirement in graph}
+    settled: list[EvidenceRequirement] = []
+    for requirement in requirements:
+        among = (
+            _among_of_input(requirement, by_id)
+            if isinstance(requirement, RankRequirement) and requirement.among is None
+            else None
+        )
+        settled.append(
+            requirement if among is None else requirement.model_copy(update={"among": among})
+        )
+    return settled
+
+
+def _among_of_input(
+    rank: RankRequirement, by_id: Mapping[str, EvidenceRequirement]
+) -> RankAmong | None:
+    """The `among` `rank`'s input admits, or `None` when its shape or axis cannot be read."""
+    chain: dict[str, EvidenceRequirement] = {}
+    pending = [rank.input_id]
+    while pending:
+        requirement_id = pending.pop()
+        if requirement_id in chain or requirement_id not in by_id:
+            continue
+        chain[requirement_id] = by_id[requirement_id]
+        pending.extend(inputs_of(by_id[requirement_id]))
+    try:
+        shapes = _build_shapes(chain, whole_history={}, origins={})
+    except ValueError:
+        return None
+    shape = shapes.get(rank.input_id)
+    if shape is None:
+        return None
+    if rank.axis is None:
+        axis_role = shape.roles[0] if len(shape.roles) == 1 else None
+    else:
+        axis_role = role_named(shape.roles, rank.axis)
+    return None if axis_role is None else _admitted_among(axis_role)
 
 
 def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape) -> str | None:

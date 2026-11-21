@@ -1152,6 +1152,113 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
     assert "beyond_limit (ranked beyond the limit): 3 row(s)" in rank_step.digest
 
 
+APART_SPEC = "spec_" + "8" * 32
+
+
+def _years_apart_approved_plan(decision: Callable[..., Decision], schemas: dict[str, Any]) -> Plan:
+    """The top three donors in 2019 and in 2023, as `planner.plan.FilterRequirement`'s
+    `predicates` describe years asked for apart: the dataset reads 2019 to 2023 and
+    a filter takes out each year between. Translated, compiled and approved."""
+    source = SelectedSource(
+        spec_id=APART_SPEC,
+        sentence="ODA disbursed by six DAC donors, 2019 to 2023",
+        has_data=True,
+        served_count=1,
+        shape_member_digest=member_digest(["OdaDisbursed"]),
+        entities=TOP_DONORS,
+        unit_ref="USD",
+        unit_label="US dollars",
+        coverage_window=Period(start=2019, end=2023),
+        identity=TOP_DONOR_IDENTITY,
+    )
+    population = decision(
+        slot="population_scope",
+        description="Whether the rank compares the named donors or every donor the source holds.",
+        options=["the named donors only", "every donor the source holds"],
+        chosen="every donor the source holds",
+        rationale="The question asks for the top three donors overall.",
+        fixes=DecisionFixes(among=RankAmong.POPULATION),
+    )
+    draft = Plan(
+        question="Which three donors disbursed the most ODA in 2019 and in 2023, in one chart?",
+        decisions=[decision(), population],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="oda_disbursed",
+                decision_ids=["measure"],
+                measure="ODA disbursed",
+                entities=[Entity(name=donor.label, role="donor") for donor in TOP_DONORS],
+                period=Period(start=2019, end=2023),
+            ),
+            FilterRequirement(
+                id="two_years",
+                decision_ids=["measure"],
+                input_id="oda_disbursed",
+                predicates=tuple(
+                    PeriodThreshold(op="ne", year=year) for year in (2020, 2021, 2022)
+                ),
+            ),
+            RankRequirement(
+                id="top_three",
+                decision_ids=["measure", "population_scope"],
+                input_id="two_years",
+                direction=RankDirection.HIGHEST_FIRST,
+                among=RankAmong.POPULATION,
+                axis="donor",
+                per_period=True,
+                limit=3,
+            ),
+        ],
+        status=PlanStatus.DRAFT,
+    )
+    translation = build_translation(draft, {"oda_disbursed": APART_SPEC})
+    compiled = compile_plan(
+        plan=draft,
+        translation=translation,
+        schemas=schemas,
+        discovered={"oda_disbursed": source},
+    )
+    assert compiled.workflow is not None, compiled.issues
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
+
+
+async def test_years_asked_for_apart_compile_to_a_range_less_the_years_between(
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., Any],
+    decision: Callable[..., Decision],
+    pg_database_url: str,
+) -> None:
+    """2019 and 2023 compile against the mounted services' own tool schemas to
+    a retrieval of 2019 to 2023, a filter taking out 2020, 2021 and 2022, and a
+    rank keeping the top three donors in each year left."""
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
+
+    async with running_lifespan(app):
+        surface = McpSurface(
+            sources={
+                "data-mcp": mounted_mcp_transport(
+                    app, f"{DATA_MCP_MOUNT_PATH}/mcp", token="test-token"
+                ),
+                "analysis-mcp": mounted_mcp_transport(
+                    app, f"{ANALYSIS_MCP_MOUNT_PATH}/mcp", token="test-token"
+                ),
+            }
+        )
+        schemas = {schema.name: schema for schema in await surface.list_tools()}
+        approved = _years_apart_approved_plan(decision, schemas)
+
+    assert approved.workflow is not None
+    retrieve, kept, ranked = approved.workflow.steps
+    assert (retrieve.tool.name, kept.tool.name, ranked.tool.name) == ("get_data", "filter", "rank")
+    assert kept.args["predicates"] == [
+        {"kind": "ordered_threshold", "column": "time_period", "op": "ne", "value": str(year)}
+        for year in (2020, 2021, 2022)
+    ]
+    assert ranked.args == {"rank_by": ["donor"], "ascending": False, "per_period": True, "limit": 3}
+
+
 ROLLING_SPEC = "spec_" + "9" * 32
 ROLLING_YEARS = range(2015, 2025)
 

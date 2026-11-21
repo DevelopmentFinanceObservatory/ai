@@ -2789,6 +2789,8 @@ def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
     # The source counts every place on a place axis, so a level kept from it
     # is named without a count.
     level = _place_level_word(requirement, plan)
+    # `Plan` validation refuses a rank stating no `among` (`planner.plan._rank_shape`).
+    assert requirement.among is not None
     among_text = among_phrase(
         requirement.among,
         across=(level or role) if covering is not None or by_breakdown else None,

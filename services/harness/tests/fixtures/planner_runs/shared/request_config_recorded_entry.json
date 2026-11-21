@@ -160,7 +160,7 @@
                     "type": "string"
                   },
                   "group_by": {
-                    "description": "Which columns to group by before reducing: period, entity (the roles of the entities named, plus a breakdown's codes when the input has them; an `across` party is summed), breakdown (its codes alone), or two of them. Without period, the years reduce to one figure per group. Empty reduces every row to one figure, over every year, party and code.",
+                    "description": "Which columns to group by before reducing: period, entity (the roles of the entities named, plus a breakdown's codes when the input has them; an `across` party is summed), breakdown (its codes alone), or two of them. Without period, the years reduce to one figure per group. Empty reduces every row to one figure, over every year, party and code. Over an input naming no entity, `entity` keeps nothing: rank that input, or group by period alone.",
                     "items": {
                       "$ref": "#/$defs/GroupBy"
                     },
@@ -688,7 +688,7 @@
                     "$ref": "#/$defs/Identifier"
                   },
                   "predicates": {
-                    "description": "The conditions a row has to satisfy, all of them, to survive this filter.",
+                    "description": "The conditions a row has to satisfy, all of them, to survive this filter. For years asked for apart, as 2019 and 2023, the dataset's `period` runs from the first to the last and a `period_threshold` of op 'ne' drops each year between.",
                     "items": {
                       "discriminator": {
                         "mapping": {
@@ -1070,7 +1070,7 @@
                       "population"
                     ],
                     "type": "string",
-                    "description": "Who this rank compares an entity against: 'named' for exactly the entities a filter has narrowed to, 'population' for every entity the retrieved definition holds: every member of the party its `across` states, or, where entities are named, those entities as the focus among the rest."
+                    "description": "Who this rank compares an entity against: 'named' for exactly the entities a filter has narrowed to, 'population' for every entity the retrieved definition holds: every member of the party its `across` states, or, where entities are named, those entities as the focus among the rest. Unset takes the one value the input admits: 'named' over an axis a filter narrowed, else 'population'."
                   },
                   "axis": {
                     "maxLength": 100,
@@ -1079,7 +1079,7 @@
                     "description": "Which role dimension of the input this rank keeps; required once the input carries more than one."
                   },
                   "reduction": {
-                    "description": "How to collapse an entity's rows to one value first. Required when the input carries more than one role, to collapse the other role's rows, and required when the window leaves an entity more than one row.",
+                    "description": "How to collapse an entity's rows to one value first. Required when the input carries more than one role, to collapse the other role's rows, and required when the window leaves an entity more than one row. A dataset requirement naming an entity on one side of a flow and stating `across` for the other carries both roles.",
                     "enum": [
                       "sum",
                       "mean",
@@ -1165,8 +1165,7 @@
                   "kind",
                   "id",
                   "input_id",
-                  "direction",
-                  "among"
+                  "direction"
                 ],
                 "type": "object"
               },
@@ -1473,7 +1472,7 @@
                   "type": "string"
                 },
                 "type": "array",
-                "description": "The `id` of each step that combines its years, an `aggregate` whose `group_by` leaves out `period` or a `rank` with a `reduction` and `per_period` false, because the user's own words ask for one figure or one ranking over them: a change to the plan the user asks for, or, when no asks are listed, the question itself. A step named once keeps that standing in later patches while its kind and `reduction` stay, and loses it when an `aggregate`'s `group_by` gains `period` or a `rank` sets `per_period`. Leave it empty for a step that answers an ask marked (across years)."
+                "description": "The `id` of each step that combines its years, an `aggregate` whose `group_by` leaves out `period` or a `rank` with a `reduction` and `per_period` false, because the user's own words ask for one figure or one ranking over them: a change to the plan the user asks for, or, when no asks are listed, the question itself. A step named once keeps that standing in later patches while its kind and `reduction` stay, and loses it when an `aggregate`'s `group_by` gains `period` or a `rank` sets `per_period`. Leave it empty for a step that answers an ask marked (across years), and in every call, a first draft's included, whose brief does not say the user asks for a change to the plan."
               },
               "amends_version": {
                 "type": "integer",
