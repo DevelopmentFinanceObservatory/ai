@@ -44,8 +44,10 @@ import itertools
 import json
 import logging
 import re
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, MutableMapping, Sequence
 from contextvars import ContextVar
+from dataclasses import replace
 from datetime import datetime
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, overload
 
@@ -1239,7 +1241,8 @@ class AggregateRequirement(TaggedModel):
             "entities named, plus a breakdown's codes when the input has them; an `across` "
             "party is summed), breakdown (its codes alone), or two of them. Without period, "
             "the years reduce to one figure per group. Empty reduces every row to one figure, "
-            "over every year, party and code."
+            "over every year, party and code. Over an input naming no entity, `entity` keeps "
+            "nothing: rank that input, or group by period alone."
         ),
     )
 
@@ -1424,13 +1427,15 @@ class RankRequirement(TaggedModel):
     direction: RankDirection = Field(
         description="Which end of the ranking comes first: the highest value or the lowest."
     )
-    among: RankAmong = Field(
+    among: RankAmong | None = Field(
+        default=None,
         description=(
             "Who this rank compares an entity against: 'named' for exactly the entities a "
             "filter has narrowed to, 'population' for every entity the retrieved definition "
             "holds: every member of the party its `across` states, or, where entities are "
-            "named, those entities as the focus among the rest."
-        )
+            "named, those entities as the focus among the rest. Unset takes the one value "
+            "the input admits: 'named' over an axis a filter narrowed, else 'population'."
+        ),
     )
     axis: str | None = Field(
         default=None,
@@ -1441,8 +1446,8 @@ class RankRequirement(TaggedModel):
     reduction: Reduction | None = Field(
         default=None,
         description=(
-            "How to collapse an entity's rows to one value first. Required when the input "
-            "carries more than one role, to collapse the other role's rows, and required "
+            "How to collapse an entity's rows to one value first. Required when a role "
+            "other than the axis holds several parties, to collapse that role's rows, and "
             "when the window leaves an entity more than one row."
         ),
     )
@@ -1691,7 +1696,11 @@ class FilterRequirement(TaggedModel):
     predicates: tuple[Predicate, ...] = Field(
         min_length=1,
         max_length=MAX_PREDICATES,
-        description="The conditions a row has to satisfy, all of them, to survive this filter.",
+        description=(
+            "The conditions a row has to satisfy, all of them, to survive this filter. For "
+            "years asked for apart, as 2019 and 2023, the dataset's `period` runs from the "
+            "first to the last and a `period_threshold` of op 'ne' drops each year between."
+        ),
     )
 
     @model_validator(mode="after")
@@ -1749,6 +1758,18 @@ EvidenceRequirement = Annotated[
 def is_dataset(requirement: EvidenceRequirement) -> bool:
     """Return whether `requirement` is a `DatasetRequirement`."""
     return isinstance(requirement, DatasetRequirement)
+
+
+def answer_mode_of(requirements: Sequence[EvidenceRequirement]) -> AnswerMode:
+    """The one `AnswerMode` `requirements` validate under as its definition reads.
+
+    `series` where a dataset requirement is unread by every other one, which
+    is then the answer and which `computed` refuses; `computed` where every
+    dataset requirement feeds a calculation, whose result is the answer.
+    """
+    read = {input_id for requirement in requirements for input_id in inputs_of(requirement)}
+    unread = any(is_dataset(r) and r.id not in read for r in requirements)
+    return AnswerMode.SERIES if unread else AnswerMode.COMPUTED
 
 
 def inputs_of(requirement: EvidenceRequirement) -> tuple[Identifier, ...]:
@@ -3402,6 +3423,10 @@ def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -
     """The shape a fresh retrieval carries: one role dimension per role phrase the entities
     state, then one open dimension per `across` word, then the breakdown's.
 
+    A role phrase one entity states alone, not as a set's members, is
+    `single`. The plan cannot tell whether Search binds the name to one party,
+    so `submission.service._rank_roles_expand` and the compiler check it.
+
     Its years run on past `period` with `period_end_open`, and start at
     `first_year` for a read of its dataset's whole history, the first year
     the dataset holds on record (`_build_shapes`).
@@ -3417,8 +3442,15 @@ def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -
     role_names = sorted(
         {entity.role for entity in requirement.entities}, key=lambda role: (role is None, role)
     )
+    stating = Counter(entity.role for entity in requirement.entities)
     roles = tuple(
-        RoleDimension(role=name, requirement_id=requirement.id, place=place_role(name))
+        RoleDimension(
+            role=name,
+            requirement_id=requirement.id,
+            place=place_role(name),
+            single=stating[name] == 1
+            and not any(entity.members for entity in requirement.entities if entity.role == name),
+        )
         for name in role_names
     )
     roles = (
@@ -3580,6 +3612,11 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
     axis_role = _selected_role(input_shape.roles, requirement.axis)
+    if requirement.among is None:
+        raise ValueError(
+            f"{requirement.id!r} states no `among`, and axis {axis_role.role!r} admits only "
+            f"among={_admitted_among(axis_role).value!r}; state it"
+        )
     if requirement.among is RankAmong.NAMED and not axis_role.narrowed:
         raise ValueError(
             f"{requirement.id!r} states among='named', but axis {axis_role.role!r} carries no "
@@ -3600,13 +3637,129 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
     )
 
 
+def _admitted_among(axis_role: RoleDimension) -> RankAmong:
+    """The one `among` a rank over `axis_role` may state.
+
+    A filter that narrowed the axis to named entities leaves only them to
+    rank, so the rank is 'named', and `_rank_shape` refuses 'named' over an
+    axis no filter narrowed. Over any other axis the rank is 'population',
+    which `planner.shapes.rejects` refuses over a narrowed one.
+    """
+    return RankAmong.NAMED if axis_role.narrowed else RankAmong.POPULATION
+
+
+def ranks_among_settled(
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    graph: Sequence[EvidenceRequirement],
+    first_years: Sequence[FirstYear] = (),
+) -> list[EvidenceRequirement]:
+    """`requirements`, each rank stating no `among` given the one its input admits.
+
+    `graph` is every requirement the plan will state, which a rank's input
+    chain is read from. The input's shape is built from the requirements
+    that chain reads alone (`_build_shapes`), each dataset requirement
+    `first_years` names starting at its first year on record, as the split
+    can read it (`whole_history_split`), and gives `_admitted_among` the
+    axis the rank keeps. A rank whose input shape cannot be built, or whose
+    axis names no role of it, keeps `among` unset, and `Plan` validation
+    refuses the fault that stops it.
+    """
+    by_id = {requirement.id: requirement for requirement in graph}
+    whole_history = {first.requirement_id: first.year for first in first_years}
+    settled: list[EvidenceRequirement] = []
+    for requirement in requirements:
+        among = (
+            _among_of_input(requirement, by_id, whole_history)
+            if isinstance(requirement, RankRequirement) and requirement.among is None
+            else None
+        )
+        settled.append(
+            requirement if among is None else requirement.model_copy(update={"among": among})
+        )
+    return settled
+
+
+def _among_of_input(
+    rank: RankRequirement,
+    by_id: Mapping[str, EvidenceRequirement],
+    whole_history: Mapping[str, int],
+) -> RankAmong | None:
+    """The `among` `rank`'s input admits, or `None` when its shape or axis cannot be read."""
+    chain: dict[str, EvidenceRequirement] = {}
+    pending = [rank.input_id]
+    while pending:
+        requirement_id = pending.pop()
+        if requirement_id in chain or requirement_id not in by_id:
+            continue
+        chain[requirement_id] = by_id[requirement_id]
+        pending.extend(inputs_of(by_id[requirement_id]))
+    try:
+        shapes = _build_shapes(
+            chain,
+            whole_history={key: year for key, year in whole_history.items() if key in chain},
+            origins={},
+        )
+    except ValueError:
+        return None
+    shape = shapes.get(rank.input_id)
+    if shape is None:
+        return None
+    if rank.axis is None:
+        axis_role = shape.roles[0] if len(shape.roles) == 1 else None
+    else:
+        axis_role = role_named(shape.roles, rank.axis)
+    return None if axis_role is None else _admitted_among(axis_role)
+
+
+def _other_roles_single(requirement: RankRequirement, input_shape: FrameShape) -> bool:
+    """Whether every role of `input_shape` but the one `requirement` ranks by is `single`."""
+    axis_role = (
+        None if requirement.axis is None else role_named(input_shape.roles, requirement.axis)
+    )
+    return axis_role is not None and all(
+        role.single for role in input_shape.roles if role is not axis_role
+    )
+
+
+def rank_single_roles(plan: Plan) -> list[tuple[RankRequirement, RoleDimension]]:
+    """Each rank of `plan` stating no `reduction` over an input of several roles, with each other role it rests on.
+
+    Plan validation admits such a rank only where every other role is
+    `single` (`_rank_reduction_reason`); whether each name binds one party
+    is a fact of the source (`submission.service._rank_roles_expand`). The
+    shapes are those of the plan as it runs (`split_of`), which validation
+    built, and each rank and role is named by the model's requirement
+    (`origin_of`), once.
+    """
+    split = split_of(plan)
+    shapes = _split_shapes(split)
+    found: dict[tuple[str, str | None, str], tuple[RankRequirement, RoleDimension]] = {}
+    for requirement in split.requirements:
+        if not isinstance(requirement, RankRequirement) or requirement.reduction is not None:
+            continue
+        shape = shapes.get(requirement.input_id)
+        if shape is None or len(shape.roles) < 2 or requirement.axis is None:
+            continue
+        rank = plan.requirement(origin_of(split, requirement.id))
+        assert isinstance(rank, RankRequirement)
+        axis_role = role_named(shape.roles, requirement.axis)
+        for role in shape.roles:
+            if role is axis_role or not role.single:
+                continue
+            origin = replace(role, requirement_id=origin_of(split, role.requirement_id))
+            found.setdefault((rank.id, origin.role, origin.requirement_id), (rank, origin))
+    return list(found.values())
+
+
 def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape) -> str | None:
     """Return why `requirement` needs a reduction it does not state, or `None` when it has enough.
 
     A rank orders entities by one value each. An axis over an input carrying
-    more than one role always needs a reduction, in either mode, to collapse
-    the other role's rows to one value per axis entity per (period, in
-    per-period mode). Short of that, `per_period=True` ranks each period on
+    more than one role needs a reduction, in either mode, to collapse the
+    other roles' rows to one value per axis entity per (period, in
+    per-period mode), unless each other role is `single` and so holds one
+    row per axis entity already. Short of that, `per_period=True` ranks each period on
     its own and never needs a reduction just to collapse years together;
     `per_period=False` needs one unless its input holds one row per entity,
     or the years of its input its window keeps (`_years_read`) are one and
@@ -3619,7 +3772,7 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
     """
     if requirement.reduction is not None:
         return None
-    if len(input_shape.roles) > 1:
+    if len(input_shape.roles) > 1 and not _other_roles_single(requirement, input_shape):
         return (
             f"{requirement.id!r} ranks by axis {requirement.axis!r} over an input carrying more "
             "than one role, which needs a reduction to collapse the other role's rows to one "
@@ -4098,8 +4251,8 @@ def _check_population_claims_are_cited(
             for decision in cited
         ):
             raise ValueError(
-                f"{requirement.id!r} states {field}={value!r}, a claim over entities nobody "
-                f"named, but cites no decision whose `fixes` names `{field}`"
+                f"{requirement.id!r} holds {field}={value.value!r}, a claim over entities "
+                f"nobody named, but cites no decision whose `fixes` names `{field}`; cite one"
             )
 
 
@@ -4325,10 +4478,10 @@ class Plan(StrictModel):
             "Whether the answer is a computed figure or the series itself. `series` (the "
             "default, and what a plan persisted before this field existed means) leaves an "
             "unread dataset requirement as the answer in its own right; `computed` requires "
-            "every dataset requirement to feed a calculation. The planner's proposal tool requires the "
-            "model to pass this explicitly on a first draft, so the default "
-            "only governs a plan built another way, such as a legacy record deserialising "
-            "without the field."
+            "every dataset requirement to feed a calculation. The planner's proposal tool reads "
+            "a first draft stating none from its requirements (`answer_mode_of`), so the "
+            "default only governs a plan built another way, such as a legacy record "
+            "deserialising without the field."
         ),
     )
     # Past `MAX_PLAN_DECISIONS`, a plan carries the decisions qualifying its answer
@@ -5635,8 +5788,8 @@ def period_licences_held(
 
     `named` is the `across_years` of the `propose_plan` call that states
     `plan`, the steps whose years the user's own words, as the planner read
-    them, ask to combine. Only a call made where the planner reads those
-    words names any (`submission.service.admit`). A licence of `previous`,
+    them, ask to combine. `submission.service.admit` empties it for a call
+    made where the planner reads none of those words. A licence of `previous`,
     the plan the call amends, holds while `plan` states a step of its id and
     kind that combines its years with the licensed reduction
     (`_keeps_licence`), whatever years it reads: a replan that narrows the
@@ -5670,25 +5823,6 @@ def period_licences_held(
     }
     held.update((name, licence) for name, licence in granted.items() if licence is not None)
     return tuple(held[step_id] for step_id in steps if step_id in held)
-
-
-def licences_restated(
-    named: Sequence[str],
-    *,
-    requirements: Sequence[EvidenceRequirement],
-    previous: Plan | None,
-) -> frozenset[str]:
-    """The steps of `named` whose licence `previous` already holds, as `requirements` state them.
-
-    Naming such a step grants nothing `period_licences_held` would not
-    carry anyway.
-    """
-    held = set(previous.period_licences) if previous is not None else set()
-    return frozenset(
-        requirement.id
-        for requirement in requirements
-        if requirement.id in named and _licence_for(requirement) in held
-    )
 
 
 def _keeps_licence(step: EvidenceRequirement | None, licence: PeriodLicence) -> bool:

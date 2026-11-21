@@ -373,8 +373,8 @@ class PlannerAdapter:
         # below as `BUDGET_EXHAUSTED` is. The orchestrator reads the user's
         # words and marks its asks (across years). The planner reads them only
         # in an entry the user's amendment opens, which `save_amendment_entry`
-        # records below, and only there may `propose_plan`'s `across_years`
-        # name a step.
+        # records below, and only there does `propose_plan` read its
+        # `across_years`.
         self._specs = tuple(
             specs
             if specs is not None

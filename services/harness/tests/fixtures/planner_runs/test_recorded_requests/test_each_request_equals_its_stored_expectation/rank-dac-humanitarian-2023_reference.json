@@ -1,0 +1,378 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Which DAC donors gave the most humanitarian aid in 2023?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Which DAC donors gave the most humanitarian aid in 2023? Ranked by gross ODA disbursements for humanitarian aid (emergency response, reconstruction and rehabilitation, and disaster preparedness) from DAC countries in 2023 in current US dollars from OECD CRS.",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "ranking_limit",
+        "description": "How many top donors to show",
+        "options": [
+          "5",
+          "10",
+          "20"
+        ],
+        "chosen": "10",
+        "resolved_by": "planner_default",
+        "rationale": "Top 10 is standard for presenting leading donors when no specific count is requested.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": 10
+        }
+      },
+      {
+        "slot": "ranking_among",
+        "description": "Rank across all DAC donors in the dataset",
+        "options": [
+          "population",
+          "named"
+        ],
+        "chosen": "population",
+        "resolved_by": "planner_default",
+        "rationale": "The question asks for top DAC donors across the entire population of DAC donors.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": "population",
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      },
+      {
+        "slot": "scope_sector_spec_a0bae43fbff80e08f0a6982e2bb88ce5",
+        "description": "Which sector codes the figures count.",
+        "options": [
+          "humanitarian aid (CRS 720 + 730 + 740)",
+          "emergency response, CRS 720 alone",
+          "reconstruction and rehabilitation, CRS 730 alone",
+          "disaster preparedness, CRS 740 alone"
+        ],
+        "chosen": "humanitarian aid (CRS 720 + 730 + 740)",
+        "resolved_by": "planner_default",
+        "rationale": "Search's default for this question.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_a0bae43fbff80e08f0a6982e2bb88ce5",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        },
+        "scope": {
+          "choice_id": "spec_a0bae43fbff80e08f0a6982e2bb88ce5:sector",
+          "axis": "sector",
+          "options": [
+            {
+              "option_id": "sector:720+730+740",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "sector:720",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "sector:730",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "sector:740",
+              "status": "available",
+              "years": null,
+              "code": null
+            }
+          ],
+          "provenance": "default"
+        }
+      },
+      {
+        "slot": "scope_measure_basis_spec_a0bae43fbff80e08f0a6982e2bb88ce5",
+        "description": "Which basis the figures are measured on.",
+        "options": [
+          "gross disbursements, current USD",
+          "net disbursements, current USD",
+          "grant equivalents (OECD headline), current USD",
+          "commitments, current USD"
+        ],
+        "chosen": "gross disbursements, current USD",
+        "resolved_by": "planner_default",
+        "rationale": "Search's default for this question.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_a0bae43fbff80e08f0a6982e2bb88ce5",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        },
+        "scope": {
+          "choice_id": "spec_a0bae43fbff80e08f0a6982e2bb88ce5:measure_basis",
+          "axis": "measure_basis",
+          "options": [
+            {
+              "option_id": "measure_basis:gross",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "measure_basis:net",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "measure_basis:grant_equivalent",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "measure_basis:commitments",
+              "status": "available",
+              "years": null,
+              "code": null
+            }
+          ],
+          "provenance": "default"
+        }
+      },
+      {
+        "slot": "scope_provider_spec_a0bae43fbff80e08f0a6982e2bb88ce5",
+        "description": "Whose spending the figures count.",
+        "options": [
+          "bilateral flows only",
+          "bilateral plus imputed multilateral"
+        ],
+        "chosen": "bilateral flows only",
+        "resolved_by": "planner_default",
+        "rationale": "Search's default for this question.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_a0bae43fbff80e08f0a6982e2bb88ce5",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        },
+        "scope": {
+          "choice_id": "spec_a0bae43fbff80e08f0a6982e2bb88ce5:provider",
+          "axis": "provider",
+          "options": [
+            {
+              "option_id": "provider:bilateral",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "provider:inclusive",
+              "status": "available",
+              "years": null,
+              "code": null
+            }
+          ],
+          "provenance": "default"
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "humanitarian_aid",
+        "decision_ids": [
+          "scope_sector_spec_a0bae43fbff80e08f0a6982e2bb88ce5",
+          "scope_measure_basis_spec_a0bae43fbff80e08f0a6982e2bb88ce5",
+          "scope_provider_spec_a0bae43fbff80e08f0a6982e2bb88ce5"
+        ],
+        "measure": "gross ODA disbursements for humanitarian aid (emergency response, reconstruction and rehabilitation, and disaster preparedness)",
+        "entities": [
+          {
+            "name": "DAC countries",
+            "role": "donor",
+            "members": true
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2023,
+          "end": 2023
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_a0bae43fbff80e08f0a6982e2bb88ce5",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "aggregate",
+        "id": "donor_totals",
+        "decision_ids": [],
+        "input_id": "humanitarian_aid",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "rank",
+        "id": "top_dac_donors",
+        "decision_ids": [
+          "ranking_among",
+          "ranking_limit"
+        ],
+        "input_id": "donor_totals",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": null,
+        "reduction": "sum",
+        "window_start": null,
+        "window_end": null,
+        "per_period": false,
+        "limit": 10,
+        "rolling": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Ranking of DAC donors by humanitarian aid in 2023"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "top_dac_donors"
+        ]
+      }
+    ],
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [
+          "donor"
+        ],
+        "over": []
+      }
+    ],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

@@ -90,6 +90,7 @@ from planner.plan import (
     load_plan,
     period_window,
     plan_revision,
+    ranks_among_settled,
     restated_to_anchors,
     restated_translation,
     retrieves_period,
@@ -945,16 +946,6 @@ def test_rank_window_needs_both_years_or_neither() -> None:
             direction=RankDirection.HIGHEST_FIRST,
             among=RankAmong.POPULATION,
             window_start=2020,
-        )
-
-
-def test_a_rank_needs_among_stated() -> None:
-    with pytest.raises(ValidationError, match="among"):
-        RankRequirement(
-            id="rank",
-            decision_ids=["measure"],
-            input_id="annual_debt_service",
-            direction=RankDirection.HIGHEST_FIRST,
         )
 
 
@@ -2413,19 +2404,37 @@ def test_a_series_of_every_place_needs_no_level(
 def test_a_rank_over_across_beside_a_named_entity_states_a_reduction(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
-    # "Top donors to Kenya": Kenya's recipient role and every donor are two
-    # role dimensions, so ranking donors collapses the recipient rows first.
-    dataset = requirement(
+    # "Top donors to Kenya and Uganda": the two recipients and every donor are
+    # two role dimensions, so ranking donors collapses the recipient rows first.
+    # Kenya alone leaves one row per donor in 2022, which needs none.
+    kenya = requirement(
         entities=[Entity(name="Kenya", role="recipient")],
         across=("donor",),
         period=Period(start=2022, end=2022),
     )
+    dataset = kenya.model_copy(
+        update={
+            "entities": (
+                Entity(name="Kenya", role="recipient"),
+                Entity(name="Uganda", role="recipient"),
+            )
+        }
+    )
+    africa = kenya.model_copy(
+        update={"entities": (Entity(name="Africa", role="recipient", members=True),)}
+    )
 
-    with pytest.raises(ValidationError, match="more than one role, which needs a reduction"):
-        _plan(
-            _population_decision(decision),
-            evidence_requirements=[dataset, _rank(dataset.id, axis="donor")],
-        )
+    for several in (dataset, africa):
+        with pytest.raises(ValidationError, match="more than one role, which needs a reduction"):
+            _plan(
+                _population_decision(decision),
+                evidence_requirements=[several, _rank(several.id, axis="donor")],
+            )
+    one = _plan(
+        _population_decision(decision),
+        evidence_requirements=[kenya, _rank(kenya.id, axis="donor")],
+    )
+    assert one.requirement("ranked").reduction is None
     with pytest.raises(ValidationError, match=r"roles are \['donor', 'recipient'\]"):
         _plan(
             _population_decision(decision),
@@ -2642,12 +2651,52 @@ def test_among_named_with_a_narrowing_filter_validates(
     assert plan.requirement("ranked").among == RankAmong.NAMED
 
 
+@pytest.mark.parametrize(("narrowed", "among"), [(False, "population"), (True, "named")])
+def test_a_rank_stating_no_among_takes_the_one_its_axis_admits(
+    decision: DecisionFactory, requirement: RequirementFactory, narrowed: bool, among: str
+) -> None:
+    # Each value is refused where the other holds, 'named' over an axis no
+    # filter narrowed and 'population' over a narrowed one, so the input decides.
+    dataset = requirement()
+    named = FilterRequirement(
+        id="named_entities",
+        decision_ids=["measure"],
+        input_id=dataset.id,
+        predicates=(EntityIn(names=["Kenya"], role="debtor"),),
+    )
+    ranked = _rank(named.id if narrowed else dataset.id, among=None, reduction=Reduction.MEAN)
+    stated = [dataset, named, ranked] if narrowed else [dataset, ranked]
+
+    settled = ranks_among_settled([ranked], graph=stated)
+
+    assert [one.among for one in settled] == [RankAmong(among)]  # type: ignore[union-attr]
+    plan = _plan(
+        _population_decision(decision) if among == "population" else decision(),
+        evidence_requirements=[*stated[:-1], *settled],
+    )
+    assert plan.requirement("ranked").among == RankAmong(among)
+
+
+def test_a_rank_stating_no_among_over_an_input_it_cannot_shape_is_refused(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    dataset = requirement()
+    unsettled = _rank(dataset.id, among=None, reduction=Reduction.MEAN)
+
+    assert ranks_among_settled([unsettled], graph=[unsettled]) == [unsettled]
+    with pytest.raises(ValidationError, match="admits only among='population'"):
+        _plan(decision(), evidence_requirements=[dataset, unsettled])
+
+
 def test_among_population_with_no_decision_fixing_it_fails(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
     dataset = requirement()
 
-    with pytest.raises(ValidationError, match="cites no decision whose `fixes` names `among`"):
+    with pytest.raises(
+        ValidationError,
+        match=r"holds among='population', .* cites no decision whose `fixes` names `among`",
+    ):
         _plan(
             decision(),  # fixes=None
             evidence_requirements=[
