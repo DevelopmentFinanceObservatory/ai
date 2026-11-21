@@ -623,17 +623,26 @@ answers while a turn streams on any instance, and it changes nothing. An
 unknown `conversation_id` answers 404 `not_found`. Members with no value
 are left out, as frames leave them out.
 
-| Member         | What it holds                                                                                                                                                                                                                                                                                                                    |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `turn`         | the latest turn: `index`, `status` (`running`, `paused`, `done`, `failed`, `cancelled`, `abandoned`), `trace_id`, `lease_live`, and `retry_after_seconds`, the lease's remaining time, while `lease_live` is true; absent before the first turn                                                                                  |
-| `closed_since` | every closed turn after `since`, oldest first, at most 3: `turn_index`, `user_message`, `reply` (as `message.complete` sent it, empty when the turn closed with none), `component_ids`, `error`, the code a turn that did not end cleanly closed on, and `new_question` on a turn ended by one (delta 27); empty without `since` |
-| `pause`        | when `turn.status` is `paused`: the `interrupt_id` to answer, its `kind` (`plan` or `elicitation`), and `frames`, the frames the pause was sent as, its `plan.proposed` or `elicitation.request` last, each with the `seq` it went out with                                                                                      |
-| `manifest`     | the composition manifest; absent when the conversation has no canvas                                                                                                                                                                                                                                                             |
+| Member         | What it holds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `turn`         | the latest turn: `index`, `status` (`running`, `paused`, `done`, `failed`, `cancelled`, `abandoned`), `trace_id`, `user_message` (as `closed_since` words it, for a page that lacks the prompt), `lease_live`, and `retry_after_seconds`, the lease's remaining time, while `lease_live` is true; absent before the first turn                                                                                                                                                                                            |
+| `closed_since` | every closed turn after `since`, oldest first, at most 3: `turn_index`, `user_message`, `reply` (as `message.complete` sent it, empty when the turn closed with none), `component_ids`, `cards` (each id's stored card: `component_id`, `type`, `title`, `revision`, `fact_summary`; no `payload` or `provenance`, which the component id reads from the presentation platform), `error`, the code a turn that did not end cleanly closed on, and `new_question` on a turn ended by one (delta 27); empty without `since` |
+| `pause`        | when `turn.status` is `paused`: the `interrupt_id` to answer, its `kind` (`plan` or `elicitation`), and `frames`, the frames the pause was sent as, its `plan.proposed` or `elicitation.request` last, each with the `seq` it went out with                                                                                                                                                                                                                                                                               |
+| `manifest`     | the composition manifest; absent when the conversation has no canvas                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 `user_message` is the turn's record: the message, with a `(then: ...)` line
 for each amendment, answer or switch on the turn's cards. A client holding
 more than 3 turns fewer than the server reads again with `since` set to the
 last turn it got.
+
+`status` reads `running` in two states the cursor alone would name
+otherwise. A turn whose segment closed it and has not yet stored its record
+reads `running` while that segment's lease is live, so a closed status
+always comes with the turn in `closed_since`. A turn paused on a question
+whose answer `/interrupt` recorded and the turn has not yet taken, because
+the client left in between, reads `running` with no `pause`, and
+`turn.resume` carries that answer on as a retried `interrupt.response`
+would.
 
 What a page does with `turn`:
 
@@ -656,7 +665,8 @@ does: `done`, a pause, or an `error` frame.
 | -------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | `turn_index` is the open turn, `running`, and no lease is live | 200, a new SSE stream                                                   |
 | `turn_index` is not the open turn, or no turn is open          | 409 `edit_conflict`, `refresh_then_retry`, `pointer: "/turn_index"`     |
-| the turn is paused on a question                               | 409 `edit_conflict`, `refresh_then_retry`, `pointer: "/turn_index"`     |
+| the turn is paused on a question with no answer recorded       | 409 `edit_conflict`, `refresh_then_retry`, `pointer: "/turn_index"`     |
+| the turn is paused on an answer recorded and not yet taken     | 200, a new SSE stream carrying that answer on                           |
 | a lease is live, on any instance                               | 409 `transient_unavailable` with `retry_after_seconds`                  |
 | a Stop is live for the turn                                    | the turn closes `cancelled`, and the resume answers 409 `edit_conflict` |
 | unknown `conversation_id`                                      | 404 `not_found`                                                         |
@@ -670,8 +680,10 @@ Users type new questions into the plan card's revise box. The client sends
 them as `amend`, and the planner decides whether the text changes the plan
 or asks something else (`propose_plan`'s `starts_new_plan`, with or without
 `amends_version`). For a different question, the turn ends with its plan
-set aside unapproved: the new stream sends `done` with `new_question`, the
-`amend` text as sent, and no message, `plan.versioned` or new card. The
+set aside unapproved: the new stream sends a `message.complete` saying the
+plan was set aside for a new question, which a client without this delta
+still shows, then `done` with `new_question`, the `amend` text as sent, and
+no `plan.versioned` or new card. The
 turn closes `done`, its pending interrupt is cleared, so a later answer to
 it gets 404, and the conversation's next turn sees that the plan was set
 aside for a new question.
@@ -680,8 +692,7 @@ The client closes the card ("Taken as a new question") and sends
 `new_question` as the next `turn.request`, which is metered, opens its own
 trace, and plans or answers the question like any other. A state read's
 closed turn carries the same `new_question`, for a page that lost the
-stream before `done`. A client that ignores the field loses the question,
-as before this delta. No new frame, request kind or turn status is added.
+stream before `done`. A client that ignores the field shows the message and loses the question. No new frame, request kind or turn status is added.
 
 ## Sample fixture values (delta 10)
 

@@ -3509,7 +3509,7 @@ async def test_a_new_question_typed_on_the_plan_card_ends_the_turn_and_hands_it_
 
         assert "plan.proposed" not in _events(second)
         assert "plan.versioned" not in _events(second)
-        assert "message.complete" not in _events(second)
+        assert _frame(second, "message.complete")["text"] == studio_state_module.SET_ASIDE_REPLY
         done = second[-1]
         assert done["event"] == "done"
         assert done["new_question"] == typed
@@ -3538,12 +3538,59 @@ async def test_a_new_question_typed_on_the_plan_card_ends_the_turn_and_hands_it_
     assert history is not None
     (record,) = history["turns"]
     assert record["ended"] == studio_state_module._SET_ASIDE
+    assert record["assistant"] == studio_state_module.SET_ASIDE_REPLY
     assert "error" not in record
     reloaded = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert reloaded.turns[0]["ended_by"] == "new_question"
     assert reloaded.turns[0]["new_question"] == typed
     assert "ended_by" not in reloaded.turns[1]
+
+
+async def test_a_set_aside_turn_whose_closing_write_failed_is_read_and_recorded_as_set_aside(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The turn ends on a new question typed on the plan card, and its
+    closing write saves nothing. Once the lease lapses, the state read and the
+    next load find the cursor closed with no record, and record the turn as
+    the stream ended it: `done`, its reply the set-aside sentence, and the
+    typed question kept, with no `state_not_saved`."""
+    clock = await StoreClock.start(_engine())
+    store = StudioStore(_engine(), **clock.store_kwargs)
+    app = _app(
+        *_plan("kenya debt"),
+        planner=_RestartRefusingPlanner(schemas=real_schemas),
+        tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
+        store=store,
+    )
+    typed = "what was Kenya's ODA in 2023?"
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("kenya debt"))
+        plan_v1 = _frame(first, "plan.proposed")
+        _close_as(store, SegmentClose.FAILED)
+        await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(plan_v1["interrupt_id"], "amend", typed),
+        )
+        await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)
+        read = (
+            await client.get(
+                "/api/studio/state",
+                params={"conversation_id": CONVERSATION, "since": 0},
+                headers=AUTH,
+            )
+        ).json()
+
+    assert read["turn"]["status"] == "done"
+    (closed,) = read["closed_since"]
+    assert closed["new_question"] == typed
+    assert closed["reply"] == studio_state_module.SET_ASIDE_REPLY
+    assert "error" not in closed
+    reloaded = await StudioStore(_engine(), **clock.store_kwargs).load(PRINCIPAL, CONVERSATION)
+    assert reloaded is not None
+    assert reloaded.turns[0]["new_question"] == typed
+    assert "error" not in reloaded.turns[0]
 
 
 async def test_an_approval_is_recorded_with_its_approver_and_its_revision() -> None:

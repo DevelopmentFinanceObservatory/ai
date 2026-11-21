@@ -103,6 +103,7 @@ from harness.scope_choices import REASON_COPY
 from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
 from harness.sentences import DROPPED_REASON, MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
+    SET_ASIDE_REPLY,
     ConversationState,
     _PendingChoice,
     _PendingInterrupt,
@@ -2974,10 +2975,19 @@ class _Translator:
         self._held.clear()
         if self.paused:
             return frames
+        if new_question:
+            # The planner ended the turn before the agent answered: the reply
+            # says the plan was set aside, for a client that does not read
+            # `done.new_question`.
+            self._final_text = SET_ASIDE_REPLY
         answer, notes, basis = self._final_text, None, None
+        # A set-aside turn's reply is the code's own, with no figures to note.
+        answered = bool(self._final_text) and not new_question
         if self._final_text:
             notes = (
-                " ".join(
+                None
+                if not answered
+                else " ".join(
                     loose_match_notes(
                         self._conversation.turn_readings,
                         specs=self._conversation.turn_specs,
@@ -2986,10 +2996,14 @@ class _Translator:
                 )
                 or None
             )
-            basis = basis_line(
-                self._conversation.turn_readings,
-                specs=self._conversation.turn_specs,
-                plans=self._conversation.turn_plans,
+            basis = (
+                basis_line(
+                    self._conversation.turn_readings,
+                    specs=self._conversation.turn_specs,
+                    plans=self._conversation.turn_plans,
+                )
+                if answered
+                else None
             )
             closing = "".join(f"\n\n{block}" for block in (notes, basis) if block)
             if closing:
@@ -3017,7 +3031,7 @@ class _Translator:
                     self._conversation.turn_readings, specs=self._conversation.turn_specs
                 )
             ]
-            if self._final_text
+            if answered
             else []
         )
         self._record_chips(chips)

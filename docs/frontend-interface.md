@@ -408,13 +408,14 @@ the step it stopped in again from its start, so the new stream carries no
 sent goes out once. The stream ends with `done`, a pause or an `error`
 frame.
 
-| Case                                              | Answer                                                          |
-| ------------------------------------------------- | --------------------------------------------------------------- |
-| the turn is open, running, and no stream holds it | a new SSE stream                                                |
-| `turn_index` is not the open turn, or none is     | 409 `edit_conflict`, `pointer: "/turn_index"`: read state again |
-| the turn is paused on a question                  | 409 `edit_conflict`: answer it on `/interrupt`                  |
-| a stream holds the turn                           | 409 `transient_unavailable` with `retry_after_seconds`          |
-| unknown `conversation_id`                         | 404 `not_found`                                                 |
+| Case                                                       | Answer                                                          |
+| ---------------------------------------------------------- | --------------------------------------------------------------- |
+| the turn is open, running, and no stream holds it          | a new SSE stream                                                |
+| `turn_index` is not the open turn, or none is              | 409 `edit_conflict`, `pointer: "/turn_index"`: read state again |
+| the turn is paused on a question with no answer recorded   | 409 `edit_conflict`: answer it on `/interrupt`                  |
+| the turn is paused on an answer recorded and not yet taken | a new SSE stream carrying that answer on                        |
+| a stream holds the turn                                    | 409 `transient_unavailable` with `retry_after_seconds`          |
+| unknown `conversation_id`                                  | 404 `not_found`                                                 |
 
 ### 4.6 GET `/api/studio/state`
 
@@ -424,16 +425,18 @@ it answers while a turn streams, and it changes nothing. An unknown
 `conversation_id` answers 404 `not_found`. A member with no value is left
 out.
 
-- `turn`: `{index, status, trace_id, lease_live, retry_after_seconds}`.
+- `turn`: `{index, status, trace_id, user_message, lease_live, retry_after_seconds?}`. `user_message` is the turn's prompt, to show above a resumed reply when the page lacks it.
   `status` is `running`, `paused`, `done`, `failed`, `cancelled` or
   `abandoned`. `retry_after_seconds` is set while `lease_live` is true.
-  Absent before the first turn.
+  Absent before the first turn. A turn reads `running` until its closed
+  record exists, so a closed status always comes with the turn in
+  `closed_since`. A turn whose answer was recorded and not yet taken, a
+  page left right after sending it, also reads `running`, with no `pause`.
 - `closed_since`: the closed turns after `since`, oldest first, at most 3,
-  each `{turn_index, user_message, reply, component_ids, error?}`. `reply`
-  is the text `message.complete` sent, empty when the turn closed with
-  none; `error` is the code of a turn that did not end cleanly;
-  `new_question` is set on a turn ended by a new question (§6), which the
-  page sends as the next turn when it holds none after it. When more
+  each `{turn_index, user_message, reply, component_ids, cards, error?, new_question?}`. `cards` holds each card the turn made, in `component_ids` order: `{component_id, type, title, revision, fact_summary?}`, the same `fact_summary` its `component.created` carried. It holds no `payload` or `provenance`; read the resolved revision from the presentation platform by `component_id`. `reply` is the text `message.complete` sent, empty when
+  the turn closed with none; `error` is the code of a turn that did not
+  end cleanly; `new_question` is set on a turn ended by a new question
+  (§6), which the page sends as the next turn when it holds none after it. When more
   turns are missing, read again with `since` set to the last one returned.
 - `pause`: on a paused turn, `{interrupt_id, kind, frames}`. `kind` is
   `plan` or `elicitation`. `frames` are the frames the pause was sent as,
@@ -684,8 +687,8 @@ a loop:
    Nothing was computed.
 1. When the `amend` text asks a different question rather than a change to
    the plan, the turn ends with the plan set aside unapproved. The stream
-   sends `done` with `new_question`, the text as sent, and no message or
-   new card. Close the card as "Taken as a new question" and send
+   sends a `message.complete` saying so, then `done` with `new_question`,
+   the text as sent, and no new card. Close the card as "Taken as a new question" and send
    `new_question` as a new `turn.request`. An answer to the closed card's
    `interrupt_id` gets 404.
 

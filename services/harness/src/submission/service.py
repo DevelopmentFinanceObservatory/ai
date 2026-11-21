@@ -525,6 +525,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         existing,
         amends_version=proposal.amends_version,
         starts_new_plan=proposal.starts_new_plan,
+        amendment_entry=in_amendment_entry,
         rounds_so_far=load_plan_rounds(view.state),
         question=question,
     )
@@ -1895,6 +1896,7 @@ def _resolve_intent(
     starts_new_plan: bool,
     rounds_so_far: int,
     question: str | None = None,
+    amendment_entry: bool = False,
 ) -> tuple[Plan | None, int] | dict[str, object]:
     """Which plan a `propose_plan` call means, from what the call states.
 
@@ -1907,11 +1909,14 @@ def _resolve_intent(
     read as starting a fresh plan and drop every item it did not restate.
 
     With nothing recorded, the call is a first draft. With a plan recorded,
-    a call stating `starts_new_plan` reports a different question, whatever
-    `amends_version` says: a model that names the version beside it still
-    means the user asked something else, and reading the pair as a patch
-    would record an empty amendment and drop the user's question. Otherwise
-    an `amends_version` naming the recorded version patches it. Anything else
+    a call stating `starts_new_plan` alone reports a different question. On
+    an entry the user's amendment opened (`amendment_entry`), so does a call
+    stating it beside `amends_version`: the user's words are what the call
+    classifies, and reading the pair as a patch would record an empty
+    amendment and drop the user's question. On any other entry (a replan
+    after a run, a pick's replan) there are no words of the user's to hand
+    on, so the pair is read as the patch its payload is. Otherwise an
+    `amends_version` naming the recorded version patches it. Anything else
     is refused, naming the version to pass so the next call is correct. `rounds_so_far` counts the proposals made in this
     entry into the planner. `PlannerAdapter` zeroes it on every entry that is not
     a mid-turn resume. An amendment increments it, since every version opens a
@@ -1923,7 +1928,7 @@ def _resolve_intent(
     held to `existing.question` rather than the call's own wording of the
     question it is answering:
 
-    - A restart (`starts_new_plan`) is refused with
+    - A restart, as above, is refused with
       `QUESTION_FIXED` before the round cap is even checked, ahead of
       `BUDGET_EXHAUSTED`. Both refusals record nothing, so nothing is lost
       by checking this one first, and a restart can never succeed under a
@@ -1940,7 +1945,8 @@ def _resolve_intent(
     """
     if existing is None:
         return None, 1
-    blocked = _restart_blocked(existing, starts_new_plan=starts_new_plan) or _round_cap_blocked(
+    restart = starts_new_plan and (amends_version is None or amendment_entry)
+    blocked = _restart_blocked(existing, restart=restart) or _round_cap_blocked(
         existing, rounds_so_far=rounds_so_far
     )
     if blocked is not None:
@@ -1953,13 +1959,13 @@ def _resolve_intent(
     return existing, rounds_so_far + 1
 
 
-def _restart_blocked(existing: Plan, *, starts_new_plan: bool) -> dict[str, object] | None:
+def _restart_blocked(existing: Plan, *, restart: bool) -> dict[str, object] | None:
     """Return the `QUESTION_FIXED` refusal for a restart, or `None`.
 
     Split out of `_resolve_intent` to keep its own branch count within this
     project's `PLR0911` budget.
     """
-    if not starts_new_plan:
+    if not restart:
         return None
     return problem(
         ProblemCode.QUESTION_FIXED,

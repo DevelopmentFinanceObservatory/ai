@@ -115,6 +115,7 @@ from harness.db.commit import (
 from harness.db.jsonb import json_or_none, to_json_param
 from harness.fatal_codes import recorded_code
 from harness.graph.state import (
+    NEW_QUESTION_KEY,
     ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -124,6 +125,7 @@ from harness.provenance import CardLineage, CardLineageDecodeError, lineage_from
 from harness.run_ledger import end_unfinished
 from harness.studio_state import (
     SEGMENT_TTL_S,
+    SET_ASIDE_REPLY,
     TURN_LOG_EVENT,
     ConversationState,
     DatabaseUnavailable,
@@ -1231,6 +1233,33 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
         conversation.turn_applied_choice = dict(state[ORCHESTRATOR_APPLIED_KEY] or {})
 
 
+def set_aside_question(cursor: Cursor) -> str | None:
+    """The user's words turn `cursor` ended on when it closed `done` with
+    its plan card set aside for them, a different question
+    (`harness.graph.state.NEW_QUESTION_KEY`), else `None`."""
+    typed = cursor.state.get(NEW_QUESTION_KEY)
+    if cursor.status is TurnStatus.DONE and isinstance(typed, str) and typed:
+        return typed
+    return None
+
+
+def record_closed_turn(conversation: ConversationState, cursor: Cursor) -> str | None:
+    """Record turn `cursor`, closed, on `conversation` as the client was told
+    it ended, for a turn whose closing write never stored its record: keep
+    its records (`keep_turn_records`) and close it on its set-aside question
+    when it ended on one (`set_aside_question`), with the reply the stream
+    sent, and otherwise with no reply and `closed_turn_error`'s error.
+    Returns the error recorded."""
+    keep_turn_records(conversation, cursor.state)
+    typed = set_aside_question(cursor)
+    if typed is not None:
+        conversation.close_turn(final_text=SET_ASIDE_REPLY, new_question=typed)
+        return None
+    error = closed_turn_error(cursor)
+    conversation.close_turn(final_text="", error=error)
+    return error
+
+
 @dataclass
 class _RuntimeEntry:
     """The process-local anchor for one (principal, conversation_id).
@@ -1552,8 +1581,7 @@ class StudioStore:
         lease = _row_segment(row)
         live = lease is not None and lease.expires_at > row.db_now
         if closed is not None and not live:
-            keep_turn_records(state, closed.state)
-            state.close_turn(final_text="", error=closed_turn_error(closed))
+            record_closed_turn(state, closed)
         return StoredConversation(
             state=state,
             turn_status=status,
@@ -1620,9 +1648,7 @@ class StudioStore:
         Returns the copy and the row's new version, `None` when it recorded
         nothing."""
         recorded = _shallow_copy(durable)
-        keep_turn_records(recorded, cursor.state)
-        error = closed_turn_error(cursor)
-        recorded.close_turn(final_text="", error=error)
+        error = record_closed_turn(recorded, cursor)
         before = _serialize_durable(durable)
         delta = _changed_since(_serialize_durable(recorded), before)
         lines = _committed_lines(delta, stored=before)

@@ -127,14 +127,15 @@ _PROPOSE_PLAN_ARGUMENTS = {
     "amends_version": (
         "The `version` this call patches, as the last `propose_plan` call "
         'answered it and as the brief\'s own "version N" line states it. '
-        "Required once a plan is recorded, unless `starts_new_plan` is set: "
-        "a call stating neither is refused, and `question` never stands in "
-        "for the choice."
+        "Required to patch a recorded plan. A call stating neither this nor "
+        "`starts_new_plan` is refused, and `question` never stands in for "
+        "the choice."
     ),
     "starts_new_plan": (
         "True says the user's reply asks a different question from the one "
-        "fixed for this turn. Refused, recording nothing: the harness ends the "
-        "turn and tells the user to send that question as its own message."
+        "fixed for this turn, even beside `amends_version`. Refused, recording "
+        "nothing: the harness ends the turn and sends the reply on as its own "
+        "question."
     ),
 }
 

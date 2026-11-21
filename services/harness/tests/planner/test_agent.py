@@ -3084,15 +3084,27 @@ def test_a_call_with_no_plan_recorded_needs_no_statement_of_intent(
     assert result["previous_version"] is None
 
 
-def test_a_call_stating_both_reads_as_a_new_question(
-    decision: DecisionFactory, requirements: RequirementPair
+@pytest.mark.parametrize(
+    ("user_amends", "recorded"),
+    [
+        pytest.param(True, 1, id="user-amendment-entry-new-question"),
+        pytest.param(False, 2, id="replan-entry-patch"),
+    ],
+)
+def test_a_call_stating_both_is_a_new_question_only_on_the_users_amendment(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    user_amends: bool,
+    recorded: int,
 ) -> None:
-    # The Kenya turn: the model named the version it was shown beside
-    # `starts_new_plan`, and meant a different question. Read as a patch, the
-    # pair recorded an empty amendment and the user's question was lost.
+    # On an entry the user's amendment opened, `starts_new_plan` beside
+    # `amends_version` reports a different question and records nothing. On
+    # any other entry, such as a replan after a run, no words of the user's
+    # are there to hand on, and the pair patches the plan the version names.
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = user_amends
 
     result = call_planner_tool(
         tools["propose_plan"],
@@ -3103,11 +3115,13 @@ def test_a_call_stating_both_reads_as_a_new_question(
         tool_context=ctx,
     )
 
-    assert result["outcome"] == Outcome.REFUSED.value, result
-    assert result["code"] == ProblemCode.QUESTION_FIXED.value
     stored = load_plan(ctx.state)
     assert stored is not None
-    assert stored.version == 1
+    assert stored.version == recorded
+    if user_amends:
+        assert result["code"] == ProblemCode.QUESTION_FIXED.value, result
+    else:
+        assert result["outcome"] == Outcome.OK.value, result
 
 
 # --- Patching an existing plan -----------------------------------------------------

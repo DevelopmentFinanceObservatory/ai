@@ -5,13 +5,14 @@ prose doc explains the protocol; this module is what the server actually
 validates and emits, and the two ship together. Deltas the repo doc
 indexes that change a shape are marked on the field they touch.
 
-Four request kinds arrive over POST, discriminated on `kind`
+Five request kinds arrive over POST, discriminated on `kind`
 (`STUDIO_REQUEST_ADAPTER`): `turn.request`, `interrupt.response`,
-`composition.mutate`, `turn.cancel`. Twelve frame types leave over SSE, discriminated on
-`event` (`STUDIO_FRAME_ADAPTER`): message.delta, message.complete,
-plan.proposed, plan.versioned, activity.step, component.created,
-component.revised, composition.updated, elicitation.request, suggestions,
-error, done.
+`composition.mutate`, `turn.cancel`, `turn.resume`. `GET /api/studio/state`
+answers `ConversationRead`. Thirteen frame types leave over SSE,
+discriminated on `event` (`STUDIO_FRAME_ADAPTER`): message.delta,
+message.complete, plan.proposed, plan.versioned, plan.approved,
+activity.step, component.created, component.revised, composition.updated,
+elicitation.request, suggestions, error, done.
 
 Every model forbids unknown members, mirroring the schemas'
 `additionalProperties: false`, so a frame the contract doesn't describe
@@ -1739,24 +1740,41 @@ class TurnStatusName(StrEnum):
 
 
 class TurnState(_WireModel):
-    """The conversation's latest turn. `lease_live` says a segment holds the
-    turn now, on some instance; `retry_after_seconds` is then the most the
-    lease has left, and is absent otherwise. A `running` turn with no live
-    lease is carried on by `POST /api/studio/resume`."""
+    """The conversation's latest turn. `user_message` is what the user asked
+    it, as `ClosedTurn.user_message` words it. `lease_live` says a segment
+    holds the turn now, on some instance; `retry_after_seconds` is then the
+    most the lease has left, and is absent otherwise. A `running` turn with
+    no live lease is carried on by `POST /api/studio/resume`."""
 
     index: int = Field(ge=1)
     status: TurnStatusName
     trace_id: str
+    user_message: str
     lease_live: bool
     retry_after_seconds: int | None = Field(default=None, ge=0)
+
+
+class StoredCard(_WireModel):
+    """A card a closed turn made or changed, as the conversation stores it:
+    its type, title, revision and the `fact_summary` its
+    `component.created` or `component.revised` frame carried. The stored
+    card holds no `payload` or `provenance`; the component id reads the
+    resolved revision from the presentation platform."""
+
+    component_id: str
+    type: str
+    title: str
+    revision: int = Field(ge=1)
+    fact_summary: FactSummary | None = None
 
 
 class ClosedTurn(_WireModel):
     """One closed turn: the user's message as the turn recorded it (an
     amendment or an answer adds a `(then: ...)` line), the reply the turn
     closed on (empty when it closed with none), the ids of the cards it
-    made or changed, and the code it closed on when it did not end
-    cleanly. `new_question` is set on a turn the user ended by typing a
+    made or changed with each one's stored card (`cards`, in the same order,
+    leaving out an id the conversation holds no card for), and the code it
+    closed on when it did not end cleanly. `new_question` is set on a turn the user ended by typing a
     different question on its plan card (`Done.new_question`): the client
     sends it as the next turn when it holds no later one."""
 
@@ -1764,6 +1782,7 @@ class ClosedTurn(_WireModel):
     user_message: str
     reply: str
     component_ids: list[str]
+    cards: list[StoredCard] = Field(default_factory=list)
     error: str | None = None
     new_question: str | None = None
 

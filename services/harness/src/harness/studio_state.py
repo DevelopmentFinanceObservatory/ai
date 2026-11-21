@@ -455,6 +455,9 @@ TURN_LOG_EVENT = "studio.turn"
 # A turn record's `ended_by` for a turn the user ended by typing a different
 # question on its plan card (`ConversationState.close_turn`).
 NEW_QUESTION = "new_question"
+# The reply such a turn closes on, which a client that does not read
+# `done.new_question` still shows.
+SET_ASIDE_REPLY = "The plan was set aside, since your message asks a new question."
 # What the conversation digest says of such a turn (`_history_turn`).
 _SET_ASIDE = "The user set this plan aside unapproved and asked a new question in the next turn."
 

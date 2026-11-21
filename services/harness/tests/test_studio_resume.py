@@ -21,12 +21,30 @@ from compiler.surface import ProgressCallback, ToolCallResult
 from fastapi import FastAPI
 from google.genai import types
 from harness.scripted import ScriptedSurface
-from harness.studio_store import StudioStore
+from harness.studio import _conversation_read
+from harness.studio_state import ConversationState
+from harness.studio_store import StoredConversation, StudioStore
+from harness.turn.store import TurnStatus
 from planner.workflow import ToolId
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .scripted_tools import plan_call, search_call
-from .studio_routes import AUTH, orchestrator_app, stream, studio_client, turn_body
+from .scripted_tools import (
+    CannedSearch,
+    chart,
+    definite_envelope,
+    fetch_call,
+    make_charts_call,
+    plan_call,
+    search_call,
+)
+from .studio_routes import (
+    AUTH,
+    frame_for,
+    orchestrator_app,
+    stream,
+    studio_client,
+    turn_body,
+)
 from .turn_driver import CONVERSATION
 
 # The principal `AUTH`'s bearer token resolves to.
@@ -184,6 +202,7 @@ async def test_a_resume_carries_a_turn_its_client_left_on_to_its_pause(
             "index": 1,
             "status": "running",
             "trace_id": before.json()["turn"]["trace_id"],
+            "user_message": "q with forks",
             "lease_live": False,
         }
         assert "pause" not in before.json()
@@ -389,3 +408,114 @@ async def test_a_resume_sends_the_approved_plan_its_departed_client_never_got(
     assert _events(resumed).count("plan.approved") == 1
     assert next(f for f in resumed if f["event"] == "plan.approved")["revision"] == plan["revision"]
     assert _events(resumed)[-1] == "done"
+
+
+async def test_a_resume_carries_on_an_answer_its_client_left_before_the_turn_took_it(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The client approves and leaves after `/interrupt` recorded the answer
+    and before the turn accepted it, so the cursor still stands paused with
+    its only entry resuming. The state read shows the turn running with no
+    lease and no pause to answer, and `/resume` carries the answer on as a
+    retry of it would."""
+    app, _ = orchestrator_app(
+        plan_call("q with forks"),
+        _text("Planned and run."),
+        tool_surface=ScriptedSurface(),
+        engine=pg_engine,
+    )
+    async with studio_client(app) as client:
+        first = await stream(client, "/api/studio/turn", turn_body("q with forks"))
+    plan = first[-1]
+    assert plan["event"] == "plan.proposed"
+
+    turns = app.state.studio.turns
+    reached = asyncio.Event()
+    record_answer = turns.record_answer
+
+    async def hang_before_accepting(*args: Any, **kwargs: Any) -> Any:
+        reached.set()
+        await asyncio.Event().wait()
+        return await record_answer(*args, **kwargs)
+
+    turns.record_answer = hang_before_accepting
+    await _leave_once(
+        app,
+        "/api/studio/interrupt",
+        {
+            "kind": "interrupt.response",
+            "schema_version": 1,
+            "conversation_id": CONVERSATION,
+            "interrupt_id": plan["interrupt_id"],
+            "decision": "approve",
+        },
+        reached,
+    )
+    turns.record_answer = record_answer
+
+    async with studio_client(app) as client:
+        read = (await _state(client)).json()
+        resumed = await stream(client, "/api/studio/resume", _resume_body(1))
+
+    assert read["turn"]["status"] == "running"
+    assert read["turn"]["lease_live"] is False
+    assert "pause" not in read
+    assert _events(resumed).count("plan.approved") == 1
+    assert _events(resumed)[-1] == "done"
+
+
+@pytest.mark.parametrize(
+    ("cursor", "recorded", "lease_seconds", "status"),
+    [
+        pytest.param(TurnStatus.DONE, False, 30.0, "running", id="closed-record-unwritten"),
+        pytest.param(TurnStatus.DONE, True, None, "done", id="closed-recorded"),
+        pytest.param(TurnStatus.RUNNING, False, None, "running", id="left-running"),
+    ],
+)
+def test_the_state_read_reports_a_closed_turn_only_once_its_record_exists(
+    cursor: TurnStatus, recorded: bool, lease_seconds: float | None, status: str
+) -> None:
+    """A segment closes the cursor before its closing write stores the
+    turn's record. Until the record exists the read says `running`, so a
+    page reads again instead of finding the turn closed with nothing in
+    `closed_since`."""
+    state = ConversationState(conversation_id=CONVERSATION, turn_index=1, trace_id="tr_1")
+    if recorded:
+        state.close_turn(final_text="Done.")
+    stored = StoredConversation(state=state, turn_status=cursor, lease_seconds=lease_seconds)
+
+    read = _conversation_read(stored, since=0)
+
+    assert read.turn is not None
+    assert read.turn.status.value == status
+    assert [turn.turn_index for turn in read.closed_since] == ([1] if recorded else [])
+
+
+async def test_a_closed_turn_carries_the_cards_it_made(pg_engine: AsyncEngine) -> None:
+    """A page that never got a turn's frames draws its cards from the state
+    read: each card the turn made comes with its stored type, title, revision
+    and fact summary."""
+    app, _ = orchestrator_app(
+        search_call("life expectancy in Kenya"),
+        fetch_call(),
+        make_charts_call(chart(frame_for(), title="Life expectancy in Kenya")),
+        _text("Here is the card."),
+        resolver=CannedSearch(definite_envelope()),
+        engine=pg_engine,
+    )
+    async with studio_client(app) as client:
+        frames = await stream(client, "/api/studio/turn", turn_body("life expectancy in Kenya"))
+        read = (await _state(client, since=0)).json()
+
+    created = next(frame for frame in frames if frame["event"] == "component.created")
+    (block,) = frames[-1]["composition"]["blocks"]
+    (closed,) = read["closed_since"]
+    assert closed["component_ids"] == [created["component_id"]]
+    (card,) = closed["cards"]
+    assert card == {
+        "component_id": created["component_id"],
+        "type": created["type"],
+        "title": block["title"],
+        "revision": created["revision"],
+        "fact_summary": created["fact_summary"],
+    }
