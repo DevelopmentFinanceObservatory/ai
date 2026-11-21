@@ -4175,8 +4175,8 @@ def _check_population_claims_are_cited(
             for decision in cited
         ):
             raise ValueError(
-                f"{requirement.id!r} states {field}={value!r}, a claim over entities nobody "
-                f"named, but cites no decision whose `fixes` names `{field}`"
+                f"{requirement.id!r} holds {field}={value.value!r}, a claim over entities "
+                f"nobody named, but cites no decision whose `fixes` names `{field}`; cite one"
             )
 
 

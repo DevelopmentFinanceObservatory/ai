@@ -1,0 +1,161 @@
+{
+  "id": "rank-top-five-donors-ethiopia",
+  "kind": "rank",
+  "origin": "trace 6ee5f189",
+  "question": "Net ODA to Ethiopia from 2014 to 2023 in current US dollars from OECD DAC2a, split by the top five donors across the period.",
+  "searches": [
+    {
+      "parts": [
+        {
+          "variable": "net disbursements of official development assistance (ODA)",
+          "entities": [
+            {
+              "text": "Ethiopia",
+              "role": "to"
+            }
+          ],
+          "time": "2014 to 2023",
+          "unit": "current US dollars",
+          "open_roles": [
+            "donor"
+          ],
+          "operations": [
+            {
+              "verb": "rank",
+              "phrase": "top five donors",
+              "over": "origin"
+            }
+          ],
+          "sources": [
+            {
+              "text": "OECD DAC2a"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "Net disbursements of official development assistance (ODA) to Ethiopia from 2014 to 2023 by donor, split by the top five donors across the period, in current US dollars from OECD DAC2a.",
+  "asks": [
+    {
+      "by": [
+        "donor"
+      ],
+      "across_years": true,
+      "text": "Top five donors of ODA to Ethiopia across 2014 to 2023"
+    },
+    {
+      "by": [
+        "donor"
+      ],
+      "text": "Annual ODA to Ethiopia from the top five donors from 2014 to 2023"
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "unit_asked": true,
+  "period_reduction": "across_years",
+  "reference_payload": {
+    "across_years": [],
+    "answer_mode": "computed",
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "unit": {
+          "prices": "current",
+          "currency": "USD"
+        },
+        "entities": [
+          {
+            "name": "Ethiopia",
+            "role": "recipient"
+          }
+        ],
+        "across": [
+          "donor"
+        ],
+        "frequency": "annual",
+        "source": "OECD DAC2a",
+        "period": {
+          "end": 2023,
+          "start": 2014
+        },
+        "source_spec_id": "spec_bffad92a5a891f080d65023aa313335c",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "measure": "Net disbursements of official development assistance (ODA)",
+        "id": "ethiopia_oda_by_donor"
+      },
+      {
+        "input_id": "ethiopia_oda_by_donor",
+        "per_period": false,
+        "among": "population",
+        "decision_ids": [
+          "rank_among"
+        ],
+        "window_start": 2014,
+        "id": "top_five_donors",
+        "kind": "rank",
+        "axis": "donor",
+        "limit": 5,
+        "window_end": 2023,
+        "direction": "highest_first",
+        "reduction": "sum"
+      },
+      {
+        "kind": "rank",
+        "window_end": 2023,
+        "among": "population",
+        "axis": "donor",
+        "window_start": 2014,
+        "reduction": "sum",
+        "input_id": "ethiopia_oda_by_donor",
+        "decision_ids": [
+          "rank_among"
+        ],
+        "direction": "highest_first",
+        "per_period": true,
+        "id": "annual_top_five",
+        "limit": 5
+      }
+    ],
+    "answered": [
+      {
+        "outputs": [
+          "top_five_donors"
+        ],
+        "ask": 0
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "annual_top_five"
+        ]
+      }
+    ],
+    "decisions": [
+      {
+        "resolved_by": "planner_default",
+        "fixes": [
+          "among"
+        ],
+        "slot": "rank_among",
+        "description": "Compare donors against the entire reporting donor population in DAC2a",
+        "chosen": "population",
+        "rationale": "The question asks for the top five donors across all donors reporting aid to Ethiopia.",
+        "options": [
+          "population",
+          "named"
+        ]
+      }
+    ],
+    "question": "Net disbursements of official development assistance (ODA) to Ethiopia from 2014 to 2023 by donor, split by the top five donors across the period, in current US dollars from OECD DAC2a."
+  }
+}

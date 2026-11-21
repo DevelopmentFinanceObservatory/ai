@@ -2675,7 +2675,10 @@ def test_among_population_with_no_decision_fixing_it_fails(
 ) -> None:
     dataset = requirement()
 
-    with pytest.raises(ValidationError, match="cites no decision whose `fixes` names `among`"):
+    with pytest.raises(
+        ValidationError,
+        match=r"holds among='population', .* cites no decision whose `fixes` names `among`",
+    ):
         _plan(
             decision(),  # fixes=None
             evidence_requirements=[

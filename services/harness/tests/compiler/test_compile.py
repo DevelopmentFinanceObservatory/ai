@@ -6193,6 +6193,66 @@ def test_a_rank_over_an_open_party_it_does_not_keep_compiles_with_one_row_per_en
     assert result.workflow.steps[-1].args.get("aggregation") == aggregation
 
 
+_DAC_HUMANITARIAN_BLOCK = (
+    Path(__file__).parent.parent / "fixtures" / "search_spec_dac_humanitarian.json"
+)
+
+
+@pytest.mark.parametrize(
+    ("reduction", "codes"),
+    [(None, [Code.RANK_REDUCTION_REQUIRED]), (Reduction.SUM, [])],
+    ids=["no-reduction", "summed"],
+)
+def test_humanitarian_aid_by_dac_donor_ranks_only_with_a_reduction(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    reduction: Reduction | None,
+    codes: list[Code],
+) -> None:
+    # The plan the Studio recorded for "humanitarian aid by DAC donor in 2019 and
+    # 2023", over dev `search`'s own block: the DAC group binds `origin` and the
+    # 163 recipients stay open on `destination`, so each donor holds one row per
+    # recipient a year until the rank sums them.
+    block = json.loads(_DAC_HUMANITARIAN_BLOCK.read_text())["spec"]
+    dac = source_from_spec_block(block)
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="humanitarian aid",
+        entities=[Entity(name="Development Assistance Committee", role="donor", members=True)],
+        period=Period(start=2019, end=2023),
+        stat_vars=StatVarReading.SUM,
+    )
+    fields: dict[str, Any] = {
+        "id": "ranked",
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "axis": "donor",
+        "per_period": True,
+        "limit": 10,
+        "reduction": reduction,
+    }
+    plan = _draft(
+        [decision(), _population_decision(decision)],
+        [
+            aid,
+            RankRequirement(decision_ids=["measure", "population"], input_id="aid", **fields),
+        ],
+    )
+
+    result = build(
+        plan,
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=dac.spec_id),
+            RankOperation(requirement_id="ranked", input="fetch", **fields),
+            terminal=["ranked"],
+        ),
+        discovered={"aid": dac},
+    )
+
+    assert _codes(result) == codes
+
+
 def test_a_whole_side_over_an_open_axis_beside_a_named_entity_is_refused(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:

@@ -1,0 +1,144 @@
+{
+  "id": "rank-dac-humanitarian-2023",
+  "kind": "rank",
+  "origin": "trace 0c57c202",
+  "question": "Which DAC donors gave the most humanitarian aid in 2023?",
+  "searches": [
+    {
+      "parts": [
+        {
+          "variable": "humanitarian aid",
+          "entities": [
+            {
+              "text": "DAC countries",
+              "members": true
+            }
+          ],
+          "time": "2023",
+          "open_roles": [
+            "donor"
+          ],
+          "operations": [
+            {
+              "verb": "rank",
+              "phrase": "most humanitarian aid",
+              "over": "origin"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "Which DAC donors gave the most humanitarian aid in 2023? Ranked by gross ODA disbursements for humanitarian aid (emergency response, reconstruction and rehabilitation, and disaster preparedness) from DAC countries in 2023 in current US dollars from OECD CRS.",
+  "asks": [
+    {
+      "text": "Ranking of DAC donors by humanitarian aid in 2023",
+      "by": [
+        "donor"
+      ]
+    }
+  ],
+  "required_kinds": [
+    "aggregate",
+    "dataset",
+    "rank"
+  ],
+  "acceptable_kinds": [
+    "aggregate",
+    "dataset",
+    "rank"
+  ],
+  "unit_asked": true,
+  "period_reduction": "none",
+  "reference_payload": {
+    "answered": [
+      {
+        "outputs": [
+          "top_dac_donors"
+        ],
+        "ask": 0
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "id": "humanitarian_aid",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "frequency": "annual",
+        "kind": "dataset",
+        "measure": "gross ODA disbursements for humanitarian aid (emergency response, reconstruction and rehabilitation, and disaster preparedness)",
+        "entities": [
+          {
+            "role": "donor",
+            "members": true,
+            "name": "DAC countries"
+          }
+        ],
+        "period": {
+          "end": 2023,
+          "start": 2023
+        },
+        "decision_ids": [],
+        "source_spec_id": "spec_a0bae43fbff80e08f0a6982e2bb88ce5"
+      },
+      {
+        "decision_ids": [],
+        "kind": "aggregate",
+        "reduction": "sum",
+        "input_id": "humanitarian_aid",
+        "group_by": [
+          "entity",
+          "period"
+        ],
+        "id": "donor_totals"
+      },
+      {
+        "decision_ids": [
+          "ranking_among",
+          "ranking_limit"
+        ],
+        "input_id": "donor_totals",
+        "limit": 10,
+        "among": "population",
+        "kind": "rank",
+        "id": "top_dac_donors",
+        "direction": "highest_first",
+        "reduction": "sum"
+      }
+    ],
+    "answer_mode": "computed",
+    "question": "Which DAC donors gave the most humanitarian aid in 2023? Ranked by gross ODA disbursements for humanitarian aid (emergency response, reconstruction and rehabilitation, and disaster preparedness) from DAC countries in 2023 in current US dollars from OECD CRS.",
+    "decisions": [
+      {
+        "fixes": [
+          "limit"
+        ],
+        "description": "How many top donors to show",
+        "slot": "ranking_limit",
+        "rationale": "Top 10 is standard for presenting leading donors when no specific count is requested.",
+        "options": [
+          "5",
+          "10",
+          "20"
+        ],
+        "resolved_by": "planner_default",
+        "chosen": "10"
+      },
+      {
+        "chosen": "population",
+        "rationale": "The question asks for top DAC donors across the entire population of DAC donors.",
+        "resolved_by": "planner_default",
+        "fixes": [
+          "among"
+        ],
+        "description": "Rank across all DAC donors in the dataset",
+        "options": [
+          "population",
+          "named"
+        ],
+        "slot": "ranking_among"
+      }
+    ]
+  }
+}

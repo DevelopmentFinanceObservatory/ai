@@ -1,0 +1,253 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Net ODA to Ethiopia from 2014 to 2023 in current US dollars from OECD DAC2a, split by the top five donors across the period."
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Net disbursements of official development assistance (ODA) to Ethiopia from 2014 to 2023 by donor, split by the top five donors across the period, in current US dollars from OECD DAC2a.",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "rank_among",
+        "description": "Compare donors against the entire reporting donor population in DAC2a",
+        "options": [
+          "population",
+          "named"
+        ],
+        "chosen": "population",
+        "resolved_by": "planner_default",
+        "rationale": "The question asks for the top five donors across all donors reporting aid to Ethiopia.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": "population",
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      },
+      {
+        "slot": "scope_measure_basis_spec_bffad92a5a891f080d65023aa313335c",
+        "description": "Which basis the figures are measured on.",
+        "options": [
+          "gross disbursements, current USD",
+          "net disbursements, current USD",
+          "grant equivalents (OECD headline), current USD",
+          "commitments, current USD"
+        ],
+        "chosen": "net disbursements, current USD",
+        "resolved_by": "user",
+        "rationale": "The user's question asked for net disbursements, current USD.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_bffad92a5a891f080d65023aa313335c",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        },
+        "scope": {
+          "choice_id": "spec_bffad92a5a891f080d65023aa313335c:measure_basis",
+          "axis": "measure_basis",
+          "options": [
+            {
+              "option_id": "measure_basis:gross",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "measure_basis:net",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "measure_basis:grant_equivalent",
+              "status": "unavailable",
+              "years": null,
+              "code": "basis_not_published"
+            },
+            {
+              "option_id": "measure_basis:commitments",
+              "status": "unavailable",
+              "years": null,
+              "code": "basis_not_published"
+            }
+          ],
+          "provenance": "explicit"
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "ethiopia_oda_by_donor",
+        "decision_ids": [
+          "scope_measure_basis_spec_bffad92a5a891f080d65023aa313335c"
+        ],
+        "measure": "Net disbursements of official development assistance (ODA)",
+        "entities": [
+          {
+            "name": "Ethiopia",
+            "role": "recipient"
+          }
+        ],
+        "across": [
+          "donor"
+        ],
+        "period": {
+          "start": 2014,
+          "end": 2023
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": {
+          "currency": "USD",
+          "prices": "current",
+          "base_year": null
+        },
+        "source": "OECD DAC2a",
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_bffad92a5a891f080d65023aa313335c",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "rank",
+        "id": "top_five_donors",
+        "decision_ids": [
+          "rank_among"
+        ],
+        "input_id": "ethiopia_oda_by_donor",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": "donor",
+        "reduction": "sum",
+        "window_start": 2014,
+        "window_end": 2023,
+        "per_period": false,
+        "limit": 5,
+        "rolling": null
+      },
+      {
+        "kind": "rank",
+        "id": "annual_top_five",
+        "decision_ids": [
+          "rank_among"
+        ],
+        "input_id": "ethiopia_oda_by_donor",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": "donor",
+        "reduction": "sum",
+        "window_start": 2014,
+        "window_end": 2023,
+        "per_period": true,
+        "limit": 5,
+        "rolling": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Top five donors of ODA to Ethiopia across 2014 to 2023",
+      "Annual ODA to Ethiopia from the top five donors from 2014 to 2023"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "top_five_donors"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "annual_top_five"
+        ]
+      }
+    ],
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [
+          "donor"
+        ],
+        "over": []
+      },
+      {
+        "ask": 1,
+        "by": [
+          "donor"
+        ],
+        "over": []
+      }
+    ],
+    "asks_across_years": [
+      0
+    ],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}
