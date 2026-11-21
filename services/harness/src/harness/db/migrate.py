@@ -5,9 +5,9 @@ The SQL files in `harness/db/migrations` run in filename order.
 its bytes. A run refuses when an applied file changed, or when one is
 missing and its name sorts at or below the newest file this image holds. A
 fix is a new file. An applied file newer than every file here was written by
-a later release, whose migrations add to this schema, so the run logs it and
-carries on, and a revision of this release can still start beside the later
-one or after a rollback.
+a later release. That release may have renamed or dropped what this one reads,
+so the run logs the file and carries on, and an image started against a newer
+schema runs only where the deploy notes say it may.
 
 The bookkeeping table is created in a transaction of its own. The pending
 files then apply in one transaction, every one of them or none. Each
@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -69,8 +70,38 @@ class MigrationChecksumError(RuntimeError):
     missing. Fix forward with a new file."""
 
 
-def _sha256(path: Path) -> str:
+def sha256(path: Path) -> str:
+    """The SHA-256 of the bytes of the file at `path`, as hex."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+async def bound_and_lock(
+    conn: Any,
+    *,
+    timeout_s: float = MIGRATION_TIMEOUT_S,
+    lock_timeout_s: float = MIGRATION_LOCK_TIMEOUT_S,
+) -> None:
+    """Bound each statement and lock wait of the asyncpg connection `conn`'s
+    open transaction, then take the migrations' advisory lock until it ends."""
+    await conn.execute(
+        f"SET LOCAL statement_timeout = {round(timeout_s * 1000)}; "
+        f"SET LOCAL lock_timeout = {round(lock_timeout_s * 1000)}",
+        timeout=MIGRATION_CALL_TIMEOUT_S,
+    )
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock($1)", _ADVISORY_LOCK_KEY, timeout=MIGRATION_CALL_TIMEOUT_S
+    )
+
+
+async def record_applied(conn: Any, path: Path) -> None:
+    """Record the file at `path` in `harness_schema_migrations` as applied,
+    with the SHA-256 of its bytes."""
+    await conn.execute(
+        "INSERT INTO harness_schema_migrations (version, content_sha256) VALUES ($1, $2)",
+        path.name,
+        sha256(path),
+        timeout=MIGRATION_CALL_TIMEOUT_S,
+    )
 
 
 async def apply_pending(
@@ -99,17 +130,11 @@ async def apply_pending(
         conn = raw.driver_connection
         assert conn is not None
         wait = MIGRATION_CALL_TIMEOUT_S
-        timeout = (
-            f"SET LOCAL statement_timeout = {round(timeout_s * 1000)}; "
-            f"SET LOCAL lock_timeout = {round(lock_timeout_s * 1000)}"
-        )
         async with conn.transaction():
-            await conn.execute(timeout, timeout=wait)
-            await conn.execute("SELECT pg_advisory_xact_lock($1)", _ADVISORY_LOCK_KEY, timeout=wait)
+            await bound_and_lock(conn, timeout_s=timeout_s, lock_timeout_s=lock_timeout_s)
             await conn.execute(_BOOKKEEPING, timeout=wait)
         async with conn.transaction():
-            await conn.execute(timeout, timeout=wait)
-            await conn.execute("SELECT pg_advisory_xact_lock($1)", _ADVISORY_LOCK_KEY, timeout=wait)
+            await bound_and_lock(conn, timeout_s=timeout_s, lock_timeout_s=lock_timeout_s)
             rows = await conn.fetch(
                 "SELECT version, content_sha256 FROM harness_schema_migrations", timeout=wait
             )
@@ -121,19 +146,13 @@ async def apply_pending(
                 logger.info("schema: applied by a later release, not in this image: %s", missing)
             ran: list[str] = []
             for path in files:
-                digest = _sha256(path)
+                digest = sha256(path)
                 if path.name in applied:
                     if applied[path.name] != digest:
                         raise MigrationChecksumError(f"{path.name} changed since it was applied")
                     continue
                 await conn.execute(path.read_text(), timeout=wait)
-                await conn.execute(
-                    "INSERT INTO harness_schema_migrations (version, content_sha256) "
-                    "VALUES ($1, $2)",
-                    path.name,
-                    digest,
-                    timeout=wait,
-                )
+                await record_applied(conn, path)
                 ran.append(path.name)
         for name in ran:
             logger.info("schema: applied %s", name)
