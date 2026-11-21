@@ -153,6 +153,7 @@ def test_the_instruction_says_when_cards_come_off_and_that_pinned_ones_stay():
     assert "each turn's cards join the ones already on the canvas" in text
     assert "when the conversation turns to another subject" in text
     assert "remove_cards leaves pinned cards on the canvas and names them as kept_pinned" in text
+    assert "A pinned card comes off once the user unpins it from the card's menu" in text
     # The ids of the earlier subject's cards come from the canvas listing.
     assert (
         "or turns to another subject so the earlier subject's cards come off, call recall "
@@ -210,14 +211,15 @@ def test_the_instruction_has_search_elect_the_measure_and_asks_only_what_search_
         "under `alternatives`: go on with it and do not ask about the count" in text
     )
     assert (
-        "No button offers the counts a part lists under `alternatives`: name only those, once, "
-        "with the count search chose" in text
+        "No button offers the counts a part lists under `alternatives`: name those once, so "
+        "the user can ask for one" in text
     )
     # The harness states the count basis after the reply (`turn_records.basis_line`)
     # and offers the other options as chips (`turn_records.scope_chips`).
     assert f'"{turn_records._BASIS_LEAD}...", naming the sector, region, provider' in text
     assert "buttons, so leave those out of the reply" in text
     assert "name the source with that count" not in text
+    assert "with the count search chose" not in text
     assert "switch to another count" not in text
     assert "Search leaves a count open only when a part lists `candidates`" in text
     assert (

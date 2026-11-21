@@ -1899,7 +1899,10 @@ def _nothing_removed_note(
     card left to take off."""
     sentences: list[str] = []
     if kept_pinned:
-        sentences.append("The user pinned the cards in kept_pinned, so they stay on the canvas.")
+        sentences.append(
+            "The user pinned the cards in kept_pinned, so they stay on the canvas. The user "
+            "can unpin one from the card's menu (Unpin from Canvas) and then ask again."
+        )
     if already_off:
         sentences.append(
             "Those cards were already off the canvas."
@@ -2972,20 +2975,19 @@ def build_orchestrator_tools(
         `part`: "plan" for the plan records of a turn, "readings" for the
         search readings of a turn, "canvas" for the conversation's cards, or,
         with `component_id`, that one card's stored entry. The canvas listing
-        ranks cards by the turn that drew them, and each card it lists names
-        that turn:
+        ranks cards by the turn that drew them, not by where they sit. Each
+        card it lists names its `turn`, and a card on the canvas its
+        `position` there, 1 being the first card the user sees:
         - `blocks`: cards in full with their facts, while places remain:
           this turn's cards on the canvas, then the pinned ones, then the
           other cards on the canvas, newest turn first.
         - `titles`: the next cards of those three groups, by id, title and
           type.
-        - `this_turn_not_shown`, `pinned_not_shown`: how many of this turn's
-          and of the pinned cards neither list holds.
         - `off_canvas`: cards off the canvas by id, title and type, a whole
           turn at a time, this turn's first, then newest turn first.
-        - `earlier`: for each turn with cards no list holds, how many are on
+        - `counted`: for each turn with cards no list holds, how many are on
           the canvas (`on_canvas`) and how many off it (`off_canvas`).
-        - `earlier_rest`: the same two counts for older turns' cards and
+        - `counted_rest`: the same two counts for older turns' cards and
           cards of no recorded turn.
         For a plan or readings, `turn` is the turn's number as the
         conversation digest counts them; leave it out for the newest turn

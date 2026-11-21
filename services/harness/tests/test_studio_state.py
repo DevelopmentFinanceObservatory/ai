@@ -487,9 +487,10 @@ def test_a_realistic_canvas_block_states_its_shared_coordinates_once():
             "component_id": component_id,
             **entry,
             "fact_summary": entry["fact_summary"] and factored(entry["fact_summary"]),
+            "position": position,
             "turn": 1,
         }
-        for component_id, entry in entries.items()
+        for position, (component_id, entry) in enumerate(entries.items(), start=1)
     ]
 
 
@@ -720,8 +721,8 @@ def test_the_canvas_listing_stays_under_its_maximum_with_every_field_at_its_cap(
     assert len(listing["blocks"]) == studio_state._DIGEST_BLOCK_CAP
     assert len(listing["titles"]) == 3 * studio_state._LISTING_COMPACT_CAP
     assert len(listing["off_canvas"]) == studio_state._LISTING_COMPACT_CAP
-    assert len(listing["earlier"]) == studio_state._EARLIER_TURN_CAP
-    assert "earlier_rest" in listing
+    assert len(listing["counted"]) == studio_state._EARLIER_TURN_CAP
+    assert "counted_rest" in listing
     size = _serialised({"part": "canvas", **listing})
     assert size <= CANVAS_LISTING_MAX_BYTES
     assert size > CANVAS_LISTING_MAX_BYTES * 0.9  # the maximum is within reach
@@ -810,7 +811,13 @@ def test_this_turns_cards_past_the_full_places_are_named_compactly():
         f"cmp_{index:02d}" for index in range(cap)
     ]
     assert listing["titles"] == [
-        {"component_id": f"cmp_{index:02d}", "type": "line_chart", "title": "Aid", "turn": 1}
+        {
+            "component_id": f"cmp_{index:02d}",
+            "type": "line_chart",
+            "title": "Aid",
+            "position": index + 1,
+            "turn": 1,
+        }
         for index in range(cap, cap + 3)
     ]
     assert "titles" not in _canvas({"cmp_01": _entry("Aid", None)}).canvas_listing_state()
@@ -874,7 +881,7 @@ def test_every_card_drawn_this_turn_and_every_pinned_card_is_named():
         : studio_state._DIGEST_BLOCK_CAP
     ]
     assert all(entry["pinned"] for entry in listing["titles"] if entry["turn"] == 1)
-    assert "earlier" not in listing
+    assert "counted" not in listing
 
 
 def test_a_follow_up_turn_lists_the_earlier_cards_on_the_canvas_in_full():
@@ -907,13 +914,14 @@ def test_a_card_left_on_the_canvas_is_named_ahead_of_removed_cards():
     assert [entry["component_id"] for entry in listing["off_canvas"]] == [
         f"cmp_3_{n:02d}" for n in range(40)
     ]
-    assert "earlier" not in listing
+    assert "counted" not in listing
 
 
 @pytest.mark.parametrize("order", ["reversed", "pinned-last", "interleaved"])
 def test_the_canvas_views_name_the_same_cards_however_the_canvas_is_ordered(order: str):
     """The user reorders the canvas; the views rank by the turn that drew each
-    card, so the order of the composition's blocks changes nothing."""
+    card, so the order of the composition's blocks changes which cards are
+    named, and how, not at all. Each card's `position` follows the canvas."""
     reorder: dict[str, Callable[[list[str]], list[str]]] = {
         "reversed": lambda ids: ids[::-1],
         "pinned-last": lambda ids: sorted(ids, key=lambda cid: cid.startswith("cmp_1_")),
@@ -923,8 +931,40 @@ def test_the_canvas_views_name_the_same_cards_however_the_canvas_is_ordered(orde
     plain = _turns_of_cards(*groups)
     moved = _turns_of_cards(*groups, order=reorder[order])
 
-    assert moved.canvas_listing_state() == plain.canvas_listing_state()
+    assert _without_positions(moved.canvas_listing_state()) == _without_positions(
+        plain.canvas_listing_state()
+    )
     assert moved.canvas_summary_state() == plain.canvas_summary_state()
+
+
+def _without_positions(listing: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: [{k: v for k, v in entry.items() if k != "position"} for entry in value]
+        if key in ("blocks", "titles", "off_canvas")
+        else value
+        for key, value in listing.items()
+    }
+
+
+def test_each_card_on_the_canvas_states_where_the_user_sees_it():
+    """A card dragged to the top of the canvas keeps its rank and states its
+    new position, so "the top chart" names it."""
+    state = _turns_of_cards((2, False, True), (3, False, True))
+    assert state.composition is not None
+    blocks = state.composition.blocks
+    state.composition = _next_manifest(
+        state.composition, [blocks[-1], *blocks[:-1]], actor=CompositionActor.USER
+    )
+
+    listing = state.canvas_listing_state()
+
+    assert [(block["component_id"], block["position"]) for block in listing["blocks"]] == [
+        ("cmp_2_00", 4),
+        ("cmp_2_01", 5),
+        ("cmp_2_02", 1),
+        ("cmp_1_00", 2),
+        ("cmp_1_01", 3),
+    ]
 
 
 def test_pinned_cards_past_the_compact_cap_are_counted():
@@ -936,7 +976,7 @@ def test_pinned_cards_past_the_compact_cap_are_counted():
     assert len(listing["blocks"]) == full
     assert all(block["pinned"] for block in listing["blocks"])
     assert len(listing["titles"]) == compact
-    assert listing["pinned_not_shown"] == 5
+    assert listing["counted"] == [{"turn": 1, "on_canvas": 5}]
 
 
 def test_earlier_cards_past_the_caps_are_counted_by_turn():
@@ -958,12 +998,12 @@ def test_earlier_cards_past_the_caps_are_counted_by_turn():
     assert len(_named_ids(listing)) == full + compact
     assert {entry["turn"] for entry in listing["off_canvas"]} == {cap + 3}
     assert len(listing["off_canvas"]) == compact
-    assert listing["earlier"][0] == {"turn": cap + 4, "on_canvas": 3}
-    assert [count["turn"] for count in listing["earlier"]] == [
+    assert listing["counted"][0] == {"turn": cap + 4, "on_canvas": 3}
+    assert [count["turn"] for count in listing["counted"]] == [
         cap + 4,
         *range(cap + 2, 3, -1),
     ]
-    assert listing["earlier_rest"] == {"off_canvas": 4}
+    assert listing["counted_rest"] == {"off_canvas": 4}
 
 
 def test_cards_this_turn_took_off_rank_behind_the_pinned_ones():
@@ -990,7 +1030,7 @@ def test_turns_of_cards_off_the_canvas_are_named_whole_or_counted():
     listing = state.canvas_listing_state()
 
     assert [entry["turn"] for entry in listing["off_canvas"]] == [3, 3, *[2] * (compact - 3)]
-    assert listing["earlier"] == [{"turn": 1, "off_canvas": 5}]
+    assert listing["counted"] == [{"turn": 1, "off_canvas": 5}]
 
 
 def test_recall_without_a_component_lists_the_canvas():

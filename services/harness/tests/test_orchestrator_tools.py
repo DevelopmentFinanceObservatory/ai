@@ -5505,7 +5505,7 @@ async def test_remove_cards_takes_named_cards_off_and_says_which_it_never_held()
     state = _two_card_canvas()
     tools, ctx = _tools(remove_cards=_remove_callable(state))
 
-    answer = await tools["remove_cards"](ctx, ["cmp_01", "cmp_99"])
+    answer = await tools["remove_cards"](ctx, ["cmp_01", "cmp_99", "cmp_99"])
 
     assert answer == {"removed": ["cmp_01"], "not_in_conversation": ["cmp_99"]}
     assert state.composition is not None
@@ -5544,6 +5544,7 @@ async def test_remove_cards_leaves_a_pinned_card_and_names_it():
 
     assert pinned_only["removed"] == []
     assert pinned_only["kept_pinned"] == ["cmp_01"]
+    assert "Unpin from Canvas" in pinned_only["note"]
     assert cleared == {"removed": ["cmp_02"], "kept_pinned": ["cmp_01"]}
     assert [b.component_id for b in state.composition.blocks] == ["cmp_01"]
     assert {key: value for key, value in mixed.items() if key != "note"} == {

@@ -4,7 +4,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 72963,
+      "total_chars": 72981,
       "system_instruction_chars": 20148,
       "declaration_total_chars": 40287,
       "declarations": [
@@ -26,12 +26,12 @@
         }
       ],
       "contents": {
-        "total_chars": 12864,
+        "total_chars": 12880,
         "buckets": [
           {
             "bucket": "text(planner-brief)",
             "count": 1,
-            "chars": 12859
+            "chars": 12875
           },
           {
             "bucket": "text",
@@ -45,7 +45,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 105846,
+      "total_chars": 105864,
       "system_instruction_chars": 20148,
       "declaration_total_chars": 40287,
       "declarations": [
@@ -67,7 +67,7 @@
         }
       ],
       "contents": {
-        "total_chars": 45585,
+        "total_chars": 45601,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
@@ -77,7 +77,7 @@
           {
             "bucket": "text(planner-brief)",
             "count": 1,
-            "chars": 12859
+            "chars": 12875
           },
           {
             "bucket": "functionCall:get_skill",
@@ -96,7 +96,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 106482,
+      "total_chars": 106500,
       "system_instruction_chars": 20148,
       "declaration_total_chars": 40287,
       "declarations": [
@@ -118,7 +118,7 @@
         }
       ],
       "contents": {
-        "total_chars": 46059,
+        "total_chars": 46075,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
@@ -128,7 +128,7 @@
           {
             "bucket": "text(planner-brief)",
             "count": 1,
-            "chars": 12859
+            "chars": 12875
           },
           {
             "bucket": "functionResponse:propose_plan",
