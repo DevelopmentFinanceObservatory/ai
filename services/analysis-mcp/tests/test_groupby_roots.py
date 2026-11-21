@@ -168,3 +168,76 @@ async def test_a_breakdown_and_a_sum_are_roots_of_each_verb_shape(
     assert result.is_error is False, result.content
     inputs = runner.requests[-1]["tree"]["inputs"]
     assert {name: node["rendering"]["groupby"] for name, node in inputs.items()} == groupbys
+
+
+# A breakdown summed over a purpose axis keeps `stat_var_crsPurpose`, and each recipient
+# receives under one purpose of three, so the recipient, purpose and year grid is a
+# third full.
+_PURPOSE = "stat_var_crsPurpose"
+_BY_PURPOSE = {"by": ["crsPurpose", "time_period"], "op": "sum", "levels": {"crsPurpose": 1}}
+_RECEIVED = {"country/KEN": "Education", "country/NGA": "Health", "country/ETH": "Water"}
+
+
+def _aid_by_purpose() -> Frame:
+    return Frame.build(
+        role_keys=["recipient", _PURPOSE],
+        rows=[
+            {
+                "stat_var": "dcid:Aid",
+                "recipient": recipient,
+                _PURPOSE: purpose,
+                "time_period": year,
+                "value": float(10 * (index + 1) + int(year) - 2020),
+                "unit": "dcid:USDollar",
+            }
+            for index, (recipient, purpose) in enumerate(_RECEIVED.items())
+            for year in ("2021", "2022")
+        ],
+    )
+
+
+async def test_a_sparse_breakdown_refuses_naming_the_flag_and_answers_with_it(
+    store: InMemoryMaterialisationStore, runner: ReplayedRunner
+) -> None:
+    frame = await _fetch(store, _aid_by_purpose(), _BY_PURPOSE)
+
+    refused = await verbs.aggregate(
+        frame_ref=frame, aggregation="sum", group_by=("recipient", _PURPOSE)
+    )
+    answered = await verbs.aggregate(
+        frame_ref=frame,
+        aggregation="sum",
+        group_by=("recipient", _PURPOSE),
+        allow_sparse_breakdowns=True,
+    )
+
+    assert refused.structured_content is not None
+    assert refused.structured_content["code"] == "coverage_insufficient"
+    assert refused.structured_content["fix"]["allow_sparse_breakdowns"] is True
+    assert "allow_sparse_breakdowns" not in runner.requests[0]["tree"]["arguments"]
+    assert answered.is_error is False, answered.content
+    assert runner.requests[1]["tree"]["arguments"]["allow_sparse_breakdowns"] is True
+
+
+async def test_a_partitioned_rank_keeps_its_limit_within_each_partition(
+    store: InMemoryMaterialisationStore, runner: ReplayedRunner
+) -> None:
+    frame = await _fetch(store, _aid_by_purpose(), _BY_PURPOSE)
+
+    result = await verbs.rank(
+        frame_ref=frame,
+        rank_by=(_PURPOSE,),
+        partition_by=("recipient",),
+        aggregation="sum",
+        limit=1,
+        allow_sparse_breakdowns=True,
+    )
+
+    assert result.is_error is False, result.content
+    arguments = runner.requests[-1]["tree"]["arguments"]
+    assert arguments["partition_by"] == ["recipient"]
+    assert arguments["allow_sparse_breakdowns"] is True
+    # One purpose kept for each of the three recipients.
+    assert result.structured_content is not None
+    assert result.structured_content["rows"] == len(_RECEIVED)
+    assert "within each recipient" in result.content[0].text

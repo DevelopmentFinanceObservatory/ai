@@ -107,6 +107,14 @@ MAX_RANK_LIMIT = 1000
 # `operation_uncovered` with the vocabulary in `fix`, rather than a generic schema
 # error.
 AGGREGATIONS: tuple[str, ...] = ("sum", "mean", "max", "min")
+
+# What the `aggregate` and `rank` tools tell a caller about `allow_sparse_breakdowns`.
+ALLOW_SPARSE_BREAKDOWNS_DESCRIPTION = (
+    "True counts an empty cell of a breakdown column (stat_var_<axis>, such as "
+    "stat_var_crsPurpose) as no flow, not a coverage gap. Set it for a flow that adds up, "
+    "such as aid by purpose, or when a coverage_insufficient refusal's fix names it. "
+    "Recipients, donors, years and stat_var still count every missing cell."
+)
 # The furthest a rolling period can sit behind the latest one, since the frame
 # grammar's years run from 0000 to 9999.
 MIN_ROLLING_OFFSET = -9999
@@ -617,6 +625,11 @@ class AggregateOpSpec(_OpSpecBase):
     candidate units in the refusal's `fix["units"]`). A retry supplying one
     of those values here, a unit ref or the object of a converted or
     composed unit, pins the aggregate to that unit's rows.
+
+    `allow_sparse_breakdowns`, left `False`, counts every `group_by` column in
+    the coverage grid. Set, the runner leaves the `stat_var_<axis>` columns a
+    summed breakdown keeps out of the grid, so a breakdown cell no row fills
+    counts as no gap. Every other column, `stat_var` included, still counts.
     """
 
     verb: Literal[Verb.AGGREGATE] = Verb.AGGREGATE
@@ -625,6 +638,7 @@ class AggregateOpSpec(_OpSpecBase):
     ] = ()
     aggregation: str = Field(min_length=1, max_length=_MAX_AGGREGATION_NAME_CHARS)
     unit: PinnedUnit | None = None
+    allow_sparse_breakdowns: Annotated[bool, HASHED_WHEN_SET] = False
 
 
 class _SlicePairOpSpec(_OpSpecBase):
@@ -756,6 +770,14 @@ class RankOpSpec(_OpSpecBase):
     `rolling` says which of the window's years follow the latest period
     (`WindowRolling`), and names only a bound that is set. A bound may
     instead be a `RelativeYear`, as on `GrowthOpSpec`.
+
+    `partition_by`, left empty, ranks every entity in one ranking. Set, it
+    names the role columns of each partition: the entities sharing a
+    partition's values are ranked among themselves, with their own rank
+    numbers, ties and `limit`. It names no column `rank_by` names.
+
+    `allow_sparse_breakdowns` is `AggregateOpSpec`'s, over the grid of
+    `partition_by` and `rank_by`.
     """
 
     verb: Literal[Verb.RANK] = Verb.RANK
@@ -770,6 +792,17 @@ class RankOpSpec(_OpSpecBase):
     per_period: bool = False
     limit: Annotated[int | None, HASHED_WHEN_SET] = Field(default=None, ge=1, le=MAX_RANK_LIMIT)
     rolling: Annotated[WindowRolling | None, HASHED_WHEN_SET] = None
+    partition_by: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)], ...],
+        HASHED_WHEN_SET,
+    ] = ()
+    allow_sparse_breakdowns: Annotated[bool, HASHED_WHEN_SET] = False
+
+    @model_validator(mode="after")
+    def _partition_is_apart_from_the_ranked(self) -> RankOpSpec:
+        if shared := sorted(set(self.partition_by) & set(self.rank_by)):
+            raise ValueError(f"partition_by names columns rank_by names too: {shared}")
+        return self
 
     @model_validator(mode="after")
     def _window_bounds_are_paired(self) -> RankOpSpec:

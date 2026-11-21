@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field, PlainValidator, create_model,
 
 from analysis_mcp.artifact import Exclusion, ExclusionReason, ExclusionSide, Interval, Observation
 from analysis_mcp.execution_identity import ExecutionIdentity
-from analysis_mcp.result import VerbResult
+from analysis_mcp.result import StatVarsSummed, VerbResult
 
 logger = logging.getLogger(__name__)
 
@@ -398,6 +398,7 @@ class GrowthParameters(_Facts):
 
 class RankParameters(_Facts):
     rank_by: tuple[str, ...] = ()
+    partition_by: tuple[str, ...] = ()
 
 
 class FilterParameters(_Facts):
@@ -492,6 +493,8 @@ class VerbSummary(BaseModel):
     (`frame_ref_resolution.DerivedMarker`), `None` when the result carries none.
     `rolling` is the latest year the call's relative periods were filled from,
     which the answer states beside the summary, `None` for a call with none.
+    `stat_vars_summed` is each dataset version the call read summed over its
+    StatVars, which the answer also states beside the summary.
     """
 
     model_config = ConfigDict(extra="ignore", frozen=True, arbitrary_types_allowed=True)
@@ -513,6 +516,7 @@ class VerbSummary(BaseModel):
     derived: dict[str, Any] | None = None
     result: Any
     rolling: Rolling | None = None
+    stat_vars_summed: tuple[StatVarsSummed, ...] = ()
 
     @classmethod
     def parse(cls, summary: Mapping[str, Any]) -> VerbSummary:

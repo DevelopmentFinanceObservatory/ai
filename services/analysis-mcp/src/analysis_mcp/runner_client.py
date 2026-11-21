@@ -7,7 +7,9 @@ populations to `POST /api/datasets/analysis/anchor`. Each returns the runner's
 answer, or the `ToolRefusal` its reply maps to:
 
 - 200 from the analysis route is the stored frame's ref and the `summary` of
-  the call (`summary.VerbSummary`). From the anchor route it is `AnchorAnswer`.
+  the call (`summary.VerbSummary`), with each dataset version the runner read
+  summed over its StatVars (`stat_vars_summed`). From the anchor route it is
+  `AnchorAnswer`.
 - 202 is a root dataset still building, `ToolRefusal.analysis_pending` with the
   runner's `retry_after_s`.
 - A problem document keeps the runner's `code`, `detail`, `fix` and
@@ -41,7 +43,13 @@ takes the latest period over the anchor roots and checks the literals against
 it, so a call over data the record never saw would otherwise compute a window
 that ends at another dataset's latest period. The ref's roots are the roots
 the runner read, those behind a derived input and the anchor roots included,
-so the check covers a derived input as it covers a fetched frame.
+so the check covers a derived input as it covers a fetched frame. A root the
+runner read as a rendering of its own version, such as the sum of a dataset of
+several StatVars, names that rendering, and the answer's `derived_roots` names
+the dataset version the sum read: the root is covered when that version is one
+the record was resolved over, and a sum of another version refuses as other
+data does. dfo-apis names no base for a party-totals cut, which can drop
+periods, so a cut root is covered only by its own pair.
 
 `replay_derived` asks the runner to compute a derived frame again from its stored
 recipe with `latest: true`, which reads its roots at their datasets' current
@@ -105,6 +113,7 @@ from dfo_frame_grammar import shift_period
 from dfo_spec_kit.registry import REGISTRY
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from analysis_mcp.result import StatVarsSummed
 from analysis_mcp.settings import Settings
 from analysis_mcp.summary import RecomputedInput, ResolvedPeriod, Rolling, VerbSummary
 from analysis_mcp.tool_errors import RetryMode, ToolErrorCode, ToolRefusal
@@ -160,6 +169,8 @@ _SPEC_ROOT_CODES = _ROOT_CODES | {"spec_not_found"}
 _OVER_CEILING_CODE = "over_ceiling"
 _RESPONSE_INVALID = "response_invalid"
 
+# An answer's `stat_vars_summed`, one entry per dataset version read summed.
+_STAT_VARS_SUMMED: TypeAdapter[tuple[StatVarsSummed, ...]] = TypeAdapter(tuple[StatVarsSummed, ...])
 # An answer's `resolved_periods`, one entry per relative period of the recipe.
 _RESOLVED_PERIODS: TypeAdapter[tuple[ResolvedPeriod, ...]] = TypeAdapter(
     Annotated[tuple[ResolvedPeriod, ...], Field(min_length=1)]
@@ -496,13 +507,42 @@ def _ref_roots(body: Mapping[str, Any]) -> frozenset[Pair] | None:
     return frozenset(pairs)
 
 
+def _derived_bases(body: Mapping[str, Any]) -> dict[Pair, str] | None:
+    """The dataset version each root of the ready answer `body` read as a rendering of
+    its own derives from, by the pair the root names (`derived_roots`), or `None` when
+    the answer states them outside the contract. An answer with none states an empty
+    list or, from a dfo-apis that predates it, no field."""
+    derived = body.get("derived_roots", [])
+    if not isinstance(derived, list):
+        return None
+    bases: dict[Pair, str] = {}
+    for root in derived:
+        if not isinstance(root, Mapping):
+            return None
+        fields = (root.get(key) for key in ("spec_id", "content_version", "base_content_version"))
+        spec_id, content_version, base = fields
+        if not all(isinstance(field, str) for field in (spec_id, content_version, base)):
+            return None
+        bases[spec_id, content_version] = base
+    return bases
+
+
 def _uncovered(body: Mapping[str, Any], anchor: Anchor) -> ToolRefusal | None:
     """The refusal for a ready answer `body` that read a root `anchor`'s record was
-    not resolved over. See the module docstring."""
+    not resolved over. A root read as a rendering of its own version, a groupby sum
+    or a party-totals cut, is covered when the version it derives from is one the
+    record was resolved over. See the module docstring."""
     roots = _ref_roots(body)
     if roots is None:
         return _unusable("the analysis answer names no roots")
-    uncovered = sorted(roots - anchor.pairs)
+    bases = _derived_bases(body)
+    if bases is None:
+        return _unusable("the analysis answer's derived_roots do not fit this service")
+    uncovered = sorted(
+        (spec_id, content_version)
+        for spec_id, content_version in roots - anchor.pairs
+        if (spec_id, bases.get((spec_id, content_version))) not in anchor.pairs
+    )
     if not uncovered:
         return None
     spec_id, content_version = uncovered[0]
@@ -668,10 +708,16 @@ def _ready_summary(
     if anchor is not None and (refusal := _uncovered(body, anchor)) is not None:
         return refusal
     try:
-        return VerbSummary.parse(body["summary"])
+        summary = VerbSummary.parse(body["summary"])
     except (ValidationError, KeyError) as exc:
         logger.warning("analysis runner summary unreadable: %s", exc)
         return _unusable(f"the analysis summary does not fit this service: {_unread_summary(exc)}")
+    try:
+        summed = _STAT_VARS_SUMMED.validate_python(body.get("stat_vars_summed") or ())
+    except ValidationError as exc:
+        logger.warning("analysis runner stat_vars_summed unreadable: %s", exc)
+        return _unusable("the analysis answer's stat_vars_summed do not fit this service")
+    return summary.model_copy(update={"stat_vars_summed": summed}) if summed else summary
 
 
 async def replay_derived(ref: FrameRef) -> FrameRef | ToolRefusal:

@@ -11,6 +11,7 @@ from pydantic import Field
 
 from analysis_mcp.op_spec import (
     AGGREGATIONS,
+    ALLOW_SPARSE_BREAKDOWNS_DESCRIPTION,
     MAX_RANK_LIMIT,
     FrameRefArgument,
     PinnedUnit,
@@ -33,8 +34,25 @@ async def rank(
     ],
     rank_by: Annotated[
         tuple[str, ...],
-        Field(min_length=1, description="Column names identifying each ranked entity."),
+        Field(
+            min_length=1,
+            description=(
+                "Column names identifying each ranked entity. crsPurpose names a summed "
+                "frame's stat_var_crsPurpose."
+            ),
+        ),
     ],
+    partition_by: Annotated[
+        tuple[str, ...],
+        Field(
+            default=(),
+            description=(
+                "Columns splitting the ranking: each partition is ranked on its own and limit "
+                "applies within it, so rank_by=['origin'], partition_by=['destination'], "
+                "limit=6 keeps each recipient's top 6 donors. Names no rank_by column."
+            ),
+        ),
+    ] = (),
     aggregation: Annotated[
         str | None,
         Field(
@@ -110,7 +128,8 @@ async def rank(
                 "Keep only the entities ranked at this position or better: 10 keeps the "
                 "highest 10, or the lowest 10 with ascending=True. Entities that share the "
                 "value at the boundary are all kept, so more than limit can remain. Applies "
-                "within each period when per_period=True, and the output's value is then "
+                "within each partition under partition_by. Applies within each period when "
+                "per_period=True, and the output's value is then "
                 "the measured value, not the rank position. Left None, every ranked entity "
                 "is kept."
             ),
@@ -147,12 +166,17 @@ async def rank(
             ),
         ),
     ] = None,
+    allow_sparse_breakdowns: Annotated[
+        bool, Field(default=False, description=ALLOW_SPARSE_BREAKDOWNS_DESCRIPTION)
+    ] = False,
 ) -> ToolResult:
     """Rank entities identified by `rank_by`, optionally reducing each
     entity's own rows with `aggregation` first.
 
     Use it to order entities by a value, such as the largest donors in a
-    year, and to keep the top or bottom few.
+    year, and to keep the top or bottom few. With `partition_by`, it ranks
+    and applies `limit` within each partition, such as the top 6 donors of
+    each recipient.
 
     Ranks what's present. An entity absent from the window simply isn't
     ranked. Competition ranking ("1224"). Entities sharing a value share a
@@ -190,9 +214,14 @@ async def rank(
     ordinal marker. Coverage and the floor check cover every ranked entity,
     and the rows left out are reported as a `beyond_limit` exclusion.
 
+    A get_data frame or bare spec_id holding several StatVars is summed over
+    them first unless `rank_by` names `stat_var`, keeping the breakdown
+    axes `rank_by` and `partition_by` name. The digest gives the count summed.
+
     Args:
         frame_ref: The {spec_id, content_version} pair naming the input frame.
         rank_by: Column names identifying each ranked entity.
+        partition_by: Columns splitting the ranking; `limit` applies per partition.
         aggregation: The reduction function. None expects one row per entity already.
         window_start: The window's first calendar year, paired with window_end.
         window_end: The window's last calendar year, paired with window_start.
@@ -204,10 +233,11 @@ async def rank(
         rolling: Which window years follow the latest period, and the
             populations that period is taken over.
         anchor_key: The handle of the stored latest period, set on a rolling call.
+        allow_sparse_breakdowns: Count an empty breakdown cell as no flow.
 
     Returns:
         A digest: each entity's rank, value, and coverage, the resolved
-        unit, overall coverage, and the result's {spec_id, content_version}
+        unit, overall coverage, the StatVars summed, and the result's {spec_id, content_version}
         pair and identity fields. On refusal, a typed error with a
         machine-readable fix.
     """

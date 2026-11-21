@@ -311,6 +311,46 @@ async def test_a_rolling_call_that_read_data_outside_its_anchor_record_refuses(
     }
 
 
+# A version the runner rendered from `_FRAME`'s dataset: a sum over its StatVars,
+# or a party-totals cut.
+_SUMMED = {"spec_id": _SPEC, "content_version": "cv_" + "a" * 32}
+
+
+@pytest.mark.parametrize(
+    ("base", "covered"),
+    [(_CV, True), ("cv_" + "b" * 32, False), (None, False)],
+    ids=[
+        "sum-of-the-anchored-version",
+        "sum-of-another-version",
+        # dfo-apis names no base for a cut, which can drop periods (C121f).
+        "cut-of-the-anchored-version",
+    ],
+)
+async def test_a_rolling_call_that_read_a_rendering_is_checked_by_its_base_version(
+    store: InMemoryMaterialisationStore, base: str | None, covered: bool
+) -> None:
+    # The record holds `_FRAME`'s dataset version; the runner read a version of its
+    # own rendered from it, and names the version a sum derives from.
+    record = await _anchor_over_both(store)
+    ready = _reading(_recorded_ready("growth"), _SUMMED, _OTHER_DATASET)
+    derived = [] if base is None else [{**_SUMMED, "base_content_version": base}]
+    _install(httpx2.Response(200, json={**ready, "derived_roots": derived}))
+
+    result = await _rolling_growth(_FRAME, record.anchor_key)
+
+    structured = result.structured_content
+    assert structured is not None
+    if covered:
+        assert result.is_error is False, result.content
+        return
+    assert structured["code"] == "rolling_anchor_unresolved"
+    assert structured["fix"] == {
+        "detail": "root_not_in_record",
+        "anchor_key": record.anchor_key,
+        "root": _SUMMED,
+    }
+
+
 async def test_a_rolling_call_over_other_populations_than_its_record_refuses_before_any_call(
     store: InMemoryMaterialisationStore,
 ) -> None:
@@ -573,6 +613,38 @@ async def test_a_ready_answer_replies_with_its_summarys_verb_result_and_digest(
     text = result.content[0].text
     assert text.endswith(f"execution_identity: {summary.execution_identity.canonical_string()}")
     assert f"spec_id={summary.spec_id}, content_version={summary.content_version}" in text
+
+
+async def test_the_statvars_a_summed_read_added_up_reach_the_result_and_the_digest(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    summed = [{"spec_id": _SPEC, "content_version": _DATASET_CV, "count": 1598}]
+    _install(
+        httpx2.Response(200, json={**_recorded_ready("aggregate"), "stat_vars_summed": summed})
+    )
+
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    assert result.is_error is False, result.content
+    assert result.structured_content is not None
+    assert result.structured_content["stat_vars_summed"] == summed
+    head, _, identity = result.content[0].text.rpartition("\n\n")
+    assert head.endswith(f"summed: {_SPEC}, {_DATASET_CV} added up over 1,598 StatVars.")
+    assert identity.startswith("frame reference:")
+
+
+async def test_an_answer_whose_summed_reads_do_not_fit_refuses_as_outside_the_contract(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    summed = [{"spec_id": _SPEC, "count": 0}]
+    _install(
+        httpx2.Response(200, json={**_recorded_ready("aggregate"), "stat_vars_summed": summed})
+    )
+
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "upstream_error"
 
 
 async def test_a_summary_tolerates_fields_dfo_apis_adds_to_its_exclusions_and_time(
