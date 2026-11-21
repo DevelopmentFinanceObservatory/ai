@@ -19,10 +19,10 @@ read refuses a frame holding more rows than the claim before decoding it.
 
 The harness mounts both in one process, and claims rows itself for the frames its own
 tools read (`harness.orchestrator_tools`, `harness.rolling_cards`), so one budget serves
-them all: `row_budget()` builds it on first use from `BaseServiceSettings.frame_rows_in_flight_max`,
+them all. `row_budget()` builds it on first use from `BaseServiceSettings.frame_rows_in_flight_max`,
 which every service's settings inherit from the same env var. A service run on its own
-builds its own. `FrameServiceSettings` refuses a budget smaller than twice
-`max_frame_rows`, so every legal call fits an idle budget.
+builds its own. `FrameServiceSettings` refuses a budget smaller than `max_frame_rows`,
+the largest claim, so every legal call fits an idle budget.
 
 A claim that does not fit is refused at once and never queued: a queued call would spend
 its own deadline waiting, as the combined server's in-flight cap

@@ -48,7 +48,7 @@ A read verifies, in order:
    for.
 
 A ceiling in steps 1 and 3 raises `FrameTooLarge`, which data-mcp
-(`data_mcp.frame_materialisation`) maps to a refusal -- the stored bytes are exactly what was
+(`data_mcp.frame_materialisation`) maps to a refusal. The stored bytes are exactly what was
 written, just too large for this store's contract to serve back, and a
 narrower `frame_ref` can succeed. A recorded row count that is not a count
 or that the footer contradicts, and every failure in steps 2 and 4, raise

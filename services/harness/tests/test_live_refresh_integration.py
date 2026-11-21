@@ -21,7 +21,7 @@ import httpx2
 import pytest
 from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, SURFACE_HEADER, TURN_HEADER
 from common.materialisation import FrameRef
-from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget
+from common.row_budget import RowBudget, row_budget
 from compiler.surface import McpSurface, ToolCallResult
 from data_mcp import client_holder, frame_materialisation
 from fastapi import FastAPI
@@ -298,38 +298,21 @@ async def test_a_deadline_too_short_to_mint_waits_and_the_next_call_redraws(
     assert (await harness.refresh(harness.service())).json() == _REDRAWN
 
 
-async def test_a_full_refresh_row_budget_waits_and_leaves_the_shared_budget_alone(
+async def test_a_refresh_the_runner_computes_claims_no_refresh_rows(
     harness: Harness,
 ) -> None:
+    """The runner computes every step and apis already holds its frame, so nothing
+    is published and the refresh row budget is never claimed."""
     await harness.draw_card()
     harness.move_dataset()
-    publishes = len(harness.apis.published())
 
     # Another replay holds every row of the refresh budget.
     budget = RowBudget(max_rows=1_000)
     with budget.claim(budget.max_rows):
         response = await harness.refresh(harness.service(row_budget=budget))
 
-    assert (response.status_code, response.json()) == (
-        200,
-        {"status": "pending", "retry_after_s": ROW_BUDGET_RETRY_AFTER_S},
-    )
-    assert harness.verbs == []
-    assert len(harness.apis.published()) == publishes
-    assert row_budget().in_flight == 0
-
-
-async def test_a_step_larger_than_the_whole_refresh_row_budget_is_refused_for_good(
-    harness: Harness,
-) -> None:
-    """No later request could claim the rows, so the route must not answer `pending`."""
-    await harness.draw_card()
-    harness.move_dataset()
-
-    response = await harness.refresh(harness.service(row_budget=RowBudget(max_rows=1)))
-
-    assert (response.status_code, response.json()["code"]) == (422, "rows_over_refresh_budget")
-    assert harness.verbs == []
+    assert (response.status_code, response.json()["status"]) == (200, "redrawn")
+    assert harness.verbs != []
     assert row_budget().in_flight == 0
 
 

@@ -373,18 +373,19 @@ _IN_PROCESS_TWINS = {
 }
 
 
-# Each registered tool's name, description and input schema as a caller lists them.
+# Each registered tool's full definition as a caller lists it, dumped from the
+# in-process tools at dfo-ai commit 22b57716.
 _TOOL_SCHEMAS = Path(__file__).resolve().parent / "fixtures" / "tool_schemas.json"
 
 
-async def test_registered_tool_schemas_match_the_snapshot() -> None:
-    """The names, descriptions and argument schemas the server registers are the
-    ones `fixtures/tool_schemas.json` holds, byte for byte, so a change to the
-    functions the tools take their signatures from cannot change what a model reads."""
+async def test_registered_tool_definitions_match_the_snapshot() -> None:
+    """Every tool the server registers is defined as `fixtures/tool_schemas.json`
+    holds it: name, title, description, input and output schemas, annotations,
+    execution and meta. A change to the functions the tools take their signatures
+    from cannot change what a caller reads."""
     tools = await mcp.list_tools(run_middleware=False)
     registered = {
-        tool.name: {"description": tool.description, "parameters": tool.parameters}
-        for tool in tools
+        tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True) for tool in tools
     }
 
     assert registered == json.loads(_TOOL_SCHEMAS.read_text())

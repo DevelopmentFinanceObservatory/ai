@@ -1,14 +1,14 @@
 """The frame `content_version` a stored frame is verified against, and the
-derived-ness marker of a frame an in-process verb stored.
+derived-ness marker a stored verb result carries.
 
 `derive_frame_content_version` hashes a frame's canonical bytes into its
 frame-grammar `cv_`, and is registered as the store's deriver
 (`common.materialisation.register_content_version_deriver`).
 
 `read_derived_marker` reads `applied_policy.detail["derived"]`, the marker a
-producer verb wrote onto its output's trace before analysis-mcp's verbs computed
-on dfo-apis' analysis runner, and `DerivedMarker` names its flags. The harness
-reads it from frames the store still holds (`harness.orchestrator_tools`).
+producer verb wrote onto its output's trace when analysis-mcp's verbs computed in
+process, and `DerivedMarker` names its flags. The harness reads it from stored
+frames that carry it (`harness.orchestrator_tools`).
 """
 
 from __future__ import annotations
@@ -31,9 +31,8 @@ def derive_frame_content_version(*, frame: Frame) -> str:
     bytes alone, so one frame has one token whatever lineage produced it.
 
     The store calls it to verify a frame it reads
-    (`common.materialisation.register_content_version_deriver`), and an
-    in-process verb called it when it wrote its output
-    (`Trace.frame_content_version`).
+    (`common.materialisation.register_content_version_deriver`). Stored verb
+    results carry it as `Trace.frame_content_version`.
 
     A `frame_ref` pair names either an original materialisation (a
     `spec_`/`cv_` pair, `get_data`'s own fixtures included) or a prior toolkit result (a chained verb call, an

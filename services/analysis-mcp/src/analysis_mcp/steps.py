@@ -9,8 +9,8 @@ of its inputs holds. A member the schema makes optional is absent until set,
 and a model dumps only the members it holds. A unit is `None` only where the data
 declares none and the values are no ratio.
 
-An in-process verb stored its step on its `Trace`, naming each input by the
-frame pair it read (`VersionRef`); a frame the store still holds keeps it.
+A stored frame that an in-process verb wrote carries its step on its `Trace`,
+naming each input by the frame pair it read (`VersionRef`).
 `common.steps.assemble_steps` turns the steps along a frame's ancestry into one
 list whose inputs name earlier steps. The reason names in `left_out` follow the
 exclusion reasons (`analysis_mcp.artifact.ExclusionReason`), which the kit's

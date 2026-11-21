@@ -15,8 +15,8 @@ below, and `tests/executor/test_classify.py` reads both servers' enums, and
 every code the code registry (`dfo_spec_kit.registry`) maps to dfo-apis'
 analysis route, which analysis-mcp passes through as the runner wrote it
 (`analysis_mcp.runner_client.RUNNER_CODES`), and fails when one is missing
-here -- so adding a code means picking a side, not landing in the stop bucket
-by omission:
+here, so adding a code means picking a side. A code left out would reach the
+stop bucket by omission:
 
 - `METHOD_CHOICE_CODES`: the refusal's `fix` is a set of alternatives -- which
   entity, unit, facet, window, coverage or denominator -- and choosing one

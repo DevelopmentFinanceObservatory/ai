@@ -2,7 +2,7 @@
 `RollingCards.admit` applies them, and the test for a year in a title.
 
 The frames, traces and anchor records are those analysis-mcp's in-process verbs
-stored (`stored_verbs`): `Scene` (`test_recipe_replay.py`) replays them over an
+stored (`stored_verbs`). `Scene` (`test_recipe_replay.py`) replays them over an
 in-memory store, with apis as `FakeApis`. One reporter of three holds 2023, so the
 latest year over all three is 2022 and the latest year over that reporter alone
 is 2023.

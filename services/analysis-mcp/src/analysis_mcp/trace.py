@@ -30,7 +30,7 @@ Everything past `upstream_trace` is what only the toolkit knows:
   a `Trace` predating this field.
 - `steps`: the step record of this result's own operation
   (`analysis_mcp.steps.Step`), its inputs naming the frames it read.
-  An in-process verb set it when it stored its result; no identity field reads
+  Frames the in-process verbs stored carry it. No identity field reads
   it. `()` on a `Trace` stored without the field. `common.steps.assemble_steps` joins the steps along a frame's
   ancestry.
 - `time`: whether this result's `time_period` names a genuine single

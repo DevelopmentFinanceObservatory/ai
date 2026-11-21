@@ -40,11 +40,11 @@ class BaseServiceSettings(BaseSettings):
     absorbs the freed Arrow pages a long-lived allocator keeps. At 2 GiB the implied
     value is 1,348 MiB / 865 B = 1,634,335 rows.
 
-    The default, 1,100,000 rows, sits below that implied value: four 250,000-row calls
-    at once. Recompute the implied value whenever `max_frame_rows`, the instance's
+    The default, 1,100,000 rows, sits below that implied value and admits four
+    250,000-row calls at once. Recompute the implied value whenever `max_frame_rows`, the instance's
     memory, the measured idle or the columns a frame carries change; the script exits 1
     when this setting exceeds it. `FrameServiceSettings` refuses a value
-    below twice `max_frame_rows`.
+    below `max_frame_rows`.
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
@@ -78,21 +78,21 @@ class FrameServiceSettings(BaseServiceSettings):
     matches the durable store's own ceiling
     (`common.materialisation.GcsMaterialisationStore`).
 
-    `frame_rows_in_flight_max` must be at least twice `max_frame_rows`. The largest
-    claim on the frame row budget (`common.row_budget`) is a two-input verb's, two
-    inputs of up to `max_frame_rows` rows each, and a budget smaller than that refuses
-    such a call on every attempt. Settings that break the rule fail at startup.
+    `frame_rows_in_flight_max` must be at least `max_frame_rows`. Every claim on the
+    frame row budget (`common.row_budget`) is one frame of up to `max_frame_rows`
+    rows: data-mcp's artifact or cache-hit read, presentation-mcp's publish, and the
+    harness's reads of a stored frame. A budget smaller than that refuses such a call
+    on every attempt. Settings that break the rule fail at startup.
     """
 
     max_frame_rows: int = 250_000
 
     @model_validator(mode="after")
-    def _budget_admits_a_two_input_verb(self) -> Self:
-        if self.frame_rows_in_flight_max < 2 * self.max_frame_rows:
+    def _budget_admits_a_full_frame(self) -> Self:
+        if self.frame_rows_in_flight_max < self.max_frame_rows:
             raise ValueError(
-                f"frame_rows_in_flight_max ({self.frame_rows_in_flight_max}) is below twice "
-                f"max_frame_rows ({self.max_frame_rows}), so a two-input verb on two "
-                "max_frame_rows inputs could never run; lower MAX_FRAME_ROWS or raise "
-                "FRAME_ROWS_IN_FLIGHT_MAX"
+                f"frame_rows_in_flight_max ({self.frame_rows_in_flight_max}) is below "
+                f"max_frame_rows ({self.max_frame_rows}), so a call on a max_frame_rows frame "
+                "could never run; lower MAX_FRAME_ROWS or raise FRAME_ROWS_IN_FLIGHT_MAX"
             )
         return self

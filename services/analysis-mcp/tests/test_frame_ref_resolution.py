@@ -9,7 +9,6 @@ call and its own `test_trace_round_trips_through_the_common_trace_codec`.
 
 from __future__ import annotations
 
-from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.frame_ref_resolution import (
     DerivedMarker,
     derive_frame_content_version,
@@ -20,6 +19,7 @@ from analysis_mcp.op_spec import AggregateOpSpec
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from common.materialisation import FrameRef, get_content_version_deriver
 from dfo_frame_grammar import Frame
+from engine_identity import EXECUTION_IDENTITY
 
 _SNAPSHOT_REF = {"spec_id": "spec_" + "a" * 32, "content_version": "cv_" + "b" * 32}
 
@@ -36,7 +36,7 @@ def _trace_with_detail(detail: dict[str, object]) -> Trace:
         applied_policy=AppliedPolicy(detail=detail),
         content_version="ocv_" + "c" * 32,
         input_content_versions=[_SNAPSHOT_REF["content_version"]],
-        execution_identity=current_execution_identity(),
+        execution_identity=EXECUTION_IDENTITY,
     )
 
 

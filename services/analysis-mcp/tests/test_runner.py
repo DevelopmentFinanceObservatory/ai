@@ -483,7 +483,6 @@ def _record(options: dict[str, Any]) -> MintRecord:
                         "party_kind",
                         "party_class",
                         "party_whole",
-                        "party_kind",
                     ],
                 },
             },
@@ -494,7 +493,7 @@ def _record(options: dict[str, Any]) -> MintRecord:
         "mint-record",
         "stat-vars-sum",
         "breakdown-with-columns",
-        "flow-columns-as-recorded",
+        "flow-columns-in-order-once",
     ],
 )
 async def test_a_get_data_frame_is_sent_as_the_dataset_version_its_mint_record_names(
@@ -594,6 +593,24 @@ async def test_a_summary_tolerates_fields_dfo_apis_adds_to_its_exclusions_and_ti
     assert result.is_error is False, result.content
     assert result.structured_content is not None
     assert result.structured_content["exclusions"] == summary["exclusions"]
+
+
+async def test_an_exclusion_reason_the_tools_do_not_declare_is_named_in_the_digest_only(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    body = _recorded_ready("rank")
+    summary = body["summary"]
+    (declared, *_) = summary["exclusions"]
+    added = {**declared, "reason": "a_reason_dfo_apis_added", "side": "a_side_it_added"}
+    stated = {**summary, "exclusions": [*summary["exclusions"], added]}
+    _install(httpx2.Response(200, json={**body, "summary": stated}))
+
+    result = await verbs.rank(frame_ref=_FRAME, rank_by=["donor"])
+
+    assert result.is_error is False, result.content
+    assert result.structured_content is not None
+    assert result.structured_content["exclusions"] == summary["exclusions"]
+    assert "a_reason_dfo_apis_added, a_side_it_added" in result.content[0].text
 
 
 @pytest.mark.parametrize(
@@ -782,6 +799,18 @@ async def test_the_caller_is_named_beside_the_principal(
             {"x": 1},
         ),
         (
+            _problem(422, "unit_heterogeneous", fix={"x": 1}, retry_mode="refresh_then_retry"),
+            "unit_heterogeneous",
+            "correct_and_retry",
+            {"x": 1},
+        ),
+        (
+            _problem(422, "a_code_no_registry_holds", fix={"x": 1}, retry_mode=["correct"]),
+            "a_code_no_registry_holds",
+            "do_not_retry",
+            {"x": 1},
+        ),
+        (
             _problem(500, "internal_error"),
             "upstream_error",
             "do_not_retry",
@@ -811,6 +840,8 @@ async def test_the_caller_is_named_beside_the_principal(
         "retryable-registry-code",
         "code-this-service-defines-no-factory-for",
         "code-no-registry-holds",
+        "unheld-retry-mode",
+        "malformed-retry-mode",
         "this-services-own-code",
         "no-problem-document",
         "summary-unreadable",

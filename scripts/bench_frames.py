@@ -68,7 +68,7 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from analysis_mcp.execution_identity import current_execution_identity
+from analysis_mcp.execution_identity import ExecutionIdentity
 from analysis_mcp.identity import op_spec_hash_for
 from analysis_mcp.op_spec import AggregateOpSpec
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
@@ -292,7 +292,9 @@ def _verb_trace(ref: FrameRef, frame: Frame) -> Trace:
         applied_policy=AppliedPolicy(),
         content_version=ref.content_version,
         input_content_versions=[_ref("bench-input").content_version],
-        execution_identity=current_execution_identity(),
+        execution_identity=ExecutionIdentity(
+            engine_version="bench", frame_grammar_version="bench", reduction_policy_version="bench"
+        ),
     )
 
 
@@ -507,7 +509,7 @@ def _current_rss_mb() -> float:
 
 def _child(step: str, rows: int, inputs_path: Path) -> dict[str, Any]:
     # Every ceiling a step reads from the environment is lifted. The settings refuse a
-    # budget below twice that ceiling; the step itself runs against the unbounded budget
+    # budget below that ceiling, and the step itself runs against the unbounded budget
     # installed below.
     os.environ["MAX_FRAME_ROWS"] = str(UNBOUNDED_ROWS)
     os.environ["FRAME_ROWS_IN_FLIGHT_MAX"] = str(2 * UNBOUNDED_ROWS)

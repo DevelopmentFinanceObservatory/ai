@@ -30,7 +30,7 @@ answer, or the `ToolRefusal` its reply maps to:
   `service_unavailable` keeps its code with a delay. A code this service
   defines for its own failures (`_LOCAL_CODES`) is `upstream_error` naming it.
   `RUNNER_CODES` is every code the code registry (`dfo_spec_kit.registry`) maps
-  to the analysis route; a code outside it passes through too, and is logged.
+  to the analysis route. A code outside it passes through too, and is logged.
 - An answer outside that contract, an unreachable dfo-apis, a timeout and a
   failed credential are `upstream_error`, the last three retryable.
 
@@ -117,8 +117,8 @@ DERIVED_FILE_PATH = f"{DERIVED_PATH}/file"
 # The derived file query that answers the frame's rows as one Parquet file.
 DERIVED_FILE_QUERY: Mapping[str, str] = {"format": "parquet", "bundle": "false"}
 
-# Codes this service defines for its own failures. One in a runner reply is no
-# refusal of the call's arguments, so it is `upstream_error` naming it.
+# Codes this service defines for its own failures. A runner reply that carries one
+# is `upstream_error` naming it.
 _LOCAL_CODES = frozenset(
     {
         ToolErrorCode.FRAME_NOT_HELD,
@@ -387,6 +387,22 @@ async def refusal_for(
     return refusal
 
 
+def _stated_mode(stated: object, *, code: str) -> RetryMode | None:
+    """The `RetryMode` a runner refusal states, or `None` when it states none or
+    one this service does not hold, which is logged."""
+    if stated is None:
+        return None
+    if isinstance(stated, str):
+        try:
+            return RetryMode(stated)
+        except ValueError:
+            pass
+    logger.warning(
+        "dfo-apis refused %s with retry_mode %r, which this service does not hold", code, stated
+    )
+    return None
+
+
 def _passed_through(
     problem: Mapping[str, Any],
     *,
@@ -398,19 +414,15 @@ def _passed_through(
     """The runner's refusal as it wrote it: its `code`, `detail`, `fix` and the
     `retry_mode` its problem document states. A code missing from `RUNNER_CODES` is
     logged, since the registry the client pins does not know it. A document with no
-    `retry_mode` takes `retry_after_delay` when it is `retryable`, else the mode
-    this service gives a code it defines."""
+    `retry_mode`, or one stating a mode `RetryMode` does not hold, which is logged,
+    takes `retry_after_delay` when it is `retryable`, else the mode this service
+    gives a code it defines."""
     if code not in RUNNER_CODES:
         logger.warning("dfo-apis refused with %s, a code the code registry does not hold", code)
     retryable = problem.get("retryable") is True
-    stated = problem.get("retry_mode")
-    mode = (
-        RetryMode(stated)
-        if stated in set(RetryMode)
-        else RetryMode.RETRY_AFTER_DELAY
-        if retryable
-        else None
-    )
+    mode = _stated_mode(problem.get("retry_mode"), code=code)
+    if mode is None and retryable:
+        mode = RetryMode.RETRY_AFTER_DELAY
     return ToolRefusal(
         code=ToolErrorCode(code) if code in _TOOL_CODES else code,
         message=detail,

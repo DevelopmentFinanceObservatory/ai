@@ -28,16 +28,19 @@ since these tools send no `on`.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 from common.materialisation import FrameRef
 from dfo_frame_grammar.grammar import ComposedUnit, UnitCell, unit_cell_from_json
 from pydantic import BaseModel, ConfigDict, Field, PlainValidator, create_model, model_validator
 
-from analysis_mcp.artifact import Exclusion, Interval, Observation
+from analysis_mcp.artifact import Exclusion, ExclusionReason, ExclusionSide, Interval, Observation
 from analysis_mcp.execution_identity import ExecutionIdentity
 from analysis_mcp.result import VerbResult
+
+logger = logging.getLogger(__name__)
 
 type KeyPairs = tuple[tuple[str, str], ...]
 type KeyPeriods = tuple[KeyPairs, tuple[str, ...]]
@@ -92,14 +95,27 @@ def _shown(data: object, *, entries: str, count: str, magnitude: Callable[[Any],
     return {**data, entries: list(shown), count: len(listed)}
 
 
+_DECLARED_REASONS = frozenset(get_args(ExclusionReason))
+_DECLARED_SIDES = frozenset({None, *get_args(ExclusionSide)})
+
+
 class _Facts(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
 
 class SummaryExclusion(Exclusion):
-    """An `Exclusion` as a summary states it, ignoring fields dfo-apis adds."""
+    """An `Exclusion` as a summary states it, ignoring fields dfo-apis adds. Its
+    `reason` and `side` are open: dfo-apis owns that vocabulary, so a reason or side
+    `Exclusion` does not list parses as its text, and a digest names it as written."""
 
     model_config = ConfigDict(extra="ignore")
+
+    reason: str
+    side: str | None = None
+
+    def declared(self) -> bool:
+        """Whether `Exclusion`, the tools' declared output, holds this reason and side."""
+        return self.reason in _DECLARED_REASONS and self.side in _DECLARED_SIDES
 
 
 class SummaryObservation(Observation):
@@ -517,7 +533,21 @@ class VerbSummary(BaseModel):
         return cls.model_validate({**summary, "result": call.result})
 
     def verb_result(self) -> VerbResult:
-        """The `VerbResult` a tool returns as `structuredContent`."""
-        return VerbResult.model_validate(
-            self.model_dump(include=set(VerbResult.model_fields), mode="json")
-        )
+        """The `VerbResult` a tool returns as `structuredContent`. An exclusion whose
+        reason or side the declared output schema does not hold is left out of it and
+        logged; the digest still names it."""
+        undeclared = [exclusion for exclusion in self.exclusions if not exclusion.declared()]
+        for exclusion in undeclared:
+            logger.warning(
+                "dfo-apis stated exclusion reason %r, side %r, which VerbResult does not "
+                "declare; it is left out of structuredContent",
+                exclusion.reason,
+                exclusion.side,
+            )
+        fields = self.model_dump(include=set(VerbResult.model_fields), mode="json")
+        fields["exclusions"] = [
+            exclusion.model_dump(mode="json")
+            for exclusion in self.exclusions
+            if exclusion.declared()
+        ]
+        return VerbResult.model_validate(fields)

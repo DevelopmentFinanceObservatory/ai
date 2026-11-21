@@ -898,10 +898,10 @@ def _per_period_ranks_block(
 ) -> str:
     """One block per period, each capped and truncation-noted exactly like
     the collapse mode's single block. `entity_ranks` is already grouped by
-    period -- the analysis runner's per-period `rank` emits one
-    period's own ranking, in rank order, before moving to the next -- so
-    consecutive runs sharing a `time_period` are the per-period grouping,
-    with no second sort needed here.
+    period (the analysis runner's per-period `rank` emits one
+    period's own ranking, in rank order, before moving to the next), so
+    consecutive runs sharing a `time_period` are the per-period grouping
+    and no second sort is needed here.
     """
     periods: list[str] = []
     grouped: dict[str, list[EntityRank]] = {}

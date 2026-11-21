@@ -9,7 +9,8 @@ fixes, so a runner refusal maps onto this module's fields: `code`, `message`,
 and a retryable `upstream_error` set. A runner code this module defines no
 factory for passes through as the runner wrote it. `upstream_code` names the
 runner's own code under `upstream_error`, which stands for a reply outside the
-runner's contract.
+runner's contract. The paragraphs below say what each code means when a verb's
+computation refuses with it, in the runner or, for the store codes, here.
 
 `unit_heterogeneous` and `facet_heterogeneous` carry a disambiguation payload
 in `fix["disambiguation"]`: its `candidates`, each an `id` and a `label`.
@@ -104,10 +105,9 @@ is left empty and the two frames declare no role column in common while
 both declare some -- distinct from `join_output_collision`, which fires
 after a match is found.
 
-`mixed_time_grain` fires when a resolved input's `time_period` column
-carries more than one grain, a span beside a point, or two different spans,
-checked once at frame admission; `do_not_retry`, since the
-stored frame doesn't change between calls. `frame_not_held` fires when a
+`mixed_time_grain` fires when an input's `time_period` column carries more
+than one grain, a span beside a point, or two different spans. It is `do_not_retry`,
+since the stored frame is the same on every call. `frame_not_held` fires when a
 resolved `frame_ref` names a pair the store cannot return -- never
 registered, fabricated, or past the store's own retention. `frame_expired`
 fires when a pair aged out past an in-memory store's TTL, with a `get_data`
@@ -128,29 +128,17 @@ its envelope names a different reference than the one requested, or, when the re
 content_version disagrees with the value that check compares against. Every
 one of those means the identical reference reaches the identical wrong
 object, so the fix is a fresh result under a new reference.
-`frame_too_large_before_decode` reuses `frame_too_large`'s code for a stored
-object the same store refuses before decoding, over its encoded byte size,
-row count, column count, or row-group uncompressed size. The bytes are
-exactly what was written, just too large for this store to serve back, so
-unlike `frame_integrity_failed` it is retryable with a narrower
-`frame_ref`. `frame_too_large` itself fires on the row count the store
-reports for a held frame before it is read, against a service-level row
-ceiling, not the store's own resource-protection one. `frame_too_large_on_write` also
-reuses `frame_too_large`'s code, for the same store's row ceiling checked
-the other direction: a verb's own computed result, refused before `put`
-writes anything, so no reference is ever minted for a caller to retry with
--- the fix is narrowing this call's own inputs, not a smaller `frame_ref`.
+`frame_too_large` fires when a step's result is too large to store, so nothing
+is stored and narrowing the call's inputs is the fix.
 
 `derived_input_unusable` refuses a derived input a verb cannot read, with a
-retry over a different `frame_ref`. `derived_input_unrecoverable` refuses,
-for every verb, an input whose trace records an analysis-mcp engine before
-0.3.0. Those engines labelled a collapsed or grown row with one borrowed
-point, such as `2022` over a 2018-2022 sum, so their periods do not state the
-years they cover and no retry over the same result fixes it.
+retry over a different `frame_ref`. `derived_input_unrecoverable` refuses a
+derived (`ops_`) input computed from a dataset version dfo-apis does not
+hold (`derived_input_root_lost`), so no retry over the same result fixes it.
+Running the steps again from the source data does.
 
-`derived_input_ordinal` fires when a resolved input carries
-`DerivedMarker.ordinal` -- a per-period `rank`'s own `value` column holds a
-rank position, not a measured value, and no verb here may treat a position
+`derived_input_ordinal` fires when an input is a per-period `rank`'s result.
+Its `value` column holds a rank position, not a measured value, and no verb here may treat a position
 as a quantity to ratio, grow at a percentage rate or rank again. Raised by
 `share_of` and `quotient_of` on either side (a ratio has no meaning over a
 position), by
@@ -164,7 +152,7 @@ name.
 `place_levels_mixed` fires when `rank`, an `aggregate` whose `group_by`
 leaves a place column out, or either side of a `share_of` reads a frame
 carrying that column's `{role}_type` enrichment whose several places
-share no level of `common.place_type.PLACE_LEVELS`: the frame names no place, so it holds
+share no level of `common.place_type.PLACE_LEVELS`. The frame names no place, so it holds
 the world, regions, World Bank groups, countries and their subdivisions
 side by side. A type outside `PLACE_LEVELS`, such as `Place`,
 `ProvisionalNode` or `UNGeoRegion`, names no level, so places sharing only
@@ -189,7 +177,7 @@ holding parties out as `party_residual` exclusions.
 `service_unavailable` fires when the analysis runner is busy (`runner_client`),
 when a root dataset of the call is still building (`analysis_pending`), or when
 the frame store fails a read (`frame_store_unavailable`). It is the one
-`retry_after_delay` code: the same call succeeds once the wait it names has
+`retry_after_delay` code. The same call succeeds once the wait it names has
 passed.
 
 `rolling_anchor_unresolved` fires when the latest period a rolling call stands
@@ -211,16 +199,15 @@ It is retryable over a frame fetched without the option. It also fires when a
 lost frame has no mint record to state its rendering, and `get_data` names a
 frame that has one.
 
-`upstream_error` is a runner refusal under a code this module does not
-define, or an answer the runner could not give. `upstream_code` names the
+`upstream_error` is a runner refusal under a code this service defines for its
+own failures (`runner_client._LOCAL_CODES`), or an answer outside the runner's
+contract. `upstream_code` names the
 runner's code. It is `retry_after_delay` when the refusal was retryable and
 carries a delay, and `do_not_retry` otherwise.
 
 `internal_error` is the registration-site catch-all's code (see
 `server.py`): every other code names something a specific, anticipated
-failure produced; `internal_error` names the absence of one. Every other
-refusal `compare`, `growth`, `rank`, `share_of`, `quotient_of`, `join`, and
-`filter` can reach reuses one of the existing codes/factories where the shape fits.
+failure produced, and `internal_error` names the absence of one.
 """
 
 from __future__ import annotations
@@ -307,9 +294,8 @@ class ToolErrorCode(StrEnum):
 # was wrong, so retrying unchanged reaches the identical failure.
 # `non_finite_result`/`internal_error`: no specific argument to change.
 # `mixed_time_grain`: the frame `frame_ref` names doesn't change between calls.
-# `derived_input_unrecoverable`: a result from an earlier engine whose
-# period labels misstate its years, so only a fresh run from the source data
-# fixes it.
+# `derived_input_unrecoverable`: a derived input whose root dfo-apis does not
+# hold, so only a fresh run from the source data fixes it.
 # `derived_input_ordinal` stays `correct_and_retry`: `growth` retries with
 # `change="absolute"` over the identical frame_ref, `rank` retries over the
 # frame_ref the per-period rank read, and `share_of` and `quotient_of` retry
@@ -318,8 +304,8 @@ class ToolErrorCode(StrEnum):
 # `frame_integrity_failed`: a corrupted or tampered stored object, so the
 # identical frame_ref reaches the identical bytes.
 # `rolling_grain_unsupported`: the root frames' periods don't change between calls.
-# `service_unavailable` is `retry_after_delay`: the identical call fits once
-# other calls release their frame rows.
+# `service_unavailable` is `retry_after_delay`, since the identical call succeeds
+# once the wait it names has passed.
 # Every other code names something a caller can change (a different
 # frame_ref, a supported aggregation, a narrower group_by, a unit pin).
 _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {

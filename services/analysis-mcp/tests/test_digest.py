@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pyarrow as pa
 import pytest
 from analysis_mcp.artifact import Exclusion, Interval
 from analysis_mcp.digest import (
@@ -50,6 +49,7 @@ from party_frames import (
     PRIVATE_WHOLE,
     PROVIDER,
     provider_frame,
+    provider_frame_by_year,
 )
 
 
@@ -1503,14 +1503,11 @@ def test_a_quotient_over_the_pooled_donors_names_the_denominators_private_donors
 def test_a_private_donor_only_in_a_period_left_out_is_not_disclosed(verb, render) -> None:
     # 2021 divides 20 by 40; the private donor's 100 sits in 2020, which the
     # denominator lacks, so it is no part of the figure.
-    numerator = provider_frame(
-        {"country/FRA": (OFFICIAL, 5.0), "GatesFoundation": (PRIVATE, 100.0)}, years=("2020",)
-    )
-    numerator_2021 = provider_frame(
-        {"country/FRA": (OFFICIAL, 10.0), "country/DEU": (OFFICIAL, 10.0)}
-    )
-    both_years = Frame.from_table(
-        columns=numerator.columns, table=pa.concat_tables([numerator.table, numerator_2021.table])
+    both_years = provider_frame_by_year(
+        {
+            "2020": {"country/FRA": (OFFICIAL, 5.0), "GatesFoundation": (PRIVATE, 100.0)},
+            "2021": {"country/FRA": (OFFICIAL, 10.0), "country/DEU": (OFFICIAL, 10.0)},
+        }
     )
     result = computed(
         verb,

@@ -4815,9 +4815,9 @@ def _frame_role_columns(role_keys: Sequence[str]) -> tuple[str, ...]:
     """The role columns `Frame.build(role_keys=role_keys, rows=())` would carry, in its own order.
 
     The same technique `data_mcp.frame_materialisation.observed_shape` uses on a
-    real frame, over an empty one built for its columns alone -- what
-    `expected_role_keys` is checked against, rather than a hand-written
-    literal that could drift from `grammar.normalize_role_keys`' own rules.
+    real frame, over an empty one built for its columns alone. `expected_role_keys`
+    is checked against it, as a hand-written literal could drift from
+    `grammar.normalize_role_keys`' own rules.
     """
     frame = Frame.build(role_keys=role_keys, rows=())
     return frame.columns[1 : frame.columns.index(TIME_PERIOD_COLUMN)]

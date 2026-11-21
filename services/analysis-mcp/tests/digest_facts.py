@@ -7,17 +7,18 @@ out.
 
 `computed` is the facts dfo-apis' engine computes for one verb over a test's
 frames, replayed from `fixtures/digest_engine_facts.json`, keyed by the verb, the
-Parquet bytes of each frame and the RFC 8785 form of the arguments. To record
-facts a test asks for and the fixture lacks, run the tests with
-`DIGEST_FACTS_RECORD=<path>`: each request is written there with its frames as
+grammar's `frame_sha256` of each frame and the RFC 8785 form of the arguments. The
+fixture's `recorded_with` entry names the dfo-apis revision that computed it. To
+record facts a test asks for and the fixture lacks, run the tests with
+`DIGEST_FACTS_RECORD=<path>`. Each request is written there with its frames as
 base64 Parquet, and the test fails. Compute the facts in a dfo-apis checkout with
-`runner_record/engine_facts.py`, merge them into the fixture, and run again.
+`runner_record/engine_facts.py`, which writes them into the fixture with that
+checkout's revision, and run again.
 """
 
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 from collections.abc import Mapping
@@ -33,7 +34,7 @@ from analysis_mcp.summary import (
     ShareOfFacts,
 )
 from common.materialisation.frame_codec import frame_to_parquet_bytes
-from dfo_frame_grammar import Frame
+from dfo_frame_grammar import Frame, frame_sha256
 from dfo_frame_grammar.grammar import ComposedUnit, UnitRequest
 from pydantic import BaseModel
 
@@ -69,8 +70,7 @@ def facts[T: BaseModel](model: type[T], **fields: object) -> T:
 
 
 def _key(verb: str, frames: tuple[Frame, ...], arguments: Mapping[str, Any]) -> str:
-    digests = [hashlib.sha256(frame_to_parquet_bytes(frame)).hexdigest() for frame in frames]
-    body = {"frames": digests, "arguments": _json(arguments)}
+    body = {"frames": [frame_sha256(frame) for frame in frames], "arguments": _json(arguments)}
     return f"{verb} {rfc8785.dumps(body).decode()}"
 
 

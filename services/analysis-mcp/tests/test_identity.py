@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
-from analysis_mcp.execution_identity import ExecutionIdentity, current_execution_identity
+from analysis_mcp.execution_identity import ExecutionIdentity
 from analysis_mcp.identity import (
     OP_SPEC_HASH_PATTERN,
     TOOLKIT_CONTENT_VERSION_PATTERN,
@@ -30,6 +30,7 @@ from analysis_mcp.op_spec import (
 )
 from common.materialisation import FrameRef
 from common.recipe import normal_form
+from engine_identity import EXECUTION_IDENTITY
 from pydantic import ValidationError
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -129,10 +130,9 @@ def test_op_spec_hash_is_independent_of_denominator_by_key_order(
     model: type[ShareOfOpSpec | QuotientOfOpSpec],
 ) -> None:
     """Two calls differing only in `denominator_by`'s own key insertion
-    order mint one `op_spec_hash` -- JCS sorts an
-    object's own members regardless of Python dict insertion order, so this
-    requires no explicit registration in `identity._normalise_parameters`,
-    unlike an array-shaped field."""
+    order mint one `op_spec_hash`. JCS sorts an object's own members regardless
+    of Python dict insertion order, so this needs no registration in
+    `identity._normalise_parameters`, as an array-shaped field does."""
     a = op_spec_hash_for(
         _two_sided_op_spec(
             model,
@@ -169,7 +169,7 @@ def test_toolkit_content_version_has_the_published_shape() -> None:
     content_version = mint_toolkit_content_version(
         op_spec_hash=op_spec_hash,
         input_content_versions=[SNAPSHOT_REF["content_version"]],
-        execution_identity=current_execution_identity(),
+        execution_identity=EXECUTION_IDENTITY,
     )
     assert TOOLKIT_CONTENT_VERSION_PATTERN.fullmatch(content_version)
 
@@ -177,7 +177,7 @@ def test_toolkit_content_version_has_the_published_shape() -> None:
 def test_toolkit_content_version_is_independent_of_input_order() -> None:
     op_spec_hash = op_spec_hash_for(_op_spec(group_by=("reporter",)))
     other_cv = "cv_" + "c" * 32
-    ei = current_execution_identity()
+    ei = EXECUTION_IDENTITY
     a = mint_toolkit_content_version(
         op_spec_hash=op_spec_hash,
         input_content_versions=[SNAPSHOT_REF["content_version"], other_cv],
@@ -219,14 +219,14 @@ def test_duplicate_input_content_version_refuses() -> None:
                 SNAPSHOT_REF["content_version"],
                 SNAPSHOT_REF["content_version"],
             ],
-            execution_identity=current_execution_identity(),
+            execution_identity=EXECUTION_IDENTITY,
         )
     assert exc_info.value.category == "duplicate_member"
 
 
 def test_recompute_toolkit_content_version_matches_mint() -> None:
     op_spec_hash = op_spec_hash_for(_op_spec(group_by=("reporter",)))
-    ei = current_execution_identity()
+    ei = EXECUTION_IDENTITY
     minted = mint_toolkit_content_version(
         op_spec_hash=op_spec_hash,
         input_content_versions=[SNAPSHOT_REF["content_version"]],

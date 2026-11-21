@@ -2,8 +2,7 @@
 
 The verbs are analysis-mcp's in-process verbs, replayed from what they stored
 (`stored_verbs`), behind a double that counts each call, so the frames, traces and
-pairs are the ones a store holds from before the verbs computed on dfo-apis'
-analysis runner. The mint is
+pairs are the ones those verbs stored. The mint is
 `Dataset`, which registers a dataset's current frame as data-mcp's mint does.
 apis is `FakeApis` behind `httpx2.MockTransport`, and the publisher is
 presentation-mcp's `PlatformAssembler.publish_frame` over it. The mounted
@@ -21,7 +20,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from analysis_mcp.execution_identity import current_execution_identity
 from common.caller import (
     CALLER_PRINCIPAL_HEADER,
     SURFACE_HEADER,
@@ -74,7 +72,7 @@ from .replay_support import (
     reporter_rows,
     yearly,
 )
-from .stored_verbs import filter_verb, growth, join, resolve_anchor
+from .stored_verbs import EXECUTION_IDENTITY, filter_verb, growth, join, resolve_anchor
 
 _TOOLS = {"filter": filter_verb, "growth": growth, "join": join, "resolve_anchor": resolve_anchor}
 # A second dataset, minted from the same frame as `SPEC`.
@@ -236,7 +234,7 @@ class Scene:
         self.tools = Tools()
         self.apis = FakeApis()
         # The verbs are analysis-mcp's in-process functions, so apis names their engine.
-        self.apis.execution_identity = dataclasses.asdict(current_execution_identity())
+        self.apis.execution_identity = dataclasses.asdict(EXECUTION_IDENTITY)
         self.assembler = self.apis.assembler()
         self.budget = RowBudget(max_rows=100_000)
 
@@ -523,7 +521,7 @@ async def test_a_flow_root_minted_with_kinds_keeps_the_stored_normal_form(
     assert replayed.recipe["replay_key"] == replay_key(
         normal_form_hash=recipe["normal_form_hash"],
         root_datasets=[current.model_dump()],
-        execution_identities=[current_execution_identity().canonical_string()],
+        execution_identities=[EXECUTION_IDENTITY.canonical_string()],
     )
 
 
@@ -675,40 +673,36 @@ async def test_a_refusal_that_names_a_wait_is_pending(scene: Scene) -> None:
     assert await scene.replay(recipe) == Pending(retry_after_s=4.0, reason="busy")
 
 
-async def test_rows_the_refresh_budget_has_no_room_for_are_pending_and_no_verb_is_called(
+async def test_rows_the_refresh_budget_has_no_room_for_are_pending_and_nothing_is_published(
     scene: Scene,
 ) -> None:
     _, recipe = await scene.fixed()
     scene.dataset.move(SECOND_VALUES)
+    posts = len(scene.apis.published())
 
     # Another replay holds the whole budget, and gives it back.
     with scene.budget.claim(scene.budget.max_rows):
         assert await scene.replay(recipe) == Pending(retry_after_s=2.0, reason="row_budget")
-        assert scene.tools.calls == []
+        assert len(scene.apis.published()) == posts
     assert isinstance(await scene.replay(recipe), Replayed)
 
 
-@pytest.mark.parametrize(
-    ("recipe_of", "stage"),
-    [
-        # A rolling recipe claims its roots' rows together for the anchor call.
-        pytest.param(Scene.rolling, "anchor", id="roots-of-a-rolling-recipe"),
-        pytest.param(Scene.fixed, "verb", id="inputs-of-a-verb"),
-    ],
-)
-async def test_rows_past_the_whole_refresh_budget_are_refused_for_good(
-    scene: Scene, recipe_of: Any, stage: str
+async def test_rows_past_the_whole_refresh_budget_are_refused_for_good_at_the_publish(
+    scene: Scene,
 ) -> None:
-    """No later call could claim them, so the replay must not answer `Pending`."""
-    _, recipe = await recipe_of(scene)
+    """No later call could claim them, so the replay must not answer `Pending`. The
+    verbs compute on dfo-apis' analysis runner and claim no rows, so they run."""
+    _, recipe = await scene.fixed()
     scene.dataset.move(SECOND_VALUES)
     scene.budget = RowBudget(max_rows=1)
+    posts = len(scene.apis.published())
 
     refused = await scene.replay(recipe)
 
     assert isinstance(refused, Refused), refused
-    assert (refused.code, refused.stage) == ("rows_over_refresh_budget", stage)
-    assert scene.tools.calls == []
+    assert (refused.code, refused.stage) == ("rows_over_refresh_budget", "publish")
+    assert scene.tools.calls != []
+    assert len(scene.apis.published()) == posts
 
 
 async def test_a_dataset_joined_beside_a_rolling_step_is_not_read_for_its_period(

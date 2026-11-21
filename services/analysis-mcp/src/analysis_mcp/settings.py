@@ -16,7 +16,7 @@ class Settings(FrameServiceSettings):
     local development or an eval run against a live analysis-mcp instance.
 
     `max_frame_rows` (`common.FrameServiceSettings`, shared with data-mcp and
-    presentation-mcp) is read by no analysis-mcp code: dfo-apis' analysis runner
+    presentation-mcp) is unused in analysis-mcp, since dfo-apis' analysis runner
     computes every verb.
 
     `frame_store_bucket` names the GCS bucket the materialisation store

@@ -2,8 +2,7 @@
 derived frame ends as.
 
 The store is `InMemoryMaterialisationStore`, filled with the frames and traces
-analysis-mcp's in-process verbs stored (`stored_verbs`), the frames a store holds
-from before the verbs computed on dfo-apis' analysis runner. apis is `FakeApis` behind
+analysis-mcp's in-process verbs stored (`stored_verbs`). apis is `FakeApis` behind
 `httpx2.MockTransport`: the recipe and versions routes, answering as apis'
 publish door does.
 """

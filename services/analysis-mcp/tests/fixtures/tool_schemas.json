@@ -1,7 +1,22 @@
 {
   "aggregate": {
+    "_meta": {
+      "fastmcp": {
+        "tags": [],
+        "version": "1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": null
+    },
     "description": "Group a stored frame by `group_by` and reduce each group's `value` with `aggregation`.\n\nUse it to total or average a frame over one of its dimensions.\n\n`aggregate` skips absent grid cells, not null values. `Frame.build` cannot\nrepresent an in-frame null observation today (`value` must be finite,\n`status` is reserved), so \"coverage\" here means cells present versus\ncells expected for the grouped grain. Both figures land in the trace's\n`applied_policy` on every call. Unit and facet heterogeneity are checked\nbefore any number is computed. A heterogeneous unit refuses with\ncandidates to retry against via `unit`, and a heterogeneous facet\nrefuses naming a differently-scoped `frame_ref` to retry with instead. A\nresult below the configured coverage floor refuses rather than returning\na number computed from too sparse a grid. Under sum or mean with\n`time_period` outside `group_by`, every output row's `time_period` is\none span from the earliest to the latest period the call reduced\n(`2018/2022`), the same on every row.",
-    "parameters": {
+    "execution": null,
+    "icons": null,
+    "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "aggregation": {
@@ -110,11 +125,262 @@
         "aggregation"
       ],
       "type": "object"
-    }
+    },
+    "name": "aggregate",
+    "outputSchema": {
+      "$defs": {
+        "Exclusion": {
+          "additionalProperties": false,
+          "description": "Rows one narrowing step dropped, and why.\n\n`entities` names, per role column the output frame declares, every\ndistinct value a dropped row carried on that column, capped at\n`ENTITY_CAP` values per role. `entities_truncated` is set when a role's\ndistinct-value count exceeded that cap; `rows` still names the true\ntotal dropped. A per-period `rank`'s `beyond_limit` names only the\nentities cut from every period they were ranked in; an entity kept in\nsome period is still in the output, though its other periods' rows\ncount in `rows`.\n\n`side` names which of a two-input verb's two sides these rows came from\n(`compare`/`join`'s `left`/`right`, `share_of`'s\n`numerator`/`denominator`). `None` for a single-input verb (`aggregate`,\n`growth`, `rank`, `filter`).",
+          "properties": {
+            "entities": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Entities",
+              "type": "object"
+            },
+            "entities_truncated": {
+              "default": false,
+              "title": "Entities Truncated",
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "unit_unbound",
+                "unit_not_selected",
+                "entity_not_selected",
+                "outside_window",
+                "endpoint_missing",
+                "zero_or_sign_crossing_base",
+                "non_finite",
+                "predicate",
+                "unmatched_key",
+                "period_unmatched",
+                "beyond_limit",
+                "zero_denominator",
+                "party_total",
+                "party_residual"
+              ],
+              "title": "Reason",
+              "type": "string"
+            },
+            "rows": {
+              "minimum": 0,
+              "title": "Rows",
+              "type": "integer"
+            },
+            "side": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "numerator",
+                    "denominator",
+                    "left",
+                    "right"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side"
+            }
+          },
+          "required": [
+            "reason",
+            "rows"
+          ],
+          "title": "Exclusion",
+          "type": "object"
+        },
+        "Interval": {
+          "additionalProperties": false,
+          "description": "The output's `time_period` stands for a span from `start` to `end`:\nthe earliest and latest real periods the output collapsed, unioned\nacross every group or entity the result carries. A verb builds one when\nit collapses a frame of points into one span (`aggregate` under sum or\nmean outside time grouping, a collapsing `rank`, `growth` over its\nwindow); a verb reading a span frame carries the input's interval on,\nand a raw materialisation labelled with one span reads as that span.\n\n`contiguous` is set when every period of the result's grain (year,\nmonth, or day) between `start` and `end` appears in at least one\ncollapsed input row. `absent` names up to 10 of the periods in that\nspan that do not, sorted; `absent_count` is the true total, so a\n10-entry `absent` list never has to be read as exhaustive. `contiguous`\nis `True`, `absent` is `()`, and `absent_count` is `0` for a span of\nexactly one period.\n\n`contiguous` is `None`, with `absent` and `absent_count` left at their\ndefaults, when contiguity cannot be computed -- unknown, not `False`:\n`start` or `end` is a calendar-invalid day the source frame carried (the\nframe grammar admits a source's own out-of-range date; see\n`dfo_frame_grammar.grammar`), or the span is a raw materialisation's own\nlabel, whose trace records no periods it collapsed.",
+          "properties": {
+            "absent": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Absent",
+              "type": "array"
+            },
+            "absent_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Absent Count",
+              "type": "integer"
+            },
+            "contiguous": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": true,
+              "title": "Contiguous"
+            },
+            "end": {
+              "title": "End",
+              "type": "string"
+            },
+            "kind": {
+              "const": "interval",
+              "default": "interval",
+              "title": "Kind",
+              "type": "string"
+            },
+            "start": {
+              "title": "Start",
+              "type": "string"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "title": "Interval",
+          "type": "object"
+        },
+        "Observation": {
+          "additionalProperties": false,
+          "description": "The output's own `time_period` names a genuine single observation.",
+          "properties": {
+            "kind": {
+              "const": "observation",
+              "default": "observation",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "title": "Observation",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "properties": {
+        "content_version": {
+          "title": "Content Version",
+          "type": "string"
+        },
+        "dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Dropped Key Count",
+          "type": "integer"
+        },
+        "exclusions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Exclusion"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "frame_content_version": {
+          "title": "Frame Content Version",
+          "type": "string"
+        },
+        "ranked_before_limit": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ranked Before Limit"
+        },
+        "right_dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Right Dropped Key Count",
+          "type": "integer"
+        },
+        "role_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Role Keys",
+          "type": "array"
+        },
+        "rows": {
+          "minimum": 0,
+          "title": "Rows",
+          "type": "integer"
+        },
+        "spec_id": {
+          "title": "Spec Id",
+          "type": "string"
+        },
+        "stat_var_count": {
+          "minimum": 0,
+          "title": "Stat Var Count",
+          "type": "integer"
+        },
+        "time": {
+          "discriminator": {
+            "mapping": {
+              "interval": "#/$defs/Interval",
+              "observation": "#/$defs/Observation"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Observation"
+            },
+            {
+              "$ref": "#/$defs/Interval"
+            }
+          ],
+          "title": "Time"
+        }
+      },
+      "required": [
+        "spec_id",
+        "content_version",
+        "frame_content_version",
+        "rows",
+        "stat_var_count"
+      ],
+      "title": "VerbResult",
+      "type": "object"
+    },
+    "title": "Aggregate by group"
   },
   "compare": {
+    "_meta": {
+      "fastmcp": {
+        "tags": [],
+        "version": "1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": null
+    },
     "description": "Subtract or add two slices, period by period, over the periods both report.\n\nEach side is `frame_ref` (or `right_frame_ref`) narrowed by an `entity`\nbinding down to one row per `time_period`. `operation` picks the form:\n`difference` (the default) gives `delta`, `right - left`, at each period;\n`sum` adds the two sides. A period only one side reports is left out,\nnever counted as zero; the digest names those periods and each side's\ncoverage. Periods with no overlap refuse (`comparison_periods_disjoint`),\nnaming each side's own available periods. A sum needs both sides in the\nsame unit (`cross_frame_unit_mismatch`, `cross_frame_unit_unbound`);\ndiffering provenance or measurement method is a warning, and the result\nleaves that facet unbound. The result is one series under its own\nstat_var. Use `join` instead to set two different variables side by side\nfor one entity.",
-    "parameters": {
+    "execution": null,
+    "icons": null,
+    "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "frame_ref": {
@@ -277,11 +543,262 @@
         "frame_ref"
       ],
       "type": "object"
-    }
+    },
+    "name": "compare",
+    "outputSchema": {
+      "$defs": {
+        "Exclusion": {
+          "additionalProperties": false,
+          "description": "Rows one narrowing step dropped, and why.\n\n`entities` names, per role column the output frame declares, every\ndistinct value a dropped row carried on that column, capped at\n`ENTITY_CAP` values per role. `entities_truncated` is set when a role's\ndistinct-value count exceeded that cap; `rows` still names the true\ntotal dropped. A per-period `rank`'s `beyond_limit` names only the\nentities cut from every period they were ranked in; an entity kept in\nsome period is still in the output, though its other periods' rows\ncount in `rows`.\n\n`side` names which of a two-input verb's two sides these rows came from\n(`compare`/`join`'s `left`/`right`, `share_of`'s\n`numerator`/`denominator`). `None` for a single-input verb (`aggregate`,\n`growth`, `rank`, `filter`).",
+          "properties": {
+            "entities": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Entities",
+              "type": "object"
+            },
+            "entities_truncated": {
+              "default": false,
+              "title": "Entities Truncated",
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "unit_unbound",
+                "unit_not_selected",
+                "entity_not_selected",
+                "outside_window",
+                "endpoint_missing",
+                "zero_or_sign_crossing_base",
+                "non_finite",
+                "predicate",
+                "unmatched_key",
+                "period_unmatched",
+                "beyond_limit",
+                "zero_denominator",
+                "party_total",
+                "party_residual"
+              ],
+              "title": "Reason",
+              "type": "string"
+            },
+            "rows": {
+              "minimum": 0,
+              "title": "Rows",
+              "type": "integer"
+            },
+            "side": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "numerator",
+                    "denominator",
+                    "left",
+                    "right"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side"
+            }
+          },
+          "required": [
+            "reason",
+            "rows"
+          ],
+          "title": "Exclusion",
+          "type": "object"
+        },
+        "Interval": {
+          "additionalProperties": false,
+          "description": "The output's `time_period` stands for a span from `start` to `end`:\nthe earliest and latest real periods the output collapsed, unioned\nacross every group or entity the result carries. A verb builds one when\nit collapses a frame of points into one span (`aggregate` under sum or\nmean outside time grouping, a collapsing `rank`, `growth` over its\nwindow); a verb reading a span frame carries the input's interval on,\nand a raw materialisation labelled with one span reads as that span.\n\n`contiguous` is set when every period of the result's grain (year,\nmonth, or day) between `start` and `end` appears in at least one\ncollapsed input row. `absent` names up to 10 of the periods in that\nspan that do not, sorted; `absent_count` is the true total, so a\n10-entry `absent` list never has to be read as exhaustive. `contiguous`\nis `True`, `absent` is `()`, and `absent_count` is `0` for a span of\nexactly one period.\n\n`contiguous` is `None`, with `absent` and `absent_count` left at their\ndefaults, when contiguity cannot be computed -- unknown, not `False`:\n`start` or `end` is a calendar-invalid day the source frame carried (the\nframe grammar admits a source's own out-of-range date; see\n`dfo_frame_grammar.grammar`), or the span is a raw materialisation's own\nlabel, whose trace records no periods it collapsed.",
+          "properties": {
+            "absent": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Absent",
+              "type": "array"
+            },
+            "absent_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Absent Count",
+              "type": "integer"
+            },
+            "contiguous": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": true,
+              "title": "Contiguous"
+            },
+            "end": {
+              "title": "End",
+              "type": "string"
+            },
+            "kind": {
+              "const": "interval",
+              "default": "interval",
+              "title": "Kind",
+              "type": "string"
+            },
+            "start": {
+              "title": "Start",
+              "type": "string"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "title": "Interval",
+          "type": "object"
+        },
+        "Observation": {
+          "additionalProperties": false,
+          "description": "The output's own `time_period` names a genuine single observation.",
+          "properties": {
+            "kind": {
+              "const": "observation",
+              "default": "observation",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "title": "Observation",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "properties": {
+        "content_version": {
+          "title": "Content Version",
+          "type": "string"
+        },
+        "dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Dropped Key Count",
+          "type": "integer"
+        },
+        "exclusions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Exclusion"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "frame_content_version": {
+          "title": "Frame Content Version",
+          "type": "string"
+        },
+        "ranked_before_limit": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ranked Before Limit"
+        },
+        "right_dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Right Dropped Key Count",
+          "type": "integer"
+        },
+        "role_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Role Keys",
+          "type": "array"
+        },
+        "rows": {
+          "minimum": 0,
+          "title": "Rows",
+          "type": "integer"
+        },
+        "spec_id": {
+          "title": "Spec Id",
+          "type": "string"
+        },
+        "stat_var_count": {
+          "minimum": 0,
+          "title": "Stat Var Count",
+          "type": "integer"
+        },
+        "time": {
+          "discriminator": {
+            "mapping": {
+              "interval": "#/$defs/Interval",
+              "observation": "#/$defs/Observation"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Observation"
+            },
+            {
+              "$ref": "#/$defs/Interval"
+            }
+          ],
+          "title": "Time"
+        }
+      },
+      "required": [
+        "spec_id",
+        "content_version",
+        "frame_content_version",
+        "rows",
+        "stat_var_count"
+      ],
+      "title": "VerbResult",
+      "type": "object"
+    },
+    "title": "Subtract or add two series"
   },
   "filter": {
+    "_meta": {
+      "fastmcp": {
+        "tags": [],
+        "version": "1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": null
+    },
     "description": "Keep only the rows of `frame_ref` satisfying every predicate in `predicates`.\n\nUse it to keep the rows of a frame that pass a condition.\n\nRow-value predicates only. An `ordered_threshold` compares a column's\nown ordered cell against a threshold, numerically against `value`, or\nlexically against `time_period`'s own period string at any grain\n(`YYYY`, `YYYY-MM`, `YYYY-MM-DD`). A `category_match` tests a column's\nown string cell against a closed set of values. This includes the\n`unit` column itself. A `place_level` reads a place's types, such as\na frame's `observationAbout_type` column,\nby `common.place_type.levels_of`: a frame that names no place holds\nevery level of place, and `place_level` on it with `\"Country\"` keeps\nthe countries. A `category_match` on `unit` is an ordinary way\nto narrow a heterogeneous-unit frame down to one unit, since filter\ninspects each row in isolation and never combines two rows' own values\n(unlike `aggregate`/`compare`/`growth`/`rank`/`share_of`, filter resolves\nno unit or facet before running). An empty result is valid, and the\nframe grammar accepts a columns-only empty frame. `frame_ref` may\nitself name a prior `aggregate`, `rank` or `growth` result whose\n`time_period` is one span such as `2018/2022`. An `ordered_threshold` on\n`time_period` refuses over it (`filter_predicate_type_mismatch`, `actual_type` `interval`),\nsince the span's string says nothing about the periods it covers. A\n`category_match` on the exact span string keeps its rows, and a predicate\non any other column filters as usual.\n\nA `time_period` threshold's value may be {anchor: 'latest', offset: n},\nwhich follows the data as growth's window years do.",
-    "parameters": {
+    "execution": null,
+    "icons": null,
+    "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "anchor_key": {
@@ -597,11 +1114,262 @@
         "frame_ref"
       ],
       "type": "object"
-    }
+    },
+    "name": "filter",
+    "outputSchema": {
+      "$defs": {
+        "Exclusion": {
+          "additionalProperties": false,
+          "description": "Rows one narrowing step dropped, and why.\n\n`entities` names, per role column the output frame declares, every\ndistinct value a dropped row carried on that column, capped at\n`ENTITY_CAP` values per role. `entities_truncated` is set when a role's\ndistinct-value count exceeded that cap; `rows` still names the true\ntotal dropped. A per-period `rank`'s `beyond_limit` names only the\nentities cut from every period they were ranked in; an entity kept in\nsome period is still in the output, though its other periods' rows\ncount in `rows`.\n\n`side` names which of a two-input verb's two sides these rows came from\n(`compare`/`join`'s `left`/`right`, `share_of`'s\n`numerator`/`denominator`). `None` for a single-input verb (`aggregate`,\n`growth`, `rank`, `filter`).",
+          "properties": {
+            "entities": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Entities",
+              "type": "object"
+            },
+            "entities_truncated": {
+              "default": false,
+              "title": "Entities Truncated",
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "unit_unbound",
+                "unit_not_selected",
+                "entity_not_selected",
+                "outside_window",
+                "endpoint_missing",
+                "zero_or_sign_crossing_base",
+                "non_finite",
+                "predicate",
+                "unmatched_key",
+                "period_unmatched",
+                "beyond_limit",
+                "zero_denominator",
+                "party_total",
+                "party_residual"
+              ],
+              "title": "Reason",
+              "type": "string"
+            },
+            "rows": {
+              "minimum": 0,
+              "title": "Rows",
+              "type": "integer"
+            },
+            "side": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "numerator",
+                    "denominator",
+                    "left",
+                    "right"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side"
+            }
+          },
+          "required": [
+            "reason",
+            "rows"
+          ],
+          "title": "Exclusion",
+          "type": "object"
+        },
+        "Interval": {
+          "additionalProperties": false,
+          "description": "The output's `time_period` stands for a span from `start` to `end`:\nthe earliest and latest real periods the output collapsed, unioned\nacross every group or entity the result carries. A verb builds one when\nit collapses a frame of points into one span (`aggregate` under sum or\nmean outside time grouping, a collapsing `rank`, `growth` over its\nwindow); a verb reading a span frame carries the input's interval on,\nand a raw materialisation labelled with one span reads as that span.\n\n`contiguous` is set when every period of the result's grain (year,\nmonth, or day) between `start` and `end` appears in at least one\ncollapsed input row. `absent` names up to 10 of the periods in that\nspan that do not, sorted; `absent_count` is the true total, so a\n10-entry `absent` list never has to be read as exhaustive. `contiguous`\nis `True`, `absent` is `()`, and `absent_count` is `0` for a span of\nexactly one period.\n\n`contiguous` is `None`, with `absent` and `absent_count` left at their\ndefaults, when contiguity cannot be computed -- unknown, not `False`:\n`start` or `end` is a calendar-invalid day the source frame carried (the\nframe grammar admits a source's own out-of-range date; see\n`dfo_frame_grammar.grammar`), or the span is a raw materialisation's own\nlabel, whose trace records no periods it collapsed.",
+          "properties": {
+            "absent": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Absent",
+              "type": "array"
+            },
+            "absent_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Absent Count",
+              "type": "integer"
+            },
+            "contiguous": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": true,
+              "title": "Contiguous"
+            },
+            "end": {
+              "title": "End",
+              "type": "string"
+            },
+            "kind": {
+              "const": "interval",
+              "default": "interval",
+              "title": "Kind",
+              "type": "string"
+            },
+            "start": {
+              "title": "Start",
+              "type": "string"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "title": "Interval",
+          "type": "object"
+        },
+        "Observation": {
+          "additionalProperties": false,
+          "description": "The output's own `time_period` names a genuine single observation.",
+          "properties": {
+            "kind": {
+              "const": "observation",
+              "default": "observation",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "title": "Observation",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "properties": {
+        "content_version": {
+          "title": "Content Version",
+          "type": "string"
+        },
+        "dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Dropped Key Count",
+          "type": "integer"
+        },
+        "exclusions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Exclusion"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "frame_content_version": {
+          "title": "Frame Content Version",
+          "type": "string"
+        },
+        "ranked_before_limit": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ranked Before Limit"
+        },
+        "right_dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Right Dropped Key Count",
+          "type": "integer"
+        },
+        "role_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Role Keys",
+          "type": "array"
+        },
+        "rows": {
+          "minimum": 0,
+          "title": "Rows",
+          "type": "integer"
+        },
+        "spec_id": {
+          "title": "Spec Id",
+          "type": "string"
+        },
+        "stat_var_count": {
+          "minimum": 0,
+          "title": "Stat Var Count",
+          "type": "integer"
+        },
+        "time": {
+          "discriminator": {
+            "mapping": {
+              "interval": "#/$defs/Interval",
+              "observation": "#/$defs/Observation"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Observation"
+            },
+            {
+              "$ref": "#/$defs/Interval"
+            }
+          ],
+          "title": "Time"
+        }
+      },
+      "required": [
+        "spec_id",
+        "content_version",
+        "frame_content_version",
+        "rows",
+        "stat_var_count"
+      ],
+      "title": "VerbResult",
+      "type": "object"
+    },
+    "title": "Filter rows"
   },
   "growth": {
+    "_meta": {
+      "fastmcp": {
+        "tags": [],
+        "version": "1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": null
+    },
     "description": "Compute each entity's growth across `[window_start, window_end]`.\n\nUse it for the change between two periods, as a percentage or an amount.\n\n`change=\"relative\"` (the default) computes\n`growth_rate = (value_end - value_start) / value_start`, the total\npercentage change across the window; a zero or sign-crossing base makes\nthat undefined, so such an entity is excluded as\n`zero_or_sign_crossing_base` before any division is attempted.\n`change=\"absolute\"` computes `value_end - value_start` directly, in the\ninput's own unit; that arithmetic is defined over any base. Either mode\nexcludes an entity whose value overflows as `non_finite`, and the call\nrefuses (`non_finite_result`) only when every entity is excluded so.\n\nBoth modes read only each entity's rows in `window_start` and\n`window_end`. Every entity with a row in both is computed, whatever\nyears between them it lacks; a warning counts the entities with such\ngaps. An entity missing either endpoint year is left out and listed\nunder exclusions as `endpoint_missing`. When no entity has both, the\ncall refuses (`growth_gap_year`), counting the entities missing each\nendpoint and suggesting a window at least one entity holds both ends of,\nwhen one exists.\n\nA window year given as {anchor: 'latest', offset: n} follows the data:\nthe call takes the newest year at least half of the input's series hold\nand moves back -n years. It computes over those literal years, which the\nresult names, and a card drawn from the result moves forward when new\ndata lands.\n\nEach output row's `time_period` is the window as a span, such as\n`2020/2023`. A frame whose rows already carry a span, such as an\n`aggregate` or `rank` result over several years, refuses\n(`derived_input_unusable`), because growth reads one row per period.\nRetry over the frame that result was computed from.",
-    "parameters": {
+    "execution": null,
+    "icons": null,
+    "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "anchor_key": {
@@ -920,11 +1688,262 @@
         "window_end"
       ],
       "type": "object"
-    }
+    },
+    "name": "growth",
+    "outputSchema": {
+      "$defs": {
+        "Exclusion": {
+          "additionalProperties": false,
+          "description": "Rows one narrowing step dropped, and why.\n\n`entities` names, per role column the output frame declares, every\ndistinct value a dropped row carried on that column, capped at\n`ENTITY_CAP` values per role. `entities_truncated` is set when a role's\ndistinct-value count exceeded that cap; `rows` still names the true\ntotal dropped. A per-period `rank`'s `beyond_limit` names only the\nentities cut from every period they were ranked in; an entity kept in\nsome period is still in the output, though its other periods' rows\ncount in `rows`.\n\n`side` names which of a two-input verb's two sides these rows came from\n(`compare`/`join`'s `left`/`right`, `share_of`'s\n`numerator`/`denominator`). `None` for a single-input verb (`aggregate`,\n`growth`, `rank`, `filter`).",
+          "properties": {
+            "entities": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Entities",
+              "type": "object"
+            },
+            "entities_truncated": {
+              "default": false,
+              "title": "Entities Truncated",
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "unit_unbound",
+                "unit_not_selected",
+                "entity_not_selected",
+                "outside_window",
+                "endpoint_missing",
+                "zero_or_sign_crossing_base",
+                "non_finite",
+                "predicate",
+                "unmatched_key",
+                "period_unmatched",
+                "beyond_limit",
+                "zero_denominator",
+                "party_total",
+                "party_residual"
+              ],
+              "title": "Reason",
+              "type": "string"
+            },
+            "rows": {
+              "minimum": 0,
+              "title": "Rows",
+              "type": "integer"
+            },
+            "side": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "numerator",
+                    "denominator",
+                    "left",
+                    "right"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side"
+            }
+          },
+          "required": [
+            "reason",
+            "rows"
+          ],
+          "title": "Exclusion",
+          "type": "object"
+        },
+        "Interval": {
+          "additionalProperties": false,
+          "description": "The output's `time_period` stands for a span from `start` to `end`:\nthe earliest and latest real periods the output collapsed, unioned\nacross every group or entity the result carries. A verb builds one when\nit collapses a frame of points into one span (`aggregate` under sum or\nmean outside time grouping, a collapsing `rank`, `growth` over its\nwindow); a verb reading a span frame carries the input's interval on,\nand a raw materialisation labelled with one span reads as that span.\n\n`contiguous` is set when every period of the result's grain (year,\nmonth, or day) between `start` and `end` appears in at least one\ncollapsed input row. `absent` names up to 10 of the periods in that\nspan that do not, sorted; `absent_count` is the true total, so a\n10-entry `absent` list never has to be read as exhaustive. `contiguous`\nis `True`, `absent` is `()`, and `absent_count` is `0` for a span of\nexactly one period.\n\n`contiguous` is `None`, with `absent` and `absent_count` left at their\ndefaults, when contiguity cannot be computed -- unknown, not `False`:\n`start` or `end` is a calendar-invalid day the source frame carried (the\nframe grammar admits a source's own out-of-range date; see\n`dfo_frame_grammar.grammar`), or the span is a raw materialisation's own\nlabel, whose trace records no periods it collapsed.",
+          "properties": {
+            "absent": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Absent",
+              "type": "array"
+            },
+            "absent_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Absent Count",
+              "type": "integer"
+            },
+            "contiguous": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": true,
+              "title": "Contiguous"
+            },
+            "end": {
+              "title": "End",
+              "type": "string"
+            },
+            "kind": {
+              "const": "interval",
+              "default": "interval",
+              "title": "Kind",
+              "type": "string"
+            },
+            "start": {
+              "title": "Start",
+              "type": "string"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "title": "Interval",
+          "type": "object"
+        },
+        "Observation": {
+          "additionalProperties": false,
+          "description": "The output's own `time_period` names a genuine single observation.",
+          "properties": {
+            "kind": {
+              "const": "observation",
+              "default": "observation",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "title": "Observation",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "properties": {
+        "content_version": {
+          "title": "Content Version",
+          "type": "string"
+        },
+        "dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Dropped Key Count",
+          "type": "integer"
+        },
+        "exclusions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Exclusion"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "frame_content_version": {
+          "title": "Frame Content Version",
+          "type": "string"
+        },
+        "ranked_before_limit": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ranked Before Limit"
+        },
+        "right_dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Right Dropped Key Count",
+          "type": "integer"
+        },
+        "role_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Role Keys",
+          "type": "array"
+        },
+        "rows": {
+          "minimum": 0,
+          "title": "Rows",
+          "type": "integer"
+        },
+        "spec_id": {
+          "title": "Spec Id",
+          "type": "string"
+        },
+        "stat_var_count": {
+          "minimum": 0,
+          "title": "Stat Var Count",
+          "type": "integer"
+        },
+        "time": {
+          "discriminator": {
+            "mapping": {
+              "interval": "#/$defs/Interval",
+              "observation": "#/$defs/Observation"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Observation"
+            },
+            {
+              "$ref": "#/$defs/Interval"
+            }
+          ],
+          "title": "Time"
+        }
+      },
+      "required": [
+        "spec_id",
+        "content_version",
+        "frame_content_version",
+        "rows",
+        "stat_var_count"
+      ],
+      "title": "VerbResult",
+      "type": "object"
+    },
+    "title": "Calculate growth"
   },
   "join": {
+    "_meta": {
+      "fastmcp": {
+        "tags": [],
+        "version": "1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": null
+    },
     "description": "Inner-join `frame_ref` and `right_frame_ref` on `join_keys` (or every\nshared role column, auto-detected) plus `time_period`.\n\n`right_keys` pairs a left column with a right column of another name\nholding the same entities, as `share_of`'s `denominator_by` does:\n`join_keys=[\"observationAbout\"]`, `right_keys={\"observationAbout\":\n\"destination\"}` joins a WHO series to a CRS series where both name\nKenya. Values match by equality, so Kenya against Uganda matches\nnothing and both sides' keys are dropped. Auto-detection pairs\nsame-name columns only.\n\nA joined pair of rows never collapses into one row: the result frame is\nlong-format, one row per matched key per side, `stat_var` distinguishing\nwhich side a row's own value came from -- `Frame` allows exactly one\n`value` column, so this is the only representable shape. A key present\non one side and absent on the other is dropped (inner join); both\nsides' own dropped counts are recorded in the trace and surfaced as a\ndigest warning, never a fabricated null for the missing side.\n\nAuto-detection picks up any entity-identifying role column (a reporting\ncountry, say) both frames declare, so joining two different entities'\nown series of the same variable auto-detects that column as a join key,\nevery row's key value differs between the two sides, and the join\nmatches zero rows on both sides. Use `compare` instead to combine one\nvariable across two entities; `join` is for combining two different\nvariables for one entity.",
-    "parameters": {
+    "execution": null,
+    "icons": null,
+    "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "frame_ref": {
@@ -1080,11 +2099,262 @@
         "right_frame_ref"
       ],
       "type": "object"
-    }
+    },
+    "name": "join",
+    "outputSchema": {
+      "$defs": {
+        "Exclusion": {
+          "additionalProperties": false,
+          "description": "Rows one narrowing step dropped, and why.\n\n`entities` names, per role column the output frame declares, every\ndistinct value a dropped row carried on that column, capped at\n`ENTITY_CAP` values per role. `entities_truncated` is set when a role's\ndistinct-value count exceeded that cap; `rows` still names the true\ntotal dropped. A per-period `rank`'s `beyond_limit` names only the\nentities cut from every period they were ranked in; an entity kept in\nsome period is still in the output, though its other periods' rows\ncount in `rows`.\n\n`side` names which of a two-input verb's two sides these rows came from\n(`compare`/`join`'s `left`/`right`, `share_of`'s\n`numerator`/`denominator`). `None` for a single-input verb (`aggregate`,\n`growth`, `rank`, `filter`).",
+          "properties": {
+            "entities": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Entities",
+              "type": "object"
+            },
+            "entities_truncated": {
+              "default": false,
+              "title": "Entities Truncated",
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "unit_unbound",
+                "unit_not_selected",
+                "entity_not_selected",
+                "outside_window",
+                "endpoint_missing",
+                "zero_or_sign_crossing_base",
+                "non_finite",
+                "predicate",
+                "unmatched_key",
+                "period_unmatched",
+                "beyond_limit",
+                "zero_denominator",
+                "party_total",
+                "party_residual"
+              ],
+              "title": "Reason",
+              "type": "string"
+            },
+            "rows": {
+              "minimum": 0,
+              "title": "Rows",
+              "type": "integer"
+            },
+            "side": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "numerator",
+                    "denominator",
+                    "left",
+                    "right"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side"
+            }
+          },
+          "required": [
+            "reason",
+            "rows"
+          ],
+          "title": "Exclusion",
+          "type": "object"
+        },
+        "Interval": {
+          "additionalProperties": false,
+          "description": "The output's `time_period` stands for a span from `start` to `end`:\nthe earliest and latest real periods the output collapsed, unioned\nacross every group or entity the result carries. A verb builds one when\nit collapses a frame of points into one span (`aggregate` under sum or\nmean outside time grouping, a collapsing `rank`, `growth` over its\nwindow); a verb reading a span frame carries the input's interval on,\nand a raw materialisation labelled with one span reads as that span.\n\n`contiguous` is set when every period of the result's grain (year,\nmonth, or day) between `start` and `end` appears in at least one\ncollapsed input row. `absent` names up to 10 of the periods in that\nspan that do not, sorted; `absent_count` is the true total, so a\n10-entry `absent` list never has to be read as exhaustive. `contiguous`\nis `True`, `absent` is `()`, and `absent_count` is `0` for a span of\nexactly one period.\n\n`contiguous` is `None`, with `absent` and `absent_count` left at their\ndefaults, when contiguity cannot be computed -- unknown, not `False`:\n`start` or `end` is a calendar-invalid day the source frame carried (the\nframe grammar admits a source's own out-of-range date; see\n`dfo_frame_grammar.grammar`), or the span is a raw materialisation's own\nlabel, whose trace records no periods it collapsed.",
+          "properties": {
+            "absent": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Absent",
+              "type": "array"
+            },
+            "absent_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Absent Count",
+              "type": "integer"
+            },
+            "contiguous": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": true,
+              "title": "Contiguous"
+            },
+            "end": {
+              "title": "End",
+              "type": "string"
+            },
+            "kind": {
+              "const": "interval",
+              "default": "interval",
+              "title": "Kind",
+              "type": "string"
+            },
+            "start": {
+              "title": "Start",
+              "type": "string"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "title": "Interval",
+          "type": "object"
+        },
+        "Observation": {
+          "additionalProperties": false,
+          "description": "The output's own `time_period` names a genuine single observation.",
+          "properties": {
+            "kind": {
+              "const": "observation",
+              "default": "observation",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "title": "Observation",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "properties": {
+        "content_version": {
+          "title": "Content Version",
+          "type": "string"
+        },
+        "dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Dropped Key Count",
+          "type": "integer"
+        },
+        "exclusions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Exclusion"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "frame_content_version": {
+          "title": "Frame Content Version",
+          "type": "string"
+        },
+        "ranked_before_limit": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ranked Before Limit"
+        },
+        "right_dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Right Dropped Key Count",
+          "type": "integer"
+        },
+        "role_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Role Keys",
+          "type": "array"
+        },
+        "rows": {
+          "minimum": 0,
+          "title": "Rows",
+          "type": "integer"
+        },
+        "spec_id": {
+          "title": "Spec Id",
+          "type": "string"
+        },
+        "stat_var_count": {
+          "minimum": 0,
+          "title": "Stat Var Count",
+          "type": "integer"
+        },
+        "time": {
+          "discriminator": {
+            "mapping": {
+              "interval": "#/$defs/Interval",
+              "observation": "#/$defs/Observation"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Observation"
+            },
+            {
+              "$ref": "#/$defs/Interval"
+            }
+          ],
+          "title": "Time"
+        }
+      },
+      "required": [
+        "spec_id",
+        "content_version",
+        "frame_content_version",
+        "rows",
+        "stat_var_count"
+      ],
+      "title": "VerbResult",
+      "type": "object"
+    },
+    "title": "Join two results"
   },
   "quotient_of": {
+    "_meta": {
+      "fastmcp": {
+        "tags": [],
+        "version": "1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": null
+    },
     "description": "Divide one measure by another, per period both report, such as GDP by population.\n\nEach side is `frame_ref` (or `denominator_frame_ref`) narrowed by an\n`entity` binding and summed per period. The result's unit is composed\nfrom the two sides, \"<numerator's unit> per <denominator's unit>\", and is\nnever one side's alone; a side that declares no unit is named by its\nstat_var (\"USDollar per Count_Person\"). The result is one series under\nits own stat_var. `numerator_by` keys the output, one series per key.\n`denominator_by` pairs each `numerator_by` column with the denominator\ncolumn holding the same entities, by name; without it every key divides\nby the denominator's one total. A period only one side reports, a\nnumerator key with no denominator match or no shared period, and a cell\nwhose denominator sums to zero are left out, never counted as zero; the\ndigest names them. The call refuses when nothing is left to divide\n(`comparison_periods_disjoint`, `quotient_of_no_key_matched`,\n`quotient_of_zero_denominator`) and when a side is a share, a growth\nrate or a quotient already (`quotient_of_side_unit_unsupported`). Use\n`share_of` for a part of its whole in one unit.",
-    "parameters": {
+    "execution": null,
+    "icons": null,
+    "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "denominator_by": {
@@ -1252,11 +2522,262 @@
         "frame_ref"
       ],
       "type": "object"
-    }
+    },
+    "name": "quotient_of",
+    "outputSchema": {
+      "$defs": {
+        "Exclusion": {
+          "additionalProperties": false,
+          "description": "Rows one narrowing step dropped, and why.\n\n`entities` names, per role column the output frame declares, every\ndistinct value a dropped row carried on that column, capped at\n`ENTITY_CAP` values per role. `entities_truncated` is set when a role's\ndistinct-value count exceeded that cap; `rows` still names the true\ntotal dropped. A per-period `rank`'s `beyond_limit` names only the\nentities cut from every period they were ranked in; an entity kept in\nsome period is still in the output, though its other periods' rows\ncount in `rows`.\n\n`side` names which of a two-input verb's two sides these rows came from\n(`compare`/`join`'s `left`/`right`, `share_of`'s\n`numerator`/`denominator`). `None` for a single-input verb (`aggregate`,\n`growth`, `rank`, `filter`).",
+          "properties": {
+            "entities": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Entities",
+              "type": "object"
+            },
+            "entities_truncated": {
+              "default": false,
+              "title": "Entities Truncated",
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "unit_unbound",
+                "unit_not_selected",
+                "entity_not_selected",
+                "outside_window",
+                "endpoint_missing",
+                "zero_or_sign_crossing_base",
+                "non_finite",
+                "predicate",
+                "unmatched_key",
+                "period_unmatched",
+                "beyond_limit",
+                "zero_denominator",
+                "party_total",
+                "party_residual"
+              ],
+              "title": "Reason",
+              "type": "string"
+            },
+            "rows": {
+              "minimum": 0,
+              "title": "Rows",
+              "type": "integer"
+            },
+            "side": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "numerator",
+                    "denominator",
+                    "left",
+                    "right"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side"
+            }
+          },
+          "required": [
+            "reason",
+            "rows"
+          ],
+          "title": "Exclusion",
+          "type": "object"
+        },
+        "Interval": {
+          "additionalProperties": false,
+          "description": "The output's `time_period` stands for a span from `start` to `end`:\nthe earliest and latest real periods the output collapsed, unioned\nacross every group or entity the result carries. A verb builds one when\nit collapses a frame of points into one span (`aggregate` under sum or\nmean outside time grouping, a collapsing `rank`, `growth` over its\nwindow); a verb reading a span frame carries the input's interval on,\nand a raw materialisation labelled with one span reads as that span.\n\n`contiguous` is set when every period of the result's grain (year,\nmonth, or day) between `start` and `end` appears in at least one\ncollapsed input row. `absent` names up to 10 of the periods in that\nspan that do not, sorted; `absent_count` is the true total, so a\n10-entry `absent` list never has to be read as exhaustive. `contiguous`\nis `True`, `absent` is `()`, and `absent_count` is `0` for a span of\nexactly one period.\n\n`contiguous` is `None`, with `absent` and `absent_count` left at their\ndefaults, when contiguity cannot be computed -- unknown, not `False`:\n`start` or `end` is a calendar-invalid day the source frame carried (the\nframe grammar admits a source's own out-of-range date; see\n`dfo_frame_grammar.grammar`), or the span is a raw materialisation's own\nlabel, whose trace records no periods it collapsed.",
+          "properties": {
+            "absent": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Absent",
+              "type": "array"
+            },
+            "absent_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Absent Count",
+              "type": "integer"
+            },
+            "contiguous": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": true,
+              "title": "Contiguous"
+            },
+            "end": {
+              "title": "End",
+              "type": "string"
+            },
+            "kind": {
+              "const": "interval",
+              "default": "interval",
+              "title": "Kind",
+              "type": "string"
+            },
+            "start": {
+              "title": "Start",
+              "type": "string"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "title": "Interval",
+          "type": "object"
+        },
+        "Observation": {
+          "additionalProperties": false,
+          "description": "The output's own `time_period` names a genuine single observation.",
+          "properties": {
+            "kind": {
+              "const": "observation",
+              "default": "observation",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "title": "Observation",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "properties": {
+        "content_version": {
+          "title": "Content Version",
+          "type": "string"
+        },
+        "dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Dropped Key Count",
+          "type": "integer"
+        },
+        "exclusions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Exclusion"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "frame_content_version": {
+          "title": "Frame Content Version",
+          "type": "string"
+        },
+        "ranked_before_limit": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ranked Before Limit"
+        },
+        "right_dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Right Dropped Key Count",
+          "type": "integer"
+        },
+        "role_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Role Keys",
+          "type": "array"
+        },
+        "rows": {
+          "minimum": 0,
+          "title": "Rows",
+          "type": "integer"
+        },
+        "spec_id": {
+          "title": "Spec Id",
+          "type": "string"
+        },
+        "stat_var_count": {
+          "minimum": 0,
+          "title": "Stat Var Count",
+          "type": "integer"
+        },
+        "time": {
+          "discriminator": {
+            "mapping": {
+              "interval": "#/$defs/Interval",
+              "observation": "#/$defs/Observation"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Observation"
+            },
+            {
+              "$ref": "#/$defs/Interval"
+            }
+          ],
+          "title": "Time"
+        }
+      },
+      "required": [
+        "spec_id",
+        "content_version",
+        "frame_content_version",
+        "rows",
+        "stat_var_count"
+      ],
+      "title": "VerbResult",
+      "type": "object"
+    },
+    "title": "Divide two series"
   },
   "rank": {
+    "_meta": {
+      "fastmcp": {
+        "tags": [],
+        "version": "1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": null
+    },
     "description": "Rank entities identified by `rank_by`, optionally reducing each\nentity's own rows with `aggregation` first.\n\nUse it to order entities by a value, such as the largest donors in a\nyear, and to keep the top or bottom few.\n\nRanks what's present. An entity absent from the window simply isn't\nranked. Competition ranking (\"1224\"). Entities sharing a value share a\nrank number, and the rank number never breaks a tie. The *order* two\ntied entities are listed in is broken deterministically by the frame\ngrammar's own total ordering over `rank_by`'s values. Refuses\n(`coverage_insufficient`, reusing `aggregate`'s own floor) when the\ngrid, every ranked entity times every distinct period any entity\ncontributes as reflected in the input data rather than the window's\nfull calendar range, falls below the configured coverage floor. A\nperiod where no entity has any data at all is invisible to this check.\n\nA window year given as {anchor: 'latest', offset: n} follows the data\nas growth's window years do.\n\nCollapsed, every output row's `time_period` is the extent of the\nperiods the window holds, such as `2018/2022`, or that one period when\nthe window holds only one. A frame whose rows carry one span, such as\na growth result, keeps that span; a window keeps a span row only when\nit covers every year of the span.\n\n`per_period=True` ranks each of the window's periods on its own instead\nof collapsing them: with no `limit`, the output frame's own `value`\ncolumn carries each entity's rank *position* per period, not its\nmeasured value, and no\nverb here may read that position as a quantity to ratio (`share_of`) or\ngrow at a percentage rate (`growth` with `change=\"relative\"`) or rank\nagain -- all three refuse (`derived_input_ordinal`) over this call's own\noutput, or over anything derived from it. A top or bottom N per period\nis this call with `limit` set.\n\n`limit` keeps the entities ranked at that position or better in the\noutput frame, every one tied at the boundary included, with their\nmeasured values in either mode: a limited per-period rank writes no\nordinal marker. Coverage and the floor check cover every ranked entity,\nand the rows left out are reported as a `beyond_limit` exclusion.",
-    "parameters": {
+    "execution": null,
+    "icons": null,
+    "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "aggregation": {
@@ -1599,11 +3120,262 @@
         "rank_by"
       ],
       "type": "object"
-    }
+    },
+    "name": "rank",
+    "outputSchema": {
+      "$defs": {
+        "Exclusion": {
+          "additionalProperties": false,
+          "description": "Rows one narrowing step dropped, and why.\n\n`entities` names, per role column the output frame declares, every\ndistinct value a dropped row carried on that column, capped at\n`ENTITY_CAP` values per role. `entities_truncated` is set when a role's\ndistinct-value count exceeded that cap; `rows` still names the true\ntotal dropped. A per-period `rank`'s `beyond_limit` names only the\nentities cut from every period they were ranked in; an entity kept in\nsome period is still in the output, though its other periods' rows\ncount in `rows`.\n\n`side` names which of a two-input verb's two sides these rows came from\n(`compare`/`join`'s `left`/`right`, `share_of`'s\n`numerator`/`denominator`). `None` for a single-input verb (`aggregate`,\n`growth`, `rank`, `filter`).",
+          "properties": {
+            "entities": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Entities",
+              "type": "object"
+            },
+            "entities_truncated": {
+              "default": false,
+              "title": "Entities Truncated",
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "unit_unbound",
+                "unit_not_selected",
+                "entity_not_selected",
+                "outside_window",
+                "endpoint_missing",
+                "zero_or_sign_crossing_base",
+                "non_finite",
+                "predicate",
+                "unmatched_key",
+                "period_unmatched",
+                "beyond_limit",
+                "zero_denominator",
+                "party_total",
+                "party_residual"
+              ],
+              "title": "Reason",
+              "type": "string"
+            },
+            "rows": {
+              "minimum": 0,
+              "title": "Rows",
+              "type": "integer"
+            },
+            "side": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "numerator",
+                    "denominator",
+                    "left",
+                    "right"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side"
+            }
+          },
+          "required": [
+            "reason",
+            "rows"
+          ],
+          "title": "Exclusion",
+          "type": "object"
+        },
+        "Interval": {
+          "additionalProperties": false,
+          "description": "The output's `time_period` stands for a span from `start` to `end`:\nthe earliest and latest real periods the output collapsed, unioned\nacross every group or entity the result carries. A verb builds one when\nit collapses a frame of points into one span (`aggregate` under sum or\nmean outside time grouping, a collapsing `rank`, `growth` over its\nwindow); a verb reading a span frame carries the input's interval on,\nand a raw materialisation labelled with one span reads as that span.\n\n`contiguous` is set when every period of the result's grain (year,\nmonth, or day) between `start` and `end` appears in at least one\ncollapsed input row. `absent` names up to 10 of the periods in that\nspan that do not, sorted; `absent_count` is the true total, so a\n10-entry `absent` list never has to be read as exhaustive. `contiguous`\nis `True`, `absent` is `()`, and `absent_count` is `0` for a span of\nexactly one period.\n\n`contiguous` is `None`, with `absent` and `absent_count` left at their\ndefaults, when contiguity cannot be computed -- unknown, not `False`:\n`start` or `end` is a calendar-invalid day the source frame carried (the\nframe grammar admits a source's own out-of-range date; see\n`dfo_frame_grammar.grammar`), or the span is a raw materialisation's own\nlabel, whose trace records no periods it collapsed.",
+          "properties": {
+            "absent": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Absent",
+              "type": "array"
+            },
+            "absent_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Absent Count",
+              "type": "integer"
+            },
+            "contiguous": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": true,
+              "title": "Contiguous"
+            },
+            "end": {
+              "title": "End",
+              "type": "string"
+            },
+            "kind": {
+              "const": "interval",
+              "default": "interval",
+              "title": "Kind",
+              "type": "string"
+            },
+            "start": {
+              "title": "Start",
+              "type": "string"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "title": "Interval",
+          "type": "object"
+        },
+        "Observation": {
+          "additionalProperties": false,
+          "description": "The output's own `time_period` names a genuine single observation.",
+          "properties": {
+            "kind": {
+              "const": "observation",
+              "default": "observation",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "title": "Observation",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "properties": {
+        "content_version": {
+          "title": "Content Version",
+          "type": "string"
+        },
+        "dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Dropped Key Count",
+          "type": "integer"
+        },
+        "exclusions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Exclusion"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "frame_content_version": {
+          "title": "Frame Content Version",
+          "type": "string"
+        },
+        "ranked_before_limit": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ranked Before Limit"
+        },
+        "right_dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Right Dropped Key Count",
+          "type": "integer"
+        },
+        "role_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Role Keys",
+          "type": "array"
+        },
+        "rows": {
+          "minimum": 0,
+          "title": "Rows",
+          "type": "integer"
+        },
+        "spec_id": {
+          "title": "Spec Id",
+          "type": "string"
+        },
+        "stat_var_count": {
+          "minimum": 0,
+          "title": "Stat Var Count",
+          "type": "integer"
+        },
+        "time": {
+          "discriminator": {
+            "mapping": {
+              "interval": "#/$defs/Interval",
+              "observation": "#/$defs/Observation"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Observation"
+            },
+            {
+              "$ref": "#/$defs/Interval"
+            }
+          ],
+          "title": "Time"
+        }
+      },
+      "required": [
+        "spec_id",
+        "content_version",
+        "frame_content_version",
+        "rows",
+        "stat_var_count"
+      ],
+      "title": "VerbResult",
+      "type": "object"
+    },
+    "title": "Rank entities"
   },
   "resolve_anchor": {
+    "_meta": {
+      "fastmcp": {
+        "tags": [],
+        "version": "1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": null
+    },
     "description": "Find the latest period of the data a question's rolling periods follow.\n\nThe latest period is the newest calendar year at least half of the series\nof every population hold. A series is one combination of a frame's columns\nother than `time_period`, `value` and `status`.\n\nUse it before a rolling `growth`, `rank` or `filter` call, to find the\nlatest period the data holds.\n\nThe result is stored, and its `anchor_key` goes on every rolling `growth`,\n`rank` and `filter` call of the question, whose literal periods are\n`period` moved back by each rolling offset. This tool computes no frame\nand returns no {spec_id, content_version} pair.",
-    "parameters": {
+    "execution": null,
+    "icons": null,
+    "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "populations": {
@@ -1741,11 +3513,83 @@
         "roots"
       ],
       "type": "object"
-    }
+    },
+    "name": "resolve_anchor",
+    "outputSchema": {
+      "$defs": {
+        "LeftOutSeries": {
+          "additionalProperties": false,
+          "description": "A series that holds no value at the latest period. `root` indexes the\nrecord's `populations`.",
+          "properties": {
+            "coordinates": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Coordinates",
+              "type": "object"
+            },
+            "root": {
+              "minimum": 0,
+              "title": "Root",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "root",
+            "coordinates"
+          ],
+          "title": "LeftOutSeries",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "What `resolve_anchor` returns as `structuredContent`.\n\n- `anchor_key`: the handle of the stored record, passed to each rolling\n  `growth`, `rank` and `filter` call as `anchor_key`.\n- `period`: the latest period, which a rolling literal at offset 0 is.\n- `left_out`: each series counted that holds no value at `period`, as the\n  index of its population in the canonical populations and its\n  `coordinates`, the series' value in each of its columns.",
+      "properties": {
+        "anchor_key": {
+          "pattern": "^rak_[0-9a-f]{32}$",
+          "title": "Anchor Key",
+          "type": "string"
+        },
+        "left_out": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LeftOutSeries"
+          },
+          "title": "Left Out",
+          "type": "array"
+        },
+        "period": {
+          "title": "Period",
+          "type": "string"
+        }
+      },
+      "required": [
+        "anchor_key",
+        "period"
+      ],
+      "title": "ResolvedAnchor",
+      "type": "object"
+    },
+    "title": "Find the latest period"
   },
   "share_of": {
+    "_meta": {
+      "fastmcp": {
+        "tags": [],
+        "version": "1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": null
+    },
     "description": "Divide a numerator by a denominator, per matched (key, period).\n\n`operation` picks the form. `share` (the default) gives the numerator's\nshare of its whole in per cent, unit `Percent` (5.3 means 5.3%), the unit\na published \"% of GDP\" series carries. `quotient` divides one measure by\nanother in different units, such as GDP by population; the result's unit\nis \"<numerator's unit> per <denominator's unit>\", and a side that is a\nshare, a growth rate or a quotient already refuses\n(`quotient_of_side_unit_unsupported`). Either way the result is one series\nunder its own stat_var.\n\nEach side is narrowed by its own `entity` binding, then every remaining\nrow sharing both `numerator_by`'s key values and a `time_period` is\nsummed. `numerator_by` left empty (the default) gives one row per period,\nno role columns. `denominator_by` pairs each `numerator_by` column with\nthe denominator's column carrying that role, by name; left empty, the\ndenominator is pooled (one total per period, shared by every numerator\nkey). A non-empty `denominator_by` must name every `numerator_by`\ncolumn, and a share refuses a key outside `numerator_by`\n(`op_spec_invalid`). A numerator key with no denominator match, a key\nsharing no period, and a period one side holds alone are left out and\nrecorded, never counted as zero; the digest names them. The call refuses\nonly when nothing is left to divide (`share_of_key_unmatched`,\n`share_of_grain_mismatch`, `quotient_of_no_key_matched`,\n`comparison_periods_disjoint`). A period whose denominator sums to zero\nrefuses a share (`share_of_zero_denominator`, retryable with another\ndenominator source); a quotient leaves that cell out and refuses only\nwhen every cell divides by zero (`quotient_of_zero_denominator`). A\ngenuine overflow (`non_finite_result`) is not retryable.",
-    "parameters": {
+    "execution": null,
+    "icons": null,
+    "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "denominator_by": {
@@ -1936,11 +3780,262 @@
         "frame_ref"
       ],
       "type": "object"
-    }
+    },
+    "name": "share_of",
+    "outputSchema": {
+      "$defs": {
+        "Exclusion": {
+          "additionalProperties": false,
+          "description": "Rows one narrowing step dropped, and why.\n\n`entities` names, per role column the output frame declares, every\ndistinct value a dropped row carried on that column, capped at\n`ENTITY_CAP` values per role. `entities_truncated` is set when a role's\ndistinct-value count exceeded that cap; `rows` still names the true\ntotal dropped. A per-period `rank`'s `beyond_limit` names only the\nentities cut from every period they were ranked in; an entity kept in\nsome period is still in the output, though its other periods' rows\ncount in `rows`.\n\n`side` names which of a two-input verb's two sides these rows came from\n(`compare`/`join`'s `left`/`right`, `share_of`'s\n`numerator`/`denominator`). `None` for a single-input verb (`aggregate`,\n`growth`, `rank`, `filter`).",
+          "properties": {
+            "entities": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Entities",
+              "type": "object"
+            },
+            "entities_truncated": {
+              "default": false,
+              "title": "Entities Truncated",
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "unit_unbound",
+                "unit_not_selected",
+                "entity_not_selected",
+                "outside_window",
+                "endpoint_missing",
+                "zero_or_sign_crossing_base",
+                "non_finite",
+                "predicate",
+                "unmatched_key",
+                "period_unmatched",
+                "beyond_limit",
+                "zero_denominator",
+                "party_total",
+                "party_residual"
+              ],
+              "title": "Reason",
+              "type": "string"
+            },
+            "rows": {
+              "minimum": 0,
+              "title": "Rows",
+              "type": "integer"
+            },
+            "side": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "numerator",
+                    "denominator",
+                    "left",
+                    "right"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side"
+            }
+          },
+          "required": [
+            "reason",
+            "rows"
+          ],
+          "title": "Exclusion",
+          "type": "object"
+        },
+        "Interval": {
+          "additionalProperties": false,
+          "description": "The output's `time_period` stands for a span from `start` to `end`:\nthe earliest and latest real periods the output collapsed, unioned\nacross every group or entity the result carries. A verb builds one when\nit collapses a frame of points into one span (`aggregate` under sum or\nmean outside time grouping, a collapsing `rank`, `growth` over its\nwindow); a verb reading a span frame carries the input's interval on,\nand a raw materialisation labelled with one span reads as that span.\n\n`contiguous` is set when every period of the result's grain (year,\nmonth, or day) between `start` and `end` appears in at least one\ncollapsed input row. `absent` names up to 10 of the periods in that\nspan that do not, sorted; `absent_count` is the true total, so a\n10-entry `absent` list never has to be read as exhaustive. `contiguous`\nis `True`, `absent` is `()`, and `absent_count` is `0` for a span of\nexactly one period.\n\n`contiguous` is `None`, with `absent` and `absent_count` left at their\ndefaults, when contiguity cannot be computed -- unknown, not `False`:\n`start` or `end` is a calendar-invalid day the source frame carried (the\nframe grammar admits a source's own out-of-range date; see\n`dfo_frame_grammar.grammar`), or the span is a raw materialisation's own\nlabel, whose trace records no periods it collapsed.",
+          "properties": {
+            "absent": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Absent",
+              "type": "array"
+            },
+            "absent_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Absent Count",
+              "type": "integer"
+            },
+            "contiguous": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": true,
+              "title": "Contiguous"
+            },
+            "end": {
+              "title": "End",
+              "type": "string"
+            },
+            "kind": {
+              "const": "interval",
+              "default": "interval",
+              "title": "Kind",
+              "type": "string"
+            },
+            "start": {
+              "title": "Start",
+              "type": "string"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "title": "Interval",
+          "type": "object"
+        },
+        "Observation": {
+          "additionalProperties": false,
+          "description": "The output's own `time_period` names a genuine single observation.",
+          "properties": {
+            "kind": {
+              "const": "observation",
+              "default": "observation",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "title": "Observation",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "properties": {
+        "content_version": {
+          "title": "Content Version",
+          "type": "string"
+        },
+        "dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Dropped Key Count",
+          "type": "integer"
+        },
+        "exclusions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Exclusion"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "frame_content_version": {
+          "title": "Frame Content Version",
+          "type": "string"
+        },
+        "ranked_before_limit": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ranked Before Limit"
+        },
+        "right_dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Right Dropped Key Count",
+          "type": "integer"
+        },
+        "role_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Role Keys",
+          "type": "array"
+        },
+        "rows": {
+          "minimum": 0,
+          "title": "Rows",
+          "type": "integer"
+        },
+        "spec_id": {
+          "title": "Spec Id",
+          "type": "string"
+        },
+        "stat_var_count": {
+          "minimum": 0,
+          "title": "Stat Var Count",
+          "type": "integer"
+        },
+        "time": {
+          "discriminator": {
+            "mapping": {
+              "interval": "#/$defs/Interval",
+              "observation": "#/$defs/Observation"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Observation"
+            },
+            {
+              "$ref": "#/$defs/Interval"
+            }
+          ],
+          "title": "Time"
+        }
+      },
+      "required": [
+        "spec_id",
+        "content_version",
+        "frame_content_version",
+        "rows",
+        "stat_var_count"
+      ],
+      "title": "VerbResult",
+      "type": "object"
+    },
+    "title": "Calculate a share or a ratio"
   },
   "sum_of": {
+    "_meta": {
+      "fastmcp": {
+        "tags": [],
+        "version": "1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": null
+    },
     "description": "Add two single-series slices, period by period, over the periods both report.\n\nEach side is `frame_ref` (or `right_frame_ref`) narrowed by an `entity`\nbinding down to one row per `time_period`. A period only one side\nreports is left out, never counted as zero; the digest names those\nperiods and each side's coverage. Periods with no overlap refuse\n(`comparison_periods_disjoint`), and the two sides must resolve to the\nsame unit (`cross_frame_unit_mismatch`, `cross_frame_unit_unbound`).\nDiffering provenance or measurement method is a warning, and the result\nleaves that facet unbound. The result is one series under its own\nstat_var. Use `compare` for the difference between two slices.",
-    "parameters": {
+    "execution": null,
+    "icons": null,
+    "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "frame_ref": {
@@ -2094,6 +4189,242 @@
         "frame_ref"
       ],
       "type": "object"
-    }
+    },
+    "name": "sum_of",
+    "outputSchema": {
+      "$defs": {
+        "Exclusion": {
+          "additionalProperties": false,
+          "description": "Rows one narrowing step dropped, and why.\n\n`entities` names, per role column the output frame declares, every\ndistinct value a dropped row carried on that column, capped at\n`ENTITY_CAP` values per role. `entities_truncated` is set when a role's\ndistinct-value count exceeded that cap; `rows` still names the true\ntotal dropped. A per-period `rank`'s `beyond_limit` names only the\nentities cut from every period they were ranked in; an entity kept in\nsome period is still in the output, though its other periods' rows\ncount in `rows`.\n\n`side` names which of a two-input verb's two sides these rows came from\n(`compare`/`join`'s `left`/`right`, `share_of`'s\n`numerator`/`denominator`). `None` for a single-input verb (`aggregate`,\n`growth`, `rank`, `filter`).",
+          "properties": {
+            "entities": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Entities",
+              "type": "object"
+            },
+            "entities_truncated": {
+              "default": false,
+              "title": "Entities Truncated",
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "unit_unbound",
+                "unit_not_selected",
+                "entity_not_selected",
+                "outside_window",
+                "endpoint_missing",
+                "zero_or_sign_crossing_base",
+                "non_finite",
+                "predicate",
+                "unmatched_key",
+                "period_unmatched",
+                "beyond_limit",
+                "zero_denominator",
+                "party_total",
+                "party_residual"
+              ],
+              "title": "Reason",
+              "type": "string"
+            },
+            "rows": {
+              "minimum": 0,
+              "title": "Rows",
+              "type": "integer"
+            },
+            "side": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "numerator",
+                    "denominator",
+                    "left",
+                    "right"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side"
+            }
+          },
+          "required": [
+            "reason",
+            "rows"
+          ],
+          "title": "Exclusion",
+          "type": "object"
+        },
+        "Interval": {
+          "additionalProperties": false,
+          "description": "The output's `time_period` stands for a span from `start` to `end`:\nthe earliest and latest real periods the output collapsed, unioned\nacross every group or entity the result carries. A verb builds one when\nit collapses a frame of points into one span (`aggregate` under sum or\nmean outside time grouping, a collapsing `rank`, `growth` over its\nwindow); a verb reading a span frame carries the input's interval on,\nand a raw materialisation labelled with one span reads as that span.\n\n`contiguous` is set when every period of the result's grain (year,\nmonth, or day) between `start` and `end` appears in at least one\ncollapsed input row. `absent` names up to 10 of the periods in that\nspan that do not, sorted; `absent_count` is the true total, so a\n10-entry `absent` list never has to be read as exhaustive. `contiguous`\nis `True`, `absent` is `()`, and `absent_count` is `0` for a span of\nexactly one period.\n\n`contiguous` is `None`, with `absent` and `absent_count` left at their\ndefaults, when contiguity cannot be computed -- unknown, not `False`:\n`start` or `end` is a calendar-invalid day the source frame carried (the\nframe grammar admits a source's own out-of-range date; see\n`dfo_frame_grammar.grammar`), or the span is a raw materialisation's own\nlabel, whose trace records no periods it collapsed.",
+          "properties": {
+            "absent": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Absent",
+              "type": "array"
+            },
+            "absent_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Absent Count",
+              "type": "integer"
+            },
+            "contiguous": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": true,
+              "title": "Contiguous"
+            },
+            "end": {
+              "title": "End",
+              "type": "string"
+            },
+            "kind": {
+              "const": "interval",
+              "default": "interval",
+              "title": "Kind",
+              "type": "string"
+            },
+            "start": {
+              "title": "Start",
+              "type": "string"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "title": "Interval",
+          "type": "object"
+        },
+        "Observation": {
+          "additionalProperties": false,
+          "description": "The output's own `time_period` names a genuine single observation.",
+          "properties": {
+            "kind": {
+              "const": "observation",
+              "default": "observation",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "title": "Observation",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "properties": {
+        "content_version": {
+          "title": "Content Version",
+          "type": "string"
+        },
+        "dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Dropped Key Count",
+          "type": "integer"
+        },
+        "exclusions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Exclusion"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "frame_content_version": {
+          "title": "Frame Content Version",
+          "type": "string"
+        },
+        "ranked_before_limit": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ranked Before Limit"
+        },
+        "right_dropped_key_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Right Dropped Key Count",
+          "type": "integer"
+        },
+        "role_keys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Role Keys",
+          "type": "array"
+        },
+        "rows": {
+          "minimum": 0,
+          "title": "Rows",
+          "type": "integer"
+        },
+        "spec_id": {
+          "title": "Spec Id",
+          "type": "string"
+        },
+        "stat_var_count": {
+          "minimum": 0,
+          "title": "Stat Var Count",
+          "type": "integer"
+        },
+        "time": {
+          "discriminator": {
+            "mapping": {
+              "interval": "#/$defs/Interval",
+              "observation": "#/$defs/Observation"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Observation"
+            },
+            {
+              "$ref": "#/$defs/Interval"
+            }
+          ],
+          "title": "Time"
+        }
+      },
+      "required": [
+        "spec_id",
+        "content_version",
+        "frame_content_version",
+        "rows",
+        "stat_var_count"
+      ],
+      "title": "VerbResult",
+      "type": "object"
+    },
+    "title": "Add two series"
   }
 }

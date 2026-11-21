@@ -4,9 +4,11 @@ Runs in a dfo-apis checkout, from its root, like `answer.py`. Reads the requests
 `digest_facts.computed` writes under `DIGEST_FACTS_RECORD`, runs each through its
 verb's `run_<verb>` in `dfo_analysis_engine.engine`, and writes the facts the
 runner states in a summary's `result` (`dfo_analysis_engine.calls._facts`) beside
-the fixture's own, by the request's key.
+the fixture's own, by the request's key. `revision` is the checkout's commit, which
+the fixture records under `recorded_with`; a fixture recorded at another revision is
+refused, so one fixture holds one revision's facts.
 
-    uv run python engine_facts.py <requests.json> <fixtures/digest_engine_facts.json>
+    uv run python engine_facts.py <requests.json> <fixtures/digest_engine_facts.json> <revision>
 """
 
 from __future__ import annotations
@@ -32,15 +34,21 @@ _RUNS: dict[str, Any] = {
 }
 
 
-def main(requests_path: str, facts_path: str) -> None:
+RECORDED_WITH = "recorded_with"
+
+
+def main(requests_path: str, facts_path: str, revision: str) -> None:
     requests = json.loads(Path(requests_path).read_text())
     written = Path(facts_path)
     facts = json.loads(written.read_text()) if written.exists() else {}
+    held = facts.setdefault(RECORDED_WITH, {"dfo_apis": revision})["dfo_apis"]
+    if held != revision:
+        raise SystemExit(f"the fixture holds facts from dfo-apis {held}, not {revision}")
     for key, request in requests.items():
         frames = [read_canonical_frame(base64.b64decode(data)) for data in request["frames"]]
         result = _RUNS[request["verb"]](*frames, **request["arguments"])
         facts[key] = _facts(result, top=True)
-    written.write_text(json.dumps(facts, indent=1, sort_keys=True) + "\n")
+    written.write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
 
 
 if __name__ == "__main__":
