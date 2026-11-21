@@ -21,7 +21,7 @@ GCP_PROJECT := "dev-fin-observatory"
 PORT := "8080"
 
 # The local Postgres `just pg-up` starts: one container, bound to 127.0.0.1,
-# holding the harness's own tables, ADK's session tables, and a schema per test.
+# holding the harness's own tables and a schema per test.
 PG_CONTAINER := "dfo-ai-pg"
 PG_PORT      := "55432"
 PG_URL       := "postgresql+asyncpg://postgres:postgres@127.0.0.1:" + PG_PORT + "/postgres"
@@ -237,7 +237,7 @@ _secret NAME:
 
 # ── Development ──────────────────────────────────────
 
-# google-adk reads GOOGLE_API_KEY straight from the process environment rather
+# google-genai reads GOOGLE_API_KEY straight from the process environment rather
 # than through pydantic-settings, so .env has to be exported into the process.
 # That's what `uv run --env-file` does here.
 #
@@ -435,7 +435,7 @@ fix:
     uv run ruff check --fix .
     uv run ruff format .
 
-# Type check every workspace member with ty
+# Type check every workspace member, and the evals, with ty
 # (services/harness/src covers both harness and planner -- see
 # services/harness/pyproject.toml's tool.uv.build-backend.module-name)
 typecheck:
@@ -444,6 +444,7 @@ typecheck:
     uv run ty check services/data-mcp/src
     uv run ty check services/analysis-mcp/src
     uv run ty check services/presentation-mcp/src
+    uv run ty check evals
 
 # Root pyproject.toml's [tool.pytest.ini_options] lists each member's testpaths
 # and sets --import-mode=importlib so same-named test modules across

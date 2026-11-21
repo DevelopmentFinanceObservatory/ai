@@ -12,29 +12,30 @@ from typing import Any
 
 import pytest
 from compiler.surface import FixtureSurface
-from google.adk.tools.base_tool import BaseTool
+from google.genai import types
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.settings import Settings
 from harness.wiring import build_planner
-from orchestrator.agent import create_orchestrator_agent
+from orchestrator.declarations import tool_declaration
 from planner.declaration import _referred
-from planner.tool_spec import ToolSpec
+from planner.tool_spec import function_declaration
 
-from .orchestrator_fakes import no_executor, no_resolver
-from .planner_tools import planner_tool_declaration
 
-# The tools of every model the harness runs, by the builder that builds them: the
-# planner as the server builds it, and the orchestrator.
-_TOOLS: dict[str, Callable[[], Sequence[Any]]] = {
-    "served_planner": lambda: (
-        build_planner(settings=Settings(), surface=FixtureSurface(schemas=[]))._specs
-    ),
-    "orchestrator": lambda: (
-        create_orchestrator_agent(
-            model_name="gemini-test",
-            tools=build_orchestrator_tools(resolver=no_resolver, executor=no_executor),
-        ).tools
-    ),
+async def _unused(**kwargs: Any) -> Any:
+    raise AssertionError("no call expected")
+
+
+# The declarations of every model the harness runs, by the builder that builds
+# its tools: the planner as the server builds it, and the orchestrator.
+_DECLARATIONS: dict[str, Callable[[], Sequence[types.FunctionDeclaration]]] = {
+    "served_planner": lambda: [
+        function_declaration(spec)
+        for spec in build_planner(settings=Settings(), surface=FixtureSurface(schemas=[]))._specs
+    ],
+    "orchestrator": lambda: [
+        tool_declaration(tool)
+        for tool in build_orchestrator_tools(resolver=_unused, executor=_unused)
+    ],
 }
 
 
@@ -56,23 +57,19 @@ def _refs_beside_other_keys(node: Any, path: str) -> list[str]:
     return []
 
 
-@pytest.mark.parametrize("model", sorted(_TOOLS))
+@pytest.mark.parametrize("model", sorted(_DECLARATIONS))
 def test_no_declaration_puts_a_key_beside_a_ref(model: str) -> None:
-    tools = _TOOLS[model]()
-    assert all(isinstance(tool, ToolSpec | BaseTool) for tool in tools)
-    declarations = [planner_tool_declaration(tool) for tool in tools]
+    declarations = _DECLARATIONS[model]()
 
-    assert all(declarations)
+    assert declarations
     assert [
         hit
         for declaration in declarations
-        if declaration is not None
         for hit in _refs_beside_other_keys(
             declaration.model_dump(exclude_none=True), declaration.name or ""
         )
     ] == []
 
     for declaration in declarations:
-        assert declaration is not None
         schema = declaration.parameters_json_schema or {}
         assert _referred(schema) == set(schema.get("$defs", {})), declaration.name

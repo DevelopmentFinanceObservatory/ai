@@ -14,10 +14,10 @@ declaration on its own, and the text the planner's `contents` carries. Each real
 file with the reason it sits where it does.
 
 The fenced foreign-agent relay is the exception to every other ceiling's
-rounding: no relayed text may reach the planner at all. ADK relays another
-agent's turn into a request as fenced user text
-(`google.adk.flows.llm_flows.context._fencing._present_other_agent_message`), and no
-other agent runs inside a planner run, so any relayed part is a regression.
+rounding: no relayed text may reach the planner at all. An agent framework
+relays another agent's turn into a request as fenced user text, as the
+earlier framework did, and no other agent runs inside a planner run, so any relayed part is a
+regression.
 
 Every realistic-input ceiling is proved live by `test_every_ceiling_fails_when_its_segment_grows`.
 The relay guard's own proof is `test_no_relayed_foreign_agent_text_reaches_the_planner`
@@ -86,7 +86,6 @@ from typing import Any
 import pytest
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp.skills_client import PAGE_CHARS, continuation_line, page_of, with_closing_line
-from google.adk.models.llm_request import LlmRequest
 from google.genai import types
 from harness import planner_adapter, studio_state
 from harness.planner_adapter import (
@@ -150,6 +149,7 @@ from .context_probe import (
     BRIEF_BUCKET,
     BRIEF_MARKER,
     RELAY_MARKER,
+    ModelRequest,
     bucket_chars,
     compose,
     contents_leading,
@@ -161,8 +161,9 @@ from .context_probe import (
 from .context_probe import (
     record_chars as _record_chars,
 )
+from .planner_host import PlannerHarness
 from .scripted_genai import Reply, Request, ScriptedGenai, call_part, reply, text_part
-from .test_planner_adapter import _NO_DATA_SEARCH_RESPONSE, _AdapterHarness, _gdp_plan
+from .test_planner_adapter import _NO_DATA_SEARCH_RESPONSE, _gdp_plan
 
 # The root conftest.py chdirs every test into a tmp_path, so this must be absolute.
 _BASELINE_PATH = Path(__file__).resolve().parent / "context_baseline.json"
@@ -264,10 +265,10 @@ def _adapter(scripted: ScriptedGenai) -> PlannerAdapter:
     )
 
 
-def _as_llm_request(request: Request) -> LlmRequest:
-    """`request`, as the planner sent it to Gemini, in the `LlmRequest` shape
+def _as_model_request(request: Request) -> ModelRequest:
+    """`request`, as the planner sent it to Gemini, in the shape
     `context_probe.compose` measures."""
-    return LlmRequest(
+    return ModelRequest(
         model=request.model, contents=request.content_list, config=request.generate_config
     )
 
@@ -345,7 +346,7 @@ async def _recorded_round(
     `state` is what the session holds before the round, such as the asks.
 
     Returns `{"planner": (records, requests)}`: the `context_probe.compose`
-    records in call order, and the requests as `LlmRequest` objects, which the
+    records in call order, and the requests as `ModelRequest` objects, which the
     stability assertions compare byte for byte.
     """
     draft = _gdp_plan(decision, requirement, derived_requirement)
@@ -353,12 +354,12 @@ async def _recorded_round(
     adapter = _adapter(scripted)
 
     arguments: dict[str, Any] = {"question": draft.question, **context}
-    output = await _AdapterHarness(state).run(
+    output = await PlannerHarness(state).run(
         adapter, prior_plan=draft.model_dump(mode="json"), **arguments
     )
     assert output is not None and "refused" in output, output
 
-    requests = [_as_llm_request(request) for request in scripted.requests]
+    requests = [_as_model_request(request) for request in scripted.requests]
     records = [
         compose(request, agent="planner", scenario=scenario, call_index=index)
         for index, request in enumerate(requests)
@@ -422,7 +423,7 @@ async def _declaration_digests() -> dict[str, str]:
         specs=planner_specs(translate=build_translate(surface=surface), surface=surface),
         client=scripted.client,
     )
-    await _AdapterHarness().run(adapter, question="go", readings=[])
+    await PlannerHarness().run(adapter, question="go", readings=[])
     return {"served": _declarations_digest(scripted.requests[0])}
 
 
@@ -652,9 +653,9 @@ def test_no_relayed_foreign_agent_text_reaches_the_planner(
 ) -> None:
     """No relayed text reaches the planner, tagged with an author or not.
 
-    Translation runs inside the planner's own `propose_plan` call, and
-    `harness.planner_adapter._PLANNER_BRANCH` keeps another agent's turns off the
-    planner's branch, so no fenced relay belongs in a planner request.
+    Translation runs inside the planner's own `propose_plan` call, and no
+    other agent's turn is written into a planner request, so no fenced relay
+    belongs in one.
     """
     planner_records = [
         record
@@ -666,7 +667,7 @@ def test_no_relayed_foreign_agent_text_reaches_the_planner(
         found = relay_buckets(record)
         assert not found, (
             f"{_baseline_key(record)}: the planner is carrying relayed foreign-agent "
-            f"text: {found}. ADK is relaying another agent's turn into this request."
+            f"text: {found}. Another agent's turn is relayed into this request."
         )
 
 
@@ -675,8 +676,8 @@ def test_the_relay_check_measures_a_relay_that_is_there() -> None:
 
     The control for `test_no_relayed_foreign_agent_text_reaches_the_planner`: a
     bucket that always read empty, or a marker match that had drifted from
-    what `_fencing` emits, would pass that test for the wrong reason. The
-    relay built here is ADK's own framing: one tagged part naming the author,
+    the relay's framing, would pass that test for the wrong reason. The
+    relay built here is the earlier framework's framing: one tagged part naming the author,
     then the fenced payload.
     """
     request = _request(
@@ -794,12 +795,11 @@ def _request(
     brief: int | None = None,
     skill: int | None = None,
 ) -> Any:
-    """A `LlmRequest` carrying the named declarations and text parts, oversized.
+    """A `ModelRequest` carrying the named declarations and text parts, oversized.
 
-    `relay`, when given, prepends an ADK-shaped fenced relay of
-    `(author, chars)`: the framing `_fencing._present_other_agent_message`
-    emits, so the relay bucket is exercised against the real shape, not
-    one this test invented. `brief`, when given, prepends a planner-brief part of
+    `relay`, when given, prepends a fenced relay of `(author, chars)` in the
+    framing the earlier framework emitted, so the relay bucket is exercised against a
+    shape a framework used, not one this test invented. `brief`, when given, prepends a planner-brief part of
     that many chars, `harness.planner_adapter._READINGS_CONTEXT`'s own opening
     words, which is what `context_probe` buckets on, so the brief ceiling is
     exercised against a part that really is one. `skill`, when given, appends
@@ -844,7 +844,7 @@ def _request(
                 ],
             ),
         )
-    return LlmRequest(
+    return ModelRequest(
         model="probe",
         contents=contents,
         config=types.GenerateContentConfig(

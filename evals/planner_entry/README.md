@@ -46,7 +46,7 @@ just eval-planner-entry baseline-replica --baseline-langfuse '<base run>/baselin
 
 `uv run --env-file .env --package harness python evals/planner_entry/langfuse_store.py pull '<name>' --out <file>` writes a pushed experiment's records to a file.
 
-An item run's trace holds the task's records and no planner spans. The eval exports no ADK traces, so no entry trace exists to link to, and the push sends on a tracer provider of its own, so `--push` exports none either.
+An item run's trace holds the task's records and no planner spans. The eval sets up no telemetry, so no entry trace exists to link to, and the push sends on a tracer provider of its own, so `--push` exports none either.
 
 ## What a run is
 

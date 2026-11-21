@@ -1,4 +1,4 @@
-"""The reads a planner proposal can ask for, made without ADK.
+"""The reads a planner proposal can ask for, made outside a model turn.
 
 `with_source_reads` makes the reads a refused `propose_plan` asks for (the
 first-year history, a scope, a compile on a basis or of a whole, a pin by

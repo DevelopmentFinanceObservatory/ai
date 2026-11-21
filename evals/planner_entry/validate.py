@@ -257,7 +257,7 @@ def _faults(
 ) -> list[str]:
     if run.error is not None:
         return [run.error.splitlines()[0]]
-    calls = tool_calls(run.events)
+    calls = tool_calls(run.records)
     responses = [call["response"] or {} for call in calls if call["name"] == "propose_plan"]
     faults = []
     if refusal is not None:

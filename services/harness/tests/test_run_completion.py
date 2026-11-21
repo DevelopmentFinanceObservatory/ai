@@ -1,11 +1,14 @@
 """The completion gate in the harness: how `McpExecutor.publish_result` sorts a
 publish into published, retryable and final, and how a planned turn whose
 publication is unfinished hands back `pending` and the next turn carries it on.
+
+The turns run on the turn loop (`tests.turn_driver.TurnDriver`) over the
+plan path's nodes (`tests.plan_turns.plan_nodes`); the Studio routes'
+own run in `test_run_completion_routes.py`.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import asynccontextmanager
@@ -29,20 +32,15 @@ from executor.ledger import (
     RunChange,
     RunRecord,
     RunStatus,
-    idempotency_key,
 )
-from google.adk.errors import StaleSessionError
 from google.api_core.exceptions import Forbidden, ServiceUnavailable, from_http_status
-from google.genai import types
 from harness import mcp_client
-from harness.conversation import current_conversation_id, current_conversation_key
-from harness.graph import answer as answer_module
+from harness.conversation import current_conversation_id
 from harness.mcp_client import McpExecutor
 from harness.provenance import ProvenanceStore
-from harness.run_ledger import StudioRunLedger
-from harness.scripted import ScriptedPlannerModel, ScriptedSurface
+from harness.scripted import ScriptedSurface
 from harness.settings import Settings
-from harness.studio_store import StudioStore
+from harness.studio_store import ConversationStale
 from harness.studio_translate import _RecordingSurface
 from planner.plan import Plan, PlanStatus
 from presentation_mcp import client as presentation_client
@@ -53,24 +51,11 @@ from presentation_mcp.platform_contract import NormalFormConflict, Refusal, Retr
 from presentation_mcp.settings import Settings as PresentationSettings
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .orchestrator_fakes import (
-    CONVERSATION,
-    NO_ADK,
-    approve_answer,
-    call,
-    create_request_input_response,
-    no_turn_specs,
-    open_session,
-    orchestrator_app,
-    orchestrator_runner,
-    plan_call,
-    request_text,
-    run_turn,
-    single_pause,
-    stream,
-    studio_client,
-    turn_body,
-)
+from .graph_turns import agent_read, opening_graph
+from .plan_turns import approve_turn, plan_nodes
+from .scripted_genai import Step, reply, text_part
+from .scripted_tools import plan_call, scripted_orchestrator
+from .turn_driver import ScriptedModels, TurnDriver, scripted_models
 
 DERIVED = FrameRef(spec_id="ops_" + "2" * 32, content_version="ocv_" + "3" * 32)
 REPLAY_KEY = "rpk_" + "e" * 64
@@ -368,33 +353,64 @@ class _LinkingSurface(ScriptedSurface):
         self.linked.append(frame_ref)
 
 
-async def test_a_pending_publication_is_handed_back_with_its_run_and_carried_on_next_turn() -> None:
+_BRIEF = "Kenya's debt service since 2015"
+_QUESTION = "Kenya's debt service?"
+
+
+def _planned(after_plan: str, *later: str) -> ScriptedModels:
+    """The agent hands `_BRIEF` to the planner, reads the plan's hand-back
+    with `after_plan`, and answers each later turn in order with `later`."""
+    steps: list[Step] = [reply(plan_call(_BRIEF)), reply(text_part(after_plan))]
+    steps += [reply(text_part(text)) for text in later]
+    return scripted_models(orchestrator=steps)
+
+
+def _driver(
+    engine: AsyncEngine,
+    models: ScriptedModels,
+    *,
+    tool_surface: Any,
+    executor: Any,
+    run_ledger: Any = None,
+    publisher: Any = None,
+) -> TurnDriver:
+    """One instance running the plan path over `models`: the scripted
+    planner, `tool_surface` running the approved plan, `executor`
+    describing its frames, its runs kept in `run_ledger` (one of its own by
+    default) and published through `publisher` (all at once by default)."""
+    extra = {"publisher": publisher} if publisher is not None else {}
+    nodes = plan_nodes(
+        scripted_orchestrator(),
+        models,
+        run_ledger=run_ledger or InMemoryRunLedger(scope=current_conversation_id.get),
+        tool_surface=tool_surface,
+        executor=executor,
+        **extra,
+    )
+    return TurnDriver(engine, graph=opening_graph(nodes))
+
+
+def _hand_back_body(models: ScriptedModels) -> dict[str, Any]:
+    """The structured fields of the plan's hand-back in the agent's latest request."""
+    read = agent_read(models.orchestrator.requests[-1])
+    fields = (json.loads(line) for line in read.split("\n") if line.startswith("{"))
+    return next(body for body in fields if "frames" in body)
+
+
+async def test_a_pending_publication_is_handed_back_with_its_run_and_carried_on_next_turn(
+    pg_engine: AsyncEngine,
+) -> None:
     publisher = _FlakyPublisher()
     surface = _LinkingSurface()
-    runner, model = orchestrator_runner(
-        call(
-            "plan",
-            brief="Kenya's debt service since 2015",
-            asks=["Kenya's debt service since 2015"],
-        ),
-        types.Part.from_text(text="Handed to the planner."),
-        types.Part.from_text(text="It is pending."),
-        types.Part.from_text(text="It is done."),
-        planner=ScriptedPlannerModel(),
-        tool_surface=surface,
-        executor=_describes,
-        publisher=publisher,
-    )
-    await open_session(runner)
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
+    models = _planned("It is pending.", "It is done.")
+    driver = _driver(
+        pg_engine, models, tool_surface=surface, executor=_describes, publisher=publisher
     )
 
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
+    await approve_turn(driver, _QUESTION)
 
-    after_plan = request_text(model.requests[-1])
-    body = json.loads(next(line for line in after_plan.split("\n") if line.startswith('{"frames"')))
+    after_plan = agent_read(models.orchestrator.requests[-1])
+    body = _hand_back_body(models)
     run = body["run"]
     assert run["status"] == "pending"
     assert body["frames"] == []
@@ -403,11 +419,9 @@ async def test_a_pending_publication_is_handed_back_with_its_run_and_carried_on_
     assert surface.linked == []
 
     publisher.fixed = True
-    await run_turn(runner, types.UserContent("Is it ready?"))
+    await driver.turn("Is it ready?", turn_index=2)
 
-    next_turn = request_text(model.requests[-1])
-    runs = json.loads(next(line for line in next_turn.split("\n") if line.startswith('{"runs"')))
-    (resumed,) = runs["runs"]
+    (resumed,) = _runs(agent_read(models.orchestrator.requests[-1]))
     assert (resumed["run_id"], resumed["status"]) == (run["run_id"], "completed")
     assert [frame["frame"] for frame in resumed["frames"]]
     assert len(publisher.frames) == PUBLISH_ATTEMPTS + 1
@@ -457,7 +471,9 @@ def _runs(text: str) -> list[dict[str, Any]]:
     ids=["refused", "raised"],
 )
 async def test_a_resumed_runs_result_is_listed_again_until_its_hand_back_is_recorded(
-    describe: dict[str, Any] | Exception, not_chartable: list[dict[str, str]] | None
+    describe: dict[str, Any] | Exception,
+    not_chartable: list[dict[str, str]] | None,
+    pg_engine: AsyncEngine,
 ) -> None:
     """Publication completes the run on the next turn, but its frames cannot
     be described then: the run stands completed with its result undelivered,
@@ -466,33 +482,21 @@ async def test_a_resumed_runs_result_is_listed_again_until_its_hand_back_is_reco
     publisher = _FlakyPublisher()
     executor = _DescribeFails(describe)
     ledger = InMemoryRunLedger(scope=current_conversation_id.get)
-    runner, model = orchestrator_runner(
-        call(
-            "plan",
-            brief="Kenya's debt service since 2015",
-            asks=["Kenya's debt service since 2015"],
-        ),
-        types.Part.from_text(text="Handed to the planner."),
-        types.Part.from_text(text="It is pending."),
-        types.Part.from_text(text="It is computed."),
-        types.Part.from_text(text="It is done."),
-        planner=ScriptedPlannerModel(),
+    models = _planned("It is pending.", "It is computed.", "It is done.")
+    driver = _driver(
+        pg_engine,
+        models,
         tool_surface=_LinkingSurface(),
         executor=executor,
         publisher=publisher,
         run_ledger=ledger,
     )
-    await open_session(runner)
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-    )
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
+    await approve_turn(driver, _QUESTION)
     publisher.fixed = True
 
-    await run_turn(runner, types.UserContent("Is it ready?"))
+    await driver.turn("Is it ready?", turn_index=2)
 
-    (undelivered,) = _runs(request_text(model.requests[-1]))
+    (undelivered,) = _runs(agent_read(models.orchestrator.requests[-1]))
     assert (undelivered["status"], undelivered["code"]) == ("completed", "result_undelivered")
     assert undelivered["frames"] == []
     assert undelivered.get("frames_not_chartable") == not_chartable
@@ -500,9 +504,9 @@ async def test_a_resumed_runs_result_is_listed_again_until_its_hand_back_is_reco
     assert run is not None and run.status is RunStatus.COMPLETED and not run.delivered
 
     executor.fixed = True
-    await run_turn(runner, types.UserContent("And now?"))
+    await driver.turn("And now?", turn_index=3)
 
-    (delivered,) = _runs(request_text(model.requests[-1]))
+    (delivered,) = _runs(agent_read(models.orchestrator.requests[-1]))
     assert (delivered["run_id"], delivered["status"]) == (undelivered["run_id"], "completed")
     assert "code" not in delivered
     assert [frame["frame"] for frame in delivered["frames"]]
@@ -511,9 +515,9 @@ async def test_a_resumed_runs_result_is_listed_again_until_its_hand_back_is_reco
     assert await ledger.unfinished() == ()
 
 
-async def test_a_run_completed_in_its_own_turn_whose_frames_are_unread_is_listed_next_turn() -> (
-    None
-):
+async def test_a_run_completed_in_its_own_turn_whose_frames_are_unread_is_listed_next_turn(
+    pg_engine: AsyncEngine,
+) -> None:
     """The run completes in the turn that ran it, but `plan_done` cannot
     describe its frames: the run stands completed with its result
     undelivered, and the next turn lists it and records it delivered."""
@@ -524,80 +528,53 @@ async def test_a_run_completed_in_its_own_turn_whose_frames_are_unread_is_listed
         }
     )
     ledger = InMemoryRunLedger(scope=current_conversation_id.get)
-    runner, model = orchestrator_runner(
-        call(
-            "plan",
-            brief="Kenya's debt service since 2015",
-            asks=["Kenya's debt service since 2015"],
-        ),
-        types.Part.from_text(text="Handed to the planner."),
-        types.Part.from_text(text="It is computed."),
-        types.Part.from_text(text="It is done."),
-        planner=ScriptedPlannerModel(),
-        tool_surface=_LinkingSurface(),
-        executor=executor,
-        run_ledger=ledger,
-    )
-    await open_session(runner)
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
+    models = _planned("It is computed.", "It is done.")
+    driver = _driver(
+        pg_engine, models, tool_surface=_LinkingSurface(), executor=executor, run_ledger=ledger
     )
 
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
+    await approve_turn(driver, _QUESTION)
 
-    after_plan = request_text(model.requests[-1])
-    body = json.loads(next(line for line in after_plan.split("\n") if line.startswith('{"frames"')))
-    run = body["run"]
+    run = _hand_back_body(models)["run"]
     assert (run["status"], run["code"]) == ("completed", "result_undelivered")
     stored = await ledger.get(run["run_id"])
     assert stored is not None and not stored.delivered
 
     executor.fixed = True
-    await run_turn(runner, types.UserContent("Is it ready?"))
+    await driver.turn("Is it ready?", turn_index=2)
 
-    (listed,) = _runs(request_text(model.requests[-1]))
+    (listed,) = _runs(agent_read(models.orchestrator.requests[-1]))
     assert (listed["run_id"], listed["status"]) == (run["run_id"], "completed")
     assert [frame["frame"] for frame in listed["frames"]]
     stored = await ledger.get(run["run_id"])
     assert stored is not None and stored.delivered
 
 
-async def test_a_resumed_run_whose_frames_stay_unread_is_listed_no_more_past_the_bound() -> None:
+async def test_a_resumed_run_whose_frames_stay_unread_is_listed_no_more_past_the_bound(
+    pg_engine: AsyncEngine,
+) -> None:
     """Publication completes the run on the next turn, but its frames are
     never described: each turn lists it undelivered until the delivery
     bound, whose turn says it is not listed again, and no later turn lists
-    it. Each later turn has a session of its own, as in Studio."""
+    it. Each later turn has a cursor of its own, as in Studio."""
     publisher = _FlakyPublisher()
     ledger = InMemoryRunLedger(scope=current_conversation_id.get)
-    runner, model = orchestrator_runner(
-        call(
-            "plan",
-            brief="Kenya's debt service since 2015",
-            asks=["Kenya's debt service since 2015"],
-        ),
-        types.Part.from_text(text="Handed to the planner."),
-        types.Part.from_text(text="It is pending."),
-        *(types.Part.from_text(text="Not yet.") for _ in range(MAX_DELIVERY_ATTEMPTS + 1)),
-        planner=ScriptedPlannerModel(),
+    models = _planned("It is pending.", *("Not yet." for _ in range(MAX_DELIVERY_ATTEMPTS + 1)))
+    driver = _driver(
+        pg_engine,
+        models,
         tool_surface=_LinkingSurface(),
         executor=_DescribeFails(TimeoutError("describe_frame ran past its deadline")),
         publisher=publisher,
         run_ledger=ledger,
     )
-    await open_session(runner)
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-    )
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
+    await approve_turn(driver, _QUESTION)
     publisher.fixed = True
 
     standings = []
     for turn in range(MAX_DELIVERY_ATTEMPTS):
-        await open_session(runner, session_id=f"s#t{turn}")
-        await run_turn(runner, types.UserContent("Is it ready?"), session_id=f"s#t{turn}")
-        (standing,) = _runs(request_text(model.requests[-1]))
+        await driver.turn("Is it ready?", turn_index=turn + 2)
+        (standing,) = _runs(agent_read(models.orchestrator.requests[-1]))
         standings.append(standing)
 
     assert {(s["status"], s["code"]) for s in standings} == {("completed", "result_undelivered")}
@@ -606,53 +583,43 @@ async def test_a_resumed_run_whose_frames_stay_unread_is_listed_no_more_past_the
     ) + [True]
     assert await ledger.unfinished() == ()
 
-    await open_session(runner, session_id="s#last")
-    await run_turn(runner, types.UserContent("And now?"), session_id="s#last")
+    await driver.turn("And now?", turn_index=MAX_DELIVERY_ATTEMPTS + 2)
 
-    assert _runs(request_text(model.requests[-1])) == []
+    assert _runs(agent_read(models.orchestrator.requests[-1])) == []
 
 
-async def test_a_run_carried_on_after_a_restart_keeps_its_frames_provenance() -> None:
+async def test_a_run_carried_on_after_a_restart_keeps_its_frames_provenance(
+    pg_engine: AsyncEngine,
+) -> None:
     """The process that ran the run is gone, and its provenance store with
     it: the run's frames rest on the retrievals it sealed, as a run that
     finished in its own turn does."""
     ledger = InMemoryRunLedger(scope=current_conversation_id.get)
     publisher = _FlakyPublisher()
-    runner, _ = orchestrator_runner(
-        call(
-            "plan",
-            brief="Kenya's debt service since 2015",
-            asks=["Kenya's debt service since 2015"],
-        ),
-        types.Part.from_text(text="Handed to the planner."),
-        types.Part.from_text(text="It is pending."),
-        planner=ScriptedPlannerModel(),
+    driver = _driver(
+        pg_engine,
+        _planned("It is pending."),
         tool_surface=_RecordingSurface(ScriptedSurface(), provenance=ProvenanceStore()),
         executor=_describes,
         publisher=publisher,
         run_ledger=ledger,
     )
-    await open_session(runner)
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-    )
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
+    await approve_turn(driver, _QUESTION)
     publisher.fixed = True
 
     provenance = ProvenanceStore()
-    restarted, model = orchestrator_runner(
-        types.Part.from_text(text="It is done."),
-        planner=ScriptedPlannerModel(),
+    models = scripted_models(orchestrator=[reply(text_part("It is done."))])
+    restarted = _driver(
+        pg_engine,
+        models,
         tool_surface=_RecordingSurface(ScriptedSurface(), provenance=provenance),
         executor=_describes,
         publisher=publisher,
         run_ledger=ledger,
     )
-    await open_session(restarted)
-    await run_turn(restarted, types.UserContent("Is it ready?"))
+    await restarted.turn("Is it ready?", turn_index=2)
 
-    (resumed,) = _runs(request_text(model.requests[-1]))
+    (resumed,) = _runs(agent_read(models.orchestrator.requests[-1]))
     assert resumed["status"] == "completed" and resumed["frames"]
     derived = publisher.frames[-1]
     lineage = provenance.get(
@@ -667,43 +634,27 @@ async def test_a_run_carried_on_after_a_restart_keeps_its_frames_provenance() ->
     }
 
 
-async def test_a_completed_run_admitted_again_on_a_fresh_surface_keeps_its_provenance() -> None:
+async def test_a_completed_run_admitted_again_on_a_fresh_surface_keeps_its_provenance(
+    pg_engine: AsyncEngine,
+) -> None:
     """A later run of the same work under the same key finds the run
     completed, and the process that computed it is gone with its provenance
     store: its frames rest on the retrievals it sealed."""
     ledger = InMemoryRunLedger(scope=current_conversation_id.get)
 
-    async def approved_turn(surface: Any) -> dict[str, Any]:
-        runner, model = orchestrator_runner(
-            call(
-                "plan",
-                brief="Kenya's debt service since 2015",
-                asks=["Kenya's debt service since 2015"],
-            ),
-            types.Part.from_text(text="Handed to the planner."),
-            types.Part.from_text(text="It is done."),
-            planner=ScriptedPlannerModel(),
-            tool_surface=surface,
-            executor=_describes,
-            run_ledger=ledger,
+    async def approved_turn(surface: Any, *, turn_index: int) -> dict[str, Any]:
+        models = _planned("It is done.")
+        driver = _driver(
+            pg_engine, models, tool_surface=surface, executor=_describes, run_ledger=ledger
         )
-        await open_session(runner)
-        approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-        approve = create_request_input_response(
-            approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-        )
-        await run_turn(runner, types.Content(role="user", parts=[approve]))
-        after_plan = request_text(model.requests[-1])
-        body = json.loads(
-            next(line for line in after_plan.split("\n") if line.startswith('{"frames"'))
-        )
-        return body
+        await approve_turn(driver, _QUESTION, turn_index=turn_index)
+        return _hand_back_body(models)
 
     first = _RecordingSurface(ScriptedSurface(), provenance=ProvenanceStore())
-    ran = await approved_turn(first)
+    ran = await approved_turn(first, turn_index=1)
     provenance = ProvenanceStore()
     second = _RecordingSurface(ScriptedSurface(), provenance=provenance)
-    again = await approved_turn(second)
+    again = await approved_turn(second, turn_index=2)
 
     assert again["run"] == ran["run"]
     run = await ledger.get(again["run"]["run_id"])
@@ -741,7 +692,7 @@ class _Outage:
         self.gets += 1
         if self.gets == self.on_get and not self.faulted:
             self.faulted = True
-            raise StaleSessionError("the session could not be read")
+            raise ConversationStale("the conversation could not be read")
         return await self.alive.get(run_id)
 
     async def submission(self, run_id: str) -> Any:
@@ -762,7 +713,7 @@ class _Outage:
     async def record(self, run_id: str, change: RunChange) -> RunRecord:
         if self.on_get is None and isinstance(change, Attempt) and not self.faulted:
             self.faulted = True
-            raise StaleSessionError("another writer landed first")
+            raise ConversationStale("another writer landed first")
         return await self.alive.record(run_id, change)
 
 
@@ -779,157 +730,28 @@ class _Outage:
     ids=["attempt", "driver_read", "plan_read", "node_read"],
 )
 async def test_a_ledger_outage_mid_run_hands_back_an_unfinished_run_carried_on_next_turn(
-    on_get: int | None, left_at: RunStatus, plan_at: PlanStatus
+    on_get: int | None, left_at: RunStatus, plan_at: PlanStatus, pg_engine: AsyncEngine
 ) -> None:
     """The run could not be recorded or read as it went: the turn closes
     saying so, with no figure, and the run is left for the next turn to
     finish and deliver."""
     ledger = _Outage(on_get=on_get)
-    runner, model = orchestrator_runner(
-        call(
-            "plan",
-            brief="Kenya's debt service since 2015",
-            asks=["Kenya's debt service since 2015"],
-        ),
-        types.Part.from_text(text="Handed to the planner."),
-        types.Part.from_text(text="It could not be saved."),
-        types.Part.from_text(text="It is done."),
-        planner=ScriptedPlannerModel(),
-        tool_surface=_LinkingSurface(),
-        executor=_describes,
-        run_ledger=ledger,
-    )
-    await open_session(runner)
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
+    models = _planned("It could not be saved.", "It is done.")
+    driver = _driver(
+        pg_engine, models, tool_surface=_LinkingSurface(), executor=_describes, run_ledger=ledger
     )
 
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
+    ran = await approve_turn(driver, _QUESTION)
 
-    after_plan = request_text(model.requests[-1])
-    body = json.loads(next(line for line in after_plan.split("\n") if line.startswith('{"frames"')))
+    body = _hand_back_body(models)
     run = body["run"]
     assert (run["status"], run["code"]) == ("unfinished", "ledger_unavailable")
     assert body["frames"] == [] and body["step_summaries"] == []
     left = await ledger.alive.get(run["run_id"])
     assert left is not None and left.status is left_at and not left.delivered
-    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    assert session is not None
-    assert Plan.model_validate_json(session.state["plan"]).status is plan_at
+    assert Plan.model_validate_json(ran.cursor.state["plan"]).status is plan_at
 
-    await run_turn(runner, types.UserContent("Is it ready?"))
+    await driver.turn("Is it ready?", turn_index=2)
 
-    next_turn = request_text(model.requests[-1])
-    runs = json.loads(next(line for line in next_turn.split("\n") if line.startswith('{"runs"')))
-    (resumed,) = runs["runs"]
+    (resumed,) = _runs(agent_read(models.orchestrator.requests[-1]))
     assert (resumed["run_id"], resumed["status"]) == (run["run_id"], "completed")
-
-
-# The principal `orchestrator_fakes.AUTH`'s token names.
-PRINCIPAL = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-
-
-def _frame(frames: list[dict[str, Any]], event: str) -> dict[str, Any]:
-    return next(frame for frame in frames if frame["event"] == event)
-
-
-async def test_a_studio_run_left_pending_is_carried_on_from_the_conversation_ledger(
-    monkeypatch: pytest.MonkeyPatch, pg_engine: AsyncEngine
-) -> None:
-    """Through the studio, over its stored run ledger: a run whose
-    publication is unfinished at the end of its turn is kept under a key that
-    names the conversation, not the turn, and the next turn, in a session of
-    its own, completes it and hands the agent its frames and the notes read
-    from the plan stored with the ledger."""
-    total = "The figures are the sum of 3 indicators."
-    monkeypatch.setattr(answer_module, "_stat_var_totals", lambda *a, **k: [total])
-    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
-    ledger = StudioRunLedger(store)
-    publisher = _FlakyPublisher()
-    app, model = orchestrator_app(
-        plan_call("Kenya's debt service since 2015"),
-        types.Part.from_text(text="Handed to the planner."),
-        types.Part.from_text(text="It is pending."),
-        types.Part.from_text(text="It is done."),
-        tool_surface=ScriptedSurface(),
-        store=store,
-        run_ledger=ledger,
-        publisher=publisher,
-    )
-    async with studio_client(app) as client:
-        first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
-        plan = _frame(first, "plan.proposed")
-        await stream(
-            client,
-            "/api/studio/interrupt",
-            {
-                "kind": "interrupt.response",
-                "schema_version": 1,
-                "conversation_id": CONVERSATION,
-                "interrupt_id": plan["interrupt_id"],
-                "decision": "approve",
-            },
-        )
-        after_plan = request_text(model.requests[-1])
-        body = json.loads(
-            next(line for line in after_plan.split("\n") if line.startswith('{"frames"'))
-        )
-        assert (body["run"]["status"], body["frames"]) == ("pending", [])
-
-        publisher.fixed = True
-        await stream(client, "/api/studio/turn", turn_body("Is it ready?"))
-
-    next_turn = request_text(model.requests[-1])
-    runs = json.loads(next(line for line in next_turn.split("\n") if line.startswith('{"runs"')))
-    (resumed,) = runs["runs"]
-    assert (resumed["run_id"], resumed["status"]) == (body["run"]["run_id"], "completed")
-    assert [frame["frame"] for frame in resumed["frames"]]
-    assert resumed["totals"] == [total]
-    token = current_conversation_key.set((PRINCIPAL, CONVERSATION))
-    try:
-        run = await ledger.get(resumed["run_id"])
-    finally:
-        current_conversation_key.reset(token)
-    assert run is not None and run.status is RunStatus.COMPLETED
-    assert run.idempotency_key == idempotency_key(
-        caller=PRINCIPAL,
-        conversation_id=f"{PRINCIPAL}/{CONVERSATION}",
-        task=f"plan:{plan['revision']}",
-    )
-
-
-async def test_the_default_ledger_keeps_one_conversations_runs_from_another(
-    pg_engine: AsyncEngine,
-) -> None:
-    publisher = _FlakyPublisher()
-    app, model = orchestrator_app(
-        plan_call("Kenya's debt service since 2015"),
-        types.Part.from_text(text="Handed to the planner."),
-        types.Part.from_text(text="It is pending."),
-        types.Part.from_text(text="Another conversation."),
-        tool_surface=ScriptedSurface(),
-        publisher=publisher,
-        engine=pg_engine,
-    )
-    async with studio_client(app) as client:
-        first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
-        await stream(
-            client,
-            "/api/studio/interrupt",
-            {
-                "kind": "interrupt.response",
-                "schema_version": 1,
-                "conversation_id": CONVERSATION,
-                "interrupt_id": _frame(first, "plan.proposed")["interrupt_id"],
-                "decision": "approve",
-            },
-        )
-        assert '"status": "pending"' in request_text(model.requests[-1])
-
-        publisher.fixed = True
-        other = turn_body("Hello", conversation_id="conv_01other000")
-        await stream(client, "/api/studio/turn", other)
-
-    assert '{"runs"' not in request_text(model.requests[-1])
-    assert len(publisher.frames) == PUBLISH_ATTEMPTS

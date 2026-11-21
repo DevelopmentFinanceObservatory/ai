@@ -2,8 +2,8 @@
 
 Each instance is a `StudioStore` over an engine of its own (its own pool of
 two connections, as a deployed instance has), all on one Postgres schema
-(the `pg_engine` fixture's). A heartbeat renewal, a checkpoint, a canvas
-edit, a cancel and run-ledger writes on one conversation all commit, and
+(the `pg_engine` fixture's). A heartbeat renewal, a fenced card write, a
+canvas edit, a cancel and run-ledger writes on one conversation all commit, and
 none retries or is refused. Two claims on one turn state still conflict.
 """
 
@@ -17,12 +17,12 @@ import pytest
 from executor.ledger import PlanApproval, SourcePolicy, Start, idempotency_key, new_run
 from harness.conversation import current_conversation_key
 from harness.run_ledger import StudioRunLedger
-from harness.studio_state import _next_manifest
-from harness.studio_store import ConversationStale, StudioStore
+from harness.studio_state import ConversationState, _next_manifest
+from harness.studio_store import ConversationStale, Renewal, StudioStore
 from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .orchestrator_fakes import NO_ADK, no_turn_specs
 from .store_clock import StoreClock
 from .test_run_ledger import _another_engine
 
@@ -45,8 +45,6 @@ async def engines(pg_engine: AsyncEngine) -> AsyncIterator[list[AsyncEngine]]:
 def _store(engine: AsyncEngine, *, clock: StoreClock | None = None) -> StudioStore:
     return StudioStore(
         engine,
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **(clock.store_kwargs if clock is not None else {}),
     )
 
@@ -63,6 +61,14 @@ def _adding(component_id: str):
         return _next_manifest(manifest, blocks, actor=CompositionActor.USER)
 
     return mutate
+
+
+def _final_text(text: str):
+    def change(conversation: ConversationState) -> bool:
+        conversation.turn_final_text = text
+        return True
+
+    return change
 
 
 def _candidate(task: str):
@@ -82,12 +88,13 @@ def _candidate(task: str):
     )
 
 
-async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
+async def test_heartbeat_canvas_cancel_and_runs_commit_side_by_side(
     engines: list[AsyncEngine],
 ) -> None:
-    """Instance A streams: it renews its lease, checkpoints and writes runs.
-    Instance B edits the canvas and instance C presses Stop, over and over,
-    at the same time. Every write lands; nothing raises."""
+    """Instance A streams: it renews its lease, writes runs and makes the
+    turn's fenced card write (`change_canvas`). Instance B edits the canvas
+    and instance C presses Stop, over and over, at the same time. Every
+    write lands; nothing raises."""
     owner, editor, stopper = (_store(engine) for engine in engines)
     state = await owner.create(PRINCIPAL, CONVERSATION)
     segment_id = owner.claim_segment(PRINCIPAL, CONVERSATION)
@@ -96,15 +103,14 @@ async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
     await editor.load(PRINCIPAL, CONVERSATION)
     ledger = StudioRunLedger(owner)
 
-    async def heartbeat() -> list[str]:
+    async def heartbeat() -> list[Renewal]:
         return [await owner.renew(PRINCIPAL, CONVERSATION, segment_id) for _ in range(ROUNDS)]
 
     async def stream() -> None:
         token = current_conversation_key.set((PRINCIPAL, CONVERSATION))
         try:
             for index in range(ROUNDS):
-                state.turn_final_text = f"answer {index}"
-                await owner.checkpoint(PRINCIPAL, CONVERSATION, segment_id)
+                await owner.change_canvas(PRINCIPAL, CONVERSATION, _final_text(f"round {index}"))
                 run = await ledger.admit(_candidate(f"t{index}"), submission={})
                 await ledger.record(run.run.run_id, Start())
         finally:
@@ -121,16 +127,19 @@ async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
         asyncio.gather(heartbeat(), stream(), edits(), stops()), timeout=60
     )
 
-    assert set(renewals) <= {"ok", "cancelled"} and "cancelled" in renewals
+    assert all(renewal.held for renewal in renewals)
+    assert any(renewal.stop_id is not None for renewal in renewals)
     assert all(cancels)
     reloaded = await _store(engines[0]).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert [block.component_id for block in reloaded.composition.blocks] == [
         f"cmp_{index:03d}" for index in range(ROUNDS)
     ]
-    assert reloaded.turn_final_text == f"answer {ROUNDS - 1}"
+    assert reloaded.turn_final_text == f"round {ROUNDS - 1}"
     assert reloaded.segment is not None and reloaded.segment.id == segment_id
-    assert reloaded.segment.cancel is True
+    async with engines[0].connect() as conn:
+        stop_id = (await conn.execute(text("SELECT stop_id FROM conversations"))).scalar_one()
+    assert stop_id is not None
     token = current_conversation_key.set((PRINCIPAL, CONVERSATION))
     try:
         assert len(await ledger.unfinished()) == ROUNDS
@@ -193,7 +202,7 @@ async def test_a_claim_racing_a_live_owners_renewal_is_refused(
     await clock.advance(50)  # past the 45 s TTL
     await taker.load(PRINCIPAL, CONVERSATION)
     taker.claim_segment(PRINCIPAL, CONVERSATION)
-    assert await owner.renew(PRINCIPAL, CONVERSATION, segment_id) == "ok"
+    assert (await owner.renew(PRINCIPAL, CONVERSATION, segment_id)).held
 
     with pytest.raises(ConversationStale):
         await taker.save(PRINCIPAL, CONVERSATION)

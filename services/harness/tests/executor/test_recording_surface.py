@@ -64,7 +64,7 @@ from planner.records import PlaceLevel, PlaceType
 from planner.workflow import OpenAxis, OpenEntityAxis, SelectedSource, ToolId
 from translator.mechanical import build_translation
 
-from ..resolved_revision import component_for, resolved_revision
+from ..resolved_revision import resolved_revision
 from ..unreachable_surface import unreachable_surface
 from .conftest import (
     CONTENT_VERSION,
@@ -79,6 +79,12 @@ from .conftest import (
 
 ManifestFactory = Callable[..., dict[str, Any]]
 PlanFactory = Callable[..., Plan]
+
+
+async def _assembled_component(executor: Any, **kwargs: Any) -> dict[str, Any] | None:
+    """The wire component `_assemble_component` built, or None when it withheld the card."""
+    assembled = await executor._assemble_component(**kwargs)
+    return None if assembled is None else assembled.component
 
 
 def _today_utc() -> str:
@@ -130,7 +136,7 @@ async def test_a_component_from_a_planned_run_carries_its_retrievals_real_proven
     # what `create_app` wires `McpExecutor` and `_RecordingSurface` to share
     # (`provenance=provenance` on both).
     executor = McpExecutor(settings=Settings(), provenance=store)
-    component = component_for(
+    component = await _assembled_component(
         executor,
         reply={"component_id": "cmp_1", "revision": 1},
         envelope=resolved_revision("stat_card", frame_ref=frame_ref.model_dump()),
@@ -261,7 +267,7 @@ async def test_two_independent_retrievals_each_attribute_to_their_own_frame(
     retrieve-then-aggregate branches, one dataset behind each, so the run
     holds two `EvidenceRecord`s while each terminal frame is fed by exactly
     one retrieval of its own. `link_evidence_to_terminal_frames` links each
-    terminal frame to its own retrieval, and `McpExecutor._component_from_lineage`
+    terminal frame to its own retrieval, and `McpExecutor._assemble_component`
     builds each card from that retrieval's real source and date.
     """
     debt_manifest = manifest_for(
@@ -332,12 +338,12 @@ async def test_two_independent_retrievals_each_attribute_to_their_own_frame(
     executor = McpExecutor(settings=Settings(), provenance=store)
     debt_ref = outcome.results["totals"].model_dump()
     population_ref = outcome.results["population_totals_op"].model_dump()
-    debt_component = component_for(
+    debt_component = await _assembled_component(
         executor,
         reply={"component_id": "cmp_debt", "revision": 1},
         envelope=resolved_revision("stat_card", frame_ref=debt_ref),
     )
-    population_component = component_for(
+    population_component = await _assembled_component(
         executor,
         reply={"component_id": "cmp_population", "revision": 1},
         envelope=resolved_revision("stat_card", frame_ref=population_ref),
@@ -404,7 +410,7 @@ async def test_a_stopped_runs_derived_frame_is_withheld_unlinked(
 
 
 async def test_a_frame_with_no_linked_manifest_is_withheld_not_fabricated() -> None:
-    """`McpExecutor._component_from_lineage` withholds the component when the
+    """`McpExecutor._assemble_component` withholds the component when the
     frame has no lineage in the store, the state of a frame nothing was linked
     to (a retrieval it rests on has no recorded manifest, or the store evicted
     it). An empty `ProvenanceStore` reproduces that "no lineage found" state
@@ -412,7 +418,7 @@ async def test_a_frame_with_no_linked_manifest_is_withheld_not_fabricated() -> N
     frame_ref = {"spec_id": "ops_" + "f" * 32, "content_version": "ocv_" + "f" * 32}
     executor = McpExecutor(settings=Settings(), provenance=ProvenanceStore())
 
-    component = component_for(
+    component = await _assembled_component(
         executor,
         reply={"component_id": "cmp_1", "revision": 1},
         envelope=resolved_revision("stat_card", frame_ref=frame_ref),
@@ -673,7 +679,7 @@ async def _assemble(
     store: ProvenanceStore, frame_ref: dict[str, str], *, facts: dict[str, Any] | None = None
 ) -> dict[str, Any] | None:
     executor = McpExecutor(settings=Settings(), provenance=store)
-    return component_for(
+    return await _assembled_component(
         executor,
         reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts or {}},
         envelope=resolved_revision("stat_card", frame_ref=frame_ref),
@@ -1370,7 +1376,7 @@ async def test_a_step_refused_after_its_own_call_succeeded_is_amended_to_failed(
 
     # Before the amendment: the raw call succeeded, and that is all
     # `_RecordingSurface` knows -- the exact defect.
-    assert [record.result["outcome"] for record in surface._records] == ["ok"]
+    assert [record.result["outcome"] for record in surface._records.items] == ["ok"]
 
     _mark_masked_step_failed(surface, outcome, tools={"debt": "get_data"})
 

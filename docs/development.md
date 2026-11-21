@@ -62,20 +62,6 @@ To rotate a credential, add a new version to the secret in Secret Manager, delet
 
 `data-mcp`'s definition store persists the definitions `search` mints until the first `get_data` registers them permanently. With `DEFINITION_STORE_BUCKET` unset it uses an in-memory store instead of GCS. That is fine for local development and for a single Cloud Run instance. With several instances behind one service, every other instance refuses `get_data` with `definition_not_held` for an id this instance minted, so the lifespan in `server.py` logs a warning when the bucket is unset and `K_SERVICE` (Cloud Run's service marker) is set.
 
-## Upgrading `google-adk`
-
-The harness pins `google-adk==2.9.1` (`services/harness/pyproject.toml`) and depends on four of its private modules: `flows/llm_flows/contents` (`_is_event_belongs_to_branch`), `flows/llm_flows/_fencing` (`_present_other_agent_message`), `tools/agent_tool` (`_SingleTurnAgentTool`) and `workflow/_llm_agent_wrapper` (`prepare_llm_agent_context`). Nothing imports them, so an upgrade that changes their behaviour produces no import error. The planner's context isolation rests on all four: its run is stamped with a branch, and ADK's branch filter drops the translator's events from what the planner is handed. The branch comparison direction, the sub-branch naming and the `single_turn` scope inheritance are each one of those modules' contract.
-
-ADK's filter is fail-open. `_is_event_belongs_to_branch` opens with `if not invocation_branch or not event.branch: return True`, so it keeps an event whose branch is empty. The planner is isolated while `override_branch=_PLANNER_BRANCH` reaches `ctx.run_node`, which happens at one call site, in `services/harness/src/harness/planner_adapter.py`. After each run, and on the way out of one that suspends for a planner-side ask, `harness.planner_adapter._check_branches` checks that every planner event carries `_PLANNER_BRANCH` and every translator event a branch strictly under it, and that a completed run appended a planner event at all. It raises `PlannerAdapterError` otherwise. A dropped keyword, a second call site without it, or an ADK release that stops honouring it therefore fails the run. The relay ceiling below is the measured consequence.
-
-`services/harness/tests/test_context_budget.py` is the first test file to fail after a bump, and `just check` runs it with the rest of the suite. Three of its tests are the early warning:
-
-- `test_no_relayed_foreign_agent_text_reaches_the_planner` holds the fenced foreign-agent relay in the planner's context at exactly zero characters.
-- `test_the_relay_check_measures_a_relay_that_is_there` proves that reading can go non-zero, so the zero is a measurement.
-- `test_the_cached_prefix_is_stable_across_a_run` holds the planner's static prefix byte-identical across a run. Gemini's implicit caching matches on that prefix, and so does the shared explicit cache (`harness.prefix_cache.prefix_key`).
-
-A failure after a bump means ADK changed one of those behaviours. The failing test's docstring names the mechanism it asserts, and `.venv/lib/python3.*/site-packages/google/adk` is the installed source to check that claim against. An accommodation to the new behaviour that moves a measured number means running `just context-baseline`, and reviewers read the diff of `services/harness/tests/context_baseline.json`.
-
 ## Branches and deploys
 
 `dev` is the trunk. CI (`lint`, `test`, `docker`) runs on every ready pull request into `dev` or `main`, and again on each push to `dev`. Merging to `dev` deploys the dev Cloud Run service. A release is a pull request from `dev` into `main`, and `deploy-prod.yml` deploys production on every push to `main`.

@@ -1,4 +1,4 @@
-"""The scripted google-genai client drives both model stacks and each stream behaviour."""
+"""The scripted google-genai client drives Pydantic AI's Gemini model and each stream behaviour."""
 
 from __future__ import annotations
 
@@ -8,8 +8,6 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from google.adk.models import Gemini
-from google.adk.models.llm_request import LlmRequest
 from google.genai import errors, types
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel
@@ -66,30 +64,6 @@ async def test_pydantic_ai_streams_text_and_a_function_call_through_the_client()
     assert _declared_names(first.generate_config) == ["lookup"]
     returned = scripted.requests[1].content_list[-1].parts[0].function_response
     assert (returned.name, returned.response) == ("lookup", {"return_value": "GHANA"})
-
-
-async def test_adk_gemini_streams_one_response_through_the_client() -> None:
-    scripted = ScriptedGenai([reply(text_part("Accra"), usage=usage_metadata(prompt=5))])
-    # `Gemini.client` is a public field, so the scripted client is handed over as one.
-    model = Gemini(model="gemini-test", client=scripted.client)
-    request = LlmRequest(
-        model="gemini-test",
-        contents=[types.Content(role="user", parts=[text_part("capital?")])],
-        config=types.GenerateContentConfig(system_instruction=INSTRUCTIONS),
-    )
-
-    responses = [r async for r in model.generate_content_async(request, stream=True)]
-
-    assert (
-        "".join(
-            part.text
-            for r in responses
-            if not r.partial and r.content
-            for part in r.content.parts or []
-        )
-        == "Accra"
-    )
-    assert scripted.requests[0].generate_config.system_instruction == INSTRUCTIONS
 
 
 async def _drain(scripted: ScriptedGenai) -> list[types.GenerateContentResponse]:

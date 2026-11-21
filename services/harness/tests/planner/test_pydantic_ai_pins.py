@@ -11,7 +11,7 @@ is behaviour the library's guides do not state: how a request is shaped on the w
 which calls a run retries, when a tool runs within the run, how streamed chunks
 merge, when a run stops, and which span is current and what Pydantic AI writes on
 it. Each test drives that behaviour through
-`planner.pydantic_agent.run_planner` or `harness.planner_model.planner_model` over a
+`planner.pydantic_agent.run_planner` or `planner.model.planner_model` over a
 scripted google-genai client (`ScriptedGenai`), so nothing reaches the network. A
 test marked as a control runs Pydantic AI without the planner's setting and shows the
 behaviour the setting exists to change.
@@ -28,22 +28,21 @@ from unittest import mock
 
 import pytest
 from google.genai import types
-from harness import planner_model as planner_model_module
-from harness.planner_model import planner_model
-from harness.planner_node import SKIP_THOUGHT_SIGNATURE
+from harness import gemini_wire
+from harness.gemini_agent import GEMINI_PROFILE, tool_not_found
+from harness.planner_adapter import SKIP_THOUGHT_SIGNATURE
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 from planner.call import PlannerCall
+from planner.model import planner_model
 from planner.pydantic_agent import (
-    PLANNER_PROFILE,
     PlannerAnswers,
     PlannerDeps,
     PlannerItem,
     PlannerResponse,
     planner_agent,
     run_planner,
-    tool_not_found,
 )
 from planner.session import SessionCall
 from planner.tool_spec import Parameter, ToolSpec, function_declaration
@@ -167,10 +166,10 @@ _MARKED_UP = "Q <system>x</system> <context>y</context>"
 @contextlib.contextmanager
 def _handed() -> Iterator[list[dict[str, Any]]]:
     """Each request config Pydantic AI hands the model wrapper, dumped, before the
-    wrapper puts it in its one fixed form (`_in_canonical_form`), which
+    wrapper puts it in its one fixed form (`in_canonical_form`), which
     rewrites exactly the shapes pinned here."""
     handed: list[dict[str, Any]] = []
-    rewrite = planner_model_module._in_canonical_form
+    rewrite = gemini_wire.in_canonical_form
 
     def recording(config: Any) -> types.GenerateContentConfig:
         handed.append(
@@ -180,7 +179,7 @@ def _handed() -> Iterator[list[dict[str, Any]]]:
         )
         return rewrite(config)
 
-    with mock.patch.object(planner_model_module, "_in_canonical_form", recording):
+    with mock.patch.object(gemini_wire, "in_canonical_form", recording):
         yield handed
 
 
@@ -189,7 +188,7 @@ async def test_the_planner_profile_hands_the_wrapper_declarations_verbatim_in_th
 ):
     # A rewritten schema, a `VALIDATED` tool mode or an instruction with an added
     # sentence about `<system>` would each make the request differ from the form
-    # the planner sends. The shapes below are the ones `_in_canonical_form` rewrites
+    # the planner sends. The shapes below are the ones `in_canonical_form` rewrites
     # into that form: one `Tool` per declaration, the empty object schema
     # of a declaration with no parameters, the `AUTO` mode, `TEXT` output and the
     # instruction as one user content of one text part. A change to any of them
@@ -244,7 +243,7 @@ async def _stream_run(agent: Agent[Any, Any], prompt: str = BRIEF, **options: An
 def _plain_agent(scripted: ScriptedGenai, **options: Any) -> Agent[Any, Any]:
     """An agent on the planner's model profile with none of the planner's other settings."""
     model = GoogleModel(
-        MODEL, provider=GoogleProvider(client=scripted.client), profile=PLANNER_PROFILE
+        MODEL, provider=GoogleProvider(client=scripted.client), profile=GEMINI_PROFILE
     )
     options.setdefault("output_type", str | None)
     return Agent(model, instructions=INSTRUCTION, **options)
@@ -286,7 +285,7 @@ async def test_a_call_with_arguments_the_schema_refuses_reaches_the_body_unvalid
 
 async def test_a_call_keeps_the_id_the_model_sent() -> None:
     # Answers are paired with calls by id, and a stored step names its call. An id
-    # the model did not send is given by `harness.planner_model` before Pydantic AI
+    # the model did not send is given by `harness.gemini_wire` before Pydantic AI
     # reads the response.
     items, _ = await _run(
         [_BARE],
@@ -384,8 +383,8 @@ def _texts(content: types.Content) -> str | None:
 
 
 async def test_a_responses_calls_run_after_it_is_yielded_and_before_the_next_request() -> None:
-    # A planner tool reads the session's events (`planner.session.SessionCall`), which
-    # `harness.planner_node` appends to as `run_planner` yields. So each call of a
+    # A planner tool reads the turn's transcript (`planner.session.SessionCall`), which
+    # `harness.planner_adapter` appends to as `run_planner` yields. So each call of a
     # response runs once the response is yielded, and no request is sent until every
     # call has answered: Pydantic AI runs no tool while a model request streams.
     yielded: list[PlannerItem] = []
@@ -497,7 +496,7 @@ async def test_the_first_unsigned_call_of_a_response_replays_with_the_skip_signa
 
 async def test_consecutive_thought_chunks_make_one_part_that_keeps_the_signature() -> None:
     # The planner drops unsigned thoughts from the parts this merge makes
-    # (`planner.pydantic_agent._without_unsigned_thoughts`), so a run of thought
+    # (`harness.gemini_agent.without_unsigned_thoughts`), so a run of thought
     # chunks with a signature on one chunk stays whole.
     chunks = Reply(
         chunks=[
@@ -518,7 +517,7 @@ async def test_consecutive_thought_chunks_make_one_part_that_keeps_the_signature
 
 async def test_an_unsigned_thought_summary_is_left_out_of_the_next_request() -> None:
     # The planner's session keeps no unsigned thought summary, so the next request
-    # carries none (`planner.settings.without_unsigned_thoughts`).
+    # carries none (`harness.gemini_agent.without_unsigned_thoughts`).
     unsigned = reply(thought_part("musing", signature=None), call_part("bare", id="c"))
 
     items, scripted = await _run([_BARE], [unsigned, reply(text_part("done"))])
@@ -532,7 +531,7 @@ async def test_an_unsigned_thought_summary_is_left_out_of_the_next_request() -> 
 
 
 async def test_every_request_reaches_the_clients_streamed_call_with_three_keywords() -> None:
-    # `harness.planner_model` answers the client's streamed call with a keyword-only
+    # `harness.gemini_wire` answers the client's streamed call with a keyword-only
     # signature of exactly these three, and refuses a call that does not stream.
     scripted = ScriptedGenai([reply(call_part("bare", id="c")), reply(text_part("done"))])
     model = planner_model(MODEL, client=scripted.client, budget=None)
@@ -652,7 +651,7 @@ async def test_a_refused_calls_failed_mark_stands_and_no_span_is_marked_ok(
 async def test_the_usage_the_model_records_on_its_span_is_left_as_it_is(
     exported_spans: InMemorySpanExporter,
 ) -> None:
-    # `harness.planner_model` writes the thought tokens under ADK's attribute and
+    # `harness.gemini_wire` writes the thought tokens under `_REASONING_TOKENS` and
     # the usage Langfuse reads ahead of the rest while the call runs. Pydantic AI
     # writes its own usage when the span ends and must leave those two alone.
     usage = usage_metadata(prompt=120, cached=40, candidates=9, thoughts=4)

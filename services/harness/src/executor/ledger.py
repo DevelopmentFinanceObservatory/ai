@@ -82,6 +82,9 @@ class RunStatus(StrEnum):
 
 
 TERMINAL_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.FAILED})
+# The statuses of a run whose computation is unfinished: never started, or
+# started and not yet come to an outcome.
+UNFINISHED_STATUSES = frozenset({RunStatus.ADMITTED, RunStatus.RUNNING})
 
 # How many times an unfinished run is resumed, and how long after its
 # admission, before the run fails (`Resume`).
@@ -220,7 +223,9 @@ class RunRecord(StrictModel):
     `submission_digest()` of the submission and source policy the run
     executes. `outcome` is what its computation came to, as the executor
     states it, recorded once with `Publishing` or `Fail`. `resumes` counts
-    how often the unfinished run was carried on (`Resume`). `delivered` says
+    the times a started run was carried on (`Resume`): by a later turn
+    (`executor.run.resume_run`, which counts an `admitted` run as started),
+    or by a caller taking over a `running` run. `delivered` says
     no later turn carries a completed run on: the conversation recorded the
     hand-back of its result, or `undelivered` reached the delivery bound
     (`Undelivered`). `undelivered` counts the turns that carried a completed

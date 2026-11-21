@@ -44,7 +44,7 @@ import itertools
 import json
 import logging
 import re
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, MutableMapping, Sequence
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, overload
@@ -219,13 +219,6 @@ SPEC_SEARCHED_STATE_KEY = "planner:spec_searched_at"
 # the identity its block carries, and `translator.discovery.discover_source`
 # builds a pinned requirement's source from an entry with no `search` call.
 PIN_SOURCES_STATE_KEY = "planner:pin_sources"
-
-# The session-state slot the host writes a seeded turn's seeds to, as JSON:
-# one entry per Search result a Studio handoff carries (`TurnRequest.seed_spec`),
-# as `harness.seeds.seeds_slot` compacts it, a `harness.wire.Seed` or the
-# refusal its step fails with. `harness.graph`'s `seed` node reads each entry
-# and clears the slot. Unset on a turn with no seeds.
-SEEDS_STATE_KEY = "seeds"
 
 # The session-state slot holding a `WindowedPin` for every pin of a dataset
 # whose identity a search in the conversation recorded
@@ -6009,7 +6002,7 @@ class SessionState(Protocol):
 
     def get(self, key: str, default: Any = None, /) -> Any: ...
 
-    def __setitem__(self, key: str, value: Any) -> None: ...
+    def __setitem__(self, key: str, value: Any, /) -> None: ...
 
 
 def period_window(period: Period, *, end_open: bool = False) -> dict[str, object]:
@@ -6601,12 +6594,14 @@ def _scope_rank(block: Mapping[str, Any] | None) -> int:
 
 def with_blocks(
     held: Mapping[str, Mapping[str, Any]], blocks: Mapping[str, Mapping[str, Any]]
-) -> dict[str, dict[str, Any]]:
+) -> dict[str, Mapping[str, Any]]:
     """`held`, spec blocks by spec_id, with each of `blocks`, a newer answer,
     held for its spec_id: the newer answer holds it, and the held block's
-    scope content stands where it says more (`standing_block`)."""
+    scope content stands where it says more (`standing_block`). A held
+    block `blocks` does not answer is kept as the same object: writers
+    replace a block whole, so the shared object stays as stored."""
     return {
-        **{spec_id: dict(block) for spec_id, block in held.items()},
+        **held,
         **{
             spec_id: dict(standing_block(block, held.get(spec_id)))
             for spec_id, block in blocks.items()
@@ -6921,11 +6916,12 @@ def save_plan(state: SessionState, plan: Plan) -> None:
     state[PLAN_STATE_KEY] = plan.model_dump_json()
 
 
-def clear_plan(state: SessionState) -> None:
-    """Clear the plan session `state` holds, with the alignments that belong to it
-    (`ALIGNMENTS_STATE_KEY`), so the next plan reads none of them."""
+def clear_plan(state: MutableMapping[str, Any]) -> None:
+    """Clear the plan `state` holds and remove the alignments that belong to it
+    (`ALIGNMENTS_STATE_KEY`), so the next plan reads none of them. A state with
+    no alignments holds no such key."""
     state[PLAN_STATE_KEY] = None
-    state[ALIGNMENTS_STATE_KEY] = None
+    state.pop(ALIGNMENTS_STATE_KEY, None)
 
 
 def load_plan_rounds(state: SessionState) -> int:

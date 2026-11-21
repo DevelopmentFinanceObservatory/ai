@@ -292,6 +292,7 @@ from executor.classify import (
 from executor.completion import ResultPublisher, publish_results
 from executor.ledger import (
     TERMINAL_STATUSES,
+    UNFINISHED_STATUSES,
     Attempt,
     AuthorisationExpiredError,
     Fail,
@@ -502,6 +503,18 @@ def _is_transient(exc: Exception) -> bool:
 # retries through the same binding. It runs on the event loop, so it must
 # return promptly.
 type StepProgressCallback = Callable[[str, ProgressReport], None]
+
+# Read when a run's computation is cancelled: whether the cancellation ends
+# the run, which is then recorded failed (`cancelled`). `False` leaves the run
+# unfinished, as a process that died mid-run does, for a later call to carry
+# on. The caller that cancels decides, so it answers from what it knew when it
+# cancelled: a turn's Stop ends the run, a client that left does not.
+type CancelEndsRun = Callable[[], bool]
+
+
+def every_cancel_ends_run() -> bool:
+    """`CancelEndsRun` for a caller whose every cancellation ends the run."""
+    return True
 
 
 async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
@@ -734,6 +747,7 @@ class _Runtime:
     label_refs: LabelRefs
     on_progress: StepProgressCallback | None
     publisher: ResultPublisher | None
+    cancel_ends_run: CancelEndsRun
 
 
 async def execute_authorised(
@@ -751,6 +765,7 @@ async def execute_authorised(
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
     label_refs: LabelRefs = default_label_refs,
     on_progress: StepProgressCallback | None = None,
+    cancel_ends_run: CancelEndsRun = every_cancel_ends_run,
 ) -> RunOutcome:
     """Run `submission` under `authorisation`, a plan's approval, as one run of `ledger`.
 
@@ -760,7 +775,9 @@ async def execute_authorised(
     carries that run on: one whose computation finished returns the outcome it
     recorded and only resumes publication, and one that was still computing
     runs its workflow again, the tools answering what the store already
-    holds. A key whose run failed admits a new run of the work. Every tool call
+    holds. A run the key names that is still `admitted`, as the studio
+    admits one with the plan's approval, starts here and counts no resume
+    (`RunRecord.resumes`). A key whose run failed admits a new run of the work. Every tool call
     is recorded as an attempt before it goes out, and the retrieved inputs are
     sealed, and checked against the authorisation's sources, before the first
     derived step. An accepted run then publishes each derived terminal frame
@@ -768,8 +785,9 @@ async def execute_authorised(
     (`executor.completion.publish_results`); a stopped one is recorded failed.
 
     `sleep`, `jitter`, `max_concurrent_steps`, `fetch_series_stats`,
-    `label_refs` and `on_progress` are `execute_approved_plan`'s own. With no
-    `publisher`, a run with a derived result stays `publishing`.
+    `label_refs`, `on_progress` and `cancel_ends_run` are
+    `execute_approved_plan`'s own. With no `publisher`, a run with a derived
+    result stays `publishing`.
 
     `authorisation` must approve the work `submission` is: its approved
     revision is `submission.revision`. One that names other work admits no run.
@@ -800,6 +818,7 @@ async def execute_authorised(
         label_refs=label_refs,
         on_progress=on_progress,
         publisher=publisher,
+        cancel_ends_run=cancel_ends_run,
     )
     if (authorised := authorisation.approved_revision) != submission.revision:
         return Refused(
@@ -807,12 +826,10 @@ async def execute_authorised(
             refusal=RefusalKind.AUTHORISATION_MISMATCH,
             detail=f"the authorisation names work {authorised}, not {submission.revision}",
         )
-    candidate = new_run(
-        idempotency_key=idempotency_key,
-        submission_digest=submission_digest(
-            submission=submission, source_policy=authorisation.source_policy
-        ),
+    candidate = run_candidate(
+        submission,
         authorisation=authorisation,
+        idempotency_key=idempotency_key,
         now=datetime.now(UTC),
     )
     try:
@@ -822,8 +839,29 @@ async def execute_authorised(
         return Refused(
             revision=submission.revision, refusal=RefusalKind.AUTHORISATION_EXPIRED, detail=str(exc)
         )
+    # A run its key names that is still `admitted` was never computed, so
+    # computing it here starts it and counts no resume.
+    resumed = admission.resumed and admission.run.status is not RunStatus.ADMITTED
     return await _carry_out(
-        admission.run, submission, ledger=ledger, runtime=runtime, resumed=admission.resumed
+        admission.run, submission, ledger=ledger, runtime=runtime, resumed=resumed
+    )
+
+
+def run_candidate(
+    submission: Submission, *, authorisation: PlanApproval, idempotency_key: str, now: datetime
+) -> RunRecord:
+    """The `admitted` run `execute_authorised` asks its ledger to admit for
+    `submission` under `authorisation` and `idempotency_key`, minted at
+    `now`: its digest covers the submission and the approval's source
+    policy (`submission_digest`), so any caller admitting the same work
+    under the same key binds the same run."""
+    return new_run(
+        idempotency_key=idempotency_key,
+        submission_digest=submission_digest(
+            submission=submission, source_policy=authorisation.source_policy
+        ),
+        authorisation=authorisation,
+        now=now,
     )
 
 
@@ -871,10 +909,14 @@ async def resume_run(
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
     label_refs: LabelRefs = default_label_refs,
+    cancel_ends_run: CancelEndsRun = every_cancel_ends_run,
 ) -> RunOutcome:
     """Carry an unfinished `run` of `ledger` on from `submission`, the one
     stored with it (`load_submission`), as `execute_authorised` carries on a
-    run its key already names. Raises as `execute_authorised` does."""
+    run its key already names. A later turn's carry-on: it counts a resume
+    for any unfinished run, an `admitted` one included, so a run whose start
+    keeps failing meets `MAX_PUBLICATION_RESUMES`. Raises as
+    `execute_authorised` does."""
     runtime = _Runtime(
         surface=surface,
         capabilities=capabilities,
@@ -885,6 +927,7 @@ async def resume_run(
         label_refs=label_refs,
         on_progress=None,
         publisher=publisher,
+        cancel_ends_run=cancel_ends_run,
     )
     return await _carry_out(run, submission, ledger=ledger, runtime=runtime, resumed=True)
 
@@ -906,15 +949,20 @@ async def _carry_out(
     """Take `run` to its outcome, or, when this process is already carrying
     it out, wait for that outcome without driving the run a second time. The
     driver starts from the ledger's current record, since `run` may be a
-    snapshot taken before an earlier driver finished. `resumed` says `run`
-    was admitted before this call, so driving it carries it on (`_drive`).
+    snapshot taken before an earlier driver finished. `resumed` says driving
+    `run` carries on a started run and counts a resume (`_compute`): a later
+    turn's `resume_run`, which counts an `admitted` run as started, or a
+    submission whose key names a run past `admitted`. A run still
+    `admitted` that its own submission finds is started, not resumed.
 
     A waiter cancelled leaves the run going on for the caller driving it. A
-    driver cancelled fails a computation it was running (`_abandoned`),
-    whether or not another caller waits on it, and each waiter then takes
-    the run from the ledger as a driver would: a run failed with no outcome
-    answers `RUN_ABANDONED`, and one the driver left unfinished, cancelled
-    before or after its computation, is carried on by the waiter."""
+    driver cancelled before its computation finished fails the run
+    (`_abandoned`) when its `cancel_ends_run` says the cancellation ends the
+    run, whether or not another caller waits on it, and each waiter then
+    takes the run from the ledger as a driver would: a run failed with no
+    outcome answers `RUN_ABANDONED`, and one the driver left unfinished, by a
+    cancellation that does not end the run or one after its computation
+    finished, is carried on by the waiter."""
     while (in_flight := _IN_FLIGHT.get(run.run_id)) is not None:
         await asyncio.wait((in_flight,))
         if not in_flight.cancelled():
@@ -922,11 +970,9 @@ async def _carry_out(
     outcome: asyncio.Future[RunOutcome] = asyncio.get_running_loop().create_future()
     _IN_FLIGHT[run.run_id] = outcome
     try:
-        async with store_faults(run.run_id):
-            current = await ledger.get(run.run_id)
-        if current is None:
-            raise RunNotFoundError(run.run_id)
-        result = await _drive(current, submission, ledger=ledger, runtime=runtime, resumed=resumed)
+        result = await _drive(
+            run.run_id, submission, ledger=ledger, runtime=runtime, resumed=resumed
+        )
     except asyncio.CancelledError:
         outcome.cancel()
         raise
@@ -942,85 +988,133 @@ async def _carry_out(
 
 
 async def _drive(
-    run: RunRecord,
+    run_id: str,
     submission: Submission,
     *,
     ledger: RunLedger,
     runtime: _Runtime,
     resumed: bool,
 ) -> RunOutcome:
-    """Take `run` from where the ledger holds it to its outcome.
-
-    An unfinished run admitted before (`resumed`) is first recorded carried
-    on (`Resume`), which fails one resumed too often or too old. A run that
-    already came to an outcome returns it, finishing its publication, and
-    one failed before it came to any answers `RUN_ABANDONED`.
+    """Take run `run_id` from where the ledger holds it to its outcome:
+    compute it (`_compute`), then publish its results.
 
     Raises:
         LedgerUnavailableError: the ledger's store could not record the run's
-            progress; the run is left unfinished, never failed for it.
-        RunAbandonedError: a defect stopped the computation; the run is
-            recorded failed (`_abandoned`).
+            progress; the run is left unfinished.
+        RunAbandonedError: a defect stopped the computation, among them a
+            `CancelledError` that reached this task while nobody cancelled
+            it, as a tool client's cancel scope can leak one from a step;
+            the run is recorded failed (`internal_error`).
+
+    A cancellation of this task before the run's computation finished, at
+    any point from the ledger read to the record of its outcome, records the
+    run failed (`cancelled`) when `runtime.cancel_ends_run` says it ends the
+    run, and otherwise leaves it unfinished for a later turn to carry on
+    (`harness.graph.resume`).
     """
-    if resumed and run.status not in TERMINAL_STATUSES:
-        run = await record_change(ledger, run.run_id, Resume())
+    try:
+        to_publish, outcome = await _compute(
+            run_id, submission, ledger=ledger, runtime=runtime, resumed=resumed
+        )
+    except asyncio.CancelledError as exc:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling() > 0:
+            if runtime.cancel_ends_run():
+                await _abandoned(
+                    run_id,
+                    ExecutorCode.CANCELLED,
+                    "the turn running it was cancelled",
+                    ledger=ledger,
+                )
+            raise
+        await _abandoned(run_id, ExecutorCode.INTERNAL_ERROR, _defect(exc), ledger=ledger)
+        raise RunAbandonedError(run_id) from exc
+    if to_publish is not None:
+        await publish_results(
+            to_publish,
+            ledger=ledger,
+            publisher=runtime.publisher,
+            sleep=runtime.sleep,
+            jitter=runtime.jitter,
+        )
+    return outcome
+
+
+async def _compute(
+    run_id: str,
+    submission: Submission,
+    *,
+    ledger: RunLedger,
+    runtime: _Runtime,
+    resumed: bool,
+) -> tuple[RunRecord | None, RunOutcome]:
+    """Run `run_id`'s computation from where the ledger holds it, returning
+    the run when it still has results to publish, and its outcome.
+
+    An unfinished run is first recorded carried on (`Resume`), which fails
+    one resumed too often or too old, when it was admitted before
+    (`resumed`) or is already `running`: a caller that finds it running
+    took it over from a driver whose cancellation left it unfinished. A run
+    that already came to an outcome returns it, and one failed before it
+    came to any answers `RUN_ABANDONED`.
+
+    Raises:
+        RunNotFoundError: the ledger holds no run `run_id`.
+        LedgerUnavailableError: as `_drive`.
+        RunAbandonedError: a defect raised by the computation, recorded
+            failed (`internal_error`).
+    """
+    async with store_faults(run_id):
+        run = await ledger.get(run_id)
+    if run is None:
+        raise RunNotFoundError(run_id)
+    if run.status not in TERMINAL_STATUSES and (resumed or run.status is RunStatus.RUNNING):
+        run = await record_change(ledger, run_id, Resume())
     if run.outcome is not None:
-        if run.status in (RunStatus.PUBLISHING, RunStatus.PENDING):
-            await publish_results(
-                run,
-                ledger=ledger,
-                publisher=runtime.publisher,
-                sleep=runtime.sleep,
-                jitter=runtime.jitter,
-            )
-        return _recorded_outcome(run.outcome, workflow=submission.workflow)
+        publishing = run.status in (RunStatus.PUBLISHING, RunStatus.PENDING)
+        return (run if publishing else None), _recorded_outcome(
+            run.outcome, workflow=submission.workflow
+        )
     if run.status is RunStatus.FAILED:
         assert run.failure is not None, "a failed run records its failure"
-        return Refused(
+        return None, Refused(
             revision=submission.revision,
-            run_id=run.run_id,
+            run_id=run_id,
             refusal=RefusalKind.RUN_ABANDONED,
             detail=f"the run failed before it came to an outcome: {run.failure.reason}",
         )
     if run.status is RunStatus.ADMITTED:
         try:
-            run = await record_change(ledger, run.run_id, Start())
+            run = await record_change(ledger, run_id, Start())
         except AuthorisationExpiredError as exc:
-            return await _failed(
+            return None, await _failed(
                 Refused(
                     revision=submission.revision,
-                    run_id=run.run_id,
+                    run_id=run_id,
                     refusal=RefusalKind.AUTHORISATION_EXPIRED,
                     detail=str(exc),
                 ),
                 ledger=ledger,
             )
     try:
-        outcome = await _run_workflow(submission, run_id=run.run_id, ledger=ledger, runtime=runtime)
-    except LedgerUnavailableError:
+        outcome = await _run_workflow(submission, run_id=run_id, ledger=ledger, runtime=runtime)
+    except (LedgerUnavailableError, asyncio.CancelledError):
         raise
     except BaseException as exc:
-        await _abandoned(run.run_id, exc, ledger=ledger)
+        await _abandoned(run_id, ExecutorCode.INTERNAL_ERROR, _defect(exc), ledger=ledger)
         if isinstance(exc, Exception):
-            raise RunAbandonedError(run.run_id) from exc
+            raise RunAbandonedError(run_id) from exc
         raise
     if not isinstance(outcome, Accepted):
-        return await _failed(outcome, ledger=ledger)
+        return None, await _failed(outcome, ledger=ledger)
     results = tuple(
         ResultFrame(spec_id=frame.spec_id, content_version=frame.content_version)
         for frame in outcome.results.values()
     )
     run = await record_change(
-        ledger, run.run_id, Publishing(results, outcome=outcome.model_dump(mode="json"))
+        ledger, run_id, Publishing(results, outcome=outcome.model_dump(mode="json"))
     )
-    await publish_results(
-        run,
-        ledger=ledger,
-        publisher=runtime.publisher,
-        sleep=runtime.sleep,
-        jitter=runtime.jitter,
-    )
-    return outcome
+    return run, outcome
 
 
 def _recorded_outcome(raw: JsonValue, *, workflow: Workflow) -> RunOutcome:
@@ -1042,21 +1136,28 @@ def _recorded_outcome(raw: JsonValue, *, workflow: Workflow) -> RunOutcome:
     )
 
 
-async def _abandoned(run_id: str, exc: BaseException, *, ledger: RunLedger) -> None:
-    """Record run `run_id` failed by `exc`, which ends its computation with no
-    outcome: the turn running it was cancelled, or a defect raised. Only a
-    process that died mid-run, or a ledger that could not record the run's
-    progress (`LedgerUnavailableError`, which `_drive` never passes here),
-    leaves a run unfinished for the next turn to carry on; a failed run is
-    never carried on, and submitting its work again admits a new run. A
-    write that fails here is logged, so `exc` still propagates."""
-    cancelled = isinstance(exc, asyncio.CancelledError)
-    code = ExecutorCode.CANCELLED if cancelled else ExecutorCode.INTERNAL_ERROR
-    reason = "the turn running it was cancelled" if cancelled else f"{type(exc).__name__}: {exc}"
+async def _abandoned(run_id: str, code: str, reason: str, *, ledger: RunLedger) -> None:
+    """Record run `run_id` failed under `code` for `reason` when its
+    computation is unfinished (`admitted` or `running`): a cancellation that
+    ends the run (`CancelEndsRun`), or a defect raised. A run whose
+    computation already finished keeps its outcome for the next turn to
+    publish. A process that died mid-run, a cancellation that does not end
+    the run, or a ledger that could not record the run's progress
+    (`LedgerUnavailableError`, which `_drive` never passes here) leaves a run
+    unfinished for the next turn to carry on; a failed run is never carried
+    on, and submitting its work again admits a new run. A read or write that
+    fails here is logged, so the caller's exception still propagates."""
     try:
-        await ledger.record(run_id, Fail(code, reason))
+        run = await ledger.get(run_id)
+        if run is not None and run.status in UNFINISHED_STATUSES:
+            await ledger.record(run_id, Fail(code, reason))
     except Exception:
         logger.exception("executor: could not record run %s as %s", run_id, code)
+
+
+def _defect(exc: BaseException) -> str:
+    """The failure reason a run records for defect `exc`."""
+    return f"{type(exc).__name__}: {exc}"
 
 
 async def _failed(
@@ -1074,6 +1175,122 @@ async def _failed(
     return outcome
 
 
+@dataclass(frozen=True, kw_only=True)
+class ApprovedWork:
+    """What an approved plan runs as: the plan `running`, its `submission`,
+    the `authorisation` its approval grants and the run's `idempotency_key`."""
+
+    running: Plan
+    submission: Submission
+    authorisation: PlanApproval
+    idempotency_key: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class UnrunnablePlan:
+    """An approved plan `approved_work` finds nothing to run for: the `plan`
+    as its rules leave it and the `refused` outcome it answers with."""
+
+    plan: Plan
+    refused: Refused
+
+
+def approved_work(
+    plan: Plan, *, approver: str, conversation_id: str
+) -> ApprovedWork | UnrunnablePlan:
+    """The work approved `plan` runs as under `execute_approved_plan`'s rules,
+    or the `UnrunnablePlan` it cannot run as: `NOT_APPROVED` for a plan that
+    is not `APPROVED`, carries no workflow, or whose approval cannot be
+    stated (a workflow that retrieves no source), `STALE_REVISION` for one whose
+    content no longer hashes to its approved revision, and
+    `AUTHORISATION_EXPIRED`, the plan failed, for one with no approval time.
+    Its authorisation is a `PlanApproval` of the approved revision by
+    `approver` over every source the workflow retrieves, in force for
+    `PLAN_APPROVAL_TTL` from `approved_at`; its key names the approved
+    revision for `approver` in `conversation_id`. Pure: it reads and writes
+    no ledger, so the studio's interrupt route admits the same run in the
+    save that records the approval, and `execute_approved_plan` then
+    carries that run on. It raises nothing."""
+    if plan.status is not PlanStatus.APPROVED:
+        return UnrunnablePlan(
+            plan=plan,
+            refused=Refused(
+                revision=plan_revision(plan),
+                refusal=RefusalKind.NOT_APPROVED,
+                detail=f"this plan is {plan.status.value}, not approved; nothing runs",
+            ),
+        )
+    if plan.workflow is None:
+        return UnrunnablePlan(
+            plan=plan,
+            refused=Refused(
+                revision=plan_revision(plan),
+                refusal=RefusalKind.NOT_APPROVED,
+                detail="this plan carries no workflow; nothing runs",
+            ),
+        )
+    try:
+        running = plan.start_execution()
+    except ValueError as exc:
+        # Approved as different content: nothing runs.
+        return UnrunnablePlan(
+            plan=plan,
+            refused=Refused(
+                revision=plan_revision(plan), refusal=RefusalKind.STALE_REVISION, detail=str(exc)
+            ),
+        )
+    assert running.workflow is not None  # checked on `plan` above
+    # `start_execution` refuses a plan whose content does not hash to it.
+    assert running.approved_revision is not None
+    if running.approved_at is None:
+        return UnrunnablePlan(
+            plan=running.fail(),
+            refused=Refused(
+                revision=plan_revision(running),
+                refusal=RefusalKind.AUTHORISATION_EXPIRED,
+                detail="this plan carries no approval time, so it needs approving again",
+            ),
+        )
+    # The plan validated its own workflow and requirements.
+    submission = Submission.model_construct(
+        revision=plan_revision(running),
+        workflow=running.workflow,
+        requirements=tuple(
+            r for r in running.evidence_requirements if isinstance(r, DatasetRequirement)
+        ),
+    )
+    try:
+        authorisation = PlanApproval(
+            source_policy=submission.source_policy(),
+            expires_at=running.approved_at + PLAN_APPROVAL_TTL,
+            plan_version=running.version,
+            approved_revision=running.approved_revision,
+            approver=approver,
+            at=running.approved_at,
+        )
+    except ValidationError as exc:
+        # A workflow that retrieves no source has no source policy to
+        # authorise, and an approval that cannot be stated runs nothing.
+        return UnrunnablePlan(
+            plan=plan,
+            refused=Refused(
+                revision=plan_revision(plan),
+                refusal=RefusalKind.NOT_APPROVED,
+                detail=f"this plan's approval cannot be authorised: {exc}",
+            ),
+        )
+    return ApprovedWork(
+        running=running,
+        submission=submission,
+        authorisation=authorisation,
+        idempotency_key=idempotency_key(
+            caller=approver,
+            conversation_id=conversation_id,
+            task=f"plan:{running.approved_revision}",
+        ),
+    )
+
+
 async def execute_approved_plan(
     plan: Plan,
     *,
@@ -1089,6 +1306,7 @@ async def execute_approved_plan(
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
     label_refs: LabelRefs = default_label_refs,
     on_progress: StepProgressCallback | None = None,
+    cancel_ends_run: CancelEndsRun = every_cancel_ends_run,
 ) -> tuple[Plan, RunOutcome]:
     """Run an approved plan through `execute_authorised` and record the run in its status.
 
@@ -1104,7 +1322,9 @@ async def execute_approved_plan(
     run, as is one whose approval has expired when a new run is admitted. The run's
     idempotency key names the approved revision (which covers the plan's
     version) for `approver` in `conversation_id`, so executing one revision
-    again, in any turn of the conversation, carries on its run. `ledger` keeps the run, a
+    again, in any turn of the conversation, carries on its run, the one the
+    studio admitted with the approval among them. The submission,
+    authorisation and key are `approved_work`'s. `ledger` keeps the run, a
     fresh `InMemoryRunLedger` by default.
 
     The plan's status follows its run's: `COMPLETED` once the run completed,
@@ -1126,6 +1346,10 @@ async def execute_approved_plan(
     `on_progress` hears a report with no message as each step starts, every
     progress report a step's tool call sends, and a report naming the next
     attempt each time a step is retried, tagged with the step's id.
+    `cancel_ends_run` is read when the run's computation is cancelled: a
+    cancellation it says ends the run records the run failed (`cancelled`),
+    and any other leaves the run unfinished, for executing the revision again
+    or `resume_run` to carry on. Every cancellation ends the run by default.
 
     Returns:
         The plan as the run left it, or unchanged when it could not start,
@@ -1135,52 +1359,15 @@ async def execute_approved_plan(
         LedgerUnavailableError: the ledger's store could not record or read
             the run (`execute_authorised`).
     """
-    if plan.status is not PlanStatus.APPROVED:
-        return plan, Refused(
-            revision=plan_revision(plan),
-            refusal=RefusalKind.NOT_APPROVED,
-            detail=f"this plan is {plan.status.value}, not approved; nothing runs",
-        )
-    try:
-        running = plan.start_execution()
-    except ValueError as exc:
-        # Approved as different content: nothing runs.
-        return plan, Refused(
-            revision=plan_revision(plan), refusal=RefusalKind.STALE_REVISION, detail=str(exc)
-        )
-    assert running.workflow is not None, "an EXECUTING plan always carries a workflow"
-    assert running.approved_revision is not None, "an EXECUTING plan was approved"
-    if running.approved_at is None:
-        return running.fail(), Refused(
-            revision=plan_revision(running),
-            refusal=RefusalKind.AUTHORISATION_EXPIRED,
-            detail="this plan carries no approval time, so it needs approving again",
-        )
-    # The plan validated its own workflow and requirements.
-    submission = Submission.model_construct(
-        revision=plan_revision(running),
-        workflow=running.workflow,
-        requirements=tuple(
-            r for r in running.evidence_requirements if isinstance(r, DatasetRequirement)
-        ),
-    )
+    work = approved_work(plan, approver=approver, conversation_id=conversation_id)
+    if isinstance(work, UnrunnablePlan):
+        return work.plan, work.refused
+    running = work.running
     ledger = ledger if ledger is not None else InMemoryRunLedger()
-    approval = PlanApproval(
-        source_policy=submission.source_policy(),
-        expires_at=running.approved_at + PLAN_APPROVAL_TTL,
-        plan_version=running.version,
-        approved_revision=running.approved_revision,
-        approver=approver,
-        at=running.approved_at,
-    )
     outcome = await execute_authorised(
-        submission,
-        authorisation=approval,
-        idempotency_key=idempotency_key(
-            caller=approver,
-            conversation_id=conversation_id,
-            task=f"plan:{running.approved_revision}",
-        ),
+        work.submission,
+        authorisation=work.authorisation,
+        idempotency_key=work.idempotency_key,
         ledger=ledger,
         surface=surface,
         publisher=publisher,
@@ -1191,6 +1378,7 @@ async def execute_approved_plan(
         fetch_series_stats=fetch_series_stats,
         label_refs=label_refs,
         on_progress=on_progress,
+        cancel_ends_run=cancel_ends_run,
     )
     run = None
     if outcome.run_id is not None:
@@ -1342,6 +1530,7 @@ async def read_anchors(
         label_refs=no_label_refs,
         on_progress=None,
         publisher=None,
+        cancel_ends_run=every_cancel_ends_run,
     )
     submission = Submission.model_construct(
         revision=revision, workflow=workflow, requirements=tuple(requirements)
@@ -1617,10 +1806,11 @@ class _Run:
         # completion when one of them raises something `_attempt` did not
         # catch. Such an exception is a defect, since `_attempt` returns
         # `_Stopped` and never raises it, and ending the wave at once would
-        # abandon that wave's other in-flight steps unawaited. A
-        # `BaseException` outside `Exception`, such as `CancelledError`,
-        # is not captured by `return_exceptions` and propagates
-        # regardless.
+        # abandon that wave's other in-flight steps unawaited. A step
+        # that ends with `CancelledError` is captured the same way and
+        # raised below: when this task was cancelled the cancellation
+        # also reaches the `gather` itself, and when it was not, the step
+        # leaked one, which `_drive` records as a defect.
         outcomes = await asyncio.gather(
             *(self._attempt(step, schemas[step.tool.name]) for step in wave),
             return_exceptions=True,

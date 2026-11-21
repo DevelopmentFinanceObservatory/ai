@@ -94,7 +94,7 @@ YEARS = tuple(str(year) for year in range(2015, 2025))
 SAMPLE_INTERVAL_S = 0.01
 SEED = 20260930
 # The instance memory the budget figures assume unless `--memory-mib` says otherwise, the
-# deployed harness's estimated memory at rest (ADK, the harness and three servers), and
+# deployed harness's estimated memory at rest (the harness and three servers), and
 # the headroom kept for the freed Arrow pages a long-lived allocator holds on to.
 DEFAULT_MEMORY_MIB = 2048
 DEFAULT_IDLE_MIB = 400

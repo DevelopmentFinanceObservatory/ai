@@ -65,7 +65,7 @@ class Settings(FrameServiceSettings):
 
     The `upstream_*` fields bound `PlatformAssembler`'s retry loop, mirroring
     data-mcp's own `UpstreamClient` settings (see `data_mcp.settings.Settings`
-    for the ADK call-budget rationale behind these defaults).
+    for the call-budget rationale behind these defaults).
 
     `max_schema_version` is the admission bound `server.py`'s startup lifespan
     compares the platform's `release()` `schema_version` against.

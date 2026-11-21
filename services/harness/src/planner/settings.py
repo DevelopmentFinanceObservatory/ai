@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 from common.settings import BaseServiceSettings
 from google.genai import types
 
-# The name the planner runs under: the author and branch of its events in the
-# session (`harness.planner_events`) and the name of its agent's spans.
+# The name the planner runs under: the name of its agent and its spans, and
+# the agent its usage is logged under.
 AGENT_NAME = "dfo_planner"
 
 # The concrete version `common.settings.BaseServiceSettings.model_name`'s floating
@@ -43,24 +41,8 @@ class AgentSettings(BaseServiceSettings):
 # roughly 1/14 to 1/46 the wall time and near-zero reasoning tokens.
 # `include_thoughts=True` puts the model's own thought summary on the
 # response, so a trace shows what a generation reasoned rather than only a
-# token count. `without_unsigned_thoughts` keeps that summary out of the
-# model's later requests and the session's events
-# (`planner.pydantic_agent._without_unsigned_thoughts`).
+# token count. `harness.gemini_agent.without_unsigned_thoughts` keeps that
+# summary out of the model's later requests and the turn's transcript.
 AGENT_THINKING_CONFIG = types.ThinkingConfig(
     thinking_level=types.ThinkingLevel.LOW, include_thoughts=True
 )
-
-
-def without_unsigned_thoughts(parts: Sequence[types.Part]) -> list[types.Part] | None:
-    """`parts`, one model response's, less every thought-summary part that
-    carries no thought signature, or None when that would drop no part or
-    every part.
-
-    A part with a `thought_signature` is kept whether or not it is a thought,
-    since Gemini requires the signature on a later request. A response made
-    only of unsigned thoughts is kept whole, so no response is left empty.
-    """
-    kept = [part for part in parts if not part.thought or part.thought_signature]
-    if not kept or len(kept) == len(parts):
-        return None
-    return kept

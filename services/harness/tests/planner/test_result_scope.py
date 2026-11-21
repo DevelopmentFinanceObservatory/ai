@@ -15,7 +15,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from google.adk.events import EventActions
 from harness.plan_display import answer_scopes, step_rows
 from planner.plan import (
     ASKS_ACROSS_YEARS_STATE_KEY,
@@ -182,10 +181,8 @@ def _decisions(variant: str, decision: Callable[..., Decision]) -> list[Decision
 
 
 def _context() -> Any:
-    """The part of ADK's `ToolContext` `propose_plan` reads: state, events and actions."""
-    return SimpleNamespace(
-        state={}, function_call_id=None, actions=EventActions(), session=SimpleNamespace(events=[])
-    )
+    """The part of a tool call's context `propose_plan` reads: state, events and actions."""
+    return SimpleNamespace(state={}, function_call_id=None, run_ended=False, records=[])
 
 
 COMPUTED = AnswerMode.COMPUTED

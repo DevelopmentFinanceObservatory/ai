@@ -4,15 +4,15 @@
 pinned planner agent and its plan contract. The frozen adapter that drove
 them, `harness.planner_adapter`, exported `PlannerAgent` and
 `PlannerAgentError`. That module path now names its replacement instead
-(`harness.planner_adapter.PlannerAdapter`, over `harness.planner_node` and
+(`harness.planner_adapter.PlannerAdapter`, over `planner.pydantic_agent` and
 `translator.tool`), so banning the path would also ban legitimate use of
 the current adapter. Banning `PlannerAgent`/`PlannerAgentError` by name is
 strictly stronger than banning the old path was: it catches the frozen
 adapter reintroduced under any module, not only the one it used to live at.
 
 The guard also bans the `planner.agent` module and the names
-`create_planner_agent`, `SpecTool` and `prepend_brief`. Each belonged to the ADK
-planner: the `LlmAgent` builder, the tool wrapper ADK ran, and the model
+`create_planner_agent`, `SpecTool` and `prepend_brief`. Each belonged to the
+planner that ran on Google ADK: its agent builder, its tool wrapper, and the model
 callback that showed the brief. The planner runs on Pydantic AI alone
 (`planner.pydantic_agent`).
 

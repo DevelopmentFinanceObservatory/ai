@@ -26,12 +26,10 @@ from compiler.compile import compile_plan
 from compiler.sources import source_from_spec_block
 from compiler.surface import McpSurface
 from data_mcp.server import mcp as data_mcp
-from google.adk.events import Event, EventActions
-from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
-from google.genai import types
 from harness.decision_pick import decision_pick
 from harness.plan_display import decision_option_id
 from harness.studio_state import _turn_identities
+from harness.turn.store import AgentRecord
 from planner.plan import (
     ASKS_STATE_KEY,
     DECISION_PICK_STATE_KEY,
@@ -60,7 +58,7 @@ from translator.mechanical import build_translation
 from ..basis_alignment import HEALTH, TOTAL, provider_block
 from ..decision_drafts import drafts
 from ..planner_tools import call_planner_tool
-from ..session_events import response_event
+from ..session_events import response_event, user_answer
 from .test_agent import (
     _CONSTANT_GROSS,
     _FRANCE_KENYA,
@@ -181,12 +179,12 @@ def _ranked_donors() -> list[Any]:
 
 
 def _context() -> Any:
-    """The part of ADK's `ToolContext` `propose_plan` reads, holding no asks."""
+    """The part of a tool call's context `propose_plan` reads, holding no asks."""
     return SimpleNamespace(
         state={ASKS_STATE_KEY: []},
         function_call_id=None,
-        actions=EventActions(),
-        session=SimpleNamespace(events=[]),
+        run_ended=False,
+        records=[],
     )
 
 
@@ -206,7 +204,7 @@ def _recorded_dac_total(ctx: Any, decision: Callable[..., Decision]) -> dict[str
         evidence_requirements=[_dac_total()],
     )
     assert first["outcome"] == Outcome.OK.value, first
-    ctx.session.events = [response_event("propose_plan", first)]
+    ctx.records = [response_event("propose_plan", first)]
     return first
 
 
@@ -425,7 +423,7 @@ def test_a_pick_releases_no_user_decision_of_a_requirement_it_did_not_change(
         ],
     )
     assert first["outcome"] == Outcome.OK.value, first
-    ctx.session.events = [response_event("propose_plan", first)]
+    ctx.records = [response_event("propose_plan", first)]
     _pick_top_ten(ctx)
 
     result = _propose_plan(
@@ -522,7 +520,7 @@ def test_a_pick_listing_entities_releases_no_user_decision_fixing_the_recipient(
         ],
     )
     assert first["outcome"] == Outcome.OK.value, first
-    ctx.session.events = [response_event("propose_plan", first)]
+    ctx.records = [response_event("propose_plan", first)]
     _pick_top_ten(ctx)
     aid, top = _ranked_donors()
     ghana = (Entity(name="Ghana", role="recipient"),)
@@ -582,7 +580,7 @@ def test_a_later_proposal_of_the_pick_replan_holds_the_pick_against_the_plan_pic
         amends_version=first["version"],
     )
     assert held["outcome"] == Outcome.OK.value, held
-    ctx.session.events = [*ctx.session.events, response_event("propose_plan", held)]
+    ctx.records = [*ctx.records, response_event("propose_plan", held)]
 
     result = _propose_plan(
         ctx,
@@ -621,7 +619,7 @@ def test_a_pick_holds_the_users_decisions_whatever_the_session_records(
     the same: the pick is no word of the user's."""
     ctx = _context()
     first = _recorded_dac_total(ctx, decision)
-    ctx.session.events = recorded(first)
+    ctx.records = recorded(first)
     _pick_top_ten(ctx)
     aid, top = _ranked_donors()
 
@@ -1933,7 +1931,7 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
     earlier = aid("earlier", 2010, decision_ids=("measure",), period=Period(start=2010, end=2014))
     ctx = _FakeToolContext()
     _show_blocks(ctx, _offering_constant(), _constant_block())
-    ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
+    ctx.records = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
     propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     card = propose(
         question="q",
@@ -1998,12 +1996,9 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
     assert [d for d in plan.decisions if d.slot == priced] == [decided]
 
 
-def _switch_event(choice_id: str, option_id: str) -> Any:
+def _switch_event(choice_id: str, option_id: str) -> AgentRecord:
     """The approval card's answer switching row `choice_id` to option `option_id`."""
-    part = create_request_input_response(
-        "approve", {"result": {"switch": {"choice_id": choice_id, "option_id": option_id}}}
-    )
-    return Event(content=types.Content(role="user", parts=[part]))
+    return user_answer("int_approve", {"switch": {"choice_id": choice_id, "option_id": option_id}})
 
 
 @pytest.mark.parametrize(
@@ -2069,7 +2064,7 @@ def test_a_switch_of_the_prices_row_is_the_users_new_prices(
     else:
         _show_blocks(ctx, _FRANCE_KENYA)
     constant = answered == "constant"
-    ctx.session.events = _prices_ask_events(
+    ctx.records = _prices_ask_events(
         constant_spec_id=_CONSTANT_GROSS if constant else None, pick=None if constant else "o1"
     )
     first = (
@@ -2099,8 +2094,8 @@ def test_a_switch_of_the_prices_row_is_the_users_new_prices(
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
-    ctx.session.events = [
-        *ctx.session.events,
+    ctx.records = [
+        *ctx.records,
         response_event("propose_plan", card),
         _switch_event(f"decision/{slot}", option),
     ]
@@ -2213,7 +2208,7 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
 
     ctx = _FakeToolContext()
     _show_blocks(ctx, _FRANCE_KENYA)
-    ctx.session.events = _prices_ask_events(pick="o1")
+    ctx.records = _prices_ask_events(pick="o1")
     propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     card = propose(
         question="q",
@@ -2232,8 +2227,8 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
-    ctx.session.events = [
-        *ctx.session.events,
+    ctx.records = [
+        *ctx.records,
         response_event("propose_plan", card),
         _switch_event(f"decision/{slot}", constant),
     ]
@@ -2250,8 +2245,8 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
-    ctx.session.events = [
-        *ctx.session.events,
+    ctx.records = [
+        *ctx.records,
         response_event("propose_plan", switched),
         _switch_event("decision/years", later),
     ]

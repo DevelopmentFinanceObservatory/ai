@@ -14,7 +14,7 @@ tool with.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, NamedTuple, Protocol
@@ -69,10 +69,10 @@ class Step(NamedTuple):
 
     `message` is a message the user typed into the session, which the
     planner adapter's own messages are not (`planner.session._user_message`).
-    `call` is an ask, the planner's own (`PLANNER_ASK`) or a workflow
-    interrupt's `adk_request_input`, with its id and `args`. `answer` is a
-    response to one, with its id, the `args` of the nearest preceding call
-    sharing that id (`None` when none precedes it) and the response body.
+    `call` is an ask, the planner's own (`PLANNER_ASK`) or a pause the turn
+    put to the user, with its id and `args`. `answer` is a response to one,
+    with its id, the `args` of the nearest preceding call sharing that id
+    (`None` when none precedes it) and the response body.
     `response` is any other tool's response, with its `name` and body.
     """
 
@@ -123,37 +123,6 @@ class PlannerCall(Protocol):
         ...
 
 
-class RecordingState:
-    """A view over a state mapping that reads and writes through to it and
-    records each key written through the view, in first-write order.
-
-    The view is a `planner.plan.SessionState`. Writes made to the mapping by
-    anything but the view are unrecorded.
-    """
-
-    def __init__(self, state: MutableMapping[str, Any]) -> None:
-        self._state = state
-        self._written: dict[str, None] = {}
-
-    @property
-    def written(self) -> tuple[str, ...]:
-        """Every key written through the view, in first-write order."""
-        return tuple(self._written)
-
-    def get(self, key: str, default: Any = None, /) -> Any:
-        return self._state.get(key, default)
-
-    def __getitem__(self, key: str) -> Any:
-        return self._state[key]
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        self._state[key] = value
-        self._written[key] = None
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._state
-
-
 def candidate_ids(candidates: Any) -> frozenset[str]:
     """The spec_ids of a list of `{"spec_id", "label"}` candidates."""
     return frozenset(
@@ -169,12 +138,12 @@ def _offered_candidates(args: dict[str, Any]) -> dict[str, frozenset[str]]:
 
     - the planner's own `PLANNER_ASK` call: `args` is exactly the kwargs the
       model supplied, flat -- `args["candidates"]`, the one question `q1`.
-    - the graph's `ask` node, under `harness.graph`'s `CLARIFY_INTERRUPT`:
-      its `args` hold the whole interrupt request, so the caller's own
-      `payload` nests under `args["payload"]` (`planner.session.session_steps`
-      says how the session records it). Its `questions` each carry their own `id` and
-      `candidates`, whose ids are scoped to that question. A `payload` with
-      `candidates` and no `questions` holds the one question `q1`.
+    - the pause the graph's `ask` node puts to the user: its `args` hold the
+      pause's message and its `payload`, which nests under `args["payload"]`
+      (`planner.session.session_steps` says how the transcript records it).
+      Its `questions` each carry their own `id` and `candidates`, whose ids
+      are scoped to that question. A `payload` with `candidates` and no
+      `questions` holds the one question `q1`.
     """
     return {
         question_id: candidate_ids(candidates)
@@ -416,27 +385,15 @@ def elected_spec_ids(call: PlannerCall) -> frozenset[str]:
     prices elects the listed reading measuring both, the one the `ask`
     node tells the agent to fetch.
 
-    Every `adk_request_input` call the workflow itself raises (the `ask`
-    node of `harness.graph`, under `CLARIFY_INTERRUPT`) shares the one fixed
-    id `"clarify"` across every question in a session. The planner's own
-    `PLANNER_ASK` calls each get their own id. Pairing by id alone
-    would let a round-2 offer, re-raised under the same id, retroactively
-    read a round-1 answer as electing whatever round 2 happens to also
-    offer. The steps walk the session once, in order, and pair each
-    response with the call whose offer was seen most recently at that
-    point -- the nearest preceding call sharing its id -- rather than
-    building a dict of every call keyed by id first and reading it back
-    after the fact.
+    The steps walk the turn's transcript once, in order, and pair each
+    answer with the call whose offer was seen most recently at that point (the
+    nearest preceding call sharing its id), so an answer resolves against the
+    offer it answered, whatever a later offer under the same id holds.
 
-    The record is read, not kept in a state key: the call carrying its
-    offered candidates, and the answer once it arrives, are both in the
-    session's history (`planner.session.session_steps` says how ADK writes
-    them).
-
-    Read across the whole session, not scoped to one invocation: the ask
-    pauses the run, and the answer that resumes it can arrive on a later
-    invocation than the one that asked, so there is no single "this turn"
-    an invocation id could scope this to.
+    The call carrying its offered candidates, and the answer once it arrives,
+    are both in the turn's transcript (`planner.session.session_steps` says
+    how it holds them). The transcript is read whole, since the ask pauses the
+    turn and the answer resumes it in a later segment.
     """
     specs = stored_mapping(call.state, ORCHESTRATOR_SPECS_KEY)
     elected: set[str] = set()
@@ -457,12 +414,12 @@ def _said(answer: object) -> str:
 def _is_answer(body: Mapping[str, Any]) -> bool:
     """Whether an ask's response body carries something the user said.
 
-    A user's answer is `{"result": ...}` (`harness.studio`'s `/interrupt` route wraps
-    it, as ADK wraps any non-dict value), read as `harness.graph.state.resume_answers`
-    reads it: a pick of a candidate, or free text for a reply outside the offered
-    options. A body with no `result` is a call the tool or ADK rejected. A dismissal of
-    the pause and a question left to the planner are the user declining to choose, and
-    blank text says nothing.
+    A user's answer is `{"result": ...}` (`planner.session.session_steps` wraps
+    it), read as `harness.graph.state.resume_answers` reads it: a pick of a
+    candidate, or free text for a reply outside the offered options. A body
+    with no `result` is a call the tool rejected. A dismissal of the pause and
+    a question left to the planner are the user declining to choose, and blank
+    text says nothing.
     """
     return any(_said(answer) for answer in _answers(body.get("result")).values())
 
@@ -471,7 +428,7 @@ def _is_amendment(body: Mapping[str, Any]) -> bool:
     """Whether an ask's response body is the user amending the approval card.
 
     `harness.studio`'s `/interrupt` route answers the approval card
-    (`harness.graph.APPROVE_INTERRUPT`) with `{"result": {"amendment": ...}}`
+    (`harness.graph.state.APPROVE_PAUSE`) with `{"result": {"amendment": ...}}`
     when the user types a change there.
     """
     result = body.get("result")
@@ -490,12 +447,11 @@ def user_spoke_since_recorded(call: PlannerCall, version: int) -> bool:
     (a `message` step). A
     refusal, a skip, a referral and the planner adapter's own messages are not.
 
-    `harness.studio_state.ConversationState.session_id` opens a new ADK
-    session for every Studio turn, and every turn starts with the user's
-    message. A plan this session holds no recording response for was
-    recorded before that message, so this answers `True`. The planner adapter
-    seeds such a plan from the graph's record
-    (`harness.planner_adapter.PlannerAdapter`).
+    Every Studio turn has a transcript of its own (`planner.session`), and
+    every turn starts with the user's message. A plan this transcript holds
+    no recording response for was recorded before that message, so this
+    answers `True`. The planner adapter seeds such a plan from the graph's
+    record (`harness.planner_adapter.PlannerAdapter`).
     """
     last: object = None
     recorded = False
@@ -534,7 +490,7 @@ def answers_since_referral(call: PlannerCall) -> ReferralAnswers:
     once, in order. An ask after that response is one the
     model raised knowing the referral, and its `id` is remembered. A response counts as the
     user's answer when it pairs by `id` with one of those asks and `_is_answer` holds. An ask
-    issued before the referral, a call the tool or ADK rejected, and a skip do not count. A skip
+    issued before the referral, a call the tool rejected, and a skip do not count. A skip
     is the user declining to choose, which the planner may not substitute for, so the planner
     ends the turn by telling them what cannot be done.
 
@@ -553,8 +509,8 @@ def answers_since_referral(call: PlannerCall) -> ReferralAnswers:
     pairs them. A pick made before the referral is not counted. Picks keep the
     order the answers came in. An ask with no answer, a skip included, leaves
     every id it offered unanswered. An ask whose response has no `result`,
-    one the tool or ADK refused, never reached the user, so it offered
-    nothing. A pending ask has no response and stays unanswered.
+    one the tool refused, never reached the user, so it offered nothing. A
+    pending ask has no response and stays unanswered.
 
     `picked_ever` holds the user's standing picks since the first referral,
     which a later translation does not clear. An answered ask, picked or in
@@ -646,7 +602,7 @@ def combination_picks(
     It asks about the combination the latest `combination_unasked` refusal before it names, read
     off that refusal's own response, so the model cannot point an ask at another sum. A
     refusal binds the first ask after it that reached the user and no other, so an ask
-    with no refusal of its own before it asks about nothing. An ask the tool or ADK refused
+    with no refusal of its own before it asks about nothing. An ask the tool refused
     leaves no step (`planner.session.session_steps`), so it binds nothing and leaves the
     refusal for the next ask. Each response pairs with the nearest preceding call sharing
     its `id`, as `elected_spec_ids` pairs them. The combination ask is one question, `q1`

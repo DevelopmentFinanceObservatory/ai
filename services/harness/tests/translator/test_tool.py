@@ -723,7 +723,7 @@ def test_return_to_planner_attaches_the_candidates_for_a_kind_sent_as_a_string(
     source: SourceFactory,
     context_holding: ContextHolding,
 ) -> None:
-    # ADK hands a tool the raw JSON value, so a model naming this kind sends
+    # A tool receives the raw JSON value, so a model naming this kind sends
     # the string, not the member. The sibling test above passes the member and
     # so never exercised the path a real call takes: the candidates were left
     # off and `Referral` then refused the referral for carrying none, which no

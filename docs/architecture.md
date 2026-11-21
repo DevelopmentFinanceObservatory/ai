@@ -6,28 +6,29 @@ dfo-ai is the AI layer of the Development Finance Observatory
 (DFO). It's a uv workspace monorepo whose packages deploy together as
 **one** Cloud Run service at launch.
 
-**`services/harness`** runs the agent. It's built on Google ADK and
+**`services/harness`** runs the agent. It's built on Pydantic AI and
 FastAPI, and powers the site's chat-and-canvas workspace (DFO Studio) over
 an SSE event stream: the frozen wire contract in
 `docs/studio-contract-v1.md`. A data turn runs one agent that calls its
-own tools (`services/harness/src/orchestrator/README.md`) inside an ADK
-workflow that owns routing, approval and execution; card edits, canvas
+own tools (`services/harness/src/orchestrator/README.md`) inside the turn
+graph (`harness.graph`), whose nodes run on the harness's own turn loop
+(`harness.turn`) and own routing, approval and execution; card edits, canvas
 mutations, and cancellation are direct studio routes (see
 `services/harness/README.md`). It mounts data-mcp, analysis-mcp, and
 presentation-mcp as FastMCP ASGI sub-apps inside its own process,
 reachable over streamable HTTP at in-container loopback paths
 (`/mcp/data`, `/mcp/analysis`, `/mcp/presentation`).
 
-The agent runs in ADK's chat mode, so each of its runs in a turn reads its
-own earlier calls and their results. Its `plan` and `ask_user` tools record
-a hand-off and end its run; when the workflow comes back, the `orchestrate`
-node (`harness.graph.orchestrate`) answers the open call with a function
-response under the call's id, and ADK pairs a call with its last response.
-The agent reads a plan's frames, step summaries, asks and plan record, or
-the user's answers, as that call's result. The `seed` node's hand-back, the
-runs and datasets a turn opens with, answers no call: it waits in session
-state and `orchestrator.agent.prepend_digests` shows it after the user's
-message on every request.
+The agent keeps its message history across its runs in a turn
+(`orchestrator.run.StoredHistory`), so each run reads its own earlier calls
+and their results. Its `plan` and `ask_user` tools record a hand-off and end
+its run; when the graph comes back, the `orchestrate` node
+(`harness.graph.orchestrate`) answers the open call with a function response
+under the call's id. The agent reads a plan's frames, step summaries, asks
+and plan record, or the user's answers, as that call's result. The `seed`
+node's hand-back, the runs and datasets a turn opens with, answers no call:
+`orchestrator.run.run_orchestrator` sends it after the user's message on the
+turn's first request.
 
 **`services/harness/src/planner`** is the Planner Agent: the agent that
 drafts a methodological plan for a question, recording each decision it makes,
@@ -35,11 +36,12 @@ the alternatives it considered, and the evidence an acceptable answer rests on.
 It holds the plan at the user's approval, ships inside `harness` as a sibling
 top-level module, and knows nothing about execution. The DFO Studio runs the
 modules described below, adapted for its workflow by
-`harness.planner_adapter.PlannerAdapter`. The planner is a Pydantic AI agent that
-runs inside the function node `harness.planner_node`. Its model calls go
-through `harness.planner_model`, and the node yields each response and tool
-answer as an ADK session event (`harness.planner_events`). The adapter builds the
-tool specs and the instruction the agent serves.
+`harness.planner_adapter.PlannerAdapter`. The planner is a Pydantic AI agent
+that runs inside the turn's `planner` node (`harness.graph.planning`). Its
+model calls go through `planner.model` over `harness.gemini_wire`, and the
+adapter writes each response and its tools' answers to the turn's transcript
+(`planner.session`). The adapter builds the tool specs and the instruction the
+agent serves.
 
 The plan-approve-execute workflow spans four top-level modules beside it,
 `planner`, `translator`, `compiler` and `executor`. The planner settles
@@ -196,12 +198,11 @@ source out of a `describe` answer. `executor.run` keeps each server's digest
 text as its step's `StepRecord.digest`, which the workflow's `plan_done`
 node hands to the agent as `step_summaries`. The planner's model reaches
 these Python functions through the planner's tool specs (`planner.specs`),
-which `harness.planner_adapter.PlannerAdapter` serves. ADK's
-`McpTool` plays no part, so no `CallToolResult` dump is built for them and an
-`after_tool_callback` editing one would have nothing to edit. Where a tool
-does answer with a digest, a refusal's machine-readable detail rides the
-same call. data-mcp and analysis-mcp put the actionable recovery grammar in
-`structuredContent`, and the harness's own mounted consumers read it there.
+which `harness.planner_adapter.PlannerAdapter` serves, so no
+`CallToolResult` dump is built for them. Where a tool does answer with a
+digest, a refusal's machine-readable detail rides the same call. data-mcp and
+analysis-mcp put the actionable recovery grammar in `structuredContent`, and
+the harness's own mounted consumers read it there.
 
 **Telemetry.** The harness records agent usage through its own Langfuse and
 OpenTelemetry traces. The website proxy's analytics cover other usage, so
@@ -210,7 +211,7 @@ proxy-level metrics do not dilute the agent traces.
 A deployed service with the Langfuse variables set sends Langfuse Cloud (EU
 region) the text of each Studio question and the assistant's replies; the
 orchestrator and planner prompts, which include the canvas and conversation
-digests, and each model response, on ADK's `generate_content` spans; tool
+digests, and each model response, on Pydantic AI's `chat` spans; tool
 arguments and results at digest level, on its `execute_tool` spans; and
 refusal codes with the refusal fields recorded on the trace events below.
 `common.telemetry.init_telemetry` sets
@@ -220,11 +221,38 @@ content on those spans; `NO_CONTENT` keeps them off. A streamed response
 appears as one output message per chunk, and a thought summary appears as
 unlabelled text. Everything above is sent unmasked. `LANGFUSE_SAMPLE_RATE`
 and a Langfuse `mask` function limit it.
-`ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN=otel_semconv_1_36` returns ADK to its v1
-span layout, under which Langfuse prices each model call twice and shows each
-`invoke_workflow` span without its parent.
 
-One studio turn is one trace, whose id is derived from the turn's wire `trace_id`. No span outlives the request that opened it. Each segment of the turn, the `/turn` stream and every `/interrupt` stream that resumes it on any instance, has a `turn.segment` span of its own, opened with its claim (`ConversationState.begin_turn`, `open_segment_span`) and ended once the segment ends on that instance (`end_segment_span`), with the cause of the stream's last ending frame as its status, the level `harness.studio_state.span_level` gives it, and the turn as stored as `dfo.stored`. The segment parents that stream's ADK, MCP and `record_event` spans and carries no input or output. `StudioStore` writes a zero-duration observation on the same trace (`common.telemetry.record_turn_outcome`) beside each `studio.turn` log line, a `turn` for each turn close and a `turn.pause` for each pause one of its writes commits, so the line, the observation and the stored record agree, and a reader that sees only names, as the Langfuse BigQuery export does, never reads a pause as a close. It carries the user's message as its input, the closing text as its output (on a pause, the text streamed so far), and, for a turn closed with an error code, that code as its status message, at level `WARNING` for a Stop's `cancelled` and a newer turn's `abandoned` and `ERROR` for any other code. Its metadata holds `dfo.external_id`, the error as `dfo.turn_error` when there is one, and `dfo.turn_status` `paused` on a pause. A turn that paused holds a `turn.pause` observation for each pause beside its `turn`, which a reader resolves by the rule the log line's dbt model uses: the latest close that is not `abandoned`, else the latest close, else the latest pause.
+One studio turn is one trace, and each segment of the turn adds a `turn.segment`
+span to it. The trace id is derived from the turn's wire `trace_id`. A
+segment's owner (`harness.studio_stream.own_segment`) opens the span when it
+starts and ends it once, when the stream ends. The `/turn` stream and the
+`/interrupt` stream that resumes the turn are separate requests, so a turn
+that pauses has one span per segment, and each segment's agent, MCP and
+`record_event` spans nest under its own `turn.segment` span on the shared
+trace. The span's status is the way the stream ended (`done`, `paused`,
+`failed`, `unclosed`, `cancelled`, `left` for a client that went while the
+turn ran, `lost`, or `unsaved`), with `dfo.saved` and `dfo.client_gone` as
+attributes, and it carries no input or output. A turn the client leaves stays
+open for the next request to carry on. `done` and `paused` end at the default
+level, `failed`, `unclosed` and `unsaved` at `ERROR`, and `cancelled`, `left`
+and `lost` at `WARNING`.
+
+A zero-duration observation on the same trace
+(`common.telemetry.record_turn_outcome`) is written beside each `studio.turn`
+log line: a `turn` for each turn close a `StudioStore` write commits, and a
+`turn.pause` for each pause the turn's cursor write commits
+(`harness.turn.store.TurnStore.pause`), so the line, the observation and the
+stored record agree, and a reader that sees only names, as the Langfuse
+BigQuery export does, never reads a pause as a close. It carries the user's
+message as its input, the closing text as its output (on a pause, the text
+streamed so far), and, for a turn closed with an error code, that code as its
+status message, at level `WARNING` for a Stop's `cancelled` and a newer
+turn's `abandoned` and `ERROR` for any other code. Its metadata holds
+`dfo.external_id`, the error as `dfo.turn_error` when there is one, and
+`dfo.turn_status` `paused` on a pause. A turn that paused holds a
+`turn.pause` observation for each pause beside its `turn`, which a reader
+resolves by the rule the log line's dbt model uses: the latest close that is
+not `abandoned`, else the latest close, else the latest pause.
 
 Every studio stream calls `common.telemetry.flush_telemetry` after its segment span ends and before its response ends, so queued spans export while the request still has CPU. `POST /api/studio/cancel` calls it when it closes a paused turn, since no stream runs then.
 

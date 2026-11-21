@@ -160,7 +160,7 @@ def _turn_so_far(ctx: _FakeToolContext) -> None:
             (("current prices", "current"), ("constant prices", "constant")), start=1
         )
     ]
-    ctx.session.events = [_clarify_ask_event(candidates), _clarify_answer_event(_option("o2"))]
+    ctx.records = [_clarify_ask_event(candidates), _clarify_answer_event(_option("o2"))]
 
 
 def _searched(spec_id: str) -> dict[str, Any]:
@@ -250,7 +250,7 @@ def after_hand_back(
         ), answer
         if answer["outcome"] == "ok":
             answer = {**answer, "translation": {"kind": "pinned_source_not_found"}}
-        ctx.session.events = [*ctx.session.events, response_event("propose_plan", answer)]
+        ctx.records = [*ctx.records, response_event("propose_plan", answer)]
     _handed_back(ctx, held=held, envelope=envelope or RECORDED["translator"])
     if search is not None:
         tools = {tool.name: tool for tool in planner_tool_specs(surface=search)}

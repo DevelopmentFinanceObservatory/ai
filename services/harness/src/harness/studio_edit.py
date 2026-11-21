@@ -1,6 +1,6 @@
 """The Edit Card route: `component_ref.intent: "edit"`.
 
-No resolve, no plan, no ADK session: the card is described, the model
+No resolve, no plan, no agent run: the card is described, the model
 decides between a revise patch (title / select / order) and a full recreate
 (type, window, frame_ref), and the platform write streams back as
 `component.revised` or `component.created`. A recreated component takes
@@ -22,21 +22,29 @@ new card has a new id and a fresh revision history, and the reply says so.
 
 Failures serialise into the stream as a stream-fatal error frame, as
 they do in a turn.
+
+The edit runs as two halves (`harness.studio_stream.Work`). `edit_events`
+makes the edit's calls in the work's drive and reads the conversation. It
+emits what the edit sends and changes as events, with its frames unnumbered,
+and leaves every write to the other half. `edit_event_frames` turns each
+event into frames in the stream owner's task, which numbers them, records
+the turn, and writes the card to the canvas (`StudioStore.change_canvas`).
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from common.mcp_telemetry import WRITE_TOKEN_KEY
+from pydantic import BaseModel
 
-from harness.conversation import current_conversation_id, current_conversation_key
+from harness.conversation import current_conversation_key
+from harness.provenance import CARD_FRAME_KEY, CardLineage
 from harness.studio_state import (
     ConversationState,
-    DatabaseUnavailable,
-    SegmentLost,
     _block_title,
     _digest_entry,
     _next_manifest,
@@ -44,9 +52,11 @@ from harness.studio_state import (
     _turn_component_entry,
     drawn_series_ids,
 )
+from harness.studio_store import StudioStore
 from harness.studio_translate import (
     _RecordingExecutor,
     _stream_fatal,
+    closed_on_reply,
     failure_detail,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
@@ -54,11 +64,8 @@ from harness.wire import (
     ActivityStep,
     CompositionActor,
     CompositionUpdated,
-    Done,
-    MessageComplete,
     StepProduced,
     StepStatus,
-    Suggestions,
     component_created,
     component_revised,
 )
@@ -92,40 +99,87 @@ _REBUILT_TEXT = (
 )
 
 
-async def edit_frames(
+@dataclass(frozen=True)
+class EditClosed:
+    """The edit ends on `text`, its reply, and `done`."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class EditFailed:
+    """The edit ends on the stream-fatal frame for `error`."""
+
+    error: Exception
+
+
+@dataclass(frozen=True)
+class CanvasChange:
+    """A card write. `change` runs on the canvas as stored and returns
+    whether it changed the canvas (`StudioStore.change_canvas`), and
+    `lineage`, the written card's frame lineage, commits with it."""
+
+    change: Callable[[ConversationState], bool]
+    lineage: CardLineage | None = None
+
+
+# An edit emits a frame to number or one of the events above.
+type EditEvent = BaseModel | EditClosed | EditFailed | CanvasChange
+
+
+async def edit_events(
     *,
     recorder: _RecordingExecutor,
     edit_model: Any,
     conversation: ConversationState,
     component_id: str,
     message: str,
-) -> AsyncGenerator[Any]:
-    """The Edit Card route: no resolve, no plan.
+) -> AsyncGenerator[EditEvent]:
+    """The Edit Card route's events: no resolve, no plan.
 
-    Failures serialise INTO the stream as a stream-fatal error frame,
-    exactly like `_frames` -- a malformed model draft must not kill the
-    transport with no error frame. A lost segment or an unreachable database
-    propagates, and the stream relaying this ends on it
-    (`StudioRunner._checkpointed`).
-    """
+    Failures serialise into the stream as a stream-fatal error frame, as
+    they do in a turn, so a malformed model draft cannot end the transport
+    without an error frame."""
     try:
-        async for frame in _edit_flow(
+        async for event in _edit_flow(
             recorder=recorder,
             edit_model=edit_model,
             conversation=conversation,
             component_id=component_id,
             message=message,
         ):
-            yield frame
-    except (SegmentLost, DatabaseUnavailable):
-        # The card's write fenced out by another instance's takeover, or one
-        # that could not reach the database before the lease's deadline
-        # (`StudioStore.change_canvas`), ends the stream where every save
-        # that loses the segment does (`StudioRunner._checkpointed`).
-        raise
+            yield event
     except Exception as exc:
         logger.exception("studio edit turn failed (trace_id=%s)", conversation.trace_id)
-        yield _stream_fatal(conversation, exc)
+        yield EditFailed(exc)
+
+
+async def edit_event_frames(
+    event: EditEvent, *, conversation: ConversationState, store: StudioStore
+) -> list[BaseModel]:
+    """The frames of `event`, numbered, with what it changes written: the
+    turn's record for its end, and the card for a card write. A card write
+    fenced out by another instance's takeover, or one that cannot reach the
+    database before the lease's deadline, raises `SegmentLost` or
+    `DatabaseUnavailable`, and the stream ends as a lost lease does."""
+    c = conversation
+    match event:
+        case EditClosed(text=text):
+            return [*closed_on_reply(c, text, suggestions=True)]
+        case EditFailed(error=error):
+            return [_stream_fatal(c, error)]
+        case CanvasChange(change=change, lineage=lineage):
+            key = current_conversation_key.get()
+            assert key is not None, "an edit runs only inside a conversation's stream"
+            if not await store.change_canvas(*key, change, lineage=lineage):
+                return []
+            return [
+                CompositionUpdated(
+                    event="composition.updated", seq=c.next_seq(), manifest=c.composition
+                )
+            ]
+        case _:
+            return [event.model_copy(update={"seq": c.next_seq()})]
 
 
 async def _edit_flow(
@@ -135,11 +189,14 @@ async def _edit_flow(
     conversation: ConversationState,
     component_id: str,
     message: str,
-) -> AsyncGenerator[Any]:
+) -> AsyncGenerator[EditEvent]:
     """Verified platform rules (2026-08-28, hosted dev): a revision may
     change only title/select; type/window/frame_ref edits recreate the
     component instead, and the studio replaces the block in place. The
     old component stays readable at its prior revisions.
+
+    Its frames carry `seq` 0 until `edit_event_frames` numbers them, in the
+    order this yields them.
     """
     c = conversation
 
@@ -153,7 +210,7 @@ async def _edit_flow(
         """A finished step, failed when `failed` gives the sentence it shows."""
         return ActivityStep(
             event="activity.step",
-            seq=c.next_seq(),
+            seq=0,
             step_id=step_id,
             label=label,
             status=StepStatus.FAILED if failed else StepStatus.COMPLETE,
@@ -161,16 +218,10 @@ async def _edit_flow(
             produced=produced,
         )
 
-    def _close(text: str) -> list[Any]:
-        c.turn_final_text = text
-        c.close_turn(final_text=text)
-        return [
-            MessageComplete(event="message.complete", seq=c.next_seq(), text=text),
-            Suggestions(event="suggestions", seq=c.next_seq(), items=[]),
-            Done(event="done", seq=c.next_seq(), trace_id=c.trace_id, composition=c.composition),
-        ]
+    def _close(text: str) -> list[EditEvent]:
+        return [EditClosed(text)]
 
-    def _refused(step_id: str, label: str, lead: str, result: dict[str, Any]) -> list[Any]:
+    def _refused(step_id: str, label: str, lead: str, result: dict[str, Any]) -> list[EditEvent]:
         """The failed step and the closing message of a call that was refused.
         Both give the sentence for the refusal's code. Its message, which is
         written for a model, goes to the log."""
@@ -184,7 +235,6 @@ async def _edit_flow(
         ]
 
     described = await recorder(tool="describe_component", args={"component_id": component_id})
-    recorder.drain(current_conversation_id.get())
     if described.get("outcome") != "ok":
         for frame in _refused("e1", "Read the card", "I couldn't open that card.", described):
             yield frame
@@ -197,7 +247,6 @@ async def _edit_flow(
     frame_view: dict[str, Any] = {}
     if stored.get("frame_ref"):
         viewed = await recorder(tool="describe_frame", args={"frame_ref": stored["frame_ref"]})
-        recorder.drain(current_conversation_id.get())
         if viewed.get("outcome") == "ok":
             frame_view = viewed.get("view") or {}
 
@@ -223,11 +272,16 @@ async def _edit_flow(
     # Set when the revise was refused because the new select needs another frame.
     moved = False
     if patch and write_token:
-        written = await recorder(
-            tool="write_component",
-            args={"intent": patch, "component_id": component_id, WRITE_TOKEN_KEY: write_token},
-        )
-        recorder.drain(current_conversation_id.get())
+        revise_args: dict[str, Any] = {
+            "intent": patch,
+            "component_id": component_id,
+            WRITE_TOKEN_KEY: write_token,
+        }
+        if stored.get("frame_ref"):
+            # The executor reads the card's lineage by this frame, which the
+            # card's stored intent read above names.
+            revise_args[CARD_FRAME_KEY] = stored["frame_ref"]
+        written = await recorder(tool="write_component", args=revise_args)
         moved = (written.get("refusal") or {}).get(
             "code"
         ) == HarnessCode.ROLLING_SELECT_NEEDS_NEW_FRAME
@@ -247,6 +301,7 @@ async def _edit_flow(
             frames = _close("The card already looks like that; nothing changed.")
         else:
             component = written["component"]
+            token = recorder.write_token(component)
             revised = component_revised(component, component_id, patch)
             yield _step(
                 "e2",
@@ -254,11 +309,12 @@ async def _edit_flow(
                 produced=StepProduced(component_id=component_id, revision=revised.revision),
             )
             caught_up = _is_no_op(component, current_revision)
-            revised.seq = c.next_seq()
-            frames: list[Any] = [revised]
+            frames: list[EditEvent] = [revised]
             title = _block_title(component) if caught_up else patch.get("title")
 
             def revise(work: ConversationState) -> bool:
+                if token:
+                    work.write_tokens = {**work.write_tokens, component_id: token}
                 _record_revision(
                     work,
                     component_id=component_id,
@@ -270,14 +326,7 @@ async def _edit_flow(
                     work, component_id=component_id, revision=revised.revision, title=title
                 )
 
-            key = current_conversation_key.get()
-            assert key is not None, "an edit runs only inside a conversation's stream"
-            if await recorder.store.change_canvas(*key, revise):
-                frames.append(
-                    CompositionUpdated(
-                        event="composition.updated", seq=c.next_seq(), manifest=c.composition
-                    )
-                )
+            frames.append(CanvasChange(revise, lineage=recorder.card_lineage(component)))
             frames.extend(_close(text or "Done -- the card was updated."))
         for frame in frames:
             yield frame
@@ -306,7 +355,6 @@ async def _edit_flow(
         step_label = "Rebuild the card"
         closing = text or "Done -- the card was rebuilt with your change."
     written = await recorder(tool="write_component", args={"intent": intent})
-    recorder.drain(current_conversation_id.get())
     if written.get("outcome") != "ok" or not written.get("component"):
         lead = _refused_lead(written, unreadable=_UNREADABLE_LEAD)
         for frame in _refused("e2", step_label, lead, written):
@@ -314,18 +362,19 @@ async def _edit_flow(
         return
     created = component_created(written["component"], step_id="e2")
     component = written["component"]
-    # The step frame is yielded FIRST and its seq allocated first --
-    # stamping the created frame earlier gave it a lower seq than
-    # the step that precedes it on the wire (broke delta 2).
+    token = recorder.write_token(component)
+    # The step frame is yielded first. Frames are numbered in the order they
+    # are yielded, and the step precedes the card it produced on the wire.
     yield _step(
         "e2",
         step_label,
         produced=StepProduced(component_id=created.component_id, revision=created.revision),
     )
-    created.seq = c.next_seq()
     yield created
 
     def recreate(work: ConversationState) -> bool:
+        if token:
+            work.write_tokens = {**work.write_tokens, created.component_id: token}
         entry = _digest_entry(component)
         work.components[created.component_id] = entry
         work.turn_components.append(
@@ -339,12 +388,7 @@ async def _edit_flow(
         )
         return _replace_block(work, old_component_id=component_id, component=component)
 
-    key = current_conversation_key.get()
-    assert key is not None, "an edit runs only inside a conversation's stream"
-    if await recorder.store.change_canvas(*key, recreate):
-        yield CompositionUpdated(
-            event="composition.updated", seq=c.next_seq(), manifest=c.composition
-        )
+    yield CanvasChange(recreate, lineage=recorder.card_lineage(component))
     for frame in _close(closing):
         yield frame
 
