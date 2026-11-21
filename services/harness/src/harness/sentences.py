@@ -1021,6 +1021,7 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
     ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN: FailureText(
         "Fewer than half of these series now report the year the plan counted from",
         "so ask again to plan from the latest year they report",
+        filled="Most of these series now end in {fill}, before the year the plan counted from",
     ),
     HarnessCode.EMPTY_RESULT: FailureText(
         "The data holds no figures for the places and period asked",
@@ -1118,6 +1119,7 @@ CEILING_SENTENCES: Mapping[str, FailureText] = {
 _FILL_KEYS: Mapping[str, str] = {
     "binding_invalid": "value",
     HarnessCode.TITLE_QUOTES_ROLLING_PERIOD: "period",
+    ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN: "anchor",
 }
 
 # A fill-in the Activity log would cut the sentence at, or an identifier (a

@@ -13,10 +13,6 @@ from data_mcp.tool_errors import CeilingKind, ToolRefusal, from_upstream_error, 
 from data_mcp.tool_errors import ToolErrorCode as DataCode
 from executor.classify import (
     BACKOFF_SECONDS,
-    BRIEF_AVOIDABLE_CEILING_KINDS,
-    BRIEF_AVOIDABLE_CODES,
-    BRIEF_UNAVOIDABLE_CEILING_KINDS,
-    BRIEF_UNAVOIDABLE_CODES,
     COMPILER_PROVABLE_CODES,
     MAX_ATTEMPTS_PER_STEP,
     MAX_RETRY_AFTER_SECONDS,
@@ -28,7 +24,6 @@ from executor.classify import (
     Disposition,
     ExecutorCode,
     ToolFailure,
-    brief_can_avoid,
     candidates_of,
     classify_refusal,
     delay_before_retry,
@@ -37,8 +32,6 @@ from executor.classify import (
     parse_tool_failure,
     retry_delay,
 )
-from executor.outcomes import RefusalKind
-from planner.records import EvidenceIssueCode
 
 _PLACED = (
     METHOD_CHOICE_CODES,
@@ -60,68 +53,6 @@ def test_every_code_either_server_can_answer_with_is_placed_exactly_once() -> No
         "stale": sorted(placed - served),
     }
     assert sum(len(codes) for codes in _PLACED) == len(placed), "a code sits in two sets"
-
-
-def test_every_code_a_stopped_run_can_fail_with_is_placed_on_one_side_of_brief_can_avoid() -> None:
-    # A stopped run's `failed_step` code is a tool's, the executor's own, a
-    # stop's kind, an evidence finding, or `rediscovery_needed`. Each sits in
-    # exactly one set, so a new code is placed on purpose.
-    universe = (
-        {code.value for code in DataCode}
-        | {code.value for code in AnalysisCode}
-        | {code.value for code in ExecutorCode}
-        | {kind.value for kind in RefusalKind}
-        | {code.value for code in EvidenceIssueCode}
-        | {"rediscovery_needed"}
-    )
-    placed = BRIEF_AVOIDABLE_CODES | BRIEF_UNAVOIDABLE_CODES
-
-    assert universe == placed, {
-        "unplaced": sorted(universe - placed),
-        "stale": sorted(placed - universe),
-    }
-    assert not BRIEF_AVOIDABLE_CODES & BRIEF_UNAVOIDABLE_CODES
-    # An `over_ceiling` is decided by the ceiling it names, so every kind is placed too.
-    kinds = set(get_args(CeilingKind))
-    assert kinds == BRIEF_AVOIDABLE_CEILING_KINDS | BRIEF_UNAVOIDABLE_CEILING_KINDS
-    assert not BRIEF_AVOIDABLE_CEILING_KINDS & BRIEF_UNAVOIDABLE_CEILING_KINDS
-
-
-@pytest.mark.parametrize(
-    ("code", "fix", "avoidable"),
-    [
-        ("over_ceiling", {"ceiling_kind": "rows"}, True),
-        ("over_ceiling", {"ceiling_kind": "member_cardinality"}, False),
-        ("over_ceiling", {}, False),
-    ],
-)
-def test_brief_can_avoid_an_over_ceiling_only_for_a_ceiling_another_request_narrows(
-    code: str, fix: dict[str, str], avoidable: bool
-) -> None:
-    assert brief_can_avoid(code, fix=fix) is avoidable
-
-
-@pytest.mark.parametrize(
-    ("code", "avoidable"),
-    [
-        ("facet_not_available", True),
-        ("entity_ambiguous", True),
-        ("rediscovery_needed", True),
-        ("surface_changed", True),
-        ("window_short", False),
-        ("place_levels_mixed", False),
-        ("internal_error", False),
-        ("capability_unavailable", False),
-        ("publication_error", False),
-        ("service_unavailable", False),
-        ("a_code_no_service_answers", False),
-        (None, False),
-    ],
-)
-def test_brief_can_avoid_holds_only_for_a_placed_avoidable_code(
-    code: str | None, avoidable: bool
-) -> None:
-    assert brief_can_avoid(code) is avoidable
 
 
 def test_a_refusal_missing_its_code_parses_into_a_failure_naming_the_defect() -> None:

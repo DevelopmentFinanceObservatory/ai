@@ -14,13 +14,16 @@ from __future__ import annotations
 import dataclasses
 import json
 from datetime import UTC, datetime
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from analysis_mcp.digest import render_rank_digest
 from analysis_mcp.engine.rank import run_rank
 from analysis_mcp.execution_identity import current_execution_identity
 from compiler.surface import ToolCallResult
+from data_mcp.tool_errors import ToolErrorCode as DataCode
+from data_mcp.tool_errors import ToolRefusal as DataRefusal
 from dfo_frame_grammar import Frame
 from executor.ledger import (
     Attempt,
@@ -39,8 +42,8 @@ from harness.graph.plan_done import (
     StepSummary,
     _ask_status,
     _partial_result,
+    _retry_note,
     _stop_causes,
-    _system_fault,
 )
 from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
@@ -112,19 +115,27 @@ async def refuses_to_describe(*, tool: str, args: dict[str, Any], on_progress: A
 
 
 class RefusingGetDataSurface(ScriptedSurface):
-    """`ScriptedSurface` whose `get_data` answers the refusal `code` names."""
+    """`ScriptedSurface` whose `get_data` answers the refusal `code` names, with
+    the retry mode data-mcp gives it, or `do_not_retry` for a code data-mcp
+    does not answer."""
 
     def __init__(self, code: str, fix: dict[str, Any] | None = None) -> None:
         super().__init__()
         self.code = code
         self.fix = fix or {}
+        served = code in set(DataCode)
+        self.retry_mode = (
+            DataRefusal(code=DataCode(code), message="", fix=self.fix).retry_mode.value
+            if served
+            else "do_not_retry"
+        )
 
     async def call_tool(self, *, tool: Any, arguments: Any, on_progress: Any = None) -> Any:
         if tool.name != "get_data":
             return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
         refusal = {
             "code": self.code,
-            "retry_mode": "do_not_retry",
+            "retry_mode": self.retry_mode,
             "fix": self.fix,
             "message": "this deployment cannot serve the request",
         }
@@ -556,14 +567,17 @@ async def test_a_system_fault_ends_the_turn_worded_as_the_systems_fault(
     after_plan = agent_read(models.orchestrator.requests[-1])
     assert failure_sentence("internal_error") in after_plan
     assert failure_sentence("composed_unit_sum_unsupported") not in after_plan
+    assert "do not ask the user to change the question" in after_plan
 
 
 @pytest.mark.parametrize(
     ("code", "fix"),
     [
         ("member_not_resolvable", {}),
-        # A narrower request is a plan the model can draft.
-        ("over_ceiling", {"ceiling_kind": "rows"}),
+        # The user is told data-mcp's remedy only once no new plan is left.
+        ("member_not_resolvable", {"remedy": "Ask about one sector."}),
+        # Another facet is a plan the model can draft.
+        ("facet_not_available", {}),
     ],
 )
 async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_failed_step(
@@ -581,8 +595,9 @@ async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_fai
             reply(text_part("It could not be computed.")),
         ]
     )
-    driver = _driver(pg_engine, models, tool_surface=RefusingGetDataSurface(code, fix))
-    sentence = failure_sentence(code, "do_not_retry", fix)
+    surface = RefusingGetDataSurface(code, fix)
+    driver = _driver(pg_engine, models, tool_surface=surface)
+    sentence = failure_sentence(code, surface.retry_mode, fix)
 
     second = await approve_turn(driver, _QUESTION)
 
@@ -602,7 +617,14 @@ async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_fai
     assert ended.outcome is Outcome.DONE
     # The second stop leaves no note, since the turn's one new plan is spent.
     assert ended.cursor.state.get(ORCHESTRATOR_RETRY_NOTE_KEY) is None
-    assert sentence in agent_read(models.orchestrator.requests[-1])
+    first, last = (agent_read(request) for request in models.orchestrator.requests[1:])
+    told = "as the failed step's remedy says it"
+    assert told not in first
+    if "remedy" in fix:
+        assert failure_cause(code, fix) in last
+        assert told in last
+    else:
+        assert sentence in last
 
 
 @pytest.mark.parametrize(
@@ -631,14 +653,15 @@ async def test_an_unavoidable_failure_ends_the_turn_on_its_sentence_with_no_seco
             reply(text_part("It could not be computed.")),
         ]
     )
-    driver = _driver(pg_engine, models, tool_surface=RefusingGetDataSurface(code, fix))
+    surface = RefusingGetDataSurface(code, fix)
+    driver = _driver(pg_engine, models, tool_surface=surface)
 
     ran = await approve_turn(driver, _QUESTION)
 
     assert ran.outcome is Outcome.DONE
     assert not ran.cursor.state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")
     after_plan = agent_read(models.orchestrator.requests[-1])
-    sentence = failure_sentence(code, "do_not_retry", fix)
+    sentence = failure_sentence(code, surface.retry_mode, fix)
     if "remedy" in fix:
         assert failure_cause(code, fix) in after_plan
         assert sentence not in after_plan
@@ -646,22 +669,24 @@ async def test_an_unavoidable_failure_ends_the_turn_on_its_sentence_with_no_seco
         assert sentence in after_plan
 
 
-@pytest.mark.parametrize(
-    ("code", "system"),
-    [
-        ("place_levels_mixed", True),
-        ("publication_error", True),
-        ("binding_invalid", True),
-        # A fresh plan gets past each of these: a different frame, or an
-        # approval given again.
-        ("frame_integrity_failed", False),
-        ("surface_changed", False),
-        ("stale_revision", False),
-        ("authorisation_expired", False),
-    ],
-)
-def test_only_a_fault_of_the_system_reads_as_one(code: str, system: bool) -> None:
-    assert _system_fault(code) is system
+def test_a_retry_note_survives_a_card_it_cannot_draw_and_words_a_stop_at_no_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A note never fails the turn: a card that cannot be drawn names "a step",
+    and a stop at no step says the plan could not run."""
+
+    def undrawable(plan: Plan) -> list[dict[str, object]]:
+        raise ValueError("no card")
+
+    monkeypatch.setattr(plan_done_module.plan_display, "card_rows", undrawable)
+    plan = cast("Plan", SimpleNamespace(translation=object(), workflow=object()))
+    failed = {"step_id": "retrieve", "code": "facet_not_available", "cause": "data"}
+    cause = failure_cause("facet_not_available")
+
+    assert _retry_note(plan, failed).startswith(f"The approved plan stopped at a step. {cause} ")
+    assert _retry_note(plan, {**failed, "step_id": None}).startswith(
+        f"The approved plan could not run. {cause} "
+    )
 
 
 async def test_a_plan_whose_frames_cannot_be_described_hands_back_the_reason_not_a_frame(

@@ -5,6 +5,7 @@ and each ask's status, or the planner's refusal.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import (
     Mapping,
@@ -16,14 +17,9 @@ from typing import Any, NamedTuple, cast
 from analysis_mcp import digest as analysis_digest
 from data_mcp import get_data_digest
 from data_mcp.tool_errors import ToolErrorCode
-from executor.classify import (
-    BRIEF_AVOIDABLE_CODES,
-    HARNESS_FAULT_CODES,
-    ExecutorCode,
-    brief_can_avoid,
-)
+from executor.classify import ExecutorCode
 from executor.ledger import RunLedger
-from executor.outcomes import STOP_CAUSES, RefusalKind, StepRecord, StopCause
+from executor.outcomes import Remedy, StepRecord, remedy
 from planner.plan import (
     Plan,
     SessionState,
@@ -63,15 +59,11 @@ from harness.graph.state import (
     stored_mapping,
     stored_sequence,
 )
-from harness.sentences import (
-    DECLINE_REASONS,
-    FAILURE_CLASS,
-    FailureClass,
-    failure_cause,
-    failure_sentence,
-)
+from harness.sentences import DECLINE_REASONS, failure_cause, failure_sentence
 from harness.turn.node import Next, Node, NodeCtx
 from harness.turn_records import AlignedBasis, PlanAsk, PlanRecord, aligned_basis
+
+logger = logging.getLogger(__name__)
 
 # Characters of planner text one hand-back to the orchestrator may carry per
 # field, and characters the plan record may take. The two recorded plans in
@@ -270,8 +262,8 @@ def _hand_back_text(summary: StepSummary) -> str:
 def _give_plan_back(ctx: NodeCtx[GraphEvent]) -> bool:
     """Give the orchestrator its plan call back (`BUDGETS`), once a turn, for
     one brief that avoids the failure. It runs for a planner refusal the
-    planner did not mark final, and for a stopped run only when
-    `executor.classify.brief_can_avoid` holds. Answers whether it gave the
+    planner did not mark final, and for a stopped run only when a new plan
+    is its remedy (`executor.outcomes.remedy`). Answers whether it gave the
     call back; the turn's second call answers no. The workflow's own replan
     cap is untouched."""
     calls = dict(ctx.state.get(ORCHESTRATOR_CALLS_KEY) or {})
@@ -283,30 +275,15 @@ def _give_plan_back(ctx: NodeCtx[GraphEvent]) -> bool:
     return True
 
 
-def _system_fault(code: object) -> bool:
-    """Whether a stopped run's `failed_step` `code` is a fault of the system
-    itself: one of `HARNESS_FAULT_CODES`, a code `harness.sentences` words as
-    a system fault, or a stop kind `STOP_CAUSES` lays on the harness. A code
-    a fresh plan gets past (`BRIEF_AVOIDABLE_CODES`), such as an approval a
-    changed plan made stale, is none."""
-    if not isinstance(code, str) or code in BRIEF_AVOIDABLE_CODES:
-        return False
-    if code in HARNESS_FAULT_CODES or FAILURE_CLASS.get(code) is FailureClass.SYSTEM_FAULT:
-        return True
-    kind = RefusalKind(code) if code in set(RefusalKind) else None
-    return kind is not None and STOP_CAUSES[kind] is StopCause.HARNESS
-
-
 def _worded_as(failed: Mapping[str, Any]) -> tuple[object, Mapping[str, object] | None]:
     """The code and `fix` the user's words for `failed`, a run's
     `failed_step`, are read from: its own, or `internal_error` and none for a
-    fault of the system (`_system_fault`), whatever its code's class, so the
+    fault of the system (`Remedy.SYSTEM`), whatever its code's class, so the
     user is never told their question caused it."""
-    code = failed.get("code")
-    if _system_fault(code):
+    if remedy(failed) is Remedy.SYSTEM:
         return ExecutorCode.INTERNAL_ERROR.value, None
     fix = failed.get("fix")
-    return code, fix if isinstance(fix, Mapping) else None
+    return failed.get("code"), fix if isinstance(fix, Mapping) else None
 
 
 def _user_sentence(failed: Mapping[str, Any]) -> str:
@@ -327,18 +304,34 @@ def _user_cause(failed: Mapping[str, Any]) -> str:
 def _retry_note(plan: Plan | None, failed: Mapping[str, Any]) -> str:
     """What the next plan card says before it, once `plan` stopped on `failed`
     and the plan call was given back: the step it stopped at, by the label
-    its card showed, what happened there (`_user_cause`), and that the new
-    plan needs approving. The new plan is the way past the failure, so the
-    note gives no advice of its own."""
-    label = None
-    if plan is not None and plan.translation is not None and plan.workflow is not None:
-        rows = plan_display.card_rows(plan)
-        label = next((row["label"] for row in rows if row["id"] == failed.get("step_id")), None)
-    where = f"the step “{label}”" if label else "a step"
+    its card showed, or that the plan could not run for a stop at no step;
+    what happened there (`_user_cause`); and that the new plan needs
+    approving. The new plan is the way past the failure, so the note gives no
+    advice of its own. A step whose label cannot be read is "a step", since
+    the note never fails the turn."""
+    step_id = failed.get("step_id")
+    if not step_id:
+        opening = "The approved plan could not run."
+    else:
+        label = _card_label_of(plan, step_id)
+        opening = f"The approved plan stopped at {f'the step “{label}”' if label else 'a step'}."
     return (
-        f"The approved plan stopped at {where}. {_user_cause(failed)} This new plan is drafted to get "
-        "past it, so it needs your approval."
+        f"{opening} {_user_cause(failed)} This new plan is drafted to get past it, so it needs "
+        "your approval."
     )
+
+
+def _card_label_of(plan: Plan | None, step_id: object) -> str | None:
+    """The label `plan`'s card shows for `step_id`, or None when it shows none
+    or the card cannot be drawn (`plan_display.card_rows`)."""
+    if plan is None or plan.translation is None or plan.workflow is None:
+        return None
+    try:
+        rows = plan_display.card_rows(plan)
+    except Exception:
+        logger.warning("plan_done: the card of the stopped plan could not be drawn", exc_info=True)
+        return None
+    return next((str(row["label"]) for row in rows if row["id"] == step_id), None)
 
 
 def _ask_status(
@@ -820,8 +813,8 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
         for the rest of the turn.
 
         A stopped run gives the plan call back (`_give_plan_back`) only when
-        a different brief can avoid its failure (`executor.classify.brief_can_avoid`),
-        and leaves the next plan card a note naming the step it stopped at
+        a new plan is its remedy (`executor.outcomes.remedy`), and leaves the
+        next plan card a note naming the step it stopped at
         (`ORCHESTRATOR_RETRY_NOTE_KEY`). Any other stopped run ends the turn:
         the lead carries the user's sentence for the failure (`_user_sentence`)
         for the agent to relay, and a fault of the system is told as one.
@@ -1008,14 +1001,11 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
                 if failed.get(key)
             }
             partial = _partial_result(result.get("asks"), frames=bool(result["frames"]))
-            remedy = "remedy" in result["failed_step"]
+            advised = "remedy" in result["failed_step"]
             # A remedy says what the user can do, so the sentence keeps only its cause.
-            sentence = _user_cause(failed) if remedy else _user_sentence(failed)
-            fix = failed.get("fix")
-            avoidable = brief_can_avoid(
-                failed.get("code"), fix=fix if isinstance(fix, Mapping) else None
-            )
-            given_back = avoidable and _give_plan_back(ctx)
+            sentence = _user_cause(failed) if advised else _user_sentence(failed)
+            past = remedy(failed)
+            given_back = past is Remedy.REPLAN and _give_plan_back(ctx)
             if missing_capability:
                 lead = (
                     "The approved plan stopped at the step marked failed: this deployment "
@@ -1036,15 +1026,15 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
             if given_back:
                 ctx.state[ORCHESTRATOR_RETRY_NOTE_KEY] = _retry_note(plan, failed)
                 lead += " A brief that avoids the failure may be planned once more."
-            elif avoidable:
+            elif past is Remedy.REPLAN:
                 lead += f" The turn's one new plan is spent. Tell the user: {sentence}"
             else:
                 lead += f" No other plan this turn gets past it. Tell the user: {sentence}"
-                if _system_fault(failed.get("code")):
+                if past is Remedy.SYSTEM:
                     lead += (
                         " The fault is the system's: do not ask the user to change the question."
                     )
-            if remedy:
+            if advised and not given_back:
                 lead += (
                     " Tell the user what they can do about it, as the failed step's remedy says it."
                 )

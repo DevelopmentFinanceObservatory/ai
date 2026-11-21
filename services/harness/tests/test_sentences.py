@@ -43,6 +43,7 @@ from harness.sentences import (
     FailureClass,
     PlanWords,
     StopCode,
+    failure_cause,
     failure_sentence,
     referral_reason,
     refusal_reason,
@@ -445,6 +446,11 @@ def test_a_fill_in_reads_only_the_member_its_code_names() -> None:
     assert "Kenya" in failure_sentence("binding_invalid", fix=fix)
     assert "2023" not in failure_sentence("binding_invalid", fix=fix)
     assert failure_sentence("schema_invalid", fix=fix) == failure_sentence("schema_invalid")
+    # The user is told the latest year the series reach, not the one the plan counted from.
+    behind = {"anchor": "2022", "planned_anchor": "2023", "remedy": "Ask again."}
+    cause = failure_cause(ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN, behind)
+    assert "2022" in cause
+    assert "2023" not in cause
 
 
 @pytest.mark.parametrize("code", list(HarnessCode))
