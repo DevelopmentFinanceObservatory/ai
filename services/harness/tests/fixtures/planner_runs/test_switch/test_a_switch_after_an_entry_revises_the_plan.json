@@ -2248,6 +2248,7 @@
     "orchestrator:ask_breakdowns": null,
     "orchestrator:asks_across_years": null,
     "orchestrator:kept_asks": null,
+    "orchestrator:replanned_stop": null,
     "orchestrator:amendments": null,
     "planner:pending_ask": null,
     "planner:asked_referral": null,

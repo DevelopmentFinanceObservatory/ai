@@ -245,7 +245,10 @@ class RunnerClient:
             detail = f"dfo-apis is unreachable: {type(exc).__name__}"
         logger.warning("dfo-apis call to %s failed: %s", path, detail)
         return ToolRefusal.upstream_error(
-            upstream_code=None, detail=detail, retry_after_s=DEFAULT_RETRY_AFTER_S
+            upstream_code=None,
+            detail=detail,
+            retry_after_s=DEFAULT_RETRY_AFTER_S,
+            service_failure=True,
         )
 
     async def aclose(self) -> None:
@@ -274,7 +277,7 @@ runner_holder: Holder[RunnerClient] = Holder(default_factory=_build)
 
 def _unusable(detail: str) -> ToolRefusal:
     return ToolRefusal.upstream_error(
-        upstream_code=_RESPONSE_INVALID, detail=detail, retry_after_s=None
+        upstream_code=_RESPONSE_INVALID, detail=detail, retry_after_s=None, service_failure=True
     )
 
 
@@ -359,6 +362,7 @@ async def refusal_for(
             upstream_code=None,
             detail=f"dfo-apis answered {response.status_code} with no problem document",
             retry_after_s=_retry_after_s(response) if response.status_code >= 500 else None,
+            service_failure=True,
         )
     code: str = problem["code"]
     detail = str(problem.get("detail") or problem.get("title") or code)
@@ -402,6 +406,8 @@ async def refusal_for(
             upstream_code=code,
             detail=detail,
             retry_after_s=_retry_after_s(response) if retryable else None,
+            # A problem the runner answered with a 5xx is its own failure.
+            service_failure=response.status_code >= 500,
             fix=fix,
         )
     else:

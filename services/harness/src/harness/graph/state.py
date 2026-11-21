@@ -97,6 +97,11 @@ ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
 # computed that ask (`_kept_asks`), written by `execute` when a run stops and
 # read by `plan_done`; cleared by `plan_start` and `plan_done`.
 ORCHESTRATOR_KEPT_ASKS_KEY = "orchestrator:kept_asks"
+# The `failed_step` (`executor.outcomes.failed_step`) of the latest run of this
+# plan call that stopped and went back to the planner, written by `execute` on
+# its `"replan"` edge. `plan_done` reads its remedy when the planner then
+# refuses. `plan_start` and `plan_done` clear it.
+ORCHESTRATOR_REPLANNED_STOP_KEY = "orchestrator:replanned_stop"
 # The run the studio's interrupt route admitted with the approval of the
 # plan `approve` last approved (`harness.studio`), or None when it admitted
 # none: written by `approve.decide` on every approval and read by `execute`,
@@ -107,6 +112,12 @@ APPROVED_RUN_KEY = "orchestrator:approved_run"
 # Written by the `planner` node, cleared by `plan_start`, and handed to the
 # agent by `plan_done`, since the amendment reaches the planner alone.
 ORCHESTRATOR_AMENDMENTS_KEY = "orchestrator:amendments"
+# Why the turn's next plan card is a new attempt. It names the step the
+# approved plan stopped at and what happened there, with no advice, since the
+# new plan is the way past it. `plan_done` writes it when it gives the plan call
+# back, and the `planner` node takes it onto the next first draft as its
+# `refusal_note`, which Studio shows before the card.
+ORCHESTRATOR_RETRY_NOTE_KEY = "orchestrator:retry_note"
 # The state a planner entry replanning for a pick on the plan card puts back
 # when the replan does not land (`harness.graph.planning`), written when the
 # replan pauses on a planner-side ask and cleared when the entry ends, so it
