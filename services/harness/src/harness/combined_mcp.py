@@ -101,7 +101,7 @@ from analysis_mcp.server import PUBLIC_SHAPES as ANALYSIS_PUBLIC_SHAPES
 from analysis_mcp.server import healthz as analysis_healthz
 from analysis_mcp.server import mcp as analysis_mcp
 from common.auth import BearerTokenVerifier
-from common.caller import current_caller, current_user_agent
+from common.caller import MCP_CLIENT_NAME_LIMIT, current_caller, current_user_agent
 from common.echoed_text import truncate_value
 from common.materialisation import get_store as get_frame_store
 from common.public_shape import PublicShape
@@ -537,7 +537,7 @@ def _record_refusal(span: RequestSpan, result: ToolResult) -> str:
 
 
 # The longest client-supplied string a log line carries, and the most mime types.
-_CLIENT_TEXT_LIMIT = 128
+_CLIENT_TEXT_LIMIT = MCP_CLIENT_NAME_LIMIT
 _MIME_TYPES_LIMIT = 8
 # A tool name the log line writes bare.
 _TOOL_NAME = re.compile(rf"[A-Za-z0-9_.\-]{{1,{_CLIENT_TEXT_LIMIT}}}")

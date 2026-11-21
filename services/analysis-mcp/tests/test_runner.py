@@ -694,6 +694,7 @@ async def test_the_caller_is_named_beside_the_principal(
             "x-dfo-caller",
             "x-dfo-surface",
             "x-dfo-user-agent",
+            "x-dfo-mcp-client",
             "x-dfo-client",
         )
         if name in headers
