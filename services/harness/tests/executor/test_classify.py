@@ -7,10 +7,12 @@ import random
 from typing import cast, get_args
 
 import pytest
+from analysis_mcp.runner_client import RUNNER_CODES
 from analysis_mcp.tool_errors import ToolErrorCode as AnalysisCode
 from data_mcp.errors import UpstreamError
 from data_mcp.tool_errors import CeilingKind, ToolRefusal, from_upstream_error, to_tool_result
 from data_mcp.tool_errors import ToolErrorCode as DataCode
+from dfo_spec_kit.registry import REGISTRY
 from executor.classify import (
     BACKOFF_SECONDS,
     COMPILER_PROVABLE_CODES,
@@ -42,10 +44,27 @@ _PLACED = (
 )
 
 
+def test_every_analysis_route_code_in_the_registry_is_classified() -> None:
+    """analysis-mcp passes a runner refusal through with the runner's own code, so
+    every code the code registry maps to dfo-apis' analysis route needs a side."""
+    analysis_route = {
+        entry.code
+        for entry in REGISTRY
+        if any(mapping.endpoint == "datasets.analysis" for mapping in entry.mappings)
+    }
+
+    assert analysis_route
+    assert analysis_route <= frozenset().union(*_PLACED), sorted(
+        analysis_route - frozenset().union(*_PLACED)
+    )
+
+
 def test_every_code_either_server_can_answer_with_is_placed_exactly_once() -> None:
     # A new server code must be placed here deliberately, not fall into the
     # stop bucket by omission: this fails until someone picks a side.
-    served = {code.value for code in DataCode} | {code.value for code in AnalysisCode}
+    served = (
+        {code.value for code in DataCode} | {code.value for code in AnalysisCode} | RUNNER_CODES
+    )
     placed = frozenset().union(*_PLACED)
 
     assert served == placed, {

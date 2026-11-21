@@ -4,7 +4,7 @@ narrowing dropped and why (`Exclusion`), and whether the output's
 span of more than one real period (`Observation`/`Interval`).
 
 `ExclusionReason` is the closed set of narrowing steps found across every
-engine (`analysis_mcp.engine`): `narrow_and_resolve`'s unit narrowing
+verb of dfo-apis' analysis engine: `narrow_and_resolve`'s unit narrowing
 (`unit_unbound`, `unit_not_selected`) and entity narrowing
 (`entity_not_selected`), `growth`'s and `rank`'s window filters
 (`outside_window`), `growth`'s entities lacking a row in either endpoint
@@ -17,8 +17,7 @@ matched cells whose denominator sums to zero (`zero_denominator`), and the
 flow parties a sum or a rank leaves out because they total other parties
 (`party_total`) or, on a ranked role, because they are unallocated residuals
 (`party_residual`). A heterogeneous facet always refuses
-(`analysis_mcp.engine.common.FacetHeterogeneousError`); this set carries no
-facet reason.
+(`facet_heterogeneous`); this set carries no facet reason.
 
 `entity_not_selected` and `period_unmatched` are recorded here and in
 `structuredContent` but never rendered in the digest's own exclusions block
@@ -33,10 +32,30 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from analysis_mcp.engine.common import ExclusionReason, ExclusionSide
+ExclusionReason = Literal[
+    "unit_unbound",
+    "unit_not_selected",
+    "entity_not_selected",
+    "outside_window",
+    "endpoint_missing",
+    "zero_or_sign_crossing_base",
+    "non_finite",
+    "predicate",
+    "unmatched_key",
+    "period_unmatched",
+    "beyond_limit",
+    "zero_denominator",
+    "party_total",
+    "party_residual",
+]
 
-# Per-role-column cap on `Exclusion.entities`, mirroring
-# `analysis_mcp.engine.common._ENTITY_CAP`.
+# Which of a two-input verb's two sides a dropped row came from. `None` for
+# a single-input verb (`aggregate`, `growth`, `rank`, `filter`). `compare`/
+# `join` tag `left`/`right`; `share_of` and `quotient_of` tag
+# `numerator`/`denominator`.
+ExclusionSide = Literal["numerator", "denominator", "left", "right"]
+
+# Per-role-column cap on `Exclusion.entities`, the cap dfo-apis' engine applies.
 ENTITY_CAP = 20
 
 

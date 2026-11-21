@@ -1,7 +1,9 @@
 """`harness.recipe_replay`: a stored recipe computed again on newer data.
 
-The verbs are analysis-mcp's own functions behind a double that counts each call,
-so the frames, traces and pairs are the ones a deployment stores. The mint is
+The verbs are analysis-mcp's in-process verbs, replayed from what they stored
+(`stored_verbs`), behind a double that counts each call, so the frames, traces and
+pairs are the ones a store holds from before the verbs computed on dfo-apis'
+analysis runner. The mint is
 `Dataset`, which registers a dataset's current frame as data-mcp's mint does.
 apis is `FakeApis` behind `httpx2.MockTransport`, and the publisher is
 presentation-mcp's `PlatformAssembler.publish_frame` over it. The mounted
@@ -20,10 +22,6 @@ from typing import Any
 
 import pytest
 from analysis_mcp.execution_identity import current_execution_identity
-from analysis_mcp.filter_tool import filter_verb
-from analysis_mcp.growth_tool import growth
-from analysis_mcp.join_tool import join
-from analysis_mcp.rolling_tool import resolve_anchor
 from common.caller import (
     CALLER_PRINCIPAL_HEADER,
     SURFACE_HEADER,
@@ -76,6 +74,7 @@ from .replay_support import (
     reporter_rows,
     yearly,
 )
+from .stored_verbs import filter_verb, growth, join, resolve_anchor
 
 _TOOLS = {"filter": filter_verb, "growth": growth, "join": join, "resolve_anchor": resolve_anchor}
 # A second dataset, minted from the same frame as `SPEC`.

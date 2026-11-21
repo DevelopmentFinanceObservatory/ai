@@ -11,9 +11,12 @@ otherwise.
 
 The mode decides the transient and refresh cases; the code decides the rest.
 Every code either server can answer with sits in exactly one of the five sets
-below, and `tests/executor/test_classify.py` reads both servers' enums and
-fails when one is missing here -- so adding a server code means picking a
-side, not landing in the stop bucket by omission:
+below, and `tests/executor/test_classify.py` reads both servers' enums, and
+every code the code registry (`dfo_spec_kit.registry`) maps to dfo-apis'
+analysis route, which analysis-mcp passes through as the runner wrote it
+(`analysis_mcp.runner_client.RUNNER_CODES`), and fails when one is missing
+here -- so adding a code means picking a side, not landing in the stop bucket
+by omission:
 
 - `METHOD_CHOICE_CODES`: the refusal's `fix` is a set of alternatives -- which
   entity, unit, facet, window, coverage or denominator -- and choosing one
@@ -26,7 +29,8 @@ side, not landing in the stop bucket by omission:
   missing keys or years is a data-dependent choice, not something the
   compiler could have ruled out.
   `quotient_of_zero_denominator` and `quotient_of_no_key_matched` sit beside
-  them for the same reason: `quotient_of` refuses only when every matched
+  them for the same reason, as do `compare_no_key_matched` and
+  `sum_of_no_key_matched`, the same refusal of a keyed `compare` or `sum_of`: `quotient_of` refuses only when every matched
   cell divides by zero, or when no numerator key pairs with a denominator
   key at all, and which denominator, window or `denominator_axis` gives the
   division something to divide by is the planner's to choose.
@@ -134,6 +138,8 @@ METHOD_CHOICE_CODES = frozenset(
         "share_of_key_unmatched",
         "quotient_of_zero_denominator",
         "quotient_of_no_key_matched",
+        "compare_no_key_matched",
+        "sum_of_no_key_matched",
     }
 )
 
@@ -171,6 +177,8 @@ TRANSIENT_CODES = frozenset(
         # coverage is unchanged, or starts a fresh one if coverage has been published
         # since.
         "operation_still_processing",
+        # dfo-apis: the request did not complete before its deadline.
+        "timeout",
     }
 )
 
@@ -187,6 +195,9 @@ COMPILER_PROVABLE_CODES = frozenset(
         "share_of_key_unknown",
         "place_levels_mixed",
         "composed_unit_sum_unsupported",
+        # The executor resolves one anchor record over one set of populations
+        # and states it on every rolling step of a run.
+        "rolling_populations_differ",
     }
 )
 
@@ -254,6 +265,27 @@ STOP_CODES = frozenset(
         "rolling_anchor_unresolved",
         "rolling_grain_unsupported",
         "internal_error",
+        # dfo-apis' analysis runner, past what analysis-mcp writes again in its
+        # own words. A root it cannot read stands for frames that are gone, as
+        # `frame_not_held` and `frame_expired` do, and a Spec root's mint refuses
+        # with the mint's own codes. Each reproduces on the same plan.
+        "artifact_expired",
+        "snapshot_not_found",
+        "snapshot_revoked",
+        "recipe_not_found",
+        "spec_not_found",
+        "several_members",
+        "verify_not_permitted",
+        "collection_probe_ceiling",
+        "definition_not_reproducible",
+        "excluded_by_registry",
+        "facet_binding_unsupported",
+        "identity_collision",
+        "identity_quarantined",
+        "members_not_held",
+        "rate_coverage_gap",
+        "recipe_not_declared",
+        "role_signature_incompatible",
     }
 )
 

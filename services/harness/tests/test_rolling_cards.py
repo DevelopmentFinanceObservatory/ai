@@ -1,9 +1,9 @@
 """`harness.rolling_cards`: the rules every `write_component` passes, as
 `RollingCards.admit` applies them, and the test for a year in a title.
 
-The frames, traces, anchor records and replays are real: `Scene`
-(`test_recipe_replay.py`) runs analysis-mcp's own functions over an in-memory
-store, with apis as `FakeApis`. One reporter of three holds 2023, so the
+The frames, traces and anchor records are those analysis-mcp's in-process verbs
+stored (`stored_verbs`): `Scene` (`test_recipe_replay.py`) replays them over an
+in-memory store, with apis as `FakeApis`. One reporter of three holds 2023, so the
 latest year over all three is 2022 and the latest year over that reporter alone
 is 2023.
 """
@@ -16,8 +16,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from analysis_mcp.growth_tool import growth
-from analysis_mcp.rolling_tool import resolve_anchor
 from analysis_mcp.runner_client import DerivedUnread
 from common import telemetry
 from common.caller import (
@@ -54,6 +52,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from .replay_support import REPORTERS, SPEC, STAT_VAR, reporter_frame, reporter_rows, yearly
+from .stored_verbs import growth, resolve_anchor
 from .test_recipe_replay import SHARED_WIRE, Scene, Wire, wire_identity
 
 FRANCE, BRITAIN, AMERICA = REPORTERS

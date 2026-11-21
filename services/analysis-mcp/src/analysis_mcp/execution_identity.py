@@ -11,10 +11,12 @@ engine and watches `content_version` move confirms the binding holds.
 rather than pinned here, so a frame-grammar bump is picked up automatically
 instead of drifting out of sync with a hand-copied literal.
 
-`current_execution_identity` names this package's own engine, which only the
-in-process verb functions compute with (`tool_pipeline.mint_identity_or_refusal`).
-The registered tools compute on dfo-apis' analysis runner, whose identity apis'
-capabilities document names (`common.live_apis.LiveApisClient.analysis_execution_identity`).
+`current_execution_identity` names the engine of the frames analysis-mcp computed
+in process before its tools computed on dfo-apis' analysis runner. Their stored
+traces carry it, and `frame_ref_resolution` reads a stored trace's engine version to
+refuse a frame that predates span labels (`derived_input_unrecoverable`).
+The registered tools compute on the runner, whose identity apis' capabilities
+document names (`common.live_apis.LiveApisClient.analysis_execution_identity`).
 """
 
 from __future__ import annotations

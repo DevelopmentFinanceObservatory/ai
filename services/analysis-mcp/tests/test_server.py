@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from pathlib import Path
 
 import httpx2
 import jsonschema
@@ -370,6 +371,23 @@ _IN_PROCESS_TWINS = {
     "quotient_of": quotient_of_tool.quotient_of,
     "resolve_anchor": rolling_tool.resolve_anchor,
 }
+
+
+# Each registered tool's name, description and input schema as a caller lists them.
+_TOOL_SCHEMAS = Path(__file__).resolve().parent / "fixtures" / "tool_schemas.json"
+
+
+async def test_registered_tool_schemas_match_the_snapshot() -> None:
+    """The names, descriptions and argument schemas the server registers are the
+    ones `fixtures/tool_schemas.json` holds, byte for byte, so a change to the
+    functions the tools take their signatures from cannot change what a model reads."""
+    tools = await mcp.list_tools(run_middleware=False)
+    registered = {
+        tool.name: {"description": tool.description, "parameters": tool.parameters}
+        for tool in tools
+    }
+
+    assert registered == json.loads(_TOOL_SCHEMAS.read_text())
 
 
 async def test_every_registered_tool_keeps_its_in_process_twins_schema_and_description() -> None:

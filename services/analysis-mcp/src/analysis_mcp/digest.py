@@ -12,8 +12,7 @@ call's `summary` (`GroupSummary`, `EntityGrowth`, `PeriodComparison`,
 `PeriodSum`, `PeriodQuotient`, `EntityRank` and the rest), never
 `frame.rows`. The frame itself never appears in a digest.
 `render_summary_digest` renders a runner summary (`summary.VerbSummary`) with
-its verb's renderer. The in-process tools render their engine result's facts
-(`engine_facts.facts_of`), the same JSON the runner sends.
+its verb's renderer.
 
 Every list is capped at `LIST_CAP` entries, following `data_mcp.digest`'s
 own discipline of bounding the model-facing text while the full result stays
@@ -368,7 +367,7 @@ def _rank_time_line(
     """`time: rows are labelled {label}; real periods span {start} to
     {end}...` for an `Interval`, where `{label}` is the one `time_period`
     every collapsed row carries (`span_label(periods_in_window)`, as
-    `engine.rank.run_rank` stamps it). `None` for a plain `Observation` or an
+    the analysis runner's `rank` stamps it). `None` for a plain `Observation` or an
     absent `time`.
 
     `per_period=True` states which periods were ranked instead, since each
@@ -490,8 +489,8 @@ def render_aggregate_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (the facts of `analysis_mcp.engine.aggregate.run_aggregate`)
-    into the digest text a successful `aggregate` tool call returns.
+    """Render `result` (the `AggregateFacts` the analysis runner's reply
+    states) into the digest text a successful `aggregate` tool call returns.
 
     When every row carries one label (`result.period_label`, set under sum or
     mean with `time_period` outside `group_by`), the header states it once, and a
@@ -609,8 +608,8 @@ def render_growth_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (the facts of `analysis_mcp.engine.growth.run_growth`) into
-    the digest text a successful `growth` tool call returns.
+    """Render `result` (the `GrowthFacts` the analysis runner's reply
+    states) into the digest text a successful `growth` tool call returns.
 
     When the input carried `DerivedMarker.ordinal` (a per-period rank's own
     output, or a growth reading one), every entity's own line and the
@@ -722,8 +721,8 @@ def render_compare_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (the facts of `analysis_mcp.engine.compare.run_compare`) into
-    the digest text a successful `compare` tool call returns. The label line
+    """Render `result` (the `CompareFacts` the analysis runner's reply
+    states) into the digest text a successful `compare` tool call returns. The label line
     names the result's StatVar by what it subtracts (`_difference_label`)."""
     header = (
         f"compare: {len(result.intersected_periods)} intersected period(s) "
@@ -823,8 +822,8 @@ def render_sum_of_digest(
     time: Time | None = None,
     heading: str = "sum_of",
 ) -> str:
-    """Render `result` (the facts of `analysis_mcp.engine.sum_of.run_sum_of`) into
-    the digest text a successful `sum_of` tool call returns, opening with `heading`.
+    """Render `result` (the `SumOfFacts` the analysis runner's reply
+    states) into the digest text a successful `sum_of` tool call returns, opening with `heading`.
     Each period one side alone reports, which the sum leaves out, is named with that
     side and its value there, straight after the label, so a reader keeping only
     the digest's start still has it. The coverage line states the summed
@@ -899,7 +898,7 @@ def _per_period_ranks_block(
 ) -> str:
     """One block per period, each capped and truncation-noted exactly like
     the collapse mode's single block. `entity_ranks` is already grouped by
-    period -- the engine (`engine.rank._rank_per_period`) emits one
+    period -- the analysis runner's per-period `rank` emits one
     period's own ranking, in rank order, before moving to the next -- so
     consecutive runs sharing a `time_period` are the per-period grouping,
     with no second sort needed here.
@@ -928,8 +927,8 @@ def render_rank_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (the facts of `analysis_mcp.engine.rank.run_rank`) into the
-    digest text a successful `rank` tool call returns.
+    """Render `result` (the `RankFacts` the analysis runner's reply
+    states) into the digest text a successful `rank` tool call returns.
 
     `result.per_period=True` renders one block per period instead of one
     ranking overall -- each entity's own `value` here is still the measured
@@ -1038,8 +1037,8 @@ def render_share_of_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (the facts of `analysis_mcp.engine.share_of.run_share_of`)
-    into the digest text a successful `share_of` tool call returns.
+    """Render `result` (the `ShareOfFacts` the analysis runner's reply
+    states) into the digest text a successful `share_of` tool call returns.
 
     Every share prints as its output row holds it, in per cent, which the
     header names. An un-keyed call states its first and latest share on the
@@ -1274,8 +1273,8 @@ def render_quotient_of_digest(
     time: Time | None = None,
     heading: str = "quotient_of",
 ) -> str:
-    """Render `result` (the facts of `analysis_mcp.engine.quotient_of.run_quotient_of`)
-    into the digest text a successful `quotient_of` tool call returns, opening with
+    """Render `result` (the `QuotientOfFacts` the analysis runner's reply
+    states) into the digest text a successful `quotient_of` tool call returns, opening with
     `heading`.
 
     Every quotient is a plain number in the composed unit, which the header
@@ -1361,8 +1360,8 @@ def render_join_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (the facts of `analysis_mcp.engine.join.run_join`) into the
-    digest text a successful `join` tool call returns."""
+    """Render `result` (the `JoinFacts` the analysis runner's reply
+    states) into the digest text a successful `join` tool call returns."""
     join_keys_text = (
         ", ".join(
             left if left == right else f"{left}={right}"
@@ -1426,8 +1425,8 @@ def render_filter_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (the facts of `analysis_mcp.engine.filter.run_filter`) into
-    the digest text a successful `filter` tool call returns."""
+    """Render `result` (the `FilterFacts` the analysis runner's reply
+    states) into the digest text a successful `filter` tool call returns."""
     header = (
         f"filter: {predicate_count} predicate(s) applied, {result.kept_row_count}/"
         f"{result.total_row_count} row(s) kept ({result.dropped_row_count} dropped)"

@@ -456,7 +456,8 @@ def _record(options: dict[str, Any]) -> MintRecord:
         ),
         (
             # data-mcp's flow enrichment order: the type columns, then party_kind,
-            # party_class and party_whole. dfo-apis keeps a root's columns sorted.
+            # party_class and party_whole. The root sends them as the record lists
+            # them, and dfo-apis sorts and dedupes them.
             _record(
                 {
                     "format": "parquet",
@@ -479,9 +480,10 @@ def _record(options: dict[str, Any]) -> MintRecord:
                     "columns": [
                         "financingProvider_type",
                         "financingRecipient_type",
-                        "party_class",
                         "party_kind",
+                        "party_class",
                         "party_whole",
+                        "party_kind",
                     ],
                 },
             },
@@ -492,7 +494,7 @@ def _record(options: dict[str, Any]) -> MintRecord:
         "mint-record",
         "stat-vars-sum",
         "breakdown-with-columns",
-        "flow-columns-sorted",
+        "flow-columns-as-recorded",
     ],
 )
 async def test_a_get_data_frame_is_sent_as_the_dataset_version_its_mint_record_names(
@@ -752,15 +754,38 @@ async def test_the_caller_is_named_beside_the_principal(
         ),
         (
             _problem(404, "spec_not_found"),
-            "upstream_error",
+            "spec_not_found",
             "do_not_retry",
-            {"detail": "spec_not_found detail"},
+            {},
         ),
         (
             httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
-            "upstream_error",
+            "timeout",
             "retry_after_delay",
-            {"detail": "slow"},
+            {},
+        ),
+        (
+            _problem(
+                422,
+                "compare_no_key_matched",
+                fix={"on": {"donor": "donor"}},
+                retry_mode="correct_and_retry",
+            ),
+            "compare_no_key_matched",
+            "correct_and_retry",
+            {"on": {"donor": "donor"}},
+        ),
+        (
+            _problem(422, "a_code_no_registry_holds", fix={"x": 1}, retry_mode="correct_and_retry"),
+            "a_code_no_registry_holds",
+            "correct_and_retry",
+            {"x": 1},
+        ),
+        (
+            _problem(500, "internal_error"),
+            "upstream_error",
+            "do_not_retry",
+            {"detail": "internal_error detail"},
         ),
         (
             httpx2.Response(502, text="bad gateway"),
@@ -782,8 +807,11 @@ async def test_the_caller_is_named_beside_the_principal(
         "over-ceiling",
         "busy",
         "pending",
-        "unmapped-code",
-        "retryable-unmapped-code",
+        "registry-code",
+        "retryable-registry-code",
+        "code-this-service-defines-no-factory-for",
+        "code-no-registry-holds",
+        "this-services-own-code",
         "no-problem-document",
         "summary-unreadable",
     ],
@@ -1478,15 +1506,18 @@ async def test_a_rebuilt_input_the_tree_recomputed_is_named_by_its_replayed_pair
 
 
 @pytest.mark.parametrize(
-    "resent",
+    ("resent", "code"),
     [
-        httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
-        httpx2.Response(502, text="bad gateway"),
+        (
+            httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
+            "timeout",
+        ),
+        (httpx2.Response(502, text="bad gateway"), "upstream_error"),
     ],
     ids=["timeout", "no-problem-document"],
 )
 async def test_a_transient_failure_of_the_call_sent_again_stays_retryable(
-    store: InMemoryMaterialisationStore, resent: httpx2.Response
+    store: InMemoryMaterialisationStore, resent: httpx2.Response, code: str
 ) -> None:
     await store.put_mint_record(_record({"format": "parquet"}))
     lost = {"spec_id": _SPEC, "content_version": _DATASET_CV}
@@ -1501,10 +1532,7 @@ async def test_a_transient_failure_of_the_call_sent_again_stays_retryable(
 
     structured = result.structured_content
     assert structured is not None
-    assert (structured["code"], structured["retry_mode"]) == (
-        "upstream_error",
-        "retry_after_delay",
-    )
+    assert (structured["code"], structured["retry_mode"]) == (code, "retry_after_delay")
     assert structured["retry_after_s"] is not None
 
 
@@ -1631,7 +1659,7 @@ async def test_a_lost_frame_on_a_call_that_does_not_rebuild_returns_the_runners_
         ),
         (
             httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
-            "upstream_error",
+            "timeout",
             DEFAULT_RETRY_AFTER_S,
             True,
         ),

@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 
 import pytest
-from analysis_mcp.engine.filter import run_filter
 from analysis_mcp.execution_identity import ExecutionIdentity, current_execution_identity
 from analysis_mcp.identity import (
     OP_SPEC_HASH_PATTERN,
@@ -24,13 +23,13 @@ from analysis_mcp.identity import (
 from analysis_mcp.op_spec import (
     AggregateOpSpec,
     CategoryMatchPredicate,
+    FilterOpSpec,
     OpSpecAdapter,
     QuotientOfOpSpec,
     ShareOfOpSpec,
 )
 from common.materialisation import FrameRef
 from common.recipe import normal_form
-from dfo_frame_grammar import Frame
 from pydantic import ValidationError
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -72,30 +71,23 @@ def test_op_spec_hash_moves_when_the_op_spec_changes() -> None:
     assert a != b
 
 
-def test_nfd_category_match_matches_the_same_rows_as_its_nfc_form() -> None:
+def test_an_nfd_category_match_is_its_nfc_form() -> None:
     """`Frame.build` NFC-normalises every cell it stores, and
-    `CategoryMatchPredicate.values` normalises to NFC at construction too --
-    so an NFD-spelled predicate matches the identical rows its NFC form
-    does, rather than minting two different results against an NFC-stored
-    cell.
+    `CategoryMatchPredicate.values` normalises to NFC at construction too, so an
+    NFD-spelled predicate is the NFC one: the same values, and one op-spec hash,
+    rather than two results against an NFC-stored cell.
     """
     nfd = "café"
     nfc = "café"
-    frame = Frame.build(
-        role_keys=["reporter"],
-        rows=[
-            {"stat_var": "dcid:X", "reporter": nfc, "time_period": "2020", "value": 1.0},
-            {"stat_var": "dcid:X", "reporter": "dcid:OTHER", "time_period": "2020", "value": 2.0},
-        ],
+    nfd_predicate = CategoryMatchPredicate(column="reporter", values=(nfd,))
+    nfc_predicate = CategoryMatchPredicate(column="reporter", values=(nfc,))
+
+    assert nfd_predicate.values == nfc_predicate.values == (nfc,)
+    assert op_spec_hash_for(
+        FilterOpSpec(frame_ref=FrameRef(**SNAPSHOT_REF), predicates=(nfd_predicate,))
+    ) == op_spec_hash_for(
+        FilterOpSpec(frame_ref=FrameRef(**SNAPSHOT_REF), predicates=(nfc_predicate,))
     )
-    nfd_result = run_filter(
-        frame, predicates=(CategoryMatchPredicate(column="reporter", values=(nfd,)),)
-    )
-    nfc_result = run_filter(
-        frame, predicates=(CategoryMatchPredicate(column="reporter", values=(nfc,)),)
-    )
-    assert nfd_result.kept_row_count == nfc_result.kept_row_count == 1
-    assert nfd_result.frame == nfc_result.frame
 
 
 def test_duplicate_group_by_column_refuses() -> None:
@@ -137,8 +129,7 @@ def test_op_spec_hash_is_independent_of_denominator_by_key_order(
     model: type[ShareOfOpSpec | QuotientOfOpSpec],
 ) -> None:
     """Two calls differing only in `denominator_by`'s own key insertion
-    order mint one `op_spec_hash` and (via `frame_ref_resolution.
-    canonical_entity_binding`) execute over one order -- JCS sorts an
+    order mint one `op_spec_hash` -- JCS sorts an
     object's own members regardless of Python dict insertion order, so this
     requires no explicit registration in `identity._normalise_parameters`,
     unlike an array-shaped field."""

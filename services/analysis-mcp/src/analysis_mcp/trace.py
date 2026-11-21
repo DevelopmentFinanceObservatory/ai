@@ -13,9 +13,7 @@ Everything past `upstream_trace` is what only the toolkit knows:
 
 - `frame_content_version`: the stored output frame's own frame-grammar `cv_`,
   derived once when this result is written
-  (`frame_ref_resolution.derive_frame_content_version`). The next hop that
-  resolves this result as its own input reads this field directly
-  (`frame_ref_resolution.input_content_version`).
+  (`frame_ref_resolution.derive_frame_content_version`).
 - `op_spec_hash`: which op-spec produced this result.
 - `execution_record`: the replay witness. `kind="op_spec_canonical"` and
   `content` is the canonical JCS serialisation of the fully expanded
@@ -32,7 +30,7 @@ Everything past `upstream_trace` is what only the toolkit knows:
   a `Trace` predating this field.
 - `steps`: the step record of this result's own operation
   (`analysis_mcp.steps.Step`), its inputs naming the frames it read.
-  `tool_pipeline.store_result_and_render` sets it; no identity field reads
+  An in-process verb set it when it stored its result; no identity field reads
   it. `()` on a `Trace` stored without the field. `common.steps.assemble_steps` joins the steps along a frame's
   ancestry.
 - `time`: whether this result's `time_period` names a genuine single
@@ -102,7 +100,7 @@ class AppliedPolicy(BaseModel):
     real null cells without this shape changing.
 
     `resolved_unit` and `resolved_facets` carry what
-    `analysis_mcp.engine.common.resolve_unit_and_facets` decided before
+    `dfo_analysis_engine.engine.common.resolve_unit_and_facets` decided before
     computing -- `resolved_unit` is the single unit the result was computed
     over (`None` when the input frame carried no `unit` at all; a converted
     unit as its request object, `units.unit_json`), and

@@ -1,16 +1,13 @@
 """The frame rows this process's tool calls hold in memory at once.
 
 A call that decodes, computes over or encodes a frame allocates in proportion to the
-frame's rows, so rows are what the budget counts. data-mcp, analysis-mcp and
-presentation-mcp each claim rows at the point a call knows its row count and has not
-yet made its large allocation, and release them when that work ends:
+frame's rows, so rows are what the budget counts. data-mcp and presentation-mcp each
+claim rows at the point a call knows its row count and has not yet made its large
+allocation, and release them when that work ends:
 
 - data-mcp: `frame_materialisation`, after the store opens a held pair and before it
   reads it, for the read that confirms a cache hit; and after the artifact footer gives
   the row count, for the parse and the store write.
-- analysis-mcp: `frame_ref_resolution.resolve_input_frames`, once the store has opened
-  every input (`MaterialisationStore.open`) and before it reads any, for all the
-  inputs' rows in one claim, held for the whole verb call (`holds_input_rows`).
 - presentation-mcp: `frame_publish.publish_body_for`, after the store opens the frame
   and before it reads it, for the read, the publish body's encoding and the publish
   request that sends it.
@@ -20,11 +17,12 @@ the download, its checks and the decode all run under the claim. A frame stored
 without a recorded row count is claimed at the service's `max_frame_rows`, and its
 read refuses a frame holding more rows than the claim before decoding it.
 
-The harness mounts all three in one process, so one budget serves them all:
-`row_budget()` builds it on first use from `BaseServiceSettings.frame_rows_in_flight_max`,
+The harness mounts both in one process, and claims rows itself for the frames its own
+tools read (`harness.orchestrator_tools`, `harness.rolling_cards`), so one budget serves
+them all: `row_budget()` builds it on first use from `BaseServiceSettings.frame_rows_in_flight_max`,
 which every service's settings inherit from the same env var. A service run on its own
-builds its own. `FrameServiceSettings` refuses a budget smaller than the largest claim,
-a two-input verb's two `max_frame_rows` inputs, so every legal call fits an idle budget.
+builds its own. `FrameServiceSettings` refuses a budget smaller than twice
+`max_frame_rows`, so every legal call fits an idle budget.
 
 A claim that does not fit is refused at once and never queued: a queued call would spend
 its own deadline waiting, as the combined server's in-flight cap
@@ -33,8 +31,7 @@ its own deadline waiting, as the combined server's in-flight cap
 `ROW_BUDGET_RETRY_AFTER_S`.
 
 Work a claim covers can run in a worker thread that outlives the coroutine awaiting it:
-a store read or write cut off by its deadline, or a verb call cancelled at the call
-limit.
+a store read or write cut off by its deadline, or a call cancelled at the call limit.
 `RowClaim.hold_through` runs such work so the claim gives its rows back only once the
 work and the claim's `with` block have both ended.
 

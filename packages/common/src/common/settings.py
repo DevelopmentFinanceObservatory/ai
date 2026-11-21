@@ -24,28 +24,26 @@ class BaseServiceSettings(BaseSettings):
     `harness.settings.Settings.studio_api_token`'s own precedent.
 
     `frame_rows_in_flight_max` bounds the frame rows this process's tool calls hold in
-    memory at once (`common.row_budget`). It lives here so that data-mcp, analysis-mcp
-    and presentation-mcp, mounted in one harness process, read one value from one env
-    var, `FRAME_ROWS_IN_FLIGHT_MAX`. `scripts/bench_frames.py --rows 250000
+    memory at once (`common.row_budget`). It lives here so that data-mcp,
+    presentation-mcp and the harness, in one harness process, read one value from one
+    env var, `FRAME_ROWS_IN_FLIGHT_MAX`. `scripts/bench_frames.py --rows 250000
     --memory-mib <MiB>` prints the implied value:
 
         (instance memory - idle - headroom) / worst bytes a row
 
-    Worst bytes a row is the largest `delta_mb` / claimed rows among whole calls at
-    250,000 rows, over frames that carry each flow party's kind, as
-    `get_data(without_party_totals=True)` serves every flow retrieval.
-    On the run this default comes from, growth added 269.0 MiB over 250,000 rows, 1,128
-    bytes a row, and the largest join a caller can complete added 477.3 MiB over its two
-    inputs' 500,000 rows, 1,001 bytes a row. Idle is assumed to be 400 MiB for the
-    harness and three servers; the deployed figure is unmeasured. Headroom is 300 MiB,
-    which absorbs the freed Arrow pages a long-lived allocator keeps. At 2 GiB the
-    implied value is 1,348 MiB / 1,128 B = 1,252,788 rows.
+    Worst bytes a row is the largest `delta_mb` / claimed rows among the whole calls this
+    process runs, `get_data` and `publish_call`, at 250,000 rows over frames that carry
+    each flow party's kind, as `get_data(without_party_totals=True)` serves every flow
+    retrieval. On a macOS run, `get_data` added 206.2 MiB over 250,000 rows, 865 bytes a
+    row, and `publish_call` 144 MiB. Idle is assumed to be 400 MiB for the harness
+    and three servers; the deployed figure is unmeasured. Headroom is 300 MiB, which
+    absorbs the freed Arrow pages a long-lived allocator keeps. At 2 GiB the implied
+    value is 1,348 MiB / 865 B = 1,634,335 rows.
 
-    The default is the implied value less a 10% measurement margin, rounded down to the
-    next 100,000: 1,127,509 rounds to 1,100,000, four 250,000-row calls or two joins at
-    once. Recompute it by the same rule whenever `max_frame_rows`, the instance's
+    The default, 1,100,000 rows, sits below that implied value: four 250,000-row calls
+    at once. Recompute the implied value whenever `max_frame_rows`, the instance's
     memory, the measured idle or the columns a frame carries change; the script exits 1
-    when this setting exceeds the implied value. `FrameServiceSettings` refuses a value
+    when this setting exceeds it. `FrameServiceSettings` refuses a value
     below twice `max_frame_rows`.
     """
 
@@ -72,10 +70,11 @@ class FrameServiceSettings(BaseServiceSettings):
     """The settings data-mcp, analysis-mcp and presentation-mcp share as the services
     that read frames.
 
-    `max_frame_rows` is the row ceiling every one of them enforces: data-mcp on a
-    fetched artifact, from its Parquet footer before any row is parsed, analysis-mcp on
-    every resolved input and join result, and all three on a frame read back from the
-    store, whose rows they claim at this ceiling when the store recorded no count. It
+    `max_frame_rows` is the row ceiling data-mcp and presentation-mcp enforce: data-mcp
+    on a fetched artifact, from its Parquet footer before any row is parsed, and both on
+    a frame read back from the store, whose rows they claim at this ceiling when the
+    store recorded no count. analysis-mcp inherits the field and reads it nowhere, since
+    dfo-apis' analysis runner computes its verbs. It
     matches the durable store's own ceiling
     (`common.materialisation.GcsMaterialisationStore`).
 

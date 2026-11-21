@@ -1,0 +1,1918 @@
+{
+  "aggregate {\"arguments\":{\"aggregation\":\"mean\",\"group_by\":[\"time_period\"]},\"frames\":[\"ef2fca8dcf14bb799749d029b9833c3c1849761531a1894d0df436c63d8e9da0\"]}": {
+    "collapsed_periods": [
+      "2021"
+    ],
+    "entity_count": null,
+    "exclusions": {
+      "records": [
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": [
+            "DACEUInstitutionsAndMembers"
+          ],
+          "reason": "party_total",
+          "row_count": 1,
+          "side": null
+        }
+      ]
+    },
+    "expected_cell_count": 1,
+    "facet_selections": [],
+    "group_summaries": [
+      {
+        "group_key": [
+          [
+            "time_period",
+            "2021"
+          ]
+        ],
+        "row_count": 3,
+        "time_period_max": "2021",
+        "time_period_min": "2021",
+        "value": 116.66666666666667,
+        "value_period": null
+      }
+    ],
+    "period_entities": [
+      [
+        "2021",
+        3
+      ]
+    ],
+    "period_label": null,
+    "pooled_parties": [],
+    "present_cell_count": 1,
+    "realised_coverage_fraction": 1.0,
+    "resolved_unit": "USD",
+    "skipped_cell_count": 0,
+    "warnings": []
+  },
+  "aggregate {\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"reporter\"]},\"frames\":[\"176eef4f4804d6963d61466d0ae47cf44349f72a21e71424e83fc8a51201d159\"]}": {
+    "collapsed_periods": [
+      "2018",
+      "2019",
+      "2020",
+      "2021",
+      "2022"
+    ],
+    "entity_count": 2,
+    "exclusions": {
+      "records": []
+    },
+    "expected_cell_count": 2,
+    "facet_selections": [],
+    "group_summaries": [
+      {
+        "group_key": [
+          [
+            "reporter",
+            "dcid:GBR"
+          ]
+        ],
+        "row_count": 3,
+        "time_period_max": "2020",
+        "time_period_min": "2018",
+        "value": 3.0,
+        "value_period": null
+      },
+      {
+        "group_key": [
+          [
+            "reporter",
+            "dcid:USA"
+          ]
+        ],
+        "row_count": 5,
+        "time_period_max": "2022",
+        "time_period_min": "2018",
+        "value": 5.0,
+        "value_period": null
+      }
+    ],
+    "period_entities": [
+      [
+        "2018",
+        2
+      ],
+      [
+        "2019",
+        2
+      ],
+      [
+        "2020",
+        2
+      ],
+      [
+        "2021",
+        1
+      ],
+      [
+        "2022",
+        1
+      ]
+    ],
+    "period_label": "2018/2022",
+    "pooled_parties": [],
+    "present_cell_count": 2,
+    "realised_coverage_fraction": 1.0,
+    "resolved_unit": null,
+    "skipped_cell_count": 0,
+    "warnings": []
+  },
+  "aggregate {\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"frames\":[\"11a92042f39ddf92f8f9cde92b853b3855d01c44adbee36cfbbf779ba7f66835\"]}": {
+    "collapsed_periods": [
+      "2021"
+    ],
+    "entity_count": null,
+    "exclusions": {
+      "records": [
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": [
+            "DACEUInstitutionsAndMembers"
+          ],
+          "reason": "party_total",
+          "row_count": 1,
+          "side": null
+        }
+      ]
+    },
+    "expected_cell_count": 1,
+    "facet_selections": [],
+    "group_summaries": [
+      {
+        "group_key": [
+          [
+            "time_period",
+            "2021"
+          ]
+        ],
+        "row_count": 3,
+        "time_period_max": "2021",
+        "time_period_min": "2021",
+        "value": 350.0,
+        "value_period": null
+      }
+    ],
+    "period_entities": [
+      [
+        "2021",
+        3
+      ]
+    ],
+    "period_label": null,
+    "pooled_parties": [
+      {
+        "count": 3,
+        "periods": 1,
+        "private_count": null,
+        "private_total_count": null,
+        "private_value": null,
+        "role": "financingProvider",
+        "total_count": 0
+      }
+    ],
+    "present_cell_count": 1,
+    "realised_coverage_fraction": 1.0,
+    "resolved_unit": "USD",
+    "skipped_cell_count": 0,
+    "warnings": []
+  },
+  "aggregate {\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"frames\":[\"4aa0c2dd386b91cd8b1594b18dfb521763dd494c11d280f02a4811372ee1c5f8\"]}": {
+    "collapsed_periods": [
+      "2021"
+    ],
+    "entity_count": null,
+    "exclusions": {
+      "records": []
+    },
+    "expected_cell_count": 1,
+    "facet_selections": [],
+    "group_summaries": [
+      {
+        "group_key": [
+          [
+            "time_period",
+            "2021"
+          ]
+        ],
+        "row_count": 2,
+        "time_period_max": "2021",
+        "time_period_min": "2021",
+        "value": 4297.6,
+        "value_period": null
+      }
+    ],
+    "period_entities": [
+      [
+        "2021",
+        2
+      ]
+    ],
+    "period_label": null,
+    "pooled_parties": [
+      {
+        "count": 2,
+        "periods": 1,
+        "private_count": 1,
+        "private_total_count": 0,
+        "private_value": 30.0,
+        "role": "financingProvider",
+        "total_count": 1
+      }
+    ],
+    "present_cell_count": 1,
+    "realised_coverage_fraction": 1.0,
+    "resolved_unit": "USD",
+    "skipped_cell_count": 0,
+    "warnings": []
+  },
+  "aggregate {\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"frames\":[\"98e2f50fd66999bf6796c7e84b5ab1d67e0548411c08036621c4d0d93b0cb82d\"]}": {
+    "collapsed_periods": [
+      "2021"
+    ],
+    "entity_count": null,
+    "exclusions": {
+      "records": []
+    },
+    "expected_cell_count": 1,
+    "facet_selections": [],
+    "group_summaries": [
+      {
+        "group_key": [
+          [
+            "time_period",
+            "2021"
+          ]
+        ],
+        "row_count": 2,
+        "time_period_max": "2021",
+        "time_period_min": "2021",
+        "value": 4578.400000000001,
+        "value_period": null
+      }
+    ],
+    "period_entities": [
+      [
+        "2021",
+        2
+      ]
+    ],
+    "period_label": null,
+    "pooled_parties": [
+      {
+        "count": 2,
+        "periods": 1,
+        "private_count": null,
+        "private_total_count": null,
+        "private_value": null,
+        "role": "financingProvider",
+        "total_count": 2
+      }
+    ],
+    "present_cell_count": 1,
+    "realised_coverage_fraction": 1.0,
+    "resolved_unit": "USD",
+    "skipped_cell_count": 0,
+    "warnings": []
+  },
+  "aggregate {\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"frames\":[\"9e8938f9ebc61299a7ec425b179789625e9a4ff489920b5ec7126e0f6a606721\"]}": {
+    "collapsed_periods": [
+      "2021"
+    ],
+    "entity_count": null,
+    "exclusions": {
+      "records": []
+    },
+    "expected_cell_count": 1,
+    "facet_selections": [],
+    "group_summaries": [
+      {
+        "group_key": [
+          [
+            "time_period",
+            "2021"
+          ]
+        ],
+        "row_count": 2,
+        "time_period_max": "2021",
+        "time_period_min": "2021",
+        "value": 430.8,
+        "value_period": null
+      }
+    ],
+    "period_entities": [
+      [
+        "2021",
+        2
+      ]
+    ],
+    "period_label": null,
+    "pooled_parties": [
+      {
+        "count": 2,
+        "periods": 1,
+        "private_count": 1,
+        "private_total_count": 1,
+        "private_value": 310.8,
+        "role": "financingProvider",
+        "total_count": 1
+      }
+    ],
+    "present_cell_count": 1,
+    "realised_coverage_fraction": 1.0,
+    "resolved_unit": "USD",
+    "skipped_cell_count": 0,
+    "warnings": []
+  },
+  "aggregate {\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"frames\":[\"b47178b9890a57722dafe3ecb2633e27866eb1e3a1ccb20a16a6e4dc701dd400\"]}": {
+    "collapsed_periods": [
+      "2021"
+    ],
+    "entity_count": null,
+    "exclusions": {
+      "records": [
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": [
+            "DACEUInstitutionsAndMembers"
+          ],
+          "reason": "party_total",
+          "row_count": 1,
+          "side": null
+        }
+      ]
+    },
+    "expected_cell_count": 1,
+    "facet_selections": [],
+    "group_summaries": [
+      {
+        "group_key": [
+          [
+            "time_period",
+            "2021"
+          ]
+        ],
+        "row_count": 2,
+        "time_period_max": "2021",
+        "time_period_min": "2021",
+        "value": 320.0,
+        "value_period": null
+      }
+    ],
+    "period_entities": [
+      [
+        "2021",
+        2
+      ]
+    ],
+    "period_label": null,
+    "pooled_parties": [
+      {
+        "count": 2,
+        "periods": 1,
+        "private_count": 0,
+        "private_total_count": 0,
+        "private_value": 0.0,
+        "role": "financingProvider",
+        "total_count": 0
+      }
+    ],
+    "present_cell_count": 1,
+    "realised_coverage_fraction": 1.0,
+    "resolved_unit": "USD",
+    "skipped_cell_count": 0,
+    "warnings": []
+  },
+  "aggregate {\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"frames\":[\"d1a0f95d542fb01fab1887a824a41ae665a0a9903f557f0b6a25b6874be77e11\"]}": {
+    "collapsed_periods": [
+      "2021"
+    ],
+    "entity_count": null,
+    "exclusions": {
+      "records": []
+    },
+    "expected_cell_count": 1,
+    "facet_selections": [],
+    "group_summaries": [
+      {
+        "group_key": [
+          [
+            "time_period",
+            "2021"
+          ]
+        ],
+        "row_count": 2,
+        "time_period_max": "2021",
+        "time_period_min": "2021",
+        "value": 4578.400000000001,
+        "value_period": null
+      }
+    ],
+    "period_entities": [
+      [
+        "2021",
+        2
+      ]
+    ],
+    "period_label": null,
+    "pooled_parties": [
+      {
+        "count": 2,
+        "periods": 1,
+        "private_count": 1,
+        "private_total_count": 1,
+        "private_value": 310.8,
+        "role": "financingProvider",
+        "total_count": 2
+      }
+    ],
+    "present_cell_count": 1,
+    "realised_coverage_fraction": 1.0,
+    "resolved_unit": "USD",
+    "skipped_cell_count": 0,
+    "warnings": []
+  },
+  "aggregate {\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"frames\":[\"d747e8863e4d32915280ce70ef44a3ac69080bdaf629d034b5e6445919b962cf\"]}": {
+    "collapsed_periods": [
+      "2020",
+      "2021"
+    ],
+    "entity_count": null,
+    "exclusions": {
+      "records": []
+    },
+    "expected_cell_count": 2,
+    "facet_selections": [],
+    "group_summaries": [
+      {
+        "group_key": [
+          [
+            "time_period",
+            "2020"
+          ]
+        ],
+        "row_count": 2,
+        "time_period_max": "2020",
+        "time_period_min": "2020",
+        "value": 1e+308,
+        "value_period": null
+      },
+      {
+        "group_key": [
+          [
+            "time_period",
+            "2021"
+          ]
+        ],
+        "row_count": 2,
+        "time_period_max": "2021",
+        "time_period_min": "2021",
+        "value": 1e+308,
+        "value_period": null
+      }
+    ],
+    "period_entities": [
+      [
+        "2020",
+        2
+      ],
+      [
+        "2021",
+        2
+      ]
+    ],
+    "period_label": null,
+    "pooled_parties": [
+      {
+        "count": 2,
+        "periods": 2,
+        "private_count": 1,
+        "private_total_count": 0,
+        "private_value": null,
+        "role": "financingProvider",
+        "total_count": 0
+      }
+    ],
+    "present_cell_count": 2,
+    "realised_coverage_fraction": 1.0,
+    "resolved_unit": "USD",
+    "skipped_cell_count": 0,
+    "warnings": []
+  },
+  "aggregate {\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"frames\":[\"ef2fca8dcf14bb799749d029b9833c3c1849761531a1894d0df436c63d8e9da0\"]}": {
+    "collapsed_periods": [
+      "2021"
+    ],
+    "entity_count": null,
+    "exclusions": {
+      "records": [
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": [
+            "DACEUInstitutionsAndMembers"
+          ],
+          "reason": "party_total",
+          "row_count": 1,
+          "side": null
+        }
+      ]
+    },
+    "expected_cell_count": 1,
+    "facet_selections": [],
+    "group_summaries": [
+      {
+        "group_key": [
+          [
+            "time_period",
+            "2021"
+          ]
+        ],
+        "row_count": 3,
+        "time_period_max": "2021",
+        "time_period_min": "2021",
+        "value": 350.0,
+        "value_period": null
+      }
+    ],
+    "period_entities": [
+      [
+        "2021",
+        3
+      ]
+    ],
+    "period_label": null,
+    "pooled_parties": [
+      {
+        "count": 3,
+        "periods": 1,
+        "private_count": 1,
+        "private_total_count": 0,
+        "private_value": 30.0,
+        "role": "financingProvider",
+        "total_count": 0
+      }
+    ],
+    "present_cell_count": 1,
+    "realised_coverage_fraction": 1.0,
+    "resolved_unit": "USD",
+    "skipped_cell_count": 0,
+    "warnings": []
+  },
+  "aggregate {\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[]},\"frames\":[\"bdd0f3468615a132581acf783eb455132712eb0fb7e719dc0d4f8cbc66c2ff11\"]}": {
+    "collapsed_periods": [
+      "2020",
+      "2021"
+    ],
+    "entity_count": null,
+    "exclusions": {
+      "records": [
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": [
+            "DACEUInstitutionsAndMembers"
+          ],
+          "reason": "party_total",
+          "row_count": 2,
+          "side": null
+        }
+      ]
+    },
+    "expected_cell_count": 1,
+    "facet_selections": [],
+    "group_summaries": [
+      {
+        "group_key": [],
+        "row_count": 6,
+        "time_period_max": "2021",
+        "time_period_min": "2020",
+        "value": 700.0,
+        "value_period": null
+      }
+    ],
+    "period_entities": [
+      [
+        "2020",
+        3
+      ],
+      [
+        "2021",
+        3
+      ]
+    ],
+    "period_label": "2020/2021",
+    "pooled_parties": [
+      {
+        "count": 3,
+        "periods": 2,
+        "private_count": 1,
+        "private_total_count": 0,
+        "private_value": 60.0,
+        "role": "financingProvider",
+        "total_count": 0
+      }
+    ],
+    "present_cell_count": 1,
+    "realised_coverage_fraction": 1.0,
+    "resolved_unit": "USD",
+    "skipped_cell_count": 0,
+    "warnings": []
+  },
+  "quotient_of {\"arguments\":{\"denominator_by\":{\"recipient\":\"observationAbout\"},\"denominator_entity\":{},\"numerator_by\":[\"recipient\"],\"numerator_entity\":{},\"stat_var\":\"dcid:ops_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"frames\":[\"5021022206b46151442ad0642f6f1e9618746e9a2e698e709ebdca1f05c609e7\",\"b1163dec0132507303000ea059db24bd9892ae974d84312aa268b6dfc0c0b768\"]}": {
+    "coverage": {
+      "entities": 3,
+      "entities_with_fewer_periods": 0,
+      "period_entities": [
+        [
+          "2020",
+          3
+        ]
+      ],
+      "periods": 1
+    },
+    "denominator_coverage_fraction": 0.625,
+    "denominator_facet_selections": [],
+    "denominator_only_periods": [
+      [
+        [
+          [
+            "recipient",
+            "B"
+          ]
+        ],
+        [
+          "2021",
+          "2022"
+        ]
+      ]
+    ],
+    "denominator_periods": [
+      "2020",
+      "2021",
+      "2022"
+    ],
+    "denominator_pooled": [],
+    "denominator_resolved_unit": null,
+    "denominator_stat_var": "dcid:Count_Person",
+    "exclusions": {
+      "records": [
+        {
+          "entities": {
+            "recipient": [
+              "C"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": null,
+          "reason": "unmatched_key",
+          "row_count": 1,
+          "side": "numerator"
+        },
+        {
+          "entities": {
+            "recipient": [
+              "A",
+              "D"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": null,
+          "reason": "period_unmatched",
+          "row_count": 3,
+          "side": "numerator"
+        },
+        {
+          "entities": {
+            "observationAbout": [
+              "B",
+              "D"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": null,
+          "reason": "period_unmatched",
+          "row_count": 3,
+          "side": "denominator"
+        },
+        {
+          "entities": {
+            "recipient": [
+              "E",
+              "F"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": null,
+          "reason": "zero_denominator",
+          "row_count": 2,
+          "side": "numerator"
+        },
+        {
+          "entities": {
+            "observationAbout": [
+              "E",
+              "F"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": null,
+          "reason": "zero_denominator",
+          "row_count": 2,
+          "side": "denominator"
+        }
+      ]
+    },
+    "facet_selections": [],
+    "keys_with_zero_denominator": [
+      [
+        [
+          "recipient",
+          "E"
+        ]
+      ]
+    ],
+    "keys_without_shared_period": [
+      [
+        [
+          "recipient",
+          "D"
+        ]
+      ]
+    ],
+    "matched_periods": [
+      "2020",
+      "2021"
+    ],
+    "numerator_coverage_fraction": 0.625,
+    "numerator_facet_selections": [],
+    "numerator_only_periods": [
+      [
+        [
+          [
+            "recipient",
+            "A"
+          ]
+        ],
+        [
+          "2019",
+          "2021"
+        ]
+      ]
+    ],
+    "numerator_periods": [
+      "2018",
+      "2019",
+      "2020",
+      "2021"
+    ],
+    "numerator_pooled": [],
+    "numerator_resolved_unit": null,
+    "numerator_stat_var": "dcid:Aid",
+    "period_quotients": [
+      {
+        "denominator_value": 2.0,
+        "key": [
+          [
+            "recipient",
+            "A"
+          ]
+        ],
+        "numerator_value": 1.0,
+        "quotient": 0.5,
+        "time_period": "2020"
+      },
+      {
+        "denominator_value": 2.0,
+        "key": [
+          [
+            "recipient",
+            "B"
+          ]
+        ],
+        "numerator_value": 1.0,
+        "quotient": 0.5,
+        "time_period": "2020"
+      },
+      {
+        "denominator_value": 2.0,
+        "key": [
+          [
+            "recipient",
+            "F"
+          ]
+        ],
+        "numerator_value": 1.0,
+        "quotient": 0.5,
+        "time_period": "2020"
+      }
+    ],
+    "stat_var": "dcid:ops_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "unit": {
+      "denominator": {
+        "stat_var": "dcid:Count_Person"
+      },
+      "numerator": {
+        "stat_var": "dcid:Aid"
+      }
+    },
+    "unmatched_keys": [
+      [
+        [
+          "recipient",
+          "C"
+        ]
+      ]
+    ],
+    "warnings": [],
+    "zero_denominator_cells": [
+      {
+        "key": [
+          [
+            "recipient",
+            "E"
+          ]
+        ],
+        "numerator_value": 1.0,
+        "time_period": "2020"
+      },
+      {
+        "key": [
+          [
+            "recipient",
+            "F"
+          ]
+        ],
+        "numerator_value": 1.0,
+        "time_period": "2021"
+      }
+    ]
+  },
+  "quotient_of {\"arguments\":{\"denominator_entity\":{},\"numerator_entity\":{\"financingProvider\":\"country/FRA\"},\"stat_var\":\"dcid:ratio\"},\"frames\":[\"ef2fca8dcf14bb799749d029b9833c3c1849761531a1894d0df436c63d8e9da0\",\"ef2fca8dcf14bb799749d029b9833c3c1849761531a1894d0df436c63d8e9da0\"]}": {
+    "coverage": {
+      "entities": null,
+      "entities_with_fewer_periods": null,
+      "period_entities": [
+        [
+          "2021",
+          3
+        ]
+      ],
+      "periods": 1
+    },
+    "denominator_coverage_fraction": 1.0,
+    "denominator_facet_selections": [],
+    "denominator_only_periods": [],
+    "denominator_periods": [
+      "2021"
+    ],
+    "denominator_pooled": [
+      {
+        "count": 3,
+        "periods": 1,
+        "private_count": 1,
+        "private_total_count": 0,
+        "private_value": 30.0,
+        "role": "financingProvider",
+        "total_count": 0
+      }
+    ],
+    "denominator_resolved_unit": "USD",
+    "denominator_stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+    "exclusions": {
+      "records": [
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers",
+              "GatesFoundation",
+              "country/DEU"
+            ],
+            "financingProvider_party_class": [
+              "official",
+              "private"
+            ],
+            "financingProvider_party_kind": [
+              "party",
+              "total"
+            ],
+            "financingProvider_party_whole": [
+              "false"
+            ],
+            "financingRecipient": [
+              "country/ETH"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": null,
+          "reason": "entity_not_selected",
+          "row_count": 3,
+          "side": "numerator"
+        },
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": [
+            "DACEUInstitutionsAndMembers"
+          ],
+          "reason": "party_total",
+          "row_count": 1,
+          "side": "denominator"
+        }
+      ]
+    },
+    "facet_selections": [],
+    "keys_with_zero_denominator": [],
+    "keys_without_shared_period": [],
+    "matched_periods": [
+      "2021"
+    ],
+    "numerator_coverage_fraction": 1.0,
+    "numerator_facet_selections": [],
+    "numerator_only_periods": [],
+    "numerator_periods": [
+      "2021"
+    ],
+    "numerator_pooled": [],
+    "numerator_resolved_unit": "USD",
+    "numerator_stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+    "period_quotients": [
+      {
+        "denominator_value": 350.0,
+        "key": [],
+        "numerator_value": 120.0,
+        "quotient": 0.34285714285714286,
+        "time_period": "2021"
+      }
+    ],
+    "stat_var": "dcid:ratio",
+    "unit": {
+      "denominator": "USD",
+      "numerator": "USD"
+    },
+    "unmatched_keys": [],
+    "warnings": [],
+    "zero_denominator_cells": []
+  },
+  "quotient_of {\"arguments\":{\"denominator_entity\":{},\"numerator_entity\":{},\"stat_var\":\"dcid:ratio\"},\"frames\":[\"97469c1182e18ccf06b6fd9078f26b5be233466418e72ecfe4cee0f884982be7\",\"c1277d9fc9e99d8dc4303d13999479dbf5d6f62396d2e8e09174e33d63f74b2a\"]}": {
+    "coverage": {
+      "entities": null,
+      "entities_with_fewer_periods": null,
+      "period_entities": [
+        [
+          "2021",
+          1
+        ]
+      ],
+      "periods": 1
+    },
+    "denominator_coverage_fraction": 1.0,
+    "denominator_facet_selections": [],
+    "denominator_only_periods": [],
+    "denominator_periods": [
+      "2021"
+    ],
+    "denominator_pooled": [],
+    "denominator_resolved_unit": "USD",
+    "denominator_stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+    "exclusions": {
+      "records": [
+        {
+          "entities": {},
+          "entities_truncated": false,
+          "parties": null,
+          "reason": "period_unmatched",
+          "row_count": 2,
+          "side": "numerator"
+        }
+      ]
+    },
+    "facet_selections": [],
+    "keys_with_zero_denominator": [],
+    "keys_without_shared_period": [],
+    "matched_periods": [
+      "2021"
+    ],
+    "numerator_coverage_fraction": 0.5,
+    "numerator_facet_selections": [],
+    "numerator_only_periods": [],
+    "numerator_periods": [
+      "2020",
+      "2021"
+    ],
+    "numerator_pooled": [
+      {
+        "count": 2,
+        "periods": 1,
+        "private_count": 0,
+        "private_total_count": 0,
+        "private_value": 0.0,
+        "role": "financingProvider",
+        "total_count": 0
+      }
+    ],
+    "numerator_resolved_unit": "USD",
+    "numerator_stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+    "period_quotients": [
+      {
+        "denominator_value": 40.0,
+        "key": [],
+        "numerator_value": 20.0,
+        "quotient": 0.5,
+        "time_period": "2021"
+      }
+    ],
+    "stat_var": "dcid:ratio",
+    "unit": {
+      "denominator": "USD",
+      "numerator": "USD"
+    },
+    "unmatched_keys": [],
+    "warnings": [],
+    "zero_denominator_cells": []
+  },
+  "rank {\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"rank_by\":[\"financingProvider\"],\"window_end\":null,\"window_start\":null},\"frames\":[\"ef2fca8dcf14bb799749d029b9833c3c1849761531a1894d0df436c63d8e9da0\"]}": {
+    "aggregation": "sum",
+    "entity_ranks": [
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "financingProvider",
+            "country/DEU"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 1,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 200.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "financingProvider",
+            "country/FRA"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 2,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 120.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "financingProvider",
+            "GatesFoundation"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 3,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 30.0
+      }
+    ],
+    "exclusions": {
+      "records": [
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": [
+            "DACEUInstitutionsAndMembers"
+          ],
+          "reason": "party_total",
+          "row_count": 1,
+          "side": null
+        }
+      ]
+    },
+    "expected_cell_count": 3,
+    "facet_selections": [],
+    "limit": null,
+    "overall_coverage_fraction": 1.0,
+    "per_period": false,
+    "periods_in_window": [
+      "2021"
+    ],
+    "present_cell_count": 3,
+    "private_parties": [
+      [
+        "financingProvider",
+        "GatesFoundation"
+      ]
+    ],
+    "resolved_unit": "USD",
+    "warnings": [],
+    "window_end": null,
+    "window_period_count": 1,
+    "window_start": null
+  },
+  "rank {\"arguments\":{\"aggregation\":null,\"ascending\":true,\"rank_by\":[\"reporter\"],\"window_end\":null,\"window_start\":null},\"frames\":[\"24cd424f7b421de815ebeb0fa3ea3c3566e0929fae600f6290771cce7f997533\"]}": {
+    "aggregation": null,
+    "entity_ranks": [
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:001"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 1,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 1.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:002"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 2,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 2.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:003"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 3,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 3.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:004"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 4,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 4.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:005"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 5,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 5.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:006"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 6,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 6.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:007"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 7,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 7.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:008"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 8,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 8.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:009"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 9,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 9.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:010"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 10,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 10.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:011"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 11,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 11.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:012"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 12,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 12.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:013"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 13,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 13.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:014"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 14,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 14.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:015"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 15,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 15.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:016"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 16,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 16.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:017"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 17,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 17.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:018"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 18,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 18.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:019"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 19,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 19.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:020"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 20,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 20.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:021"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 21,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 21.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:022"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 22,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 22.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:023"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 23,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 23.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:024"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 24,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 24.0
+      },
+      {
+        "coverage_fraction": 1.0,
+        "entity_key": [
+          [
+            "reporter",
+            "dcid:025"
+          ]
+        ],
+        "period_count": 1,
+        "rank": 25,
+        "row_count": 1,
+        "time_period": "2021",
+        "value": 25.0
+      }
+    ],
+    "exclusions": {
+      "records": []
+    },
+    "expected_cell_count": 25,
+    "facet_selections": [],
+    "limit": null,
+    "overall_coverage_fraction": 1.0,
+    "per_period": false,
+    "periods_in_window": [
+      "2021"
+    ],
+    "present_cell_count": 25,
+    "private_parties": [],
+    "resolved_unit": "dcid:USDollar",
+    "warnings": [],
+    "window_end": null,
+    "window_period_count": 1,
+    "window_start": null
+  },
+  "share_of {\"arguments\":{\"denominator_entity\":{},\"numerator_by\":[\"financingProvider\"],\"numerator_entity\":{},\"stat_var\":\"dcid:share\"},\"frames\":[\"b47178b9890a57722dafe3ecb2633e27866eb1e3a1ccb20a16a6e4dc701dd400\",\"b47178b9890a57722dafe3ecb2633e27866eb1e3a1ccb20a16a6e4dc701dd400\"]}": {
+    "coverage": {
+      "entities": 2,
+      "entities_with_fewer_periods": 0,
+      "period_entities": [
+        [
+          "2021",
+          2
+        ]
+      ],
+      "periods": 1
+    },
+    "denominator_coverage_fraction": 1.0,
+    "denominator_facet_selections": [],
+    "denominator_only_periods": [],
+    "denominator_periods": [
+      "2021"
+    ],
+    "denominator_pooled": [
+      {
+        "count": 2,
+        "periods": 1,
+        "private_count": 0,
+        "private_total_count": 0,
+        "private_value": 0.0,
+        "role": "financingProvider",
+        "total_count": 0
+      }
+    ],
+    "denominator_resolved_unit": "USD",
+    "denominator_stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+    "exclusions": {
+      "records": [
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": [
+            "DACEUInstitutionsAndMembers"
+          ],
+          "reason": "party_total",
+          "row_count": 1,
+          "side": "numerator"
+        },
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": [
+            "DACEUInstitutionsAndMembers"
+          ],
+          "reason": "party_total",
+          "row_count": 1,
+          "side": "denominator"
+        }
+      ]
+    },
+    "keys_without_shared_period": [],
+    "matched_periods": [
+      "2021"
+    ],
+    "numerator_coverage_fraction": 1.0,
+    "numerator_facet_selections": [],
+    "numerator_only_periods": [],
+    "numerator_periods": [
+      "2021"
+    ],
+    "numerator_pooled": [],
+    "numerator_resolved_unit": "USD",
+    "numerator_stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+    "period_shares": [
+      {
+        "denominator_value": 320.0,
+        "key": [
+          [
+            "financingProvider",
+            "country/DEU"
+          ]
+        ],
+        "numerator_value": 200.0,
+        "percent": 62.5,
+        "time_period": "2021"
+      },
+      {
+        "denominator_value": 320.0,
+        "key": [
+          [
+            "financingProvider",
+            "country/FRA"
+          ]
+        ],
+        "numerator_value": 120.0,
+        "percent": 37.5,
+        "time_period": "2021"
+      }
+    ],
+    "stat_var": "dcid:share",
+    "unmatched_keys": [],
+    "warnings": []
+  },
+  "share_of {\"arguments\":{\"denominator_entity\":{},\"numerator_by\":[\"financingProvider\"],\"numerator_entity\":{},\"stat_var\":\"dcid:share\"},\"frames\":[\"ef2fca8dcf14bb799749d029b9833c3c1849761531a1894d0df436c63d8e9da0\",\"ef2fca8dcf14bb799749d029b9833c3c1849761531a1894d0df436c63d8e9da0\"]}": {
+    "coverage": {
+      "entities": 3,
+      "entities_with_fewer_periods": 0,
+      "period_entities": [
+        [
+          "2021",
+          3
+        ]
+      ],
+      "periods": 1
+    },
+    "denominator_coverage_fraction": 1.0,
+    "denominator_facet_selections": [],
+    "denominator_only_periods": [],
+    "denominator_periods": [
+      "2021"
+    ],
+    "denominator_pooled": [
+      {
+        "count": 3,
+        "periods": 1,
+        "private_count": 1,
+        "private_total_count": 0,
+        "private_value": 30.0,
+        "role": "financingProvider",
+        "total_count": 0
+      }
+    ],
+    "denominator_resolved_unit": "USD",
+    "denominator_stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+    "exclusions": {
+      "records": [
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": [
+            "DACEUInstitutionsAndMembers"
+          ],
+          "reason": "party_total",
+          "row_count": 1,
+          "side": "numerator"
+        },
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": [
+            "DACEUInstitutionsAndMembers"
+          ],
+          "reason": "party_total",
+          "row_count": 1,
+          "side": "denominator"
+        }
+      ]
+    },
+    "keys_without_shared_period": [],
+    "matched_periods": [
+      "2021"
+    ],
+    "numerator_coverage_fraction": 1.0,
+    "numerator_facet_selections": [],
+    "numerator_only_periods": [],
+    "numerator_periods": [
+      "2021"
+    ],
+    "numerator_pooled": [],
+    "numerator_resolved_unit": "USD",
+    "numerator_stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+    "period_shares": [
+      {
+        "denominator_value": 350.0,
+        "key": [
+          [
+            "financingProvider",
+            "GatesFoundation"
+          ]
+        ],
+        "numerator_value": 30.0,
+        "percent": 8.571428571428571,
+        "time_period": "2021"
+      },
+      {
+        "denominator_value": 350.0,
+        "key": [
+          [
+            "financingProvider",
+            "country/DEU"
+          ]
+        ],
+        "numerator_value": 200.0,
+        "percent": 57.14285714285714,
+        "time_period": "2021"
+      },
+      {
+        "denominator_value": 350.0,
+        "key": [
+          [
+            "financingProvider",
+            "country/FRA"
+          ]
+        ],
+        "numerator_value": 120.0,
+        "percent": 34.285714285714285,
+        "time_period": "2021"
+      }
+    ],
+    "stat_var": "dcid:share",
+    "unmatched_keys": [],
+    "warnings": []
+  },
+  "share_of {\"arguments\":{\"denominator_entity\":{},\"numerator_entity\":{\"financingProvider\":\"country/FRA\"},\"stat_var\":\"dcid:share\"},\"frames\":[\"ef2fca8dcf14bb799749d029b9833c3c1849761531a1894d0df436c63d8e9da0\",\"ef2fca8dcf14bb799749d029b9833c3c1849761531a1894d0df436c63d8e9da0\"]}": {
+    "coverage": {
+      "entities": null,
+      "entities_with_fewer_periods": null,
+      "period_entities": [
+        [
+          "2021",
+          3
+        ]
+      ],
+      "periods": 1
+    },
+    "denominator_coverage_fraction": 1.0,
+    "denominator_facet_selections": [],
+    "denominator_only_periods": [],
+    "denominator_periods": [
+      "2021"
+    ],
+    "denominator_pooled": [
+      {
+        "count": 3,
+        "periods": 1,
+        "private_count": 1,
+        "private_total_count": 0,
+        "private_value": 30.0,
+        "role": "financingProvider",
+        "total_count": 0
+      }
+    ],
+    "denominator_resolved_unit": "USD",
+    "denominator_stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+    "exclusions": {
+      "records": [
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers",
+              "GatesFoundation",
+              "country/DEU"
+            ],
+            "financingProvider_party_class": [
+              "official",
+              "private"
+            ],
+            "financingProvider_party_kind": [
+              "party",
+              "total"
+            ],
+            "financingProvider_party_whole": [
+              "false"
+            ],
+            "financingRecipient": [
+              "country/ETH"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": null,
+          "reason": "entity_not_selected",
+          "row_count": 3,
+          "side": "numerator"
+        },
+        {
+          "entities": {
+            "financingProvider": [
+              "DACEUInstitutionsAndMembers"
+            ]
+          },
+          "entities_truncated": false,
+          "parties": [
+            "DACEUInstitutionsAndMembers"
+          ],
+          "reason": "party_total",
+          "row_count": 1,
+          "side": "denominator"
+        }
+      ]
+    },
+    "keys_without_shared_period": [],
+    "matched_periods": [
+      "2021"
+    ],
+    "numerator_coverage_fraction": 1.0,
+    "numerator_facet_selections": [],
+    "numerator_only_periods": [],
+    "numerator_periods": [
+      "2021"
+    ],
+    "numerator_pooled": [],
+    "numerator_resolved_unit": "USD",
+    "numerator_stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+    "period_shares": [
+      {
+        "denominator_value": 350.0,
+        "key": [],
+        "numerator_value": 120.0,
+        "percent": 34.285714285714285,
+        "time_period": "2021"
+      }
+    ],
+    "stat_var": "dcid:share",
+    "unmatched_keys": [],
+    "warnings": []
+  },
+  "share_of {\"arguments\":{\"denominator_entity\":{},\"numerator_entity\":{},\"stat_var\":\"dcid:ratio\"},\"frames\":[\"97469c1182e18ccf06b6fd9078f26b5be233466418e72ecfe4cee0f884982be7\",\"c1277d9fc9e99d8dc4303d13999479dbf5d6f62396d2e8e09174e33d63f74b2a\"]}": {
+    "coverage": {
+      "entities": null,
+      "entities_with_fewer_periods": null,
+      "period_entities": [
+        [
+          "2021",
+          1
+        ]
+      ],
+      "periods": 1
+    },
+    "denominator_coverage_fraction": 1.0,
+    "denominator_facet_selections": [],
+    "denominator_only_periods": [],
+    "denominator_periods": [
+      "2021"
+    ],
+    "denominator_pooled": [],
+    "denominator_resolved_unit": "USD",
+    "denominator_stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+    "exclusions": {
+      "records": [
+        {
+          "entities": {},
+          "entities_truncated": false,
+          "parties": null,
+          "reason": "period_unmatched",
+          "row_count": 2,
+          "side": "numerator"
+        }
+      ]
+    },
+    "keys_without_shared_period": [],
+    "matched_periods": [
+      "2021"
+    ],
+    "numerator_coverage_fraction": 0.5,
+    "numerator_facet_selections": [],
+    "numerator_only_periods": [],
+    "numerator_periods": [
+      "2020",
+      "2021"
+    ],
+    "numerator_pooled": [
+      {
+        "count": 2,
+        "periods": 1,
+        "private_count": 0,
+        "private_total_count": 0,
+        "private_value": 0.0,
+        "role": "financingProvider",
+        "total_count": 0
+      }
+    ],
+    "numerator_resolved_unit": "USD",
+    "numerator_stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+    "period_shares": [
+      {
+        "denominator_value": 40.0,
+        "key": [],
+        "numerator_value": 20.0,
+        "percent": 50.0,
+        "time_period": "2021"
+      }
+    ],
+    "stat_var": "dcid:ratio",
+    "unmatched_keys": [],
+    "warnings": []
+  }
+}

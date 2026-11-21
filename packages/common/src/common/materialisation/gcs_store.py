@@ -47,9 +47,8 @@ A read verifies, in order:
    called with, and this checks it against the reference `get` was asked
    for.
 
-A ceiling in steps 1 and 3 raises `FrameTooLarge`, which
-`analysis_mcp.frame_ref_resolution.resolve_input_frame` maps to the
-retryable `frame_too_large` refusal -- the stored bytes are exactly what was
+A ceiling in steps 1 and 3 raises `FrameTooLarge`, which data-mcp
+(`data_mcp.frame_materialisation`) maps to a refusal -- the stored bytes are exactly what was
 written, just too large for this store's contract to serve back, and a
 narrower `frame_ref` can succeed. A recorded row count that is not a count
 or that the footer contradicts, and every failure in steps 2 and 4, raise
@@ -209,11 +208,11 @@ _ENVELOPE_METADATA_KEY = "envelope"
 # object anywhere near real scale), never threaded from a service's own
 # settings: more than one service builds a store over the same bucket, and
 # per-service ceilings would let them diverge on what the bucket serves back.
-# `resolve_input_frame`'s own `settings.max_frame_rows` check is a separate,
-# service-level business ceiling on top of this one.
+# A service's own `settings.max_frame_rows` check is a separate, service-level
+# business ceiling on top of this one.
 
 # The default of the `max_frame_rows` setting (`common.FrameServiceSettings`) that
-# data-mcp, analysis-mcp and presentation-mcp enforce; a service may set its own
+# data-mcp and presentation-mcp enforce; a service may set its own
 # lower, and claims and reads at that.
 _DEFAULT_MAX_FRAME_ROWS = 250_000
 

@@ -67,15 +67,14 @@ _RECORD_WRITE_TIMEOUT_S = 2.0
 
 
 def root_rendering(record: MintRecord, *, default_enrichment: bool = False) -> dict[str, Any]:
-    """The rendering of a root read as `record`'s options state. With
-    `default_enrichment`, a record of the plain rendering leaves `columns` out, which
-    takes the default enrichment (dfo-apis `RootRendering.columns`)."""
+    """The rendering of a root read as `record`'s options state, its `columns` as the
+    record lists them: dfo-apis sorts and dedupes them on receipt
+    (`analysis_roots.mint_options`). With `default_enrichment`, a record of the plain
+    rendering leaves `columns` out, which takes the default enrichment (dfo-apis
+    `RootRendering.columns`)."""
     rendering: dict[str, Any] = {
         "without_party_totals": record.options.get("without_party_totals") is True,
-        # Sorted and listed once, as dfo-apis keeps a root's columns
-        # (`analysis_roots.mint_options`), so the recipe's normal form is the one
-        # dfo-apis computes.
-        "columns": sorted(set(record.options.get("columns") or ())),
+        "columns": list(record.options.get("columns") or ()),
     }
     if (groupby := record.options.get("groupby")) is not None:
         rendering["groupby"] = groupby

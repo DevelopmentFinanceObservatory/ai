@@ -3,8 +3,8 @@
 Every step runs in a fresh subprocess so one step's peak never hides in the next. A
 step's input is built first (outside the timed region), then the step runs alone. Inputs
 are built the way production builds them: Arrow columns through `build_frame_from_arrow`,
-and an analysis input read back out of the store, so a verb sees the table layout a
-stored frame decodes to.
+read back out of the store, so a step sees the table layout a stored frame decodes to.
+The analysis verbs compute in dfo-apis' analysis runner, so no step here runs one.
 
 Single stages:
 
@@ -12,22 +12,6 @@ Single stages:
 - store_put, store_get: `GcsMaterialisationStore` over an in-memory fake bucket, so the
   Parquet codec runs exactly as in production.
 - frame_sha256: the grammar's content hash of the frame.
-- aggregate, filter: the engine entry points over the CRS-shaped frame.
-- rank, growth, compare, share_of, join: the engine entry points over a single-StatVar
-  frame of the same row count (these verbs refuse more than one StatVar), which adds a
-  `sector` role so one StatVar can still reach 250,000 rows.
-- rank_limit, rank_per_period, rank_per_period_limit: `rank` with `limit=10`, with
-  `per_period` on, and with both. These rank the 169 recipients (1,690 recipient-year
-  cells under `per_period`).
-- rank_entities, rank_entities_limit: `rank` over every (provider, recipient, sector)
-  triple, n / 10 entities, without and with `limit=10`.
-
-join and join_call run under the production row ceiling (analysis-mcp's `max_frame_rows`
-default) and join two frames that share half their keys: the right side's sector is
-renamed on every other row. Two rows a matched key make the result as many rows as one
-input, the worst join the ceiling admits; a full match would build twice that and be
-refused. These figures therefore differ from runs that joined two fully matching frames
-with the ceiling lifted. Every other step lifts every ceiling.
 - wire: presentation-mcp's `publish_body`, the encoded publish request body.
 
 Whole calls, each starting from an empty process with its inputs held only in the fake
@@ -35,8 +19,6 @@ bucket, as a deployed instance holds them in GCS:
 
 - get_data: data-mcp's `_verify_parse_and_register` over the fetched artifact bytes
   (digest check, footer row count, decode, store write).
-- aggregate_call ... filter_call: the registered analysis tool function (store read,
-  engine, identity mint, store write, digest), over the same inputs as the engine steps.
 - publish_call: presentation-mcp's `publish_body_for` (store read, then `publish_body`).
 
 Each step reports `peak_rss_mb` (the process high-water mark, `ru_maxrss`, which includes
@@ -46,8 +28,8 @@ A whole call's `delta_mb` is what one call adds to an idle instance. `wire` and
 `publish_call` also report `body_bytes`, the size of the publish request body.
 
 A whole call also reports `claimed_rows`, the most rows it held at once in the process's
-frame row budget (`common.row_budget`): a join claims both inputs. After the table the
-script checks the budget. It refuses, and exits 1, unless every whole-call step ran at
+frame row budget (`common.row_budget`). Every step lifts every ceiling. After the
+table the script checks the budget. It refuses, and exits 1, unless every whole-call step ran at
 the largest row count and claimed rows, so a subset run or a call that stopped claiming
 cannot pass. Otherwise it prints the worst bytes a claimed row, the largest `delta_mb` /
 `claimed_rows` among those calls, and what that implies at `--memory-mib`:
@@ -57,7 +39,7 @@ cannot pass. Otherwise it prints the worst bytes a claimed row, the largest `del
 `max_frame_rows`, `frame_rows_in_flight_max` or the instance's memory changes.
 
     uv run python scripts/bench_frames.py --out bench.json
-    uv run python scripts/bench_frames.py --rows 50000 --steps decode,aggregate --out bench.json
+    uv run python scripts/bench_frames.py --rows 50000 --steps decode,get_data --out bench.json
     uv run python scripts/bench_frames.py --rows 250000 --memory-mib 2048
 """
 
@@ -79,31 +61,16 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from analysis_mcp.aggregate_tool import aggregate
-from analysis_mcp.compare_tool import compare
-from analysis_mcp.engine.aggregate import run_aggregate
-from analysis_mcp.engine.compare import run_compare
-from analysis_mcp.engine.filter import run_filter
-from analysis_mcp.engine.growth import run_growth
-from analysis_mcp.engine.join import run_join
-from analysis_mcp.engine.rank import run_rank
-from analysis_mcp.engine.share_of import run_share_of
 from analysis_mcp.execution_identity import current_execution_identity
-from analysis_mcp.filter_tool import filter_verb
-from analysis_mcp.growth_tool import growth
 from analysis_mcp.identity import op_spec_hash_for
-from analysis_mcp.join_tool import join
-from analysis_mcp.op_spec import AggregateOpSpec, CategoryMatchPredicate, OrderedThresholdPredicate
-from analysis_mcp.rank_tool import rank
-from analysis_mcp.settings import Settings as AnalysisSettings
-from analysis_mcp.share_of_tool import share_of
+from analysis_mcp.op_spec import AggregateOpSpec
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from common.materialisation import FrameRef, MaterialisationTrace, StoredFrameTrace, set_store
 from common.materialisation.gcs_store import GcsMaterialisationStore
@@ -117,7 +84,6 @@ from data_mcp.frame_materialisation import (
 from data_mcp.manifest import strip_manifest
 from data_mcp.settings import Settings as DataSettings
 from dfo_frame_grammar import Frame, build_frame_from_arrow, frame_sha256
-from fastmcp.tools import ToolResult
 from presentation_mcp.frame_publish import publish_body, publish_body_for
 
 DEFAULT_ROWS = (50_000, 60_000, 250_000)
@@ -135,46 +101,19 @@ DEFAULT_IDLE_MIB = 400
 DEFAULT_HEADROOM_MIB = 300
 # Every ceiling a step could meet is lifted, so a step measures its row count, never a refusal.
 UNBOUNDED_ROWS = 10_000_000
-# join and join_call keep the production row ceiling, so they measure only a join a caller
-# can complete.
-PRODUCTION_MAX_FRAME_ROWS = AnalysisSettings.model_fields["max_frame_rows"].default
-PRODUCTION_CEILING_STEPS = frozenset({"join", "join_call"})
 UNBOUNDED_BYTES = 2**33
 
 CRS_ROLES = ("financingProvider", "financingRecipient")
-SECTOR_ROLES = (*CRS_ROLES, "sector")
-# Each party's kind, as `get_data(place_types=True)` serves it: the verbs that pool or rank
-# several parties refuse a frame without it. Role keys of the frame, never ranked or grouped.
+# Each party's kind, as `get_data(place_types=True)` serves it. Role keys of the frame.
 KIND_COLUMNS = tuple(kind_column(role) for role in CRS_ROLES)
-SECTOR_A = "dcid:bench_sv_a"
-SECTOR_B = "dcid:bench_sv_b"
 
 STEPS = (
     "decode",
     "store_put",
     "store_get",
     "frame_sha256",
-    "aggregate",
-    "rank",
-    "rank_limit",
-    "rank_per_period",
-    "rank_per_period_limit",
-    "rank_entities",
-    "rank_entities_limit",
-    "share_of",
-    "compare",
-    "growth",
-    "join",
-    "filter",
     "wire",
     "get_data",
-    "aggregate_call",
-    "rank_call",
-    "share_of_call",
-    "compare_call",
-    "growth_call",
-    "join_call",
-    "filter_call",
     "publish_call",
 )
 # The steps that run a whole call; the budget check needs every one of them.
@@ -222,50 +161,12 @@ def _crs_table(n: int) -> pa.Table:
     )
 
 
-def _sector_table(n: int, *, stat_var: str) -> pa.Table:
-    """`n` rows of one StatVar: every year for each of `n / 10` (provider, recipient, sector)
-    entities, in shuffled order, so growth and share_of find no gap years, every party of
-    kind `party`."""
-    if n % len(YEARS):
-        raise SystemExit(f"{n} rows is not a multiple of the {len(YEARS)} years")
-    rng = random.Random(SEED)
-    cells = list(range(n))
-    rng.shuffle(cells)
-    sectors, providers, recipients, years = [], [], [], []
-    for cell in cells:
-        entity, year = divmod(cell, len(YEARS))
-        sector, pair = divmod(entity, N_PROVIDERS * N_RECIPIENTS)
-        provider, recipient = divmod(pair, N_RECIPIENTS)
-        sectors.append(sector)
-        providers.append(provider)
-        recipients.append(recipient)
-        years.append(year)
-    return pa.table(
-        {
-            "stat_var": pa.repeat(stat_var, n),
-            "financingProvider": _take(_labels("dcid:provider_", N_PROVIDERS), providers),
-            "financingRecipient": _take(_labels("dcid:recipient_", N_RECIPIENTS), recipients),
-            "sector": _take(_labels("dcid:sector_", max(sectors) + 1), sectors),
-            "time_period": _take(pa.array(YEARS, type=pa.string()), years),
-            "value": _values(rng, n),
-            "unit": pa.repeat("dcid:USD", n),
-            **_party_kinds(n),
-        }
-    )
-
-
 def _party_kinds(n: int) -> dict[str, pa.Array]:
     return {column: pa.repeat("party", n) for column in KIND_COLUMNS}
 
 
 def _crs_frame(n: int) -> Frame:
     return build_frame_from_arrow(_crs_table(n), role_keys=(*CRS_ROLES, *KIND_COLUMNS))
-
-
-def _sector_frame(n: int, *, stat_var: str) -> Frame:
-    return build_frame_from_arrow(
-        _sector_table(n, stat_var=stat_var), role_keys=(*SECTOR_ROLES, *KIND_COLUMNS)
-    )
 
 
 def _artifact_bytes(n: int) -> bytes:
@@ -426,29 +327,6 @@ def _crs_inputs(n: int) -> _Inputs:
     return _stored_inputs({"crs": _crs_frame(n)})
 
 
-def _sector_inputs(n: int) -> _Inputs:
-    return _stored_inputs({"sector_a": _sector_frame(n, stat_var=SECTOR_A)})
-
-
-def _join_inputs(n: int) -> _Inputs:
-    """Two n-row frames sharing n/2 keys, the right side's sector renamed on every other
-    row, which keeps its keys unique."""
-    left = _sector_table(n, stat_var=SECTOR_A)
-    right = _sector_table(n, stat_var=SECTOR_B)
-    sectors = right.column("sector").to_pylist()
-    renamed = pa.array(
-        [f"dcid:other_{label}" if index % 2 else label for index, label in enumerate(sectors)],
-        type=pa.string(),
-    )
-    right = right.set_column(right.schema.get_field_index("sector"), "sector", renamed)
-    return _stored_inputs(
-        {
-            "sector_a": build_frame_from_arrow(left, role_keys=(*SECTOR_ROLES, *KIND_COLUMNS)),
-            "sector_b": build_frame_from_arrow(right, role_keys=(*SECTOR_ROLES, *KIND_COLUMNS)),
-        }
-    )
-
-
 def _artifact_inputs(n: int) -> _Inputs:
     return _Inputs({}, {}, artifact=_artifact_bytes(n))
 
@@ -461,12 +339,6 @@ def _read(store: GcsMaterialisationStore, ref: FrameRef) -> Frame:
     held = asyncio.run(store.get(ref))
     assert held is not None
     return held[0]
-
-
-def _settled(result: ToolResult) -> None:
-    """Refuse to time a call that refused: a refusal skips the work being measured."""
-    if result.is_error:
-        raise RuntimeError(f"the call refused: {result.structured_content}")
 
 
 _Run = Callable[[], dict[str, int] | None]
@@ -514,119 +386,6 @@ def _setup_frame_sha256(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run
 
     def run() -> None:
         frame_sha256(frame)
-
-    return run
-
-
-def _setup_aggregate(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
-    frame = _read(store, inputs.refs[0])
-
-    def run() -> None:
-        run_aggregate(frame, group_by=["stat_var", "financingProvider"], aggregation="sum")
-
-    return run
-
-
-def _rank_setup(
-    *, rank_by: list[str], per_period: bool = False, limit: int | None = None
-) -> _Setup:
-    def setup(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
-        frame = _read(store, inputs.refs[0])
-
-        def run() -> None:
-            run_rank(
-                frame,
-                rank_by=rank_by,
-                aggregation="sum",
-                window_start=None,
-                window_end=None,
-                ascending=False,
-                per_period=per_period,
-                limit=limit,
-            )
-
-        return run
-
-    return setup
-
-
-RANK_LIMIT = 10
-RANK_BY_RECIPIENT = ["financingRecipient"]
-# One entity a (sector, provider, recipient) triple: n / 10 entities, where
-# `RANK_BY_RECIPIENT` ranks N_RECIPIENTS.
-RANK_BY_TRIPLE = list(SECTOR_ROLES)
-
-
-SHARE_NUMERATOR = {"financingProvider": "dcid:provider_0"}
-SHARE_BY = ["financingRecipient", "sector"]
-
-
-def _setup_share_of(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
-    frame = _read(store, inputs.refs[0])
-
-    def run() -> None:
-        run_share_of(
-            frame,
-            frame,
-            stat_var=SECTOR_A,
-            numerator_entity=SHARE_NUMERATOR,
-            denominator_entity={},
-            numerator_by=SHARE_BY,
-            denominator_by={column: column for column in SHARE_BY},
-        )
-
-    return run
-
-
-COMPARE_LEFT = {
-    "financingProvider": "dcid:provider_0",
-    "financingRecipient": "dcid:recipient_0",
-    "sector": "dcid:sector_0",
-}
-COMPARE_RIGHT = {**COMPARE_LEFT, "financingRecipient": "dcid:recipient_1"}
-
-
-def _setup_compare(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
-    frame = _read(store, inputs.refs[0])
-
-    def run() -> None:
-        run_compare(frame, frame, left_entity=COMPARE_LEFT, right_entity=COMPARE_RIGHT)
-
-    return run
-
-
-def _setup_growth(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
-    frame = _read(store, inputs.refs[0])
-
-    def run() -> None:
-        run_growth(frame, window_start=YEARS[0], window_end=YEARS[-1], entity_by=list(SECTOR_ROLES))
-
-    return run
-
-
-def _setup_join(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
-    left = _read(store, inputs.refs[0])
-    right = _read(store, inputs.refs[1])
-
-    def run() -> None:
-        run_join(left, right, max_output_rows=PRODUCTION_MAX_FRAME_ROWS)
-
-    return run
-
-
-FILTER_PREDICATES = (
-    OrderedThresholdPredicate(column="value", op="gte", value=250_000.0),
-    CategoryMatchPredicate(
-        column="financingProvider", values=("dcid:provider_0", "dcid:provider_1")
-    ),
-)
-
-
-def _setup_filter(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
-    frame = _read(store, inputs.refs[0])
-
-    def run() -> None:
-        run_filter(frame, predicates=list(FILTER_PREDICATES))
 
     return run
 
@@ -686,9 +445,11 @@ def _setup_get_data(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
                 ref=ref,
                 manifest=manifest,
                 options=rendering,
+                stamp=None,
                 settings=settings,
                 writer="bench",
                 store=store,
+                kinds_asked=True,
                 write_deadline=None,
             )
         )
@@ -697,21 +458,6 @@ def _setup_get_data(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
         return {"artifact_bytes": len(fetched)}
 
     return run
-
-
-def _tool_setup(call: Callable[..., Coroutine[Any, Any, ToolResult]]) -> _Setup:
-    """A step running `call` with the step's frame handles, as the tool server runs it."""
-
-    def setup(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
-        set_store(store)
-        handles = [_handle(ref) for ref in inputs.refs]
-
-        def run() -> None:
-            _settled(asyncio.run(call(*handles)))
-
-        return run
-
-    return setup
 
 
 def _setup_publish_call(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
@@ -737,74 +483,8 @@ SETUPS: dict[str, tuple[Callable[[int], _Inputs], _Setup]] = {
     "store_put": (_crs_inputs, _setup_store_put),
     "store_get": (_crs_inputs, _setup_store_get),
     "frame_sha256": (_crs_inputs, _setup_frame_sha256),
-    "aggregate": (_crs_inputs, _setup_aggregate),
-    "rank": (_sector_inputs, _rank_setup(rank_by=RANK_BY_RECIPIENT)),
-    "rank_limit": (_sector_inputs, _rank_setup(rank_by=RANK_BY_RECIPIENT, limit=RANK_LIMIT)),
-    "rank_per_period": (_sector_inputs, _rank_setup(rank_by=RANK_BY_RECIPIENT, per_period=True)),
-    "rank_per_period_limit": (
-        _sector_inputs,
-        _rank_setup(rank_by=RANK_BY_RECIPIENT, per_period=True, limit=RANK_LIMIT),
-    ),
-    "rank_entities": (_sector_inputs, _rank_setup(rank_by=RANK_BY_TRIPLE)),
-    "rank_entities_limit": (
-        _sector_inputs,
-        _rank_setup(rank_by=RANK_BY_TRIPLE, limit=RANK_LIMIT),
-    ),
-    "share_of": (_sector_inputs, _setup_share_of),
-    "compare": (_sector_inputs, _setup_compare),
-    "growth": (_sector_inputs, _setup_growth),
-    "join": (_join_inputs, _setup_join),
-    "filter": (_crs_inputs, _setup_filter),
     "wire": (_crs_inputs, _setup_wire),
     "get_data": (_artifact_inputs, _setup_get_data),
-    "aggregate_call": (
-        _crs_inputs,
-        _tool_setup(
-            lambda ref: aggregate(
-                frame_ref=ref, aggregation="sum", group_by=("stat_var", "financingProvider")
-            )
-        ),
-    ),
-    "rank_call": (
-        _sector_inputs,
-        _tool_setup(
-            lambda ref: rank(frame_ref=ref, rank_by=("financingRecipient",), aggregation="sum")
-        ),
-    ),
-    "share_of_call": (
-        _sector_inputs,
-        _tool_setup(
-            lambda ref: share_of(
-                frame_ref=ref,
-                numerator_entity=SHARE_NUMERATOR,
-                denominator_entity={},
-                numerator_by=SHARE_BY,
-                denominator_by={column: column for column in SHARE_BY},
-            )
-        ),
-    ),
-    "compare_call": (
-        _sector_inputs,
-        _tool_setup(
-            lambda ref: compare(frame_ref=ref, left_entity=COMPARE_LEFT, right_entity=COMPARE_RIGHT)
-        ),
-    ),
-    "growth_call": (
-        _sector_inputs,
-        _tool_setup(
-            lambda ref: growth(
-                frame_ref=ref, window_start=YEARS[0], window_end=YEARS[-1], entity_by=SECTOR_ROLES
-            )
-        ),
-    ),
-    "join_call": (
-        _join_inputs,
-        _tool_setup(lambda left, right: join(frame_ref=left, right_frame_ref=right)),
-    ),
-    "filter_call": (
-        _crs_inputs,
-        _tool_setup(lambda ref: filter_verb(frame_ref=ref, predicates=FILTER_PREDICATES)),
-    ),
     "publish_call": (_published_inputs, _setup_publish_call),
 }
 
@@ -826,12 +506,11 @@ def _current_rss_mb() -> float:
 
 
 def _child(step: str, rows: int, inputs_path: Path) -> dict[str, Any]:
-    # Each analysis tool reads its row ceiling from the environment on every call.
-    ceiling = PRODUCTION_MAX_FRAME_ROWS if step in PRODUCTION_CEILING_STEPS else UNBOUNDED_ROWS
-    os.environ["MAX_FRAME_ROWS"] = str(ceiling)
-    # The settings refuse a budget below two inputs at that ceiling. The step itself runs
-    # against the unbounded budget installed below.
-    os.environ["FRAME_ROWS_IN_FLIGHT_MAX"] = str(2 * ceiling)
+    # Every ceiling a step reads from the environment is lifted. The settings refuse a
+    # budget below twice that ceiling; the step itself runs against the unbounded budget
+    # installed below.
+    os.environ["MAX_FRAME_ROWS"] = str(UNBOUNDED_ROWS)
+    os.environ["FRAME_ROWS_IN_FLIGHT_MAX"] = str(2 * UNBOUNDED_ROWS)
     # This script's parent wrote the file a moment ago.
     inputs: _Inputs = pickle.loads(inputs_path.read_bytes())
     run = SETUPS[step][1](_store(_FakeClient(inputs.objects, inputs.metadata)), inputs)
