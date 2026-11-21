@@ -303,7 +303,9 @@ def test_the_search_and_ask_user_declarations_carry_prices_beside_counts():
 
     assert "`other_prices`, each with its spec_id and label" in declarations["search"]
     ask_user = declarations["ask_user"]
-    assert "An option for a count or prices that a search result names" in ask_user
+    assert "An option for one of a part's candidates carries the spec_id" in ask_user
+    assert "names its part in `prices_of`" in ask_user
+    assert "count" not in ask_user
 
 
 def test_every_chart_field_is_described_and_select_json_shows_a_list_of_values():
@@ -5609,7 +5611,7 @@ async def test_a_canvas_listing_does_not_spend_the_detail_reads():
     listing = await tools["recall"]("canvas", ctx)
     reads = [await tools["recall"]("canvas", ctx, component_id="cmp_01") for _ in range(3)]
 
-    assert [card["component_id"] for card in listing["on_canvas"]] == ["cmp_01"]
+    assert [card["component_id"] for card in listing["blocks"]] == ["cmp_01"]
     assert all("error" not in read for read in reads)
     for _ in range(BUDGETS["recall_canvas"] - 1):
         await tools["recall"]("canvas", ctx)

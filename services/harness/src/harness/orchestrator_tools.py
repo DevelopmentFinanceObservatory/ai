@@ -2803,10 +2803,10 @@ def build_orchestrator_tools(
         you.
 
         Ask only what changes the answer. Each question offers at least one
-        option. An option for a count or prices that a search result names
-        carries the spec_id the result gives it, and the answer names that
-        spec_id when the user picks it. A prices question names its part in
-        `prices_of`, and its options are filled in. Each spec_id goes on one option. End
+        option. An option for one of a part's candidates carries the spec_id
+        the search result gives it, and the answer names that spec_id when
+        the user picks it. Each spec_id goes on one option. A prices question
+        names its part in `prices_of`, and its options are filled in. End
         your turn after calling ask_user. Every answer comes back as this
         call's result.
         """
@@ -2970,10 +2970,12 @@ def build_orchestrator_tools(
         user's canvas.
 
         `part`: "plan" for the plan records of a turn, "readings" for the
-        search readings of a turn, "canvas" for every card of the conversation,
-        listed as on_canvas or hidden, each with its id, title, type, facts
-        and pinned state, or, with `component_id`, that one card's stored
-        entry. For a plan or readings, `turn` is the turn's number as the
+        search readings of a turn, "canvas" for the conversation's cards, or,
+        with `component_id`, that one card's stored entry. The canvas listing
+        names this turn's cards and the pinned ones, then the cards of the
+        newest earlier turns that fit, each with its id, title, type and the
+        turn that drew it, the first in full with their facts; every other
+        card is counted by the turn that drew it. For a plan or readings, `turn` is the turn's number as the
         conversation digest counts them; leave it out for the newest turn
         that has the part. A target that does not exist is refused with the
         values that do.

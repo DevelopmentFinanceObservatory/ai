@@ -4,7 +4,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 149401,
+      "total_chars": 179902,
       "system_instruction_chars": 20148,
       "declaration_total_chars": 40287,
       "declarations": [
@@ -26,12 +26,12 @@
         }
       ],
       "contents": {
-        "total_chars": 87572,
+        "total_chars": 116527,
         "buckets": [
           {
             "bucket": "text(planner-brief)",
             "count": 1,
-            "chars": 87567
+            "chars": 116522
           },
           {
             "bucket": "text",
@@ -45,7 +45,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 182284,
+      "total_chars": 212785,
       "system_instruction_chars": 20148,
       "declaration_total_chars": 40287,
       "declarations": [
@@ -67,12 +67,12 @@
         }
       ],
       "contents": {
-        "total_chars": 120293,
+        "total_chars": 149248,
         "buckets": [
           {
             "bucket": "text(planner-brief)",
             "count": 1,
-            "chars": 87567
+            "chars": 116522
           },
           {
             "bucket": "functionResponse:get_skill",
@@ -96,7 +96,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 182920,
+      "total_chars": 213421,
       "system_instruction_chars": 20148,
       "declaration_total_chars": 40287,
       "declarations": [
@@ -118,12 +118,12 @@
         }
       ],
       "contents": {
-        "total_chars": 120767,
+        "total_chars": 149722,
         "buckets": [
           {
             "bucket": "text(planner-brief)",
             "count": 1,
-            "chars": 87567
+            "chars": 116522
           },
           {
             "bucket": "functionResponse:get_skill",

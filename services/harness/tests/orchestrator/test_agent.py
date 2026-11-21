@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from google.genai import types
+from harness import turn_records
 from harness.gemini_wire import model_retry_options
 from harness.orchestrator_tools import MAX_ASK_QUESTIONS, build_orchestrator_tools
 from harness.prefix_cache import PrefixCache
@@ -201,12 +202,16 @@ def test_the_instruction_has_search_elect_the_measure_and_asks_only_what_search_
     )
     assert (
         "A count search chose (`counted_as`) is settled too, even when it lists other counts "
-        "under `alternatives`: go on with it, do not ask about the count" in text
+        "under `alternatives`: go on with it and do not ask about the count" in text
     )
     assert (
-        "In the reply, name the other counts search offers for the part (its `alternatives`), "
-        "so the user can ask for one" in text
+        "Name the other counts in a part's `alternatives` once, so the user can ask for one" in text
     )
+    # The harness states the count basis after the reply (`turn_records.basis_line`)
+    # and offers the other options as chips (`turn_records.scope_chips`).
+    assert f'"{turn_records._BASIS_LEAD}...", naming the sector, region, provider' in text
+    assert "leave the count and those options out of the reply" in text
+    assert "name the source with that count" not in text
     assert "switch to another count" not in text
     assert "Search leaves a count open only when a part lists `candidates`" in text
     assert (

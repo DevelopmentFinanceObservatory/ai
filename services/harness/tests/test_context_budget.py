@@ -1354,20 +1354,34 @@ _BIG = 100_000
 
 
 def _canvas_state(*, title: str, fact_summary: Any) -> ConversationState:
-    """A conversation whose composition holds three times the block cap of components,
-    each naming three times the show cap of 100,000-character entities."""
+    """A conversation that fills every group a canvas view names past its caps:
+    the open turn drew the full places and the compact ones and more, an
+    earlier turn drew as many pinned cards, and more earlier turns than the
+    digest counts apart drew one card each. Each card names three times the
+    show cap of 100,000-character entities."""
     state = ConversationState(conversation_id=_CONVERSATION)
-    entries = {
-        f"cmp_{index:016x}": {
-            "type": "line_chart",
-            "title": title,
-            "revision": 999_999_999,
-            "fact_summary": fact_summary,
-            "entities": [_ASTRAL * _BIG] * (3 * studio_state._DIGEST_SHOW_CAP),
-            "time": _ASTRAL * _BIG,
-        }
-        for index in range(3 * studio_state._DIGEST_BLOCK_CAP)
-    }
+    group = studio_state._DIGEST_BLOCK_CAP + studio_state._LISTING_COMPACT_CAP + 2
+    # Oldest first: the pinned cards' turn, the one-card turns, the open turn.
+    sizes = [group, *[1] * (studio_state._EARLIER_TURN_CAP + 2), group]
+    entries: dict[str, dict[str, Any]] = {}
+    turns: list[list[dict[str, Any]]] = []
+    for turn, size in enumerate(sizes):
+        cards = []
+        for index in range(size):
+            component_id = f"cmp_{turn:04x}{index:012x}"
+            entries[component_id] = {
+                "type": "line_chart",
+                "title": title,
+                "revision": 999_999_999,
+                "fact_summary": fact_summary,
+                "entities": [_ASTRAL * _BIG] * (3 * studio_state._DIGEST_SHOW_CAP),
+                "time": _ASTRAL * _BIG,
+            }
+            cards.append({"component_id": component_id, "action": "created"})
+        turns.append(cards)
+    *closed, state.turn_components = turns
+    state.turns = [{"user": "u", "assistant": "a", "cards": cards} for cards in closed]
+    pinned = {card["component_id"] for card in closed[0]}
     state.components.update(entries)
     state.composition = studio_state._next_manifest(
         None,
@@ -1377,6 +1391,7 @@ def _canvas_state(*, title: str, fact_summary: Any) -> ConversationState:
                 revision=entry["revision"],
                 type=ComponentType(entry["type"]),
                 title="block",
+                pinned=component_id in pinned,
             )
             for component_id, entry in entries.items()
         ],

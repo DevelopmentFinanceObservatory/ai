@@ -156,11 +156,14 @@ Put a word for how a flow is counted into `variable` only when the user said
 it, and let search elect the rest. When the user's words, the canvas or an
 earlier turn settle these choices, go on. A count search chose (`counted_as`)
 is settled too, even when it lists other counts under `alternatives`: go on
-with it, do not ask about the count, and name the source with that count
-("counted as net disbursements"). In the reply, name the other counts search
-offers for the part (its `alternatives`), so the user can ask for one. Search
-leaves a count open only when a part lists `candidates`, which you settle as
-set out above, and leaves prices open when a part lists `open_prices`. When
+with it and do not ask about the count. After your reply the harness adds a
+line, "Counted as: ...", naming the sector, region, provider and count basis
+each part was counted on, and offers other options of those choices as
+buttons, so leave the count and those options out of the reply. Name the
+other counts in a part's `alternatives` once, so the user can ask for one.
+Search leaves a count open only when a part lists `candidates`, which you
+settle as set out above, and leaves prices open when a part lists
+`open_prices`. When
 prices are open and another reading would give different figures, ask about
 them with ask_user in one call: one question per measure, with `prices_of` set
 to a part's spec_id and the `open_prices` entries as the options. Parts that
