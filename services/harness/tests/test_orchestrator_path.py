@@ -4,7 +4,6 @@ with a scripted model: answer, ask, plan, and what the agent reads after each.""
 from __future__ import annotations
 
 import copy
-import dataclasses
 import json
 import logging
 from pathlib import Path
@@ -14,13 +13,11 @@ from typing import Any, cast
 import pytest
 from analysis_mcp import digest as analysis_digest
 from analysis_mcp.digest import render_rank_digest
-from analysis_mcp.engine.rank import run_rank
-from analysis_mcp.execution_identity import current_execution_identity
+from analysis_mcp.summary import EntityRank, RankFacts
 from common.materialisation import FrameRef
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp import get_data_digest
 from data_mcp.tool_errors import ToolErrorCode
-from dfo_frame_grammar import Frame
 from executor.completion import PublishFault
 from executor.ledger import InMemoryRunLedger
 from google.adk.events import EventActions
@@ -120,6 +117,7 @@ from .orchestrator_fakes import (
     visited_nodes,
 )
 from .scripted_genai import ScriptedGenai, reply, text_part
+from .stored_verbs import EXECUTION_IDENTITY
 
 
 class AskingPlanner(ScriptedPlannerModel):
@@ -1434,39 +1432,37 @@ def _ranking(
     their number, as `analysis_mcp` renders its digest, with the row count of
     the frame it keeps and, under a `limit`, the entries it ranked. Several
     `years` rank each year on its own. `warnings` are the run's."""
-    frame = Frame.build(
-        role_keys=["observationAbout"],
-        rows=[
-            {
-                "stat_var": "dcid:LifeExpectancy",
-                "observationAbout": f"country/C{number:02d}{label}",
-                "time_period": year,
-                "value": 80.0 - number,
-                "unit": "dcid:Years",
-            }
-            for number in range(entities)
-            for year in years
-        ],
+    per_period = len(years) > 1
+    ranks = tuple(
+        EntityRank(
+            entity_key=(("observationAbout", f"country/C{number:02d}{label}"),),
+            value=80.0 - number,
+            rank=number + 1,
+            row_count=1,
+            coverage_fraction=1.0,
+            time_period=year,
+        )
+        for year in years
+        for number in range(entities)
     )
-    result = run_rank(
-        frame,
-        rank_by=("observationAbout",),
-        aggregation=None,
-        window_start=None,
-        window_end=None,
-        ascending=False,
-        per_period=len(years) > 1,
+    result = RankFacts(
+        resolved_unit="dcid:Years",
+        warnings=warnings,
+        periods_in_window=years,
+        overall_coverage_fraction=1.0,
+        entity_ranks=ranks,
+        per_period=per_period,
         limit=limit,
     )
     digest = render_rank_digest(
         rank_by=("observationAbout",),
-        result=dataclasses.replace(result, warnings=warnings),
+        result=result,
         op_spec_hash="ops_" + "1" * 32,
         content_version="ocv_" + "1" * 32,
-        execution_identity=current_execution_identity(),
+        execution_identity=EXECUTION_IDENTITY,
     )
-    ranked = len(result.entity_ranks) if limit is not None else None
-    return StepSummary(digest, "rank", result.frame.num_rows, ranked)
+    ranked = len(ranks) if limit is not None else None
+    return StepSummary(digest, "rank", len(result.kept_ranks), ranked)
 
 
 def _handed_back(
@@ -2200,7 +2196,7 @@ class _NoisySurface(ScriptedSurface):
                 analysis_digest._identity_block(
                     op_spec_hash="ops_" + "1" * 32,
                     content_version="ocv_" + "1" * 32,
-                    execution_identity=current_execution_identity(),
+                    execution_identity=EXECUTION_IDENTITY,
                 ),
                 "Coverage 1960-2023.",
             ]

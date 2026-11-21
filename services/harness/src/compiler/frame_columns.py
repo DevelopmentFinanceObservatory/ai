@@ -463,7 +463,7 @@ def bound_role_keys(
     spelled the way `frame` spells it. A verb keeps each of those roles'
     enrichment columns (`common.place_type.enrichment_columns`: its type, and a
     party's kind, class and whole columns) that its input carries
-    (`analysis_mcp.engine.common.frame_keeping_role_types`), so the keys
+    (`dfo_analysis_engine.engine.common.frame_keeping_role_types`), so the keys
     take them too when `input_role_keys` holds them. With neither known,
     `expected` stands as compiled.
 
@@ -512,7 +512,7 @@ def _one_unless_grouped(arguments: Mapping[str, JsonValue], input_count: int | N
 
 # The most distinct StatVars each verb's non-empty result holds, from its
 # arguments and the StatVar count of its `FRAME_PARAMETER` input, as
-# `analysis_mcp.engine` computes it:
+# `dfo_analysis_engine.engine` computes it:
 #
 # - `get_data` reads no input. Asked to sum a family (`stat_vars="sum"`),
 #   apis collapses every member into one series under the family's own

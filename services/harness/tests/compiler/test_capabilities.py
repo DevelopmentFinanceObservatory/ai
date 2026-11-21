@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 
 import pytest
-from analysis_mcp.engine.aggregate import AGGREGATIONS
+from analysis_mcp.op_spec import AGGREGATIONS
 from analysis_mcp.server import mcp as analysis_mcp
 from compiler.capabilities import (
     CAPABILITIES,

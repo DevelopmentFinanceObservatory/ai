@@ -211,7 +211,10 @@ identity refuses again and the source must be searched for afresh. All three
 come straight back as `RediscoveryNeeded`, naming the requirement and source
 that need discovering again -- a new discovery under a new plan revision,
 which only the translator can do. A rediscovery for a step carrying no evidence binding names nothing to
-rediscover, so it is `step_refused` instead.
+rediscover. When the same call can get past it (`repost_recovers`, over `common.refusal.REPOST_RECOVERS_CODES`: `upstream_version_changed`,
+which the analysis runner answers when a root read at its newest version met an upstream refresh
+mid-load) the step is called once more at once, within `MAX_ATTEMPTS_PER_STEP`. Otherwise, or when
+that call refuses too, it is `step_refused` with the refusal's message.
 
 **A retrieval step runs under one absolute budget.** A step whose tool
 capability pins `call_timeout_s` (`get_data`, among the workflow's tools) runs

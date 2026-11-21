@@ -14,7 +14,7 @@ types `Country` and `AdministrativeArea1` with no NUTS type, such as Hong Kong, 
 Greenland, stays a country: its sovereign state's figures leave it out.
 
 Several places sit at one level when some level in `PLACE_LEVELS` is one of every place's
-levels (`at_one_level`): the countries a level filter kept, or the countries apis serves
+levels: the countries a level filter kept, or the countries apis serves
 when it falls back from every place. `PLACE_LEVELS` holds the types whose places do not contain
 one another, so a rank or a sum across places at one level counts each figure once. A type
 outside `PLACE_LEVELS` names no level. `UNGeoRegion` is such a type: the graph types both
@@ -42,7 +42,7 @@ one axis hold disjoint party classes, so a sum across a role of whole totals alo
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Collection, Mapping
 from types import MappingProxyType
 from typing import Literal, get_args
 
@@ -88,12 +88,10 @@ _SEPARATOR = ","
 # The kinds apis serves in a `{role}_party_kind` cell. A total holds other parties' figures.
 PartyKind = Literal["party", "residual", "total"]
 PARTY_KINDS: frozenset[str] = frozenset(get_args(PartyKind))
-TOTAL_KIND: PartyKind = "total"
 
 # The classes apis serves in a `{role}_party_class` cell: a party's `official` or `private`, a
 # residual's `residual`. A whole total lists the classes it holds in full.
 PartyClass = Literal["official", "private", "residual"]
-PRIVATE_CLASS: PartyClass = "private"
 
 # The `{role}_party_whole` cell of a total holding a whole population; every other row's is
 # `false`.
@@ -145,16 +143,3 @@ def levels_of(cell: str) -> frozenset[str]:
         return frozenset()
     types = frozenset(part for part in cell.split(_SEPARATOR) if part)
     return types - {_COUNTRY} if types & _NUTS else types
-
-
-def at_one_level(cells: Collection[str], *, place_count: Callable[[], int]) -> bool:
-    """Whether the places a `{role}_type` column describes sit at one level.
-
-    `cells` are the column's distinct cells and `place_count` counts the distinct places in
-    its role column. Places whose cells share a level in `PLACE_LEVELS` sit at one level, and
-    so does one place alone, whatever its cell. A place has one cell, so `place_count` is
-    called only when a single cell with no shared level leaves the number of places open.
-    """
-    if not cells or frozenset.intersection(*(levels_of(cell) & PLACE_LEVELS for cell in cells)):
-        return True
-    return len(cells) == 1 and place_count() == 1

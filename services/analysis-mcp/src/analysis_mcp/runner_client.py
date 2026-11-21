@@ -10,8 +10,8 @@ answer, or the `ToolRefusal` its reply maps to:
   the call (`summary.VerbSummary`). From the anchor route it is `AnchorAnswer`.
 - 202 is a root dataset still building, `ToolRefusal.analysis_pending` with the
   runner's `retry_after_s`.
-- A problem document keeps the runner's `code`, `detail` and `fix` where this
-  service defines the code, which holds for every engine code, except that
+- A problem document keeps the runner's `code`, `detail`, `fix` and
+  `retry_mode`, a code this service defines no factory for included, except that
   `place_levels_mixed` is written again from its `fix`
   (`ToolRefusal.place_levels_mixed`), so its message names this service's calls. Under
   `rolling: "tree"`, a derived input with no stored recipe (`recipe_not_found`)
@@ -27,8 +27,10 @@ answer, or the `ToolRefusal` its reply maps to:
   `derived_input_unrecoverable`. The refusal names only the derived inputs
   whose manifest lists the root, and every one when a manifest cannot be read.
   `over_ceiling` is `frame_too_large`, and a busy runner's retryable
-  `service_unavailable` keeps its code with a delay. Any other code is
-  `upstream_error` naming it.
+  `service_unavailable` keeps its code with a delay. A code this service
+  defines for its own failures (`_LOCAL_CODES`) is `upstream_error` naming it.
+  `RUNNER_CODES` is every code the code registry (`dfo_spec_kit.registry`) maps
+  to the analysis route. A code outside it passes through too, and is logged.
 - An answer outside that contract, an unreachable dfo-apis, a timeout and a
   failed credential are `upstream_error`, the last three retryable.
 
@@ -104,11 +106,12 @@ from common.derived_replay import retry_after_s as _retry_after_s
 from common.holder import Holder
 from common.materialisation import FrameRef, LeftOutSeries
 from dfo_frame_grammar import shift_period
+from dfo_spec_kit.registry import REGISTRY
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from analysis_mcp.settings import Settings
 from analysis_mcp.summary import RecomputedInput, ResolvedPeriod, Rolling, VerbSummary
-from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal
+from analysis_mcp.tool_errors import RetryMode, ToolErrorCode, ToolRefusal
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +121,8 @@ DERIVED_FILE_PATH = f"{DERIVED_PATH}/file"
 # The derived file query that answers the frame's rows as one Parquet file.
 DERIVED_FILE_QUERY: Mapping[str, str] = {"format": "parquet", "bundle": "false"}
 
-# Codes this service defines for its own failures.
+# Codes this service defines for its own failures. A runner reply that carries one
+# is `upstream_error` naming it.
 _LOCAL_CODES = frozenset(
     {
         ToolErrorCode.FRAME_NOT_HELD,
@@ -131,8 +135,26 @@ _LOCAL_CODES = frozenset(
         ToolErrorCode.INTERNAL_ERROR,
     }
 )
-# Codes the runner's engine refuses a computation with.
-RUNNER_CODES = frozenset(code.value for code in ToolErrorCode if code not in _LOCAL_CODES)
+# The mode of each runner code whose meaning `retryable` does not carry, as data-mcp
+# gives the same code. dfo-apis renders it through its problem envelope, with
+# `retryable` and no `retry_mode`: `upstream_version_changed` (503, retryable), the
+# source refreshed while the run read it. Waiting reads the same moved data; the same
+# request sent again at once reads the refreshed version. `member_not_resolvable` keeps
+# the mode `retryable` gives it: dfo-apis marks it retryable when a second member walk
+# can settle members the first left unsettled (`retry_after_delay`), and not otherwise
+# (`do_not_retry`).
+_FIXED_MODES: Mapping[str, RetryMode] = {
+    "upstream_version_changed": RetryMode.REFRESH_THEN_RETRY,
+}
+# The endpoint the code registry maps the analysis route's refusals to.
+ANALYSIS_ENDPOINT = "datasets.analysis"
+# Every code the analysis route may refuse with (`dfo_spec_kit.registry`).
+RUNNER_CODES = frozenset(
+    entry.code
+    for entry in REGISTRY
+    if any(mapping.endpoint == ANALYSIS_ENDPOINT for mapping in entry.mappings)
+)
+_TOOL_CODES = frozenset(ToolErrorCode)
 _UNHELD_ROOT_CODES = frozenset({"snapshot_not_found", "recipe_not_found"})
 _EXPIRED_ROOT_CODE = "artifact_expired"
 _ROOT_CODES = _UNHELD_ROOT_CODES | {_EXPIRED_ROOT_CODE}
@@ -344,8 +366,6 @@ async def refusal_for(
     root: Pair = (str(fix.get("spec_id")), str(fix.get("content_version")))
     if code == ToolErrorCode.PLACE_LEVELS_MIXED and isinstance(fix.get("column"), str):
         refusal = _place_levels_mixed(fix)
-    elif code in RUNNER_CODES:
-        refusal = ToolRefusal(code=ToolErrorCode(code), message=detail, fix=fix)
     elif (
         tree_rolling
         and code == _RECIPE_MISSING_CODE
@@ -375,14 +395,63 @@ async def refusal_for(
         refusal = ToolRefusal(code=ToolErrorCode.FRAME_TOO_LARGE, message=detail, fix=fix)
     elif (refused := busy(response)) is not None:
         refusal = _busy(refused)
-    else:
+    elif code in _LOCAL_CODES:
         refusal = ToolRefusal.upstream_error(
             upstream_code=code,
             detail=detail,
             retry_after_s=_retry_after_s(response) if retryable else None,
             fix=fix,
         )
+    else:
+        refusal = _passed_through(problem, code=code, detail=detail, fix=fix, response=response)
     return refusal
+
+
+def _stated_mode(stated: object, *, code: str) -> RetryMode | None:
+    """The `RetryMode` a runner refusal states, or `None` when it states none or
+    one this service does not hold, which is logged."""
+    if stated is None:
+        return None
+    if isinstance(stated, str):
+        try:
+            return RetryMode(stated)
+        except ValueError:
+            pass
+    logger.warning(
+        "dfo-apis refused %s with retry_mode %r, which this service does not hold", code, stated
+    )
+    return None
+
+
+def _passed_through(
+    problem: Mapping[str, Any],
+    *,
+    code: str,
+    detail: str,
+    fix: dict[str, Any],
+    response: httpx2.Response,
+) -> ToolRefusal:
+    """The runner's refusal as it wrote it: its `code`, `detail`, `fix` and the
+    `retry_mode` its problem document states. A code missing from `RUNNER_CODES` is
+    logged, since the registry the client pins does not know it. A document with no
+    `retry_mode`, or one stating a mode `RetryMode` does not hold, which is logged,
+    takes the mode `_FIXED_MODES` gives its code, else `retry_after_delay` when it is
+    `retryable`, else the mode this service gives a code it defines. Only a
+    `retry_after_delay` refusal carries `retry_after_s`."""
+    if code not in RUNNER_CODES:
+        logger.warning("dfo-apis refused with %s, a code the code registry does not hold", code)
+    retryable = problem.get("retryable") is True
+    mode = _stated_mode(problem.get("retry_mode"), code=code) or _FIXED_MODES.get(code)
+    if mode is None and retryable:
+        mode = RetryMode.RETRY_AFTER_DELAY
+    delayed = mode is RetryMode.RETRY_AFTER_DELAY
+    return ToolRefusal(
+        code=ToolErrorCode(code) if code in _TOOL_CODES else code,
+        message=detail,
+        fix=fix,
+        retry_after_s=_retry_after_s(response) if delayed else None,
+        runner_retry_mode=mode,
+    )
 
 
 def _place_levels_mixed(fix: Mapping[str, Any]) -> ToolRefusal:

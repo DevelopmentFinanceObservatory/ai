@@ -1183,6 +1183,6 @@ async def test_on_cloud_run_both_dfo_apis_clients_share_one_id_token_provider(
         await service.aclose()
 
 
-def test_a_refresh_row_budget_too_small_for_a_two_input_verb_fails_at_startup() -> None:
+def test_a_refresh_row_budget_too_small_for_one_full_frame_fails_at_startup() -> None:
     with pytest.raises(ValueError, match="LIVE_REFRESH_ROWS_IN_FLIGHT_MAX"):
-        build_live_refresh(settings=Settings(live_refresh_rows_in_flight_max=499_999))
+        build_live_refresh(settings=Settings(live_refresh_rows_in_flight_max=249_999))

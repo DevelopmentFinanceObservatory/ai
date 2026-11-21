@@ -1431,8 +1431,8 @@ def observed_shape(frame: Frame) -> tuple[tuple[str, ...], int]:
 
     The role columns are every column outside `_RESERVED_COLUMNS`, in the order
     `grammar.derive_columns` gives them, which is `normalize_role_keys`' sorted order.
-    An analysis-mcp verb declares the same pair as its result's `role_keys` and
-    `stat_var_count` (`analysis_mcp.result.observed_shape`)."""
+    An analysis-mcp verb's result declares the same pair as `role_keys` and
+    `stat_var_count` (`analysis_mcp.result.VerbResult`)."""
     role_keys = tuple(column for column in frame.columns if column not in _RESERVED_COLUMNS)
     return role_keys, len(frame.table.column(STAT_VAR_COLUMN).unique())
 

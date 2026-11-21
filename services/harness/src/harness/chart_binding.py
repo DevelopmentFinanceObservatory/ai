@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from analysis_mcp.rolling_tool import coordinate_text
+from analysis_mcp.coordinates import coordinate_text
 from common.place_type import PARTY_ROLES, PLACE_LEVELS, levels_of
 from dfo_frame_grammar.grammar import FACET_IDENTITY_COLUMNS, UNIT_COLUMN
 from dfo_frame_grammar.rolling import latest_anchor

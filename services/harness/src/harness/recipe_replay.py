@@ -588,9 +588,7 @@ class _Replay:
         ]
         reached = [self.root_frames[node["root"]] for node in anchors or rolling_roots(self.tree)]
         roots = {(frame.ref.spec_id, frame.ref.content_version): frame for frame in reached}
-        answer = await self._claimed(
-            sum(frame.rows for frame in roots.values()),
-            stage="anchor",
+        answer = await self.call_tool(
             name=RESOLVE_ANCHOR_TOOL,
             arguments={
                 "populations": populations,
@@ -603,16 +601,6 @@ class _Replay:
         self.populations = populations
         self.period = resolved["period"]
         self.anchor_key = resolved["anchor_key"]
-
-    async def _claimed(
-        self, rows: int, *, stage: Stage, name: str, arguments: Mapping[str, object]
-    ) -> ToolAnswer:
-        """Call `name` while `rows` are held from the refresh row budget."""
-        try:
-            with self.row_budget.claim(rows):
-                return await self.call_tool(name=name, arguments=arguments)
-        except RowBudgetExhausted as exc:
-            raise _rows_stop(exc, stage=stage) from exc
 
     # The tree
 
@@ -662,9 +650,7 @@ class _Replay:
                 return _Frame(ref=expected, rows=rows, frame_content_version=None)
             if rolling:
                 arguments["anchor_key"] = self.anchor_key
-            answer = await self._claimed(
-                sum(frame.rows for frame in frames.values()),
-                stage="verb",
+            answer = await self.call_tool(
                 name=op_spec["verb"],
                 arguments=arguments,
             )
@@ -916,12 +902,12 @@ async def replay_recipe(
             the datasets principal, and `list_versions` and
             `analysis_execution_identity`, which need none.
         publish: Publishes the final frame with its recipe.
-        row_budget: The rows replays may hold at once. Each verb call claims its
-            inputs' rows, `resolve_anchor` the roots', and the publish the final
-            frame's. A claim the rows in flight leave no room for returns
-            `Pending`, and one larger than the whole budget is refused
-            `rows_over_refresh_budget`. The tools claim from the process-wide
-            budget as well.
+        row_budget: The rows replays may hold at once. The publish claims the final
+            frame's rows. The verbs and `resolve_anchor` compute on dfo-apis'
+            analysis runner and claim none. A claim the rows in flight leave no
+            room for returns `Pending`, and one larger than the whole budget is
+            refused `rows_over_refresh_budget`. The publish claims from the
+            process-wide budget as well.
         surface: The surface the replay serves, one of
             `common.caller.SHARED_SURFACES`, which its derived nodes' dfo-apis
             calls name with no caller (`common.caller.shared_work_context`):
