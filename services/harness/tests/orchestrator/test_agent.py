@@ -147,7 +147,7 @@ def test_the_instruction_says_what_the_canvas_digests_focus_card_is():
 
 
 def test_the_instruction_says_when_cards_come_off_and_that_pinned_ones_stay():
-    """Cards accumulate across turns; the model takes them off when the user
+    """Cards accumulate across turns. The model takes them off when the user
     asks or the conversation changes subject, and pinned cards stay."""
     text = " ".join(INSTRUCTION.split())
     assert "each turn's cards join the ones already on the canvas" in text

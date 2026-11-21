@@ -766,7 +766,7 @@ def test_the_canvas_listing_stays_under_its_maximum_however_large_the_inputs():
 
 
 def test_a_card_taken_off_the_canvas_this_turn_is_named_off_it_and_says_so():
-    """A card this turn drew and the canvas no longer holds is still named,
+    """A card this turn drew and then lost from the canvas is still named,
     after the cards on the canvas and flagged, so the model does not read it
     as on the canvas."""
     state = _canvas({"cmp_01": _entry("Aid", _fact_summary()), "cmp_02": _entry("Debt", None)})
@@ -868,8 +868,8 @@ def _named_ids(view: dict[str, Any]) -> list[str]:
 
 
 def test_every_card_drawn_this_turn_and_every_pinned_card_is_named():
-    """Forty cards drawn this turn and twenty pinned ones: the listing names
-    each, in full or compactly, then the earlier cards still on the canvas."""
+    """With forty cards drawn this turn and twenty pinned ones, the listing
+    names each, in full or compactly, then the earlier cards still on the canvas."""
     state = _turns_of_cards((20, True, True), (2, False, True), (40, False, True))
     drawn = [f"cmp_3_{n:02d}" for n in range(40)]
     pinned = [f"cmp_1_{n:02d}" for n in range(20)]
@@ -902,7 +902,7 @@ def test_a_follow_up_turn_lists_the_earlier_cards_on_the_canvas_in_full():
 
 def test_a_card_left_on_the_canvas_is_named_ahead_of_removed_cards():
     """Turn 2's card stays on the canvas while turn 3's forty cards were taken
-    off: the next turn names the card in full, so `remove_cards` can take it
+    off. The next turn names the card in full, so `remove_cards` can take it
     by id, and the removed ones after it."""
     state = _turns_of_cards(
         (1, False, True), (1, False, True), (40, False, False), (0, False, True)
@@ -919,7 +919,7 @@ def test_a_card_left_on_the_canvas_is_named_ahead_of_removed_cards():
 
 @pytest.mark.parametrize("order", ["reversed", "pinned-last", "interleaved"])
 def test_the_canvas_views_name_the_same_cards_however_the_canvas_is_ordered(order: str):
-    """The user reorders the canvas; the views rank by the turn that drew each
+    """The user reorders the canvas. The views rank by the turn that drew each
     card, so the order of the composition's blocks changes which cards are
     named, and how, not at all. Each card's `position` follows the canvas."""
     reorder: dict[str, Callable[[list[str]], list[str]]] = {
@@ -1021,7 +1021,7 @@ def test_cards_this_turn_took_off_rank_behind_the_pinned_ones():
 
 def test_turns_of_cards_off_the_canvas_are_named_whole_or_counted():
     """The off-canvas cards are named a whole turn at a time, newest first,
-    until a turn does not fit; it and the older turns are counted."""
+    until a turn does not fit. That turn and the older turns are counted."""
     compact = studio_state._LISTING_COMPACT_CAP
     state = _turns_of_cards(
         (5, False, False), (compact - 3, False, False), (2, False, False), (0, False, True)
@@ -1050,7 +1050,7 @@ def test_recall_without_a_component_lists_the_canvas():
 
 
 def test_the_orchestrators_canvas_summary_counts_the_cards_and_names_none():
-    """The always-on summary is two counts; the listing is a recall away."""
+    """The always-on summary holds counts only. The listing is a recall away."""
     state = _canvas({"cmp_01": _entry("Aid", _fact_summary()), "cmp_02": _entry("Debt", None)})
     state.components["cmp_old"] = _entry("Old", None)
 
@@ -1154,7 +1154,7 @@ def test_a_focus_that_names_no_stored_component_stays_out_of_the_summary():
 
 
 def test_a_focus_card_off_the_canvas_comes_whole_and_says_it_is_hidden():
-    """#348 keeps the focus card whatever its state; a hidden one stays
+    """#348 keeps the focus card whatever its state. A hidden one stays
     hidden, so the model does not read it as on the user's canvas."""
     state = _canvas({"cmp_01": _entry("Aid", None)})
     state.components["cmp_off"] = _entry("Off the canvas", None)
