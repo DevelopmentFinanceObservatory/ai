@@ -3547,14 +3547,14 @@ async def test_a_new_question_typed_on_the_plan_card_ends_the_turn_and_hands_it_
     assert "ended_by" not in reloaded.turns[1]
 
 
-async def test_a_set_aside_turn_whose_closing_write_failed_is_read_and_recorded_as_set_aside(
+async def test_a_set_aside_turn_whose_closing_write_failed_keeps_its_question(
     real_schemas: list[ToolSchema],
 ) -> None:
     """The turn ends on a new question typed on the plan card, and its
     closing write saves nothing. Once the lease lapses, the state read and the
     next load find the cursor closed with no record, and record the turn as
-    the stream ended it: `done`, its reply the set-aside sentence, and the
-    typed question kept, with no `state_not_saved`."""
+    the stream told the client, `state_not_saved` with no reply, keeping the
+    typed question for the page to send as the next turn."""
     clock = await StoreClock.start(_engine())
     store = StudioStore(_engine(), **clock.store_kwargs)
     app = _app(
@@ -3585,12 +3585,12 @@ async def test_a_set_aside_turn_whose_closing_write_failed_is_read_and_recorded_
     assert read["turn"]["status"] == "done"
     (closed,) = read["closed_since"]
     assert closed["new_question"] == typed
-    assert closed["reply"] == studio_state_module.SET_ASIDE_REPLY
-    assert "error" not in closed
+    assert closed["reply"] == ""
+    assert closed["error"] == HarnessCode.STATE_NOT_SAVED.value
     reloaded = await StudioStore(_engine(), **clock.store_kwargs).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert reloaded.turns[0]["new_question"] == typed
-    assert "error" not in reloaded.turns[0]
+    assert reloaded.turns[0]["error"] == HarnessCode.STATE_NOT_SAVED.value
 
 
 async def test_an_approval_is_recorded_with_its_approver_and_its_revision() -> None:

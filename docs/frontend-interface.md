@@ -431,7 +431,9 @@ out.
   Absent before the first turn. A turn reads `running` until its closed
   record exists, so a closed status always comes with the turn in
   `closed_since`. A turn whose answer was recorded and not yet taken, a
-  page left right after sending it, also reads `running`, with no `pause`.
+  page left right after sending it, also reads `running`, with no `pause`,
+  as does a pause whose entry the server never stored; `turn.resume`
+  carries on or sends the pause again.
 - `closed_since`: the closed turns after `since`, oldest first, at most 3,
   each `{turn_index, user_message, reply, component_ids, cards, error?, new_question?}`. `cards` holds each card the turn made, in `component_ids` order: `{component_id, type, title, revision, fact_summary?}`, the same `fact_summary` its `component.created` carried. It holds no `payload` or `provenance`; read the resolved revision from the presentation platform by `component_id`. `reply` is the text `message.complete` sent, empty when
   the turn closed with none; `error` is the code of a turn that did not
@@ -685,12 +687,12 @@ a loop:
    `switch_cancelled`.
 1. `reject` ends the turn. The stream sends `message.complete` and `done`.
    Nothing was computed.
-1. When the `amend` text asks a different question rather than a change to
-   the plan, the turn ends with the plan set aside unapproved. The stream
-   sends a `message.complete` saying so, then `done` with `new_question`,
-   the text as sent, and no new card. Close the card as "Taken as a new question" and send
-   `new_question` as a new `turn.request`. An answer to the closed card's
-   `interrupt_id` gets 404.
+1. When the planner reads the `amend` text as a new question, the turn
+   ends with the plan set aside unapproved. The stream sends a
+   `message.complete` saying so, then `done` with `new_question`, the text
+   as sent, and no new card. Close the card as "Taken as a new question"
+   and send `new_question` as a new `turn.request`. An answer to the closed
+   card's `interrupt_id` gets 404.
 
 A new `turn.request` on a paused conversation abandons the pause.
 

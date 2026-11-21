@@ -125,7 +125,6 @@ from harness.provenance import CardLineage, CardLineageDecodeError, lineage_from
 from harness.run_ledger import end_unfinished
 from harness.studio_state import (
     SEGMENT_TTL_S,
-    SET_ASIDE_REPLY,
     TURN_LOG_EVENT,
     ConversationState,
     DatabaseUnavailable,
@@ -787,12 +786,15 @@ class StoredConversation:
     (`StudioStore.peek`). `state` holds the durable fields, built apart from
     this instance's live state. `turn_status` is the status of the cursor of
     the row's turn, `None` when that turn has none (an Edit Card turn, or a
-    turn claimed and not yet opened). `lease_seconds` is how long the lease
-    on the row stays live by the database clock, `None` when none is."""
+    turn claimed and not yet opened). `pause_id` is the wire interrupt id of
+    the pause a paused cursor holds, `None` otherwise. `lease_seconds` is how
+    long the lease on the row stays live by the database clock, `None` when
+    none is."""
 
     state: ConversationState
     turn_status: TurnStatus | None
     lease_seconds: float | None
+    pause_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -891,6 +893,11 @@ _STAMP_STOP = (
     "stop_id = CASE WHEN lease_cancel THEN :minted ELSE stop_id END, "
     f"stop_turn = CASE WHEN lease_cancel THEN {_TURN_INDEX_SQL} ELSE stop_turn END, "
     "lease_cancel = false"
+)
+# The status of a conversation's turn's cursor, and its pause's interrupt id.
+_TURN_PAUSE = text(
+    "SELECT status, interrupt_id FROM turn_cursors "
+    "WHERE conversation = :pk AND turn_index = :turn_index"
 )
 _TURN_AT = text(
     "SELECT status, stop_taken_id FROM turn_cursors "
@@ -1243,20 +1250,17 @@ def set_aside_question(cursor: Cursor) -> str | None:
     return None
 
 
-def record_closed_turn(conversation: ConversationState, cursor: Cursor) -> str | None:
+def record_closed_turn(conversation: ConversationState, cursor: Cursor) -> str:
     """Record turn `cursor`, closed, on `conversation` as the client was told
     it ended, for a turn whose closing write never stored its record: keep
-    its records (`keep_turn_records`) and close it on its set-aside question
-    when it ended on one (`set_aside_question`), with the reply the stream
-    sent, and otherwise with no reply and `closed_turn_error`'s error.
+    its records (`keep_turn_records`) and close it with no reply and
+    `closed_turn_error`'s error. A turn that ended on a question set aside
+    for the next turn (`set_aside_question`) keeps that question too, so the
+    state read still hands it back to the page that never got `done`.
     Returns the error recorded."""
     keep_turn_records(conversation, cursor.state)
-    typed = set_aside_question(cursor)
-    if typed is not None:
-        conversation.close_turn(final_text=SET_ASIDE_REPLY, new_question=typed)
-        return None
     error = closed_turn_error(cursor)
-    conversation.close_turn(final_text="", error=error)
+    conversation.close_turn(final_text="", error=error, new_question=set_aside_question(cursor))
     return error
 
 
@@ -1505,12 +1509,12 @@ class StudioStore:
 
     async def _read(
         self, principal: str, conversation_id: str, *, turn_status: bool = False
-    ) -> tuple[Any, dict[str, Any], Cursor | None, TurnStatus | None] | None:
+    ) -> tuple[Any, dict[str, Any], Cursor | None, tuple[TurnStatus, str | None] | None] | None:
         """The conversation's row, with the database clock's reading as
         `db_now`, its flat durable keys, the cursor of its turn when that
         turn's record is open and its cursor closed, and, with `turn_status`,
-        the status of its turn's cursor, read in one snapshot. None when no
-        row holds it."""
+        the status of its turn's cursor and the interrupt id of the pause it
+        holds, read in one snapshot. None when no row holds it."""
         async with self._engine.connect() as plain:
             conn = await plain.execution_options(isolation_level="REPEATABLE READ")
             async with conn.begin():
@@ -1531,12 +1535,14 @@ class StudioStore:
                     cursor = await cursor_at(conn, row.id, row.turn_index)
                     if cursor is not None and cursor.status in CLOSED:
                         closed = cursor
-                status = closed.status if closed is not None else None
+                status = (closed.status, None) if closed is not None else None
                 if turn_status and status is None and row.turn_index:
                     at = (
-                        await conn.execute(_TURN_AT, {"pk": row.id, "turn_index": row.turn_index})
+                        await conn.execute(
+                            _TURN_PAUSE, {"pk": row.id, "turn_index": row.turn_index}
+                        )
                     ).first()
-                    status = TurnStatus(at.status) if at is not None else None
+                    status = (TurnStatus(at.status), at.interrupt_id) if at is not None else None
         return row, flat, closed, status
 
     async def load(self, principal: str, conversation_id: str) -> ConversationState | None:
@@ -1575,7 +1581,8 @@ class StudioStore:
         stored = await self._read(principal, conversation_id, turn_status=True)
         if stored is None:
             return None
-        row, flat, closed, status = stored
+        row, flat, closed, at = stored
+        status, pause_id = at if at is not None else (None, None)
         state = ConversationState(conversation_id=conversation_id)
         _apply_delta(state, flat)
         lease = _row_segment(row)
@@ -1586,6 +1593,7 @@ class StudioStore:
             state=state,
             turn_status=status,
             lease_seconds=lease.expires_at - row.db_now if lease is not None and live else None,
+            pause_id=pause_id if status is TurnStatus.PAUSED else None,
         )
 
     async def _load(

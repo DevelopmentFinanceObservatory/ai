@@ -54,6 +54,7 @@ from contextlib import (
     suppress,
 )
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, Literal
 
 from common.caller import ADDRESS_CALLER, set_supplied_caller, set_supplied_turn
@@ -1198,18 +1199,24 @@ class _BoundedTurnRoute(APIRoute):
         return bounded
 
 
-def _resume_refusal(cursor: Cursor | None, turn_index: int) -> JSONResponse | None:
+def _resume_refusal(
+    cursor: Cursor | None, turn_index: int, pending: Mapping[str, _PendingInterrupt]
+) -> JSONResponse | None:
     """The 409 `edit_conflict` a `/resume` of turn `turn_index` answers when
-    `cursor`, the conversation's open turn, is not that turn running: no
-    turn is open, another turn is, or the turn is paused on a question,
-    which only an answer carries on. `None` when the resume may run."""
+    `cursor`, the conversation's open turn, is not that turn running or
+    paused on a pause no entry of `pending` holds (`PauseAction.REPLAY`): no
+    turn is open, another turn is, or the turn is paused on a question that
+    awaits an answer on `/interrupt`. `None` when the resume may run."""
     if cursor is None or cursor.turn_index != turn_index:
         return _not_open_turn_response(turn_index)
-    if cursor.status is not TurnStatus.RUNNING:
-        return _resume_conflict(
-            f"turn {turn_index} is paused on a question, which an answer carries on"
-        )
-    return None
+    if cursor.status is TurnStatus.RUNNING:
+        return None
+    pause_id = cursor.pause.interrupt_id if cursor.pause is not None else None
+    if _pause_action(pending, pause_id)[0] is PauseAction.REPLAY:
+        return None
+    return _resume_conflict(
+        f"turn {turn_index} is paused on a question, which an answer carries on"
+    )
 
 
 def _not_open_turn_response(turn_index: int) -> JSONResponse:
@@ -1298,24 +1305,34 @@ def _closed_turn(
     )
 
 
-def _left_answer(
-    conversation: ConversationState, cursor: Cursor | None
-) -> tuple[str, _PendingInterrupt] | None:
-    """The answer to `cursor`'s open pause that a client left before the
-    turn took it: the pending entry, by its wire id, that `/interrupt`
-    marked resuming with the answer recorded, while the cursor still stands
-    paused on it. `None` when the cursor is not paused or no such entry
-    exists."""
-    if cursor is None or cursor.status is not TurnStatus.PAUSED or cursor.pause is None:
-        return None
-    for interrupt_id, pending in conversation.pending.items():
-        if (
-            pending.resuming_segment is not None
-            and pending.answer is not None
-            and pending.adk_id == cursor.pause.interrupt_id
-        ):
-            return interrupt_id, pending
-    return None
+class PauseAction(StrEnum):
+    """What a turn paused on a question needs (`_pause_action`)."""
+
+    # The pause's entry awaits the user's answer on `/interrupt`.
+    ANSWER = "answer"
+    # The entry holds an answer a client left before the turn took it;
+    # `/resume` carries it on as a retry of that answer.
+    CARRY = "carry"
+    # No entry holds the pause, since the write that stores it never landed;
+    # `/resume` sends the pause again from the cursor (`_replay_pause`).
+    REPLAY = "replay"
+
+
+def _pause_action(
+    pending: Mapping[str, _PendingInterrupt], pause_id: str | None
+) -> tuple[PauseAction, str | None, _PendingInterrupt | None]:
+    """What a turn paused on the pause `pause_id` (the cursor's wire
+    interrupt id) needs, with the conversation's entry for that pause, by
+    its key, when it holds one. Entries for other pauses, such as an earlier
+    one whose answer the turn took, play no part. The state read and
+    `/resume` both decide by this, so every status the read gives has the
+    action `/resume` or `/interrupt` takes."""
+    for interrupt_id, entry in pending.items():
+        if pause_id is not None and entry.adk_id == pause_id:
+            if entry.resuming_segment is not None and entry.answer is not None:
+                return PauseAction.CARRY, interrupt_id, entry
+            return PauseAction.ANSWER, interrupt_id, entry
+    return PauseAction.REPLAY, None, None
 
 
 def _answer_again(
@@ -1346,8 +1363,9 @@ def _read_turn_status(stored: StoredConversation) -> TurnStatusName:
     one, with two exceptions that read `running`: a cursor closed whose
     record its segment has not yet stored, while that segment's lease is
     live, so a page reads again until the closed turn is there to read; and
-    a cursor paused on a question whose answer a client left before the
-    turn took it (`_left_answer`), which `/resume` carries on. A turn with
+    a cursor paused on a question whose entry holds an answer the turn has
+    not taken, or that no entry holds (`_pause_action`), which `/resume`
+    carries on or sends again. A turn with
     no cursor (an Edit Card turn, or one claimed and not yet opened) runs
     while a segment holds it, and is otherwise as its record closed it, or
     abandoned when nothing recorded it, as the next turn records it."""
@@ -1355,10 +1373,11 @@ def _read_turn_status(stored: StoredConversation) -> TurnStatusName:
     status = stored.turn_status
     if status is not None:
         unrecorded = status in CLOSED and not state.turn_recorded
-        answer_left = status is TurnStatus.PAUSED and any(
-            p.resuming_segment is not None and p.answer is not None for p in state.pending.values()
+        resumable = (
+            status is TurnStatus.PAUSED
+            and _pause_action(state.pending, stored.pause_id)[0] is not PauseAction.ANSWER
         )
-        return TurnStatusName.RUNNING if unrecorded or answer_left else TurnStatusName(status.value)
+        return TurnStatusName.RUNNING if unrecorded or resumable else TurnStatusName(status.value)
     if not state.turn_recorded:
         live = stored.lease_seconds is not None
         return TurnStatusName.RUNNING if live else TurnStatusName.ABANDONED
@@ -1398,12 +1417,11 @@ def _conversation_read(stored: StoredConversation, *, since: int | None) -> Conv
     ]
     pause = None
     if status is TurnStatusName.PAUSED:
-        awaiting = [p for p in state.pending.values() if p.resuming_segment is None]
-        if awaiting:
-            pending = awaiting[-1]
-            pause = PendingPause.model_validate(
-                {"interrupt_id": pending.adk_id, "kind": pending.kind, "frames": pending.frames}
-            )
+        _, _, entry = _pause_action(state.pending, stored.pause_id)
+        assert entry is not None  # a paused read is one whose entry awaits an answer
+        pause = PendingPause.model_validate(
+            {"interrupt_id": entry.adk_id, "kind": entry.kind, "frames": entry.frames}
+        )
     return ConversationRead(
         conversation_id=state.conversation_id,
         turn=turn,
@@ -3044,23 +3062,27 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     _not_open_turn_response(body.turn_index),
                 )
             cursor = await studio.turns.open_cursor(principal, conversation_id)
-            left = (
-                _left_answer(conversation, cursor)
-                if cursor is not None and cursor.turn_index == body.turn_index
-                else None
+            action, answered_id, answered = (
+                _pause_action(conversation.pending, cursor.pause.interrupt_id)
+                if cursor is not None
+                and cursor.turn_index == body.turn_index
+                and cursor.status is TurnStatus.PAUSED
+                and cursor.pause is not None
+                else (None, None, None)
             )
-            if left is not None:
+            if action is PauseAction.CARRY:
                 # A client left after its answer was recorded and before the
                 # turn took it: carry the turn on as a retry of that answer
                 # does, which claims the conversation itself.
+                assert answered_id is not None and answered is not None
                 hold.release()
                 return await interrupt(
-                    _answer_again(conversation_id, *left),
+                    _answer_again(conversation_id, answered_id, answered),
                     authorization=authorization,
                     x_dfo_account=x_dfo_account,
                     x_dfo_caller=x_dfo_caller,
                 )
-            refusal = _resume_refusal(cursor, body.turn_index)
+            refusal = _resume_refusal(cursor, body.turn_index, conversation.pending)
             if refusal is not None:
                 hold.release()
                 return refusal
@@ -3146,7 +3168,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         assert segment_id is not None
         try:
             claimed = await studio.turns.open_cursor(principal, conversation_id)
-            refusal = _resume_refusal(claimed, body.turn_index)
+            live = studio.store.current(principal, conversation_id)
+            assert live is not None
+            refusal = _resume_refusal(claimed, body.turn_index, live.pending)
             if refusal is not None:
                 await _release_claim(
                     studio.store, principal, conversation_id, hold, segment_id, turn=claiming
@@ -3157,6 +3181,23 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             left = [p for p in work.pending.values() if p.resuming_segment is not None]
             for pending in left:
                 pending.resuming_segment = segment_id
+            if claimed.status is TurnStatus.PAUSED:
+                # No entry holds the pause the cursor stands on: send it
+                # again with no node run, and its stream's closing write
+                # stores the entry the next answer answers.
+                assert claimed.pause is not None
+                return await _replay_pause(
+                    studio,
+                    principal=principal,
+                    conversation_id=conversation_id,
+                    interrupt_id=claimed.pause.interrupt_id,
+                    work=work,
+                    cursor=claimed,
+                    segment_id=segment_id,
+                    hold=hold,
+                    settings=settings,
+                    turn=claiming,
+                )
             if left:
                 try:
                     await studio.store.save(principal, conversation_id, work)

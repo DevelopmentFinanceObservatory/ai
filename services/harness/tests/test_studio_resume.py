@@ -22,8 +22,8 @@ from fastapi import FastAPI
 from google.genai import types
 from harness.scripted import ScriptedSurface
 from harness.studio import _conversation_read
-from harness.studio_state import ConversationState
-from harness.studio_store import StoredConversation, StudioStore
+from harness.studio_state import SEGMENT_TTL_S, ConversationState, _PendingInterrupt
+from harness.studio_store import SegmentClose, StoredConversation, StudioStore
 from harness.turn.store import TurnStatus
 from planner.workflow import ToolId
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -37,6 +37,7 @@ from .scripted_tools import (
     plan_call,
     search_call,
 )
+from .store_clock import StoreClock
 from .studio_routes import (
     AUTH,
     frame_for,
@@ -464,31 +465,156 @@ async def test_a_resume_carries_on_an_answer_its_client_left_before_the_turn_too
     assert _events(resumed)[-1] == "done"
 
 
+def _entry(interrupt_id: str, *, answered: bool = False) -> _PendingInterrupt:
+    return _PendingInterrupt(
+        adk_id=interrupt_id,
+        kind="plan",
+        resuming_segment="seg_left" if answered else None,
+        answer={"decision": "approve", "payload": None} if answered else None,
+    )
+
+
+# Each state the read can report, and what the page then does: `resume` for
+# `running` with no live lease, `wait` for a live lease, `answer` the pause,
+# or `append` the closed turn.
+_READ_TABLE = [
+    pytest.param(TurnStatus.RUNNING, None, (), False, None, "running", "resume", id="left-running"),
+    pytest.param(TurnStatus.RUNNING, None, (), False, 30.0, "running", "wait", id="segment-live"),
+    pytest.param(
+        TurnStatus.PAUSED,
+        "int_1",
+        (_entry("int_1"),),
+        False,
+        None,
+        "paused",
+        "answer",
+        id="paused-awaiting",
+    ),
+    pytest.param(
+        TurnStatus.PAUSED,
+        "int_1",
+        (_entry("int_1", answered=True),),
+        False,
+        None,
+        "running",
+        "resume",
+        id="paused-answer-left",
+    ),
+    pytest.param(
+        TurnStatus.PAUSED,
+        "int_1",
+        (),
+        False,
+        None,
+        "running",
+        "resume",
+        id="paused-entry-never-stored",
+    ),
+    pytest.param(
+        TurnStatus.PAUSED,
+        "int_2",
+        (_entry("int_1", answered=True), _entry("int_2")),
+        False,
+        None,
+        "paused",
+        "answer",
+        id="paused-again-after-an-answer-left",
+    ),
+    pytest.param(
+        TurnStatus.PAUSED,
+        "int_2",
+        (_entry("int_1", answered=True),),
+        False,
+        None,
+        "running",
+        "resume",
+        id="paused-again-entry-never-stored",
+    ),
+    pytest.param(
+        TurnStatus.DONE, None, (), False, 30.0, "running", "wait", id="closed-record-unwritten"
+    ),
+    pytest.param(TurnStatus.DONE, None, (), True, None, "done", "append", id="closed-recorded"),
+    pytest.param(None, None, (), False, 30.0, "running", "wait", id="edit-card-live"),
+    pytest.param(None, None, (), False, None, "abandoned", "append", id="edit-card-left"),
+]
+
+
 @pytest.mark.parametrize(
-    ("cursor", "recorded", "lease_seconds", "status"),
-    [
-        pytest.param(TurnStatus.DONE, False, 30.0, "running", id="closed-record-unwritten"),
-        pytest.param(TurnStatus.DONE, True, None, "done", id="closed-recorded"),
-        pytest.param(TurnStatus.RUNNING, False, None, "running", id="left-running"),
-    ],
+    ("cursor", "pause_id", "pending", "recorded", "lease_seconds", "status", "action"),
+    _READ_TABLE,
 )
-def test_the_state_read_reports_a_closed_turn_only_once_its_record_exists(
-    cursor: TurnStatus, recorded: bool, lease_seconds: float | None, status: str
+def test_every_state_the_read_reports_has_one_page_action(
+    cursor: TurnStatus | None,
+    pause_id: str | None,
+    pending: tuple[_PendingInterrupt, ...],
+    recorded: bool,
+    lease_seconds: float | None,
+    status: str,
+    action: str,
 ) -> None:
-    """A segment closes the cursor before its closing write stores the
-    turn's record. Until the record exists the read says `running`, so a
-    page reads again instead of finding the turn closed with nothing in
-    `closed_since`."""
+    """The contract's table of page actions, over every state the read
+    reports: a `running` turn with no live lease is resumed, a live lease is
+    waited out, a `paused` turn carries the pause to answer, and a closed
+    turn is in `closed_since`."""
     state = ConversationState(conversation_id=CONVERSATION, turn_index=1, trace_id="tr_1")
     if recorded:
         state.close_turn(final_text="Done.")
-    stored = StoredConversation(state=state, turn_status=cursor, lease_seconds=lease_seconds)
+    elif cursor is None and lease_seconds is None:
+        state.turn_recorded = False
+    state.pending = {entry.adk_id: entry for entry in pending}
+    stored = StoredConversation(
+        state=state, turn_status=cursor, lease_seconds=lease_seconds, pause_id=pause_id
+    )
 
     read = _conversation_read(stored, since=0)
 
     assert read.turn is not None
     assert read.turn.status.value == status
-    assert [turn.turn_index for turn in read.closed_since] == ([1] if recorded else [])
+    match action:
+        case "resume":
+            assert not read.turn.lease_live and read.pause is None
+        case "wait":
+            assert read.turn.lease_live and read.turn.retry_after_seconds
+        case "answer":
+            assert read.pause is not None and read.pause.interrupt_id == pause_id
+        case "append":
+            assert not read.turn.lease_live
+            assert [turn.turn_index for turn in read.closed_since] == ([1] if recorded else [])
+
+
+async def test_a_resume_sends_a_pause_whose_entry_was_never_stored(pg_engine: AsyncEngine) -> None:
+    """The turn pauses on its plan card and the closing write that stores the
+    card's entry saves nothing. Once the lease lapses, the read reports the
+    turn running with no pause, and `/resume` sends the pause again from the
+    cursor, after which the read shows it to answer."""
+    clock = await StoreClock.start(pg_engine)
+    store = StudioStore(pg_engine, **clock.store_kwargs)
+    app, _ = orchestrator_app(plan_call("q with forks"), store=store)
+    close_segment = store.close_segment
+    failed = False
+
+    async def fail_once(*args: Any, **kwargs: Any) -> SegmentClose:
+        nonlocal failed
+        if not failed:
+            failed = True
+            return SegmentClose.FAILED
+        return await close_segment(*args, **kwargs)
+
+    store.close_segment = fail_once  # type: ignore[method-assign]
+    async with studio_client(app) as client:
+        first = await stream(client, "/api/studio/turn", turn_body("q with forks"))
+        assert first[-1]["event"] == "error"
+        await clock.advance(SEGMENT_TTL_S + 1)
+        before = (await _state(client)).json()
+        resumed = await stream(client, "/api/studio/resume", _resume_body(1))
+        after = (await _state(client)).json()
+
+    assert before["turn"]["status"] == "running"
+    assert before["turn"]["lease_live"] is False
+    assert "pause" not in before
+    assert _events(resumed)[-1] == "plan.proposed"
+    assert after["turn"]["status"] == "paused"
+    assert after["pause"]["interrupt_id"] == resumed[-1]["interrupt_id"]
 
 
 async def test_a_closed_turn_carries_the_cards_it_made(pg_engine: AsyncEngine) -> None:

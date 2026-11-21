@@ -635,14 +635,24 @@ for each amendment, answer or switch on the turn's cards. A client holding
 more than 3 turns fewer than the server reads again with `since` set to the
 last turn it got.
 
-`status` reads `running` in two states the cursor alone would name
+`status` reads `running` in three states the cursor alone would name
 otherwise. A turn whose segment closed it and has not yet stored its record
 reads `running` while that segment's lease is live, so a closed status
 always comes with the turn in `closed_since`. A turn paused on a question
 whose answer `/interrupt` recorded and the turn has not yet taken, because
 the client left in between, reads `running` with no `pause`, and
 `turn.resume` carries that answer on as a retried `interrupt.response`
-would.
+would. A turn paused on a question whose entry the server never stored,
+because the write that stores it failed, reads `running` with no `pause`,
+and `turn.resume` sends that pause again. `paused` always comes with the
+`pause` whose `interrupt_id` the turn awaits.
+
+Each state the read reports has one page action: `running` with no live
+lease, send `turn.resume`; `running` with a live lease, read again after
+`retry_after_seconds`; `paused`, answer `pause` with `interrupt.response`;
+any closed status, append the turns in `closed_since` the page lacks, and
+send a closed turn's `new_question` as the next turn when the page holds
+none after it.
 
 What a page does with `turn`:
 
@@ -679,8 +689,8 @@ for the next resume.
 Users type new questions into the plan card's revise box. The client sends
 them as `amend`, and the planner decides whether the text changes the plan
 or asks something else (`propose_plan`'s `starts_new_plan`, with or without
-`amends_version`). For a different question, the turn ends with its plan
-set aside unapproved: the new stream sends a `message.complete` saying the
+`amends_version`). For a new question, the turn ends with its plan set
+aside unapproved: the new stream sends a `message.complete` saying the
 plan was set aside for a new question, which a client without this delta
 still shows, then `done` with `new_question`, the `amend` text as sent, and
 no `plan.versioned` or new card. The
@@ -692,7 +702,10 @@ The client closes the card ("Taken as a new question") and sends
 `new_question` as the next `turn.request`, which is metered, opens its own
 trace, and plans or answers the question like any other. A state read's
 closed turn carries the same `new_question`, for a page that lost the
-stream before `done`. A client that ignores the field shows the message and loses the question. No new frame, request kind or turn status is added.
+stream before `done`. A client that ignores the field shows the message
+and loses the question. The delta adds one optional member,
+`done.new_question`, and keeps the existing frames, request kinds and turn
+statuses.
 
 ## Sample fixture values (delta 10)
 
