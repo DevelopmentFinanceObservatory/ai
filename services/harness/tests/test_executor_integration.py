@@ -891,10 +891,7 @@ async def test_kenyas_rank_series_runs_end_to_end_through_the_mounted_services(
     on which entities reported that year. A population-wide change in rank
     would mix movement with reporting, which is why the plan narrows to
     Kenya between the rank and the growth. A fixture with every entity in
-    every period would hide that hole. See
-    `test_verb_coverage_corpus.py::_run_kenya_rank_change_since_2010` for
-    what growth computes straight off the population-wide series, against
-    the bare tool functions."""
+    every period would hide that hole."""
 
     async def fake_fetch(**_kwargs: Any) -> bytes:
         return _rank_parquet_bytes()

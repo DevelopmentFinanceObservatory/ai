@@ -252,7 +252,9 @@ class RediscoveryNeeded(StrictModel):
     revision, not a retry this loop can make on its own. `requirement_id`
     and `spec_id` name the requirement and the source the step was approved
     to retrieve, read off its `EvidenceBinding`; a step without one has
-    nothing to rediscover, so its refusal comes back as `Refused` instead.
+    nothing to rediscover, so its refusal comes back as `Refused` instead,
+    after one more call when that call can get past it
+    (`executor.classify.repost_recovers`).
     `also_stopped` names the wave's other stops, wave order, when this one
     is the wave's first and so the one a run raises (`executor.run._Run.execute`).
     `completed` and `evidence` hold the steps that finished before the stop

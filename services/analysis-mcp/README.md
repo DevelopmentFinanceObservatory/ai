@@ -1,6 +1,6 @@
 # analysis-mcp
 
-`analysis-mcp` provides analytical operations over tabular data frames stored in the shared materialisation store. The service exposes nine analytical tools over Model Context Protocol (MCP), executes deterministic operations defined by structured operation specifications, generates model-facing text digests, and records execution traces with lineage metadata.
+`analysis-mcp` provides analytical operations over tabular data frames. The service exposes nine analytical tools over Model Context Protocol (MCP). Each tool builds a structured operation specification from its arguments and sends it to dfo-apis' analysis runner (`POST /api/datasets/analysis`), which computes and stores the result, and the tool renders the runner's summary as a model-facing text digest.
 
 ## Analytical tools
 
@@ -26,30 +26,18 @@ Each frame argument (`frame_ref`, `right_frame_ref`, `denominator_frame_ref`) is
 
 ## Operation specifications and execution pipeline
 
-Every analytical request executes through a standard pipeline.
+Every analytical request runs through one pipeline.
 
-1. The tool parses incoming arguments into a typed `OpSpec` model with strict field validation.
-1. The pipeline normalises strings, sorts column lists, and orders entity bindings for deterministic evaluation.
-1. The system computes a canonical RFC 8785 JSON Canonicalization Scheme (JCS) hash of the operation specification (`op_spec_hash`).
-1. The analytical engine evaluates the operation, applies coverage floor thresholds, and produces an output data frame.
-1. The service mints an output content version (`ocv_` format) from the operation hash, input content versions, and execution identity.
-1. The resulting frame and trace are saved to the materialisation store under the generated pair identifier, and the service returns a formatted digest and structured reference metadata.
-
-## Frame reference resolution
-
-Analytical tools receive inputs as `FrameRef` pairs consisting of a `spec_id` and a `content_version`.
-
-The service resolves these references against the `InMemoryMaterialisationStore`. During resolution, the pipeline performs three safety checks.
-
-- Input frame row counts are validated against `max_frame_rows`.
-- Upstream lineage and frame byte hashes are verified against recorded trace metadata.
-- A frame's `time_period` column must hold points at one grain, or one span such as `2018/2022` on every row. Anything else refuses `mixed_time_grain`.
+1. The tool parses incoming arguments into a typed `OpSpec` model with strict field validation (`tool_pipeline.build_op_spec_or_refusal`).
+1. The tool sends the op-spec to the analysis runner as a one-node tree over its frame arguments (`runner_tree.verb_tree`, `runner_client.run_tree`).
+1. The runner normalises the op-spec, computes the result, mints its `ops_`/`ocv_` pair, and stores the frame with its trace in dfo-apis.
+1. The tool renders the runner's summary as the digest (`digest.render_summary_digest`) and returns it with the structured result (`result.VerbResult`).
 
 ## Refusal codes
 
 A tool call that fails returns a typed refusal, carrying a `code`, a `message`, and a machine-readable `fix`. Each code maps to exactly one retry mode. `correct_and_retry` means a different argument value can succeed. `do_not_retry` means the identical call reaches the identical outcome, so the caller needs a different approach. `retry_after_delay` means the identical call can succeed after the wait `retry_after_s` names.
 
-`op_spec_invalid`, `role_ambiguous`, `frame_not_held`, and `frame_expired` come from the pipeline stages every verb shares: op-spec validation and frame reference resolution. `frame_too_large` and `internal_error` are also shared, the former from the row-count ceiling every input frame is checked against, the latter from the registration-site backstop that catches an unanticipated failure at the wire. `service_unavailable` is shared too: it fires when this process's frame row budget (`common.row_budget`, sized by `FRAME_ROWS_IN_FLIGHT_MAX`) has no room for a resolved input's rows, and the same call fits once other calls release theirs.
+The runner refuses with its own codes, retry modes and fixes, and a refusal reaches the caller under the runner's code. `op_spec_invalid` comes from op-spec validation before the call, `frame_ref_incomplete` from a frame argument without its `content_version`, and `internal_error` from the registration-site backstop that catches an unanticipated failure at the wire. `frame_not_held` and `frame_expired` name a frame the runner does not hold. `service_unavailable` fires when the runner is busy or a root dataset of the call is still building, and the same call succeeds after the wait it names. A code this service defines for its own failures that arrives in a runner reply becomes `upstream_error` naming it.
 
 | Code                                 | Retry               | Returned by                                                                           |
 | ------------------------------------ | ------------------- | ------------------------------------------------------------------------------------- |
@@ -90,7 +78,7 @@ A tool call that fails returns a typed refusal, carrying a `code`, a `message`, 
 | `service_unavailable`                | `retry_after_delay` | every verb                                                                            |
 | `internal_error`                     | `do_not_retry`      | every verb                                                                            |
 
-`unit_heterogeneous` covers both a frame that carries more than one declared unit and a pinned unit absent from the frame's declared units. `derived_input_unusable` fires when `growth` reads a frame whose rows carry one span, such as the `2018/2022` a sum over years or a collapsed `rank` writes, and its `fix` names that span. Growth reads one row per period, so the retry is growth over the frame that result was computed from. The other verbs accept a span frame: `rank` and `aggregate` keep the span, `compare`, `sum_of`, `share_of`, `quotient_of` and `join` match on the span string, and `filter` refuses only an `ordered_threshold` on `time_period` (`filter_predicate_type_mismatch`). Over any frame, an `ordered_threshold` on `time_period` takes a point such as `2018`, and an interval operand refuses with the same code. `derived_input_ordinal` fires when an input frame's `value` is a rank position, which a per-period `rank` with no `limit` writes, or a result derived from one: `share_of` and `quotient_of` refuse it on either side, `growth` refuses it with `change="relative"` and computes a change in places with `change="absolute"`, and `rank` refuses it in either mode, since highest first over positions puts the last-placed entity first. A top or bottom N per period is one `rank` call with `per_period` and `limit` set. `derived_input_unrecoverable` fires on any result an engine before 0.3.0 computed, whose collapsed and grown rows carry one borrowed year in place of the years they cover. Its `fix` names the engine version, and the analysis has to run again from the source data.
+`unit_heterogeneous` covers both a frame that carries more than one declared unit and a pinned unit absent from the frame's declared units. `derived_input_unusable` fires when `growth` reads a frame whose rows carry one span, such as the `2018/2022` a sum over years or a collapsed `rank` writes, and its `fix` names that span. Growth reads one row per period, so the retry is growth over the frame that result was computed from. The other verbs accept a span frame: `rank` and `aggregate` keep the span, `compare`, `sum_of`, `share_of`, `quotient_of` and `join` match on the span string, and `filter` refuses only an `ordered_threshold` on `time_period` (`filter_predicate_type_mismatch`). Over any frame, an `ordered_threshold` on `time_period` takes a point such as `2018`, and an interval operand refuses with the same code. `derived_input_ordinal` fires when an input frame's `value` is a rank position, which a per-period `rank` with no `limit` writes, or a result derived from one: `share_of` and `quotient_of` refuse it on either side, `growth` refuses it with `change="relative"` and computes a change in places with `change="absolute"`, and `rank` refuses it in either mode, since highest first over positions puts the last-placed entity first. A top or bottom N per period is one `rank` call with `per_period` and `limit` set. `derived_input_unrecoverable` fires on a derived input computed from a dataset version dfo-apis does not hold. Its `fix` names the input and its root, and the analysis has to run again from the source data.
 
 `share_of` and `quotient_of` divide each numerator key over the periods it shares with its denominator group, and record each period one side holds alone as a `period_unmatched` exclusion on that side. Debt service reported for 1970-2024 over GDP reported for 1960-2025 gives 55 shares, and the 11 GDP years outside them are recorded. Both digests name the periods left out and each side's coverage. A numerator key that shares no period with its group, such as France reporting to 2026 against a denominator holding only 2027, is left out of the result, named in the digest's `numerator keys left out` line, counted in the result's `dropped_key_count` and in `applied_policy.detail["keys_without_shared_period_count"]`, and counted as entities under `period_unmatched` in the step, while every other key keeps its shares. A numerator key with no denominator group under `denominator_by` is left out the same way, in both verbs: named in the same line, counted in `dropped_key_count` and in `applied_policy.detail["unmatched_key_count"]`, recorded as an `unmatched_key` exclusion, and counted as entities under `unmatched_key` in the step. `share_of_grain_mismatch` fires only when no key shares a period, and its `fix` names both sides' periods and, for a call with one key, that key. `share_of_key_unmatched` fires only when no numerator key has a group, and its `fix` samples each side's keys and counts them, as `quotient_of_no_key_matched`'s does. A `join` keeps the keys both sides hold in a period and records each side's other rows as an `unmatched_key` exclusion on that side. An entity that matches in no period is counted in the result's `dropped_key_count` for the left side and `right_dropped_key_count` for the right, so a join of a series for Kenya, Uganda and Tanzania with one for Kenya and Ghana counts 2 and 1.
 
@@ -118,7 +106,7 @@ The primary tool response is a text digest designed for language model consumpti
 
 ### Trace record
 
-The service stores an execution trace with lineage and replay metadata.
+The runner stores an execution trace with lineage and replay metadata beside each result.
 
 - `upstream_trace`: Original materialisation lineage, including dataset revisions and applied facets.
 - `op_spec_hash`: Cryptographic digest of the canonical operation specification.
@@ -127,17 +115,16 @@ The service stores an execution trace with lineage and replay metadata.
 - `content_version`: Minted toolkit content version for the output frame.
 - `input_content_versions`: Content versions of all consumed input frames.
 - `steps`: The step record of the verb's own operation: its inputs, policy, the caller's parameters, what it kept and left out, and the unit it produces. presentation-mcp joins the steps along a frame's ancestry and sends them when it publishes the frame.
-- `execution_identity`: Python runtime version, package version, and engine build identifier.
+- `execution_identity`: The engine version, frame grammar version and reduction policy version that computed the result.
 
 ## Configuration and environment variables
 
 The service reads configuration through `Settings`.
 
-| Variable                 | Type    | Default  | Description                                                                               |
-| ------------------------ | ------- | -------- | ----------------------------------------------------------------------------------------- |
-| `SEED_FIXTURE_FRAMES`    | Boolean | `false`  | Seeds the materialisation store with development finance fixture frames on startup        |
-| `MAX_FRAME_ROWS`         | Integer | `250000` | Maximum row count permitted for an input frame                                            |
-| `DERIVED_READ_TIMEOUT_S` | Float   | `15.0`   | Seconds one read of a frame the runner stored (manifest or file) may take before it fails |
+| Variable                 | Type    | Default | Description                                                                               |
+| ------------------------ | ------- | ------- | ----------------------------------------------------------------------------------------- |
+| `SEED_FIXTURE_FRAMES`    | Boolean | `false` | Seeds the materialisation store with development finance fixture frames on startup        |
+| `DERIVED_READ_TIMEOUT_S` | Float   | `15.0`  | Seconds one read of a frame the runner stored (manifest or file) may take before it fails |
 
 ## Testing and baseline updates
 

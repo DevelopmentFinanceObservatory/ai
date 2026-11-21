@@ -79,30 +79,18 @@ must declare (`compiler.frame_columns`). A filter must declare every role
 column of its input; every other verb the columns its arguments name. A role
 the frame carries no column for is `column_unbound`, before the call.
 
-**A step's StatVar count is bounded by the frame it reads.** A family
-retrieval holds one StatVar per member the source has data for, which only the
-minted frame states. `get_data` and every analysis verb declare their frame's
-`stat_var_count`, and a non-empty result must declare at least one StatVar and
-at most its verb's bound (`compiler.frame_columns.bound_stat_var_count`):
+**A step's StatVar count is bounded by the frame it reads.** A family retrieval read separately holds one StatVar per member the source has data for, which only the minted frame states. Which inputs a verb reads is decided in two places. The compiler (`planner.shapes`) refuses a several-StatVar input only where dfo-apis' analysis runner can never accept it: a frame a step such as a filter computed, whose stored recipe the runner reads unsummed, or a family apis may not sum over every axis it varies along. A retrieval no step has read, of a family apis may sum, goes to the runner whole, and the runner sums it into one StatVar before the verb runs, or refuses `stat_var_unresolved` with the fix. After the call, `get_data` and every analysis verb declare their frame's `stat_var_count`, and a non-empty result must declare at least one StatVar and at most its verb's bound (`compiler.frame_columns.bound_stat_var_count`):
 
-| Verb                               | Input holding several StatVars                                      | Most StatVars declared |
-| ---------------------------------- | ------------------------------------------------------------------- | ---------------------- |
-| `filter`                           | runs                                                                | its input's count      |
-| `compare`                          | refuses `role_ambiguous` unless each slice keeps one row per period | its left input's count |
-| `aggregate` grouping by `stat_var` | runs                                                                | its input's count      |
-| `aggregate` otherwise              | refuses `stat_var_unresolved`                                       | 1                      |
-| `growth`, `rank`, `share_of`       | refuses `stat_var_unresolved`                                       | 1                      |
-| `quotient_of`                      | refuses `stat_var_unresolved`                                       | 1                      |
-| `sum_of`                           | runs                                                                | 1                      |
-| `join`                             | refuses `stat_var_unresolved`                                       | 2                      |
+| Verb                                                               | Compiler refuses a several-StatVar input       | Runner over a retrieval it may sum | Most StatVars declared |
+| ------------------------------------------------------------------ | ---------------------------------------------- | ---------------------------------- | ---------------------- |
+| `filter`                                                           | never                                          | keeps every StatVar                | its input's count      |
+| `aggregate` grouping by `stat_var`                                 | never                                          | keeps every StatVar                | its input's count      |
+| `aggregate` otherwise, `growth`, `rank`, `share_of`, `quotient_of` | a computed input, or a family apis may not sum | sums it into one                   | 1                      |
+| `compare`                                                          | a computed input, or a family apis may not sum | sums each slice                    | its left input's count |
+| `sum_of`                                                           | a computed input, or a family apis may not sum | sums each side                     | 1                      |
+| `join`                                                             | a computed input, or a family apis may not sum | sums each side                     | 2                      |
 
-A count outside the bound is `shape_mismatch`. A `get_data` asked to sum its
-family that declares more than one StatVar is one too, and it carries a
-`family_not_summed` payload with `do_not_retry`, so the turn closes on a message
-and remedy written for the user and spends no replan. A verb that refuses a
-several-StatVar input stops the run with its own refusal. An input whose count
-is unknown (a `get_data` call that did not read the frame) leaves a `filter`,
-`compare` or grouped `aggregate` with the lower bound alone.
+A count outside the bound is `shape_mismatch`. A `get_data` asked to sum its family that declares more than one StatVar is one too, and it carries a `family_not_summed` payload with `do_not_retry`, so the turn closes on a message and remedy written for the user and spends no replan. A verb the runner refuses over a several-StatVar input stops the run with the runner's refusal. An input whose count is unknown (a `get_data` call that did not read the frame) leaves a `filter`, `compare` or grouped `aggregate` with the lower bound alone.
 
 **A rolling step's years are written from the data the run retrieved.** A
 `growth`, `rank` or `filter` step that states a period against the newest data
@@ -211,7 +199,10 @@ identity refuses again and the source must be searched for afresh. All three
 come straight back as `RediscoveryNeeded`, naming the requirement and source
 that need discovering again -- a new discovery under a new plan revision,
 which only the translator can do. A rediscovery for a step carrying no evidence binding names nothing to
-rediscover, so it is `step_refused` instead.
+rediscover. When the same call can get past it (`repost_recovers`, over `common.refusal.REPOST_RECOVERS_CODES`: `upstream_version_changed`,
+which the analysis runner answers when a root read at its newest version met an upstream refresh
+mid-load) the step is called once more at once, within `MAX_ATTEMPTS_PER_STEP`. Otherwise, or when
+that call refuses too, it is `step_refused` with the refusal's message.
 
 **A retrieval step runs under one absolute budget.** A step whose tool
 capability pins `call_timeout_s` (`get_data`, among the workflow's tools) runs

@@ -14549,7 +14549,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_e738086b65591a27b80040bddb156e65\",\"rendering\":{\"columns\":[\"party_class\",\"party_kind\",\"party_whole\"],\"without_party_totals\":true},\"spec_id\":\"spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"verb\":\"aggregate\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_e738086b65591a27b80040bddb156e65\",\"rendering\":{\"columns\":[\"party_kind\",\"party_class\",\"party_whole\"],\"without_party_totals\":true},\"spec_id\":\"spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"verb\":\"aggregate\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
