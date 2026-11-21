@@ -345,7 +345,7 @@ class _Apis:
 
 
 async def test_each_turn_reaches_dfo_apis_under_its_own_id_through_every_mount(
-    monkeypatch: pytest.MonkeyPatch, running_lifespan: Callable[..., Any]
+    monkeypatch: pytest.MonkeyPatch, running_lifespan: Callable[..., Any], pg_database_url: str
 ) -> None:
     """Two turns of one conversation, each calling data-mcp, analysis-mcp and
     presentation-mcp through the harness's own clients over loopback HTTP. Each
@@ -356,7 +356,7 @@ async def test_each_turn_reaches_dfo_apis_under_its_own_id_through_every_mount(
     calls made for shared work inside turn 2 name no caller and no turn, and
     their dfo-apis calls reach it as the Studio surface's."""
     apis = _Apis()
-    app = create_app(settings=Settings(mcp_api_token=_TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=_TOKEN))
     connects: list[str] = []
 
     def factory(

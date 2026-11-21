@@ -28,11 +28,13 @@ from common.telemetry import (
     TAGS_META_KEY,
     USER_META_KEY,
     backend,
+    end_turn_segment,
     flush_telemetry,
     init_telemetry,
     record_event,
     record_turn_outcome,
     root_if_span_ended,
+    start_turn_segment,
     turn_call_meta,
     turn_segment,
     use_call_session,
@@ -262,6 +264,45 @@ def test_record_event_adds_a_span_event_on_the_otlp_backend(isolated_telemetry) 
     assert span.name == "turn.segment"
     assert event.name == "compose.refused"
     assert dict(event.attributes or {}) == {"reason": "no_rows", "count": 3, "level": "WARNING"}
+
+
+def test_a_turn_segment_ended_with_attributes_exports_them_on_the_otlp_backend(
+    isolated_telemetry,
+) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    telemetry._backend = "otel"
+
+    end_turn_segment(
+        start_turn_segment("tr_export0005"), status="paused", attributes={"dfo.stored": "paused"}
+    )
+
+    (span,) = exporter.get_finished_spans()
+    assert span.name == "turn.segment"
+    assert (span.attributes or {}).get("dfo.stored") == "paused"
+
+
+def test_a_turn_segment_ended_with_attributes_exports_them_on_langfuse(
+    fake_langfuse: FakeLangfuse,
+) -> None:
+    init_telemetry(service_name="harness")
+    _join_auth_check_thread()
+
+    end_turn_segment(
+        start_turn_segment("tr_export0006"),
+        status="done",
+        level="DEFAULT",
+        attributes={"dfo.stored": "done"},
+    )
+    get_client().flush()
+
+    (segment,) = [span for span in fake_langfuse.spans() if span.name == "turn.segment"]
+    assert _attribute(segment, "dfo.stored") == "done"
+    assert _attribute(segment, "langfuse.observation.level") == "DEFAULT"
+    assert _attribute(segment, "langfuse.observation.status_message") == "done"
+    assert not [span for span in fake_langfuse.spans() if span.name == "turn"]
 
 
 async def test_a_turns_otlp_spans_share_one_synthetic_parent(isolated_telemetry) -> None:
@@ -891,10 +932,12 @@ def test_a_turn_exports_its_request_and_response_on_the_outcome_observation_alon
     ("error", "paused", "level", "status_message", "status"),
     [
         (None, False, None, None, None),
-        ("cancelled", False, "ERROR", "cancelled", None),
+        ("state_not_saved", False, "ERROR", "state_not_saved", None),
+        ("cancelled", False, "WARNING", "cancelled", None),
+        ("abandoned", False, "WARNING", "abandoned", None),
         (None, True, None, None, "paused"),
     ],
-    ids=["clean", "error", "paused"],
+    ids=["clean", "error", "cancelled", "abandoned", "paused"],
 )
 def test_a_turn_closed_with_an_error_exports_its_outcome_at_level_error(
     fake_langfuse: FakeLangfuse,
@@ -905,8 +948,9 @@ def test_a_turn_closed_with_an_error_exports_its_outcome_at_level_error(
     status: str | None,
 ) -> None:
     """A turn ended with an error code marks the outcome observation `ERROR`,
-    naming the code in its status message and its `dfo.turn_error` metadata.
-    A clean turn leaves it at the default level with no `dfo.turn_error`. A
+    naming the code in its status message and its `dfo.turn_error` metadata,
+    and `WARNING` for a Stop's `cancelled` and a newer turn's `abandoned`,
+    which no failure ended. A clean turn leaves it at the default level with no `dfo.turn_error`. A
     pause is a `turn.pause` observation, never a `turn`, and says so in
     `dfo.turn_status` too, which a close leaves out."""
     init_telemetry(service_name="harness")

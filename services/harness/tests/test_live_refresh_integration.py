@@ -164,12 +164,17 @@ async def harness(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., Any],
     runner: Any,
+    pg_database_url: str,
 ) -> AsyncIterator[Harness]:
     upstream = Upstream()
     monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", upstream.fetch)
     client_holder.set_client(data_mcp_client(upstream.handler))
     app = create_app(
-        settings=Settings(mcp_api_token="test-token", live_refresh_principal=LIVE_PRINCIPAL)
+        settings=Settings(
+            database_url=pg_database_url,
+            mcp_api_token="test-token",
+            live_refresh_principal=LIVE_PRINCIPAL,
+        )
     )
     async with running_lifespan(app):
         surface = McpSurface(

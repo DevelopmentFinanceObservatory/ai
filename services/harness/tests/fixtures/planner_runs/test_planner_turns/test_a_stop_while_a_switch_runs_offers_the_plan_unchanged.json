@@ -88,7 +88,7 @@
   [
     {
       "event": "plan.proposed",
-      "seq": 7,
+      "seq": 256,
       "interrupt_id": "interrupt_id-0",
       "plan_version_id": "plan_version_id-1",
       "version": 1,

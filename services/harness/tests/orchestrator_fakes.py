@@ -9,7 +9,8 @@ script; `call`, `search_call`, `fetch_call`, `make_charts_call` and
   `request_text` and `handed_back` to read what the model was sent.
 - `orchestrator_app` serves the studio routes on the orchestrator topology,
   wired as `harness.server` wires it, and `stream` posts to a route and
-  reads its SSE frames back.
+  reads its SSE frames back. `unconnected_store` is a conversation store
+  for a test that never reaches its database.
 
 `CannedSearch` answers `search` from data-mcp search envelopes that
 `definite_envelope` builds, and `frame_for` names the frame a `fetch` of a
@@ -19,7 +20,7 @@ spec_id registers when `harness.scripted.ScriptedExecutor` answers it.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -35,8 +36,9 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import BaseSessionService, InMemorySessionService
+from google.adk.sessions.base_session_service import GetSessionConfig
 from google.genai import types
-from harness.graph.state import AGENT_NAME, frame_id_for
+from harness.graph.state import AGENT_NAME, ORCHESTRATOR_SPECS_KEY, frame_id_for
 from harness.graph.workflow import create_root_workflow
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_adapter import PlannerAdapterError
@@ -50,7 +52,8 @@ from harness.scripted import (
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
-from harness.studio_state import StudioStore, make_recall_part
+from harness.studio_state import make_recall_part, make_remove_cards
+from harness.studio_store import StudioStore
 from harness.studio_translate import _node_name
 from harness.tool_contracts import ResolverError, resolver_digest
 from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
@@ -59,6 +62,7 @@ from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import create_orchestrator_agent
 from planner.plan import AskBreakdown, load_ask_breakdowns, load_asks, load_asks_across_years
 from pydantic import Field
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from .data_mcp_definitions import DataMcpDefinitions
 
@@ -381,6 +385,65 @@ def visited_nodes(events: list[Event]) -> list[str]:
     return [_node_name(e) for e in events if e.node_info]
 
 
+async def no_turn_specs(principal: str, session_id: str) -> dict[str, Any]:
+    """A `StudioStore` `turn_specs` reader for a store whose turns hold no
+    spec blocks."""
+    del principal, session_id
+    return {}
+
+
+class _NoAdk:
+    """An `AdkBridge` for a store whose conversations ADK never held."""
+
+    async def reimport(self, principal: str, conversation_id: str) -> None:
+        del principal, conversation_id
+
+    async def moved(self, principal: str, conversation_id: str) -> bool:
+        del principal, conversation_id
+        return False
+
+    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
+        del session_id
+        return specs
+
+
+NO_ADK = _NoAdk()
+
+
+def session_turn_specs(
+    service: BaseSessionService, *, app_name: str
+) -> Callable[[str, str], Awaitable[dict[str, Any]]]:
+    """A `StudioStore` `turn_specs` reader over `service`, for a test whose
+    turn sessions live in a session service rather than in ADK's tables:
+    the spec blocks turn session `session_id` holds, as stored."""
+
+    async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
+        session = await service.get_session(
+            app_name=app_name,
+            user_id=principal,
+            session_id=session_id,
+            config=GetSessionConfig(num_recent_events=0),
+        )
+        return dict((session.state.get(ORCHESTRATOR_SPECS_KEY) or {}) if session else {})
+
+    return turn_specs
+
+
+def unconnected_store() -> StudioStore:
+    """A `StudioStore` with no database behind its engine, for a test that
+    reads only the in-process state a store holds (`StudioStore.current`), as
+    the recorder does. Any read or write the test makes through it fails at
+    once: port 1 on the loopback refuses the connection, and a 1 s connect
+    timeout bounds the attempt where it does not."""
+    return StudioStore(
+        create_async_engine(
+            "postgresql+asyncpg://unconnected@127.0.0.1:1/none", connect_args={"timeout": 1}
+        ),
+        adk=NO_ADK,
+        turn_specs=no_turn_specs,
+    )
+
+
 def orchestrator_app(
     *script: types.Part,
     resolver: Any = None,
@@ -388,6 +451,7 @@ def orchestrator_app(
     planner: Any = None,
     tool_surface: Any = None,
     session_service: BaseSessionService | None = None,
+    engine: AsyncEngine | None = None,
     store: StudioStore | None = None,
     settings: Settings | None = None,
     edit_model: Any = None,
@@ -414,10 +478,19 @@ def orchestrator_app(
     `publisher` publishes a run's derived results, all at once by default,
     and `run_ledger` keeps its runs, the workflow's in-memory ledger by
     default. `early_mints` starts each offered card's retrievals, none by
-    default.
+    default. Conversations are stored in `store`, or in a store built on
+    `engine` (the `pg_engine` fixture's) over `session_service`; one of the
+    two is required.
     """
     session_service = session_service or InMemorySessionService()
-    store = store or StudioStore(session_service, app_name=AGENT_NAME)
+    if store is None:
+        if engine is None:
+            raise TypeError("orchestrator_app needs a store, or the engine to build one on")
+        store = StudioStore(
+            engine,
+            adk=NO_ADK,
+            turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        )
     resolved_settings = settings or Settings()
     model = ScriptLlm(script=list(script))
     resolver = resolver or no_resolver
@@ -431,6 +504,7 @@ def orchestrator_app(
                 executor=recorder,
                 surface=surface_recorder,
                 recall_part=make_recall_part(store),
+                remove_cards=make_remove_cards(store),
             ),
         ).model_copy(update={"model": model})
         return create_root_workflow(

@@ -62,6 +62,7 @@ from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import PENDING_ASK_STATE_KEY, EndRun
+from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.tool import build_translate
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
@@ -781,7 +782,7 @@ async def test_calls_without_ids_are_stored_under_adk_ids_and_replayed_without_t
 
 
 async def _stopped_switch(
-    plan: Plan, monkeypatch: pytest.MonkeyPatch
+    plan: Plan, monkeypatch: pytest.MonkeyPatch, engine: AsyncEngine
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The frames of a turn whose plan the planner drafted, and of a
     switch on its card that the user stops while the revision runs."""
@@ -796,7 +797,7 @@ async def _stopped_switch(
     monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.2)
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
     adapter = scripted_planner(scripted, tools=_proposals(records=plan))
-    app = _app(plan_call(_QUESTION), planner=adapter)
+    app = _app(plan_call(_QUESTION), planner=adapter, engine=engine)
     stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
     async with _client(app) as client:
         with _numbered_call_ids():
@@ -825,12 +826,15 @@ async def _stopped_switch(
 
 
 async def test_a_stop_while_a_switch_runs_offers_the_plan_unchanged(
-    plan: Plan, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    pg_engine: AsyncEngine,
 ) -> None:
     """The plan card an entry drafted takes a switch and a Stop. The stream ends
     on the same plan re-offered under a fresh interrupt, carrying
     `switch_cancelled`."""
-    streamed = await _stopped_switch(plan, monkeypatch)
+    streamed = await _stopped_switch(plan, monkeypatch, pg_engine)
 
     expect(expectation_name(request), [_frames(frames) for frames in streamed])
 

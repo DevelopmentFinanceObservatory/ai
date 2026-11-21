@@ -20,6 +20,16 @@ GCP_PROJECT := "dev-fin-observatory"
 # Host port for the harness dev server. Also written into .env by `just env`.
 PORT := "8080"
 
+# The local Postgres `just pg-up` starts: one container, bound to 127.0.0.1,
+# holding the harness's own tables, ADK's session tables, and a schema per test.
+PG_CONTAINER := "dfo-ai-pg"
+PG_PORT      := "55432"
+PG_URL       := "postgresql+asyncpg://postgres:postgres@127.0.0.1:" + PG_PORT + "/postgres"
+
+# The database the test recipes point the Postgres-backed fixtures at
+# (services/harness/tests/conftest.py). Set it to use another one.
+export HARNESS_TEST_DATABASE_URL := env("HARNESS_TEST_DATABASE_URL", PG_URL)
+
 # The dfo-apis local runs call. `just apis-proxy` serves the dev deployment on
 # this port, authenticated as your gcloud account, since Cloud Run IAM guards
 # it. A dfo-apis checkout's `just dev` serves a local one on the same port.
@@ -231,6 +241,8 @@ _secret NAME:
 # than through pydantic-settings, so .env has to be exported into the process.
 # That's what `uv run --env-file` does here.
 #
+# The harness runs on the database `_local-database-url` picks.
+#
 # Run the harness locally, with the MCP services mounted in-process
 dev: _check-env
     #!/usr/bin/env bash
@@ -245,8 +257,56 @@ dev: _check-env
     echo "  presentation-mcp → http://localhost:{{PORT}}/mcp/presentation/mcp"
     echo "    (presentation-mcp fetches its release once at startup and mounts no tools"
     echo "     unless an apis instance with DFO_PRESENTATION_SURFACE=1 answers)"
+    database_url="$({{just_executable()}} --justfile {{justfile()}} _local-database-url)"
+    if [ -n "$database_url" ]; then
+        export DATABASE_URL="$database_url"
+    fi
     PORT={{PORT}} PRESENTATION_PUBLIC_URL=http://localhost:{{PORT}}/mcp/presentation \
         PRESENTATION_RELEASE_REQUIRED=false uv run --env-file {{ENV_FILE}} harness-server
+
+# The database `dev` and `studio-live` run the harness on. Prints nothing when
+# the environment or {{ENV_FILE}} configures one, through DATABASE_URL or the
+# Cloud SQL Connector's SESSION_STORE_INSTANCE_CONNECTION_NAME, and Docker is
+# then not needed. Otherwise it starts `just pg-up`'s Postgres and prints its URL.
+_local-database-url:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    configured() {
+        [ -n "${!1:-}" ] || [ -n "$(grep -s "^$1=" {{ENV_FILE}} | cut -d= -f2-)" ]
+    }
+    if configured DATABASE_URL || configured SESSION_STORE_INSTANCE_CONNECTION_NAME; then
+        exit 0
+    fi
+    {{just_executable()}} --justfile {{justfile()}} pg-up >&2
+    printf '%s' "{{PG_URL}}"
+
+# Start the local Postgres (postgres:18-alpine on 127.0.0.1 only) and wait until it answers. Safe to repeat.
+pg-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! docker inspect {{PG_CONTAINER}} >/dev/null 2>&1; then
+        docker run -d --name {{PG_CONTAINER}} \
+            -e POSTGRES_PASSWORD=postgres \
+            -p 127.0.0.1:{{PG_PORT}}:5432 \
+            -v {{PG_CONTAINER}}:/var/lib/postgresql \
+            postgres:18-alpine >/dev/null
+    elif [ "$(docker inspect -f '{{{{.State.Running}}}}' {{PG_CONTAINER}})" != "true" ]; then
+        docker start {{PG_CONTAINER}} >/dev/null
+    fi
+    for _ in $(seq 1 60); do
+        if docker exec {{PG_CONTAINER}} pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1; then
+            echo "Postgres → {{PG_URL}}"
+            exit 0
+        fi
+        sleep 1
+    done
+    echo "Error: Postgres did not answer within 60 s; see 'docker logs {{PG_CONTAINER}}'." >&2
+    exit 1
+
+# Stop the local Postgres and delete its data
+pg-down:
+    -docker rm -f -v {{PG_CONTAINER}}
+    -docker volume rm {{PG_CONTAINER}}
 
 # Leave running in its own terminal while local runs call dfo-apis. Needs
 # roles/run.invoker on dfo-dev-apis for your gcloud account.
@@ -257,7 +317,8 @@ apis-proxy:
 
 # Serve the studio surface against the real model and the real platform.
 # Needs GOOGLE_API_KEY in {{ENV_FILE}} and dfo-apis at DFO_APIS_URL (`just
-# apis-proxy`). Costs model spend on every turn.
+# apis-proxy`), and runs on the database `_local-database-url` picks. Costs
+# model spend on every turn.
 # A plan whose steps include an analysis verb runs and narrates its answer,
 # then cannot render a card: the platform refuses a frame_ref an analysis verb
 # minted. The turn still reaches `done` with the figures in prose.
@@ -271,6 +332,10 @@ studio-live: _check-env _check-apis
     echo "Live studio → http://localhost:{{PORT}}/api/studio/turn (any Bearer token)"
     echo "  platform   → {{DFO_APIS_URL}}"
     echo "  startup takes 15-20s while presentation-mcp fetches its release"
+    database_url="$({{just_executable()}} --justfile {{justfile()}} _local-database-url)"
+    if [ -n "$database_url" ]; then
+        export DATABASE_URL="$database_url"
+    fi
     DFO_APIS_URL={{DFO_APIS_URL}} SEED_FIXTURE_FRAMES=true PORT={{PORT}} \
         PRESENTATION_PUBLIC_URL=http://localhost:{{PORT}}/mcp/presentation \
         uv run --env-file {{ENV_FILE}} harness-server
@@ -325,7 +390,7 @@ sync:
 # evals/studio/README.md). CI runs the same battery via
 # services/harness/tests/test_studio_orchestrator_eval.py.
 # The studio's model-free contract: deterministic, in-process, no key.
-eval-studio-contract:
+eval-studio-contract: pg-up
     uv run --package harness python evals/studio/run.py --mode scripted
 
 # Start the harness with `just studio-live` first; needs the model key. See
@@ -385,7 +450,7 @@ typecheck:
 # packages/services (e.g. test_settings.py) don't collide.
 #
 # Run every workspace member's test suite in one invocation from the root
-test:
+test: pg-up
     uv run pytest
 
 # CI's third job builds the image. `docker-build` runs it locally.
@@ -415,7 +480,7 @@ test-common:
     uv run --package common pytest packages/common -v \
         --cov=packages/common/src/common --cov-report=term --cov-report=xml
 
-test-harness:
+test-harness: pg-up
     uv run --package harness pytest services/harness/tests -v \
         --cov=services/harness/src/harness --cov=services/harness/src/planner \
         --cov=services/harness/src/compiler --cov=services/harness/src/translator \

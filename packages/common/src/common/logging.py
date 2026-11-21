@@ -5,8 +5,8 @@ depending on environment, and routes uvicorn's own handlers through the same
 formatter so a startup traceback lands as one Cloud Logging entry instead of
 fragmenting across lines.
 
-Selection is automatic: `K_SERVICE` (always set on Cloud Run) selects JSON.
-Locally, set `LOG_FORMAT=json` to force JSON or `LOG_FORMAT=text` to force
+Selection is automatic: `K_SERVICE`, set in every Cloud Run service, or
+`CLOUD_RUN_JOB`, set in every Cloud Run job execution, selects JSON. Locally, set `LOG_FORMAT=json` to force JSON or `LOG_FORMAT=text` to force
 text even on Cloud Run.
 
 A record logged with `extra={JSON_FIELDS: {...}}` carries those fields as
@@ -97,7 +97,7 @@ def _use_json() -> bool:
         return True
     if override == "text":
         return False
-    return bool(os.getenv("K_SERVICE"))
+    return bool(os.getenv("K_SERVICE") or os.getenv("CLOUD_RUN_JOB"))
 
 
 def configure_logging(*, level: int = logging.INFO) -> None:

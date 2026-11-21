@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import errno
 import logging
 import pickle
 import ssl
@@ -614,6 +615,9 @@ async def test_a_failed_call_is_retryable_unless_a_permanent_fault_caused_it(
         ),
         (httpx2.UnsupportedProtocol("unsupported protocol 'ftp://'"), False),
         (ValueError("a bug"), False),
+        (OSError(errno.EHOSTUNREACH, "No route to host"), True),
+        (OSError(errno.ENETDOWN, "Network is down"), True),
+        (OSError(errno.EMFILE, "Too many open files"), False),
     ],
     ids=[
         "connect-error",
@@ -627,6 +631,9 @@ async def test_a_failed_call_is_retryable_unless_a_permanent_fault_caused_it(
         "marked-final-over-a-timeout",
         "unsupported-protocol",
         "bug",
+        "unreachable-host",
+        "network-down",
+        "too-many-open-files",
     ],
 )
 def test_transient_reads_the_whole_cause_chain(raised: BaseException, expected: bool) -> None:

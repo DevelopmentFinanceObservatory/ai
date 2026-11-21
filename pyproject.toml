@@ -21,10 +21,6 @@ members = ["packages/*", "services/*"]
 
 [dependency-groups]
 dev = [
-    # Exercises a real DatabaseSessionService over sqlite+aiosqlite in the
-    # harness session_store and studio tests, standing in for the deployed
-    # Postgres backend without a live database.
-    "aiosqlite>=0.20",
     "ruff>=0.15.0",
     "ty>=0.0.59",
     "pytest>=9.1.0",

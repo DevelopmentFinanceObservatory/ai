@@ -329,6 +329,7 @@ async def test_an_approved_plan_runs_end_to_end_through_the_mounted_services(
     derived_requirement: Callable[..., AggregateRequirement],
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
+    pg_database_url: str,
 ) -> None:
     async def fake_fetch(**_kwargs: Any) -> bytes:
         return _parquet_bytes()
@@ -343,7 +344,7 @@ async def test_an_approved_plan_runs_end_to_end_through_the_mounted_services(
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = McpSurface(
@@ -614,6 +615,7 @@ async def test_the_keyed_share_chain_runs_end_to_end_through_the_mounted_service
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
+    pg_database_url: str,
 ) -> None:
     """`retrieve(health) + retrieve(total) -> share_of(axis=donor) -> rank`, run
     through the real compiler and the real mounted services. France spends
@@ -639,7 +641,7 @@ async def test_the_keyed_share_chain_runs_end_to_end_through_the_mounted_service
         return httpx2.Response(200, json=response)
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = McpSurface(
@@ -881,6 +883,7 @@ async def test_kenyas_rank_series_runs_end_to_end_through_the_mounted_services(
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
+    pg_database_url: str,
 ) -> None:
     """The motivating per-period-rank chain, over a fixture with a genuine
     hole (Uganda has no row in 2011), so each year's rank positions depend
@@ -905,7 +908,7 @@ async def test_kenyas_rank_series_runs_end_to_end_through_the_mounted_services(
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = McpSurface(
@@ -1095,6 +1098,7 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
+    pg_database_url: str,
 ) -> None:
     """A planned `limit=3` reaches `rank` as an argument, so the stored frame
     holds the three highest donors at their measured amounts, and the three
@@ -1113,7 +1117,7 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = McpSurface(
@@ -1332,6 +1336,7 @@ def run_rolling_plan(
     mounted_mcp_transport: Callable[..., Any],
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
+    pg_database_url: str,
 ) -> Callable[..., Any]:
     """Return a coroutine function running the rolling plan twice over one version of its data.
 
@@ -1357,7 +1362,9 @@ def run_rolling_plan(
             raise AssertionError(f"unexpected call to {request.url.path}")
 
         client_holder.set_client(data_mcp_client(mint_handler))
-        app = create_app(settings=Settings(mcp_api_token="test-token"))
+        app = create_app(
+            settings=Settings(database_url=pg_database_url, mcp_api_token="test-token")
+        )
         async with running_lifespan(app):
             surface = _CountingSurface(
                 McpSurface(
@@ -1557,6 +1564,7 @@ async def studio(
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
     runner: Any,
+    pg_database_url: str,
 ) -> AsyncIterator[_Studio]:
     """The orchestrator's tools after the rolling plan ran on the mounted services.
 
@@ -1592,7 +1600,7 @@ async def studio(
     replays: list[Sequence[Mapping[str, Any]]] = []
     replay_calls: list[str] = []
     pending: list[bool] = []
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
     async with running_lifespan(app):
         surface = McpSurface(
             sources={
@@ -1854,12 +1862,13 @@ async def test_a_chart_counting_back_on_data_fetched_to_a_stated_end_year_is_ref
 async def test_a_surface_reading_the_mounted_services_without_the_token_is_refused(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., Any],
+    pg_database_url: str,
 ) -> None:
     """The same mount the previous test reads, but through a transport that
     carries no bearer -- proving `McpSurface` doesn't quietly bypass the gate
     `common.auth.apply_gate` put on it (`common.auth`'s own suite proves the
     gate itself; this proves the compiler's own client reaching it obeys it)."""
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     statuses: list[int] = []
     async with running_lifespan(app):
@@ -2053,6 +2062,7 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
+    pg_database_url: str,
 ) -> None:
     """The retrieval asks apis for each place's types, the filter keeps the
     places typed Country, and the top two are the two largest countries: Earth
@@ -2073,7 +2083,7 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = McpSurface(
@@ -2158,12 +2168,13 @@ async def test_a_level_filtered_rank_after_a_plain_read_of_the_same_mint_keeps_t
     mounted_mcp_transport: Callable[..., Any],
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
+    pg_database_url: str,
 ) -> None:
     """A plain read of GDP is stored first. The rank's retrieval asks for place types,
     and apis answers under the same `{spec_id, content_version}`; the typed frame is
     a frame of its own, so the level filter finds its type column."""
     fetched = _serve_gdp_in_both_renderings(monkeypatch, _stats_registry)
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = _gdp_surface(app, mounted_mcp_transport)
@@ -2186,12 +2197,13 @@ async def test_a_plain_total_after_a_level_filtered_rank_of_the_same_mint_reads_
     mounted_mcp_transport: Callable[..., Any],
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
+    pg_database_url: str,
 ) -> None:
     """The rank stores GDP's typed frame first. A later plain read of the same mint
     gets the plain frame, so a period total over it runs: over the typed frame, whose
     places span several levels, the total refuses `place_levels_mixed`."""
     fetched = _serve_gdp_in_both_renderings(monkeypatch, _stats_registry)
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = _gdp_surface(app, mounted_mcp_transport)
@@ -2224,13 +2236,14 @@ async def test_a_reads_freshness_date_is_its_own_renderings_beside_a_sibling(
     mounted_mcp_transport: Callable[..., Any],
     _stats_registry: _StatsRegistry,
     typed: bool,
+    pg_database_url: str,
 ) -> None:
     """The harness dates a retrieval by its manifest's data artifact
     (`harness.provenance.data_artifact`). A plain mint's manifest lists the typed
     rendering first with its own `created_at`, and get_data's manifest keeps only the
     requested one."""
     _serve_gdp_in_both_renderings(monkeypatch, _stats_registry)
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = _gdp_surface(app, mounted_mcp_transport)
@@ -2472,6 +2485,7 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
+    pg_database_url: str,
 ) -> None:
     """The compiled retrieval asks get_data for the frame without party totals, which
     data-mcp asks apis for. apis answers with the version of the cut frame, so the
@@ -2499,7 +2513,7 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
         return httpx2.Response(200, json=_register_statistics(_stats_registry, response))
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
     served = {
         version: list(_kenya_donors(cut=cut))
         for version, cut in ((KENYA_DONORS_BASE, False), (KENYA_DONORS_CUT, True))
@@ -2773,11 +2787,12 @@ async def test_get_data_with_default_flags_on_a_spec_binding_the_official_total_
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., Any],
     _stats_registry: _StatsRegistry,
+    pg_database_url: str,
 ) -> None:
     """The OECD's figure for every official donor, read by an outside model that sets no
     flag, is the one row it sums."""
     minted = _serve_whole_totals(monkeypatch, _stats_registry)
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = _flow_surface(app, mounted_mcp_transport)
@@ -2799,6 +2814,7 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., Any],
     _stats_registry: _StatsRegistry,
+    pg_database_url: str,
 ) -> None:
     """`search` for "all donors including private" returns one spec binding both totals.
     `get_data` with default flags gives two rows, and no kind column says they are
@@ -2806,7 +2822,7 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
     `place_types`, both are totals whose whole cells are `true`, and the sum is both
     populations."""
     minted = _serve_whole_totals(monkeypatch, _stats_registry)
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async def total(surface: McpSurface, frame_ref: dict[str, Any]) -> Any:
         return await surface.call_tool(
@@ -3006,6 +3022,7 @@ async def test_a_sum_of_converted_frames_pairs_one_deflation_basis_and_refuses_t
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
     right_spec: str,
+    pg_database_url: str,
 ) -> None:
     """Two series converted to constant 2024 US dollars compile as one unit: the
     requests are equal and the compiler pins neither side. DAC2a and CRS, both
@@ -3026,7 +3043,7 @@ async def test_a_sum_of_converted_frames_pairs_one_deflation_basis_and_refuses_t
         return httpx2.Response(200, json=response)
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = _flow_surface(app, mounted_mcp_transport)

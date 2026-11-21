@@ -19,6 +19,7 @@ def _reset_configured_flag():
 
 def test_configure_logging_sets_root_handler(monkeypatch):
     monkeypatch.delenv("K_SERVICE", raising=False)
+    monkeypatch.delenv("CLOUD_RUN_JOB", raising=False)
     monkeypatch.delenv("LOG_FORMAT", raising=False)
 
     configure_logging()
@@ -38,8 +39,11 @@ def test_configure_logging_is_idempotent(monkeypatch):
     assert logging.root.handlers[0] is first_handler
 
 
-def test_json_format_selected_on_cloud_run(monkeypatch):
-    monkeypatch.setenv("K_SERVICE", "harness")
+@pytest.mark.parametrize("variable", ["K_SERVICE", "CLOUD_RUN_JOB"], ids=["service", "job"])
+def test_json_format_selected_on_cloud_run(monkeypatch, variable):
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    monkeypatch.delenv("CLOUD_RUN_JOB", raising=False)
+    monkeypatch.setenv(variable, "harness")
     monkeypatch.delenv("LOG_FORMAT", raising=False)
 
     configure_logging()

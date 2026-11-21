@@ -24,13 +24,13 @@ from typing import Any
 
 import pytest
 from google.adk.events import Event
-from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from harness.planner_run import failed_tool_answer
 from harness.reply_figures import card_result
-from harness.studio_state import ConversationState, StudioStore
+from harness.studio_state import ConversationState
 from harness.studio_translate import _RecordingExecutor, _Translator
 from planner.skills import GET_SKILL
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .orchestrator_fakes import (
     CannedSearch,
@@ -44,6 +44,7 @@ from .orchestrator_fakes import (
     stream,
     studio_client,
     turn_body,
+    unconnected_store,
 )
 
 STUDIO_EVAL_DIR = Path(__file__).resolve().parents[3] / "evals" / "studio"
@@ -67,11 +68,11 @@ def _suite() -> dict[str, Any]:
     return json.loads(CASES_PATH.read_text())
 
 
-async def test_scripted_cases_report_as_marked() -> None:
+async def test_scripted_cases_report_as_marked(pg_engine: AsyncEngine) -> None:
     _load("orchestrator_scripted")
     run = _load("run")
 
-    results, passed = await run.run_suite(mode="scripted", url="", judge=False)
+    results, passed = await run.run_suite(mode="scripted", url="", judge=False, engine=pg_engine)
 
     assert results, "no scripted case ran"
     assert [r["id"] for r in results] == [c["id"] for c in run.load_cases("scripted")]
@@ -89,7 +90,7 @@ class _SkillReadFailedError(RuntimeError):
 
 
 async def test_a_planner_tool_that_raises_is_logged_as_the_answer_the_model_receives(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, pg_engine: AsyncEngine
 ) -> None:
     """A planner tool whose body raises is logged with the answer the adapter gives
     the model for it (`failed_tool_answer`)."""
@@ -109,7 +110,7 @@ async def test_a_planner_tool_that_raises_is_logged_as_the_answer_the_model_rece
 
     monkeypatch.setattr(scripted.CannedDataSurface, "call_tool", failing_skill_reads)
 
-    async with scripted.orchestrator_client(case["scenario"]) as (client, log):
+    async with scripted.orchestrator_client(case["scenario"], engine=pg_engine) as (client, log):
         await run.run_case(client, case, on_turn=log.mark_turn)
 
     planner_calls = [
@@ -645,7 +646,7 @@ async def test_a_judge_error_that_is_not_transient_still_stops_the_suite(
 _REFERENCE: list[dict[str, Any]] = []
 
 
-async def _reference_frames() -> list[dict[str, Any]]:
+async def _reference_frames(engine: AsyncEngine) -> list[dict[str, Any]]:
     """One studio turn's frames, conformant: a search, a fetch and a card,
     then an answer citing the card's figures. Built once per test run."""
     if not _REFERENCE:
@@ -655,6 +656,7 @@ async def _reference_frames() -> list[dict[str, Any]]:
             make_charts_call(chart(frame_for())),
             types.Part.from_text(text="Life expectancy in Kenya rose from 48.5 to 63.6."),
             resolver=CannedSearch(definite_envelope()),
+            engine=engine,
         )
         async with studio_client(app) as client:
             _REFERENCE.extend(await stream(client, "/api/studio/turn", turn_body("q")))
@@ -731,16 +733,20 @@ def _mutated(name: str, frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ("done-older-than-last-update", "older than the last composition.updated"),
     ],
 )
-async def test_each_invariant_rejects_a_stream_that_breaks_it(name: str, fragment: str) -> None:
-    violations = checks.check_transcript(_mutated(name, await _reference_frames()))
+async def test_each_invariant_rejects_a_stream_that_breaks_it(
+    name: str, fragment: str, pg_engine: AsyncEngine
+) -> None:
+    violations = checks.check_transcript(_mutated(name, await _reference_frames(pg_engine)))
 
     assert any(fragment in violation for violation in violations), violations
 
 
-async def test_a_revision_of_a_component_this_conversation_never_created_is_rejected() -> None:
+async def test_a_revision_of_a_component_this_conversation_never_created_is_rejected(
+    pg_engine: AsyncEngine,
+) -> None:
     # Only sound over a complete conversation: a recording may hold a later
     # slice, so the runner opts in.
-    frames = await _reference_frames()
+    frames = await _reference_frames(pg_engine)
     created = _index(frames, "component.created")
     orphan = {
         "event": "component.revised",
@@ -757,8 +763,8 @@ async def test_a_revision_of_a_component_this_conversation_never_created_is_reje
     assert not any("never streamed" in v for v in checks.check_transcript(revised))
 
 
-async def test_a_segment_must_end_on_a_terminal_frame() -> None:
-    frames = await _reference_frames()
+async def test_a_segment_must_end_on_a_terminal_frame(pg_engine: AsyncEngine) -> None:
+    frames = await _reference_frames(pg_engine)
 
     assert any("not a terminal frame" in v for v in checks.check_segment(frames[:-1]))
     pause = {"event": "plan.proposed", "seq": 2}
@@ -891,13 +897,13 @@ async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, objec
     raise AssertionError(f"no tool call expected, got {tool}")
 
 
-def test_a_count_explain_dfo_read_grounds_the_reply_that_quotes_it() -> None:
+async def test_a_count_explain_dfo_read_grounds_the_reply_that_quotes_it() -> None:
     """The counts reach the reply only through the model, so the translator's
     `explain_dfo` step carries them for the grounding check to read."""
     counts = "DFO holds 108,905 indicators in 92 datasets from 42 publishers."
     translator = _Translator(
         conversation=ConversationState(conversation_id="c1"),
-        recorder=_RecordingExecutor(_no_executor, store=StudioStore(InMemorySessionService())),
+        recorder=_RecordingExecutor(_no_executor, store=unconnected_store()),
     )
     call = types.FunctionCall(id="call_1", name="explain_dfo", args={})
     read = types.FunctionResponse(
@@ -906,7 +912,7 @@ def test_a_count_explain_dfo_read_grounds_the_reply_that_quotes_it() -> None:
     frames = [
         frame.model_dump(mode="json")
         for part in (types.Part(function_call=call), types.Part(function_response=read))
-        for frame in translator.translate(
+        for frame in await translator.translate(
             Event(author="dfo_orchestrator", content=types.Content(parts=[part]))
         )
     ]

@@ -16,6 +16,8 @@ Modes:
   --mode scripted    the studio in-process, its models scripted
                      (`orchestrator_scripted`): every model request is recorded
                      and the case's `checks` read them. No server, key or network.
+                     Conversations are stored in a throwaway schema of the
+                     Postgres `HARNESS_TEST_DATABASE_URL` names (`just pg-up`).
   --mode live        against a running server (--url), real agent + data.
 
     uv run --package harness python evals/studio/run.py --mode scripted
@@ -45,10 +47,13 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import checks
 import httpx2
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 _HERE = Path(__file__).resolve().parent
 _CASES_PATH = _HERE / "harness-studio-orchestrator-v1.cases.json"
@@ -991,14 +996,17 @@ async def judge_case(
 # ---------------------------------------------------------------------------
 
 
-async def _run_scripted_case(case: dict[str, Any]) -> dict[str, Any]:
+async def _run_scripted_case(case: dict[str, Any], *, engine: AsyncEngine) -> dict[str, Any]:
     """One case on its own scripted studio (its scripts are
-    consumed as it runs), then the case's `checks` over what the models were
-    shown. A model script that ran dry is a contract failure, since the case
-    drove less than it says."""
+    consumed as it runs), its conversations stored on `engine`, then the case's
+    `checks` over what the models were shown. A model script that ran dry is a
+    contract failure, since the case drove less than it says."""
     import orchestrator_scripted  # noqa: PLC0415 -- the harness import chain is slow
 
-    async with orchestrator_scripted.orchestrator_client(case["scenario"]) as (client, log):
+    async with orchestrator_scripted.orchestrator_client(case["scenario"], engine=engine) as (
+        client,
+        log,
+    ):
         outcome = await run_case(client, case, on_turn=log.mark_turn)
     outcome["contract"] += [
         f"the {agent} model's script ran out: the case drove fewer model calls than it needs"
@@ -1039,8 +1047,19 @@ def load_cases(mode: str, only: list[str] | None = None) -> list[dict[str, Any]]
 
 
 async def run_suite(
-    *, mode: str, url: str, judge: bool, only: list[str] | None = None
+    *,
+    mode: str,
+    url: str,
+    judge: bool,
+    only: list[str] | None = None,
+    engine: AsyncEngine | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
+    """Run the cases of `mode` and return their records and whether the suite
+    passed. Scripted mode stores its conversations on `engine` (an
+    `AsyncEngine` with the harness tables applied); each case's conversation
+    id is fresh, so one engine serves a whole run."""
+    if mode == "scripted" and engine is None:
+        raise ValueError("scripted mode needs the engine its studios store conversations on")
     config = json.loads(_CONFIG_PATH.read_text())
     cases = load_cases(mode, only)
     # A scripted case builds its own studio, so it needs no shared client.
@@ -1058,7 +1077,7 @@ async def run_suite(
             }
             try:
                 if mode == "scripted":
-                    outcome = await _run_scripted_case(case)
+                    outcome = await _run_scripted_case(case, engine=engine)
                 else:
                     assert client is not None  # only the scripted mode has none
                     outcome = await run_case(client, case)
@@ -1150,6 +1169,42 @@ def _print_record(record: dict[str, Any]) -> None:
             print(f"       - {violation}")
 
 
+@asynccontextmanager
+async def _scratch_database() -> AsyncIterator[AsyncEngine]:
+    """An engine on a fresh schema of the Postgres database
+    `HARNESS_TEST_DATABASE_URL` names, with the harness tables applied. The
+    schema is dropped on exit."""
+    from harness.db.migrate import apply_pending  # noqa: PLC0415 -- scripted mode only
+    from sqlalchemy import text  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import create_async_engine  # noqa: PLC0415
+
+    url = os.environ.get("HARNESS_TEST_DATABASE_URL")
+    if not url:
+        raise SystemExit("scripted mode needs HARNESS_TEST_DATABASE_URL; run `just pg-up`")
+    schema = f"eval_{uuid.uuid4().hex[:12]}"
+    admin = create_async_engine(url)
+    async with admin.begin() as conn:
+        await conn.execute(text(f"CREATE SCHEMA {schema}"))
+    engine = create_async_engine(url, connect_args={"server_settings": {"search_path": schema}})
+    try:
+        await apply_pending(engine)
+        yield engine
+    finally:
+        await engine.dispose()
+        async with admin.begin() as conn:
+            await conn.execute(text(f"DROP SCHEMA {schema} CASCADE"))
+        await admin.dispose()
+
+
+async def _main_suite(args: argparse.Namespace) -> tuple[list[dict[str, Any]], bool]:
+    if args.mode != "scripted":
+        return await run_suite(mode=args.mode, url=args.url, judge=args.judge, only=args.case)
+    async with _scratch_database() as engine:
+        return await run_suite(
+            mode=args.mode, url=args.url, judge=args.judge, only=args.case, engine=engine
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=_MODES, required=True)
@@ -1161,9 +1216,7 @@ def main() -> int:
     if args.mode == "live" and args.judge is False:
         print("note: live mode without --judge runs the contract layer only\n")
 
-    results, passed = asyncio.run(
-        run_suite(mode=args.mode, url=args.url, judge=args.judge, only=args.case)
-    )
+    results, passed = asyncio.run(_main_suite(args))
     counts: dict[str, int] = {}
     for record in results:
         counts[record["status"]] = counts.get(record["status"], 0) + 1

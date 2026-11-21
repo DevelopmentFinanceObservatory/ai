@@ -31,16 +31,18 @@ from mcp import MCPError
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from orchestrator.agent import create_orchestrator_agent
 from presentation_mcp.server import mcp as presentation_mcp
+from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.routing import get_route_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocketClose
 
 from harness import __version__
+from harness.adk_import import open_turn_specs, reimport_on_access
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
+from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.early_mint import EarlyMints
 from harness.generative import GeminiEdit
-from harness.graph.state import AGENT_NAME
 from harness.graph.workflow import create_root_workflow
 from harness.live_refresh import build_live_refresh, create_live_refresh_router
 from harness.mcp_client import McpExecutor, McpResolver
@@ -58,12 +60,12 @@ from harness.settings import (
 )
 from harness.studio import StudioRunner, create_studio_router
 from harness.studio_state import (
-    StudioStore,
     make_canvas_cards,
     make_canvas_series,
     make_recall_part,
     make_remove_cards,
 )
+from harness.studio_store import StudioStore
 from harness.wiring import build_planner, handing_back_planner_failures
 
 logger = logging.getLogger(__name__)
@@ -171,14 +173,70 @@ def _loopback_only(app: ASGIApp) -> ASGIApp:
     return guarded
 
 
-# Total wall-clock budget `_prepare_tables_with_retries` spends retrying
-# `DatabaseSessionService.prepare_tables` at startup. A runtime identity's
-# IAM grant can still be propagating when a fresh revision starts, taking
-# minutes rather than seconds to land; Cloud Run's default startup probe
-# window is 240 s, so this leaves headroom for the rest of startup.
-_PREPARE_TABLES_RETRY_BUDGET_S = 120.0
+# Total wall-clock budget `_lifespan` gives the startup database steps
+# (`DatabaseSessionService.prepare_tables`, then `apply_pending`), one
+# deadline the second step inherits what the first left of. A runtime
+# identity's IAM grant can still be propagating when a fresh revision
+# starts, taking minutes rather than seconds to land; Cloud Run's default
+# startup probe window is 240 s, so this leaves headroom for the rest of
+# startup.
+_STARTUP_DB_RETRY_BUDGET_S = 120.0
 _PREPARE_TABLES_INITIAL_BACKOFF_S = 1.0
 _PREPARE_TABLES_MAX_BACKOFF_S = 30.0
+
+
+async def _retry_startup_step(
+    name: str,
+    step: Callable[[], Awaitable[object]],
+    *,
+    attempt_timeout_s: float | None,
+    budget_s: float,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    now: Callable[[], float] = time.monotonic,
+    fatal: tuple[type[Exception], ...] = (),
+) -> None:
+    """Run the awaitable `step()` returns, retrying with bounded exponential backoff.
+
+    Each attempt is bounded by `attempt_timeout_s` unless it is None. A
+    failed attempt is logged with its exception and followed by a `sleep`
+    pause that doubles up to `_PREPARE_TABLES_MAX_BACKOFF_S`, capped so it
+    never pushes the call past `budget_s` total. The last exception is
+    re-raised once no time remains in the budget, and an exception in `fatal`
+    is re-raised at once. `sleep` and `now` are parameters for tests to
+    replace real waiting and a real clock with instant, deterministic fakes.
+    """
+    deadline = now() + budget_s
+    backoff_s = _PREPARE_TABLES_INITIAL_BACKOFF_S
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            if attempt_timeout_s is None:
+                await step()
+            else:
+                async with asyncio.timeout(attempt_timeout_s):
+                    await step()
+            return
+        except fatal:
+            raise
+        except Exception:
+            remaining_s = deadline - now()
+            if remaining_s <= 0:
+                logger.exception(
+                    "%s attempt %d failed and the %.0fs retry budget is exhausted",
+                    name,
+                    attempt,
+                    budget_s,
+                )
+                raise
+            logger.exception(
+                "%s attempt %d failed, retrying (%.0fs left in the retry budget)",
+                name,
+                attempt,
+                remaining_s,
+            )
+            await sleep(min(backoff_s, remaining_s))
+            backoff_s = min(backoff_s * 2, _PREPARE_TABLES_MAX_BACKOFF_S)
 
 
 async def _prepare_tables_with_retries(
@@ -189,41 +247,40 @@ async def _prepare_tables_with_retries(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], float] = time.monotonic,
 ) -> None:
-    """Retry `prepare_tables` with bounded exponential backoff.
+    """Retry `prepare_tables` under `_retry_startup_step`'s budget, each
+    attempt bounded by `connect_timeout_s`, the deadline of one connector
+    dial."""
+    await _retry_startup_step(
+        "prepare_tables",
+        session_service.prepare_tables,
+        attempt_timeout_s=connect_timeout_s,
+        budget_s=budget_s,
+        sleep=sleep,
+        now=now,
+    )
 
-    Each attempt is bounded by `connect_timeout_s`, the same deadline that
-    bounds one connector dial elsewhere; a failed attempt is logged with its
-    exception and followed by a `sleep` pause that doubles up to
-    `_PREPARE_TABLES_MAX_BACKOFF_S`, capped so it never pushes the call past
-    `budget_s` total. The last exception is re-raised once no time remains
-    in the budget. `sleep` and `now` are parameters for tests to replace real
-    waiting and a real clock with instant, deterministic fakes.
-    """
-    deadline = now() + budget_s
-    backoff_s = _PREPARE_TABLES_INITIAL_BACKOFF_S
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            async with asyncio.timeout(connect_timeout_s):
-                await session_service.prepare_tables()
-            return
-        except Exception:
-            remaining_s = deadline - now()
-            if remaining_s <= 0:
-                logger.exception(
-                    "prepare_tables attempt %d failed and the %.0fs retry budget is exhausted",
-                    attempt,
-                    budget_s,
-                )
-                raise
-            logger.exception(
-                "prepare_tables attempt %d failed, retrying (%.0fs left in the retry budget)",
-                attempt,
-                remaining_s,
-            )
-            await sleep(min(backoff_s, remaining_s))
-            backoff_s = min(backoff_s * 2, _PREPARE_TABLES_MAX_BACKOFF_S)
+
+async def _apply_migrations_with_retries(
+    engine: AsyncEngine,
+    *,
+    budget_s: float,
+) -> None:
+    """Retry `apply_pending` under `_retry_startup_step`'s budget. An
+    attempt has no bound of its own. `apply_pending` bounds each statement
+    with `statement_timeout`, each lock wait with `lock_timeout` and each
+    call it makes with `MIGRATION_CALL_TIMEOUT_S`, this budget, so a
+    migration of several statements runs as long as its statements take
+    within it.
+    A failed attempt leaves no lock behind, because `apply_pending` holds
+    a transaction-level lock. A `MigrationChecksumError` is a fault in the
+    files, so it propagates at once."""
+    await _retry_startup_step(
+        "apply_pending",
+        lambda: apply_pending(engine),
+        attempt_timeout_s=None,
+        budget_s=budget_s,
+        fatal=(MigrationChecksumError,),
+    )
 
 
 @asynccontextmanager
@@ -236,13 +293,19 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # route needs the session service. It's a no-op after the first call, so
     # this costs nothing beyond startup. `_prepare_tables_with_retries`
     # bounds each attempt by `session_store_connect_timeout_s` and retries
-    # transient failures within its own budget.
-    if isinstance(app.state.session_service, DatabaseSessionService):
-        await _prepare_tables_with_retries(
-            app.state.session_service,
-            connect_timeout_s=app.state.settings.session_store_connect_timeout_s,
-            budget_s=_PREPARE_TABLES_RETRY_BUDGET_S,
-        )
+    # transient failures; both steps share one deadline.
+    deadline = time.monotonic() + _STARTUP_DB_RETRY_BUDGET_S
+    await _prepare_tables_with_retries(
+        app.state.session_service,
+        connect_timeout_s=app.state.settings.session_store_connect_timeout_s,
+        budget_s=_STARTUP_DB_RETRY_BUDGET_S,
+    )
+    # The harness's own tables, in the same Postgres database as ADK's
+    # (`create_app` refuses any other database).
+    await _apply_migrations_with_retries(
+        app.state.session_service_engine,
+        budget_s=max(0.0, deadline - time.monotonic()),
+    )
     # A 401 from a mounted app reaches an MCP client as a raised `MCPError`,
     # not a tool result: `raise_on_error=False` on `call_tool` doesn't catch
     # it, and nothing upstream of `McpExecutor`'s call sites has a broad
@@ -287,11 +350,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.exception("failed to close the live refresh clients during shutdown")
     # Disposes whatever `build_session_service` opened for the session
-    # service above: a no-op for the in-memory backend, the engine dispose
-    # `DatabaseSessionService.close` already does for the plain-`DATABASE_URL`
-    # backend, and the engine-dispose plus connector-close for the Cloud SQL
-    # Connector path (`harness.session_store.SessionServiceHandle`). Guarded
-    # the same way as the studio close above.
+    # service above: the engine for the plain-`DATABASE_URL` backend, and the
+    # engine plus the connector for the Cloud SQL Connector path
+    # (`harness.session_store.SessionServiceHandle`). Guarded the same way as
+    # the studio close above.
     try:
         await app.state.session_service_aclose()
     except Exception:
@@ -379,6 +441,7 @@ def create_app(
     # phase.
     session_service_handle = build_session_service(settings=resolved_settings)
     app.state.session_service = session_service_handle.service
+    app.state.session_service_engine = session_service_handle.engine
     app.state.session_service_aclose = session_service_handle.aclose
 
     # Built before the studio stack, which replays a card's frame through it.
@@ -446,7 +509,21 @@ def create_app(
         logger.info("early mints: off (EARLY_MINT=false)")
     # The store exists before the workflow because the recall function is
     # bound to it (conversation resolved per request via contextvar).
-    store = StudioStore(app.state.session_service, app_name=AGENT_NAME)
+    engine = session_service_handle.engine
+    if engine.dialect.name != "postgresql":
+        raise RuntimeError(
+            "the studio stores conversations in Postgres: set DATABASE_URL to a Postgres "
+            "URL or the SESSION_STORE_* variables of the Cloud SQL Connector"
+        )
+    # The previous release may still finish turns on ADK while this one
+    # serves, so each load first brings the conversation up to date with its
+    # ADK ledger session (`harness.adk_import.reimport_on_access`), and an
+    # open turn's spec blocks are read as the import reads them.
+    store = StudioStore(
+        engine,
+        turn_specs=open_turn_specs(engine),
+        adk=reimport_on_access(engine),
+    )
     # Built once and threaded into both the `execute` node below and
     # `build_planner`'s planner (which reads skills through it and
     # passes it on to the translator), so the two compile against one set
@@ -459,7 +536,7 @@ def create_app(
     logger.info("orchestrator thinking level: %s", resolved_settings.orchestrator_thinking_level)
 
     def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
-        # Runs are kept in the conversation's ledger session, and a run
+        # Runs are kept in the conversation's `runs` table, and a run
         # completes once its derived results are published with their
         # replay recipes.
         run_ledger = StudioRunLedger(store)

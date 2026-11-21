@@ -4,6 +4,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,7 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
-from google.adk.sessions import DatabaseSessionService, InMemorySessionService
+from google.adk.sessions import DatabaseSessionService
 from harness import __version__
 from harness import server as server_module
 from harness.mcp_client import McpExecutor
@@ -35,6 +36,8 @@ from mcp import MCPError
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from presentation_mcp import server as presentation_server
 from presentation_mcp.theme import THEME_CSS, THEME_HASH
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 
 @pytest.fixture(autouse=True)
@@ -140,14 +143,17 @@ def _mounted_mcp_transport(
     )
 
 
-def test_create_app_builds_session_service_without_network() -> None:
-    app = create_app(settings=Settings())
-
-    assert isinstance(app.state.session_service, InMemorySessionService)
+@pytest.mark.parametrize("database_url", [None, "sqlite+aiosqlite:///:memory:"])
+def test_create_app_refuses_a_missing_or_non_postgres_database(database_url: str | None) -> None:
+    """The studio stores conversations in Postgres, so an app with no
+    database, or one that is not Postgres, is refused at construction."""
+    with pytest.raises(RuntimeError, match="Postgres"):
+        create_app(settings=Settings(database_url=database_url))
 
 
 async def test_lifespan_shutdown_closes_the_studio_executor(
     monkeypatch: pytest.MonkeyPatch,
+    pg_database_url: str,
 ) -> None:
     """The server's studio executor is `McpExecutor`,
     which opens one long-lived presentation-mcp client per conversation and
@@ -162,7 +168,7 @@ async def test_lifespan_shutdown_closes_the_studio_executor(
         await original_aclose(self)
 
     monkeypatch.setattr(McpExecutor, "aclose", tracking_aclose)
-    app = create_app(settings=Settings())
+    app = create_app(settings=Settings(database_url=pg_database_url))
     assert isinstance(app.state.studio.recorder._executor, McpExecutor)
 
     async with _running_lifespan(app):
@@ -173,12 +179,13 @@ async def test_lifespan_shutdown_closes_the_studio_executor(
 
 async def test_the_app_starts_presentation_mcps_chart_worker_once_and_stops_it(
     monkeypatch: pytest.MonkeyPatch,
+    pg_database_url: str,
 ) -> None:
     """presentation-mcp is served on its own mount and inside the combined
     server, and its lifespan, which owns the chart worker, runs once for both."""
     worker = presentation_server._chart_worker
     monkeypatch.setattr(worker, "_warm", True)
-    app = create_app(settings=Settings())
+    app = create_app(settings=Settings(database_url=pg_database_url))
 
     async with _running_lifespan(app):
         assert worker._warming is not None
@@ -243,6 +250,7 @@ def test_a_chart_worker_started_from_the_console_script_module_leaves_the_harnes
 
 def test_a_server_without_a_shared_secret_logs_that_auth_is_open(
     monkeypatch: pytest.MonkeyPatch,
+    pg_database_url: str,
 ) -> None:
     # `configure_logging` replaces the root handlers, so the warning is read
     # off the module logger rather than through caplog.
@@ -250,31 +258,34 @@ def test_a_server_without_a_shared_secret_logs_that_auth_is_open(
     monkeypatch.setattr(
         server_module.logger, "warning", lambda msg, *args: warnings.append(msg % args)
     )
-    create_app(settings=Settings(studio_api_token=None))
+    create_app(settings=Settings(database_url=pg_database_url, studio_api_token=None))
     assert any("STUDIO AUTH IS OPEN" in w for w in warnings)
 
 
 def test_a_server_with_a_shared_secret_does_not_log_open_auth(
     monkeypatch: pytest.MonkeyPatch,
+    pg_database_url: str,
 ) -> None:
     warnings: list[str] = []
     monkeypatch.setattr(
         server_module.logger, "warning", lambda msg, *args: warnings.append(msg % args)
     )
-    create_app(settings=Settings(studio_api_token="s3cret"))
+    create_app(settings=Settings(database_url=pg_database_url, studio_api_token="s3cret"))
     assert not any("STUDIO AUTH IS OPEN" in w for w in warnings)
 
 
 @pytest.mark.parametrize("on", [True, False], ids=["on", "off"])
 def test_the_server_says_at_startup_whether_early_mints_are_on(
-    monkeypatch: pytest.MonkeyPatch, on: bool
+    monkeypatch: pytest.MonkeyPatch,
+    on: bool,
+    pg_database_url: str,
 ) -> None:
     """`EARLY_MINT` decides whether the studio gets early mints at all, and the
     server logs which way it went."""
     infos: list[str] = []
     monkeypatch.setattr(server_module.logger, "info", lambda msg, *args: infos.append(msg % args))
 
-    app = create_app(settings=Settings(early_mint=on))
+    app = create_app(settings=Settings(database_url=pg_database_url, early_mint=on))
 
     assert (app.state.studio.early_mints is not None) is on
     assert any(line.startswith(f"early mints: {'on' if on else 'off'}") for line in infos)
@@ -282,6 +293,7 @@ def test_the_server_says_at_startup_whether_early_mints_are_on(
 
 def test_the_execute_node_runs_against_the_recorded_surface(
     monkeypatch: pytest.MonkeyPatch,
+    pg_database_url: str,
 ) -> None:
     """The `execute` node must run the approved plan against the RECORDED
     surface (`_RecordingSurface`, wrapping `StudioRunner.surface_recorder`),
@@ -300,7 +312,7 @@ def test_the_execute_node_runs_against_the_recorded_surface(
 
     monkeypatch.setattr(server_module, "create_root_workflow", _spy)
 
-    app = create_app(settings=Settings())
+    app = create_app(settings=Settings(database_url=pg_database_url))
 
     surface_recorder = app.state.studio.surface_recorder
     assert isinstance(surface_recorder, _RecordingSurface)
@@ -309,9 +321,10 @@ def test_the_execute_node_runs_against_the_recorded_surface(
 
 def test_healthz_returns_service_version_and_telemetry_state(
     monkeypatch: pytest.MonkeyPatch,
+    pg_database_url: str,
 ) -> None:
     monkeypatch.setattr(telemetry, "_backend", None)
-    client = TestClient(create_app(settings=Settings()))
+    client = TestClient(create_app(settings=Settings(database_url=pg_database_url)))
 
     response = client.get("/healthz")
 
@@ -321,12 +334,14 @@ def test_healthz_returns_service_version_and_telemetry_state(
 
 @pytest.mark.parametrize("state", ["langfuse", "otel", "off"])
 def test_telemetry_state_is_readable_from_a_route_that_reaches_the_app(
-    monkeypatch: pytest.MonkeyPatch, state: str
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    pg_database_url: str,
 ) -> None:
     """Cloud Run answers `/healthz` itself, so the resolved backend is also
     served from `/status/telemetry`, and that route carries only that value."""
     monkeypatch.setattr(telemetry, "_backend", None if state == "off" else state)
-    client = TestClient(create_app(settings=Settings()))
+    client = TestClient(create_app(settings=Settings(database_url=pg_database_url)))
 
     response = client.get("/status/telemetry")
 
@@ -335,13 +350,13 @@ def test_telemetry_state_is_readable_from_a_route_that_reaches_the_app(
     assert client.get("/healthz").json()["telemetry"] == state
 
 
-async def test_healthz_nested_under_mounted_mcp_prefixes() -> None:
+async def test_healthz_nested_under_mounted_mcp_prefixes(pg_database_url: str) -> None:
     """Each mounted FastMCP app keeps its own `/healthz` under its prefix,
     at a distinct path from the harness's top-level `/healthz` above. This
     route bypasses the MCP session manager entirely, so it works without
     driving the app's lifespan.
     """
-    app = create_app(settings=Settings())
+    app = create_app(settings=Settings(database_url=pg_database_url))
     transport = httpx2.ASGITransport(app=app)
 
     async with httpx2.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -372,11 +387,12 @@ _INITIALIZE = {
 )
 async def test_a_direct_mount_refuses_an_outside_client_whatever_token_it_holds(
     mount: str,
+    pg_database_url: str,
 ) -> None:
     """Outside MCP clients use the combined server at `/mcp/`. A direct mount
     answers an outside request 403 before the bearer check, and keeps
     `/healthz` open."""
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
     headers = {
         "authorization": "Bearer test-token",
         "accept": "application/json, text/event-stream",
@@ -403,8 +419,8 @@ async def test_a_direct_mount_refuses_an_outside_client_whatever_token_it_holds(
     assert served.status_code == 200
 
 
-async def test_the_combined_server_serves_an_outside_client() -> None:
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+async def test_the_combined_server_serves_an_outside_client(pg_database_url: str) -> None:
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with (
         _running_lifespan(app),
@@ -425,13 +441,13 @@ async def test_the_combined_server_serves_an_outside_client() -> None:
     assert response.status_code == 200
 
 
-async def test_the_presentation_theme_stylesheet_is_served_to_an_outside_client_without_a_token() -> (
-    None
-):
+async def test_the_presentation_theme_stylesheet_is_served_to_an_outside_client_without_a_token(
+    pg_database_url: str,
+) -> None:
     """A view's iframe loads its theme from `<mount>/theme-<hash>.css`, from
     the host's browser, and cannot send the bearer, so the path stays open to
     an outside client while the MCP route beside it refuses one."""
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
     theme_path = f"{PRESENTATION_MCP_MOUNT_PATH}/theme-{THEME_HASH}.css"
 
     async with httpx2.AsyncClient(
@@ -447,8 +463,8 @@ async def test_the_presentation_theme_stylesheet_is_served_to_an_outside_client_
     assert theme.headers["content-type"] == "text/css; charset=utf-8"
 
 
-async def test_mounted_data_mcp_reports_its_tools() -> None:
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+async def test_mounted_data_mcp_reports_its_tools(pg_database_url: str) -> None:
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with _running_lifespan(app):
         transport = _mounted_mcp_transport(app, f"{DATA_MCP_MOUNT_PATH}/mcp")
@@ -467,7 +483,9 @@ async def test_mounted_data_mcp_reports_its_tools() -> None:
     ]
 
 
-async def test_a_held_data_mcp_client_authenticates_every_call_not_just_the_first() -> None:
+async def test_a_held_data_mcp_client_authenticates_every_call_not_just_the_first(
+    pg_database_url: str,
+) -> None:
     """Regression for a suspected failure mode of `harness.mcp_client`'s
     held-per-conversation clients: a `Client` entered once and reused for
     several `call_tool`s must attach its bearer token to every one, not
@@ -476,7 +494,7 @@ async def test_a_held_data_mcp_client_authenticates_every_call_not_just_the_firs
     entered session -- a 401 on any call but the first would raise
     `MCPError` and fail this test, the same way the mount
     already refuses an unauthenticated request in the test above."""
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with _running_lifespan(app):
         transport = _mounted_mcp_transport(app, f"{DATA_MCP_MOUNT_PATH}/mcp")
@@ -494,11 +512,11 @@ async def test_a_held_data_mcp_client_authenticates_every_call_not_just_the_firs
                 assert result is not None
 
 
-async def test_mounted_data_mcp_refuses_an_unauthenticated_request() -> None:
+async def test_mounted_data_mcp_refuses_an_unauthenticated_request(pg_database_url: str) -> None:
     """The mount itself, not just the harness's own client, rejects a caller
     with no token, since the gate is enforced at the FastMCP layer instead
     of only by threading `auth=` through `harness.mcp_client`."""
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with _running_lifespan(app):
         statuses: list[int] = []
@@ -510,8 +528,8 @@ async def test_mounted_data_mcp_refuses_an_unauthenticated_request() -> None:
     assert set(statuses) == {401}
 
 
-async def test_mounted_analysis_mcp_reports_its_tools() -> None:
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+async def test_mounted_analysis_mcp_reports_its_tools(pg_database_url: str) -> None:
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with _running_lifespan(app):
         transport = _mounted_mcp_transport(app, f"{ANALYSIS_MCP_MOUNT_PATH}/mcp")
@@ -532,11 +550,13 @@ async def test_mounted_analysis_mcp_reports_its_tools() -> None:
     }
 
 
-async def test_mounted_analysis_mcp_refuses_an_unauthenticated_request() -> None:
+async def test_mounted_analysis_mcp_refuses_an_unauthenticated_request(
+    pg_database_url: str,
+) -> None:
     """The mount itself, not just the harness's own client, rejects a caller
     with no token, since the gate is enforced at the FastMCP layer instead
     of only by threading `auth=` through `harness.mcp_client`."""
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with _running_lifespan(app):
         statuses: list[int] = []
@@ -548,7 +568,9 @@ async def test_mounted_analysis_mcp_refuses_an_unauthenticated_request() -> None
     assert set(statuses) == {401}
 
 
-async def test_mounted_analysis_mcp_aggregate_returns_a_real_digest_through_the_wire() -> None:
+async def test_mounted_analysis_mcp_aggregate_returns_a_real_digest_through_the_wire(
+    pg_database_url: str,
+) -> None:
     """`test_mounted_analysis_mcp_reports_its_tools` above proves the mount
     lists seven tools, but never calls one -- every verb's own correctness
     still rests entirely on analysis-mcp's own test suite, and the composed
@@ -560,7 +582,7 @@ async def test_mounted_analysis_mcp_aggregate_returns_a_real_digest_through_the_
     lifespan has built it, the same store the mounted tool call resolves
     `frame_ref` against, since analysis-mcp's own `_lifespan` overwrites
     whatever store existed before `_running_lifespan` drives startup."""
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with _running_lifespan(app):
         handles = await seed_fixture_store(get_analysis_mcp_store())
@@ -584,14 +606,16 @@ async def test_mounted_analysis_mcp_aggregate_returns_a_real_digest_through_the_
     assert "unit: dcid:USDollar" in digest
 
 
-async def test_mounted_presentation_mcp_reports_zero_tools_when_no_platform_is_reachable() -> None:
+async def test_mounted_presentation_mcp_reports_zero_tools_when_no_platform_is_reachable(
+    pg_database_url: str,
+) -> None:
     """presentation-mcp's own lifespan fetches apis' `/api/presentation/release`
     at startup and mounts its tools from that document; with no platform
     reachable in this in-process test, it comes up tool-less and degraded
     instead (see `presentation_mcp.server`'s tests, which mock that fetch and
     pin the three-tools-mounted case).
     """
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with _running_lifespan(app):
         transport = _mounted_mcp_transport(app, f"{PRESENTATION_MCP_MOUNT_PATH}/mcp")
@@ -601,11 +625,13 @@ async def test_mounted_presentation_mcp_reports_zero_tools_when_no_platform_is_r
     assert tools == []
 
 
-async def test_mounted_presentation_mcp_refuses_an_unauthenticated_request() -> None:
+async def test_mounted_presentation_mcp_refuses_an_unauthenticated_request(
+    pg_database_url: str,
+) -> None:
     """The mount itself, not just the harness's own client, rejects a caller
     with no token, since the gate is enforced at the FastMCP layer instead
     of only by threading `auth=` through `harness.mcp_client`."""
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with _running_lifespan(app):
         statuses: list[int] = []
@@ -621,12 +647,13 @@ async def test_mounted_presentation_mcp_refuses_an_unauthenticated_request() -> 
 
 async def test_startup_fails_loudly_when_its_own_token_is_refused(
     monkeypatch: pytest.MonkeyPatch,
+    pg_database_url: str,
 ) -> None:
     """The startup self-check sends a token the mounts refuse, so startup
     fails with the message naming `MCP_API_TOKEN` rather than a bare
     `MCPError` on a user's first turn."""
     monkeypatch.setattr(server_module, "bearer_token", lambda: "not-the-token")
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     # Each mounted app's session manager wraps the failure in its own task
     # group on the way out.
@@ -637,8 +664,10 @@ async def test_startup_fails_loudly_when_its_own_token_is_refused(
             pass
 
 
-async def test_mcp_auth_disabled_lets_an_unauthenticated_request_through() -> None:
-    app = create_app(settings=Settings(mcp_auth_disabled=True))
+async def test_mcp_auth_disabled_lets_an_unauthenticated_request_through(
+    pg_database_url: str,
+) -> None:
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_auth_disabled=True))
 
     async with _running_lifespan(app):
         transport = _mounted_mcp_transport(app, f"{DATA_MCP_MOUNT_PATH}/mcp")
@@ -657,7 +686,9 @@ async def test_mcp_auth_disabled_lets_an_unauthenticated_request_through() -> No
     ]
 
 
-async def test_unset_mcp_api_token_mints_one_the_harness_can_call_itself_with() -> None:
+async def test_unset_mcp_api_token_mints_one_the_harness_can_call_itself_with(
+    pg_database_url: str,
+) -> None:
     """Default settings (`MCP_API_TOKEN` and `MCP_AUTH_DISABLED` both unset).
     A per-process token is minted, and `harness.server._lifespan`'s own
     startup self-check (a real `list_tools` call against the data-mcp
@@ -666,14 +697,14 @@ async def test_unset_mcp_api_token_mints_one_the_harness_can_call_itself_with() 
     would fail `_running_lifespan`'s own `task.result()` re-raise instead of
     reaching the end of this `async with` block.
     """
-    app = create_app(settings=Settings())
+    app = create_app(settings=Settings(database_url=pg_database_url))
 
     async with _running_lifespan(app):
         pass
 
 
-def test_run_sse_is_retired_in_favour_of_the_studio_routes() -> None:
-    client = TestClient(create_app(settings=Settings()))
+def test_run_sse_is_retired_in_favour_of_the_studio_routes(pg_database_url: str) -> None:
+    client = TestClient(create_app(settings=Settings(database_url=pg_database_url)))
 
     response = client.post("/run_sse")
 
@@ -681,10 +712,10 @@ def test_run_sse_is_retired_in_favour_of_the_studio_routes() -> None:
     assert "/api/studio/turn" in response.json()["detail"]
 
 
-def test_studio_routes_are_mounted() -> None:
+def test_studio_routes_are_mounted(pg_database_url: str) -> None:
     """The studio surface is part of the served app: an unauthenticated turn
     against `create_app` hits the auth check and gets a 401."""
-    client = TestClient(create_app(settings=Settings()))
+    client = TestClient(create_app(settings=Settings(database_url=pg_database_url)))
 
     response = client.post(
         "/api/studio/turn",
@@ -699,20 +730,14 @@ def test_studio_routes_are_mounted() -> None:
     assert response.status_code == 401
 
 
-def test_build_session_service_defaults_to_in_memory() -> None:
-    service = build_session_service(settings=Settings()).service
-
-    assert isinstance(service, InMemorySessionService)
-
-
 async def test_build_session_service_database_url_yields_a_working_database_session_service(
-    tmp_path,
+    pg_database_url: str,
 ) -> None:
-    """`DATABASE_URL=sqlite+aiosqlite://...` yields a real
+    """`DATABASE_URL=<postgres url>` yields a real
     `DatabaseSessionService`: a session created through it round-trips
     through `get_session`, and `close` disposes the engine it built for
     itself without raising."""
-    settings = Settings(database_url=f"sqlite+aiosqlite:///{tmp_path}/sessions.db")
+    settings = Settings(database_url=pg_database_url)
 
     service = build_session_service(settings=settings).service
 
@@ -725,9 +750,9 @@ async def test_build_session_service_database_url_yields_a_working_database_sess
 
 
 async def test_lifespan_prepares_database_tables_eagerly_and_disposes_on_shutdown(
-    monkeypatch, tmp_path
+    monkeypatch, pg_database_url: str
 ) -> None:
-    """DatabaseSessionService over sqlite+aiosqlite: the lifespan's startup
+    """With a `DatabaseSessionService` over Postgres, the lifespan's startup
     phase calls `prepare_tables` before the app accepts traffic (so a
     session created right after startup needs no lazy table creation of its
     own), and its shutdown phase disposes the engine `build_session_service`
@@ -741,7 +766,7 @@ async def test_lifespan_prepares_database_tables_eagerly_and_disposes_on_shutdow
 
     monkeypatch.setattr(DatabaseSessionService, "prepare_tables", tracking_prepare_tables)
 
-    app = create_app(settings=Settings(database_url=f"sqlite+aiosqlite:///{tmp_path}/sessions.db"))
+    app = create_app(settings=Settings(database_url=pg_database_url))
     assert isinstance(app.state.session_service, DatabaseSessionService)
 
     closed: list[bool] = []
@@ -764,8 +789,42 @@ async def test_lifespan_prepares_database_tables_eagerly_and_disposes_on_shutdow
     assert closed == [True]
 
 
+async def test_lifespan_applies_the_harness_migrations_on_postgres(
+    pg_empty_engine: AsyncEngine,
+) -> None:
+    """Startup on a Postgres `DATABASE_URL` creates the harness's own tables
+    beside ADK's. The test database is a throwaway one, since the migrations
+    write to whichever schema the connection's `search_path` names."""
+    base_url = pg_empty_engine.url
+    name = f"t_{uuid.uuid4().hex[:12]}"
+    admin = create_async_engine(base_url, isolation_level="AUTOCOMMIT")
+    async with admin.connect() as conn:
+        await conn.execute(text(f"CREATE DATABASE {name}"))
+    url = base_url.set(database=name)
+    try:
+        app = create_app(settings=Settings(database_url=url.render_as_string(hide_password=False)))
+        async with _running_lifespan(app):
+            engine = app.state.session_service_engine
+            async with engine.connect() as conn:
+                tables = set(
+                    (
+                        await conn.execute(
+                            text(
+                                "SELECT table_name FROM information_schema.tables "
+                                "WHERE table_schema = 'public'"
+                            )
+                        )
+                    ).scalars()
+                )
+        assert {"conversations", "runs", "harness_schema_migrations", "sessions"} <= tables
+    finally:
+        async with admin.connect() as conn:
+            await conn.execute(text(f"DROP DATABASE {name} WITH (FORCE)"))
+        await admin.dispose()
+
+
 async def test_lifespan_startup_prepare_tables_honors_the_configured_connect_timeout(
-    monkeypatch, tmp_path
+    monkeypatch, pg_database_url: str
 ) -> None:
     """`_lifespan`'s eager `prepare_tables` call is bounded by
     `session_store_connect_timeout_s`, not a hardcoded deadline: a setting
@@ -773,7 +832,7 @@ async def test_lifespan_startup_prepare_tables_honors_the_configured_connect_tim
     budget is zeroed so the first timeout exhausts it immediately -- the
     retry behaviour itself is covered directly, against
     `_prepare_tables_with_retries`, below."""
-    monkeypatch.setattr(server_module, "_PREPARE_TABLES_RETRY_BUDGET_S", 0.0)
+    monkeypatch.setattr(server_module, "_STARTUP_DB_RETRY_BUDGET_S", 0.0)
     original_prepare_tables = DatabaseSessionService.prepare_tables
 
     async def slow_prepare_tables(self: DatabaseSessionService) -> None:
@@ -784,7 +843,7 @@ async def test_lifespan_startup_prepare_tables_honors_the_configured_connect_tim
 
     app = create_app(
         settings=Settings(
-            database_url=f"sqlite+aiosqlite:///{tmp_path}/sessions.db",
+            database_url=pg_database_url,
             session_store_connect_timeout_s=0.01,
         )
     )
@@ -868,6 +927,51 @@ async def test_prepare_tables_with_retries_raises_after_the_budget_is_exhausted(
     assert attempts == [1, 2, 3]
 
 
+async def test_a_slow_migration_is_not_cut_short(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attempt has no bound of its own, since `apply_pending` bounds each
+    statement, so a slow migration completes on its first attempt."""
+    attempts: list[int] = []
+
+    async def slow_apply_pending(engine: object) -> list[str]:
+        attempts.append(len(attempts) + 1)
+        await asyncio.sleep(0.05)
+        return []
+
+    monkeypatch.setattr(server_module, "apply_pending", slow_apply_pending)
+
+    await server_module._apply_migrations_with_retries(cast(AsyncEngine, object()), budget_s=0.0)
+
+    assert attempts == [1]
+
+
+async def test_the_migration_step_gets_what_the_first_step_left_of_one_startup_deadline(
+    monkeypatch: pytest.MonkeyPatch, pg_database_url: str
+) -> None:
+    budgets: list[float] = []
+
+    async def slow_prepare(*_: Any, **__: Any) -> None:
+        await asyncio.sleep(0.3)
+
+    async def stop_at_migrations(engine: object, *, budget_s: float) -> None:
+        budgets.append(budget_s)
+        raise RuntimeError("startup stops here")
+
+    monkeypatch.setattr(server_module, "_STARTUP_DB_RETRY_BUDGET_S", 10.0)
+    monkeypatch.setattr(server_module, "_prepare_tables_with_retries", slow_prepare)
+    monkeypatch.setattr(server_module, "_apply_migrations_with_retries", stop_at_migrations)
+    app = create_app(settings=Settings(database_url=pg_database_url))
+
+    with pytest.raises(BaseException) as excinfo:
+        async with _running_lifespan(app):
+            pass
+
+    assert excinfo.group_contains(RuntimeError, match="startup stops here")
+    (budget,) = budgets
+    assert budget <= 9.7
+
+
 async def _preflight(app: FastAPI, origin: str) -> httpx2.Response:
     async with httpx2.AsyncClient(
         transport=httpx2.ASGITransport(app=app), base_url="http://cors.test"
@@ -882,19 +986,19 @@ async def _preflight(app: FastAPI, origin: str) -> httpx2.Response:
         )
 
 
-async def test_cors_origins_setting_admits_listed_origins_only() -> None:
+async def test_cors_origins_setting_admits_listed_origins_only(pg_database_url: str) -> None:
     """The server answers browser preflights for the origins in
     STUDIO_CORS_ORIGINS and for no other; with the list empty (the deployed
     posture) it sends no CORS headers at all."""
     listed = "http://localhost:8091"
-    app = create_app(settings=Settings(studio_cors_origins=[listed]))
+    app = create_app(settings=Settings(database_url=pg_database_url, studio_cors_origins=[listed]))
     allowed = await _preflight(app, listed)
     assert allowed.status_code == 200
     assert allowed.headers.get("access-control-allow-origin") == listed
     refused = await _preflight(app, "http://evil.example")
     assert "access-control-allow-origin" not in refused.headers
 
-    closed = await _preflight(create_app(settings=Settings()), listed)
+    closed = await _preflight(create_app(settings=Settings(database_url=pg_database_url)), listed)
     assert "access-control-allow-origin" not in closed.headers
 
 

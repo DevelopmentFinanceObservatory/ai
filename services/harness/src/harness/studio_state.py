@@ -2,56 +2,40 @@
 
 `ConversationState` is one conversation's wire bookkeeping: frame `seq`,
 pending interrupt ids, plan version lineage, the composition manifest, the
-turn records, and the digests the models see. `StudioStore` keys those
-states on (principal, conversation_id). The manifest helpers here are the
-one place a composition changes: `_apply_operations` for the user's
-mutations, `_next_manifest` for every new revision.
+turn records, and the digests the models see. `StudioStore`
+(`harness.studio_store`) keys those states on (principal, conversation_id)
+and stores their durable fields. The manifest helpers here are the one place a
+composition changes: `_apply_operations` for the user's mutations,
+`_next_manifest` for every new revision.
 
-Every durable field of a conversation, everything but the identity field
-`conversation_id` and the process-local fields `_PROCESS_LOCAL_FIELDS` names,
-lives in a per-conversation ADK "ledger" session, the same session service the runner
-already uses, keyed `(app_name, user_id=principal,
-session_id=conversation_id)`. Any instance can load a conversation's ledger
-and continue it; `StudioStore` keeps only runtime objects and each
-instance's own live `ConversationState` in process, like
-`harness.provenance.ProvenanceStore`. `create`/`load`/`save`/`release` are
-the ledger-backed API every route in `harness.studio` goes through;
-`current` is the held-in-process accessor for callers that run mid-turn,
-after a route has already loaded or created the conversation on this
-instance (`make_recall_part`, `_RecordingExecutor._keep_write_token`).
-
-`studio:segment` is a durable lease on a conversation's active stream, the
+`Segment` is a durable lease on a conversation's active stream, the
 mechanism that keeps at most one instance streaming a conversation at a
-time: `claim_segment` takes it, `renew` pushes its TTL forward,
-`checkpoint` reconciles the rest of the conversation's state into the
-ledger mid-stream (and at end of segment, through `release`), and
+time: `StudioStore.claim_segment` takes it, `renew` pushes its TTL forward,
+`checkpoint` writes the rest of the conversation's state to storage
+mid-stream (and at end of segment, through `release`), and
 `request_cancel` signals it from any instance. See `Segment`,
-`SegmentBusy` and `SegmentLost`.
+`SegmentBusy`, `SegmentLost` and `DatabaseUnavailable`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-import functools
 import json
 import logging
-import math
 import re
-import time
 import uuid
-from collections.abc import Callable, Coroutine, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from common.logging import JSON_FIELDS
 from common.telemetry import (
-    deploy_release,
-    record_turn_outcome,
-    start_telemetry_flush,
-    turn_segment,
+    EventLevel,
+    end_turn_segment,
+    start_turn_segment,
+    use_turn_segment,
 )
 from compiler.sources import alternative_definitions, source_from_spec_block
 from compiler.surface import SpecUse
@@ -59,16 +43,11 @@ from data_mcp.definition_store.identity import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from executor.ledger import RunStatus
 from fastapi.responses import JSONResponse
-from google.adk.errors import StaleSessionError
-from google.adk.events import Event, EventActions
-from google.adk.sessions import BaseSessionService, Session
-from google.adk.sessions.base_session_service import GetSessionConfig
 from planner.plan import PlanStatus, cut_user_text
 from pydantic import BaseModel, ValidationError
 
 from harness.approval import ApprovalRecord
 from harness.conversation import current_conversation_key
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY
 from harness.reply_figures import drawn_series
 from harness.turn_records import (
     PlanRecord,
@@ -96,6 +75,9 @@ from harness.wire import (
     SetLayoutHintsOp,
     ToolError,
 )
+
+if TYPE_CHECKING:
+    from harness.studio_store import StudioStore
 
 logger = logging.getLogger(__name__)
 
@@ -229,12 +211,14 @@ def _wire_id(prefix: str) -> str:
 
 
 def _apply_operations(
-    conversation: ConversationState,
+    components: Mapping[str, dict[str, Any]],
     manifest: CompositionManifest | None,
     operations: list[Any],
 ) -> JSONResponse | tuple[list[CompositionBlock], Any]:
     """Apply mutations to LOCAL copies; the first invalid operation refuses
-    the whole request with nothing applied (mutations are transactional)."""
+    the whole request with nothing applied (mutations are transactional).
+    `components` is the conversation's digest entries by component id, the
+    cards an add may put back."""
     blocks = [block.model_copy(deep=True) for block in manifest.blocks] if manifest else []
     layout_hints = manifest.layout_hints if manifest else None
     for operation in operations:
@@ -244,7 +228,7 @@ def _apply_operations(
         if isinstance(operation, AddOp):
             # Delta 11: append a block for a component this conversation
             # already streamed; the server rebuilds it from its digest.
-            entry = conversation.components.get(operation.component_id)
+            entry = components.get(operation.component_id)
             if entry is None:
                 return _tool_error_response(
                     ToolError(
@@ -419,9 +403,6 @@ SEGMENT_TTL_S = 45
 # segment, well inside the TTL so a slow renewal still lands before it
 # lapses.
 HEARTBEAT_INTERVAL_S = 5
-# This process's id, carried on every segment it claims or renews for logs
-# only. Fencing compares segment ids, never owners.
-_OWNER_ID = uuid.uuid4().hex[:12]
 
 
 class SegmentBusy(Exception):  # noqa: N818 -- named for the wire 409, not an error condition
@@ -437,15 +418,22 @@ class SegmentBusy(Exception):  # noqa: N818 -- named for the wire 409, not an er
 
 
 class SegmentLost(Exception):  # noqa: N818 -- named for the wire condition, not an error kind
-    """Raised by `StudioStore.checkpoint` when the ledger's live segment is
+    """Raised by `StudioStore.checkpoint` when the stored live segment is
     no longer the one this call is checkpointing on behalf of. Another
     instance took over after this one's TTL lapsed."""
 
 
+class DatabaseUnavailable(Exception):  # noqa: N818 -- named for the condition the stream reports
+    """Raised by `StudioStore`'s retried writes (`checkpoint`,
+    `change_canvas`, `reserve_frames`) when the database stayed unreachable
+    until the lease's deadline. The stream ends as a lost segment does,
+    leaving the turn as stored, since no close could be saved either."""
+
+
 @dataclass(frozen=True)
 class Segment:
-    """One durable claim on a conversation's active stream,
-    `studio:segment` in the ledger. `id` is the fencing token
+    """One durable claim on a conversation's active stream, the lease
+    columns of its stored row. `id` is the fencing token
     `StudioStore.claim_segment` mints; every later write on behalf of this
     segment (`renew`, `checkpoint`) is fenced against it, never against
     `owner`. `owner` is the claiming instance's id, carried for logs only.
@@ -459,28 +447,8 @@ class Segment:
     cancel: bool = False
 
 
-def _serialize_segment(segment: Segment) -> dict[str, Any]:
-    return {
-        "id": segment.id,
-        "owner": segment.owner,
-        "expires_at": segment.expires_at,
-        "cancel": segment.cancel,
-    }
-
-
-def _deserialize_segment(value: Any) -> Segment | None:
-    if not value:
-        return None
-    return Segment(
-        id=value["id"],
-        owner=value["owner"],
-        expires_at=value["expires_at"],
-        cancel=bool(value.get("cancel", False)),
-    )
-
-
 # The message, and the `event` field, of the log line `StudioStore` writes
-# for each turn close and each pause a ledger append commits.
+# for each turn close and each pause one of its writes commits.
 TURN_LOG_EVENT = "studio.turn"
 
 
@@ -498,9 +466,9 @@ class TurnUsage:
     spec a card drawn this turn rests on, once each, in the order first used
     (`compiler.surface.current_spec_uses`). `trace_id` is the turn's
     `ConversationState.trace_id`, so a stored usage naming another turn's
-    reads as unset (`_turn_usage`). `started_at` is when `begin_turn` began the
-    turn, as an ISO 8601 UTC timestamp, so a turn closed days later still
-    counts on the day it ran.
+    reads as unset (`harness.studio_store._turn_usage`). `started_at` is when
+    `begin_turn` began the turn, as an ISO 8601 UTC timestamp, so a turn
+    closed days later still counts on the day it ran.
     """
 
     trace_id: str | None = None
@@ -522,6 +490,12 @@ class TurnUsage:
         """The Langfuse tags of the turn: its surface, when it names one."""
         return [self.surface] if self.surface else []
 
+    def copy(self) -> TurnUsage:
+        """A copy whose spec lists are lists of their own."""
+        return dataclasses.replace(
+            self, fetched_specs=list(self.fetched_specs), drawn_specs=list(self.drawn_specs)
+        )
+
 
 @dataclass
 class ConversationState:
@@ -530,6 +504,8 @@ class ConversationState:
     conversation_id: str
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     turn_index: int = 0
+    # The next frame number. A segment's claim sets it to the start of the
+    # block it reserved (`StudioStore.save`), and checkpoints store it.
     seq: int = 0
     trace_id: str = ""
     pending: dict[str, _PendingInterrupt] = field(default_factory=dict)
@@ -547,7 +523,8 @@ class ConversationState:
     # Set alongside `cancel_event`, naming why it was armed: "cancelled" (a
     # client's Stop, from this instance or another) or "segment_lost" (this
     # stream's segment was taken over, or its own renewal could not keep it
-    # alive). `_sse_stream`'s cancel branch reads it once to pick the
+    # alive, or a write could not reach the database before the lease's
+    # deadline). `_sse_stream`'s cancel branch reads it once to pick the
     # frame; reset to `None` alongside `cancel_event` when the stream ends.
     cancel_reason: str | None = None
     # Armed while a plan-card switch streams (`harness.graph.switch.
@@ -579,9 +556,11 @@ class ConversationState:
     # JSON, `specs` the spec block `search` returned for each source those
     # plans used, and `identities` the `RecordedIdentity` of every source the
     # turn's searches returned or its plans used, as JSON, by spec_id
-    # (`recorded_identity`). Every key but `user` and `assistant` is
-    # optional, and a record without `plans`, `readings`, `specs` or
-    # `identities` holds none. Feeds the conversation digest (newest
+    # (`recorded_identity`). A record `close_turn` builds also names the
+    # turn's `trace_id` and its `TurnUsage` as `usage`; a record stored
+    # without them holds neither. Every key but `user`
+    # and `assistant` is optional, and a record without `plans`, `readings`,
+    # `specs` or `identities` holds none. Feeds the conversation digest (newest
     # window), the recall function (everything older) and the planner's ledger
     # (`prior_ledger_state`). None of them reads `identities`.
     turns: list[dict[str, Any]] = field(default_factory=list)
@@ -609,11 +588,17 @@ class ConversationState:
     # `ORCHESTRATOR_SEARCHES_KEY`, `ORCHESTRATOR_SPECS_KEY`), set by
     # `harness.studio` as events stream. `turn_specs` is process-local: the
     # turn's own ADK session holds the blocks, and `StudioStore.load` reads
-    # them back from it, so the ledger stores only the blocks `close_turn`
+    # them back from it, so storage keeps only the blocks `close_turn`
     # keeps.
     turn_plans: list[dict[str, Any]] = field(default_factory=list)
     turn_readings: list[dict[str, Any]] = field(default_factory=list)
     turn_specs: dict[str, Any] = field(default_factory=dict)
+    # Whether the spec blocks the open turn's session holds need no
+    # conversion (`harness.studio._keep_turn_records`). True for a turn
+    # `begin_turn` opened, whose graph writes blocks in the current form,
+    # and once a conversion of a turn `StudioStore.load` read back changed
+    # nothing. Process-local; `load` resets it.
+    turn_specs_settled: bool = False
     # The chip the turn was asked to apply, `{"choice_id", "option_id"}`, set
     # by `harness.studio`; once the graph's `seed` node applied it, as that
     # node wrote it, with `from_option_id` and `spec_id`
@@ -626,26 +611,24 @@ class ConversationState:
     # as `changed_from` for a choice that holds another label now.
     turn_choice_baseline: dict[str, str] = field(default_factory=dict)
     turn_recorded: bool = False
+    # Whether `close_turn` recorded the turn during the segment this
+    # instance claimed last (`StudioStore.claim_segment` resets it). That
+    # segment's own ending is then decided, and a Stop read after it changes
+    # nothing (`harness.studio._StreamEnding.stop_applies`). Not durable.
+    segment_closed_turn: bool = field(default=False, compare=False)
     # Who asked the current turn and the specs it used; set by `begin_turn`.
     turn_usage: TurnUsage = field(default_factory=TurnUsage)
-    # This turn's composition mutations, in order, each a pure function of
-    # the manifest before it to the manifest after (`land_component`,
-    # `_replace_block`). Not durable: replayed against a freshly reloaded
-    # manifest when a release save's `StaleSessionError` retry finds that
-    # `/composition` (which runs without the turn lock) changed it in the
-    # meantime, so that write is kept rather than overwritten. Reset by
-    # `begin_turn`.
-    _composition_ops: list[Callable[[CompositionManifest | None], CompositionManifest | None]] = (
-        field(default_factory=list, repr=False, compare=False)
-    )
+    # This instance's telemetry span for the turn's current segment, on the
+    # turn's `trace_id`. `begin_turn` or `open_segment_span` opens it, and
+    # `end_segment_span` ends it once when the segment ends on this instance,
+    # so no span outlives the segment. Streams make it current with
+    # `in_turn_span`.
+    # Excluded from repr so a log of the state doesn't dump SDK internals.
+    _telemetry_span: Any = field(default=None, repr=False, compare=False)
     # Whether a `remove_cards` of this turn changed the canvas since the
     # stream last reported one (`take_unreported_removal`). Not durable.
     # Reset by `begin_turn`.
     _removal_unreported: bool = field(default=False, repr=False, compare=False)
-    # Set while a Stop ends the running stream. `StudioRunner._locked` then
-    # closes the turn as `cancelled` once the stream's frames have unwound,
-    # before its release save. Not durable.
-    stopping: bool = field(default=False, repr=False, compare=False)
 
     def take_unreported_removal(self) -> bool:
         """Whether `remove_cards` changed the canvas since the last call: the
@@ -925,11 +908,14 @@ class ConversationState:
         match_notes: str | None = None,
         basis_line: str | None = None,
     ) -> None:
-        """Append the turn's record, once -- the resume protocol can end a
-        turn from more than one code path. The record names the turn's
-        `trace_id` and its `usage` as they stand at the close, so the store, which
-        writes the turn's `TURN_LOG_EVENT` line and `turn` outcome once the
-        save that commits the record lands (`StudioStore`), names this turn
+        """Append the turn's record, once (the resume protocol can end a turn
+        from more than one code path), and mark the running segment as the
+        one that recorded it (`segment_closed_turn`). A turn recorded
+        with an `error` drops its pending interrupts: no pause is left to
+        answer, so `/interrupt` answers 404. The record names the turn's `trace_id` and its `usage` as they
+        stand at the close, so the store, which writes the turn's
+        `TURN_LOG_EVENT` line and `turn` outcome once the write that commits
+        the record lands (`harness.studio_store.StudioStore`), names this turn
         even after `begin_turn` has moved on. A record that cannot be built is
         replaced by a minimal one (`turn`, `user`, `assistant`, the close's
         own `error` code when it has one, `trace_id` and `usage`).
@@ -974,6 +960,9 @@ class ConversationState:
         self.turns.append(record)
         # Only once a record is appended, the minimal one included.
         self.turn_recorded = True
+        self.segment_closed_turn = True
+        if error:
+            self.pending.clear()
 
     def _turn_record(
         self,
@@ -1040,15 +1029,23 @@ class ConversationState:
         return record
 
     def take_identity(
-        self, *, account: str | None, visitor: str | None, caller: str | None
+        self,
+        *,
+        account: str | None,
+        visitor: str | None,
+        caller: str | None,
+        surface: str | None = None,
     ) -> None:
         """Fill in who asks the turn where it recorded no one: `caller` for a
-        turn with no caller, and `account` and `visitor` for a turn that names
-        neither, which the turn's later segments and its outcome observation
-        then name as their user (`TurnUsage.user_id`)."""
+        turn with no caller, `surface` for a turn with no surface, and
+        `account` and `visitor` for a turn that names neither, which the
+        turn's later segments and its outcome observation then name as their
+        user (`TurnUsage.user_id`)."""
         usage = self.turn_usage
         if usage.caller is None:
             usage.caller = caller
+        if usage.surface is None:
+            usage.surface = surface
         if usage.account is not None or usage.visitor is not None:
             return
         usage.account, usage.visitor = account, visitor
@@ -1149,12 +1146,19 @@ class ConversationState:
     @property
     def awaiting_answer(self) -> bool:
         """Whether the turn is paused on an interrupt that `/interrupt` can
-        still answer. A paused turn stays open, with no span held, until the
-        resumed segment closes it, `/cancel` closes it, or the next
-        `begin_turn` abandons it. Excludes an entry already resuming under a segment: a
+        still answer. Excludes an entry already resuming under a segment: a
         disconnect mid-resume closes the turn as cancelled rather than
         looking paused for `/interrupt` to answer again."""
-        return any(p.resuming_segment is None for p in self.pending.values())
+        return awaiting_answer(p.resuming_segment for p in self.pending.values())
+
+    @property
+    def turn_status(self) -> str:
+        """How the current turn stands (`turn_status`)."""
+        return turn_status(
+            recorded=self.turn_recorded,
+            record=self.turns[-1] if self.turns else None,
+            awaiting=self.awaiting_answer,
+        )
 
     def mark_approved_sent(self, segment_id: str) -> None:
         """Record that the stream of `segment_id` sent `plan.approved` for the
@@ -1190,17 +1194,18 @@ class ConversationState:
         self.turn_choice_baseline = {}
 
     def begin_turn(self, usage: TurnUsage | None = None) -> None:
-        """Reset per-turn wire state. Abandons any pending interrupt: a fresh
+        """Reset per-turn wire state and open the span of the turn's first
+        segment (`open_segment_span`). Abandons any pending interrupt: a fresh
         turn.request on a paused conversation ends the pause, and the paused
         ADK invocation stays parked in its own per-turn session. `usage`
-        names who asks the new turn, which the previous turn's record, if it
-        is closed here, does not take. That record rides the new turn's
-        claim save, whose commit writes its line (`StudioStore`)."""
+        names who asks the new turn. A previous turn this closes as
+        `abandoned` keeps its own trace id and usage, and its record rides
+        the new turn's claim save, whose commit writes its line
+        (`harness.studio_store.StudioStore.save`)."""
         self.turn_index += 1
         self.seq = 0
         self.pending.clear()
         self.start_plan_lineage()
-        self._composition_ops = []
         self._removal_unreported = False
         if self.turn_index > 1 and not self.turn_recorded:
             # The previous turn never reached a terminal frame (an abandoned
@@ -1216,1376 +1221,80 @@ class ConversationState:
         self.turn_plans = []
         self.turn_readings = []
         self.turn_specs = {}
+        self.turn_specs_settled = True
         self.turn_applied_choice = None
         self.turn_recorded = False
         self.turn_usage = usage if usage is not None else TurnUsage()
         self.turn_usage.trace_id = self.trace_id
         self.turn_usage.started_at = datetime.now(UTC).isoformat()
+        self.open_segment_span()
 
-    def segment_span(self) -> AbstractContextManager[None]:
-        """Run a `with` block inside one `turn.segment` span on this turn's
-        trace (`common.telemetry.turn_segment`), opened on entry and ended on
-        exit. Every stream that runs graph or executor work for the turn (the
-        `/turn` stream and each `/interrupt` stream that resumes it, on any
-        instance) enters its own, so their spans and events share the turn's
-        trace and no span outlives its request. A no-op when telemetry is
-        off."""
-        return turn_segment(
+    def end_segment_span(self, status: str, *, stored: str | None = None) -> bool:
+        """End this instance's `turn.segment` span for the turn's segment,
+        once, with `status` at the level `span_level` gives it. `stored`, the
+        turn as this instance last saved it
+        (`harness.studio_store.StudioStore.stored_turn`), goes on the span as
+        `dfo.stored`. The span carries no input or output: the turn's
+        outcome observations hold those (`harness.studio_store`). Returns
+        whether a span was open to end, for the caller to flush.
+        """
+        span = self._telemetry_span
+        if span is None:
+            return False
+        self._telemetry_span = None
+        end_turn_segment(
+            span,
+            status=status,
+            level=span_level(status),
+            attributes={"dfo.stored": stored} if stored is not None else None,
+        )
+        return True
+
+    def end_leftover_span(self) -> None:
+        """End a span this state still holds as `orphaned`, logged as the
+        breach it is: every segment ends its own span before the
+        conversation's lock is free, so a new segment's span should find
+        none. Called before a new segment's span takes its place, while the
+        state still holds the turn the leftover was opened for."""
+        if self._telemetry_span is None:
+            return
+        logger.warning(
+            "studio: conversation %s still held a segment span when a new segment "
+            "claimed it; ending it as orphaned",
+            self.conversation_id,
+        )
+        self.end_segment_span("orphaned")
+
+    def open_segment_span(self) -> None:
+        """Open a `turn.segment` span for the segment about to run, on this
+        conversation's `trace_id` (`common.telemetry.start_turn_segment`),
+        ending any span still held first (`end_leftover_span`). Its spans
+        carry the turn's user and tags (`TurnUsage`). `begin_turn` opens the
+        first segment's; each later segment of the turn, the `/interrupt`
+        that resumes a pause on any instance, opens its own here, on the
+        same trace. Both run on the request's working copy
+        (`StudioStore.draft`), and its save hands the span to the live state
+        (`StudioStore._take_draft`)."""
+        self.end_leftover_span()
+        self._telemetry_span = start_turn_segment(
             self.trace_id,
             session_id=self.conversation_id,
             user_id=self.turn_usage.user_id,
             tags=self.turn_usage.tags,
         )
 
+    def in_turn_span(self) -> AbstractContextManager[None]:
+        """Make this segment's telemetry span current for a `with` block.
+        Every stream that runs graph or executor work for the turn (the
+        `/turn` stream and the `/interrupt` stream that resumes it) enters
+        its own segment's span, and every segment's span is on the turn's
+        trace. A no-op when telemetry is off or the span has ended."""
+        return use_turn_segment(self._telemetry_span)
+
     def next_seq(self) -> int:
         value = self.seq
         self.seq += 1
         return value
-
-
-# ---------------------------------------------------------------------------
-# Ledger-backed persistence: a conversation's durable fields, mirrored into
-# a per-conversation ADK session (see the module docstring)
-# ---------------------------------------------------------------------------
-
-# Every durable ConversationState field but the growing collections
-# (`turns`, `components`, `write_tokens`, `approvals`, keyed per item
-# below) gets one scalar key. `studio:` namespaces the ledger session's
-# state so nothing here collides with a key ADK or another caller might add.
-_KEY_TURN_INDEX = "studio:turn_index"
-_KEY_SEQ = "studio:seq"
-_KEY_TRACE_ID = "studio:trace_id"
-_KEY_PENDING = "studio:pending"
-_KEY_PLAN_VERSION_IDS = "studio:plan_version_ids"
-_KEY_LATEST_PLAN_VERSION = "studio:latest_plan_version"
-_KEY_COMPOSITION = "studio:composition"
-_KEY_SEGMENT = "studio:segment"
-_KEY_AUTO_ADD = "studio:auto_add"
-_KEY_TIMED_OUT_CALLS = "studio:timed_out_calls"
-_KEY_TURN_USER_MESSAGE = "studio:turn_user_message"
-_KEY_TURN_USER_WORDS = "studio:turn_user_words"
-_KEY_TURN_FINAL_TEXT = "studio:turn_final_text"
-_KEY_TURN_COMPONENTS = "studio:turn_components"
-_KEY_TURN_RECORDED = "studio:turn_recorded"
-_KEY_TURN_PLANS = "studio:turn_plans"
-_KEY_TURN_READINGS = "studio:turn_readings"
-_KEY_TURN_APPLIED_CHOICE = "studio:turn_applied_choice"
-_KEY_TURN_CHOICE_BASELINE = "studio:turn_choice_baseline"
-_KEY_TURN_USAGE = "studio:turn_usage"
-
-# `StudioStore.checkpoint`'s fetch-merge-append cycles, capping how long a
-# conversation under sustained contention retries before it raises.
-_CHECKPOINT_RETRY_ATTEMPTS = 3
-# `StudioStore.renew` and `StudioStore.request_cancel`'s fetch-append
-# cycles for their single-key `studio:segment` write.
-_SEGMENT_WRITE_RETRY_ATTEMPTS = 3
-
-
-async def _run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
-    """Run `work` in a task of its own and wait for it to finish even when
-    the caller is cancelled, then re-raise the caller's cancellation.
-
-    A ledger write the stream makes from a `finally` (`release`) or from a
-    task the stream cancels (`renew`, on the heartbeat) is cancelled with
-    `Task.cancel`, which no anyio shield stops. Cancelled mid-statement, the
-    write never lands, and an aiosqlite connection cancelled mid-statement
-    can leave the database file locked."""
-    task = asyncio.ensure_future(work)
-    cancelled: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError as exc:
-            cancelled = exc
-    if cancelled is not None:
-        raise cancelled
-    return task.result()
-
-
-# `StudioStore.mutate_composition`'s fetch-rebuild-mutate-append cycles for
-# its single-key `studio:composition` write.
-_COMPOSITION_MUTATE_RETRY_ATTEMPTS = 3
-
-_NO_BASELINE_VALUE = object()
-
-
-def _changed_since(full: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
-    """The subset of `full` that `baseline` either lacks or holds a
-    different value for. `save` and `checkpoint` both diff a freshly
-    serialized state against a baseline this way."""
-    return {
-        key: value for key, value in full.items() if baseline.get(key, _NO_BASELINE_VALUE) != value
-    }
-
-
-# Per-item keys for the collections that grow across a conversation's whole
-# life: every ledger append re-stores its own state_delta as a new event
-# row, so a whole-list key would re-store the entire list on every turn.
-# `turns` and `approvals` are append-only, indexed by their position at
-# append time; `components` and `write_tokens` are keyed by the component
-# id they are already keyed by.
-_TURN_ITEM_PREFIX = "studio:turn:"
-_COMPONENT_ITEM_PREFIX = "studio:component:"
-_WRITE_TOKEN_ITEM_PREFIX = "studio:write_token:"
-_APPROVAL_ITEM_PREFIX = "studio:approval:"
-
-# The run ledger's items (`harness.run_ledger`): one record per run, one
-# idempotency-key index entry per key, one canonical submission and one set of
-# sealed retrievals per run, and one compiling plan per revision.
-# They live in the ledger session but are no part of `ConversationState`;
-# only `StudioStore.append_run_items` writes them.
-RUN_ITEM_PREFIX = "studio:run:"
-RUN_KEY_ITEM_PREFIX = "studio:run_key:"
-RUN_SUBMISSION_ITEM_PREFIX = "studio:run_submission:"
-RUN_RETRIEVALS_ITEM_PREFIX = "studio:run_retrievals:"
-RUN_PLAN_ITEM_PREFIX = "studio:run_plan:"
-_RUN_ITEM_PREFIXES = (
-    RUN_ITEM_PREFIX,
-    RUN_KEY_ITEM_PREFIX,
-    RUN_SUBMISSION_ITEM_PREFIX,
-    RUN_RETRIEVALS_ITEM_PREFIX,
-    RUN_PLAN_ITEM_PREFIX,
-)
-# `StudioStore.append_run_items`' fetch-fence-append cycles.
-_RUN_ITEMS_RETRY_ATTEMPTS = 3
-
-# Identity, the process-local runtime objects (the lock, the cancel and
-# switch-stop state, the pending composition ops and removal flag, and the
-# Stop flag), and the turn's spec blocks
-# (`turn_specs`, read back from the turn's own ADK session by
-# `StudioStore.load`), which `_serialize_durable`/`_apply_delta` skip.
-_PROCESS_LOCAL_FIELDS = frozenset(
-    {
-        "conversation_id",
-        "lock",
-        "cancel_event",
-        "cancel_reason",
-        "switch_stop",
-        "_composition_ops",
-        "_removal_unreported",
-        "stopping",
-        "turn_specs",
-    }
-)
-
-
-def _json_safe(value: Any) -> Any:
-    """`value`, proven JSON-serialisable by round-tripping it through
-    `json.dumps`/`json.loads`. Raises on a value `json.dumps` itself
-    refuses -- ADK's own database path would silently coerce it to its
-    `repr` instead and log only a warning (`_session_util.
-    make_json_safe_state`), which would hide a bad field on that path
-    alone."""
-    return json.loads(json.dumps(value))
-
-
-def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
-    return {
-        interrupt_id: {
-            "adk_id": p.adk_id,
-            "kind": p.kind,
-            "plan_version": p.plan_version,
-            "plan_revision": p.plan_revision,
-            "questions": [
-                {
-                    "id": q.id,
-                    "question": q.question,
-                    "options": dict(q.options),
-                    "skippable": q.skippable,
-                }
-                for q in p.questions
-            ],
-            "skippable": p.skippable,
-            "legacy": p.legacy,
-            "step_order": list(p.step_order),
-            "step_labels": dict(p.step_labels),
-            "resuming_segment": p.resuming_segment,
-            "answer": p.answer,
-            "choices": {
-                choice_id: {
-                    "active": choice.active,
-                    "options": {
-                        option_id: {"label": option.label, "status": option.status}
-                        for option_id, option in choice.options.items()
-                    },
-                }
-                for choice_id, choice in p.choices.items()
-            },
-            # `new_plan` is stored beside the card. An instance rolled back to a
-            # model without it cannot load a stored card that holds it, and
-            # ignores an unknown key of the entry.
-            "card": (
-                p.card.model_dump(mode="json", exclude_none=True, exclude={"new_plan"})
-                if p.card
-                else None
-            ),
-            "card_new_plan": bool(p.card and p.card.new_plan),
-            "approved_sent": p.approved_sent,
-            "pick_replan": p.pick_replan,
-        }
-        for interrupt_id, p in pending.items()
-    }
-
-
-def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
-    pending = _PendingInterrupt(
-        adk_id=entry["adk_id"],
-        kind=entry["kind"],
-        plan_version=entry.get("plan_version"),
-        plan_revision=entry.get("plan_revision"),
-        step_order=tuple(entry.get("step_order") or ()),
-        step_labels=dict(entry.get("step_labels") or {}),
-        resuming_segment=entry.get("resuming_segment"),
-        answer=entry.get("answer"),
-        choices={
-            choice_id: _PendingChoice(
-                active=choice["active"],
-                options={
-                    option_id: _PendingOption(label=option["label"], status=option["status"])
-                    for option_id, option in choice["options"].items()
-                },
-            )
-            for choice_id, choice in (entry.get("choices") or {}).items()
-        },
-        card=(
-            PlanProposed.model_validate(
-                {**entry["card"], "new_plan": True if entry.get("card_new_plan") else None}
-            )
-            if entry.get("card")
-            else None
-        ),
-        approved_sent=bool(entry.get("approved_sent")),
-        pick_replan=bool(entry.get("pick_replan")),
-    )
-    if "questions" in entry:
-        pending.questions = tuple(
-            _PendingQuestion(
-                id=q["id"],
-                question=q["question"],
-                options=dict(q["options"]),
-                skippable=q["skippable"],
-            )
-            for q in entry["questions"]
-        )
-        pending.skippable = entry["skippable"]
-        pending.legacy = entry["legacy"]
-    elif pending.kind == "elicitation":
-        # Saved before questions were kept. The flat `option_ids` lift into
-        # one question `q1` whose labels are unknown, and every such frame
-        # was skippable as a whole.
-        options: dict[str, str | None] = dict.fromkeys(entry.get("option_ids") or ())
-        pending.questions = (_PendingQuestion(id="q1", question="", options=options),)
-        pending.skippable = True
-        pending.legacy = True
-    return pending
-
-
-def _deserialize_pending(data: dict[str, Any]) -> dict[str, _PendingInterrupt]:
-    return {interrupt_id: _deserialize_entry(entry) for interrupt_id, entry in data.items()}
-
-
-def _serialize_durable(state: ConversationState) -> dict[str, Any]:
-    """Every durable field of `state`, keyed for the ledger and proven
-    JSON-safe. The dict this returns is both a save's candidate
-    `state_delta` (before diffing against a baseline) and the snapshot
-    `save` diffs future calls against."""
-    data: dict[str, Any] = {
-        _KEY_TURN_INDEX: state.turn_index,
-        _KEY_SEQ: state.seq,
-        _KEY_TRACE_ID: state.trace_id,
-        _KEY_PENDING: _serialize_pending(state.pending),
-        # A JSON object's keys are always strings; `plan_version_ids`' int
-        # keys are recovered on load.
-        _KEY_PLAN_VERSION_IDS: {
-            str(version): value for version, value in state.plan_version_ids.items()
-        },
-        _KEY_LATEST_PLAN_VERSION: state.latest_plan_version,
-        _KEY_COMPOSITION: (
-            state.composition.model_dump(mode="json") if state.composition is not None else None
-        ),
-        _KEY_SEGMENT: _serialize_segment(state.segment) if state.segment is not None else None,
-        _KEY_AUTO_ADD: state.auto_add,
-        _KEY_TIMED_OUT_CALLS: sorted(state.timed_out_calls),
-        _KEY_TURN_USER_MESSAGE: state.turn_user_message,
-        _KEY_TURN_USER_WORDS: state.turn_user_words,
-        _KEY_TURN_FINAL_TEXT: state.turn_final_text,
-        _KEY_TURN_COMPONENTS: state.turn_components,
-        _KEY_TURN_RECORDED: state.turn_recorded,
-        _KEY_TURN_PLANS: state.turn_plans,
-        _KEY_TURN_READINGS: state.turn_readings,
-        _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
-        _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
-        _KEY_TURN_USAGE: dataclasses.asdict(state.turn_usage),
-    }
-    for index, turn in enumerate(state.turns):
-        data[f"{_TURN_ITEM_PREFIX}{index:04d}"] = turn
-    for component_id, component_entry in state.components.items():
-        data[f"{_COMPONENT_ITEM_PREFIX}{component_id}"] = component_entry
-    for component_id, token in state.write_tokens.items():
-        data[f"{_WRITE_TOKEN_ITEM_PREFIX}{component_id}"] = token
-    for index, approval in enumerate(state.approvals):
-        data[f"{_APPROVAL_ITEM_PREFIX}{index:04d}"] = approval.model_dump(mode="json")
-    return {key: _json_safe(value) for key, value in data.items()}
-
-
-def _set_list_item(items: list[Any], index: int, value: Any) -> None:
-    """`items[index] = value`, extending `items` first when `index` is one
-    past its end -- the shape every per-item key's index takes, since
-    `turns` and `approvals` are append-only."""
-    if index < len(items):
-        items[index] = value
-    else:
-        items.extend([None] * (index - len(items)))
-        items.append(value)
-
-
-def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
-    """Merge `delta` (a subset of `_serialize_durable`'s keys) onto `state`
-    in place. Used both to rebuild a `ConversationState` from a ledger's
-    full state and to re-apply one request's own changed keys onto a
-    freshly reloaded state after a release save's `StaleSessionError`."""
-    for key, value in delta.items():
-        if key == _KEY_TURN_INDEX:
-            state.turn_index = value
-        elif key == _KEY_SEQ:
-            state.seq = value
-        elif key == _KEY_TRACE_ID:
-            state.trace_id = value
-        elif key == _KEY_PENDING:
-            state.pending = _deserialize_pending(value)
-        elif key == _KEY_PLAN_VERSION_IDS:
-            state.plan_version_ids = {int(version): v for version, v in value.items()}
-        elif key == _KEY_LATEST_PLAN_VERSION:
-            state.latest_plan_version = value
-        elif key == _KEY_COMPOSITION:
-            state.composition = (
-                CompositionManifest.model_validate(value) if value is not None else None
-            )
-        elif key == _KEY_SEGMENT:
-            state.segment = _deserialize_segment(value)
-        elif key == _KEY_AUTO_ADD:
-            state.auto_add = value
-        elif key == _KEY_TIMED_OUT_CALLS:
-            state.timed_out_calls = set(value)
-        elif key == _KEY_TURN_USER_MESSAGE:
-            state.turn_user_message = value
-        elif key == _KEY_TURN_USER_WORDS:
-            state.turn_user_words = value
-        elif key == _KEY_TURN_FINAL_TEXT:
-            state.turn_final_text = value
-        elif key == _KEY_TURN_COMPONENTS:
-            state.turn_components = list(value)
-        elif key == _KEY_TURN_RECORDED:
-            state.turn_recorded = value
-        elif key == _KEY_TURN_PLANS:
-            state.turn_plans = list(value)
-        elif key == _KEY_TURN_READINGS:
-            state.turn_readings = list(value)
-        elif key == _KEY_TURN_APPLIED_CHOICE:
-            state.turn_applied_choice = dict(value) if value else None
-        elif key == _KEY_TURN_CHOICE_BASELINE:
-            state.turn_choice_baseline = dict(value or {})
-        elif key == _KEY_TURN_USAGE:
-            pass  # after the loop, once `trace_id` holds its value from this delta
-        elif key.startswith(_TURN_ITEM_PREFIX):
-            _set_list_item(state.turns, int(key.removeprefix(_TURN_ITEM_PREFIX)), value)
-        elif key.startswith(_COMPONENT_ITEM_PREFIX):
-            state.components[key.removeprefix(_COMPONENT_ITEM_PREFIX)] = value
-        elif key.startswith(_WRITE_TOKEN_ITEM_PREFIX):
-            state.write_tokens[key.removeprefix(_WRITE_TOKEN_ITEM_PREFIX)] = value
-        elif key.startswith(_APPROVAL_ITEM_PREFIX):
-            index = int(key.removeprefix(_APPROVAL_ITEM_PREFIX))
-            _set_list_item(state.approvals, index, ApprovalRecord.model_validate(value))
-        elif key.startswith(_RUN_ITEM_PREFIXES):
-            pass  # the run ledger's, read through `StudioStore.run_items`
-        else:
-            logger.warning("studio ledger: ignoring unknown state key %r", key)
-    if _KEY_TURN_USAGE in delta:
-        state.turn_usage = _turn_usage(delta[_KEY_TURN_USAGE], trace_id=state.trace_id)
-    elif state.turn_usage.trace_id != state.trace_id:
-        # A ledger written before turns kept a usage, or a delta that moved
-        # the trace id alone, leaves the turn an empty usage of its own, which
-        # `take_identity` and `note_spec_use` can fill and a save keeps.
-        state.turn_usage = TurnUsage(trace_id=state.trace_id)
-
-
-def _turn_usage(value: Any, *, trace_id: str | None) -> TurnUsage:
-    """The `TurnUsage` of the turn `trace_id` a ledger's `studio:turn_usage`
-    holds. A value that is not an object, or names another turn's trace id,
-    reads as unset, as a member of the wrong type does. An instance that
-    writes no usage leaves an earlier turn's in the ledger."""
-    stored = value if isinstance(value, dict) else {}
-    if stored.get("trace_id") != trace_id:
-        stored = {}
-
-    def text(key: str) -> str | None:
-        item = stored.get(key)
-        return item if isinstance(item, str) else None
-
-    def specs(key: str) -> list[str]:
-        items = stored.get(key)
-        return [item for item in items if isinstance(item, str)] if isinstance(items, list) else []
-
-    return TurnUsage(
-        trace_id=trace_id,
-        started_at=text("started_at"),
-        caller=text("caller"),
-        account=text("account"),
-        visitor=text("visitor"),
-        surface=text("surface"),
-        fetched_specs=specs("fetched_specs"),
-        drawn_specs=specs("drawn_specs"),
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class _TurnLine:
-    """One `TURN_LOG_EVENT` line and its outcome observation: a turn's close
-    (`status` `closed`, a `turn` observation) or a pause of it for the user
-    (`paused`, a `turn.pause` observation)."""
-
-    status: Literal["closed", "paused"]
-    trace_id: str
-    usage: TurnUsage
-    request: str
-    response: str
-    error: str | None = None
-
-
-def _closed_line(record: dict[str, Any]) -> _TurnLine:
-    """The line of the turn whose record is `record`
-    (`ConversationState.close_turn`): its reply is the answer with the code's
-    match notes and basis line after it."""
-    stored = record.get("usage")
-    stored = stored if isinstance(stored, dict) else {}
-    appended = [record[key] for key in ("match_notes", "basis_line") if record.get(key)]
-    return _TurnLine(
-        status="closed",
-        trace_id=str(record.get("trace_id")),
-        usage=_turn_usage(stored, trace_id=stored.get("trace_id")),
-        request=record["user"],
-        response="\n\n".join([record["assistant"], *appended]),
-        error=record.get("error"),
-    )
-
-
-def _paused_line(state: ConversationState) -> _TurnLine:
-    """The line of `state`'s open turn, paused for the user, with the text it
-    streamed so far as its reply."""
-    usage = state.turn_usage
-    return _TurnLine(
-        status="paused",
-        trace_id=state.trace_id,
-        usage=_turn_usage(dataclasses.asdict(usage), trace_id=usage.trace_id),
-        request=state.turn_user_message,
-        response=state.turn_final_text,
-    )
-
-
-def _committed_lines(
-    delta: dict[str, Any], *, ledger: Mapping[str, Any], state: ConversationState
-) -> list[_TurnLine]:
-    """The lines a ledger append of `delta` onto `ledger` commits: one for
-    each turn record it adds, and one for a pause when it adds an interrupt
-    the turn waits on (`ConversationState.pending`) and the turn stays open.
-    A turn closed in the same append as its last pause writes its close
-    alone."""
-    lines = [_closed_line(delta[key]) for key in sorted(delta) if key.startswith(_TURN_ITEM_PREFIX)]
-    if _KEY_PENDING in delta and not state.turn_recorded:
-        added = set(delta[_KEY_PENDING] or {}) - set(ledger.get(_KEY_PENDING) or {})
-        if added:
-            lines.append(_paused_line(state))
-    return lines
-
-
-def _keep_ledger_turns(
-    delta: dict[str, Any], *, ledger: Mapping[str, Any], conversation_id: str
-) -> dict[str, Any]:
-    """The turn records of `delta` that would overwrite one `ledger` holds,
-    taken out of `delta` and returned. A turn record commits once, so its
-    line is written once."""
-    held = {
-        key: ledger[key] for key in delta if key.startswith(_TURN_ITEM_PREFIX) and key in ledger
-    }
-    for key in held:
-        del delta[key]
-    if held:
-        logger.warning(
-            "studio ledger: conversation %s already holds turn records %s; the ledger's are kept",
-            conversation_id,
-            sorted(held),
-        )
-    return held
-
-
-def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
-    """Write `line`: its `TURN_LOG_EVENT` log line, with the turn's identity,
-    status, when it began, the deployed revision, its error code, and the
-    specs it fetched and drew, as JSON fields (`common.logging.JSON_FIELDS`)
-    and in the message. It then writes the line's outcome observation, a
-    `turn` for a close and a `turn.pause` for a pause
-    (`common.telemetry.record_turn_outcome`)."""
-    usage = line.usage
-    release = deploy_release()
-    logger.info(
-        "%s trace_id=%s status=%s caller=%s account=%s visitor=%s release=%s error=%s "
-        "fetched_specs=%d drawn_specs=%d",
-        TURN_LOG_EVENT,
-        line.trace_id,
-        line.status,
-        usage.caller,
-        usage.account,
-        usage.visitor,
-        release,
-        line.error,
-        len(usage.fetched_specs),
-        len(usage.drawn_specs),
-        extra={
-            JSON_FIELDS: {
-                "event": TURN_LOG_EVENT,
-                "trace_id": line.trace_id,
-                "status": line.status,
-                "started_at": usage.started_at,
-                "caller": usage.caller,
-                "account": usage.account,
-                "visitor": usage.visitor,
-                "surface": usage.surface,
-                "release": release,
-                "error": line.error,
-                "fetched_specs": list(usage.fetched_specs),
-                "drawn_specs": list(usage.drawn_specs),
-            }
-        },
-    )
-    record_turn_outcome(
-        line.trace_id,
-        session_id=conversation_id,
-        user_id=usage.user_id,
-        tags=usage.tags,
-        request=line.request,
-        response=line.response,
-        error=line.error,
-        paused=line.status == "paused",
-    )
-
-
-def _deserialize_durable(conversation_id: str, ledger_state: dict[str, Any]) -> ConversationState:
-    """A fresh `ConversationState` from a ledger session's full `state`
-    dict -- everything `_serialize_durable` wrote, reassembled. A key
-    `_serialize_durable` never wrote (some other prefix a future version
-    added) is ignored rather than failing the whole load."""
-    state = ConversationState(conversation_id=conversation_id)
-    _apply_delta(state, {k: v for k, v in ledger_state.items() if k.startswith("studio:")})
-    return state
-
-
-@dataclass
-class _RuntimeEntry:
-    """The process-local anchor for one (principal, conversation_id).
-
-    `lock` serializes same-instance requests before any ledger data exists,
-    including the pair racing to create a new conversation. `session` is
-    the one ledger `Session` object every save on this instance goes
-    through, set the first time `create` or `load` finds the conversation
-    (or refreshed by `renew`/`checkpoint`/`request_cancel`'s own fetch),
-    so a `StaleSessionError` means another instance, or this conversation's
-    lock-free `/composition` route, wrote first. `state` is the
-    `ConversationState` this instance keeps live between requests; `load`
-    refreshes its durable fields in place, so `lock` and `cancel_event`
-    keep their identity across a reload. `baseline` is
-    the last full durable snapshot known to be in the ledger, the reference
-    a save diffs against for a delta-only append. `composition_lock`
-    serializes same-instance `/composition` calls on the shared `state`
-    object, separate from `lock` since a canvas edit must land while a turn
-    streams. `write_lock` serializes every ledger append this instance
-    makes on this conversation: `save`, `renew`, `checkpoint`, `release`,
-    `request_cancel` and `mutate_composition` all hold it from their own
-    ledger fetch through the append and the `state`/`baseline` update that
-    follows it, so two of this instance's own writers can never interleave
-    their fetch and append and silently overwrite one another's `baseline`.
-    """
-
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    composition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    session: Session | None = None
-    state: ConversationState | None = None
-    baseline: dict[str, Any] = field(default_factory=dict)
-
-
-class StudioStore:
-    """Conversation state, keyed (principal, conversation_id).
-
-    `create`/`load`/`save`/`release` are the ledger-backed API: durable
-    fields round-trip through the ADK session service given at
-    construction, so any instance holding it can load and continue a
-    conversation another instance started. `session_service` is required --
-    every conversation this store holds lives in that service's ledger, and
-    a store with nowhere to persist to has nothing to fall back to.
-    `claim_segment`/`renew`/`checkpoint`/`request_cancel` are the segment
-    lease API (module docstring): together they keep at most one instance
-    streaming a conversation at a time.
-
-    `app_name` is the runner's app name, the same one per-turn ADK sessions
-    (`{conversation_id}#t{n}`) are keyed under. The ledger keeps its own,
-    derived app name (`f"{app_name}.ledger"`) so a client-chosen
-    `conversation_id` can never collide with a per-turn session id that
-    happens to look like `"{conversation_id}#t{n}"` -- both live in the
-    same session service, but under disjoint `(app_name, user_id,
-    session_id)` keyspaces.
-
-    `clock` is a `time.time`-shaped callable, overridable so a test can
-    move a segment's TTL without sleeping.
-    """
-
-    def __init__(
-        self,
-        session_service: BaseSessionService,
-        *,
-        app_name: str = "studio",
-        clock: Callable[[], float] = time.time,
-    ) -> None:
-        self._session_service = session_service
-        self._turn_app_name = app_name
-        self._app_name = f"{app_name}.ledger"
-        self._runtime: dict[tuple[str, str], _RuntimeEntry] = {}
-        self._clock = clock
-
-    def now(self) -> float:
-        """The injected clock's current reading. Every TTL comparison this
-        store makes goes through it; a caller outside the store that needs
-        to compare against a segment's `expires_at` (the heartbeat's
-        renewal-failure deadline) reads it through here, not the wall
-        clock, so a test can move it without sleeping."""
-        return self._clock()
-
-    def current(self, principal: str, conversation_id: str) -> ConversationState | None:
-        """This instance's live `ConversationState` for `(principal,
-        conversation_id)`, if `create` or `load` has already fetched one --
-        no ledger access. The held-in-process accessor `make_recall_part` and
-        the recorder read a conversation's in-flight durable state
-        through."""
-        entry = self._runtime.get((principal, conversation_id))
-        return entry.state if entry is not None else None
-
-    def lock_for(self, principal: str, conversation_id: str) -> asyncio.Lock:
-        """This (principal, conversation_id) pair's lock, creating its
-        runtime entry on first use. Callers acquire it BEFORE `load` or
-        `create` touch any durable state, so ownership settles while the
-        request handler still controls the response."""
-        return self._entry(principal, conversation_id).lock
-
-    def composition_lock_for(self, principal: str, conversation_id: str) -> asyncio.Lock:
-        """This (principal, conversation_id) pair's composition lock,
-        creating its runtime entry on first use. `/composition` serializes
-        same-instance calls on this lock, separate from `lock_for`'s turn
-        lock, so a canvas edit can land while a turn streams."""
-        return self._entry(principal, conversation_id).composition_lock
-
-    def _entry(self, principal: str, conversation_id: str) -> _RuntimeEntry:
-        return self._runtime.setdefault((principal, conversation_id), _RuntimeEntry())
-
-    async def _fetch_session(self, principal: str, conversation_id: str) -> Session | None:
-        """A raw, uncached read of `conversation_id`'s ledger session.
-        Unlike `load`, never touches `entry.state`: `renew`, `checkpoint`
-        and `request_cancel` use this to inspect the ledger's current
-        truth without overwriting whatever the live stream is doing to
-        the held `ConversationState` while this await is in flight."""
-        return await self._session_service.get_session(
-            app_name=self._app_name,
-            user_id=principal,
-            session_id=conversation_id,
-            config=GetSessionConfig(num_recent_events=0),
-        )
-
-    async def create(self, principal: str, conversation_id: str) -> ConversationState:
-        """Create `conversation_id`'s ledger session -- the only path that
-        creates one (`/turn` on a conversation absent from `load`). Raises
-        whatever the session service raises (`AlreadyExistsError` when
-        another instance created it first) rather than papering over a
-        race the caller must answer for."""
-        entry = self._entry(principal, conversation_id)
-        session = await self._session_service.create_session(
-            app_name=self._app_name, user_id=principal, session_id=conversation_id
-        )
-        entry.session = session
-        entry.baseline = {}
-        entry.state = ConversationState(conversation_id=conversation_id)
-        entry.state.lock = entry.lock
-        return entry.state
-
-    async def load(self, principal: str, conversation_id: str) -> ConversationState | None:
-        """Reload `conversation_id`'s durable fields from its ledger
-        session. `None` when the ledger holds nothing for it -- the store
-        does not hold the conversation. Reads with `num_recent_events=0`:
-        the ledger's own event history is never needed, only its merged
-        `state`, on both `InMemorySessionService` and
-        `DatabaseSessionService`."""
-        entry = self._entry(principal, conversation_id)
-        session = await self._session_service.get_session(
-            app_name=self._app_name,
-            user_id=principal,
-            session_id=conversation_id,
-            config=GetSessionConfig(num_recent_events=0),
-        )
-        if session is None:
-            return None
-        entry.session = session
-        durable = _deserialize_durable(conversation_id, session.state)
-        held = entry.state.turn_usage if entry.state is not None else None
-        if entry.state is None:
-            durable.lock = entry.lock
-            entry.state = durable
-        else:
-            for f in dataclasses.fields(ConversationState):
-                if f.name not in _PROCESS_LOCAL_FIELDS:
-                    setattr(entry.state, f.name, getattr(durable, f.name))
-        entry.baseline = _serialize_durable(entry.state)
-        if held is not None and held.trace_id == entry.state.trace_id:
-            # Specs the turn noted after its last save, during a pause, say,
-            # are this process's alone. A turn this instance holds keeps them.
-            for spec_id in held.fetched_specs:
-                entry.state.note_spec_use("fetched", spec_id)
-            for spec_id in held.drawn_specs:
-                entry.state.note_spec_use("drawn", spec_id)
-        if entry.state.turn_index and not entry.state.turn_recorded:
-            turn_state = await self._turn_session_state(principal, entry.state.session_id)
-            entry.state.turn_specs = dict(turn_state.get(ORCHESTRATOR_SPECS_KEY) or {})
-            usage = entry.state.turn_usage
-            if usage.surface is None and isinstance(surface := turn_state.get("surface"), str):
-                # A turn whose ledger recorded no usage still names the
-                # surface it was asked from in its own session.
-                usage.surface = surface
-        return entry.state
-
-    async def _turn_session_state(self, principal: str, session_id: str) -> dict[str, Any]:
-        """The state the open turn's own ADK session holds: the spec blocks
-        (`ORCHESTRATOR_SPECS_KEY`), for `ConversationState.close_turn` to keep
-        those of the sources its plans used, and the turn's `surface`. Empty
-        when the session does not exist yet."""
-        session = await self._session_service.get_session(
-            app_name=self._turn_app_name,
-            user_id=principal,
-            session_id=session_id,
-            config=GetSessionConfig(num_recent_events=0),
-        )
-        return dict(session.state) if session else {}
-
-    def claim_segment(self, principal: str, conversation_id: str) -> str:
-        """Claim a fresh segment on the LIVE state already loaded on this
-        instance (`create` or `load` must have run first). Raises
-        `SegmentBusy` when a segment with a still-future `expires_at` is
-        already there, else writes a fresh one into `entry.state` and
-        returns its id. Does no ledger I/O and does not save: the caller's
-        own claim save (the `/turn` claim or the `/interrupt` save)
-        persists it under the ledger's usual compare-and-swap."""
-        entry = self._runtime[(principal, conversation_id)]
-        assert entry.state is not None
-        now = self._clock()
-        live = entry.state.segment
-        if live is not None and live.expires_at > now:
-            raise SegmentBusy(retry_after_seconds=math.ceil(live.expires_at - now))
-        segment = Segment(id=_wire_id("seg"), owner=_OWNER_ID, expires_at=now + SEGMENT_TTL_S)
-        entry.state.segment = segment
-        return segment.id
-
-    async def save(self, principal: str, conversation_id: str) -> bool:
-        """Append this instance's changed durable fields as one ledger
-        event, through the one `Session` object this runtime entry holds.
-        Only the keys whose serialised value changed since the last load
-        or save on this instance are sent -- a no-op event appends
-        nothing. Raises `StaleSessionError` when another instance's write
-        has advanced the ledger past what this instance last saw; the
-        caller maps that to the existing 409 for a `/turn` claim or
-        `/interrupt` (`/composition` never calls this:
-        `mutate_composition` is its own fetch-rebuild-mutate-append cycle,
-        immune to whatever this instance's own `entry.session` marker
-        says). Held under `write_lock` like every other ledger
-        append this instance makes; when this save folds the composition
-        into its delta, the `_composition_ops` recorded for it are
-        consumed (by prefix, since more may accumulate while this call
-        awaits the append) once the append lands.
-
-        The append writes the line of each turn close and pause it commits
-        (`_append_committing`), and the save then starts the export of their
-        outcomes without waiting for it (`start_telemetry_flush`), so a claim
-        save adds no export time before its stream's first frame. A route that
-        ends with no stream awaits `flush_telemetry` itself when the save
-        says it wrote a line, which is what it returns. A turn record the
-        ledger already holds is never overwritten, and the ledger's is kept in
-        `entry.state` too.
-        """
-        entry = self._runtime[(principal, conversation_id)]
-        assert entry.session is not None and entry.state is not None
-        async with entry.write_lock:
-            full = _serialize_durable(entry.state)
-            delta = _changed_since(full, entry.baseline)
-            held = _keep_ledger_turns(
-                delta, ledger=entry.session.state, conversation_id=conversation_id
-            )
-            if held:
-                _apply_delta(entry.state, held)
-                entry.baseline.update(held)
-            if not delta:
-                return False
-            ops_folded = len(entry.state._composition_ops) if _KEY_COMPOSITION in delta else 0
-            state = entry.state
-
-            def committed() -> None:
-                entry.baseline.update(delta)
-                if ops_folded:
-                    del state._composition_ops[:ops_folded]
-
-            wrote = await self._append_committing(
-                entry.session,
-                delta,
-                conversation_id=conversation_id,
-                state=state,
-                on_committed=committed,
-            )
-        if wrote:
-            start_telemetry_flush()
-        return wrote
-
-    async def _append_committing(
-        self,
-        session: Session,
-        delta: dict[str, Any],
-        *,
-        conversation_id: str,
-        state: ConversationState,
-        on_committed: Callable[[], None],
-    ) -> bool:
-        """Append `delta` to `session`, run `on_committed` (the caller's
-        bookkeeping of what the append committed: its baseline, the
-        composition ops it folded), then write the `TURN_LOG_EVENT` line and
-        outcome observation of each turn close and pause the append committed
-        (`_committed_lines`), and say whether it wrote any. The lines are read
-        before the append, off the state `delta` was taken from, and the rest
-        runs with no await after it lands. All of it runs in one task to the
-        end (`_run_to_completion`), so a cancel of the caller cannot land the
-        append without its bookkeeping and lines, and a later save never
-        replays a committed op. An append that raises runs neither. A stale
-        one committed nothing, and the next turn closes a turn left open as
-        `abandoned`."""
-        lines = _committed_lines(delta, ledger=session.state, state=state)
-
-        async def append() -> None:
-            event = Event(author="studio", actions=EventActions(state_delta=delta))
-            await self._session_service.append_event(session, event)
-            on_committed()
-            for line in lines:
-                _write_turn_line(conversation_id, line)
-
-        await _run_to_completion(append())
-        return bool(lines)
-
-    async def mutate_composition(
-        self,
-        principal: str,
-        conversation_id: str,
-        mutate: Callable[[CompositionManifest | None], CompositionManifest | None | JSONResponse],
-    ) -> CompositionManifest | None | JSONResponse:
-        """`/composition`'s only path to the ledger: fetch, rebuild, mutate,
-        append the composition key alone, retrying the whole cycle a
-        bounded number of times on a stale append. Immune to whatever
-        `entry.session`'s own marker says: unlike `save`, every attempt
-        fetches the ledger fresh, so a renewal this instance's own
-        heartbeat made in the meantime (which advances `entry.session`
-        without this route ever seeing it) cannot hide a write another
-        instance made to the composition key.
-
-        Each attempt: fetch the ledger's current `studio:composition`
-        value: rebuild it as that fetched value with this instance's own
-        unsaved `_composition_ops` replayed on top, assign the rebuild to
-        `entry.state.composition`, and set `entry.baseline`'s composition
-        entry to the FETCHED value, not the rebuild, the same
-        fetch-then-diff shape `checkpoint` uses, so a later `save` or
-        `checkpoint` on this instance still diffs against what the ledger
-        actually holds. Then call `mutate` on the rebuild. Its return
-        says what happens next:
-
-        * The exact object passed in (a no-op): nothing to persist,
-          return it.
-        * A `JSONResponse` (a refusal): nothing to persist, return it.
-        * Any other `CompositionManifest` (or `None`): append it under
-          the fetched value's compare-and-swap. Landing cleanly assigns it
-          to `entry.state.composition` and `entry.baseline`, refreshes
-          `entry.session`, consumes the replayed ops by prefix (more may
-          have accumulated since this attempt started its rebuild, and
-          those stay for the next call), and returns it. A stale append
-          retries the whole cycle from a fresh fetch.
-
-        On every path but a stale append exhausting its retries,
-        `entry.state.composition` ends the call holding the rebuild, or,
-        on a landed mutation, the appended value with any ops the live turn
-        recorded during the append replayed on top (they stay unsaved), not
-        this instance's pre-call copy, which may already be behind the
-        ledger. Raises
-        `StaleSessionError` once `_COMPOSITION_MUTATE_RETRY_ATTEMPTS`
-        appends in a row land stale; `entry.state.composition` is left
-        holding the last rebuild, without the caller's edit. Never raises
-        for a refusal or a no-op.
-        """
-        entry = self._runtime[(principal, conversation_id)]
-        assert entry.session is not None and entry.state is not None
-        last_error: StaleSessionError | None = None
-        async with entry.write_lock:
-            for _attempt in range(1, _COMPOSITION_MUTATE_RETRY_ATTEMPTS + 1):
-                session = await self._fetch_session(principal, conversation_id)
-                assert session is not None, (
-                    f"conversation {conversation_id!r} vanished from the ledger mid-mutation"
-                )
-                fetched_raw = session.state.get(_KEY_COMPOSITION)
-                fetched = CompositionManifest.model_validate(fetched_raw) if fetched_raw else None
-                ops = list(entry.state._composition_ops)
-                ops_folded = len(ops)
-                rebuilt = fetched
-                for op in ops:
-                    rebuilt = op(rebuilt)
-                entry.state.composition = rebuilt
-                entry.baseline[_KEY_COMPOSITION] = fetched_raw
-                result = mutate(rebuilt)
-                if isinstance(result, JSONResponse) or result is rebuilt:
-                    return result
-                delta = {
-                    _KEY_COMPOSITION: result.model_dump(mode="json") if result is not None else None
-                }
-                event = Event(author="studio", actions=EventActions(state_delta=delta))
-                try:
-                    await self._session_service.append_event(session, event)
-                except StaleSessionError as exc:
-                    last_error = exc
-                    continue
-                entry.session = session
-                entry.baseline.update(delta)
-                if ops_folded:
-                    del entry.state._composition_ops[:ops_folded]
-                # Ops the live turn recorded during the append stay unsaved
-                # and are replayed on top, so the turn's card or removal is
-                # not overwritten by this result.
-                composition = result
-                for op in entry.state._composition_ops:
-                    composition = op(composition)
-                entry.state.composition = composition
-                return composition
-        assert last_error is not None
-        raise last_error
-
-    async def renew(
-        self,
-        principal: str,
-        conversation_id: str,
-        segment_id: str,
-        *,
-        timeout: float = 5.0,
-        consume_cancel: bool = False,
-    ) -> Literal["ok", "cancelled", "lost"]:
-        """Push `segment_id`'s TTL forward by `SEGMENT_TTL_S`, writing only
-        the `studio:segment` key under compare-and-swap. Fetches the
-        ledger fresh each attempt (`_fetch_session`, not `load`), so it
-        never disturbs whatever the live stream is doing to `entry.state`
-        in the meantime, and never reconciles the rest of the conversation.
-        That is `checkpoint`'s job.
-
-        `"lost"` when the fetched segment is no longer `segment_id`
-        (another instance took over after this one's TTL lapsed); the
-        caller ends the stream fatally. `"cancelled"` when it is still
-        `segment_id` but its `cancel` flag is set, still renewed, so the
-        flag keeps being observed until the caller reacts to it. With
-        `consume_cancel` the same write clears the flag, so a later
-        `request_cancel` sets it again and the next renewal reports that
-        Stop on its own. `"ok"` otherwise. A `StaleSessionError` still standing after
-        `_SEGMENT_WRITE_RETRY_ATTEMPTS` attempts, or any other exception
-        the session service raises, propagates, as does a `TimeoutError`
-        when the renewal takes longer than `timeout`. The caller's own
-        heartbeat decides how long to keep trying before giving up on the
-        renewal altogether.
-
-        Runs to the end even when the caller is cancelled
-        (`_run_to_completion`), since the heartbeat that calls it is
-        cancelled whenever its stream ends.
-        """
-        return await _run_to_completion(
-            self._renew(
-                principal,
-                conversation_id,
-                segment_id,
-                timeout=timeout,
-                consume_cancel=consume_cancel,
-            )
-        )
-
-    async def _renew(
-        self,
-        principal: str,
-        conversation_id: str,
-        segment_id: str,
-        *,
-        timeout: float,
-        consume_cancel: bool,
-    ) -> Literal["ok", "cancelled", "lost"]:
-        """`renew`'s write, run as its own task."""
-        async with asyncio.timeout(timeout):
-            entry = self._entry(principal, conversation_id)
-            last_error: StaleSessionError | None = None
-            async with entry.write_lock:
-                for _attempt in range(1, _SEGMENT_WRITE_RETRY_ATTEMPTS + 1):
-                    session = await self._fetch_session(principal, conversation_id)
-                    segment = (
-                        _deserialize_segment(session.state.get(_KEY_SEGMENT)) if session else None
-                    )
-                    if session is None or segment is None or segment.id != segment_id:
-                        return "lost"
-                    renewed = dataclasses.replace(
-                        segment,
-                        expires_at=self._clock() + SEGMENT_TTL_S,
-                        cancel=segment.cancel and not consume_cancel,
-                    )
-                    event = Event(
-                        author="studio",
-                        actions=EventActions(
-                            state_delta={_KEY_SEGMENT: _serialize_segment(renewed)}
-                        ),
-                    )
-                    try:
-                        await self._session_service.append_event(session, event)
-                    except StaleSessionError as exc:
-                        last_error = exc
-                        continue
-                    entry.session = session
-                    entry.baseline[_KEY_SEGMENT] = _serialize_segment(renewed)
-                    live_state = entry.state
-                    if (
-                        live_state is not None
-                        and live_state.segment is not None
-                        and live_state.segment.id == renewed.id
-                    ):
-                        live_state.segment = renewed
-                    return "cancelled" if segment.cancel else "ok"
-            assert last_error is not None
-            raise last_error
-
-    async def checkpoint(self, principal: str, conversation_id: str, segment_id: str) -> None:
-        """The reconciling full-state save: this instance's own changed
-        keys, merged onto the ledger's current truth, appended as one
-        event. Runs before every actionable pause frame and before `done`
-        (never `message.complete`), and once more, with the segment
-        cleared, at the end of the segment (`release`).
-
-        Fences first: raises `SegmentLost` and writes nothing when the
-        fetched ledger's live segment is not `segment_id` (another
-        instance's claim outlived this one's TTL). Otherwise fetches the
-        ledger BEFORE computing this request's changed keys, so a
-        mutation the live stream makes to `entry.state` while that fetch
-        is in flight is captured in the diff. A naive "diff first, then
-        reload" order has the opposite bug: the reload's wholesale
-        overwrite of `entry.state` would drop anything written during its
-        own await. The merge and the write to `entry.state`/`baseline`
-        that follow happen with no further await before the append, so
-        nothing new can slip in between.
-
-        The composition manifest merges by replaying this request's own
-        recorded operations (`ConversationState._composition_ops`) onto
-        the freshly fetched manifest, so a concurrent `/composition` edit
-        survives; every other changed key by its own final value, since
-        every durable key but the composition has exactly one writer (a
-        non-composition key changed on both sides logs a warning naming
-        it, and this request's value still wins). Once the append lands,
-        the ops folded into it are consumed by prefix. More may have
-        accumulated meanwhile, and those stay for the next checkpoint.
-
-        The append writes the line of each turn close and pause it commits
-        (`_append_committing`), and the stream that runs the checkpoint exports
-        their outcomes as it ends. A turn record the ledger already holds is
-        never overwritten, and the ledger's is kept.
-
-        Retries `_CHECKPOINT_RETRY_ATTEMPTS` times on `StaleSessionError`
-        (re-fencing and re-fetching each time); a retry that stays stale
-        re-raises the last one.
-        """
-        entry = self._runtime[(principal, conversation_id)]
-        assert entry.session is not None and entry.state is not None
-        last_error: StaleSessionError | None = None
-        async with entry.write_lock:
-            for _attempt in range(1, _CHECKPOINT_RETRY_ATTEMPTS + 1):
-                session = await self._fetch_session(principal, conversation_id)
-                if session is None:
-                    raise SegmentLost(
-                        f"conversation {conversation_id!r} no longer has a ledger session"
-                    )
-                fenced = _deserialize_segment(session.state.get(_KEY_SEGMENT))
-                if fenced is None or fenced.id != segment_id:
-                    raise SegmentLost(
-                        f"conversation {conversation_id!r} segment {segment_id!r} was taken over"
-                    )
-                original_baseline = entry.baseline
-                changed = _changed_since(_serialize_durable(entry.state), original_baseline)
-                _keep_ledger_turns(changed, ledger=session.state, conversation_id=conversation_id)
-                ops = list(entry.state._composition_ops)
-                ops_folded = len(ops)
-                reloaded = _deserialize_durable(conversation_id, session.state)
-                entry.baseline = _serialize_durable(reloaded)
-                if not changed:
-                    # Nothing of ours to persist; still pull in whatever
-                    # the ledger holds now so `entry.state` does not fall
-                    # behind another writer.
-                    for f in dataclasses.fields(ConversationState):
-                        if f.name not in _PROCESS_LOCAL_FIELDS:
-                            setattr(entry.state, f.name, getattr(reloaded, f.name))
-                    return
-                conflicts = sorted(
-                    key
-                    for key in changed
-                    if key != _KEY_COMPOSITION
-                    and entry.baseline.get(key) != original_baseline.get(key)
-                )
-                if conflicts:
-                    logger.warning(
-                        "studio ledger checkpoint: conversation %s had %s changed by another "
-                        "writer; this request's value wins",
-                        conversation_id,
-                        conflicts,
-                    )
-                if _KEY_COMPOSITION in changed:
-                    manifest = reloaded.composition
-                    for op in ops:
-                        manifest = op(manifest)
-                    reloaded.composition = manifest
-                    changed[_KEY_COMPOSITION] = (
-                        manifest.model_dump(mode="json") if manifest is not None else None
-                    )
-                for f in dataclasses.fields(ConversationState):
-                    if f.name not in _PROCESS_LOCAL_FIELDS:
-                        setattr(entry.state, f.name, getattr(reloaded, f.name))
-                _apply_delta(
-                    entry.state,
-                    {key: value for key, value in changed.items() if key != _KEY_COMPOSITION},
-                )
-                state = entry.state
-
-                def committed(
-                    session: Session = session,
-                    changed: dict[str, Any] = changed,
-                    ops_folded: int = ops_folded,
-                    state: ConversationState = state,
-                ) -> None:
-                    entry.session = session
-                    entry.baseline.update(changed)
-                    if ops_folded:
-                        del state._composition_ops[:ops_folded]
-
-                try:
-                    await self._append_committing(
-                        session,
-                        changed,
-                        conversation_id=conversation_id,
-                        state=state,
-                        on_committed=committed,
-                    )
-                except StaleSessionError as exc:
-                    last_error = exc
-                    continue
-                return
-        assert last_error is not None
-        raise last_error
-
-    async def release(
-        self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
-    ) -> None:
-        """The end-of-segment save: drop this segment's still-resuming
-        pending entries, clear the segment if it is still ours, then
-        `checkpoint`. Runs to the end even when the caller is cancelled
-        (`_run_to_completion`), since it runs in a `finally` on
-        client-disconnect and generator-finaliser paths, where a disconnect
-        cancels the task running it (`_unwind`'s `Task.cancel`). Cancelled
-        mid-checkpoint, the segment would stay live in the ledger until its
-        TTL. The timeout cancels the checkpoint once (`asyncio.timeout`).
-        anyio's `move_on_after` re-cancels at every await until its scope
-        exits, cutting short the session service's own rollback and
-        connection close.
-
-        Never raises anything but the caller's own cancellation: a
-        `checkpoint` that cannot land (fenced out by a takeover, a DB
-        error, or the timeout above) is logged and swallowed. The segment
-        then simply expires by its own TTL, which is what makes it safe to
-        give up here.
-        """
-        entry = self._runtime.get((principal, conversation_id))
-        if entry is None or entry.state is None:
-            return
-        await _run_to_completion(
-            self._save_release(entry.state, principal, conversation_id, segment_id, timeout=timeout)
-        )
-
-    async def _save_release(
-        self,
-        state: ConversationState,
-        principal: str,
-        conversation_id: str,
-        segment_id: str,
-        *,
-        timeout: float,
-    ) -> None:
-        """`release`'s save, run as its own task."""
-        try:
-            async with asyncio.timeout(timeout):
-                state.drop_resuming(segment_id)
-                if state.segment is not None and state.segment.id == segment_id:
-                    state.segment = None
-                try:
-                    await self.checkpoint(principal, conversation_id, segment_id)
-                except SegmentLost:
-                    logger.warning(
-                        "studio ledger release: conversation %s segment %s was already "
-                        "taken over; nothing saved",
-                        conversation_id,
-                        segment_id,
-                    )
-                except Exception:
-                    logger.exception(
-                        "studio ledger release: conversation %s failed to persist",
-                        conversation_id,
-                    )
-        except TimeoutError:
-            logger.warning(
-                "studio ledger release on conversation %s did not complete within %ss",
-                conversation_id,
-                timeout,
-            )
-
-    async def request_cancel(self, principal: str, conversation_id: str) -> bool:
-        """Signal cancellation on `conversation_id`'s live segment,
-        whoever owns it, including this instance's own, which covers
-        the gap between a claim landing and the stream arming its local
-        `cancel_event`. Fetches the ledger fresh and writes only the
-        `studio:segment` key under compare-and-swap, retrying up to
-        `_SEGMENT_WRITE_RETRY_ATTEMPTS` times on `StaleSessionError`
-        before re-raising the last one.
-
-        Returns whether a live segment was found and signalled: `False`
-        when there is none, or the one on record has already expired.
-        The caller falls back to whatever cancellation means with no
-        active segment.
-        """
-        entry = self._entry(principal, conversation_id)
-        last_error: StaleSessionError | None = None
-        async with entry.write_lock:
-            for _attempt in range(1, _SEGMENT_WRITE_RETRY_ATTEMPTS + 1):
-                session = await self._fetch_session(principal, conversation_id)
-                segment = _deserialize_segment(session.state.get(_KEY_SEGMENT)) if session else None
-                if session is None or segment is None or segment.expires_at <= self._clock():
-                    return False
-                if segment.cancel:
-                    return True
-                cancelled = dataclasses.replace(segment, cancel=True)
-                event = Event(
-                    author="studio",
-                    actions=EventActions(state_delta={_KEY_SEGMENT: _serialize_segment(cancelled)}),
-                )
-                try:
-                    await self._session_service.append_event(session, event)
-                except StaleSessionError as exc:
-                    last_error = exc
-                    continue
-                entry.session = session
-                entry.baseline[_KEY_SEGMENT] = _serialize_segment(cancelled)
-                live_state = entry.state
-                if (
-                    live_state is not None
-                    and live_state.segment is not None
-                    and live_state.segment.id == cancelled.id
-                ):
-                    live_state.segment = cancelled
-                return True
-        assert last_error is not None
-        raise last_error
-
-    async def run_items(self, principal: str, conversation_id: str) -> dict[str, Any]:
-        """The run ledger's items in `conversation_id`'s ledger session, read
-        fresh. Empty when the conversation has no ledger session."""
-        session = await self._fetch_session(principal, conversation_id)
-        if session is None:
-            return {}
-        return {k: v for k, v in session.state.items() if k.startswith(_RUN_ITEM_PREFIXES)}
-
-    async def run_statuses(
-        self, principal: str, conversation_id: str, *, conversation: ConversationState
-    ) -> dict[str, RunStatus]:
-        """The run ledger's status of each run `conversation`'s plan records
-        await (`ConversationState.awaited_runs`), by run id, read off the
-        stored run items without validating the rest. The ledger is read
-        once, and not at all when no record awaits a run."""
-        awaited = conversation.awaited_runs()
-        if not awaited:
-            return {}
-        items = await self.run_items(principal, conversation_id)
-        statuses: dict[str, RunStatus] = {}
-        for run_id in awaited:
-            raw = items.get(f"{RUN_ITEM_PREFIX}{run_id}")
-            status = raw.get("status") if isinstance(raw, dict) else None
-            if status in RunStatus:
-                statuses[run_id] = RunStatus(status)
-        return statuses
-
-    async def append_run_items(
-        self,
-        principal: str,
-        conversation_id: str,
-        segment_id: str,
-        items_for: Callable[[dict[str, Any]], dict[str, Any]],
-    ) -> None:
-        """Append the run-ledger items `items_for` derives from the ledger's
-        current run items, as one event fenced on `segment_id`.
-
-        Each attempt fetches the ledger fresh and fences first, the way
-        `checkpoint` does: raises `SegmentLost` and writes nothing when the
-        live segment is not `segment_id`. `items_for` then sees the fetched
-        run items and returns the keys to write (each under one of the
-        `RUN_*_ITEM_PREFIX`es), or an empty
-        dict to write nothing; whatever it raises propagates with nothing written. A stale
-        append retries the whole cycle, so `items_for` decides again against
-        what the other writer landed, up to `_RUN_ITEMS_RETRY_ATTEMPTS`
-        times before the last `StaleSessionError` is raised.
-        """
-        entry = self._entry(principal, conversation_id)
-        last_error: StaleSessionError | None = None
-        async with entry.write_lock:
-            for _attempt in range(1, _RUN_ITEMS_RETRY_ATTEMPTS + 1):
-                session = await self._fetch_session(principal, conversation_id)
-                if session is None:
-                    raise SegmentLost(
-                        f"conversation {conversation_id!r} no longer has a ledger session"
-                    )
-                fenced = _deserialize_segment(session.state.get(_KEY_SEGMENT))
-                if fenced is None or fenced.id != segment_id:
-                    raise SegmentLost(
-                        f"conversation {conversation_id!r} segment {segment_id!r} was taken over"
-                    )
-                current = {
-                    k: v for k, v in session.state.items() if k.startswith(_RUN_ITEM_PREFIXES)
-                }
-                delta = items_for(current)
-                if not delta:
-                    return
-                outside = sorted(key for key in delta if not key.startswith(_RUN_ITEM_PREFIXES))
-                if outside:
-                    raise ValueError(f"run ledger items outside its prefixes: {outside}")
-                event = Event(
-                    author="studio",
-                    actions=EventActions(
-                        state_delta={key: _json_safe(value) for key, value in delta.items()}
-                    ),
-                )
-                try:
-                    await self._session_service.append_event(session, event)
-                except StaleSessionError as exc:
-                    last_error = exc
-                    continue
-                entry.session = session
-                return
-        assert last_error is not None
-        raise last_error
 
 
 class RecallRefusedError(Exception):
@@ -2643,16 +1352,181 @@ def make_canvas_cards(store: StudioStore) -> Any:
     return canvas_cards
 
 
+# How a stream lost its segment: another instance took it over
+# (`segment_lost`), or the database stayed unreachable until the lease's
+# deadline (`database_unavailable`).
+type StreamLoss = Literal["segment_lost", "database_unavailable"]
+STREAM_LOSSES: tuple[StreamLoss, ...] = get_args(StreamLoss.__value__)
+
+# The span statuses that are not failures, and the level each ends at
+# (`span_level`).
+_SPAN_STATUS_LEVELS: dict[str, EventLevel] = {
+    "done": "DEFAULT",
+    "paused": "DEFAULT",
+    "cancelled": "WARNING",
+    "segment_lost": "WARNING",
+    "database_unavailable": "WARNING",
+    "disconnected": "WARNING",
+    "not_started": "WARNING",
+    "orphaned": "WARNING",
+}
+
+
+def span_level(status: str) -> EventLevel:
+    """The level a span with `status` ends at: the one
+    `_SPAN_STATUS_LEVELS` gives, and `ERROR` for any other status, which is
+    a failure.
+
+    Every `turn.segment` span on a turn's trace carries its status, level
+    and `stored` (`ConversationState.end_segment_span`). A segment's status is the cause
+    of the last ending frame its stream chose to send, in the turn record's
+    vocabulary (`harness.studio.StudioRunner._locked`). `stored` is the turn
+    as this instance last saved it (`StudioStore.stored_turn`), read after
+    its release ran, whether or not the release saved. A release's own
+    outcome is only logged.
+
+    | Case                         | Last ending | status                 | level   | stored      |
+    |                              | frame       |                        |         |             |
+    |------------------------------|-------------|------------------------|---------|-------------|
+    | Turn ends                    | `done`      | `done`                 | DEFAULT | `done`      |
+    | Turn pauses                  | pause       | `paused`               | DEFAULT | `paused`    |
+    | Checkpoint before the pause  | transient   | `database_unavailable` | WARNING | `paused`    |
+    | frame raises                 |             |                        |         |             |
+    | `DatabaseUnavailable`,       |             |                        |         |             |
+    | release saves                |             |                        |         |             |
+    | The same before `done`,      | transient   | `database_unavailable` | WARNING | `done`      |
+    | release saves                |             |                        |         |             |
+    | The same with `SegmentLost`  | transient   | `segment_lost`         | WARNING | as last     |
+    |                              |             |                        |         | saved       |
+    | `done` checkpoint commits,   | `done`      | `done`                 | DEFAULT | `done`      |
+    | `done` sent, release fails   |             |                        |         |             |
+    | `done` sent, a loss armed    | `done`      | `done`                 | DEFAULT | `done`      |
+    | before the stream ends       |             |                        |         |             |
+    | `done` recorded, its         | transient   | `transient_            | ERROR   | `done`      |
+    | checkpoint fails, release    |             | unavailable`           |         |             |
+    | saves                        |             |                        |         |             |
+    | `done` sent, a Stop before   | `done`      | `done`                 | DEFAULT | `done`      |
+    | the stream ends              |             |                        |         |             |
+    | `done` decided by the        | `done`      | `done`                 | DEFAULT | `done`      |
+    | segment, a Stop before       |             |                        |         |             |
+    | `done` is sent               |             |                        |         |             |
+    | Heartbeat, card write or     | transient   | the loss               | WARNING | `open`      |
+    | card removal loss mid-run    |             |                        |         |             |
+    | Stop mid-run, release saves  | `cancelled` | `cancelled`            | WARNING | `cancelled` |
+    | Stop mid-run, release fails  | `cancelled` | `cancelled`            | WARNING | `open`      |
+    | Stop after the pause frame   | pause, then | `cancelled`            | WARNING | `cancelled` |
+    |                              | `cancelled` |                        |         |             |
+    | Stop read while the release  | `cancelled` | `cancelled`            | WARNING | as the      |
+    | writes, its own save fails   |             |                        |         | release     |
+    |                              |             |                        |         | saved it    |
+    | Loss after the pause frame   | pause       | `paused`               | DEFAULT | `paused`    |
+    | Turn fails (model fault,     | error       | the frame's error code | ERROR   | the code,   |
+    | `state_not_saved`)           |             |                        |         | or `open`   |
+    |                              |             |                        |         | when        |
+    |                              |             |                        |         | unsaved     |
+    | Frames end cancelled, the    | error       | `failed`               | ERROR   | the code    |
+    | segment's task uncancelled,  |             |                        |         |             |
+    | no ending frame sent (a      |             |                        |         |             |
+    | pause left unsent included)  |             |                        |         |             |
+    | The same, `done` recorded    | error       | `failed`               | ERROR   | `done`      |
+    | and unsent, release saves    |             |                        |         |             |
+    | The same after the pause     | pause       | `paused`               | DEFAULT | `paused`    |
+    | frame                        |             |                        |         |             |
+    | The same after `done`        | `done`      | `done`                 | DEFAULT | `done`      |
+    | Client gone mid-run, while   | none        | `disconnected`         | WARNING | `cancelled` |
+    | waiting or at a frame        |             |                        |         |             |
+    | Client gone after the pause  | pause       | `paused`               | DEFAULT | `paused`    |
+    | frame                        |             |                        |         |             |
+    | Frames run out with no       | none        | `failed`               | ERROR   | as last     |
+    | ending frame                 |             |                        |         | saved       |
+    | Claim refused before its     | none        | `not_started`          | WARNING |             |
+    | save committed               |             |                        |         |             |
+    | (`StudioStore.drop_draft`)   |             |                        |         |             |
+    | Request or response failed   | none        | `failed`               | ERROR   |             |
+    | after its claim, before the  |             |                        |         |             |
+    | body starts, the turn left   |             |                        |         |             |
+    | open                         |             |                        |         |             |
+    | Request's task cancelled     | none        | `cancelled`            | WARNING |             |
+    | after its claim, before the  |             |                        |         |             |
+    | body starts, the turn left   |             |                        |         |             |
+    | open                         |             |                        |         |             |
+    | Client gone before the body  | none        | `disconnected`         | WARNING |             |
+    | starts (`_ClaimedStream`),   |             |                        |         |             |
+    | the turn left open           |             |                        |         |             |
+    | Span still open when a new   | none        | `orphaned`             | WARNING |             |
+    | segment's span moves in      |             |                        |         |             |
+
+    A turn's close and each of its pauses are not segment spans. The store
+    writes each as an outcome observation, a `turn` for a close and a
+    `turn.pause` for a pause, beside its `TURN_LOG_EVENT` line, once the
+    write that stores it commits (`harness.studio_store`), so a `/cancel`
+    of a paused turn and the next `/turn`'s close of an unrecorded one
+    write a `turn` with no segment of their own.
+    """
+    return _SPAN_STATUS_LEVELS.get(status, "ERROR")
+
+
+def stream_loss(exc: SegmentLost | DatabaseUnavailable) -> StreamLoss:
+    """How a lost segment or an unreachable database that ends a stream
+    ends its segment. Every place that ends a stream for either cause names
+    it through this, so one cause gives one status."""
+    return "segment_lost" if isinstance(exc, SegmentLost) else "database_unavailable"
+
+
+def awaiting_answer(resuming_segments: Iterable[str | None]) -> bool:
+    """Whether a turn whose pending interrupts are resuming under
+    `resuming_segments` awaits an answer: one of them is resuming under
+    none (`ConversationState.awaiting_answer`)."""
+    return any(segment is None for segment in resuming_segments)
+
+
+def turn_status(*, recorded: bool, record: Mapping[str, Any] | None, awaiting: bool) -> str:
+    """How a turn stands: `done` or the error code its `record` names once
+    `recorded`, `paused` while it is `awaiting` an answer, and `open`
+    otherwise. Read from the live state (`ConversationState.turn_status`)
+    and from the store's baseline (`StudioStore.stored_turn`)."""
+    if recorded and record is not None:
+        return record.get("error") or "done"
+    return "paused" if awaiting else "open"
+
+
+def _end_stream(conversation: ConversationState, reason: Literal["cancelled"] | StreamLoss) -> None:
+    """Arm `conversation.cancel_event` with `reason`, read back by
+    `harness.studio._sse_stream`'s cancel branch to pick the frame it sends
+    and the cause it names for the segment's span (`stream_loss` for a lost
+    segment). A no-op when no stream is currently armed to receive it
+    (the segment ended some other way in the gap between the caller's check
+    and this call)."""
+    conversation.cancel_reason = reason
+    if conversation.cancel_event is not None:
+        conversation.cancel_event.set()
+
+
 def make_remove_cards(store: StudioStore) -> Any:
     """The orchestrator's `remove_cards` function, bound to a store and resolved
-    to the conversation at CALL time, as `make_recall_part` is."""
+    to the conversation at CALL time, as `make_recall_part` is. The removal
+    is written as it happens, on the canvas as stored
+    (`StudioStore.change_canvas`), which runs it once per committed write.
+
+    A `SegmentLost` or `DatabaseUnavailable` there ends the stream
+    (`_end_stream`) before it propagates: raised inside the tool, it would
+    reach the model as a failed call and the turn would run on without the
+    lease or without its state saved. Either leaves the turn as stored."""
 
     async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
         key = current_conversation_key.get()
         conversation = store.current(*key) if key is not None else None
-        if conversation is None:
+        if key is None or conversation is None:
             return [], list(component_ids)
-        return remove_cards(conversation, component_ids, all_cards=all_cards)
+
+        def change(work: ConversationState) -> tuple[list[str], list[str]]:
+            return remove_cards(work, component_ids, all_cards=all_cards)
+
+        try:
+            return await store.change_canvas(*key, change)
+        except (SegmentLost, DatabaseUnavailable) as exc:
+            _end_stream(conversation, stream_loss(exc))
+            raise
 
     return remove
 
@@ -3106,26 +1980,17 @@ def _next_manifest(
     blocks: list[CompositionBlock],
     *,
     actor: CompositionActor,
-    composition_id: str | None = None,
     layout_hints: Any = _INHERIT,
 ) -> CompositionManifest:
     """The next composition revision: `previous`'s own id and revision+1
-    when there is a previous manifest; otherwise revision 1 under
-    `composition_id`, or a freshly minted one when the caller passes none,
-    the ordinary case for a one-shot call building a manifest that has no
-    earlier state to carry an id from. `layout_hints` defaults to
-    inheriting the previous manifest's; pass a value (including None) to
-    overwrite, since the user route must distinguish "preserve" from
-    "clear".
-
-    A recorded composition op that can replay with `previous=None`
-    (`_append_block`) passes the id it minted the first time it ran live
-    instead of leaving this default, so the replay reproduces the exact
-    manifest it built then, without minting a second, different one.
+    when there is a previous manifest; otherwise revision 1 under a freshly
+    minted id. `layout_hints` defaults to inheriting the previous
+    manifest's; pass a value (including None) to overwrite, since the user
+    route must distinguish "preserve" from "clear".
     """
     if layout_hints is _INHERIT:
         layout_hints = previous.layout_hints if previous else None
-    composition_id = previous.composition_id if previous else (composition_id or _wire_id("cps"))
+    composition_id = previous.composition_id if previous else _wire_id("cps")
     return CompositionManifest(
         composition_id=composition_id,
         revision=(previous.revision + 1) if previous else 1,
@@ -3134,6 +1999,10 @@ def _next_manifest(
         counts=_recount(blocks),
         layout_hints=layout_hints,
     )
+
+
+def _block_ids(composition: CompositionManifest | None) -> list[str]:
+    return [block.component_id for block in composition.blocks] if composition else []
 
 
 def _block_index(composition: CompositionManifest | None, component_id: str) -> int | None:
@@ -3156,7 +2025,9 @@ def land_component(
 ) -> Literal["created", "held"]:
     """Land `component` on `conversation`'s canvas. `harness.studio_translate`
     calls this at drain time for a write `make_charts` stamped through
-    `_RecordingExecutor.land_component`.
+    `_RecordingExecutor.land_component`, inside the store's canvas write
+    (`StudioStore.change_canvas`), where `conversation` is a copy of the live
+    state whose `composition` is the canvas as stored.
 
     Always records the component's digest entry
     (`conversation.components`), so a card is findable by `recall` and the
@@ -3171,6 +2042,10 @@ def land_component(
     the digest entry resolved one (`_digest_shows`' `time`). `close_turn`
     folds it into `conversation.turns`, in landing order, where the
     conversation digest reads it.
+
+    A canvas that already holds the component's block gets no second one
+    and the return is `"created"`. `StudioStore.change_canvas` runs it once
+    per committed write.
     """
     entry = _digest_entry(component)
     if intent is not None:
@@ -3187,26 +2062,20 @@ def land_component(
     )
     if not conversation.auto_add:
         return "held"
-    # Minted here, once, live (never inside `_append_block` itself) and
-    # bound into the op, so a later replay of that op against a freshly
-    # reloaded manifest that is ALSO still None (the ledger has not
-    # seen this composition either) reproduces this exact id, not a
-    # second, different one.
-    composition_id = (
-        conversation.composition.composition_id
-        if conversation.composition is not None
-        else _wire_id("cps")
+    previous = conversation.composition
+    if _block_index(previous, component["component_id"]) is not None:
+        return "created"
+    blocks = [block.model_copy(deep=True) for block in previous.blocks] if previous else []
+    blocks.append(
+        CompositionBlock(
+            component_id=component["component_id"],
+            revision=component["revision"],
+            type=component["type"],
+            title=_block_title(component),
+            pinned=False,
+        )
     )
-    op = functools.partial(
-        _append_block,
-        component_id=component["component_id"],
-        revision=component["revision"],
-        type=component["type"],
-        title=_block_title(component),
-        composition_id=composition_id,
-    )
-    conversation.composition = op(conversation.composition)
-    conversation._composition_ops.append(op)
+    conversation.composition = _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
     return "created"
 
 
@@ -3215,68 +2084,26 @@ def remove_cards(
 ) -> tuple[list[str], list[str]]:
     """Take blocks off `conversation`'s canvas: the named ones, or every
     block when `all_cards`. Returns the ids removed, in canvas order, and the
-    named ids the conversation never held; a named card already off the
-    canvas is neither. Recorded as a replayable op, like `_append_block`, so
-    a concurrent `/composition` reconciles with it. The stream is told a
-    removal is unreported (`ConversationState.take_unreported_removal`)."""
+    named ids the conversation never held. A card already off the canvas is
+    neither. A removal marks the stream as owing a report
+    (`ConversationState.take_unreported_removal`). `make_remove_cards` runs
+    it inside the store's canvas write, on the canvas as stored."""
     previous = conversation.composition
-    present = [block.component_id for block in previous.blocks] if previous else []
+    present = _block_ids(previous)
     named = set(component_ids)
     removed = [cid for cid in present if all_cards or cid in named]
     missing = [
         cid for cid in component_ids if cid not in present and cid not in conversation.components
     ]
-    if removed:
-        op = functools.partial(_remove_blocks, component_ids=frozenset(removed))
-        conversation.composition = op(previous)
-        conversation._composition_ops.append(op)
+    if removed and previous is not None:
+        blocks = [
+            block.model_copy(deep=True)
+            for block in previous.blocks
+            if block.component_id not in removed
+        ]
+        conversation.composition = _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
         conversation._removal_unreported = True
     return removed, missing
-
-
-def _remove_blocks(
-    previous: CompositionManifest | None, *, component_ids: frozenset[str]
-) -> CompositionManifest | None:
-    """The next manifest without `component_ids`' blocks, or `previous`
-    unchanged when it holds none of them (a replay after `/composition`
-    removed them first)."""
-    if previous is None or not any(b.component_id in component_ids for b in previous.blocks):
-        return previous
-    blocks = [
-        block.model_copy(deep=True)
-        for block in previous.blocks
-        if block.component_id not in component_ids
-    ]
-    return _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
-
-
-def _append_block(
-    previous: CompositionManifest | None,
-    *,
-    component_id: str,
-    revision: int,
-    type: str,
-    title: str,
-    composition_id: str,
-) -> CompositionManifest:
-    """The next manifest with a new block for `component_id` appended.
-
-    A pure function of `previous` and `composition_id` (`land_component`'s
-    docstring explains why the id is bound here, not minted), so it
-    doubles as a release save's stale-retry replay step: called again
-    against a freshly reloaded manifest, it reproduces this append on top
-    of whatever `/composition` changed in between, and, when that manifest
-    is still None, the exact one this call built the first time.
-    """
-    blocks = [block.model_copy(deep=True) for block in previous.blocks] if previous else []
-    blocks.append(
-        CompositionBlock(
-            component_id=component_id, revision=revision, type=type, title=title, pinned=False
-        )
-    )
-    return _next_manifest(
-        previous, blocks, actor=CompositionActor.MODEL, composition_id=composition_id
-    )
 
 
 def _replace_block(
@@ -3285,64 +2112,32 @@ def _replace_block(
     old_component_id: str,
     component: dict[str, Any],
 ) -> bool:
-    """Swap the named card's block for `component`, in place.
+    """Swap the named card's block for `component`, in place, keeping the
+    block's `pinned` flag.
 
-    True iff a block was replaced. A card that was never composed
-    (auto_add=false, or removed since) has no block to swap: the caller's
-    component still streams as component.created, but must not sneak onto
-    the canvas here. The Edit Card route's recreate (`harness.studio_edit`)
-    names the existing component_id whose slot the new component takes
-    over.
+    True iff the canvas shows `component` in the slot: a block was
+    replaced, or the canvas already held `component`'s block. A card that
+    was never composed (auto_add=false, or removed since) has no block to
+    swap. The caller's component still streams as component.created and is
+    not added to the canvas here. The Edit Card route's recreate
+    (`harness.studio_edit`) names the existing component_id whose slot the
+    new component takes over, inside the store's canvas write.
     """
     previous = conversation.composition
     index = _block_index(previous, old_component_id)
     if previous is None or index is None:
-        return False
-    op = functools.partial(
-        _replace_block_at,
-        old_component_id=old_component_id,
+        # A canvas that already shows the new block reads the swap done.
+        return _block_index(previous, component["component_id"]) is not None
+    blocks = [block.model_copy(deep=True) for block in previous.blocks]
+    blocks[index] = CompositionBlock(
         component_id=component["component_id"],
         revision=int(component["revision"]),
         type=component["type"],
         title=_block_title(component),
-    )
-    conversation.composition = op(previous)
-    conversation._composition_ops.append(op)
-    return True
-
-
-def _replace_block_at(
-    previous: CompositionManifest | None,
-    *,
-    old_component_id: str,
-    component_id: str,
-    revision: int,
-    type: str,
-    title: str,
-) -> CompositionManifest | None:
-    """The next manifest with `old_component_id`'s block swapped for the
-    named component, or `previous` unchanged when it no longer has one (a
-    release save's replay against a freshly reloaded manifest where
-    `/composition` removed the target in the meantime finds nothing to
-    swap, the same outcome `_replace_block` itself gives up front).
-
-    A pure function of `previous`, replayed the same way `_append_block`
-    is. Reads the swapped block's `pinned` flag off `previous` rather than
-    carrying the flag captured at the original call, so a pin `/composition`
-    applied in the meantime survives the replay.
-    """
-    index = _block_index(previous, old_component_id)
-    if previous is None or index is None:
-        return previous
-    blocks = [block.model_copy(deep=True) for block in previous.blocks]
-    blocks[index] = CompositionBlock(
-        component_id=component_id,
-        revision=revision,
-        type=type,
-        title=title,
         pinned=blocks[index].pinned,
     )
-    return _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
+    conversation.composition = _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
+    return True
 
 
 def _recount(blocks: list[CompositionBlock]) -> CompositionCounts:

@@ -21,12 +21,11 @@ import pytest
 from compiler.surface import ProgressCallback, ToolCallResult, ToolSurface
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.events import Event
-from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from harness.planner_adapter import PlannerAdapter
 from harness.scripted_plan import scripted_plan
 from harness.settings import Settings
-from harness.studio_state import ConversationState, StudioStore
+from harness.studio_state import ConversationState
 from harness.studio_translate import _RecordingExecutor, _Translator
 from harness.turn_events import PLANNER_ASK
 from planner.call import PlannerCall
@@ -37,6 +36,7 @@ from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
 from planner.tool_spec import Parameter, ToolSpec
 from planner.tools import EndRun
 
+from .orchestrator_fakes import unconnected_store
 from .planner_expectations import expect, expectation_name
 from .scripted_genai import (
     Reply,
@@ -184,15 +184,19 @@ async def _on(
 # --- What is compared ------------------------------------------------------------------
 
 
-def _frames(events: Sequence[Event]) -> list[dict[str, Any]]:
+async def _frames(events: Sequence[Event]) -> list[dict[str, Any]]:
     """The frames Studio's translator makes of `events`, less each line's
     duration, each id Studio draws numbered (`tests.test_planner_node._frames`)."""
     translator = _Translator(
         conversation=ConversationState(conversation_id="c1"),
-        recorder=_RecordingExecutor(_no_executor, store=StudioStore(InMemorySessionService())),
+        recorder=_RecordingExecutor(_no_executor, store=unconnected_store()),
     )
     return _numbered_frames(
-        [frame.model_dump(mode="json") for event in events for frame in translator.translate(event)]
+        [
+            frame.model_dump(mode="json")
+            for event in events
+            for frame in await translator.translate(event)
+        ]
     )
 
 
@@ -203,14 +207,14 @@ async def _no_executor(
     raise AssertionError(f"no executor call expected: {tool}({args})")
 
 
-def _assert_expected(request: pytest.FixtureRequest, stored: _Stored) -> None:
+async def _assert_expected(request: pytest.FixtureRequest, stored: _Stored) -> None:
     """Assert that `stored` equals the stored expectation of the test `request` runs."""
     expect(
         expectation_name(request),
         {
             "events": _read(stored.events),
             "steps": _steps(stored.events),
-            "frames": _frames(stored.events),
+            "frames": await _frames(stored.events),
             "state": stored.state,
         },
     )
@@ -271,7 +275,7 @@ async def test_a_conversation_stores_the_session_its_readers_read(
     stored = await _on(replies, *proposals)
 
     assert _planner_events(stored), "the planner stored no event"
-    _assert_expected(request, stored)
+    await _assert_expected(request, stored)
 
 
 async def test_a_thought_only_response_is_stored_as_one_event(
@@ -279,7 +283,7 @@ async def test_a_thought_only_response_is_stored_as_one_event(
 ) -> None:
     stored = await _on([reply(thought_part("Only thinking.", signature=None))])
 
-    _assert_expected(request, stored)
+    await _assert_expected(request, stored)
     assert len(_planner_events(stored)) == 1
 
 
@@ -300,7 +304,7 @@ async def test_parallel_writes_to_one_list_store_the_value_the_last_call_left(
         delays={"slow": 0.05},
     )
 
-    _assert_expected(request, stored)
+    await _assert_expected(request, stored)
     assert [page["skill_id"] for page in stored.state[SKILLS_READ_STATE_KEY]] == ["fast", "slow"]
 
 
@@ -319,7 +323,7 @@ async def test_a_stop_while_calls_run_stores_nothing_of_their_response(
         stop=True,
     )
 
-    _assert_expected(request, stored)
+    await _assert_expected(request, stored)
     assert SKILLS_READ_STATE_KEY in stored.state
     assert not {"stuck", _ROUNDS_KEY} & set(stored.state)
 
@@ -338,7 +342,7 @@ async def test_calls_without_ids_get_ids_starting_adk(request: pytest.FixtureReq
     (drawn,) = _call_ids(stored)
     assert drawn.startswith("adk-")
     renamed = [_renamed(event, drawn, _DRAWN_CALL_ID) for event in stored.events]
-    _assert_expected(request, _Stored(events=renamed, state=stored.state))
+    await _assert_expected(request, _Stored(events=renamed, state=stored.state))
 
 
 def _call_ids(stored: _Stored) -> list[str]:

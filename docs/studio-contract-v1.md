@@ -60,30 +60,29 @@ server maps to the `conversation_id`.
 
 That keyed state (the turn index, pending interrupts, plan version
 lineage, the composition manifest, turn records, and plan approvals)
-persists in an ADK session, through the same session service the runner
-itself uses. Any harness instance can load it and continue: a plan
+persists in the harness's own Postgres tables, one conversation row and its
+per-item rows. Any harness instance can load it and continue: a plan
 approval, an elicitation answer, and a follow-up turn all land correctly
 whichever instance receives them. A conversation streams at most one
-segment at a time, on any instance: a durable segment lease in the
-ledger (`studio:segment`) is claimed by `/turn` and by `/interrupt`'s
+segment at a time, on any instance: a durable segment lease on the
+conversation's row is claimed by `/turn` and by `/interrupt`'s
 resume, expires 45 s after it is last renewed, and is renewed by its
 owner every 5 s; a second stream on a live segment gets the 409
 `TRANSIENT_UNAVAILABLE` below with `retry_after_seconds` set to the
 lease's remaining time. The owning instance checkpoints the full
-conversation state into the ledger before any frame that says "paused"
+conversation state into its row before any frame that says "paused"
 (`plan.proposed`, `elicitation.request`) or "done" leaves the wire; a
 checkpoint that fails ends the stream with a stream-fatal
 `transient_unavailable` error in that frame's place, so any success
-frame the client sees already matches the ledger. Persistence
-itself is a deployment setting (`DATABASE_URL` or the `SESSION_STORE_*`
-family, see `services/harness/README.md`); unset, the harness falls back
-to an in-memory session service, and a restart or a request landing on a
-different instance loses everything. What a stalled owner writes after
-losing its segment stays unfenced: its per-turn ADK session writes race
+frame the client sees already matches the stored conversation. The
+database is a deployment setting (`DATABASE_URL` or the `SESSION_STORE_*`
+family, see `services/harness/README.md`). The harness refuses to start
+without it. What a stalled owner writes after losing its segment stays
+unfenced: its per-turn ADK session writes race
 the new owner's (ADK's own compare-and-swap fails one of the two), and a
 presentation-platform write already in flight can land as an orphaned
 component. One piece of state stays bound to the instance that produced
-it regardless of the session backend: editing a component requires the
+it regardless of the database: editing a component requires the
 instance that created it, because the presentation platform leases a
 component to the MCP session that created it (above), and that session,
 and the frame lineage behind it, exist only in that instance's process.
@@ -119,8 +118,8 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
   choose, and the planner plans on without a pick of theirs.
 - **`turn.cancel`** → `POST /api/studio/cancel` (delta 14) aborts the
   conversation's in-flight segment (the Stop button), whichever instance
-  owns it: the request sets the segment's durable cancel flag in the
-  ledger, and the owning instance's own heartbeat observes it and ends
+  owns it: the request sets the segment's durable cancel flag on the
+  conversation's row, and the owning instance's own heartbeat observes it and ends
   the stream within one heartbeat interval (5 s). Idempotent; returns
   204\. The aborted stream, if still open, ends with a stream-fatal `error`
   frame whose code is `cancelled` (a studio-side addition to the error
@@ -199,18 +198,22 @@ the identical `interrupt.response` body. Retrying while that resumed
 segment is still live answers 409 `transient_unavailable` with
 `retry_after_seconds` set to the lease's remaining time; retrying after
 that segment's lease has expired resumes the turn again, on a fresh
-stream whose `seq` jumps 1000 past the saved value so it never repeats a
-`seq` the dead stream already sent. Retrying with a DIFFERENT decision,
-payload or answers than the one that actually resumed answers 409
+stream whose `seq` starts in a block of numbers past every one the dead
+stream could have sent, so it never repeats a `seq` the dead stream sent.
+Retrying with a DIFFERENT decision, payload or answers than the one that actually resumed answers 409
 `edit_conflict`. The approval record for a plan interrupt is appended
 once per `interrupt_id`, on its first answer, however many times the
 resume itself retries.
 
 ### `seq` (delta 2)
 
-`seq` is monotonic **per turn**, across resumed segments: the first frame
-after a resume continues counting where the paused segment stopped. Gaps
-are legal; order is not. Use it to order frames, never as an index.
+`seq` increases **per turn**, across resumed segments. Each segment of a
+turn reserves a block of 256 numbers (a new turn numbers from 0), and a
+resumed segment, whether it follows a pause or a dead stream, starts in
+the block after every one reserved before. The first frame after a resume
+therefore carries a number past the paused segment's last, with a gap
+between them. Gaps are legal, and `seq` always orders frames. Use it for
+ordering only.
 
 ### Heartbeats (delta 3)
 
@@ -248,6 +251,16 @@ conversation. `/cancel` on an unknown or idle conversation is a no-op
 204, and a second `/turn` while one is already claimed on that
 conversation answers 409 `transient_unavailable` with
 `retry_after_seconds` set to the live segment's remaining lease.
+
+A conversation that changed both in ADK's session store and in the
+harness's tables since it was last copied across cannot be served until
+an operator repairs it. `/turn`, `/interrupt` and
+`/composition` on it answer 409 `constraint_violation`, `do_not_retry`,
+`constraint_id: "conversation_diverged"`, `pointer: "/conversation_id"`,
+and `detail` is one sentence for the user. `/cancel` answers 204 when the
+conversation has a live stream, which it signals to stop, and the same
+409 otherwise. A 409 request changes nothing, and the same request
+succeeds once the conversation is repaired.
 
 ### `interrupt_id` is opaque (delta 7)
 
@@ -296,11 +309,10 @@ blocks (component_id, revision, type, title, pinned, optional `meta`
 state of its own; re-render from every `composition.updated` frame and
 from `/api/studio/composition` responses. `expected_revision` mismatches
 refuse with `edit_conflict`. `/composition` can land while a turn streams
-on the same conversation, on the same or another instance: the mutation
-rebuilds the manifest from the ledger's latest value plus that turn's own
-not-yet-saved edits before applying the operation, and the turn's own
-checkpoint replays its edits on top of whatever `/composition` landed in
-the meantime, so both writers' edits survive.
+on the same conversation, on the same or another instance: each change
+(an edit from `/composition`, a card the turn adds, swaps, revises or
+removes) applies under the conversation's row lock to the canvas as
+stored, so both writers' edits survive.
 
 ## Plan detail (delta 17, v1.2)
 
@@ -617,7 +629,8 @@ Fixture values that are samples:
 - Static fixtures (one per frame/request):
   `services/harness/tests/wire_fixtures/studio/`
 - To run a conversation yourself:
-  `uv run --env-file .env harness-server` then
+  `just studio-live` (it runs the harness on the local Postgres `just pg-up`
+  starts, unless `.env` sets `DATABASE_URL`) then
   a local (untracked) `test_scripts/studio_client.py` on the dev machine;
   any SSE client following the resume protocol above reproduces them
 

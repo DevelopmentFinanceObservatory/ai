@@ -26,16 +26,17 @@ they do in a turn.
 
 from __future__ import annotations
 
-import functools
 import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 
-from harness.conversation import current_conversation_id
+from harness.conversation import current_conversation_id, current_conversation_key
 from harness.studio_state import (
     ConversationState,
+    DatabaseUnavailable,
+    SegmentLost,
     _block_title,
     _digest_entry,
     _next_manifest,
@@ -43,11 +44,14 @@ from harness.studio_state import (
     _turn_component_entry,
     drawn_series_ids,
 )
-from harness.studio_translate import _RecordingExecutor, _stream_fatal, failure_detail
+from harness.studio_translate import (
+    _RecordingExecutor,
+    _stream_fatal,
+    failure_detail,
+)
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.wire import (
     ActivityStep,
-    ComponentRevised,
     CompositionActor,
     CompositionUpdated,
     Done,
@@ -100,7 +104,9 @@ async def edit_frames(
 
     Failures serialise INTO the stream as a stream-fatal error frame,
     exactly like `_frames` -- a malformed model draft must not kill the
-    transport with no error frame.
+    transport with no error frame. A lost segment or an unreachable database
+    propagates, and the stream relaying this ends on it
+    (`StudioRunner._checkpointed`).
     """
     try:
         async for frame in _edit_flow(
@@ -111,6 +117,12 @@ async def edit_frames(
             message=message,
         ):
             yield frame
+    except (SegmentLost, DatabaseUnavailable):
+        # The card's write fenced out by another instance's takeover, or one
+        # that could not reach the database before the lease's deadline
+        # (`StudioStore.change_canvas`), ends the stream where every save
+        # that loses the segment does (`StudioRunner._checkpointed`).
+        raise
     except Exception as exc:
         logger.exception("studio edit turn failed (trace_id=%s)", conversation.trace_id)
         yield _stream_fatal(conversation, exc)
@@ -241,17 +253,32 @@ async def _edit_flow(
                 "Apply the edit",
                 produced=StepProduced(component_id=component_id, revision=revised.revision),
             )
-            frames = [
-                *_revised_frames(
-                    conversation,
+            caught_up = _is_no_op(component, current_revision)
+            revised.seq = c.next_seq()
+            frames: list[Any] = [revised]
+            title = _block_title(component) if caught_up else patch.get("title")
+
+            def revise(work: ConversationState) -> bool:
+                _record_revision(
+                    work,
                     component_id=component_id,
                     component=component,
-                    patch=patch,
-                    revised=revised,
-                    caught_up=_is_no_op(component, current_revision),
-                ),
-                *_close(text or "Done -- the card was updated."),
-            ]
+                    revision=revised.revision,
+                    title=title,
+                )
+                return _refresh_block(
+                    work, component_id=component_id, revision=revised.revision, title=title
+                )
+
+            key = current_conversation_key.get()
+            assert key is not None, "an edit runs only inside a conversation's stream"
+            if await recorder.store.change_canvas(*key, revise):
+                frames.append(
+                    CompositionUpdated(
+                        event="composition.updated", seq=c.next_seq(), manifest=c.composition
+                    )
+                )
+            frames.extend(_close(text or "Done -- the card was updated."))
         for frame in frames:
             yield frame
         return
@@ -297,18 +324,24 @@ async def _edit_flow(
     )
     created.seq = c.next_seq()
     yield created
-    entry = _digest_entry(component)
-    conversation.components[created.component_id] = entry
-    conversation.turn_components.append(
-        _turn_component_entry(
-            component_id=created.component_id,
-            type=created.type,
-            title=_block_title(component),
-            action="recreated",
-            window=entry.get("time"),
+
+    def recreate(work: ConversationState) -> bool:
+        entry = _digest_entry(component)
+        work.components[created.component_id] = entry
+        work.turn_components.append(
+            _turn_component_entry(
+                component_id=created.component_id,
+                type=created.type,
+                title=_block_title(component),
+                action="recreated",
+                window=entry.get("time"),
+            )
         )
-    )
-    if _replace_block(conversation, old_component_id=component_id, component=component):
+        return _replace_block(work, old_component_id=component_id, component=component)
+
+    key = current_conversation_key.get()
+    assert key is not None, "an edit runs only inside a conversation's stream"
+    if await recorder.store.change_canvas(*key, recreate):
         yield CompositionUpdated(
             event="composition.updated", seq=c.next_seq(), manifest=c.composition
         )
@@ -325,12 +358,22 @@ def _is_no_op(component: dict[str, Any], current_revision: int) -> bool:
 def _canvas_is_behind(
     conversation: ConversationState, component_id: str, head: dict[str, Any]
 ) -> bool:
-    """Whether the canvas shows an older revision than `head`, a readable head the
-    platform stored for an earlier edit whose own reply the harness never received
-    (a timeout). A no-op write over such a head is applied as a revise, so the
-    canvas catches up."""
-    shown = (conversation.components.get(component_id) or {}).get("revision")
-    return isinstance(shown, int) and shown < head["revision"]
+    """Whether the conversation shows an older revision than `head`, a readable
+    head the platform stored for an earlier edit. That edit's reply never
+    reached the harness (a timeout), or its canvas write failed. The card is
+    behind when its digest entry, or its canvas block where it has one, is
+    below the head. A no-op write over such a head is applied as a revise, so
+    the card catches up. A card with no block (held, or removed) is judged by
+    its digest entry alone."""
+    head_revision = head["revision"]
+    recorded = (conversation.components.get(component_id) or {}).get("revision")
+    if isinstance(recorded, int) and recorded < head_revision:
+        return True
+    composition = conversation.composition
+    blocks = composition.blocks if composition is not None else []
+    return any(
+        block.component_id == component_id and block.revision < head_revision for block in blocks
+    )
 
 
 def _refused_lead(result: dict[str, Any], *, unreadable: str) -> str:
@@ -422,29 +465,25 @@ def _merge_patch(stored: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any
     return merged
 
 
-def _revised_frames(
+def _record_revision(
     conversation: ConversationState,
     *,
     component_id: str,
     component: dict[str, Any],
-    patch: dict[str, Any],
-    revised: ComponentRevised,
-    caught_up: bool = False,
-) -> list[Any]:
-    """The frames of a landed revise. `revised` is the frame `component_revised`
-    built to check the card. `caught_up` marks a no-op write over a head above the
-    canvas (`_canvas_is_behind`). The title then comes from that head, which holds
-    what the earlier edit stored, and the patch's title is ignored."""
-    revision = revised.revision
-    revised.seq = conversation.next_seq()
-    frames: list[Any] = [revised]
-    entry = conversation.components.setdefault(component_id, _digest_entry(component))
+    revision: int,
+    title: str | None,
+) -> None:
+    """Bring a landed revise's digest entry up to `revision` and add its turn
+    record. `title` is the card's new title, None when the edit left it. The
+    entry is a new dict, since the store runs this on a one-level copy of the
+    live state (`StudioStore.change_canvas`)."""
+    entry = dict(conversation.components.get(component_id) or _digest_entry(component))
     entry["revision"] = revision
     entry["fact_summary"] = component.get("fact_summary") or entry.get("fact_summary")
     entry.update(drawn_series_ids(component))
-    title = _block_title(component) if caught_up else patch.get("title")
     if title:
         entry["title"] = title
+    conversation.components[component_id] = entry
     conversation.turn_components.append(
         _turn_component_entry(
             component_id=component_id,
@@ -454,20 +493,6 @@ def _revised_frames(
             window=entry.get("time"),
         )
     )
-    if _refresh_block(
-        conversation,
-        component_id=component_id,
-        revision=revision,
-        title=title,
-    ):
-        frames.append(
-            CompositionUpdated(
-                event="composition.updated",
-                seq=conversation.next_seq(),
-                manifest=conversation.composition,
-            )
-        )
-    return frames
 
 
 def _refresh_block(
@@ -477,43 +502,25 @@ def _refresh_block(
     revision: int,
     title: str | None,
 ) -> bool:
-    """Update the edited component's block; True iff a block changed (a
-    not-composed card mints no empty manifest revision). Recorded as a
-    composition op (`ConversationState._composition_ops`), the same
-    contract `harness.studio_state.land_component`/`_replace_block` follow:
-    a checkpoint reconciling this segment's composition against a freshly
-    fetched ledger manifest replays this revise onto it, rather than
-    discarding it in favour of the fetch (`StudioStore.checkpoint`'s
-    docstring)."""
+    """Bring the edited component's block up to `revision`, and `title` when
+    given; True iff a block changed. A card that is not composed, or whose
+    block already shows `revision` and `title`, mints no empty manifest
+    revision. `StudioStore.change_canvas` runs it once per committed
+    write."""
     previous = conversation.composition
     if previous is None:
         return False
-    op = functools.partial(
-        _refresh_block_at, component_id=component_id, revision=revision, title=title
-    )
-    updated = op(previous)
-    if updated is previous:
-        return False
-    conversation.composition = updated
-    conversation._composition_ops.append(op)
-    return True
-
-
-def _refresh_block_at(previous: Any, *, component_id: str, revision: int, title: str | None) -> Any:
-    """The next manifest with `component_id`'s block revised, a pure
-    function of `previous`. This is `_refresh_block`'s replay step,
-    reproducing this edit on top of whatever the ledger holds when a
-    checkpoint reconciles it."""
-    if previous is None:
-        return None
     blocks = [block.model_copy(deep=True) for block in previous.blocks]
     changed = False
     for block in blocks:
-        if block.component_id == component_id:
+        if block.component_id == component_id and (
+            block.revision != revision or (title and block.title != title)
+        ):
             block.revision = revision
             if title:
                 block.title = title
             changed = True
     if not changed:
-        return previous
-    return _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
+        return False
+    conversation.composition = _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
+    return True

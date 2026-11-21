@@ -2612,8 +2612,10 @@ def test_a_partial_result_offers_to_chart_only_frames_that_hold_series(
     ) is not charted
 
 
-async def test_a_plain_text_turn_streams_the_agents_answer_over_the_studio_routes():
-    app, model = orchestrator_app(types.Part.from_text(text="Kenya's GDP was $101 billion."))
+async def test_a_plain_text_turn_streams_the_agents_answer_over_the_studio_routes(pg_engine):
+    app, model = orchestrator_app(
+        types.Part.from_text(text="Kenya's GDP was $101 billion."), engine=pg_engine
+    )
 
     async with studio_client(app) as client:
         frames = await stream(client, "/api/studio/turn", turn_body("Kenya's GDP in 2020?"))
@@ -2629,7 +2631,7 @@ async def test_a_plain_text_turn_streams_the_agents_answer_over_the_studio_route
     assert "Kenya's GDP in 2020?" in request_text(model.requests[0])
 
 
-async def test_a_search_fetch_and_chart_turn_lands_a_card_over_the_studio_routes():
+async def test_a_search_fetch_and_chart_turn_lands_a_card_over_the_studio_routes(pg_engine):
     search = CannedSearch(definite_envelope())
     app, model = orchestrator_app(
         search_call("life expectancy"),
@@ -2637,6 +2639,7 @@ async def test_a_search_fetch_and_chart_turn_lands_a_card_over_the_studio_routes
         make_charts_call(chart(frame_for())),
         types.Part.from_text(text="Life expectancy in Kenya rose to 62 years."),
         resolver=search,
+        engine=pg_engine,
     )
 
     async with studio_client(app) as client:
