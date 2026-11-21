@@ -103,6 +103,7 @@ from harness.scope_choices import REASON_COPY
 from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
 from harness.sentences import DROPPED_REASON, MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
+    SET_ASIDE_REPLY,
     ConversationState,
     _PendingChoice,
     _PendingInterrupt,
@@ -2203,8 +2204,9 @@ class _Translator:
             note = payload.get("refusal_note")
             if isinstance(note, str) and note:
                 # `harness.graph.planning`'s `planner` node sets this in two cases. Its
-                # `"pending_refusal"` route (BUDGET_EXHAUSTED or
-                # QUESTION_FIXED), a refused amendment that still has a
+                # `"pending_refusal"` route (BUDGET_EXHAUSTED, or
+                # QUESTION_FIXED on an entry with no amendment to hand back
+                # as a new question), a refusal that still has a
                 # `PENDING_APPROVAL` plan on record re-offered unmodified,
                 # carries the refusal's sentence: the plan card below says
                 # what is still approvable, and this says why the user is
@@ -2945,7 +2947,7 @@ class _Translator:
             },
         )
 
-    async def finish(self) -> list[Any]:
+    async def finish(self, *, new_question: str | None = None) -> list[Any]:
         """Frames that close a segment that ran to the end of its events. A
         segment that did not pause closes the turn on the agent's answer,
         followed by one sentence for each loose match the turn used
@@ -2955,7 +2957,13 @@ class _Translator:
         `message.complete` text and the stored turn keeps them. The turn
         record keeps the notes and the line apart from the answer
         (`ConversationState.close_turn`), so a later turn's model reads the
-        answer alone, with no text of the code's own to restate."""
+        answer alone, with no text of the code's own to restate.
+
+        `new_question` is the user's words a turn ended on when the planner
+        read them, typed on the plan card, as a different question
+        (`harness.graph.state.NEW_QUESTION_KEY`). The turn's record says it
+        ended so (`studio_state.NEW_QUESTION`), and `done` carries the words
+        for the client to send as the next turn."""
         frames: list[Any] = [*await self._drain_recorder(), *self._close_status()]
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
@@ -2968,10 +2976,19 @@ class _Translator:
         self._held.clear()
         if self.paused:
             return frames
+        if new_question:
+            # The planner ended the turn before the agent answered: the reply
+            # says the plan was set aside, for a client that does not read
+            # `done.new_question`.
+            self._final_text = SET_ASIDE_REPLY
         answer, notes, basis = self._final_text, None, None
+        # A set-aside turn's reply is the code's own, with no figures to note.
+        answered = bool(self._final_text) and not new_question
         if self._final_text:
             notes = (
-                " ".join(
+                None
+                if not answered
+                else " ".join(
                     loose_match_notes(
                         self._conversation.turn_readings,
                         specs=self._conversation.turn_specs,
@@ -2980,10 +2997,14 @@ class _Translator:
                 )
                 or None
             )
-            basis = basis_line(
-                self._conversation.turn_readings,
-                specs=self._conversation.turn_specs,
-                plans=self._conversation.turn_plans,
+            basis = (
+                basis_line(
+                    self._conversation.turn_readings,
+                    specs=self._conversation.turn_specs,
+                    plans=self._conversation.turn_plans,
+                )
+                if answered
+                else None
             )
             closing = "".join(f"\n\n{block}" for block in (notes, basis) if block)
             if closing:
@@ -3011,11 +3032,16 @@ class _Translator:
                     self._conversation.turn_readings, specs=self._conversation.turn_specs
                 )
             ]
-            if self._final_text
+            if answered
             else []
         )
         self._record_chips(chips)
-        self._conversation.close_turn(final_text=answer, match_notes=notes, basis_line=basis)
+        self._conversation.close_turn(
+            final_text=answer,
+            match_notes=notes,
+            basis_line=basis,
+            new_question=new_question,
+        )
         frames.append(
             Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=chips)
         )
@@ -3025,6 +3051,7 @@ class _Translator:
                 seq=self._conversation.next_seq(),
                 trace_id=self._conversation.trace_id,
                 composition=self._conversation.composition,
+                new_question=new_question or None,
             )
         )
         return frames

@@ -4359,8 +4359,15 @@ def _amend_step(proposal: dict[str, Any], *, start_version: int) -> Any:
     return step
 
 
+@pytest.mark.parametrize(
+    "named",
+    [
+        pytest.param({}, id="restart"),
+        pytest.param({"amends_version": 3}, id="restart-naming-the-version"),
+    ],
+)
 async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
-    decision: Any, requirement: Any, derived_requirement: Any
+    decision: Any, requirement: Any, derived_requirement: Any, named: dict[str, Any]
 ) -> None:
     """The `amend` edge (`approve_n -> planner_n`) seeds `prior_plan` from
     the graph's own record, so a plan is already recorded when this call's
@@ -4372,7 +4379,14 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
     """
     seeded = _translated_plan(decision, requirement, derived_requirement, version=3)
     scripted = ScriptedGenai(
-        [_calls(("propose_plan", {"starts_new_plan": True, "question": "a different question"}))]
+        [
+            _calls(
+                (
+                    "propose_plan",
+                    {"starts_new_plan": True, "question": "a different question", **named},
+                )
+            )
+        ]
     )
     adapter = _scripted_planner(scripted)
     harness = PlannerHarness()
@@ -4386,11 +4400,64 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
     )
 
     assert result is not None and "refused" in result
+    assert result["refused"]["code"] == ProblemCode.QUESTION_FIXED
     assert "own message" in result["refused"]["text"]
+    assert result["refused"]["question"] == "a different question"
     plan = load_plan(await harness.state())
     assert plan is not None
     assert plan.version == 3
     assert plan.question == "kenya debt"
+
+
+@pytest.mark.parametrize(
+    ("stated", "named"),
+    [
+        pytest.param({}, {"amends_version": 3}, id="no-question"),
+        pytest.param({"question": "  "}, {}, id="blank-question"),
+        pytest.param({"question": "kenya debt"}, {}, id="the-recorded-question"),
+    ],
+)
+async def test_a_restart_on_the_amend_edge_states_the_users_new_question(
+    decision: Any,
+    requirement: Any,
+    derived_requirement: Any,
+    stated: dict[str, Any],
+    named: dict[str, Any],
+) -> None:
+    """On an entry the user's amendment opened, a `starts_new_plan` call
+    whose `question` is missing, blank or the recorded one is refused
+    `INVALID_PLAN`, correctable, naming `question` as what the retry needs,
+    since the harness would hand back no question or the old one. The retry
+    stating the new question is refused `QUESTION_FIXED` carrying it."""
+    seeded = _translated_plan(decision, requirement, derived_requirement, version=3)
+    scripted = ScriptedGenai(
+        [
+            _calls(("propose_plan", {"starts_new_plan": True, **stated, **named})),
+            _calls(
+                (
+                    "propose_plan",
+                    {"starts_new_plan": True, "question": "what is Ghana's GDP?", **named},
+                )
+            ),
+        ]
+    )
+    harness = PlannerHarness()
+
+    result = await harness.run(
+        _scripted_planner(scripted),
+        question="kenya debt",
+        readings=[],
+        prior_plan=seeded.model_dump(mode="json"),
+        amendment="actually, what is Ghana's GDP?",
+    )
+
+    (first,) = _answers(scripted.requests[1], "propose_plan")
+    assert first["outcome"] == "invalid_input"
+    assert first["code"] == ProblemCode.INVALID_PLAN
+    assert first["action"]["needs"] == ["question"]
+    assert result is not None
+    assert result["refused"]["code"] == ProblemCode.QUESTION_FIXED
+    assert result["refused"]["question"] == "what is Ghana's GDP?"
 
 
 async def test_a_second_turn_on_one_session_clears_the_first_drafts_plan_and_briefed_flag(

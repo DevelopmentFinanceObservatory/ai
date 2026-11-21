@@ -525,6 +525,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         existing,
         amends_version=proposal.amends_version,
         starts_new_plan=proposal.starts_new_plan,
+        amendment_entry=in_amendment_entry,
         rounds_so_far=load_plan_rounds(view.state),
         question=question,
     )
@@ -1872,11 +1873,13 @@ _BUDGET_APPROVABLE = (
 )
 _BUDGET_FRESH = "The user's next message opens a fresh budget."
 
-# The refusal for a `starts_new_plan` call while a plan is recorded. The call is
-# how the model tells the harness the user's reply asks a different question,
-# so the message says what happened and that nothing further is needed from
-# it. `harness.planner_adapter` ends the turn on this code as it does on
-# `BUDGET_EXHAUSTED`.
+# The refusal for a `starts_new_plan` call while a plan is recorded, with or
+# without `amends_version`. The call is how the model tells the harness the
+# user's reply asks a different question, so the message says what happened
+# and that nothing further is needed from it. `harness.planner_adapter` ends
+# the planner's run on this code as it does on `BUDGET_EXHAUSTED`, and the
+# graph's `planner` node ends the turn, handing the reply on as the next
+# turn's question.
 _QUESTION_FIXED_RESTART = (
     "This turn's question is fixed, so `starts_new_plan` cannot open a plan for a "
     "different one; nothing is recorded, and the plan already on record stands "
@@ -1893,6 +1896,7 @@ def _resolve_intent(
     starts_new_plan: bool,
     rounds_so_far: int,
     question: str | None = None,
+    amendment_entry: bool = False,
 ) -> tuple[Plan | None, int] | dict[str, object]:
     """Which plan a `propose_plan` call means, from what the call states.
 
@@ -1905,12 +1909,15 @@ def _resolve_intent(
     read as starting a fresh plan and drop every item it did not restate.
 
     With nothing recorded, the call is a first draft. With a plan recorded,
-    an `amends_version` naming that same version patches it. Anything else is
-    refused, naming the version to pass so the next call is correct.
-
-    `amends_version` and `starts_new_plan` are read in that order, so a call
-    stating both is treated as an amendment, since a payload shaped as a
-    patch is read as one. `rounds_so_far` counts the proposals made in this
+    a call stating `starts_new_plan` alone reports a different question. On
+    an entry the user's amendment opened (`amendment_entry`), so does a call
+    stating it beside `amends_version`: the user's words are what the call
+    classifies, and reading the pair as a patch would record an empty
+    amendment and drop the user's question. On any other entry (a replan
+    after a run, a pick's replan) there are no words of the user's to hand
+    on, so the pair is read as the patch its payload is. Otherwise an
+    `amends_version` naming the recorded version patches it. Anything else
+    is refused, naming the version to pass so the next call is correct. `rounds_so_far` counts the proposals made in this
     entry into the planner. `PlannerAdapter` zeroes it on every entry that is not
     a mid-turn resume. An amendment increments it, since every version opens a
     fresh discovery budget, and past `MAX_PLAN_ROUNDS` the call is refused
@@ -1921,7 +1928,7 @@ def _resolve_intent(
     held to `existing.question` rather than the call's own wording of the
     question it is answering:
 
-    - A restart (`starts_new_plan` with no `amends_version`) is refused with
+    - A restart, as above, is refused with
       `QUESTION_FIXED` before the round cap is even checked, ahead of
       `BUDGET_EXHAUSTED`. Both refusals record nothing, so nothing is lost
       by checking this one first, and a restart can never succeed under a
@@ -1938,8 +1945,9 @@ def _resolve_intent(
     """
     if existing is None:
         return None, 1
+    restart = starts_new_plan and (amends_version is None or amendment_entry)
     blocked = _restart_blocked(
-        existing, amends_version=amends_version, starts_new_plan=starts_new_plan
+        existing, restart=restart, question=question, amendment_entry=amendment_entry
     ) or _round_cap_blocked(existing, rounds_so_far=rounds_so_far)
     if blocked is not None:
         return blocked
@@ -1952,20 +1960,39 @@ def _resolve_intent(
 
 
 def _restart_blocked(
-    existing: Plan, *, amends_version: int | None, starts_new_plan: bool
+    existing: Plan, *, restart: bool, question: str | None, amendment_entry: bool
 ) -> dict[str, object] | None:
-    """Return the `QUESTION_FIXED` refusal for a restart, or `None`.
+    """Return the refusal for a restart, or `None`: `QUESTION_FIXED`, whose
+    detail carries the call's `question`, the user's new question in their
+    own words, which the harness hands back as the next turn
+    (`harness.graph.planning`). On an entry the user's amendment opened,
+    a restart whose `question` is missing or restates the recorded one is
+    refused `INVALID_PLAN` first, correctable within the round, since the
+    harness would hand back no question or the old one.
 
     Split out of `_resolve_intent` to keep its own branch count within this
     project's `PLR0911` budget.
     """
-    if not (amends_version is None and starts_new_plan):
+    if not restart:
         return None
+    if amendment_entry and (not (question or "").strip() or question == existing.question):
+        return problem(
+            ProblemCode.INVALID_PLAN,
+            "`starts_new_plan` states the user's new question in `question`, and "
+            "this call states "
+            + ("none" if not (question or "").strip() else "the question already recorded")
+            + ". State the user's new question in their own words, quoted from their "
+            "amendment or answer, and call again.",
+            outcome=Outcome.INVALID_INPUT,
+            action=Action(
+                call=PROPOSE_PLAN.call, arguments={"starts_new_plan": True}, needs=("question",)
+            ),
+        )
     return problem(
         ProblemCode.QUESTION_FIXED,
         _QUESTION_FIXED_RESTART,
         outcome=Outcome.REFUSED,
-        detail={"version": existing.version},
+        detail={"version": existing.version, **({"question": question} if question else {})},
     )
 
 

@@ -5,13 +5,14 @@ prose doc explains the protocol; this module is what the server actually
 validates and emits, and the two ship together. Deltas the repo doc
 indexes that change a shape are marked on the field they touch.
 
-Four request kinds arrive over POST, discriminated on `kind`
+Five request kinds arrive over POST, discriminated on `kind`
 (`STUDIO_REQUEST_ADAPTER`): `turn.request`, `interrupt.response`,
-`composition.mutate`, `turn.cancel`. Twelve frame types leave over SSE, discriminated on
-`event` (`STUDIO_FRAME_ADAPTER`): message.delta, message.complete,
-plan.proposed, plan.versioned, activity.step, component.created,
-component.revised, composition.updated, elicitation.request, suggestions,
-error, done.
+`composition.mutate`, `turn.cancel`, `turn.resume`. `GET /api/studio/state`
+answers `ConversationRead`. Thirteen frame types leave over SSE,
+discriminated on `event` (`STUDIO_FRAME_ADAPTER`): message.delta,
+message.complete, plan.proposed, plan.versioned, plan.approved,
+activity.step, component.created, component.revised, composition.updated,
+elicitation.request, suggestions, error, done.
 
 Every model forbids unknown members, mirroring the schemas'
 `additionalProperties: false`, so a frame the contract doesn't describe
@@ -1095,8 +1096,20 @@ class CancelRequest(_WireModel):
     conversation_id: str = _CONVERSATION_ID
 
 
+class ResumeRequest(_WireModel):
+    """POST /api/studio/resume -- carry on the conversation's open turn
+    `turn_index` when it is running and no segment holds it: one whose
+    client left while it ran. The response is a NEW SSE stream continuing
+    the turn from where it stopped."""
+
+    kind: Literal["turn.resume"]
+    schema_version: Literal[1]
+    conversation_id: str = _CONVERSATION_ID
+    turn_index: int = Field(ge=1)
+
+
 StudioRequest = Annotated[
-    TurnRequest | InterruptResponse | CompositionMutation | CancelRequest,
+    TurnRequest | InterruptResponse | CompositionMutation | CancelRequest | ResumeRequest,
     Field(discriminator="kind"),
 ]
 
@@ -1675,12 +1688,18 @@ class Done(_WireModel):
     """Turn complete. `composition` is the conversation's current manifest,
     absent when the conversation has no canvas yet. Emitted exactly once per
     turn, on the segment that finishes it -- an interrupted segment ends
-    with its pausing frame instead."""
+    with its pausing frame instead.
+
+    `new_question` is set when the user's `amend` text on a plan card asked
+    a different question: the turn ends with the plan set aside unapproved,
+    and the client sends the text as the conversation's next
+    `turn.request`."""
 
     event: Literal["done"]
     seq: int = Field(ge=0)
     trace_id: str
     composition: CompositionManifest | None = None
+    new_question: str | None = None
 
 
 StudioFrame = Annotated[
@@ -1701,3 +1720,109 @@ StudioFrame = Annotated[
 ]
 
 STUDIO_FRAME_ADAPTER: TypeAdapter[StudioFrame] = TypeAdapter(StudioFrame)
+
+
+# ---------------------------------------------------------------------------
+# The conversation-state read -- GET /api/studio/state
+# ---------------------------------------------------------------------------
+
+
+class TurnStatusName(StrEnum):
+    """Where a turn stands. `running` and `paused` are open. The rest are
+    closed."""
+
+    RUNNING = "running"
+    PAUSED = "paused"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    ABANDONED = "abandoned"
+
+
+class TurnState(_WireModel):
+    """The conversation's latest turn. `user_message` is what the user asked
+    it, as `ClosedTurn.user_message` words it. `lease_live` says a segment
+    holds the turn now, on some instance; `retry_after_seconds` is then the
+    most the lease has left, and is absent otherwise. A `running` turn with
+    no live lease is carried on by `POST /api/studio/resume`."""
+
+    index: int = Field(ge=1)
+    status: TurnStatusName
+    trace_id: str
+    user_message: str
+    lease_live: bool
+    retry_after_seconds: int | None = Field(default=None, ge=0)
+
+
+class StoredCard(_WireModel):
+    """A card a closed turn made or changed, as the conversation stores it:
+    its type, title, revision and the `fact_summary` its
+    `component.created` or `component.revised` frame carried. The stored
+    card holds no `payload` or `provenance`. The component id reads the
+    resolved revision from the presentation platform."""
+
+    component_id: str
+    type: str
+    title: str
+    revision: int = Field(ge=1)
+    fact_summary: FactSummary | None = None
+
+
+class ClosedTurn(_WireModel):
+    """One closed turn: the user's message as the turn recorded it (an
+    amendment or an answer adds a `(then: ...)` line), the reply the turn
+    closed on (empty when it closed with none), the ids of the cards it
+    made or changed with each one's stored card (`cards`, in the same order,
+    leaving out an id the conversation holds no card for), and the code it
+    closed on when it did not end cleanly. `new_question` is set on a turn the user ended by typing a
+    different question on its plan card (`Done.new_question`): the client
+    sends it as the next turn when it holds no later one."""
+
+    turn_index: int = Field(ge=1)
+    user_message: str
+    reply: str
+    component_ids: list[str]
+    cards: list[StoredCard] = Field(default_factory=list)
+    error: str | None = None
+    new_question: str | None = None
+
+
+class PendingPause(_WireModel):
+    """The open pause of a paused turn: the `interrupt_id` an
+    `interrupt.response` answers, its kind, and the frames the pause was sent
+    as, in order, its `plan.proposed` or `elicitation.request` last. Each
+    frame keeps the `seq` it went out with. `frames` is empty for a pause
+    stored before its frames were kept."""
+
+    interrupt_id: str
+    kind: Literal["plan", "elicitation"]
+    frames: list[StudioFrame]
+
+
+class ConversationRead(_WireModel):
+    """GET /api/studio/state -- the conversation as stored. `turn` is absent
+    before the first turn. `closed_since` lists the closed turns after the
+    request's `since`, oldest first, at most `MAX_CLOSED_SINCE`, and
+    `closed_total` is how many closed turns the conversation holds, the
+    index of its last: a client reads again with `since` set to the last
+    turn it got until it holds `closed_total`. `pause` is the open pause
+    when the turn is paused, and absent otherwise. `manifest` is the
+    canvas, absent when the conversation has none."""
+
+    conversation_id: str
+    turn: TurnState | None = None
+    closed_since: list[ClosedTurn]
+    closed_total: int = Field(ge=0)
+    pause: PendingPause | None = None
+    manifest: CompositionManifest | None = None
+
+
+# The most closed turns one state read returns. A client that needs more
+# reads again from the last one it got, up to `ConversationRead.closed_total`.
+# Each closed turn carries its cards, so the cap bounds the body.
+MAX_CLOSED_SINCE = 3
+
+# The response header on every Studio stream (`/turn`, `/interrupt`,
+# `/resume`) naming the index of the turn the stream carries, the
+# `turn.index` a state read reports for it.
+TURN_INDEX_HEADER = "x-dfo-turn-index"

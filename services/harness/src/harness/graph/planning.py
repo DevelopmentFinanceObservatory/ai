@@ -24,12 +24,14 @@ from planner.plan import (
 )
 from planner.plan import Plan as PlannerPlan
 from planner.session import ASKED_CALL_ID, PLANNER_ASK_PAUSE
+from planner.tool_results import ProblemCode
 
 from harness.decision_pick import DecisionPick
 from harness.graph import switch as switch_module
 from harness.graph.events import GraphEvent, PlannerStarted
 from harness.graph.interfaces import PlannerModel
 from harness.graph.state import (
+    NEW_QUESTION_KEY,
     ORCHESTRATOR_AMENDMENTS_KEY,
     ORCHESTRATOR_BRIEF_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
@@ -79,13 +81,17 @@ async def _draft(
     DRAFT/PENDING_APPROVAL transitions are enforced by `planner.plan.Plan`
     itself, inside the planner.
 
-    Three edges leave the node. `"ok"` goes to the `approve` node with a
-    drafted plan. `"pending_refusal"` also goes to `approve`, for a planner
-    that refuses to draft one at all (`PlannerAdapter`'s own
-    `MAX_PLAN_ROUNDS` cap, or `starts_new_plan` refused as `QUESTION_FIXED`
-    because the turn's question is fixed,
-    `submission.service._resolve_intent`) while `ctx.state["plan"]` still
-    holds a plan `PENDING_APPROVAL`. The refusal arrives as
+    Four edges leave the node. `"ok"` goes to the `approve` node with a
+    drafted plan. `"new_question"` ends the turn when the planner read the
+    user's amendment as a different question (`starts_new_plan`, refused as
+    `QUESTION_FIXED` because the turn's question is fixed,
+    `submission.service._resolve_intent`): the amendment's words go under
+    `NEW_QUESTION_KEY` for the client to send as the next turn, and the plan
+    card is set aside unanswered. `"pending_refusal"` also goes to
+    `approve`, for a planner that refuses to draft a plan at all
+    (`PlannerAdapter`'s own `MAX_PLAN_ROUNDS` cap, or `QUESTION_FIXED` with
+    no amendment's words to hand on) while `ctx.state["plan"]` still holds a
+    plan `PENDING_APPROVAL`. The refusal arrives as
     `{"refused": {"text": ...}}` rather than a raised `PlannerAdapterError`,
     which would fail the turn and abandon the plan the user still needs to
     act on. `"refused"` goes to `plan_done` for the same two refusals when
@@ -243,32 +249,12 @@ async def _draft(
             ),
         )
     if refused is not None:
-        text = str(refused.get("text", ""))
-        if existing is not None and existing.status is PlanStatus.PENDING_APPROVAL:
-            # The plan the user was already looking at is untouched (this
-            # refusal never writes `ctx.state["plan"]`) and still
-            # `PENDING_APPROVAL`, so it can be offered again as it stands.
-            # Go back to the `approve` node with that same plan, carrying
-            # the refusal's own sentence so the user reads why their change
-            # did not land before seeing the unchanged plan again.
-            note = (
-                f"{text} Version {existing.version} is still there to "
-                "approve; anything past that needs a new question."
-            )
-            return Next(
-                "pending_refusal",
-                {
-                    **existing.model_dump(mode="json"),
-                    "summary": note,
-                    "revision": plan_revision(existing),
-                    "refusal_note": note,
-                },
-            )
-        if unreadable:
-            text = f"{UNREADABLE_PLAN_UNPLANNED_NOTE} {text}".rstrip()
-        return Next(
-            "refused",
-            {"text": text, "final": bool(refused.get("final")), "code": refused.get("code")},
+        return _refused_entry(
+            ctx,
+            refused,
+            existing=existing,
+            amendment=amendment,
+            unreadable=unreadable,
         )
     planner_plan = PlannerPlan.model_validate(drafted["plan"])
     ctx.state["plan"] = planner_plan.model_dump_json()
@@ -294,6 +280,57 @@ async def _draft(
             # record (`"pending_refusal"`) keeps the lineage it has.
             **({"new_plan": True} if is_first_draft and not unreadable else {}),
         },
+    )
+
+
+def _refused_entry(
+    ctx: NodeCtx[GraphEvent],
+    refused: Mapping[str, Any],
+    *,
+    existing: PlannerPlan | None,
+    amendment: Any,
+    unreadable: bool,
+) -> Next:
+    """Where an entry the planner refused goes (`_draft`): `new_question`
+    for an amendment read as a different question, `pending_refusal` to
+    offer the plan still awaiting approval again, else `refused`. The new
+    question is the one the planner's `starts_new_plan` call stated, in the
+    user's words from the amendment or from an answer to a question the
+    planner asked about it, and the amendment when the call stated none."""
+    if refused.get("code") == ProblemCode.QUESTION_FIXED and amendment:
+        # The user asked a different question on the plan card. The turn
+        # ends here, and the client sends it as the next turn.
+        stated = refused.get("question")
+        ctx.state[NEW_QUESTION_KEY] = (
+            stated if isinstance(stated, str) and stated else str(amendment)
+        )
+        return Next("new_question")
+    text = str(refused.get("text", ""))
+    if existing is not None and existing.status is PlanStatus.PENDING_APPROVAL:
+        # The plan the user was already looking at is untouched (this
+        # refusal never writes `ctx.state["plan"]`) and still
+        # `PENDING_APPROVAL`, so it can be offered again as it stands.
+        # Go back to the `approve` node with that same plan, carrying
+        # the refusal's own sentence so the user reads why their change
+        # did not land before seeing the unchanged plan again.
+        note = (
+            f"{text} Version {existing.version} is still there to "
+            "approve; anything past that needs a new question."
+        )
+        return Next(
+            "pending_refusal",
+            {
+                **existing.model_dump(mode="json"),
+                "summary": note,
+                "revision": plan_revision(existing),
+                "refusal_note": note,
+            },
+        )
+    if unreadable:
+        text = f"{UNREADABLE_PLAN_UNPLANNED_NOTE} {text}".rstrip()
+    return Next(
+        "refused",
+        {"text": text, "final": bool(refused.get("final")), "code": refused.get("code")},
     )
 
 

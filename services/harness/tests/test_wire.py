@@ -55,6 +55,7 @@ from harness.wire import (
     PlanRequirement,
     PlanStep,
     PlanVersioned,
+    ResumeRequest,
     Seed,
     SkippedAnswer,
     SpecBlock,
@@ -104,6 +105,7 @@ REQUEST_FIXTURES = {
     "request-11-turn-seeded.json": TurnRequest,
     "request-12-interrupt-answers.json": InterruptResponse,
     "request-13-turn-apply-choice.json": TurnRequest,
+    "request-14-resume.json": ResumeRequest,
 }
 
 
