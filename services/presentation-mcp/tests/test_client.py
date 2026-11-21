@@ -27,6 +27,7 @@ from common.apis_auth import ApisAuthError
 from common.caller import (
     CALLER_HEADER,
     CALLER_PRINCIPAL_HEADER,
+    MCP_CLIENT_HEADER,
     MCP_SURFACE,
     SURFACE_HEADER,
     TURN_HEADER,
@@ -1324,6 +1325,7 @@ async def test_a_component_write_names_whose_card_allowance_it_spends(
         CALLER_HEADER,
         SURFACE_HEADER,
         USER_AGENT_HEADER,
+        MCP_CLIENT_HEADER,
     )
     assert {
         name: requests[0].headers[name] for name in allowance_headers if name in requests[0].headers
@@ -3314,7 +3316,7 @@ async def test_a_frame_replay_names_the_caller_and_turn_to_the_analysis_door(
         {"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers]}
     )
     identity = (CALLER_PRINCIPAL_HEADER, CALLER_HEADER, TURN_HEADER, SURFACE_HEADER)
-    identity += (USER_AGENT_HEADER,)
+    identity += (USER_AGENT_HEADER, MCP_CLIENT_HEADER)
 
     with set_http_request(mcp_request):
         async with _assembler(

@@ -3138,3 +3138,66 @@ async def test_a_groupby_mint_registers_its_rendering_under_the_pair_naming_it(
         options=_as_recorded(_SUM_SIBLING_RENDERING),
         stat_var_count=1,
     )
+
+
+def _flow_artifact(role: str, *, kinds: bool) -> bytes:
+    """A two-row flow frame whose one party role column is `role`, with that role's
+    `{role}_party_kind` column when `kinds`."""
+    columns: dict[str, pa.Array] = {
+        "stat_var": pa.array(["dcid:Test"] * 2),
+        role: pa.array(["country/FRA", "DACCountriesTotal"]),
+        "time_period": pa.array(["2020"] * 2),
+        "value": pa.array([1.0, 2.0]),
+    }
+    if kinds:
+        columns[f"{role}_party_kind"] = pa.array(["party", "total"])
+    buf = io.BytesIO()
+    pq.write_table(pa.table(columns), buf)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("role", "kinds", "max_frame_rows", "outcome"),
+    [
+        ("creditor", False, 50_000, "upstream_error"),
+        ("creditor", True, 50_000, "registered"),
+        ("financingProvider", False, 1, "over_ceiling"),
+    ],
+    ids=["creditor-without-kinds", "creditor-with-kinds", "over-ceiling-without-kinds"],
+)
+async def test_a_kinds_request_needs_the_kinds_of_every_flow_party_role_within_the_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    kinds: bool,
+    max_frame_rows: int,
+    outcome: str,
+) -> None:
+    """apis gives every flow-axis role column its kinds, so a frame naming its party side
+    `creditor` needs `creditor_party_kind` as a CRS frame needs `financingProvider_party_kind`.
+    A frame over the row ceiling refuses `over_ceiling` whatever its columns, since only a
+    narrower scope gets past it."""
+    blob = _flow_artifact(role, kinds=kinds)
+
+    async def fake_fetch(**_: Any) -> bytes:
+        return blob
+
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    store = InMemoryMaterialisationStore()
+    set_frame_store(store)
+
+    result = await materialise_and_register(
+        options=_KIND_OPTIONS,
+        manifest=_manifest(renderings={_digest_for(blob): _KIND_OPTIONS}),
+        settings=_settings(max_frame_rows=max_frame_rows),
+        writer="tester",
+    )
+
+    if outcome == "registered":
+        assert result.status == "registered"
+        assert result.frame_ref is not None
+        assert await store.get(result.frame_ref) is not None
+        return
+    assert result.status == "refused"
+    assert result.refusal is not None
+    assert result.refusal.code.value == outcome
+    assert await store.list_frames() == []

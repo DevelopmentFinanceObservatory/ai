@@ -6,7 +6,13 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 import httpx2
 import pytest
 from common.apis_auth import TOKEN_HEADER, ApisAuthError, AuthProvider
-from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, SURFACE_HEADER, USER_AGENT_HEADER
+from common.caller import (
+    CALLER_HEADER,
+    CALLER_PRINCIPAL_HEADER,
+    MCP_CLIENT_HEADER,
+    SURFACE_HEADER,
+    USER_AGENT_HEADER,
+)
 from data_mcp.client import (
     _PROBE_TIMEOUT_S,
     DATASETS_PREFIX,
@@ -1138,6 +1144,7 @@ _IDENTITY_HEADERS = (
     CALLER_HEADER,
     SURFACE_HEADER,
     USER_AGENT_HEADER,
+    MCP_CLIENT_HEADER,
     "x-dfo-client",
 )
 
