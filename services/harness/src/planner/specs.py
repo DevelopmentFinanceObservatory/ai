@@ -135,7 +135,8 @@ _PROPOSE_PLAN_ARGUMENTS = {
     ),
     "starts_new_plan": (
         "True says the user's reply asks a different question from the one "
-        "fixed for this turn. Refused, recording nothing. On the user's "
+        "fixed for this turn, which this call states in `question`, in the "
+        "user's words. Refused, recording nothing. On the user's "
         "amendment of the plan card it holds even beside `amends_version`, and "
         "the harness ends the turn and sends the reply on as its own question. "
         "Anywhere else a call that also names `amends_version` is read as that "

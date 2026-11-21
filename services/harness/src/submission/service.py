@@ -1946,9 +1946,9 @@ def _resolve_intent(
     if existing is None:
         return None, 1
     restart = starts_new_plan and (amends_version is None or amendment_entry)
-    blocked = _restart_blocked(existing, restart=restart, question=question) or _round_cap_blocked(
-        existing, rounds_so_far=rounds_so_far
-    )
+    blocked = _restart_blocked(
+        existing, restart=restart, question=question, amendment_entry=amendment_entry
+    ) or _round_cap_blocked(existing, rounds_so_far=rounds_so_far)
     if blocked is not None:
         return blocked
     invalid = _amendment_version_invalid(existing, amends_version) or _question_changed(
@@ -1960,18 +1960,34 @@ def _resolve_intent(
 
 
 def _restart_blocked(
-    existing: Plan, *, restart: bool, question: str | None
+    existing: Plan, *, restart: bool, question: str | None, amendment_entry: bool
 ) -> dict[str, object] | None:
-    """Return the `QUESTION_FIXED` refusal for a restart, or `None`. The
-    refusal's detail carries the call's `question`, the user's new question
-    in their own words, which the harness hands back as the next turn
-    (`harness.graph.planning`).
+    """Return the refusal for a restart, or `None`: `QUESTION_FIXED`, whose
+    detail carries the call's `question`, the user's new question in their
+    own words, which the harness hands back as the next turn
+    (`harness.graph.planning`). On an entry the user's amendment opened,
+    a restart whose `question` is missing or restates the recorded one is
+    refused `INVALID_PLAN` first, correctable within the round, since the
+    harness would hand back no question or the old one.
 
     Split out of `_resolve_intent` to keep its own branch count within this
     project's `PLR0911` budget.
     """
     if not restart:
         return None
+    if amendment_entry and (not (question or "").strip() or question == existing.question):
+        return problem(
+            ProblemCode.INVALID_PLAN,
+            "`starts_new_plan` states the user's new question in `question`, and "
+            "this call states "
+            + ("none" if not (question or "").strip() else "the question already recorded")
+            + ". State the user's new question in their own words, quoted from their "
+            "amendment or answer, and call again.",
+            outcome=Outcome.INVALID_INPUT,
+            action=Action(
+                call=PROPOSE_PLAN.call, arguments={"starts_new_plan": True}, needs=("question",)
+            ),
+        )
     return problem(
         ProblemCode.QUESTION_FIXED,
         _QUESTION_FIXED_RESTART,

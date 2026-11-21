@@ -2266,7 +2266,10 @@ def test_resolve_intent_refuses_a_restart_before_the_round_cap() -> None:
 def test_the_instruction_tells_the_planner_to_stop_on_a_different_question() -> None:
     instruction = planner_instruction()
 
-    assert "`starts_new_plan=true` and stop there" in instruction
+    assert (
+        "`starts_new_plan=true` and the user's new question in their own words "
+        "in `question`, and stop there"
+    ) in instruction
 
 
 def _arguments(tools: dict[str, ToolSpec], name: str = "propose_plan") -> dict[str, Any]:
@@ -3085,22 +3088,24 @@ def test_a_call_with_no_plan_recorded_needs_no_statement_of_intent(
 
 
 @pytest.mark.parametrize(
-    ("user_amends", "recorded"),
+    ("user_amends", "question", "recorded"),
     [
-        pytest.param(True, 1, id="user-amendment-entry-new-question"),
-        pytest.param(False, 2, id="replan-entry-patch"),
+        pytest.param(True, "a different question", 1, id="user-amendment-entry-new-question"),
+        pytest.param(False, "q", 2, id="replan-entry-patch"),
     ],
 )
 def test_a_call_stating_both_is_a_new_question_only_on_the_users_amendment(
     decision: DecisionFactory,
     requirements: RequirementPair,
     user_amends: bool,
+    question: str,
     recorded: int,
 ) -> None:
     # On an entry the user's amendment opened, `starts_new_plan` beside
-    # `amends_version` reports a different question and records nothing. On
-    # any other entry, such as a replan after a run, no words of the user's
-    # are there to hand on, and the pair patches the plan the version names.
+    # `amends_version` reports the different question its `question` states
+    # and records nothing. On any other entry, such as a replan after a run,
+    # no words of the user's are there to hand on, and the pair patches the
+    # plan the version names, its `question` the recorded one.
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
@@ -3108,7 +3113,7 @@ def test_a_call_stating_both_is_a_new_question_only_on_the_users_amendment(
 
     result = call_planner_tool(
         tools["propose_plan"],
-        question="q",
+        question=question,
         decisions=drafts([decision(rationale="Reconsidered.")]),
         amends_version=1,
         starts_new_plan=True,
