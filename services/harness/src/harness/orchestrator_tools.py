@@ -3063,7 +3063,7 @@ def build_orchestrator_tools(
             )
             _forget_drawn(call, removed)
         named = component_ids or []
-        if not all_cards and missing and len(missing) == len(named):
+        if not all_cards and missing and len(missing) == len(dict.fromkeys(named)):
             return _failed(
                 HarnessCode.CARD_NOT_FOUND,
                 "No card of this conversation has those ids. Nothing changed.",

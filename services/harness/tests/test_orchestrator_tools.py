@@ -5563,7 +5563,7 @@ async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
     await tools["remove_cards"](ctx, ["cmp_01"])
 
     again = await tools["remove_cards"](ctx, ["cmp_01", "cmp_01"])
-    unknown = await tools["remove_cards"](ctx, ["cmp_99"])
+    unknown = await tools["remove_cards"](ctx, ["cmp_99", "cmp_99"])
 
     assert again == {
         "removed": [],
