@@ -43,7 +43,9 @@ spans under them lose their parent.
 `turn_segment` runs a `with` block inside one segment span of a unit of work
 (a harness turn, say) on whichever backend is active, opened and ended by the
 block, and `record_turn_outcome` writes how the unit of work ended as a
-zero-duration observation. Both land on one trace seeded on the unit's id, so
+zero-duration observation. `start_turn_segment`, `use_turn_segment` and
+`end_turn_segment` open, enter and end the same segment span from different
+places, and end it with a status, level and attributes of the caller's. Both land on one trace seeded on the unit's id, so
 a unit of work that spans several requests (a turn paused for approval and
 resumed by a second request, on any instance) stays one trace and no span
 outlives the request that opened it. `turn_call_meta` gives the `_meta` entries
@@ -72,7 +74,7 @@ import os
 import secrets
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from functools import cache
 from typing import Any, Literal
@@ -511,22 +513,72 @@ def turn_segment(
     A no-op when telemetry never came up. A span that fails to open or close
     leaves the block running untraced and never raises into the caller.
     """
-    handle = _start_turn_span(
+    handle = start_turn_segment(external_id, session_id=session_id, user_id=user_id, tags=tags)
+    error: str | None = None
+    try:
+        with use_turn_segment(handle):
+            yield
+    except Exception as exc:
+        error = type(exc).__name__
+        raise
+    finally:
+        end_turn_segment(handle, status=error)
+
+
+def start_turn_segment(
+    external_id: str,
+    *,
+    session_id: str | None = None,
+    user_id: str | None = None,
+    tags: Sequence[str] = (),
+) -> Any | None:
+    """Open the `TURN_SEGMENT_NAME` span `turn_segment` opens, for a caller
+    whose segment starts and ends in different places, and return an opaque
+    handle for `use_turn_segment` and `end_turn_segment`. `None` when
+    telemetry never came up or the span fails to open, and the caller then
+    runs untraced. The span is not current anywhere until `use_turn_segment`
+    makes it current for a block."""
+    return _start_turn_span(
         external_id,
         name=TURN_SEGMENT_NAME,
         session_id=session_id,
         user_id=user_id,
         tags=tags,
     )
-    error: str | None = None
-    try:
-        with _use_turn_span(handle):
-            yield
-    except Exception as exc:
-        error = type(exc).__name__
-        raise
-    finally:
-        _end_turn_span(handle, error=error)
+
+
+def use_turn_segment(handle: Any | None) -> AbstractContextManager[None]:
+    """Make the segment behind `handle` (`start_turn_segment`) current for a
+    `with` block, on the block's task and every task started inside it. A
+    no-op for `None`. Never ends the span; `end_turn_segment` does."""
+    return _use_turn_span(handle if isinstance(handle, _TurnSpan) else None)
+
+
+def end_turn_segment(
+    handle: Any | None,
+    *,
+    status: str | None = None,
+    level: EventLevel = "ERROR",
+    attributes: Mapping[str, str] | None = None,
+) -> None:
+    """End the segment behind `handle` (`start_turn_segment`), from any task.
+    A `status` (a machine-readable code) sets the Langfuse observation's
+    level to `level` with `status` as its status message. `attributes` go on
+    the span, and on Langfuse into the observation's metadata. The segment
+    carries no input or output; `record_turn_outcome` writes those. A no-op
+    for `None`. Never raises."""
+    _end_turn_span(
+        handle if isinstance(handle, _TurnSpan) else None,
+        error=status,
+        level=level,
+        attributes=attributes,
+    )
+
+
+# The close codes `record_turn_outcome` records at `WARNING`, defined here
+# alone: `cancelled`, a unit of work a Stop or the client's leaving ended,
+# and `abandoned`, one a newer unit of work closed. Neither is a failure.
+WARNING_TURN_ERRORS = frozenset({"cancelled", "abandoned"})
 
 
 def record_turn_outcome(
@@ -547,9 +599,11 @@ def record_turn_outcome(
 
     On Langfuse `request` and `response` are the observation's input and
     output, what an evaluator filtered on the name `turn` reads. An `error`
-    (a machine-readable code such as `cancelled`) makes its level `ERROR`
-    with `error` as its status message. Its metadata holds `dfo.external_id`,
-    and `dfo.turn_error` holds `error` when there is one. A clean close writes
+    (a machine-readable code such as `state_not_saved`) makes its level
+    `ERROR` with `error` as its status message, and `WARNING` for a code in
+    `WARNING_TURN_ERRORS`, so a Stop is never reported as a failure. Its
+    metadata holds `dfo.external_id`, and `dfo.turn_error` holds `error`
+    when there is one. A clean close writes
     no `dfo.turn_error`. A pause holds `dfo.turn_status` `paused`, and a close
     holds no `dfo.turn_status`. `session_id`, `user_id` and `tags` mean what
     they do for `turn_segment`. Off Langfuse the observation is a plain span
@@ -573,7 +627,13 @@ def record_turn_outcome(
         tags=tags,
         metadata=metadata,
     )
-    _end_turn_span(handle, request=request, response=response, error=error)
+    _end_turn_span(
+        handle,
+        request=request,
+        response=response,
+        error=error,
+        level="WARNING" if error in WARNING_TURN_ERRORS else "ERROR",
+    )
 
 
 @contextmanager
@@ -880,10 +940,12 @@ def _use_turn_span(handle: _TurnSpan | None) -> Iterator[None]:
 
     It attaches a context token, and a token can only be detached in the
     context that made it. A block that an async generator holds open across a
-    `yield` is left in another context when the event loop closes the
-    generator after its task was cancelled; there is nothing to restore in that
-    context, so leaving the block there detaches nothing. Any other block is
-    entered and left on one task.
+    `yield` is left in another context when the generator is closed outside
+    the task that iterated it: by a response that closes its body in the
+    request task after the send task was cancelled (the harness's
+    `_ClaimedStream`), or by the event loop after its task was cancelled.
+    There is nothing to restore in that context, so leaving the block there
+    detaches nothing. Any other block is entered and left on one task.
     """
     attached: tuple[Any, contextvars.Token[bool]] | None = None
     if isinstance(handle, _TurnSpan):
@@ -925,12 +987,17 @@ def _end_turn_span(
     request: Any = None,
     response: Any = None,
     error: str | None = None,
+    level: EventLevel = "ERROR",
+    attributes: Mapping[str, str] | None = None,
 ) -> None:
     """End a span opened by `_start_turn_span`. A no-op for `None`.
 
     On Langfuse, `request` and `response` become the observation's input and
-    output, and an `error` makes its level `ERROR` with `error` as its status
-    message. Off Langfuse all three are ignored.
+    output, and an `error` (a machine-readable code, with no exception text)
+    sets its level to `level` with `error` as its status message. Off
+    Langfuse `request`, `response`, `error` and `level` are ignored.
+    `attributes` go on the span itself, on any backend, and on Langfuse into
+    the observation's metadata as well.
 
     Callable from any asyncio task: the span's scope is exited in the context
     it was entered in. Swallows any error from closing it, since telemetry
@@ -938,13 +1005,21 @@ def _end_turn_span(
     """
     if not isinstance(handle, _TurnSpan):
         return
+    if attributes:
+        try:
+            from opentelemetry import trace
+
+            trace.get_current_span(handle.otel_context).set_attributes(dict(attributes))
+        except Exception:
+            logger.debug("failed to set a turn span's attributes -- continuing", exc_info=True)
     if handle.observation is not None:
         try:
             handle.observation.update(
                 input=request,
                 output=response,
-                level="ERROR" if error else None,
+                level=level if error else None,
                 status_message=error or None,
+                **({"metadata": dict(attributes)} if attributes else {}),
             )
         except Exception:
             logger.debug("failed to record a turn's input and output -- continuing", exc_info=True)
@@ -1141,6 +1216,19 @@ async def flush_telemetry(*, timeout_seconds: float = FLUSH_TIMEOUT_SECONDS) -> 
     finally:
         with _flush_lock, suppress(ValueError):  # a pass already took it
             _flush_waiters.remove(wake)
+
+
+def flush_telemetry_before_exit() -> None:
+    """Export everything queued so far, blocking until the export ends, for a
+    process about to exit, such as a job whose `flush_telemetry` may have
+    returned while its export ran on a daemon thread that exit would kill.
+    Never raises, and does nothing when telemetry is off."""
+    if _backend is None:
+        return
+    try:
+        _flush_backend()
+    except Exception:
+        logger.warning("telemetry flush before exit failed", exc_info=True)
 
 
 def start_telemetry_flush() -> None:

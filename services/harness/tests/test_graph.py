@@ -115,7 +115,7 @@ from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
 from harness.sentences import FAILURE_SENTENCES, FailureClass, StopCode
 from harness.settings import Settings
-from harness.studio_state import ConversationState, StudioStore
+from harness.studio_state import ConversationState
 from harness.studio_translate import _node_name, _Translator, failure_detail
 from harness.studio_translate import _RecordingExecutor as _TranslatorRecorder
 from harness.tool_contracts import HarnessCode, reading_facts
@@ -196,6 +196,7 @@ from .orchestrator_fakes import (
     plan_call,
     request_text,
     run_turn,
+    unconnected_store,
     visited_nodes,
 )
 from .planner.test_agent import _FakeToolContext
@@ -612,7 +613,7 @@ async def test_a_plan_step_opens_its_running_line_before_its_call_answers() -> N
     stream = await _approval_stream(surface)
     translator = _Translator(
         conversation=ConversationState(conversation_id="s"),
-        recorder=_TranslatorRecorder(_no_executor, store=StudioStore(InMemorySessionService())),
+        recorder=_TranslatorRecorder(_no_executor, store=unconnected_store()),
     )
     held: list[ActivityStep] = []
 
@@ -621,7 +622,7 @@ async def test_a_plan_step_opens_its_running_line_before_its_call_answers() -> N
             if _step_progress(event) is not None and not surface.release.is_set():
                 held = [
                     frame
-                    for frame in translator.translate(event)
+                    for frame in await translator.translate(event)
                     if isinstance(frame, ActivityStep) and frame.tool
                 ]
                 surface.release.set()

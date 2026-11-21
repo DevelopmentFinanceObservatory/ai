@@ -803,7 +803,6 @@ source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [
-    { name = "aiosqlite" },
     { name = "datamodel-code-generator" },
     { name = "httpx2" },
     { name = "jsonschema" },
@@ -822,7 +821,6 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "aiosqlite", specifier = ">=0.20" },
     { name = "datamodel-code-generator", specifier = "==0.83.0" },
     { name = "httpx2", specifier = ">=2.13.0" },
     { name = "jsonschema", specifier = ">=4.26.0" },

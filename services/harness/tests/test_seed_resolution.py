@@ -40,6 +40,7 @@ from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.seeds import SEED_STEP_TOOL, resolve_seed, take_seeds
 from harness.studio_translate import _node_name
 from planner.plan import SEEDS_STATE_KEY
+from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.discovery import resolved_spec
 
 from .data_mcp_definitions import DataMcpDefinitions, GroupsSearchStub, SearchStub
@@ -433,7 +434,7 @@ async def test_seeds_resolve_together_and_the_turn_waits_for_the_slowest(
 
 
 async def test_a_seed_is_fetched_without_a_search_and_a_later_turns_planner_reads_it(
-    definition_store: InMemoryDefinitionStore,
+    definition_store: InMemoryDefinitionStore, pg_engine: AsyncEngine
 ) -> None:
     """Over the studio routes: the agent fetches the seed's spec_id with no search,
     and the next turn's planner reads the seed among the earlier readings, with the
@@ -448,6 +449,7 @@ async def test_a_seed_is_fetched_without_a_search_and_a_later_turns_planner_read
         types.Part.from_text(text="I could not plan that."),
         resolver=search,
         planner=planner,
+        engine=pg_engine,
         served=[_KENYA],
     )
     body = {**turn_body(_QUESTION), "seed_spec": _seeds([_KENYA])}

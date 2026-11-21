@@ -13,11 +13,13 @@ from common import telemetry
 from common.telemetry import (
     backend,
     current_trace_id,
+    end_turn_segment,
     flush_telemetry,
     init_telemetry,
     record_event,
     record_span,
     start_telemetry_flush,
+    start_turn_segment,
     turn_call_meta,
     turn_segment,
     use_call_session,
@@ -531,6 +533,31 @@ def test_end_turn_span_closes_the_span_when_recording_its_input_and_output_fails
     fake_span_cm.__exit__.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "level"),
+    [
+        pytest.param({"status": "failed"}, "ERROR", id="error"),
+        pytest.param({"status": "segment_lost", "level": "WARNING"}, "WARNING", id="warning"),
+    ],
+)
+def test_end_turn_segment_marks_its_status_at_its_level(monkeypatch, kwargs, level):
+    """An ended segment's status is its status message, at `ERROR` unless the
+    caller names another level, and the segment carries no input or output."""
+    telemetry._backend = "langfuse"
+    fake_span_cm = MagicMock()
+    fake_client = MagicMock()
+    fake_client.start_as_current_observation.return_value = fake_span_cm
+    monkeypatch.setattr(langfuse, "get_client", lambda: fake_client)
+    handle = start_turn_segment("tr_abc123")
+
+    end_turn_segment(handle, **kwargs)
+
+    assert fake_client.start_as_current_observation.call_args.kwargs["name"] == "turn.segment"
+    fake_span_cm.__enter__.return_value.update.assert_called_once_with(
+        input=None, output=None, level=level, status_message=kwargs["status"]
+    )
+
+
 async def test_end_turn_span_runs_in_the_context_the_span_was_opened_in(monkeypatch):
     """The scope is exited in the copy of the context it was entered in, from
     whichever task closes the turn, so its context tokens are always reset in
@@ -667,6 +694,32 @@ async def test_flush_telemetry_is_a_noop_with_no_backend(monkeypatch):
 
     assert flushed == []
     assert telemetry._FLUSH_THREAD_NAME not in started
+
+
+@pytest.mark.parametrize(
+    ("backend", "fails", "flushes"),
+    [(None, False, 0), ("otel", False, 1), ("otel", True, 1)],
+    ids=["off", "on", "failing"],
+)
+def test_a_flush_before_exit_blocks_on_the_export_and_never_raises(
+    monkeypatch, backend, fails, flushes
+):
+    """`flush_telemetry_before_exit` runs the backend's export on the
+    calling thread, does nothing with telemetry off, and swallows an export
+    that raises."""
+    calls = []
+
+    def flush_backend():
+        calls.append(threading.current_thread())
+        if fails:
+            raise RuntimeError("exporter unavailable")
+
+    monkeypatch.setattr(telemetry, "_backend", backend)
+    monkeypatch.setattr(telemetry, "_flush_backend", flush_backend)
+
+    telemetry.flush_telemetry_before_exit()
+
+    assert calls == [threading.current_thread()] * flushes
 
 
 async def test_flush_telemetry_flushes_the_langfuse_client(monkeypatch):

@@ -62,6 +62,7 @@ from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import EndRun
+from sqlalchemy.ext.asyncio import AsyncEngine
 from submission.service import scope_choice_decisions
 from translator.tool import Translate, build_translate
 
@@ -526,7 +527,7 @@ async def test_a_live_shaped_call_reply_is_replayed_without_an_empty_text_part(
     (replayed,) = [c for c in entry.requests[1].content_list if c.role == "model"]
     assert replayed.parts is not None
     assert replayed.parts[-1] != types.Part(text="")
-    _assert_expected(request, entry, also={"frames": _event_frames(entry.events)})
+    _assert_expected(request, entry, also={"frames": await _event_frames(entry.events)})
 
 
 async def test_an_ask_and_its_answer_land_the_plan_in_the_next_run(
@@ -1307,13 +1308,17 @@ def _frames(frames: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def _studio(
-    plan: Plan, replies: Sequence[Reply], *, answer: dict[str, Any] | None = None
+    plan: Plan,
+    replies: Sequence[Reply],
+    *,
+    engine: AsyncEngine,
+    answer: dict[str, Any] | None = None,
 ) -> list[list[dict[str, Any]]]:
     """The frames of a Studio turn whose orchestrator hands the question to the
     planner, and of the answer that resumes it when `answer` is given."""
     scripted = ScriptedGenai(replies)
     adapter = scripted_planner(scripted, tools=_proposals(records=plan))
-    app = _app(plan_call(_QUESTION), _text("Planned."), planner=adapter)
+    app = _app(plan_call(_QUESTION), _text("Planned."), planner=adapter, engine=engine)
     async with studio_client(app) as client:
         with _numbered_call_ids():
             first = await stream(client, "/api/studio/turn", turn_body(_QUESTION))
@@ -1340,16 +1345,16 @@ async def _studio(
     ],
 )
 async def test_a_planned_studio_turn_streams_the_stored_frames(
-    plan: Plan, replied: Reply, request: pytest.FixtureRequest
+    plan: Plan, replied: Reply, request: pytest.FixtureRequest, pg_engine: AsyncEngine
 ) -> None:
-    frames = await _studio(plan, [replied])
+    frames = await _studio(plan, [replied], engine=pg_engine)
 
     assert "plan.proposed" in [frame["event"] for frame in frames[0]]
     expect(expectation_name(request), frames)
 
 
 async def test_a_studio_ask_and_its_answer_stream_the_stored_frames(
-    plan: Plan, request: pytest.FixtureRequest
+    plan: Plan, request: pytest.FixtureRequest, pg_engine: AsyncEngine
 ) -> None:
     candidates = [
         {"spec_id": "spec_a", "label": "reading A"},
@@ -1360,7 +1365,7 @@ async def test_a_studio_ask_and_its_answer_stream_the_stored_frames(
         reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED)),
     ]
 
-    frames = await _studio(plan, replies, answer=_pick("spec_b"))
+    frames = await _studio(plan, replies, engine=pg_engine, answer=_pick("spec_b"))
 
     assert frames[0][-1]["event"] == "elicitation.request"
     assert "plan.proposed" in [frame["event"] for frame in frames[1]]
@@ -1394,9 +1399,9 @@ def _error_frame(frames: Sequence[Mapping[str, Any]]) -> tuple[str, str]:
     ],
 )
 async def test_a_dropped_gemini_call_ends_the_studio_turn_as_retry_later(
-    plan: Plan, failed: Reply
+    plan: Plan, failed: Reply, pg_engine: AsyncEngine
 ) -> None:
-    (frames,) = await _studio(plan, [failed])
+    (frames,) = await _studio(plan, [failed], engine=pg_engine)
 
     assert _error_frame(frames) == ("transient_unavailable", "retry_after_delay")
 
@@ -1433,7 +1438,7 @@ class _Dropping(httpx.AsyncByteStream):
 
 
 async def test_a_stream_google_genai_resumed_over_a_repeated_call_ends_the_turn_as_retry_later(
-    plan: Plan,
+    plan: Plan, pg_engine: AsyncEngine
 ) -> None:
     """The real google-genai client streams a checkpointed thought, then a
     function call no continuation token covers, then the connection drops. The
@@ -1481,7 +1486,7 @@ async def test_a_stream_google_genai_resumed_over_a_repeated_call_ends_the_turn_
         specs=_serving_proposals(adapter_specs(surface=surface, translate=translate), body),
         client=client,
     )
-    app = _app(plan_call(_QUESTION), _text("Planned."), planner=adapter)
+    app = _app(plan_call(_QUESTION), _text("Planned."), planner=adapter, engine=pg_engine)
     async with studio_client(app) as studio:
         frames = await stream(studio, "/api/studio/turn", turn_body(_QUESTION))
 

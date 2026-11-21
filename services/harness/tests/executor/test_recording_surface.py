@@ -224,14 +224,16 @@ async def test_a_retrieval_whose_result_left_out_its_stat_var_list_is_recorded_w
     assert reads == [f"/api/datasets/{SPEC_KENYA}/{CONTENT_VERSION}"]
 
 
-def test_create_app_shares_one_provenance_store_between_executor_and_surface_recorder() -> None:
+def test_create_app_shares_one_provenance_store_between_executor_and_surface_recorder(
+    pg_database_url: str,
+) -> None:
     """`harness.server.create_app` must build ONE `ProvenanceStore` and hand
     it to both `McpExecutor` and `_RecordingSurface` -- two independent
     stores would leave a planned run's manifests unreadable to component
     assembly even with both writers wired."""
     from harness.server import create_app  # noqa: PLC0415 -- isolate this suite's own import cost
 
-    app = create_app(settings=Settings())
+    app = create_app(settings=Settings(database_url=pg_database_url))
 
     executor = app.state.studio.recorder._executor
     assert isinstance(executor, McpExecutor)

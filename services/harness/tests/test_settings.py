@@ -123,8 +123,8 @@ def test_a_blank_database_url_is_unset(monkeypatch) -> None:
     assert Settings().database_url is None
     monkeypatch.setenv("DATABASE_URL", "   ")
     assert Settings().database_url is None
-    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-    assert Settings().database_url == "sqlite+aiosqlite:///:memory:"
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://localhost/harness")
+    assert Settings().database_url == "postgresql+asyncpg://localhost/harness"
 
 
 def test_blank_session_store_fields_are_unset(monkeypatch) -> None:
