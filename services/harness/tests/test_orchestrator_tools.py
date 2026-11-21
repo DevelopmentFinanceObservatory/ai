@@ -5517,10 +5517,17 @@ async def test_remove_cards_clears_the_canvas_and_refuses_a_call_that_names_noth
     nothing = await tools["remove_cards"](ctx)
     cleared = await tools["remove_cards"](ctx, all_cards=True)
     again = await tools["remove_cards"](ctx, all_cards=True)
+    # A fresh turn, since the three calls above spend remove_cards' budget.
+    tools, ctx = _tools(remove_cards=_remove_callable(state))
+    named = await tools["remove_cards"](ctx, ["cmp_99"], all_cards=True)
 
     assert _stated(nothing) == ("tool_arguments_invalid", "correct_and_retry")
     assert cleared == {"removed": ["cmp_01", "cmp_02"]}
     assert again == {"removed": [], "note": "The canvas was already empty."}
+    assert {key: value for key, value in named.items() if key != "note"} == {
+        "removed": [],
+        "not_in_conversation": ["cmp_99"],
+    }
 
 
 async def test_remove_cards_leaves_a_pinned_card_and_names_it():
@@ -5540,9 +5547,9 @@ async def test_remove_cards_leaves_a_pinned_card_and_names_it():
     assert {key: value for key, value in mixed.items() if key != "note"} == {
         "removed": [],
         "kept_pinned": ["cmp_01"],
+        "already_off": ["cmp_02"],
         "not_in_conversation": ["cmp_99"],
     }
-    assert "1 of the named cards was already off the canvas" in mixed["note"]
 
 
 async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
@@ -5555,7 +5562,10 @@ async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
     again = await tools["remove_cards"](ctx, ["cmp_01"])
     unknown = await tools["remove_cards"](ctx, ["cmp_99"])
 
-    assert again == {"removed": [], "note": "Those cards were already off the canvas."}
+    assert {key: value for key, value in again.items() if key != "note"} == {
+        "removed": [],
+        "already_off": ["cmp_01"],
+    }
     assert _stated(unknown) == ("card_not_found", "correct_and_retry")
     assert "cmp_99" not in unknown["error"]
 

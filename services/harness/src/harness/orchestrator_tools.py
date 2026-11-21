@@ -1889,6 +1889,7 @@ def _nothing_removed_note(
     component_ids: Sequence[str],
     *,
     kept_pinned: Collection[str],
+    already_off: Collection[str],
     missing: Collection[str],
     all_cards: bool,
 ) -> str:
@@ -1896,16 +1897,14 @@ def _nothing_removed_note(
     outcome: cards the user pinned, named cards already off the canvas, ids
     this conversation never held, and, for `all_cards`, a canvas with no
     card left to take off."""
-    off = [cid for cid in component_ids if cid not in kept_pinned and cid not in missing]
     sentences: list[str] = []
     if kept_pinned:
         sentences.append("The user pinned the cards in kept_pinned, so they stay on the canvas.")
-    if off:
+    if already_off:
         sentences.append(
             "Those cards were already off the canvas."
-            if len(off) == len(component_ids)
-            else f"{len(off)} of the named cards {'was' if len(off) == 1 else 'were'} already "
-            "off the canvas."
+            if len(already_off) == len(component_ids)
+            else "The cards in already_off were already off the canvas."
         )
     if missing:
         sentences.append("No card of this conversation has the ids in not_in_conversation.")
@@ -3025,9 +3024,9 @@ def build_orchestrator_tools(
         not pinned. A pinned card stays on the canvas, since only the user
         unpins it. Returns the ids taken off and, as `kept_pinned`, the
         pinned cards left in place; a named card already off the canvas
-        needs nothing, and an id this conversation never held is named back
-        as `not_in_conversation`. When nothing came off, `note` says what
-        each named id met (`_nothing_removed_note`).
+        needs nothing and is named back as `already_off`, and an id this
+        conversation never held is named back as `not_in_conversation`. When
+        nothing came off, `note` says what each named id met.
         """
         spent = _spend(call, "remove_cards")
         if spent:
@@ -3047,20 +3046,27 @@ def build_orchestrator_tools(
                 component_ids=component_ids or [], all_cards=all_cards
             )
             _forget_drawn(call, removed)
-        if not removed and not kept_pinned and missing and len(missing) == len(component_ids or []):
+        named = component_ids or []
+        if not all_cards and missing and len(missing) == len(named):
             return _failed(
                 HarnessCode.CARD_NOT_FOUND,
                 "No card of this conversation has those ids. Nothing changed.",
             )
-        answer: dict[str, Any] = {"removed": removed}
-        if kept_pinned:
-            answer["kept_pinned"] = kept_pinned
-        if missing:
-            answer["not_in_conversation"] = missing
+        already_off = [cid for cid in named if cid not in {*removed, *kept_pinned, *missing}]
+        answer: dict[str, Any] = {"removed": removed} | {
+            key: ids
+            for key, ids in (
+                ("kept_pinned", kept_pinned),
+                ("already_off", already_off),
+                ("not_in_conversation", missing),
+            )
+            if ids
+        }
         if not removed:
             answer["note"] = _nothing_removed_note(
-                component_ids or [],
+                named,
                 kept_pinned=kept_pinned,
+                already_off=already_off,
                 missing=missing,
                 all_cards=all_cards,
             )

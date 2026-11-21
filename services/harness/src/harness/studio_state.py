@@ -41,6 +41,7 @@ from planner.plan import PlanStatus, cut_user_text
 from pydantic import BaseModel, ValidationError
 
 from harness.approval import ApprovalRecord
+from harness.chart_binding import MAX_CHARTS_PER_CALL
 from harness.conversation import current_conversation_key
 from harness.reply_figures import drawn_series
 from harness.turn_records import (
@@ -126,7 +127,7 @@ _SUBSET_RULE = "display order"
 _DIGEST_WRAPPER_BYTES = 160
 # `recall(part="canvas")`'s listing (`canvas_listing_state`): per list,
 # `_DIGEST_BLOCK_CAP` cards in full and `_LISTING_COMPACT_CAP` others as
-# compact entries, pinned ones first in both, each with up to
+# compact entries, chosen by `_pinned_first` in both, each with up to
 # `_VIEW_FLAG_BYTES` of pinned / on_canvas flags, plus the keys and counts in
 # `_LISTING_WRAPPER_BYTES`.
 _LISTING_COMPACT_CAP = 48
@@ -619,7 +620,7 @@ class ConversationState:
 
     def _canvas_view(self, focus: str | None = None) -> _CanvasView:
         """The cards a canvas view names: the composed blocks the cap keeps,
-        pinned ones first (`_pinned_first`), in canvas order, with the focus
+        the newest and then pinned ones first (`_pinned_first`), in canvas order, with the focus
         card kept whatever its age; which blocks are pinned; how many
         composed blocks the cap left out; and the conversation's other
         cards, oldest first."""
@@ -628,8 +629,8 @@ class ConversationState:
         if self.composition is not None:
             composed = [block.component_id for block in self.composition.blocks]
             pinned = {block.component_id for block in self.composition.blocks if block.pinned}
-        # Bounded: pinned blocks, then the last blocks in canvas order, win on
-        # a very large canvas, the rest are counted, and `_digest_block` cuts
+        # Bounded: the newest blocks, then pinned ones, then the rest by age,
+        # win on a very large canvas, the rest are counted, and `_digest_block` cuts
         # each block's fields, so a view stays within `CANVAS_DIGEST_MAX_BYTES`
         # however long the conversation runs.
         ordered = _pinned_first(composed, pinned, _DIGEST_BLOCK_CAP)
@@ -656,11 +657,11 @@ class ConversationState:
         """The graph engine's digest: composed blocks in canvas order (plus
         the focused card for a card-scoped follow-up), titles and fact
         summaries only -- references and digests, never rows. A pinned block
-        says so, and pinned blocks take the cap's places first; a canvas
-        whose blocks were all removed is `{"blocks": []}`, and None means the
-        conversation has no canvas yet. `hidden` names the conversation's
-        cards taken off the canvas, id, type and title only: the user can put
-        one back."""
+        says so, and pinned blocks take the cap's places after the newest
+        (`_pinned_first`); a canvas whose blocks were all removed is
+        `{"blocks": []}`, and None means the conversation has no canvas yet.
+        `hidden` names the conversation's cards not on the canvas, id, type
+        and title only: the user can put one there."""
         view = self._canvas_view(focus)
         blocks = [self._view_block(view, cid) for cid in view.ordered]
         hidden = [
@@ -703,9 +704,9 @@ class ConversationState:
     def canvas_listing_state(self) -> dict[str, Any]:
         """`recall(part="canvas")`'s listing: the cards on the canvas, in
         canvas order, then the conversation's hidden cards. `_DIGEST_BLOCK_CAP`
-        of each come in full (id, type, title, fact summary, pinned), pinned
-        ones first and then the newest (`_pinned_first`), as the digest
-        chooses them; `_LISTING_COMPACT_CAP` of the others by id, type and
+        of each come in full (id, type, title, fact summary, pinned), the
+        newest, then pinned ones, then the next newest (`_pinned_first`), as
+        the digest chooses them; `_LISTING_COMPACT_CAP` of the others by id, type and
         title (`<list>_older`), chosen the same way and flagged pinned, so
         each can still be recalled or removed by id; the rest are counted
         (`<list>_not_shown`). Bounded by `CANVAS_LISTING_MAX_BYTES`."""
@@ -1807,10 +1808,18 @@ def _next_manifest(
 
 
 def _pinned_first(ids: list[str], pinned: set[str], cap: int) -> list[str]:
-    """At most `cap` of `ids`, in their order: the newest pinned ones take
-    the places first, then the newest of the rest."""
+    """At most `cap` of `ids`, in their order: the newest
+    `MAX_CHARTS_PER_CALL` take the first places, so the cards a turn just
+    drew are named however many cards are pinned, then the newest pinned
+    ones, then the newest of the rest."""
     newest = list(reversed(ids))
-    ranked = [cid for cid in newest if cid in pinned] + [cid for cid in newest if cid not in pinned]
+    reserved = newest[: min(MAX_CHARTS_PER_CALL, max(cap, 0))]
+    rest = newest[len(reserved) :]
+    ranked = [
+        *reserved,
+        *(cid for cid in rest if cid in pinned),
+        *(cid for cid in rest if cid not in pinned),
+    ]
     kept = set(ranked[: max(cap, 0)])
     return [cid for cid in ids if cid in kept]
 

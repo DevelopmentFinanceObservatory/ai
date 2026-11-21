@@ -753,6 +753,26 @@ def test_the_canvas_views_name_a_pinned_card_older_than_their_caps():
     assert summary == {"cards_on_canvas": full + compact + 5, "cards_pinned": 1, "cards_hidden": 0}
 
 
+def test_the_canvas_views_name_a_new_card_when_more_cards_are_pinned_than_the_cap():
+    """Pinned cards fill the cap only after the newest cards, so the card a
+    turn just drew is named however many the user pinned."""
+    cap = studio_state._DIGEST_BLOCK_CAP
+    state = _canvas({f"cmp_{n:03d}": _entry(f"Card {n}", None) for n in range(cap + 3)})
+    assert state.composition is not None
+    for block in state.composition.blocks[:-1]:
+        block.pinned = True
+    newest = state.composition.blocks[-1].component_id
+
+    digest = state.canvas_digest_state()
+    listing = state.canvas_listing_state()
+
+    assert digest is not None
+    assert len(digest["blocks"]) == cap
+    assert digest["blocks"][-1]["component_id"] == newest
+    assert "pinned" not in digest["blocks"][-1]
+    assert [block["component_id"] for block in listing["on_canvas"]][-1] == newest
+
+
 def test_a_focus_card_past_the_cap_keeps_the_pinned_cards_in_the_digest():
     cap = studio_state._DIGEST_BLOCK_CAP
     state = _canvas({f"cmp_{n:02d}": _entry(f"Card {n}", None) for n in range(cap + 3)})

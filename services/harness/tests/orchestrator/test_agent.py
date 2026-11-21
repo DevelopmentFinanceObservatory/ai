@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from google.genai import types
 from harness.gemini_wire import model_retry_options
-from harness.orchestrator_tools import build_orchestrator_tools
+from harness.orchestrator_tools import MAX_ASK_QUESTIONS, build_orchestrator_tools
 from harness.prefix_cache import PrefixCache
 from orchestrator.agent import INSTRUCTION, orchestrator_agent
 from orchestrator.model import orchestrator_model
@@ -190,6 +190,9 @@ def test_the_instruction_tells_the_agent_to_state_the_years_an_event_period_read
     assert "the reading search chose" not in text
 
 
+_NUMBER_WORDS = {2: "two", 3: "three", 4: "four"}
+
+
 def test_the_instruction_has_search_elect_the_measure_and_asks_only_what_search_left_open():
     text = " ".join(INSTRUCTION.split())
     assert (
@@ -207,15 +210,18 @@ def test_the_instruction_has_search_elect_the_measure_and_asks_only_what_search_
     assert "switch to another count" not in text
     assert "Search leaves a count open only when a part lists `candidates`" in text
     assert (
-        "ask about them with ask_user, one question per part, all in one call, with `prices_of` "
-        "set to the part's spec_id and the `open_prices` entries as the options" in text
+        "ask about them with ask_user in one call: one question per measure, with `prices_of` "
+        "set to a part's spec_id and the `open_prices` entries as the options. Parts that "
+        "measure one thing over other years share one prices question, and one call holds at "
+        f"most {_NUMBER_WORDS[MAX_ASK_QUESTIONS]} questions" in text
     )
+    assert "one question per part" not in text
     assert "count question" not in text
     assert "a count or prices still open" not in text
     assert "even when the result lists no `other_prices`" not in text
     assert (
         "When they pick prices the result does not name, search again with that unit on the "
-        "part, and put the count they chose, if any, in `variable`" in text
+        "part, and put any count the user named in `variable`" in text
     )
     assert (
         "A request that adds or combines measures from different sources, such as aid and debt, "

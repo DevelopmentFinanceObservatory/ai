@@ -1394,8 +1394,8 @@ class ScopeChip(NamedTuple):
     """One other option of a scope choice the answer's figures were counted
     on, and the spec_id of the reading that holds the choice. `label` is the
     option's label, such as "health, CRS 120 alone" on the sector axis,
-    after the part's quoted words and a colon when the answer's chips span
-    several parts."""
+    after the part's name (`part_name`) and a colon when the answer's chips
+    span several parts."""
 
     label: str
     choice_id: str
