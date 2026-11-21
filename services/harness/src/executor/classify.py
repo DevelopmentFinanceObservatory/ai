@@ -354,16 +354,20 @@ class ExecutorCode(StrEnum):
 
 # The codes that say the harness wrote a call wrong or a server failed of
 # itself, so nothing the user asked for is wrong. They are a compiler-provable
-# code, a payload that did not parse, an internal error, the run's own
-# (`executor.run._Run._anchor_fault`) or a server's, and an upstream service's
-# failure. An `upstream_error` that names a wait is transient before it is
-# anyone's fault (`executor.outcomes.stop_cause`), so only one no wait gets
-# past reads as the harness's.
+# code, a payload that did not parse, an internal error (the run's own,
+# `executor.run._Run._anchor_fault`, or a server's), and a stored frame that
+# failed its integrity check. The frame store is content-addressed, so every
+# plan reading the same scope meets the same corrupted object.
 HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
     ExecutorCode.MALFORMED_REFUSAL,
     ExecutorCode.INTERNAL_ERROR,
-    "upstream_error",
+    "frame_integrity_failed",
 }
+
+# data-mcp's code for an upstream call that failed. Its `spec_not_registered`
+# shares it, for a definition the platform refused to register, and is the
+# only one whose `fix` lists the definition's `problems`.
+UPSTREAM_ERROR = "upstream_error"
 
 
 def internal_fault(detail: str | None = None) -> dict[str, JsonValue]:
@@ -461,9 +465,25 @@ def is_anchor_fault(failure: ToolFailure) -> bool:
     )
 
 
+def is_upstream_fault(failure: ToolFailure) -> bool:
+    """Whether `failure` says an upstream service failed of itself.
+
+    Every `upstream_error` does, except data-mcp's `spec_not_registered`, which
+    names the definition the platform refused (`fix.problems`) and which
+    another spec avoids. One that names a wait is transient before it is
+    anyone's fault (`executor.outcomes.stop_cause`).
+    """
+    return failure.code == UPSTREAM_ERROR and "problems" not in failure.fix
+
+
 def is_harness_fault(failure: ToolFailure) -> bool:
-    """Whether `failure` is the harness's own fault (`HARNESS_FAULT_CODES`, `is_anchor_fault`)."""
-    return failure.code in HARNESS_FAULT_CODES or is_anchor_fault(failure)
+    """Whether `failure` is the harness's own fault (`HARNESS_FAULT_CODES`,
+    `is_anchor_fault`, `is_upstream_fault`)."""
+    return (
+        failure.code in HARNESS_FAULT_CODES
+        or is_anchor_fault(failure)
+        or is_upstream_fault(failure)
+    )
 
 
 def retry_delay(payload: Mapping[str, object], attempt: int) -> float:

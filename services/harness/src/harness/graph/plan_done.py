@@ -49,6 +49,7 @@ from harness.graph.state import (
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_READINGS_KEY,
+    ORCHESTRATOR_REPLANNED_STOP_KEY,
     ORCHESTRATOR_RETRY_NOTE_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
@@ -262,8 +263,9 @@ def _hand_back_text(summary: StepSummary) -> str:
 def _give_plan_back(ctx: NodeCtx[GraphEvent]) -> bool:
     """Give the orchestrator its plan call back (`BUDGETS`), once a turn, for
     one brief that avoids the failure. It runs for a planner refusal the
-    planner did not mark final, and for a stopped run only when a new plan
-    is its remedy (`executor.outcomes.remedy`). Answers whether it gave the
+    planner did not mark final, and for a stopped run, or a planner refusal
+    to replan past one, only when a new plan is its remedy
+    (`executor.outcomes.remedy`). Answers whether it gave the
     call back; the turn's second call answers no. The workflow's own replan
     cap is untouched."""
     calls = dict(ctx.state.get(ORCHESTRATOR_CALLS_KEY) or {})
@@ -812,6 +814,9 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
         `capability_unavailable` marks its spec_id unavailable to `fetch`
         for the rest of the turn.
 
+        A planner refusal the planner did not mark final gives the plan call
+        back, unless it refused to replan past a stop
+        (`ORCHESTRATOR_REPLANNED_STOP_KEY`) whose remedy is not a new plan.
         A stopped run gives the plan call back (`_give_plan_back`) only when
         a new plan is its remedy (`executor.outcomes.remedy`), and leaves the
         next plan card a note naming the step it stopped at
@@ -846,6 +851,8 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
         stopped_kept: dict[str, Any] | None = ctx.state.get(ORCHESTRATOR_KEPT_ASKS_KEY)
         kept = stopped_kept or {}
         ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
+        replanned_stop: Mapping[str, Any] | None = ctx.state.get(ORCHESTRATOR_REPLANNED_STOP_KEY)
+        ctx.state[ORCHESTRATOR_REPLANNED_STOP_KEY] = None
         # The user's words for each amendment of this plan call's plan, which
         # the agent reads nowhere else.
         amendments = (
@@ -890,8 +897,13 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
 
         if "text" in node_input:
             # A final refusal (an internal or repeated failure, or a question
-            # declined whole) fails the same way for any brief.
-            again = not node_input.get("final") and _give_plan_back(ctx)
+            # declined whole) fails the same way for any brief, and so does a
+            # refusal to replan past a stop no new plan remedies.
+            again = (
+                not node_input.get("final")
+                and (replanned_stop is None or remedy(replanned_stop) is Remedy.REPLAN)
+                and _give_plan_back(ctx)
+            )
             computed = ""
             listing: dict[str, Any] = {}
             # A run of this call stopped, and the stored plan is the one it
@@ -995,16 +1007,19 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
                     "as what it is, never as the derived result."
                 )
         elif failed:
+            past = remedy(failed)
+            # A fault of the system leaves the user nothing to do, so its
+            # failed step carries no remedy.
+            shown = ("step_id", "tool", "code", "message") + (
+                () if past is Remedy.SYSTEM else ("remedy",)
+            )
             result["failed_step"] = {
-                key: str(failed[key])[:_HAND_BACK_CAP]
-                for key in ("step_id", "tool", "code", "message", "remedy")
-                if failed.get(key)
+                key: str(failed[key])[:_HAND_BACK_CAP] for key in shown if failed.get(key)
             }
             partial = _partial_result(result.get("asks"), frames=bool(result["frames"]))
             advised = "remedy" in result["failed_step"]
             # A remedy says what the user can do, so the sentence keeps only its cause.
             sentence = _user_cause(failed) if advised else _user_sentence(failed)
-            past = remedy(failed)
             given_back = past is Remedy.REPLAN and _give_plan_back(ctx)
             if missing_capability:
                 lead = (

@@ -1020,8 +1020,11 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
     ),
     ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN: FailureText(
         "Fewer than half of these series now report the year the plan counted from",
-        "so ask again to plan from the latest year they report",
-        filled="Most of these series now end in {fill}, before the year the plan counted from",
+        "so ask again from the latest year",
+        filled=(
+            "The latest year at least half of these series report is {fill}, before the year "
+            "the plan counted from"
+        ),
     ),
     HarnessCode.EMPTY_RESULT: FailureText(
         "The data holds no figures for the places and period asked",

@@ -22,6 +22,7 @@ from compiler.compile import CompileIssueCode
 from compiler.sources import DiscoveryStatus
 from compiler.surface import ToolCallResult, ToolSchema
 from data_mcp.series_statistics import SeriesStatisticsSchemaError
+from data_mcp.tool_errors import ToolRefusal as DataRefusal
 from executor.outcomes import Accepted, RefusalKind
 from executor.run import execute_approved_plan
 from harness.plan_display import step_rows
@@ -399,6 +400,52 @@ async def test_a_refused_retrieval_stops_the_translation_with_the_code_the_run_g
     )
     assert [name for name, _ in surface.calls] == ["get_data"]
     assert context.plan() == draft
+
+
+@pytest.mark.parametrize(
+    ("served", "kind"),
+    [
+        # An upstream service that failed of itself is no fact of the data.
+        (
+            DataRefusal.upstream_error(upstream_code="boom", detail="failed", retry_after_s=None),
+            ReferralKind.INTERNAL_FAILURE,
+        ),
+        # A definition the platform refused is one the requirement cannot be met from.
+        (
+            DataRefusal.spec_not_registered(
+                tool="get_data", spec_id="spec_" + "0" * 32, upstream_code="bad", detail="bad"
+            ),
+            ReferralKind.REQUIREMENT_UNMEETABLE,
+        ),
+    ],
+    ids=["upstream-failure", "spec-not-registered"],
+)
+async def test_an_upstream_refusal_of_the_newest_year_read_is_referred_by_whose_it_is(
+    served: DataRefusal,
+    kind: ReferralKind,
+    rolling_draft: Callable[..., Plan],
+    source: Callable[..., SelectedSource],
+    real_schemas: list[ToolSchema],
+) -> None:
+    context = _Context(rolling_draft(), source())
+    surface = ScriptedSurface(
+        schemas=real_schemas,
+        responses={
+            "get_data": [
+                refusal(
+                    served.code.value,
+                    served.retry_mode.value,
+                    message=served.message,
+                    fix=served.fix,
+                )
+            ]
+        },
+    )
+
+    answer = await _propose(context, surface)
+
+    assert answer["code"] == ProblemCode.RUN_WOULD_STOP.value, answer
+    assert answer["action"]["arguments"]["kind"] == kind.value
 
 
 async def test_a_rolling_step_reading_a_left_out_entity_alone_stops_the_translation(

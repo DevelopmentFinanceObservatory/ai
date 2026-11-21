@@ -33,6 +33,7 @@ from harness.graph.state import (
     ORCHESTRATOR_AMENDMENTS_KEY,
     ORCHESTRATOR_BRIEF_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
+    ORCHESTRATOR_REPLANNED_STOP_KEY,
     ORCHESTRATOR_RETRY_NOTE_KEY,
     PICK_REPLAN_KEY,
     UNREADABLE_PLAN_NOTE,
@@ -402,6 +403,7 @@ async def _plan_start(ctx: NodeCtx[GraphEvent], node_input: dict[str, Any]) -> N
     ctx.state[ASK_BREAKDOWNS_STATE_KEY] = node_input.get("ask_breakdowns") or None
     ctx.state[ASKS_ACROSS_YEARS_STATE_KEY] = node_input.get("asks_across_years") or None
     ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
+    ctx.state[ORCHESTRATOR_REPLANNED_STOP_KEY] = None
     ctx.state[ORCHESTRATOR_AMENDMENTS_KEY] = None
     return Next("next", {})
 

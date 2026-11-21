@@ -556,9 +556,9 @@ async def test_a_system_fault_ends_the_turn_worded_as_the_systems_fault(
     """A code the compiler should have ruled out reaches the user as the
     system's fault, whatever its own class says, and offers no second plan."""
     models = _planned("It could not be computed.")
-    driver = _driver(
-        pg_engine, models, tool_surface=RefusingGetDataSurface("composed_unit_sum_unsupported")
-    )
+    advice = "Ask about one sector."
+    surface = RefusingGetDataSurface("composed_unit_sum_unsupported", {"remedy": advice})
+    driver = _driver(pg_engine, models, tool_surface=surface)
 
     ran = await approve_turn(driver, _QUESTION)
 
@@ -568,6 +568,9 @@ async def test_a_system_fault_ends_the_turn_worded_as_the_systems_fault(
     assert failure_sentence("internal_error") in after_plan
     assert failure_sentence("composed_unit_sum_unsupported") not in after_plan
     assert "do not ask the user to change the question" in after_plan
+    # The tool's remedy is for a question at fault, and none is.
+    assert advice not in after_plan
+    assert "as the failed step's remedy says it" not in after_plan
 
 
 @pytest.mark.parametrize(
@@ -1073,3 +1076,50 @@ async def test_an_approved_plan_runs_and_its_final_frames_come_back_to_the_agent
     (plan,) = closed.turn_plans
     assert PlanRecord.model_validate(plan).digest_line() in read
     assert "Charted." in read
+
+
+class _UnusableGetDataSurface(ScriptedSurface):
+    """`ScriptedSurface` whose `get_data` answers a result that states no frame."""
+
+    async def call_tool(self, *, tool: Any, arguments: Any, on_progress: Any = None) -> Any:
+        if tool.name != "get_data":
+            return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        return ToolCallResult(is_error=False, structured_content={}, text="fetched")
+
+
+class _RefusingReplanner(ScriptedPlannerModel):
+    """`ScriptedPlannerModel` that drafts the first plan and refuses, not
+    finally, to replan past the stop of its run."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("refusal") is not None:
+            return {"refused": {"text": "No plan gets past that step.", "final": False}}
+        return await super().__call__(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("surface", "given_back"),
+    [
+        # A method choice is the planner's to make, so another brief may make it.
+        (
+            RefusingGetDataSurface("entity_ambiguous", {"candidates": ["country/KEN"]}),
+            True,
+        ),
+        # A result the run cannot use is the system's fault, which no brief avoids.
+        (_UnusableGetDataSurface(), False),
+    ],
+    ids=["method-choice", "system-fault"],
+)
+async def test_a_planner_refusal_after_a_stop_gives_the_plan_back_only_when_a_new_plan_remedies_it(
+    surface: ScriptedSurface, given_back: bool, pg_engine: AsyncEngine
+) -> None:
+    models = _planned("It could not be computed.")
+    driver = _driver(pg_engine, models, planner=_RefusingReplanner(), tool_surface=surface)
+
+    ran = await approve_turn(driver, _QUESTION)
+
+    assert ran.outcome is Outcome.DONE
+    after_plan = agent_read(models.orchestrator.requests[-1])
+    assert "The planner could not make a plan" in after_plan
+    assert bool(ran.cursor.state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")) is given_back
+    assert ("may be planned once more" in after_plan) is given_back

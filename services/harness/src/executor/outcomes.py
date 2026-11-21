@@ -582,6 +582,9 @@ _DATA_STOP_REMEDY: dict[str, Remedy] = {
     "over_ceiling": Remedy.USER,
     "capability_unavailable": Remedy.USER,
     "entity_not_found": Remedy.USER,
+    # Only data-mcp's `spec_not_registered`, a definition the platform refused,
+    # which another spec avoids (`is_upstream_fault`).
+    "upstream_error": Remedy.REPLAN,
     # Tools no workflow step calls (`compiler.capabilities.EXCLUDED_TOOLS`).
     "skill_not_found": Remedy.USER,
     "skill_resource_not_found": Remedy.USER,
@@ -594,7 +597,6 @@ _DATA_STOP_REMEDY: dict[str, Remedy] = {
     "non_finite_result": Remedy.REPLAN,
     "frame_not_held": Remedy.REPLAN,
     "frame_expired": Remedy.REPLAN,
-    "frame_integrity_failed": Remedy.REPLAN,
     "mixed_time_grain": Remedy.REPLAN,
     "filter_unit_conversion_unsupported": Remedy.REPLAN,
     "join_output_collision": Remedy.REPLAN,
@@ -667,8 +669,8 @@ def remedy(failed: Mapping[str, object]) -> Remedy:
     (`LAPSED_APPROVAL_KINDS`). A data stop a method choice or a rediscovery
     settles (`Disposition`) is re-planned. Any other is decided by its code
     (`_DATA_STOP_REMEDY`), and an unplaced code is the user's, so it never
-    costs the user a second approval. A `failed` stated with no `cause`, such
-    as one stored before `failed_step` stamped it, is the system's.
+    costs the user a second approval. A failed step with no cause is the
+    system's.
     """
     cause = failed.get("cause")
     code = failed.get("code")

@@ -225,6 +225,13 @@ def _served(
     )
 
 
+# data-mcp's refusal of a definition the platform would not register, which
+# shares `upstream_error` with an upstream service's own failures.
+_SPEC_NOT_REGISTERED = DataRefusal.spec_not_registered(
+    tool="get_data", spec_id="spec_" + "0" * 32, upstream_code="spec_invalid", detail="bad"
+)
+
+
 def _every_stop() -> list[Refused]:
     """A stop for every code a stopped run can fail with: each server code under
     each retry mode its server answers it with, each `ceiling_kind` and each
@@ -244,6 +251,7 @@ def _every_stop() -> list[Refused]:
         for fix in fixes
         for wait in (None, 1.0)
     ]
+    stops.append(_tool_stop(_served(_SPEC_NOT_REGISTERED)))
     stops += [
         _tool_stop(ToolFailure(code=code.value, message="m", retry_mode="do_not_retry"))
         for code in set(ExecutorCode) - _LEDGER_CODES
@@ -325,7 +333,30 @@ _GET_DATA = ToolId(server="data-mcp", name="get_data")
             Remedy.SYSTEM,
             id="compiler-provable",
         ),
-        # An upstream service's failure that names no wait.
+        # An upstream service's failure that names no wait, or whose answer
+        # could not be used.
+        pytest.param(
+            _tool_stop(_served(DataRefusal.upstream_response_unusable(detail="bad body"))),
+            Remedy.SYSTEM,
+            id="upstream-response-unusable",
+        ),
+        # A stored frame that failed its integrity check meets every plan
+        # reading the same scope.
+        pytest.param(
+            _tool_stop(
+                _served(
+                    DataRefusal.frame_integrity_failed(
+                        spec_id="spec_" + "0" * 32, content_version="v1", reason="digest"
+                    )
+                )
+            ),
+            Remedy.SYSTEM,
+            id="frame-integrity-failed",
+        ),
+        # A definition the platform refused, which another spec avoids.
+        pytest.param(
+            _tool_stop(_served(_SPEC_NOT_REGISTERED)), Remedy.REPLAN, id="spec-not-registered"
+        ),
         pytest.param(
             _tool_stop(_served(DataRefusal(code=DataCode.UPSTREAM_ERROR, message="m", fix={}))),
             Remedy.SYSTEM,
@@ -428,9 +459,9 @@ def test_a_stopped_runs_remedy_follows_its_cause_its_disposition_and_its_code(
     assert remedy(failed_step(stop)) is past
 
 
-def test_a_stored_failed_step_with_no_cause_reads_as_the_systems() -> None:
-    """A `failed_step` stored before it carried its cause gives no second plan
-    and never tells the user the question was at fault."""
+def test_a_failed_step_with_no_cause_is_the_systems() -> None:
+    """A failed step with no cause is the system's: it gives no second plan and
+    never tells the user the question was at fault."""
     stored = failed_step(_issue_stop(EvidenceIssueCode.UNIT_MISMATCH))
     del stored["cause"]
 

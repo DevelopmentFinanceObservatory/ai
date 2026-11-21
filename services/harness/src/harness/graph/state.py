@@ -97,6 +97,11 @@ ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
 # computed that ask (`_kept_asks`), written by `execute` when a run stops and
 # read by `plan_done`; cleared by `plan_start` and `plan_done`.
 ORCHESTRATOR_KEPT_ASKS_KEY = "orchestrator:kept_asks"
+# The `failed_step` (`executor.outcomes.failed_step`) of the latest run of this
+# plan call that stopped and went back to the planner, written by `execute` on
+# its `"replan"` edge. `plan_done` reads its remedy when the planner then
+# refuses; cleared by `plan_start` and `plan_done`.
+ORCHESTRATOR_REPLANNED_STOP_KEY = "orchestrator:replanned_stop"
 # The run the studio's interrupt route admitted with the approval of the
 # plan `approve` last approved (`harness.studio`), or None when it admitted
 # none: written by `approve.decide` on every approval and read by `execute`,
