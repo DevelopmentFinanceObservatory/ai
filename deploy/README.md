@@ -319,7 +319,7 @@ For production, the same with `--env production`.
    && echo "$SERVING"
    ```
 
-1. Merge, and wait for the deploy workflow to finish. The new revision starts with no traffic and applies the migrations. Confirm it took none: `gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format='value(status.traffic)'` shows only `$SERVING`.
+1. Merge, and wait for the deploy workflow to finish. The new revision deploys with no traffic. Cloud Run can mark it ready without starting an instance, as it did on dev, so the harness's migrations may not have run; the job's first execution in step 4 applies them. Confirm the revision took no traffic: `gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format='value(status.traffic)'` shows only `$SERVING`.
 
 1. Create the job on the new revision's image, with the service's identity, network and database settings. The `jq` step refuses unless the service holds exactly the three `SESSION_STORE_*` variables, each as a literal value, and the job is created only when it succeeds:
 
