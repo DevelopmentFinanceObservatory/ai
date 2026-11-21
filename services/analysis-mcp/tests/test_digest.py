@@ -21,6 +21,7 @@ from analysis_mcp.digest import (
 )
 from analysis_mcp.execution_identity import ExecutionIdentity
 from analysis_mcp.summary import (
+    LIST_CAP,
     AggregateFacts,
     CompareFacts,
     EntityGrowth,
@@ -671,6 +672,72 @@ def test_rank_digest_carries_the_identity_block() -> None:
     assert "frame reference: spec_id=ops_" + "a" * 32 in digest
     assert "content_version=ocv_" + "b" * 32 in digest
     assert "execution_identity: 0.1.0|1.0.0|0.1.0" in digest
+
+
+def _partitioned_ranks(partitions: int, donors: int) -> RankFacts:
+    """A top-`donors` ranking of `donors` donors within each of `partitions`
+    recipients, ordered by recipient then rank, as the runner states it."""
+    return facts(
+        RankFacts,
+        per_period=False,
+        frame=None,
+        resolved_unit="dcid:USDollar",
+        facet_selections=(),
+        warnings=(),
+        aggregation="sum",
+        window_start="2024",
+        window_end="2024",
+        periods_in_window=("2024",),
+        expected_cell_count=partitions * donors,
+        present_cell_count=partitions * donors,
+        overall_coverage_fraction=1.0,
+        limit=donors,
+        entity_ranks=tuple(
+            EntityRank(
+                entity_key=(("destination", f"country/R{p}"), ("origin", f"donor/D{p}{d}")),
+                value=float(100 - d),
+                rank=d + 1,
+                row_count=1,
+                coverage_fraction=1.0,
+                time_period="2024",
+            )
+            for p in range(partitions)
+            for d in range(donors)
+        ),
+    )
+
+
+def _partitioned_digest(partitions: int, donors: int) -> str:
+    return render_rank_digest(
+        rank_by=("origin",),
+        partition_by=("destination",),
+        result=_partitioned_ranks(partitions, donors),
+        op_spec_hash="ops_" + "a" * 32,
+        content_version="ocv_" + "b" * 32,
+        execution_identity=_EI,
+    )
+
+
+def test_a_partitioned_rank_digest_shows_every_partition_under_the_cap() -> None:
+    """Five recipients of six donors are 30 rows over a cap of 20: each recipient
+    shows its top rows, the rest shared by rank depth, and names how many it holds."""
+    digest = _partitioned_digest(5, 6)
+
+    for p in range(5):
+        assert f"#1 origin=donor/D{p}0" in digest
+        assert f"destination=country/R{p} (4 of 6 shown)" in digest
+        assert f"donor/D{p}4" not in digest
+    assert sum(line.lstrip().startswith("#") for line in digest.splitlines()) == LIST_CAP
+
+
+def test_a_partitioned_rank_digest_names_the_partitions_past_the_cap() -> None:
+    """With more recipients than the cap, each shown recipient keeps its top row
+    and the digest names the recipients it leaves out, with their counts."""
+    digest = _partitioned_digest(LIST_CAP + 2, 3)
+
+    assert f"destination=country/R{LIST_CAP - 1} (1 of 3 shown)" in digest
+    assert f"#1 origin=donor/D{LIST_CAP}0" not in digest
+    assert f"2 partitions not shown: destination=country/R{LIST_CAP} (3)" in digest
 
 
 def _per_period_rank_result() -> RankFacts:

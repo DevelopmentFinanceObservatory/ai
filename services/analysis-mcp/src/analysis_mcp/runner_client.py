@@ -46,9 +46,10 @@ the runner read, those behind a derived input and the anchor roots included,
 so the check covers a derived input as it covers a fetched frame. A root the
 runner read as a rendering of its own version, such as the sum of a dataset of
 several StatVars, names that rendering, and the answer's `derived_roots` names
-the dataset version it derives from: the root is covered when that version is
-one the record was resolved over, and a rendering of another version refuses
-as other data does.
+the dataset version the sum read: the root is covered when that version is one
+the record was resolved over, and a sum of another version refuses as other
+data does. dfo-apis names no base for a party-totals cut, which can drop
+periods, so a cut root is covered only by its own pair.
 
 `replay_derived` asks the runner to compute a derived frame again from its stored
 recipe with `latest: true`, which reads its roots at their datasets' current
