@@ -115,7 +115,7 @@ from collections.abc import Callable, Mapping
 from enum import StrEnum
 from typing import cast
 
-from data_mcp.tool_errors import SPEC_NOT_REGISTERED
+from data_mcp.tool_errors import SERVICE_FAILURE
 from planner.records import StrictModel
 from pydantic import Field, JsonValue, ValidationError
 
@@ -362,9 +362,8 @@ HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
     ExecutorCode.INTERNAL_ERROR,
 }
 
-# data-mcp's code for an upstream call that failed. A definition the platform
-# refused to register shares it, told apart by its `fix.kind`
-# (`data_mcp.tool_errors.SPEC_NOT_REGISTERED`).
+# data-mcp's code for an upstream call that failed, whose `fix.kind` says whose
+# failure it is (`data_mcp.tool_errors.SERVICE_FAILURE`).
 UPSTREAM_ERROR = "upstream_error"
 
 
@@ -464,14 +463,14 @@ def is_anchor_fault(failure: ToolFailure) -> bool:
 
 
 def is_upstream_fault(failure: ToolFailure) -> bool:
-    """Whether `failure` says an upstream service failed of itself.
-
-    Every `upstream_error` does, except a definition the platform refused to
-    register (`fix.kind` `SPEC_NOT_REGISTERED`), which another spec avoids.
-    One that names a wait is transient before it is anyone's fault
-    (`executor.outcomes.stop_cause`).
+    """Whether `failure` says an upstream service failed of itself: an
+    `upstream_error` data-mcp marks `SERVICE_FAILURE` (a 5xx, a call with no
+    status, or a response it could not use). A definition the platform refused
+    and a refusal of the request under a code data-mcp does not map carry no
+    such mark, and another spec or request may avoid them. One that names a
+    wait is transient before it is anyone's fault (`executor.outcomes.stop_cause`).
     """
-    return failure.code == UPSTREAM_ERROR and failure.fix.get("kind") != SPEC_NOT_REGISTERED
+    return failure.code == UPSTREAM_ERROR and failure.fix.get("kind") == SERVICE_FAILURE
 
 
 def is_harness_fault(failure: ToolFailure) -> bool:

@@ -625,6 +625,9 @@ async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_fai
     told = "Tell the user what they can do about it"
     assert told not in first
     if "remedy" in fix:
+        # The plan given back is the way past it, so the hand-back states no remedy.
+        assert fix["remedy"] not in first
+    if "remedy" in fix:
         assert failure_cause(code, fix) in last
         assert f"{told}: {fix['remedy']}" in last
     else:

@@ -436,10 +436,24 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
     tool's refusal also carries that refusal's `retry_mode` and `fix`, which
     word the user's sentence for it (`harness.sentences.failure_sentence`),
     and the `disposition` `classify_refusal` gave it. Every stop carries its
-    `cause` (`stop_cause`), and the `wave_remedy` of the stops its wave made
-    (`wave_remedy`), which `remedy` reads.
+    `cause` (`stop_cause`).
+
+    `wave_remedy` is the most severe remedy (`stop_remedy`) of the stop and
+    of each stop in `outcome.also_stopped`, so a new plan gets past the wave
+    only when it gets past every stop in it; `remedy` reads it. When a stop
+    in `also_stopped` decides it, that stop, stated alone, is the
+    `deciding_stop`, which the user's words for the failure are read from.
+    The first of the most severe decides, so the stop itself does whenever
+    it is among them.
     """
-    return {**_own_step(outcome), "wave_remedy": wave_remedy(outcome).value}
+    stops = [_own_step(stop) for stop in (outcome, *outcome.also_stopped)]
+    remedies = [stop_remedy(stop) for stop in stops]
+    severity = list(Remedy)
+    deciding = max(range(len(stops)), key=lambda index: severity.index(remedies[index]))
+    failed = {**stops[0], "wave_remedy": remedies[deciding].value}
+    if deciding:
+        failed["deciding_stop"] = stops[deciding]
+    return failed
 
 
 def _own_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
@@ -539,14 +553,16 @@ def _refused_step(*, step_id: str | None, failure: ToolFailure) -> dict[str, Any
 
 
 class Remedy(StrEnum):
-    """What gets past a stopped run's failure (`remedy`), least severe first."""
+    """What gets past a stopped run's failure (`remedy`). The members run from
+    least to most severe, and a wave's remedy is its most severe stop's
+    (`failed_step`)."""
 
     # A plan drafted afresh, from another brief or approved again.
     REPLAN = "replan"
-    # The user, who accepts a fact of the data or changes the question.
-    USER = "user"
     # Waiting: the same plan can run once a service recovers.
     WAIT = "wait"
+    # The user, who accepts a fact of the data or changes the question.
+    USER = "user"
     # Nothing the user or a plan does: the fault is the system's.
     SYSTEM = "system"
 
@@ -587,8 +603,9 @@ _DATA_STOP_REMEDY: dict[str, Remedy] = {
     "over_ceiling": Remedy.USER,
     "capability_unavailable": Remedy.USER,
     "entity_not_found": Remedy.USER,
-    # Only a definition the platform refused to register, which another spec
-    # avoids (`is_upstream_fault`).
+    # A definition the platform refused to register, or a refusal of the
+    # request under a code data-mcp does not map: another spec or request may
+    # avoid either. A service's own failure is the harness's (`is_upstream_fault`).
     "upstream_error": Remedy.REPLAN,
     # Tools no workflow step calls (`compiler.capabilities.EXCLUDED_TOOLS`).
     "skill_not_found": Remedy.USER,
@@ -669,10 +686,6 @@ _DATA_STOP_REMEDY: dict[str, Remedy] = {
 }
 
 
-# The remedies from least to most severe. A wave's is its most severe stop's.
-_SEVERITY = (Remedy.REPLAN, Remedy.WAIT, Remedy.USER, Remedy.SYSTEM)
-
-
 def remedy(failed: Mapping[str, object]) -> Remedy:
     """What gets past the stopped run `failed`, its `failed_step`, names: the
     `wave_remedy` it carries. A failed step that carries none is the system's.
@@ -685,14 +698,6 @@ def remedy(failed: Mapping[str, object]) -> Remedy:
     """
     stated = failed.get("wave_remedy")
     return Remedy(stated) if isinstance(stated, str) and stated in set(Remedy) else Remedy.SYSTEM
-
-
-def wave_remedy(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> Remedy:
-    """The most severe remedy (`_SEVERITY`) of `outcome`'s stop and of each
-    stop in `outcome.also_stopped`, so a new plan gets past the wave only when
-    it gets past every stop in it (`stop_remedy`)."""
-    stops = (outcome, *outcome.also_stopped)
-    return max((stop_remedy(_own_step(stop)) for stop in stops), key=_SEVERITY.index)
 
 
 def stop_remedy(failed: Mapping[str, object]) -> Remedy:

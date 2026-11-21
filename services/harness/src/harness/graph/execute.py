@@ -56,7 +56,7 @@ from harness.graph.answer import (
     store_run_plan,
 )
 from harness.graph.events import GraphEvent, StepProgress
-from harness.graph.plan_done import StepSummary, authored_report
+from harness.graph.plan_done import StepSummary, authored_report, shown_stop
 from harness.graph.state import (
     APPROVED_RUN_KEY,
     ORCHESTRATOR_ALIGNED_SERVED_KEY,
@@ -676,7 +676,7 @@ def execute_node(
         replans = int(ctx.state.get("replans", 0))
         if not dead_end and replans < MAX_REPLANS:
             ctx.state["replans"] = replans + 1
-            ctx.state[ORCHESTRATOR_REPLANNED_STOP_KEY] = failed_step(outcome)
+            ctx.state[ORCHESTRATOR_REPLANNED_STOP_KEY] = shown_stop(failed_step(outcome), finished)
             refusal = _planner_refusal(outcome, plan=finished, origins=windowed_origins(ctx.state))
             if finished.asks:
                 refusal["computed_asks"] = _computed_asks(finished, answers)

@@ -9,10 +9,17 @@ import pytest
 from analysis_mcp.tool_errors import ToolErrorCode as AnalysisCode
 from analysis_mcp.tool_errors import ToolRefusal as AnalysisRefusal
 from common.materialisation import FrameRef
-from data_mcp.tool_errors import CeilingKind
+from data_mcp.errors import UpstreamError
+from data_mcp.tool_errors import CeilingKind, from_upstream_error
 from data_mcp.tool_errors import ToolErrorCode as DataCode
 from data_mcp.tool_errors import ToolRefusal as DataRefusal
-from executor.classify import _DATA_DETAILS, Disposition, ExecutorCode, ToolFailure
+from executor.classify import (
+    _DATA_DETAILS,
+    Disposition,
+    ExecutorCode,
+    ToolFailure,
+    parse_tool_failure,
+)
 from executor.outcomes import (
     _DATA_STOP_REMEDY,
     RUN_STATE_KEY,
@@ -34,9 +41,9 @@ from executor.outcomes import (
     save_outcome,
     stop_cause,
     stop_remedy,
-    wave_remedy,
 )
-from harness.sentences import FAILURE_CLASS, FailureClass
+from harness.graph.plan_done import _user_sentence
+from harness.sentences import FAILURE_CLASS, FailureClass, failure_sentence
 from planner.records import EvidenceIssue, EvidenceIssueCode, Period, Severity
 from planner.workflow import ToolId
 from pydantic import ValidationError
@@ -234,6 +241,12 @@ _SPEC_NOT_REGISTERED = DataRefusal.spec_not_registered(
 )
 
 
+def _upstream(status: int, *, retryable: bool = False) -> DataRefusal:
+    """data-mcp's refusal for a dfo-apis answer of `status` under a code it does not map."""
+    failure = UpstreamError(status=status, code="unmapped_code", detail="d", retryable=retryable)
+    return from_upstream_error(failure, tool="get_data")
+
+
 def _every_stop() -> list[Refused]:
     """A stop for every code a stopped run can fail with: each server code under
     each retry mode its server answers it with, each `ceiling_kind` and each
@@ -254,6 +267,7 @@ def _every_stop() -> list[Refused]:
         for wait in (None, 1.0)
     ]
     stops.append(_tool_stop(_served(_SPEC_NOT_REGISTERED)))
+    stops.append(_tool_stop(parse_tool_failure({"retry_mode": "do_not_retry"})))
     stops += [
         _tool_stop(ToolFailure(code=code.value, message="m", retry_mode="do_not_retry"))
         for code in set(ExecutorCode) - _LEDGER_CODES
@@ -315,7 +329,7 @@ _GET_DATA = ToolId(server="data-mcp", name="get_data")
 @pytest.mark.parametrize(
     ("stop", "past"),
     [
-        # Rule 1: waiting gets past it.
+        # A refusal that names a wait is waited out.
         pytest.param(
             _tool_stop(
                 _served(
@@ -327,7 +341,8 @@ _GET_DATA = ToolId(server="data-mcp", name="get_data")
             Remedy.WAIT,
             id="transient-refusal",
         ),
-        # Rule 2: the harness's own stops, but for an approval a fresh plan renews.
+        # The harness's and the services' own faults are the system's, but for an
+        # approval a fresh plan renews.
         pytest.param(
             _tool_stop(
                 _served(AnalysisRefusal(code=AnalysisCode.PLACE_LEVELS_MIXED, message="m", fix={}))
@@ -335,12 +350,19 @@ _GET_DATA = ToolId(server="data-mcp", name="get_data")
             Remedy.SYSTEM,
             id="compiler-provable",
         ),
-        # An upstream service's failure that names no wait, or whose answer
+        # An upstream service that failed of itself: a 5xx, or an answer that
         # could not be used.
+        pytest.param(_tool_stop(_served(_upstream(502))), Remedy.SYSTEM, id="upstream-5xx"),
         pytest.param(
             _tool_stop(_served(DataRefusal.upstream_response_unusable(detail="bad body"))),
             Remedy.SYSTEM,
             id="upstream-response-unusable",
+        ),
+        # A refusal that arrived with no code.
+        pytest.param(
+            _tool_stop(parse_tool_failure({"retry_mode": "do_not_retry", "message": "m"})),
+            Remedy.SYSTEM,
+            id="codeless-refusal",
         ),
         # A stored frame that failed its integrity check: a narrower scope
         # mints another.
@@ -355,25 +377,17 @@ _GET_DATA = ToolId(server="data-mcp", name="get_data")
             Remedy.REPLAN,
             id="frame-integrity-failed",
         ),
-        # A definition the platform refused, which another spec avoids.
+        # A definition the platform refused, or a refusal of the request under
+        # a code data-mcp does not map: another spec or request may avoid either.
         pytest.param(
             _tool_stop(_served(_SPEC_NOT_REGISTERED)), Remedy.REPLAN, id="spec-not-registered"
         ),
+        pytest.param(_tool_stop(_served(_upstream(422))), Remedy.REPLAN, id="upstream-4xx"),
+        # A service failure that names a wait.
         pytest.param(
-            _tool_stop(_served(DataRefusal(code=DataCode.UPSTREAM_ERROR, message="m", fix={}))),
-            Remedy.SYSTEM,
-            id="upstream-error-no-wait",
-        ),
-        pytest.param(
-            _tool_stop(
-                _served(
-                    DataRefusal(
-                        code=DataCode.UPSTREAM_ERROR, message="m", fix={}, retry_after_s=1.0
-                    )
-                )
-            ),
+            _tool_stop(_served(_upstream(503, retryable=True))),
             Remedy.WAIT,
-            id="upstream-error-wait",
+            id="upstream-5xx-wait",
         ),
         pytest.param(
             Refused(revision="r" * 64, refusal=RefusalKind.BINDING_INVALID, detail="d"),
@@ -385,7 +399,7 @@ _GET_DATA = ToolId(server="data-mcp", name="get_data")
             Remedy.REPLAN,
             id="stale-revision",
         ),
-        # Rule 3: a method choice or a source to discover again.
+        # A method choice or a source to discover again is re-planned.
         pytest.param(
             MethodChoiceNeeded(
                 revision="r" * 64,
@@ -418,7 +432,7 @@ _GET_DATA = ToolId(server="data-mcp", name="get_data")
             Remedy.REPLAN,
             id="rediscovery",
         ),
-        # Rule 4: the code's place.
+        # Any other data stop reads its code's place.
         pytest.param(
             _tool_stop(
                 _served(
@@ -486,12 +500,14 @@ def test_a_waves_remedy_is_its_most_severe_stops(
 ) -> None:
     """A new plan gets past a wave only when it gets past every stop in it, so a
     stop the user has to accept outweighs one another plan avoids, whichever
-    the run raised."""
+    the run raised, and the user is told of that stop."""
     wave = _issue_stop(primary).model_copy(update={"also_stopped": (_issue_stop(sibling),)})
+    failed = failed_step(wave)
 
     assert {stop_remedy(failed_step(stop)) for stop in (wave, *wave.also_stopped)} == {
         Remedy.USER,
         Remedy.REPLAN,
     }
-    assert wave_remedy(wave) is Remedy.USER
-    assert remedy(failed_step(wave)) is Remedy.USER
+    assert remedy(failed) is Remedy.USER
+    assert failed["code"] == primary.value
+    assert _user_sentence(failed) == failure_sentence(EvidenceIssueCode.WINDOW_SHORT.value)

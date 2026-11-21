@@ -1593,9 +1593,27 @@ def test_each_factory_produces_its_exact_fix_key_set() -> None:
             ),
             {"role", "candidates", "candidate_count", "truncated"},
         ),
+        # An upstream failure states whose it is in `kind`: the service's own,
+        # or a definition the platform refused. A refusal of the request
+        # states none.
         (
-            ToolRefusal.upstream_error(upstream_code="x", detail="y", retry_after_s=1.0),
+            ToolRefusal.upstream_error(
+                upstream_code="x", detail="y", retry_after_s=None, service_failure=False
+            ),
             {"detail"},
+        ),
+        (
+            ToolRefusal.upstream_error(
+                upstream_code="x", detail="y", retry_after_s=1.0, service_failure=True
+            ),
+            {"detail", "kind"},
+        ),
+        (ToolRefusal.upstream_response_unusable(detail="not JSON"), {"detail", "kind"}),
+        (
+            ToolRefusal.spec_not_registered(
+                tool="get_data", spec_id="spec_" + "1" * 32, upstream_code="x", detail="y"
+            ),
+            {"kind", "tool", "problems"},
         ),
         (
             ToolRefusal.service_unavailable(service="dfo-apis", retry_after_s=1.0),
@@ -1863,7 +1881,10 @@ _FIX_SAMPLES: dict[str, tuple[str, dict[str, Any]]] = {
             "candidates": [EntityCandidate(dcid="country/KEN", label="Kenya", type="Country")],
         },
     ),
-    "upstream_error": ("get_data", {"upstream_code": "x", "detail": "d", "retry_after_s": 1.0}),
+    "upstream_error": (
+        "get_data",
+        {"upstream_code": "x", "detail": "d", "retry_after_s": 1.0, "service_failure": True},
+    ),
     "upstream_response_unusable": ("search", {"detail": "d"}),
     "service_unavailable": ("get_data", {"service": "dfo-apis", "retry_after_s": 1.0}),
     "definition_not_held": ("get_data", {"definition_id": _SPEC}),

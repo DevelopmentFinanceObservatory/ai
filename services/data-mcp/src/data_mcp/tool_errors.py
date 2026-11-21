@@ -216,8 +216,13 @@ class FacetIssue:
     detail: str | None = None
 
 
-# The `fix.kind` of an `upstream_error` that is a definition dfo-apis refused to
-# register (`ToolRefusal.spec_not_registered`), and no failure of the service.
+# The `fix.kind` of an `upstream_error`, which says whose failure it is. A
+# service failure is dfo-apis or a source behind it failing of itself: a 5xx,
+# a call with no status, or a response this service could not use. A refused
+# definition is one dfo-apis would not register (`ToolRefusal.spec_not_registered`).
+# An `upstream_error` with neither is a refusal dfo-apis stated under a code this
+# service does not map, about the request it was sent.
+SERVICE_FAILURE = "service_failure"
 SPEC_NOT_REGISTERED = "spec_not_registered"
 
 
@@ -548,9 +553,12 @@ class ToolRefusal:
         upstream_code: str | None,
         detail: str | None,
         retry_after_s: float | None,
+        service_failure: bool,
         trace_id: str | None = None,
         capability_version: str | None = None,
     ) -> Self:
+        """An upstream call that failed. `service_failure` says the service
+        failed of itself rather than refusing the request (`SERVICE_FAILURE`)."""
         message = (
             f"Upstream call failed ({upstream_code or 'unclassified'}): {detail}. "
             f"Retry after {retry_after_s:.1f}s."
@@ -561,7 +569,7 @@ class ToolRefusal:
         return cls(
             code=ToolErrorCode.UPSTREAM_ERROR,
             message=message,
-            fix={"detail": detail},
+            fix={"detail": detail, **({"kind": SERVICE_FAILURE} if service_failure else {})},
             upstream_code=upstream_code,
             retry_after_s=retry_after_s,
             trace_id=trace_id,
@@ -605,7 +613,7 @@ class ToolRefusal:
                 "Retrying the same call would reach the same response, and no argument "
                 "here was wrong either."
             ),
-            fix={"detail": detail},
+            fix={"detail": detail, "kind": SERVICE_FAILURE},
             retry_after_s=None,
             trace_id=trace_id,
             capability_version=capability_version,
@@ -1835,10 +1843,15 @@ def from_upstream_error(exc: UpstreamError, *, tool: str) -> ToolRefusal:
     # a refusal whose own flag is false (apis `operations/worker.py`), so
     # a mapped cause keeps it too.
     retry_after_s = _derive_retry_after_s(exc) if exc.retryable or retried_in_place else None
+    # A failure with no status or a 5xx is the service's own. A failed
+    # operation retried in place names a source revision that moved, and a 4xx
+    # is a refusal of the request apis sent under a code this service does not map.
+    service_failure = not retried_in_place and (exc.status is None or exc.status >= 500)
     return ToolRefusal.upstream_error(
         upstream_code=code,
         detail=exc.detail,
         retry_after_s=retry_after_s,
+        service_failure=service_failure,
         trace_id=exc.trace_id,
         capability_version=exc.capability_version,
     )

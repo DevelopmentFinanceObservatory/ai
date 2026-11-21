@@ -21,8 +21,10 @@ import pytest
 from compiler.compile import CompileIssueCode
 from compiler.sources import DiscoveryStatus
 from compiler.surface import ToolCallResult, ToolSchema
+from data_mcp.errors import UpstreamError
 from data_mcp.series_statistics import SeriesStatisticsSchemaError
 from data_mcp.tool_errors import ToolRefusal as DataRefusal
+from data_mcp.tool_errors import from_upstream_error
 from executor.outcomes import Accepted, RefusalKind
 from executor.run import execute_approved_plan
 from harness.plan_display import step_rows
@@ -407,8 +409,18 @@ async def test_a_refused_retrieval_stops_the_translation_with_the_code_the_run_g
     [
         # An upstream service that failed of itself is no fact of the data.
         (
-            DataRefusal.upstream_error(upstream_code="boom", detail="failed", retry_after_s=None),
+            from_upstream_error(
+                UpstreamError(status=502, code="boom", detail="failed"), tool="get_data"
+            ),
             ReferralKind.INTERNAL_FAILURE,
+        ),
+        # A refusal of the request under a code data-mcp does not map is one
+        # the requirement cannot be met from as asked.
+        (
+            from_upstream_error(
+                UpstreamError(status=422, code="unmapped_code", detail="refused"), tool="get_data"
+            ),
+            ReferralKind.REQUIREMENT_UNMEETABLE,
         ),
         # A definition the platform refused is one the requirement cannot be met from.
         (
@@ -418,7 +430,7 @@ async def test_a_refused_retrieval_stops_the_translation_with_the_code_the_run_g
             ReferralKind.REQUIREMENT_UNMEETABLE,
         ),
     ],
-    ids=["upstream-failure", "spec-not-registered"],
+    ids=["upstream-failure", "upstream-refusal", "spec-not-registered"],
 )
 async def test_an_upstream_refusal_of_the_newest_year_read_is_referred_by_whose_it_is(
     served: DataRefusal,

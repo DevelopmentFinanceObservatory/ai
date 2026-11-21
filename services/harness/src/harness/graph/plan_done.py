@@ -285,19 +285,27 @@ def _worded_as(
     `internal_error`, whatever its code's class, so the user is never told
     their question caused it. A stop waiting gets past reads as a service
     that did not answer, with trying again shortly as its advice. Any other
-    reads its own."""
+    reads the stop that decided its wave's remedy (`_deciding`)."""
     match remedy(failed):
         case Remedy.SYSTEM:
             return ExecutorCode.INTERNAL_ERROR.value, None, None
         case Remedy.WAIT:
             return RefusalKind.TRANSPORT_FAILED.value, "retry_after_delay", None
         case _:
-            fix = failed.get("fix")
+            deciding = _deciding(failed)
+            fix = deciding.get("fix")
             return (
-                failed.get("code"),
-                failed.get("retry_mode"),
+                deciding.get("code"),
+                deciding.get("retry_mode"),
                 fix if isinstance(fix, Mapping) else None,
             )
+
+
+def _deciding(failed: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The stop of `failed`'s wave that decided its remedy: its
+    `deciding_stop`, or `failed` itself (`executor.outcomes.failed_step`)."""
+    deciding = failed.get("deciding_stop")
+    return deciding if isinstance(deciding, Mapping) else failed
 
 
 def _user_sentence(failed: Mapping[str, Any]) -> str:
@@ -318,16 +326,19 @@ def _user_remedy(failed: Mapping[str, Any]) -> str | None:
     tool's or the evidence check's words: its `remedy`, for a failure the
     user or another plan gets past. A fault of the system and a service that
     did not answer leave the user nothing to do but what their sentence says."""
-    text = failed.get("remedy")
+    text = _deciding(failed).get("remedy")
     if not text or remedy(failed) in (Remedy.SYSTEM, Remedy.WAIT):
         return None
     return str(text)[:_HAND_BACK_CAP]
 
 
-def _after_stop(ctx: NodeCtx[GraphEvent], failed: Mapping[str, Any], plan: Plan | None) -> str:
+def _after_stop(
+    ctx: NodeCtx[GraphEvent], failed: Mapping[str, Any], plan: Plan | None
+) -> tuple[str, bool]:
     """What follows a stopped run, `failed` its `failed_step` and `plan` the
-    plan it ran, as the end of the lead the agent reads. Both a run that
-    stopped and a planner that refused to replan past a stop end here.
+    plan it ran: the end of the lead the agent reads, and whether the plan
+    call was given back. Both a run that stopped and a planner that refused
+    to replan past a stop end here.
 
     `REPLAN` gives the plan call back once a turn (`_give_plan_back`), and the
     next card's note names the step and what happened there
@@ -340,7 +351,7 @@ def _after_stop(ctx: NodeCtx[GraphEvent], failed: Mapping[str, Any], plan: Plan 
     past = remedy(failed)
     if past is Remedy.REPLAN and _give_plan_back(ctx):
         ctx.state[ORCHESTRATOR_RETRY_NOTE_KEY] = _retry_note(plan, failed)
-        return " A brief that avoids the failure may be planned once more."
+        return " A brief that avoids the failure may be planned once more.", True
     advice = _user_remedy(failed)
     sentence = _user_cause(failed) if advice else _user_sentence(failed)
     match past:
@@ -360,7 +371,15 @@ def _after_stop(ctx: NodeCtx[GraphEvent], failed: Mapping[str, Any], plan: Plan 
             )
     if advice:
         tail += f" Tell the user what they can do about it: {advice}"
-    return tail
+    return tail, False
+
+
+def shown_stop(failed: Mapping[str, Any], plan: Plan) -> dict[str, Any]:
+    """`failed`, a stopped run's `failed_step`, on the step of `plan` the stop
+    landed on and named as the user reads it (`shown_failure`, `_stop_causes`)."""
+    shown = shown_failure(failed, plan, _stop_causes(plan, failed.get("step_id")))
+    assert shown is not None
+    return shown
 
 
 def _retry_note(plan: Plan | None, failed: Mapping[str, Any]) -> str:
@@ -962,7 +981,9 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
             if node_input.get("final"):
                 after = ""
             elif replanned_stop is not None:
-                after = _after_stop(ctx, replanned_stop, readable_plan(ctx, ctx.state.get("plan")))
+                after, _ = _after_stop(
+                    ctx, replanned_stop, readable_plan(ctx, ctx.state.get("plan"))
+                )
             else:
                 after = (
                     " A brief that avoids the problem may be planned once more."
@@ -1076,8 +1097,9 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
                 for key in ("step_id", "tool", "code", "message")
                 if failed.get(key)
             }
-            # The failure's own remedy, only where the user can act on it.
-            if (advice := _user_remedy(failed)) is not None:
+            after, given_back = _after_stop(ctx, failed, plan)
+            # The failure's own remedy, only where the user is told to act on it.
+            if not given_back and (advice := _user_remedy(failed)) is not None:
                 result["failed_step"]["remedy"] = advice
             partial = _partial_result(result.get("asks"), frames=bool(result["frames"]))
             if missing_capability:
@@ -1097,7 +1119,7 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
                     "failed request unchanged; and say plainly what remains unanswered and "
                     "why, in the user's terms."
                 )
-            lead += _after_stop(ctx, failed, plan)
+            lead += after
         elif hand_back.nothing_chartable:
             lead = (
                 "The approved plan ran, but its result cannot be drawn: tell the user what "
