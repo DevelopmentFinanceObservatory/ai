@@ -34,6 +34,8 @@ from executor.classify import (
     retry_delay,
 )
 
+from .conftest import runner_refused
+
 _PLACED = (
     METHOD_CHOICE_CODES,
     REDISCOVERY_CODES,
@@ -41,6 +43,28 @@ _PLACED = (
     COMPILER_PROVABLE_CODES,
     STOP_CODES,
 )
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "title", "decision"),
+    [
+        (503, "upstream_version_changed", "Upstream Version Changed", Disposition.REDISCOVER),
+        (422, "member_not_resolvable", "Member Not Resolvable", Disposition.STOP),
+        # Control: a retryable code nothing fixes keeps the delayed retry.
+        (504, "timeout", "Gateway Timeout", Disposition.RETRY_LATER),
+    ],
+    ids=["upstream-version-changed", "member-not-resolvable", "timeout"],
+)
+async def test_a_retryable_runner_refusal_reaches_the_executors_decision_for_its_code(
+    status: int, code: str, title: str, decision: Disposition
+) -> None:
+    """`retryable` alone does not decide the mode of a code the harness handles
+    otherwise: the refusal analysis-mcp returns reaches the bucket classify places
+    its code in."""
+    payload = (await runner_refused(status=status, code=code, title=title)).structured_content
+    assert payload is not None
+
+    assert classify_refusal(parse_tool_failure(payload)) is decision
 
 
 def test_every_code_either_server_can_answer_with_is_placed_exactly_once() -> None:

@@ -241,6 +241,9 @@ class RetryMode(StrEnum):
     CORRECT_AND_RETRY = "correct_and_retry"
     RETRY_AFTER_DELAY = "retry_after_delay"
     DO_NOT_RETRY = "do_not_retry"
+    # The data the call read changed upstream: find it again, then retry. Only a
+    # runner refusal takes it (`runner_client._FIXED_MODES`).
+    REFRESH_THEN_RETRY = "refresh_then_retry"
 
 
 class ToolErrorCode(StrEnum):

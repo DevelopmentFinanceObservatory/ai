@@ -131,6 +131,18 @@ _LOCAL_CODES = frozenset(
         ToolErrorCode.INTERNAL_ERROR,
     }
 )
+# The mode of each runner code whose meaning `retryable` does not carry, as data-mcp
+# gives the same code. dfo-apis renders both through its problem envelope, with
+# `retryable` and no `retry_mode`:
+# - `upstream_version_changed` (503, retryable): the source refreshed while the run
+#   read it. Waiting reads the same moved data; finding the data again does not.
+# - `member_not_resolvable` (422, retryable when a member walk left members unsettled):
+#   the definition's StatVars do not resolve to one shape, so the spec is a different
+#   plan, not a retry.
+_FIXED_MODES: Mapping[str, RetryMode] = {
+    "upstream_version_changed": RetryMode.REFRESH_THEN_RETRY,
+    "member_not_resolvable": RetryMode.DO_NOT_RETRY,
+}
 # The endpoint the code registry maps the analysis route's refusals to.
 ANALYSIS_ENDPOINT = "datasets.analysis"
 # Every code the analysis route may refuse with (`dfo_spec_kit.registry`).
@@ -415,19 +427,21 @@ def _passed_through(
     `retry_mode` its problem document states. A code missing from `RUNNER_CODES` is
     logged, since the registry the client pins does not know it. A document with no
     `retry_mode`, or one stating a mode `RetryMode` does not hold, which is logged,
-    takes `retry_after_delay` when it is `retryable`, else the mode this service
-    gives a code it defines."""
+    takes the mode `_FIXED_MODES` gives its code, else `retry_after_delay` when it is
+    `retryable`, else the mode this service gives a code it defines. Only a
+    `retry_after_delay` refusal carries `retry_after_s`."""
     if code not in RUNNER_CODES:
         logger.warning("dfo-apis refused with %s, a code the code registry does not hold", code)
     retryable = problem.get("retryable") is True
-    mode = _stated_mode(problem.get("retry_mode"), code=code)
+    mode = _stated_mode(problem.get("retry_mode"), code=code) or _FIXED_MODES.get(code)
     if mode is None and retryable:
         mode = RetryMode.RETRY_AFTER_DELAY
+    delayed = mode is RetryMode.RETRY_AFTER_DELAY
     return ToolRefusal(
         code=ToolErrorCode(code) if code in _TOOL_CODES else code,
         message=detail,
         fix=fix,
-        retry_after_s=_retry_after_s(response) if retryable else None,
+        retry_after_s=_retry_after_s(response) if delayed else None,
         runner_retry_mode=mode,
     )
 

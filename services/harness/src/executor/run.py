@@ -57,10 +57,14 @@ can fix -- the source's upstream version changed, or its approved `spec_id`
 is no longer held -- comes back as `RediscoveryNeeded` naming the requirement
 and source off the step's `EvidenceBinding`, since a bare retry reproduces it
 identically and only a new discovery, under a new plan revision, can change
-what gets retrieved; the same refusal on a step bound to no evidence has
-nothing to rediscover and stops the run as `Refused`, as does any other
-refusal. `executor.classify` places every server code. The executor never
-corrects a call, because a corrected call is a different plan.
+what gets retrieved. The same refusal on a step bound to no evidence has
+nothing to rediscover: one a second call can get past
+(`executor.classify.REPOST_RECOVERS_CODES`, `upstream_version_changed`) is
+called again once, at once, within `MAX_ATTEMPTS_PER_STEP`, and otherwise,
+or when the second call refuses too, it stops the run as `Refused` with the
+refusal's message, as does any other refusal. `executor.classify` places
+every server code. The executor never corrects a call, because a corrected
+call is a different plan.
 
 A step whose tool capability pins `call_timeout_s` (`get_data`, among the
 workflow's tools) runs under one absolute budget, `step_budget_s`, covering
@@ -283,6 +287,7 @@ from executor.classify import (
     is_anchor_fault,
     jittered_retry_delay,
     parse_tool_failure,
+    repost_recovers,
 )
 from executor.completion import ResultPublisher, publish_results
 from executor.ledger import (
@@ -2699,9 +2704,11 @@ class _Run:
         call hands `on_progress`, bound to the step's id, to the surface. Each answer is reported as it arrives, so the step's line
         stops showing the server's last wait message once the call returns.
         Each retry reports the attempt it is about to make before its delay
-        starts.
+        starts. A refusal `_repost_recovers` reads is called again once, at
+        once, within the same attempt limit.
         """
         on_progress = partial(self.on_progress, step_id) if self.on_progress is not None else None
+        reposted = False
         for attempt in range(MAX_ATTEMPTS_PER_STEP):
             last = attempt + 1 == MAX_ATTEMPTS_PER_STEP
             await self._record_attempt(step_id, tool)
@@ -2742,9 +2749,20 @@ class _Run:
                 result.structured_content or {}, attempt, jitter=self.jitter
             )
             if delay_s is None:
-                return result, attempt + 1
+                if last or reposted or not self._repost_recovers(step_id, result):
+                    return result, attempt + 1
+                reposted = True
+                delay_s = 0.0
             await self._before_retry(delay_s, attempt, on_progress)
         raise AssertionError("unreachable: every attempt returns or raises")
+
+    def _repost_recovers(self, step_id: str, result: ToolCallResult) -> bool:
+        """Whether calling again with the same arguments can get past the refusal `result`
+        carries (`executor.classify.repost_recovers`) on a step bound to no evidence. A bound
+        step goes back to the planner as `RediscoveryNeeded` instead."""
+        return step_id not in self.evidence_bindings and repost_recovers(
+            result.structured_content or {}
+        )
 
     async def _record_attempt(self, step_id: str, tool: ToolId) -> None:
         """Record an attempt of `tool` for step `step_id`, with the step's
@@ -2819,7 +2837,8 @@ class _Run:
                 )
             )
         # A rediscovery on a step bound to no evidence would name nothing to
-        # rediscover, so it is a plain stop like any other refusal.
+        # rediscover, so it is a plain stop like any other refusal; `_call`
+        # has already called again once where that can get past it.
         return self._step_refused(step.id, step.tool, result, failure)
 
     def _step_refused(

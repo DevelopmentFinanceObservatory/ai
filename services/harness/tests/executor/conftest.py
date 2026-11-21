@@ -27,8 +27,11 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx2
 import pytest
+from analysis_mcp.runner_client import refusal_for
 from analysis_mcp.server import mcp as analysis_mcp
+from analysis_mcp.tool_errors import to_tool_result
 from compiler.compile import compile_plan
 from compiler.sources import member_digest
 from compiler.surface import (
@@ -41,6 +44,7 @@ from compiler.surface import (
 from data_mcp.manifest import SeriesStatisticsModel
 from data_mcp.series_statistics import series_statistics_table
 from data_mcp.server import mcp as data_mcp
+from mcp.types import TextContent
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -222,6 +226,36 @@ def refusal(code: str, retry_mode: str, **extra: Any) -> ToolCallResult:
         structured_content={"code": code, "retry_mode": retry_mode, **extra},
         text=f"refused: {code}",
     )
+
+
+def runner_problem(*, status: int, code: str, title: str) -> httpx2.Response:
+    """A refusal as dfo-apis' analysis route renders one its own handling does not
+    name (`datasets_api.doors.analysis._refused`, through `Envelope.render`): the
+    problem document with `retryable` set and no `retry_mode` or `fix`."""
+    body = {
+        "type": f"/codes/{code}",
+        "title": title,
+        "status": status,
+        "detail": f"{title}: the run could not finish.",
+        "code": code,
+        "trace_id": "0af7651916cd43dd8448eb211c80319c",
+        "capability_version": "cap_2026_11",
+        "retryable": True,
+    }
+    return httpx2.Response(
+        status,
+        json=body,
+        headers={"content-type": "application/problem+json", "cache-control": "no-store"},
+    )
+
+
+async def runner_refused(*, status: int, code: str, title: str) -> ToolCallResult:
+    """The result an analysis-mcp tool returns for `runner_problem`'s refusal."""
+    served = to_tool_result(
+        await refusal_for(runner_problem(status=status, code=code, title=title), refs_by_root={})
+    )
+    text = "".join(part.text for part in served.content if isinstance(part, TextContent))
+    return ToolCallResult(is_error=True, structured_content=served.structured_content, text=text)
 
 
 @pytest.fixture

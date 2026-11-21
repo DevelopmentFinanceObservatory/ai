@@ -799,7 +799,7 @@ async def test_the_caller_is_named_beside_the_principal(
             {"x": 1},
         ),
         (
-            _problem(422, "unit_heterogeneous", fix={"x": 1}, retry_mode="refresh_then_retry"),
+            _problem(422, "unit_heterogeneous", fix={"x": 1}, retry_mode="retry_whenever"),
             "unit_heterogeneous",
             "correct_and_retry",
             {"x": 1},
