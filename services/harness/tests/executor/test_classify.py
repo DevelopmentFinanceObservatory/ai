@@ -46,22 +46,35 @@ _PLACED = (
 
 
 @pytest.mark.parametrize(
-    ("status", "code", "title", "decision"),
+    ("status", "code", "title", "retryable", "decision"),
     [
-        (503, "upstream_version_changed", "Upstream Version Changed", Disposition.REDISCOVER),
-        (422, "member_not_resolvable", "Member Not Resolvable", Disposition.STOP),
-        # Control: a retryable code nothing fixes keeps the delayed retry.
-        (504, "timeout", "Gateway Timeout", Disposition.RETRY_LATER),
+        (
+            503,
+            "upstream_version_changed",
+            "Upstream Version Changed",
+            True,
+            Disposition.REDISCOVER,
+        ),
+        # dfo-apis marks it retryable when a second member walk can settle members the
+        # first left unsettled; the stated mode outranks the code's stop bucket.
+        (422, "member_not_resolvable", "Member Not Resolvable", True, Disposition.RETRY_LATER),
+        (422, "member_not_resolvable", "Member Not Resolvable", False, Disposition.STOP),
+        (504, "timeout", "Gateway Timeout", True, Disposition.RETRY_LATER),
     ],
-    ids=["upstream-version-changed", "member-not-resolvable", "timeout"],
+    ids=[
+        "upstream-version-changed",
+        "member-not-resolvable-unsettled",
+        "member-not-resolvable",
+        "timeout",
+    ],
 )
-async def test_a_retryable_runner_refusal_reaches_the_executors_decision_for_its_code(
-    status: int, code: str, title: str, decision: Disposition
+async def test_a_runner_refusal_reaches_the_executors_decision_for_its_code(
+    status: int, code: str, title: str, retryable: bool, decision: Disposition
 ) -> None:
-    """`retryable` alone does not decide the mode of a code the harness handles
-    otherwise: the refusal analysis-mcp returns reaches the bucket classify places
-    its code in."""
-    payload = (await runner_refused(status=status, code=code, title=title)).structured_content
+    """A runner refusal's `retryable` decides its mode only where its code carries
+    no fixed one, and the refusal analysis-mcp returns reaches that decision."""
+    refused = await runner_refused(status=status, code=code, title=title, retryable=retryable)
+    payload = refused.structured_content
     assert payload is not None
 
     assert classify_refusal(parse_tool_failure(payload)) is decision

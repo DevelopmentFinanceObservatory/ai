@@ -250,7 +250,7 @@ class RediscoveryNeeded(StrictModel):
     to retrieve, read off its `EvidenceBinding`; a step without one has
     nothing to rediscover, so its refusal comes back as `Refused` instead,
     after one more call when that call can get past it
-    (`executor.classify.REPOST_RECOVERS_CODES`).
+    (`executor.classify.repost_recovers`).
     `also_stopped` names the wave's other stops, wave order, when this one
     is the wave's first and so the one a run raises (`executor.run._Run.execute`).
     `completed` and `evidence` hold the steps that finished before the stop

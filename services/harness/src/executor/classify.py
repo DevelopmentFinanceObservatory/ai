@@ -119,6 +119,7 @@ from collections.abc import Callable, Mapping
 from enum import StrEnum
 from typing import cast
 
+from common.refusal import REPOST_RECOVERS_CODES
 from planner.records import StrictModel
 from pydantic import Field, JsonValue, ValidationError
 
@@ -159,17 +160,6 @@ REDISCOVERY_CODES = frozenset(
 # `open_role_unavailable` is left out: the StatVars its identity elects declare
 # no role on the open axis, so the same spec_id refuses every time.
 RECOVERABLE_SPEC_CODES = frozenset({"upstream_version_changed", "definition_not_held"})
-
-# The `REDISCOVERY_CODES` a second call of the same arguments can get past,
-# for a step bound to no evidence, which has nothing to rediscover.
-# `upstream_version_changed` comes from a read of a source's newest version
-# (the analysis runner's Spec and `latest` roots, data-mcp's mint) whose
-# upstream refreshed twice while it loaded; the runner caches rate tables by
-# refresh date, so the next call loads the refreshed table and reads the new
-# version. A ref pinned to a version that is gone refuses with another code.
-# `definition_not_held` and `open_role_unavailable` refuse the same arguments
-# every time.
-REPOST_RECOVERS_CODES = frozenset({"upstream_version_changed"})
 
 TRANSIENT_CODES = frozenset(
     {
@@ -551,7 +541,8 @@ def delay_before_retry(
 
 def repost_recovers(payload: Mapping[str, object]) -> bool:
     """Whether calling again at once with the same arguments can get past the
-    refusal `payload` carries: a `REDISCOVER` refusal in `REPOST_RECOVERS_CODES`.
+    refusal `payload` carries: a `REDISCOVER` refusal in
+    `common.refusal.REPOST_RECOVERS_CODES`.
 
     The executor's step loop makes that call once, for a step bound to no
     evidence, which has nothing to rediscover.

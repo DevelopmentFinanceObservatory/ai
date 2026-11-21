@@ -132,16 +132,15 @@ _LOCAL_CODES = frozenset(
     }
 )
 # The mode of each runner code whose meaning `retryable` does not carry, as data-mcp
-# gives the same code. dfo-apis renders both through its problem envelope, with
-# `retryable` and no `retry_mode`:
-# - `upstream_version_changed` (503, retryable): the source refreshed while the run
-#   read it. Waiting reads the same moved data; finding the data again does not.
-# - `member_not_resolvable` (422, retryable when a member walk left members unsettled):
-#   the definition's StatVars do not resolve to one shape, so the spec is a different
-#   plan, not a retry.
+# gives the same code. dfo-apis renders it through its problem envelope, with
+# `retryable` and no `retry_mode`: `upstream_version_changed` (503, retryable), the
+# source refreshed while the run read it. Waiting reads the same moved data; the same
+# request sent again at once reads the refreshed version. `member_not_resolvable` keeps
+# the mode `retryable` gives it: dfo-apis marks it retryable when a second member walk
+# can settle members the first left unsettled (`retry_after_delay`), and not otherwise
+# (`do_not_retry`).
 _FIXED_MODES: Mapping[str, RetryMode] = {
     "upstream_version_changed": RetryMode.REFRESH_THEN_RETRY,
-    "member_not_resolvable": RetryMode.DO_NOT_RETRY,
 }
 # The endpoint the code registry maps the analysis route's refusals to.
 ANALYSIS_ENDPOINT = "datasets.analysis"

@@ -59,7 +59,7 @@ and source off the step's `EvidenceBinding`, since a bare retry reproduces it
 identically and only a new discovery, under a new plan revision, can change
 what gets retrieved. The same refusal on a step bound to no evidence has
 nothing to rediscover: one a second call can get past
-(`executor.classify.REPOST_RECOVERS_CODES`, `upstream_version_changed`) is
+(`executor.classify.repost_recovers`, `upstream_version_changed`) is
 called again once, at once, within `MAX_ATTEMPTS_PER_STEP`, and otherwise,
 or when the second call refuses too, it stops the run as `Refused` with the
 refusal's message, as does any other refusal. `executor.classify` places

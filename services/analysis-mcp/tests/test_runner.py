@@ -1728,6 +1728,55 @@ async def test_a_derived_input_whose_replay_cannot_run_yet_refuses_with_its_dela
     assert any(_OPS in record.getMessage() for record in caplog.records) is logged
 
 
+@pytest.mark.parametrize(
+    ("replays", "code", "retry_mode"),
+    [
+        (
+            [
+                _problem(503, "upstream_version_changed", retryable=True),
+                httpx2.Response(200, json=_ready_as(_REPLAYED)),
+            ],
+            None,
+            None,
+        ),
+        (
+            [_problem(503, "upstream_version_changed", retryable=True)] * 2,
+            "upstream_version_changed",
+            "refresh_then_retry",
+        ),
+    ],
+    ids=["settles", "persists"],
+)
+async def test_a_replay_the_upstream_refreshed_under_is_run_once_more(
+    store: InMemoryMaterialisationStore,
+    replays: list[httpx2.Response],
+    code: str | None,
+    retry_mode: str | None,
+) -> None:
+    """A replay reads its roots at their newest versions, so a second replay reads
+    the refreshed data; one that refuses again answers with the runner's refusal."""
+    lost_root = {"spec_id": _SPEC, "content_version": _DATASET_CV}
+    answers = iter(replays)
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if body["latest"]:
+            return next(answers)
+        if body["tree"]["inputs"]["data"] == _DERIVED:
+            return _problem(404, "snapshot_not_found", fix=lost_root)
+        return httpx2.Response(200, json=_recorded_ready("aggregate"))
+
+    runner = _install(answer)
+    result = await verbs.aggregate(frame_ref=_DERIVED, aggregation="sum", rebuild_lost_frames=True)
+
+    assert sum(json.loads(request.content)["latest"] for request in runner.requests) == 2
+    structured = result.structured_content
+    assert structured is not None
+    if code is None:
+        assert result.is_error is False, _text(result)
+    else:
+        assert (structured["code"], structured["retry_mode"]) == (code, retry_mode)
+
+
 def _level_column(node: dict[str, Any]) -> str:
     """The column of the place_level predicate of the filter step `node`."""
     assert node["verb"] == "filter"

@@ -11,7 +11,10 @@ On a public call (`rebuild_lost_frames`), a frame the runner no longer holds
 (`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_` frame
 as the Spec root that fetches it at its newest version in its recorded rendering
 (`runner_tree.spec_root`), an `ops_` frame as the pair the runner computes from its
-stored recipe on current data (`runner_client.replay_derived`). The runner names one
+stored recipe on current data (`runner_client.replay_derived`). A replay refused with a
+code the same request can get past (`common.refusal.REPOST_RECOVERS_CODES`, the upstream
+refreshing under the read) runs once more, and a second such refusal answers the call as
+the runner wrote it. The runner names one
 lost dataset per refusal, so a call over two lost datasets is sent again once per
 side, at most once per distinct frame argument. A `spec_` frame whose rendering
 cannot be established refuses as `spec_root` says. A replay the runner cannot run
@@ -31,6 +34,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from common.materialisation import FrameRef
+from common.refusal import REPOST_RECOVERS_CODES
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, ValidationError
 
@@ -106,6 +110,10 @@ async def _rebuilt(
     call answers when no root can."""
     if ref.spec_id.startswith("ops_"):
         replayed = await replay_derived(ref)
+        if isinstance(replayed, ToolRefusal) and replayed.code in REPOST_RECOVERS_CODES:
+            replayed = await replay_derived(ref)
+            if isinstance(replayed, ToolRefusal) and replayed.code in REPOST_RECOVERS_CODES:
+                return replayed
         if isinstance(replayed, ToolRefusal):
             return replayed if _transient(replayed) else lost.not_rebuilt()
         return _Rebuilt(ref=ref, node=replayed.model_dump())

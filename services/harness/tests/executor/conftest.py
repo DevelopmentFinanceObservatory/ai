@@ -228,10 +228,12 @@ def refusal(code: str, retry_mode: str, **extra: Any) -> ToolCallResult:
     )
 
 
-def runner_problem(*, status: int, code: str, title: str) -> httpx2.Response:
+def runner_problem(
+    *, status: int, code: str, title: str, retryable: bool = True
+) -> httpx2.Response:
     """A refusal as dfo-apis' analysis route renders one its own handling does not
     name (`datasets_api.doors.analysis._refused`, through `Envelope.render`): the
-    problem document with `retryable` set and no `retry_mode` or `fix`."""
+    problem document with `retryable` and no `retry_mode` or `fix`."""
     body = {
         "type": f"/codes/{code}",
         "title": title,
@@ -240,7 +242,7 @@ def runner_problem(*, status: int, code: str, title: str) -> httpx2.Response:
         "code": code,
         "trace_id": "0af7651916cd43dd8448eb211c80319c",
         "capability_version": "cap_2026_11",
-        "retryable": True,
+        "retryable": retryable,
     }
     return httpx2.Response(
         status,
@@ -249,10 +251,15 @@ def runner_problem(*, status: int, code: str, title: str) -> httpx2.Response:
     )
 
 
-async def runner_refused(*, status: int, code: str, title: str) -> ToolCallResult:
+async def runner_refused(
+    *, status: int, code: str, title: str, retryable: bool = True
+) -> ToolCallResult:
     """The result an analysis-mcp tool returns for `runner_problem`'s refusal."""
     served = to_tool_result(
-        await refusal_for(runner_problem(status=status, code=code, title=title), refs_by_root={})
+        await refusal_for(
+            runner_problem(status=status, code=code, title=title, retryable=retryable),
+            refs_by_root={},
+        )
     )
     text = "".join(part.text for part in served.content if isinstance(part, TextContent))
     return ToolCallResult(is_error=True, structured_content=served.structured_content, text=text)
