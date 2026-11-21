@@ -21,6 +21,7 @@ import pytest
 from compiler.surface import ProgressCallback, ToolCallResult
 from fastapi import FastAPI
 from google.genai import types
+from harness import studio as studio_module
 from harness.scripted import ScriptedSurface
 from harness.studio import _conversation_read, _read_status, _resume_refusal
 from harness.studio_state import SEGMENT_TTL_S, ConversationState, _PendingInterrupt
@@ -1050,3 +1051,44 @@ async def test_every_stream_names_the_turn_it_carries(pg_engine: AsyncEngine) ->
     assert (first, second, answered, resumed) == ("1", "2", "2", "3")
     assert _events(frames)[-1] == "plan.proposed"
     assert read["turn"]["index"] == 3
+
+
+async def test_a_stop_records_its_turn_cancelled_only_with_the_cursor_closed(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stop on a paused turn no segment holds saves the turn's record
+    `cancelled` and closes its cursor in one transaction. When the close of
+    the cursor fails, the record is not stored either, so the turn stays
+    open, record and cursor, for the retried Stop, which closes both."""
+    app, _ = orchestrator_app(plan_call("q with forks"), engine=pg_engine)
+    real_stop = studio_module.stop_turn_on
+
+    async def close_fails(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("the cursor's close failed")
+
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("q with forks"))
+        monkeypatch.setattr(studio_module, "stop_turn_on", close_fails)
+        failed = await client.post("/api/studio/cancel", json=_CANCEL, headers=AUTH)
+        after_failure = await StudioStore(pg_engine).load(PRINCIPAL, CONVERSATION)
+        cursors_after_failure = await _cursor_statuses(pg_engine)
+        monkeypatch.setattr(studio_module, "stop_turn_on", real_stop)
+        stopped = await client.post("/api/studio/cancel", json=_CANCEL, headers=AUTH)
+
+    assert failed.status_code == 503
+    assert after_failure is not None and after_failure.turns == []
+    assert cursors_after_failure == ["paused"]
+    assert stopped.status_code == 204
+    stored = await StudioStore(pg_engine).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None and [turn["error"] for turn in stored.turns] == ["cancelled"]
+    assert await _cursor_statuses(pg_engine) == ["cancelled"]
+
+
+_CANCEL = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
+
+
+async def _cursor_statuses(engine: AsyncEngine) -> list[str]:
+    async with engine.connect() as conn:
+        return list(
+            (await conn.execute(text("SELECT status FROM turn_cursors ORDER BY id"))).scalars()
+        )

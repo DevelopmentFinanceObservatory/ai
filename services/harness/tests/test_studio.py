@@ -1127,7 +1127,7 @@ async def test_a_plan_pause_whose_acknowledgement_was_lost_is_shown_and_approvab
     assert _events(second)[-1] == "done"
 
 
-async def test_a_plan_pause_whose_turn_cannot_be_read_back_ends_transient_and_stays_paused(
+async def test_a_plan_pause_whose_turn_cannot_be_read_back_ends_transient_and_closes_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The plan's pause commits, its write raises, and the read of the turn
@@ -7968,22 +7968,13 @@ class _StopReaders:
     `StopScope` took it; the end of the segment, counted as `release` (the
     stream's closing write closing the turn, `StudioStore.close_segment`);
     a claimant that found the Stop live and closed its turn
-    (`_act_on_stop`); a load that found the turn recorded `cancelled` with
-    its cursor open and closed the cursor (`load`,
-    `StudioStore._close_recorded_cursor`); or `/cancel` under the lock
-    (`_stop_open_turn`)."""
+    (`_act_on_stop`); or `/cancel` under the lock (`_stop_open_turn`)."""
 
     def __init__(self, app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
         store = app.state.studio.store
         self.heartbeat = _StopsTaken(store)
-        self.counts = {"release": 0, "claim": 0, "load": 0, "cancel": 0}
+        self.counts = {"release": 0, "claim": 0, "cancel": 0}
         close_segment = store.close_segment
-        close_recorded_cursor = store._close_recorded_cursor
-
-        async def counted_close_recorded_cursor(*args: Any, **kwargs: Any) -> None:
-            live = await _stop_live()
-            await close_recorded_cursor(*args, **kwargs)
-            self.counts["load"] += live and not await _stop_live()
 
         act_on_stop = studio_module._act_on_stop
         stop_open = studio_module._stop_open_turn
@@ -8004,7 +7995,6 @@ class _StopReaders:
             return await stop_open(*args, **kwargs)
 
         monkeypatch.setattr(store, "close_segment", counted_close_segment)
-        monkeypatch.setattr(store, "_close_recorded_cursor", counted_close_recorded_cursor)
         monkeypatch.setattr(studio_module, "_act_on_stop", counted_claim)
         monkeypatch.setattr(studio_module, "_stop_open_turn", counted_cancel)
 
@@ -8221,11 +8211,10 @@ async def _stop_after_the_claim_before_the_abandon(row: _Row):
 
 async def _stop_whose_claimant_cannot_close_the_turn(row: _Row):
     """A Stop left live on a paused turn whose lease lapsed. The next
-    `/turn` acts on it first and saves the turn's record `cancelled`, but
-    its close of the cursor is refused (another writer moved the cursor), so
-    that `/turn` answers a retryable 409 and starts nothing. Its retry's
-    load finds the record closed over an open cursor and closes the cursor
-    as the record states, which ends the Stop, and runs the new turn."""
+    `/turn` acts on it first, but its close is refused (another writer moved
+    the cursor), which rolls back the turn's record with it, so that
+    `/turn` answers a retryable 409 and starts nothing; its retry acts on
+    the Stop and runs the new turn."""
     app = await row.build(*_plan(), _text("Hello."), clock=True)
     store = app.state.studio.store
     sent: list[httpx2.Response] = []
@@ -8246,14 +8235,14 @@ async def _stop_whose_claimant_cannot_close_the_turn(row: _Row):
         async def moved(*_args: Any, **_kwargs: Any) -> Any:
             raise CursorStale("another writer moved the cursor")
 
-        real_stop_turn = studio_module.stop_turn
-        row.monkeypatch.setattr(studio_module, "stop_turn", moved)
+        real_stop_turn = studio_module.stop_turn_on
+        row.monkeypatch.setattr(studio_module, "stop_turn_on", moved)
         busy = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
         assert busy.status_code == 409
         assert busy.json()["retry"] == "retry_after_delay"
         assert await _turn_statuses() == ["paused"]
         assert await _stop_live()
-        row.monkeypatch.setattr(studio_module, "stop_turn", real_stop_turn)
+        row.monkeypatch.setattr(studio_module, "stop_turn_on", real_stop_turn)
         return await _stream(client, "/api/studio/turn", _turn_body("hi")), sent[0]
 
 
@@ -8626,8 +8615,8 @@ async def _stop_whose_claim_is_abandoned(row: _Row):
             _stop_whose_claimant_cannot_close_the_turn,
             ["cancelled", "done"],
             "done",
-            {"load": 1},
-            id="claimant-close-refused-turn-refused-retry-loads-it-closed",
+            {"claim": 1},
+            id="claimant-close-refused-turn-refused-retry-acts",
         ),
         pytest.param(
             _stop_with_no_lease(running=False),
@@ -8859,13 +8848,14 @@ async def test_a_closing_write_that_fails_under_a_stop_leaves_the_stop_for_the_n
 async def test_a_cancel_whose_close_fails_answers_503_and_leaves_the_stop_live(
     fails: str,
 ) -> None:
-    """`/cancel` finds no live lease on a paused turn and one of the two
-    writes that close it fails: it answers a retryable 503 and leaves a Stop
+    """`/cancel` finds no live lease on a paused turn, and the save of the
+    turn's record or the close of its cursor, which share one transaction,
+    fails: it answers a retryable 503, stores neither, and leaves a Stop
     live, so the next `/turn` closes the turn `cancelled` before it streams.
     The instance's live state changes only with a save that commits."""
     app = _app(*_plan(), _text("Hello."))
-    store, turns = app.state.studio.store, app.state.studio.turns
-    real_save, real_finish = store.save, turns.finish
+    store = app.state.studio.store
+    real_save, real_close = store.save, studio_module.stop_turn_on
     claimed = [False]
 
     async def save(*args: Any, **kwargs: Any) -> Any:
@@ -8876,17 +8866,19 @@ async def test_a_cancel_whose_close_fails_answers_503_and_leaves_the_stop_live(
             raise ConnectionError("the database is unreachable")
         return await real_save(*args, **kwargs)
 
-    async def finish(cursor: Any, **kwargs: Any) -> Any:
-        if fails == "turn" and claimed[0] and kwargs.get("status") is TurnStatus.CANCELLED:
+    async def close(*args: Any, **kwargs: Any) -> Any:
+        if fails == "turn" and claimed[0]:
             claimed[0] = False
             raise ConnectionError("the database is unreachable")
-        return await real_finish(cursor, **kwargs)
+        return await real_close(*args, **kwargs)
 
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
-        store.save, turns.finish = save, finish
-        refused = await _post_stop(client)
-        store.save, turns.finish = real_save, real_finish
+        store.save, studio_module.stop_turn_on = save, close
+        try:
+            refused = await _post_stop(client)
+        finally:
+            store.save, studio_module.stop_turn_on = real_save, real_close
         held = bool(store.current(PRINCIPAL, CONVERSATION).pending)
         live = await _stop_live()
         statuses = await _turn_statuses()
@@ -8894,7 +8886,7 @@ async def test_a_cancel_whose_close_fails_answers_503_and_leaves_the_stop_live(
 
     assert refused.status_code == 503
     assert refused.json()["retry"] == "retry_after_delay"
-    assert held is (fails == "record")
+    assert held
     assert live
     assert statuses == ["paused"]
     assert _events(after)[-1] == "done"

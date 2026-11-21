@@ -160,7 +160,7 @@ from harness.turn.loop import (
     abandon_on,
     reject,
     run_segment,
-    stop_turn,
+    stop_turn_on,
 )
 from harness.turn.store import (
     Cursor,
@@ -1657,13 +1657,15 @@ async def _stop_turn_at(
     """Close the open turn at `cursor` `cancelled` under a lease this claims
     with a save that acts on any Stop live for it (`StudioStore.save` with
     `stopping`), and drop the lease. Under the lease this records a Stop of
-    its own (`StudioStore.request_cancel`), saves the turn's record closed
-    with its pending interrupts cleared (`_save_turn_closed`), then closes
-    the turn, which ends the runs it left computing in the same transaction
-    (`harness.turn.loop.stop_turn`) and ends the Stop. Returns `None` once
+    its own (`StudioStore.request_cancel`), then, in one transaction, saves
+    the turn's record closed with its pending interrupts cleared
+    (`_save_turn_closed`) and closes the turn's cursor, which ends the runs
+    it left computing and ends the Stop (`harness.turn.loop.stop_turn_on`),
+    so the record commits only with the cursor closed. Returns `None` once
     the turn is closed, and a retryable 503 when a write fails. The turn
-    then stays open with a Stop live, so the next claimant closes it
-    (`_act_on_stop`) and no later turn carries its runs on. The save of the
+    then stays open, record and cursor, with a Stop live, so the next
+    claimant closes it (`_act_on_stop`) and no later turn carries its runs
+    on. The save of the
     turn's record closed writes its `cancelled` line and `turn` outcome,
     which this exports, since no stream runs to.
 
@@ -1692,8 +1694,19 @@ async def _stop_turn_at(
         try:
             if not await studio.store.request_cancel(principal, conversation_id):
                 raise _ClaimLost
-            wrote = await _save_turn_closed(studio, principal, conversation_id, cursor)
-            await stop_turn(studio.turns, cursor, segment_id=segment_id)
+
+            async def close_cursor(conn: AsyncConnection, _pk: int) -> None:
+                assert segment_id is not None
+                await stop_turn_on(
+                    conn,
+                    cursor,
+                    segment_id=segment_id,
+                    now=datetime.fromtimestamp(studio.store.now(), UTC),
+                )
+
+            wrote = await _save_turn_closed(
+                studio, principal, conversation_id, cursor, alongside=close_cursor
+            )
         except _ClaimLost:
             raise
         except (ConversationStale, CursorStale, SegmentLost) as exc:
@@ -1727,11 +1740,14 @@ async def _save_turn_closed(
     open_turn: Cursor | None,
     *,
     clear_lease: bool = False,
+    alongside: Callable[[AsyncConnection, int], Awaitable[None]] | None = None,
 ) -> bool:
     """Save the conversation's turn closed `cancelled` when it is open,
     keeping the records `open_turn`, its cursor, holds (`keep_turn_records`),
     with its pending interrupts cleared, so an answer to one is refused.
-    With `clear_lease`, the lease on record is cleared too. The change is made
+    With `clear_lease`, the lease on record is cleared too. `alongside` runs
+    in the save's transaction (`StudioStore.save`), so what it writes, the
+    close of the turn's cursor, commits with the record or not at all. The change is made
     on a working copy (`StudioStore.draft`) and saved (`StudioStore.save`):
     only once the save commits does the live state take it. The save
     writes the close's `cancelled` line and `turn` outcome once it commits
@@ -1747,7 +1763,7 @@ async def _save_turn_closed(
     if clear_lease:
         work.segment = None
     try:
-        return await studio.store.save(principal, conversation_id, work)
+        return await studio.store.save(principal, conversation_id, work, alongside=alongside)
     except BaseException:
         studio.store.drop_draft(principal, conversation_id)
         raise

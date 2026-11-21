@@ -15,6 +15,7 @@ from harness.turn.loop import (
     reject,
     run_segment,
     stop_turn,
+    stop_turn_on,
 )
 from harness.turn.node import Next, Node, NodeCtx, Pause, StopScope, TurnKey
 from harness.turn.transcript import Transcript
@@ -44,4 +45,5 @@ __all__ = [
     "reject",
     "run_segment",
     "stop_turn",
+    "stop_turn_on",
 ]
