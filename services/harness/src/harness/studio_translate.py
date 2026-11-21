@@ -2945,7 +2945,7 @@ class _Translator:
             },
         )
 
-    async def finish(self) -> list[Any]:
+    async def finish(self, *, new_question: str | None = None) -> list[Any]:
         """Frames that close a segment that ran to the end of its events. A
         segment that did not pause closes the turn on the agent's answer,
         followed by one sentence for each loose match the turn used
@@ -2955,7 +2955,13 @@ class _Translator:
         `message.complete` text and the stored turn keeps them. The turn
         record keeps the notes and the line apart from the answer
         (`ConversationState.close_turn`), so a later turn's model reads the
-        answer alone, with no text of the code's own to restate."""
+        answer alone, with no text of the code's own to restate.
+
+        `new_question` is the user's words a turn ended on when the planner
+        read them, typed on the plan card, as a different question
+        (`harness.graph.state.NEW_QUESTION_KEY`). The turn's record says it
+        ended so (`studio_state.NEW_QUESTION`), and `done` carries the words
+        for the client to send as the next turn."""
         frames: list[Any] = [*await self._drain_recorder(), *self._close_status()]
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
@@ -3015,7 +3021,12 @@ class _Translator:
             else []
         )
         self._record_chips(chips)
-        self._conversation.close_turn(final_text=answer, match_notes=notes, basis_line=basis)
+        self._conversation.close_turn(
+            final_text=answer,
+            match_notes=notes,
+            basis_line=basis,
+            new_question=new_question,
+        )
         frames.append(
             Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=chips)
         )
@@ -3025,6 +3036,7 @@ class _Translator:
                 seq=self._conversation.next_seq(),
                 trace_id=self._conversation.trace_id,
                 composition=self._conversation.composition,
+                new_question=new_question or None,
             )
         )
         return frames

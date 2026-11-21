@@ -1095,8 +1095,20 @@ class CancelRequest(_WireModel):
     conversation_id: str = _CONVERSATION_ID
 
 
+class ResumeRequest(_WireModel):
+    """POST /api/studio/resume -- carry on the conversation's open turn
+    `turn_index` when it is running and no segment holds it: one whose
+    client left while it ran. The response is a NEW SSE stream continuing
+    the turn from where it stopped."""
+
+    kind: Literal["turn.resume"]
+    schema_version: Literal[1]
+    conversation_id: str = _CONVERSATION_ID
+    turn_index: int = Field(ge=1)
+
+
 StudioRequest = Annotated[
-    TurnRequest | InterruptResponse | CompositionMutation | CancelRequest,
+    TurnRequest | InterruptResponse | CompositionMutation | CancelRequest | ResumeRequest,
     Field(discriminator="kind"),
 ]
 
@@ -1675,12 +1687,18 @@ class Done(_WireModel):
     """Turn complete. `composition` is the conversation's current manifest,
     absent when the conversation has no canvas yet. Emitted exactly once per
     turn, on the segment that finishes it -- an interrupted segment ends
-    with its pausing frame instead."""
+    with its pausing frame instead.
+
+    `new_question` is set when the user's `amend` text on a plan card asked
+    a different question: the turn ends with the plan set aside unapproved,
+    and the client sends the text as the conversation's next
+    `turn.request`."""
 
     event: Literal["done"]
     seq: int = Field(ge=0)
     trace_id: str
     composition: CompositionManifest | None = None
+    new_question: str | None = None
 
 
 StudioFrame = Annotated[
@@ -1701,3 +1719,81 @@ StudioFrame = Annotated[
 ]
 
 STUDIO_FRAME_ADAPTER: TypeAdapter[StudioFrame] = TypeAdapter(StudioFrame)
+
+
+# ---------------------------------------------------------------------------
+# The conversation-state read -- GET /api/studio/state
+# ---------------------------------------------------------------------------
+
+
+class TurnStatusName(StrEnum):
+    """Where a turn stands. `running` and `paused` are open; the rest are
+    closed."""
+
+    RUNNING = "running"
+    PAUSED = "paused"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    ABANDONED = "abandoned"
+
+
+class TurnState(_WireModel):
+    """The conversation's latest turn. `lease_live` says a segment holds the
+    turn now, on some instance; `retry_after_seconds` is then the most the
+    lease has left, and is absent otherwise. A `running` turn with no live
+    lease is carried on by `POST /api/studio/resume`."""
+
+    index: int = Field(ge=1)
+    status: TurnStatusName
+    trace_id: str
+    lease_live: bool
+    retry_after_seconds: int | None = Field(default=None, ge=0)
+
+
+class ClosedTurn(_WireModel):
+    """One closed turn: the user's message as the turn recorded it (an
+    amendment or an answer adds a `(then: ...)` line), the reply the turn
+    closed on (empty when it closed with none), the ids of the cards it
+    made or changed, and the code it closed on when it did not end
+    cleanly. `new_question` is set on a turn the user ended by typing a
+    different question on its plan card (`Done.new_question`): the client
+    sends it as the next turn when it holds no later one."""
+
+    turn_index: int = Field(ge=1)
+    user_message: str
+    reply: str
+    component_ids: list[str]
+    error: str | None = None
+    new_question: str | None = None
+
+
+class PendingPause(_WireModel):
+    """The open pause of a paused turn: the `interrupt_id` an
+    `interrupt.response` answers, its kind, and the frames the pause was sent
+    as, in order, its `plan.proposed` or `elicitation.request` last. Each
+    frame keeps the `seq` it went out with. `frames` is empty for a pause
+    stored before its frames were kept."""
+
+    interrupt_id: str
+    kind: Literal["plan", "elicitation"]
+    frames: list[StudioFrame]
+
+
+class ConversationRead(_WireModel):
+    """GET /api/studio/state -- the conversation as stored. `turn` is absent
+    before the first turn. `closed_since` lists the closed turns after the
+    request's `since`, oldest first, at most `MAX_CLOSED_SINCE`. `pause` is
+    the open pause when the turn is paused, and absent otherwise.
+    `manifest` is the canvas, absent when the conversation has none."""
+
+    conversation_id: str
+    turn: TurnState | None = None
+    closed_since: list[ClosedTurn]
+    pause: PendingPause | None = None
+    manifest: CompositionManifest | None = None
+
+
+# The most closed turns one state read returns; a client that needs more
+# reads again from the last one it got.
+MAX_CLOSED_SINCE = 3

@@ -1872,11 +1872,13 @@ _BUDGET_APPROVABLE = (
 )
 _BUDGET_FRESH = "The user's next message opens a fresh budget."
 
-# The refusal for a `starts_new_plan` call while a plan is recorded. The call is
-# how the model tells the harness the user's reply asks a different question,
-# so the message says what happened and that nothing further is needed from
-# it. `harness.planner_adapter` ends the turn on this code as it does on
-# `BUDGET_EXHAUSTED`.
+# The refusal for a `starts_new_plan` call while a plan is recorded, with or
+# without `amends_version`. The call is how the model tells the harness the
+# user's reply asks a different question, so the message says what happened
+# and that nothing further is needed from it. `harness.planner_adapter` ends
+# the planner's run on this code as it does on `BUDGET_EXHAUSTED`, and the
+# graph's `planner` node ends the turn, handing the reply on as the next
+# turn's question.
 _QUESTION_FIXED_RESTART = (
     "This turn's question is fixed, so `starts_new_plan` cannot open a plan for a "
     "different one; nothing is recorded, and the plan already on record stands "
@@ -1905,12 +1907,12 @@ def _resolve_intent(
     read as starting a fresh plan and drop every item it did not restate.
 
     With nothing recorded, the call is a first draft. With a plan recorded,
-    an `amends_version` naming that same version patches it. Anything else is
-    refused, naming the version to pass so the next call is correct.
-
-    `amends_version` and `starts_new_plan` are read in that order, so a call
-    stating both is treated as an amendment, since a payload shaped as a
-    patch is read as one. `rounds_so_far` counts the proposals made in this
+    a call stating `starts_new_plan` reports a different question, whatever
+    `amends_version` says: a model that names the version beside it still
+    means the user asked something else, and reading the pair as a patch
+    would record an empty amendment and drop the user's question. Otherwise
+    an `amends_version` naming the recorded version patches it. Anything else
+    is refused, naming the version to pass so the next call is correct. `rounds_so_far` counts the proposals made in this
     entry into the planner. `PlannerAdapter` zeroes it on every entry that is not
     a mid-turn resume. An amendment increments it, since every version opens a
     fresh discovery budget, and past `MAX_PLAN_ROUNDS` the call is refused
@@ -1921,7 +1923,7 @@ def _resolve_intent(
     held to `existing.question` rather than the call's own wording of the
     question it is answering:
 
-    - A restart (`starts_new_plan` with no `amends_version`) is refused with
+    - A restart (`starts_new_plan`) is refused with
       `QUESTION_FIXED` before the round cap is even checked, ahead of
       `BUDGET_EXHAUSTED`. Both refusals record nothing, so nothing is lost
       by checking this one first, and a restart can never succeed under a
@@ -1938,9 +1940,9 @@ def _resolve_intent(
     """
     if existing is None:
         return None, 1
-    blocked = _restart_blocked(
-        existing, amends_version=amends_version, starts_new_plan=starts_new_plan
-    ) or _round_cap_blocked(existing, rounds_so_far=rounds_so_far)
+    blocked = _restart_blocked(existing, starts_new_plan=starts_new_plan) or _round_cap_blocked(
+        existing, rounds_so_far=rounds_so_far
+    )
     if blocked is not None:
         return blocked
     invalid = _amendment_version_invalid(existing, amends_version) or _question_changed(
@@ -1951,15 +1953,13 @@ def _resolve_intent(
     return existing, rounds_so_far + 1
 
 
-def _restart_blocked(
-    existing: Plan, *, amends_version: int | None, starts_new_plan: bool
-) -> dict[str, object] | None:
+def _restart_blocked(existing: Plan, *, starts_new_plan: bool) -> dict[str, object] | None:
     """Return the `QUESTION_FIXED` refusal for a restart, or `None`.
 
     Split out of `_resolve_intent` to keep its own branch count within this
     project's `PLR0911` budget.
     """
-    if not (amends_version is None and starts_new_plan):
+    if not starts_new_plan:
         return None
     return problem(
         ProblemCode.QUESTION_FIXED,

@@ -4359,8 +4359,15 @@ def _amend_step(proposal: dict[str, Any], *, start_version: int) -> Any:
     return step
 
 
+@pytest.mark.parametrize(
+    "named",
+    [
+        pytest.param({}, id="restart"),
+        pytest.param({"amends_version": 3}, id="restart-naming-the-version"),
+    ],
+)
 async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
-    decision: Any, requirement: Any, derived_requirement: Any
+    decision: Any, requirement: Any, derived_requirement: Any, named: dict[str, Any]
 ) -> None:
     """The `amend` edge (`approve_n -> planner_n`) seeds `prior_plan` from
     the graph's own record, so a plan is already recorded when this call's
@@ -4372,7 +4379,14 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
     """
     seeded = _translated_plan(decision, requirement, derived_requirement, version=3)
     scripted = ScriptedGenai(
-        [_calls(("propose_plan", {"starts_new_plan": True, "question": "a different question"}))]
+        [
+            _calls(
+                (
+                    "propose_plan",
+                    {"starts_new_plan": True, "question": "a different question", **named},
+                )
+            )
+        ]
     )
     adapter = _scripted_planner(scripted)
     harness = PlannerHarness()
@@ -4386,6 +4400,7 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
     )
 
     assert result is not None and "refused" in result
+    assert result["refused"]["code"] == ProblemCode.QUESTION_FIXED
     assert "own message" in result["refused"]["text"]
     plan = load_plan(await harness.state())
     assert plan is not None

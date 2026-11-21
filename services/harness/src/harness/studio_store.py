@@ -780,6 +780,20 @@ class Renewal:
 
 
 @dataclass(frozen=True)
+class StoredConversation:
+    """A conversation as its row stands, read with no lock and no lease
+    (`StudioStore.peek`). `state` holds the durable fields, built apart from
+    this instance's live state. `turn_status` is the status of the cursor of
+    the row's turn, `None` when that turn has none (an Edit Card turn, or a
+    turn claimed and not yet opened). `lease_seconds` is how long the lease
+    on the row stays live by the database clock, `None` when none is."""
+
+    state: ConversationState
+    turn_status: TurnStatus | None
+    lease_seconds: float | None
+
+
+@dataclass(frozen=True)
 class TurnLease:
     """A lease `StudioStore.claim_turn_lease` claimed: the segment's id and
     the `conversations` row's id."""
@@ -1461,12 +1475,13 @@ class StudioStore:
         return entry.state
 
     async def _read(
-        self, principal: str, conversation_id: str
-    ) -> tuple[Any, dict[str, Any], Cursor | None] | None:
+        self, principal: str, conversation_id: str, *, turn_status: bool = False
+    ) -> tuple[Any, dict[str, Any], Cursor | None, TurnStatus | None] | None:
         """The conversation's row, with the database clock's reading as
-        `db_now`, its flat durable keys, and the cursor of its turn when that
-        turn's record is open and its cursor closed, read in one snapshot.
-        None when no row holds it."""
+        `db_now`, its flat durable keys, the cursor of its turn when that
+        turn's record is open and its cursor closed, and, with `turn_status`,
+        the status of its turn's cursor, read in one snapshot. None when no
+        row holds it."""
         async with self._engine.connect() as plain:
             conn = await plain.execution_options(isolation_level="REPEATABLE READ")
             async with conn.begin():
@@ -1487,7 +1502,13 @@ class StudioStore:
                     cursor = await cursor_at(conn, row.id, row.turn_index)
                     if cursor is not None and cursor.status in CLOSED:
                         closed = cursor
-        return row, flat, closed
+                status = closed.status if closed is not None else None
+                if turn_status and status is None and row.turn_index:
+                    at = (
+                        await conn.execute(_TURN_AT, {"pk": row.id, "turn_index": row.turn_index})
+                    ).first()
+                    status = TurnStatus(at.status) if at is not None else None
+        return row, flat, closed, status
 
     async def load(self, principal: str, conversation_id: str) -> ConversationState | None:
         """Reload `conversation_id`'s durable fields. `None` when the store
@@ -1513,6 +1534,32 @@ class StudioStore:
         async with entry.write_lock:
             return await self._load(entry, principal, conversation_id)
 
+    async def peek(self, principal: str, conversation_id: str) -> StoredConversation | None:
+        """`conversation_id` as its row stands, for a read that changes
+        nothing: no lock, no lease, and this instance's live state left as
+        it is, so a stream running here keeps its own. `None` when the store
+        does not hold the conversation.
+
+        A turn whose cursor closed with its record left open and no lease
+        live is shown recorded as `load` would record it
+        (`_record_closed_turn`), on the copy alone: nothing is written."""
+        stored = await self._read(principal, conversation_id, turn_status=True)
+        if stored is None:
+            return None
+        row, flat, closed, status = stored
+        state = ConversationState(conversation_id=conversation_id)
+        _apply_delta(state, flat)
+        lease = _row_segment(row)
+        live = lease is not None and lease.expires_at > row.db_now
+        if closed is not None and not live:
+            keep_turn_records(state, closed.state)
+            state.close_turn(final_text="", error=closed_turn_error(closed))
+        return StoredConversation(
+            state=state,
+            turn_status=status,
+            lease_seconds=lease.expires_at - row.db_now if lease is not None and live else None,
+        )
+
     async def _load(
         self, entry: _RuntimeEntry, principal: str, conversation_id: str
     ) -> ConversationState | None:
@@ -1521,7 +1568,7 @@ class StudioStore:
         stored = await self._read(principal, conversation_id)
         if stored is None:
             return None
-        row, flat, closed = stored
+        row, flat, closed, _ = stored
         durable = ConversationState(conversation_id=conversation_id)
         _apply_delta(durable, flat)
         version = row.version

@@ -158,6 +158,7 @@ from planner.plan import (
     plan_revision,
 )
 from planner.plan import Plan as PlannerPlan
+from planner.tool_results import ProblemCode
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 from sqlalchemy import text
@@ -3447,56 +3448,55 @@ _QUESTION_FIXED_TEXT = (
     "was not recorded as a change to it. Ask the other question as its "
     "own message."
 )
-_QUESTION_FIXED_STILL_APPROVABLE_TEXT = (
-    f"{_QUESTION_FIXED_TEXT} Version 1 is still there to approve; anything "
-    "past that needs a new question."
-)
 
 
 class _RestartRefusingPlanner(_RefusingAmendPlanner):
     """`_RefusingAmendPlanner`, refusing every later call the way a real
     `PlannerAdapter`, which holds the turn's question fixed
-    (`submission.service._resolve_intent`), refuses an amendment
-    that tries to restart for a different question: `QUESTION_FIXED`, not
-    `BUDGET_EXHAUSTED`. Records every call's own `question`, so a test can
-    prove `ctx.state["question"]` reached the second call unchanged from
-    the first."""
+    (`submission.service._resolve_intent`), refuses an amendment its model
+    reads as a different question (`starts_new_plan`, with or without
+    `amends_version`): `QUESTION_FIXED`. Records every call's own `question`
+    and `amendment`."""
 
     def __init__(self, schemas: list[ToolSchema]) -> None:
         super().__init__(schemas)
         self.questions_seen: list[str] = []
+        self.amendments_seen: list[str | None] = []
 
     async def __call__(self, *, question: str, **kwargs: Any) -> dict[str, Any]:
         self.questions_seen.append(question)
+        self.amendments_seen.append(kwargs.get("amendment"))
         if self.calls > 0:
             self.calls += 1
-            return {"refused": {"text": _QUESTION_FIXED_TEXT}}
+            return {
+                "refused": {
+                    "text": _QUESTION_FIXED_TEXT,
+                    "final": False,
+                    "code": ProblemCode.QUESTION_FIXED.value,
+                }
+            }
         return await super().__call__(question=question, **kwargs)
 
 
-async def test_an_amend_that_restarts_is_refused_with_no_version_regression_or_duplicate_id(
+async def test_a_new_question_typed_on_the_plan_card_ends_the_turn_and_hands_it_back(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """A restart the planner refuses (`QUESTION_FIXED`)
-    reaches the wire exactly like a `BUDGET_EXHAUSTED` refusal (see
-    `test_a_refused_amendment_still_offers_the_pending_version_for_approval`,
-    just above): the same pending plan is re-offered, under the same
-    `plan_version_id` and `revision` -- proving `_interrupt_frames`
-    (`harness.studio_translate`) neither regresses `latest_plan_version` nor
-    mints a second wire id for a version it already gave one to -- and no
-    `plan.versioned` frame fires, since nothing was recorded to supersede
-    the first card with. The planner drafts for the agent's brief; the
-    refused restart records nothing, so the second call sees the same brief
-    the first one did.
-    """
+    """The user types a different question on an open plan card, which the
+    client sends as `amend`, and the planner reads it as a new question
+    (`QUESTION_FIXED`). The turn ends `done`, its plan set aside unapproved,
+    with the typed words on `done` for the client to send as the next turn,
+    and no card is offered again. The next turn's history says the plan was
+    set aside."""
     executor = ScriptedExecutor()
     planner = _RestartRefusingPlanner(schemas=real_schemas)
     app = _app(
         *_plan("kenya debt"),
+        _text("Kenya's ODA in 2023 was 3 billion dollars."),
         executor=executor,
         planner=planner,
         tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
     )
+    typed = "what was Kenya's ODA in 2023?"
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("kenya debt"))
         plan_v1 = _frame(first, "plan.proposed")
@@ -3504,27 +3504,46 @@ async def test_an_amend_that_restarts_is_refused_with_no_version_regression_or_d
         second = await _stream(
             client,
             "/api/studio/interrupt",
-            _interrupt_body(plan_v1["interrupt_id"], "amend", "what was Kenya's ODA in 2023?"),
+            _interrupt_body(plan_v1["interrupt_id"], "amend", typed),
         )
 
+        assert "plan.proposed" not in _events(second)
         assert "plan.versioned" not in _events(second)
-        message = _frame(second, "message.complete")
-        assert message["text"] == _QUESTION_FIXED_STILL_APPROVABLE_TEXT
-        plan_again = _frame(second, "plan.proposed")
-        assert plan_again["version"] == plan_v1["version"]
-        assert plan_again["revision"] == plan_v1["revision"]
-        assert plan_again["plan_version_id"] == plan_v1["plan_version_id"]
-        assert plan_again["interrupt_id"] != plan_v1["interrupt_id"]
-
-        third = await _stream(
-            client,
-            "/api/studio/interrupt",
-            _interrupt_body(plan_again["interrupt_id"], "approve"),
+        assert "message.complete" not in _events(second)
+        done = second[-1]
+        assert done["event"] == "done"
+        assert done["new_question"] == typed
+        read = await client.get(
+            "/api/studio/state",
+            params={"conversation_id": CONVERSATION, "since": 0},
+            headers=AUTH,
         )
+        (closed,) = read.json()["closed_since"]
+        assert closed["new_question"] == typed
+        assert read.json()["turn"]["status"] == "done"
+
+        stale = await client.post(
+            "/api/studio/interrupt",
+            json=_interrupt_body(plan_v1["interrupt_id"], "approve"),
+            headers=AUTH,
+        )
+        assert stale.status_code == 404
+
+        third = await _stream(client, "/api/studio/turn", _turn_body(typed))
 
     assert _events(third)[-1] == "done"
-    assert "write_component" not in [c["tool"] for c in executor.calls]
-    assert planner.questions_seen == ["kenya debt", "kenya debt"]
+    assert "new_question" not in third[-1]
+    assert planner.amendments_seen == [None, typed]
+    history = _digest(_model(app).requests[-1], "Earlier turns in this conversation")
+    assert history is not None
+    (record,) = history["turns"]
+    assert record["ended"] == studio_state_module._SET_ASIDE
+    assert "error" not in record
+    reloaded = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert reloaded is not None
+    assert reloaded.turns[0]["ended_by"] == "new_question"
+    assert reloaded.turns[0]["new_question"] == typed
+    assert "ended_by" not in reloaded.turns[1]
 
 
 async def test_an_approval_is_recorded_with_its_approver_and_its_revision() -> None:

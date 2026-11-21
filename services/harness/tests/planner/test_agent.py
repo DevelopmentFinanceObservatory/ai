@@ -3084,11 +3084,12 @@ def test_a_call_with_no_plan_recorded_needs_no_statement_of_intent(
     assert result["previous_version"] is None
 
 
-def test_an_amendment_stating_both_reads_as_the_amendment(
+def test_a_call_stating_both_reads_as_a_new_question(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
-    # Both stated is an amendment. Patching the plan the version names is the
-    # narrower reading, so it wins.
+    # The Kenya turn: the model named the version it was shown beside
+    # `starts_new_plan`, and meant a different question. Read as a patch, the
+    # pair recorded an empty amendment and the user's question was lost.
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
@@ -3102,8 +3103,11 @@ def test_an_amendment_stating_both_reads_as_the_amendment(
         tool_context=ctx,
     )
 
-    assert result["outcome"] == Outcome.OK.value, result
-    assert result["version"] == 2
+    assert result["outcome"] == Outcome.REFUSED.value, result
+    assert result["code"] == ProblemCode.QUESTION_FIXED.value
+    stored = load_plan(ctx.state)
+    assert stored is not None
+    assert stored.version == 1
 
 
 # --- Patching an existing plan -----------------------------------------------------

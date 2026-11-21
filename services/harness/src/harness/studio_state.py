@@ -452,6 +452,12 @@ class Segment:
 # for each turn close and each pause one of its writes commits.
 TURN_LOG_EVENT = "studio.turn"
 
+# A turn record's `ended_by` for a turn the user ended by typing a different
+# question on its plan card (`ConversationState.close_turn`).
+NEW_QUESTION = "new_question"
+# What the conversation digest says of such a turn (`_history_turn`).
+_SET_ASIDE = "The user set this plan aside unapproved and asked a new question in the next turn."
+
 
 @dataclass
 class TurnUsage:
@@ -880,6 +886,7 @@ class ConversationState:
         error: str | None = None,
         match_notes: str | None = None,
         basis_line: str | None = None,
+        new_question: str | None = None,
     ) -> None:
         """Append the turn's record, once, since the resume protocol can end a
         turn from more than one code path. A turn recorded with an `error`
@@ -897,7 +904,13 @@ class ConversationState:
         appends to the reply after the model's `final_text`, in that order.
         The record keeps each under its own key, beside the answer, so the
         conversation digest (`_history_turn`) shows a later turn's model the
-        answer alone, and that model has no text of the code's own to copy."""
+        answer alone, and that model has no text of the code's own to copy.
+
+        `new_question` is the user's words for a turn that ended with its
+        plan card set aside, since the user typed a different question on
+        it. The record keeps them as `new_question`, with `ended_by` set to
+        `NEW_QUESTION`, and the conversation digest tells a later turn's
+        model the plan was set aside (`_history_turn`)."""
         if self.turn_recorded:
             return
         record: dict[str, Any]
@@ -927,6 +940,9 @@ class ConversationState:
             }
             if error:
                 record["error"] = error
+        if new_question:
+            record["ended_by"] = NEW_QUESTION
+            record["new_question"] = new_question
         record["trace_id"] = self.trace_id
         record["usage"] = dataclasses.asdict(self.turn_usage)
         self.turns.append(record)
@@ -1518,6 +1534,8 @@ def _history_turn(
         record["cards_omitted"] = len(cards) - len(kept)
     if turn.get("error"):
         record["error"] = _cut_text(turn["error"], _HISTORY_ERROR_BYTE_CAP >> shrink)
+    if turn.get("ended_by") == NEW_QUESTION:
+        record["ended"] = _SET_ASIDE
     return record
 
 

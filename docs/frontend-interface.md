@@ -72,11 +72,14 @@ the list of blocks on the canvas.
 | POST   | `/api/studio/interrupt`   | SSE stream of frames (continues a paused turn)   |
 | POST   | `/api/studio/composition` | JSON: the composition manifest after the request |
 | POST   | `/api/studio/cancel`      | HTTP 204, no body                                |
+| POST   | `/api/studio/resume`      | SSE stream of frames (continues a running turn)  |
+| GET    | `/api/studio/state`       | JSON: the conversation as stored                 |
 | GET    | `/healthz`                | JSON liveness                                    |
 
 ## 3. The stream
 
-The server answers `/turn` and `/interrupt` with Server-Sent Events.
+The server answers `/turn`, `/interrupt` and `/resume` with Server-Sent
+Events.
 
 - Each frame is one `data: <json>` line. Parse the JSON. Read the `event`
   field to know the frame type.
@@ -97,8 +100,8 @@ The server answers `/turn` and `/interrupt` with Server-Sent Events.
   instance: a durable lease in the conversation's ledger, renewed every 5
   seconds and good for 45, enforces it. A second `/turn` or `/interrupt`
   during a stream gets HTTP 409 with `retry_after_seconds` set to the
-  lease's remaining time. `/cancel` and `/composition` are not blocked by
-  a stream. To stop a stream, use `/cancel` or close the connection;
+  lease's remaining time. `/cancel`, `/composition` and `GET /state` are
+  not blocked by a stream. To stop a stream, use `/cancel` or close the connection;
   `/cancel` reaches a stream running on another instance within about 5
   seconds.
 
@@ -387,8 +390,65 @@ plan-card `switch` is the exception: `/cancel` stops the switch, and the stream 
 the stream after the call. A second `/cancel`, or 10 seconds with no
 re-offered plan, ends it with the `cancelled` error frame. The call is
 safe when nothing streams. A
-closed connection also stops the turn, but proxies can hide a closed
+closed connection stops the stream too and leaves the turn open where it
+stopped, for `/resume` to carry on (§4.5). Proxies can hide a closed
 connection. Use `/cancel` for the Stop button.
+
+### 4.5 `turn.resume` → POST `/api/studio/resume`
+
+Fields: `kind: "turn.resume"`, `schema_version: 1`, `conversation_id`,
+`turn_index` (the `turn.index` a state read returned, §4.6).
+
+The server carries on the turn on a new stream, which you read as any
+other. Send it when the state read shows `status: "running"` and
+`lease_live: false`: the turn's last stream lost its client, a reload say,
+and the turn makes no progress until a client resumes it. The turn runs
+the step it stopped in again from its start, so the new stream carries no
+`activity.step` lines for earlier steps. A `plan.approved` the turn never
+sent goes out once. The stream ends with `done`, a pause or an `error`
+frame.
+
+| Case                                              | Answer                                                          |
+| ------------------------------------------------- | --------------------------------------------------------------- |
+| the turn is open, running, and no stream holds it | a new SSE stream                                                |
+| `turn_index` is not the open turn, or none is     | 409 `edit_conflict`, `pointer: "/turn_index"`: read state again |
+| the turn is paused on a question                  | 409 `edit_conflict`: answer it on `/interrupt`                  |
+| a stream holds the turn                           | 409 `transient_unavailable` with `retry_after_seconds`          |
+| unknown `conversation_id`                         | 404 `not_found`                                                 |
+
+### 4.6 GET `/api/studio/state`
+
+Query: `conversation_id`, and `since`, the number of the last turn the
+page holds (0 for none). The answer is JSON. The call takes no lease, so
+it answers while a turn streams, and it changes nothing. An unknown
+`conversation_id` answers 404 `not_found`. A member with no value is left
+out.
+
+- `turn`: `{index, status, trace_id, lease_live, retry_after_seconds}`.
+  `status` is `running`, `paused`, `done`, `failed`, `cancelled` or
+  `abandoned`. `retry_after_seconds` is set while `lease_live` is true.
+  Absent before the first turn.
+- `closed_since`: the closed turns after `since`, oldest first, at most 3,
+  each `{turn_index, user_message, reply, component_ids, error?}`. `reply`
+  is the text `message.complete` sent, empty when the turn closed with
+  none; `error` is the code of a turn that did not end cleanly;
+  `new_question` is set on a turn ended by a new question (§6), which the
+  page sends as the next turn when it holds none after it. When more
+  turns are missing, read again with `since` set to the last one returned.
+- `pause`: on a paused turn, `{interrupt_id, kind, frames}`. `kind` is
+  `plan` or `elicitation`. `frames` are the frames the pause was sent as,
+  its `plan.proposed` or `elicitation.request` last; feed them to the same
+  handlers as live frames.
+- `manifest`: the composition manifest, absent when there is no canvas.
+
+On page load, after drawing what the page kept, read the state and act on
+`turn`:
+
+- `running`, `lease_live: false`: send `turn.resume` with `turn.index`.
+- `running`, `lease_live: true`: another stream holds the turn. Read the
+  state again after `retry_after_seconds` until it changes.
+- `paused`: show `pause` and answer it on `/interrupt`.
+- closed: append the turns of `closed_since` the page does not hold.
 
 ## 5. Frames
 
@@ -408,7 +468,7 @@ Every frame has `event` and `seq`. The other fields per type:
 | `elicitation.request` | `interrupt_id`, `questions[]` (1 to 3), `skippable`                                                                                                                                                                | One to three questions for the user. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `suggestions`         | `items[]`                                                                                                                                                                                                          | Follow-up chips: `apply_choice` chips (4.1.2), or none.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `error`               | `error` (a ToolError object)                                                                                                                                                                                       | The turn failed. **No `done` follows.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `done`                | `trace_id`, `composition?`                                                                                                                                                                                         | The turn is complete. `composition` is the conversation's current manifest, or absent when the conversation has no canvas.                                                                                                                                                                                                                                                                                                                                                                                               |
+| `done`                | `trace_id`, `composition?`, `new_question?`                                                                                                                                                                        | The turn is complete. `composition` is the conversation's current manifest, or absent when the conversation has no canvas. `new_question` is set when the user's `amend` text asked a different question: see §6.                                                                                                                                                                                                                                                                                                        |
 
 Notes on specific fields:
 
@@ -622,6 +682,12 @@ a loop:
    `switch_cancelled`.
 1. `reject` ends the turn. The stream sends `message.complete` and `done`.
    Nothing was computed.
+1. When the `amend` text asks a different question rather than a change to
+   the plan, the turn ends with the plan set aside unapproved. The stream
+   sends `done` with `new_question`, the text as sent, and no message or
+   new card. Close the card as "Taken as a new question" and send
+   `new_question` as a new `turn.request`. An answer to the closed card's
+   `interrupt_id` gets 404.
 
 A new `turn.request` on a paused conversation abandons the pause.
 

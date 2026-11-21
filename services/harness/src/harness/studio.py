@@ -1,12 +1,16 @@
 """The studio endpoints: the v1 wire contract served over the turn loop.
 
-Three routes (`docs/studio-contract-v1.md`):
+The routes (`docs/studio-contract-v1.md`):
 
 * `POST /api/studio/turn`: runs one turn and streams v1 frames as SSE.
 * `POST /api/studio/interrupt`: resumes a paused turn; the response is a
   NEW SSE stream continuing it (contract delta 1).
+* `POST /api/studio/resume`: carries on a running turn no segment holds,
+  one whose client left; the response is a NEW SSE stream continuing it.
+* `POST /api/studio/cancel`: stops the conversation's turn.
 * `POST /api/studio/composition`: applies canvas mutations and returns the
   new manifest as plain JSON.
+* `GET /api/studio/state`: the conversation as stored, read with no lease.
 
 A turn runs on the turn loop (`harness.turn`) over the graph
 `harness.graph.workflow.studio_graph` builds: `/turn` opens it at the
@@ -43,6 +47,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextlib import (
@@ -56,7 +61,7 @@ from common.telemetry import flush_telemetry
 from compiler.surface import SpecUse, ToolSurface, current_spec_uses
 from executor.ledger import UNFINISHED_STATUSES, submission_content
 from executor.run import UnrunnablePlan, approved_work, run_candidate
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from planner.plan import (
@@ -85,6 +90,7 @@ from harness.graph.events import GraphEvent, StepProgress
 from harness.graph.interfaces import Executor
 from harness.graph.state import (
     APPLY_CHOICE_STATE_KEY,
+    NEW_QUESTION_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     TurnInput,
 )
@@ -120,6 +126,7 @@ from harness.studio_store import (
     ConversationExists,
     ConversationStale,
     StopPending,
+    StoredConversation,
     StudioStore,
     closed_turn_error,
     retry_delays,
@@ -161,27 +168,34 @@ from harness.turn.store import (
 from harness.turn_budget import start_turn_budget
 from harness.turn_records import CHIP_STALE_NOTE, stored_choice
 from harness.wire import (
+    MAX_CLOSED_SINCE,
     MAX_TURN_REQUEST_BYTES,
     AddOp,
     ApplyChoice,
     CancelRequest,
+    ClosedTurn,
     ComponentRefIntent,
     CompositionActor,
     CompositionManifest,
     CompositionMutation,
+    ConversationRead,
     ElicitationAnswer,
     ErrorCode,
     ErrorFrame,
     InterruptDecision,
     InterruptResponse,
     OptionAnswer,
+    PendingPause,
     PlanProposed,
     PlanRevisionStaleError,
+    ResumeRequest,
     RetryMode,
     SkippedAnswer,
     TextAnswer,
     ToolError,
     TurnRequest,
+    TurnState,
+    TurnStatusName,
 )
 
 logger = logging.getLogger(__name__)
@@ -916,7 +930,12 @@ class _SegmentWork:
         outcome = segment.outcome
         assert outcome is not None
         match outcome:
-            case Outcome.PAUSED | Outcome.DONE:
+            case Outcome.DONE:
+                typed = segment.cursor.state.get(NEW_QUESTION_KEY)
+                return outcome, await self._translator.finish(
+                    new_question=typed if isinstance(typed, str) and typed else None
+                )
+            case Outcome.PAUSED:
                 return outcome, await self._translator.finish()
             case Outcome.FAILED if not self._failed:
                 return outcome, [recorded_fatal(conversation, segment.cursor.error or {})]
@@ -1175,6 +1194,125 @@ class _BoundedTurnRoute(APIRoute):
                 )
 
         return bounded
+
+
+def _resume_refusal(cursor: Cursor | None, turn_index: int) -> JSONResponse | None:
+    """The 409 `edit_conflict` a `/resume` of turn `turn_index` answers when
+    `cursor`, the conversation's open turn, is not that turn running: no
+    turn is open, another turn is, or the turn is paused on a question,
+    which only an answer carries on. `None` when the resume may run."""
+    if cursor is None or cursor.turn_index != turn_index:
+        return _not_open_turn_response(turn_index)
+    if cursor.status is not TurnStatus.RUNNING:
+        return _resume_conflict(
+            f"turn {turn_index} is paused on a question, which an answer carries on"
+        )
+    return None
+
+
+def _not_open_turn_response(turn_index: int) -> JSONResponse:
+    """The 409 `edit_conflict` for a `/resume` of a turn that is not open."""
+    return _resume_conflict(f"turn {turn_index} is not the conversation's open turn")
+
+
+def _resume_conflict(detail: str) -> JSONResponse:
+    """A `/resume` refused for the turn it names: 409 `edit_conflict`."""
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.EDIT_CONFLICT,
+            retry=RetryMode.REFRESH_THEN_RETRY,
+            detail=detail,
+            pointer="/turn_index",
+            fix="read the conversation's state and follow what it shows",
+        ),
+        status_code=409,
+    )
+
+
+def _closed_turn(turn_index: int, record: Mapping[str, Any]) -> ClosedTurn:
+    """Turn `turn_index` as its stored record holds it. The reply is the
+    answer with the notes and the basis line the stream appended to it
+    (`ConversationState.close_turn`), as its `message.complete` sent it."""
+    reply = "".join(
+        [
+            record.get("assistant") or "",
+            *(
+                f"\n\n{block}"
+                for key in ("match_notes", "basis_line")
+                if (block := record.get(key))
+            ),
+        ]
+    )
+    return ClosedTurn(
+        turn_index=turn_index,
+        user_message=record.get("user") or "",
+        reply=reply,
+        component_ids=[
+            card["component_id"]
+            for card in record.get("cards") or []
+            if isinstance(card, Mapping) and isinstance(card.get("component_id"), str)
+        ],
+        error=record.get("error"),
+        new_question=record.get("new_question"),
+    )
+
+
+def _read_turn_status(stored: StoredConversation) -> TurnStatusName:
+    """Where the conversation's turn stands. Its cursor decides when it has
+    one. A turn with none (an Edit Card turn, or one claimed and not yet
+    opened) runs while a segment holds it, and is otherwise as its record
+    closed it, or abandoned when nothing recorded it, as the next turn
+    records it."""
+    if stored.turn_status is not None:
+        return TurnStatusName(stored.turn_status.value)
+    state = stored.state
+    if not state.turn_recorded:
+        live = stored.lease_seconds is not None
+        return TurnStatusName.RUNNING if live else TurnStatusName.ABANDONED
+    error = state.turns[-1].get("error") if state.turns else None
+    if error is None:
+        return TurnStatusName.DONE
+    if error in (TurnStatusName.CANCELLED, TurnStatusName.ABANDONED):
+        return TurnStatusName(error)
+    return TurnStatusName.FAILED
+
+
+def _conversation_read(stored: StoredConversation, *, since: int | None) -> ConversationRead:
+    """`GET /api/studio/state`'s answer for `stored`: the turn, the closed
+    turns after `since` (none when it is `None`), the open pause, and the
+    canvas. A conversation's records are kept one per turn in turn order
+    (`ConversationState.close_turn`), so record `n - 1` is turn `n`'s."""
+    state = stored.state
+    turn = (
+        TurnState(
+            index=state.turn_index,
+            status=_read_turn_status(stored),
+            trace_id=state.trace_id,
+            lease_live=stored.lease_seconds is not None,
+            retry_after_seconds=(
+                math.ceil(stored.lease_seconds) if stored.lease_seconds is not None else None
+            ),
+        )
+        if state.turn_index
+        else None
+    )
+    indexes = range(since + 1, len(state.turns) + 1) if since is not None else range(0)
+    closed = [_closed_turn(index, state.turns[index - 1]) for index in indexes[:MAX_CLOSED_SINCE]]
+    pause = None
+    if stored.turn_status is TurnStatus.PAUSED:
+        awaiting = [p for p in state.pending.values() if p.resuming_segment is None]
+        if awaiting:
+            pending = awaiting[-1]
+            pause = PendingPause.model_validate(
+                {"interrupt_id": pending.adk_id, "kind": pending.kind, "frames": pending.frames}
+            )
+    return ConversationRead(
+        conversation_id=state.conversation_id,
+        turn=turn,
+        closed_since=closed,
+        pause=pause,
+        manifest=state.composition,
+    )
 
 
 def _no_pending_interrupt_response(interrupt_id: str) -> JSONResponse:
@@ -2747,6 +2885,237 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
             raise
 
+    @router.post("/resume")
+    async def resume(  # noqa: PLR0911 -- one distinct refusal per claim guard the route enforces
+        body: ResumeRequest,
+        authorization: str | None = Header(default=None),
+        x_dfo_account: str | None = Header(default=None),
+        x_dfo_caller: str | None = Header(default=None),
+    ) -> Response:
+        """Carry on turn `turn_index` from its cursor, on a new stream, when
+        it is the conversation's open turn, running, and no segment holds
+        it: a turn whose client left while it ran, whose owner then
+        cancelled the drive and cleared the lease
+        (`harness.studio_stream`). This is the path an `/interrupt` retry
+        takes when it finds the turn running, with no answer: the segment
+        runs the node at the cursor from its start, and a node that owes an
+        accepted answer to its `resume` reads it from the turn
+        (`harness.turn.loop.run_segment`). An answer to an approved plan
+        whose approval the turn has not yet taken sends `plan.approved`
+        once, as that retry does.
+
+        A turn that is not open, another turn, or a turn paused on a
+        question answers 409 `edit_conflict` (`_resume_refusal`), checked
+        before the claim and again on the cursor read after it, since a
+        segment whose lease lapsed can move the turn until the claim
+        commits. A live lease answers the 409 `transient_unavailable` every
+        claim conflict answers, with the lease's remaining time, and a Stop
+        live for the turn closes it first and answers `edit_conflict`.
+
+        A pending entry the departed client's segment left resuming is
+        marked resuming under this segment and saved before the stream, as
+        `_replay_pause` marks one, so the stream's closing write drops it on
+        every ending but another client that leaves, which keeps it for the
+        next resume."""
+        principal = principal_for(authorization, settings=settings)
+        account, visitor = studio_identity(
+            account=x_dfo_account, caller=x_dfo_caller, settings=settings
+        )
+        conversation_id = body.conversation_id
+        hold = await _acquire_or_conflict(studio.store, principal, conversation_id)
+        if isinstance(hold, JSONResponse):
+            return hold
+        # As in `/interrupt`: the working copy of the claim, whose trace
+        # records how the request let go of it, the segment the claim save
+        # claims, and that segment while the save runs (`saving`).
+        claiming: ConversationState | None = None
+        segment_id: str | None = None
+        saving: str | None = None
+        try:
+            conversation = await studio.store.load(principal, conversation_id)
+            if conversation is None:
+                hold.release()
+                return _unknown_conversation_response(conversation_id)
+            if await studio.store.stop_live(principal, conversation_id):
+                # A Stop live for the turn closes it, which leaves no turn to
+                # carry on.
+                return await _answer_after_stop(
+                    studio,
+                    principal,
+                    conversation_id,
+                    hold,
+                    _not_open_turn_response(body.turn_index),
+                )
+            cursor = await studio.turns.open_cursor(principal, conversation_id)
+            refusal = _resume_refusal(cursor, body.turn_index)
+            if refusal is not None:
+                hold.release()
+                return refusal
+            assert cursor is not None
+            work = studio.store.draft(principal, conversation_id)
+            try:
+                segment_id = studio.store.claim_segment(principal, conversation_id, work)
+            except SegmentBusy as exc:
+                return await _unclaimed(
+                    studio.store,
+                    principal,
+                    conversation_id,
+                    hold,
+                    _streaming_conflict_response(
+                        "another request is streaming on this conversation",
+                        retry_after_seconds=exc.retry_after_seconds,
+                    ),
+                )
+            claiming = work
+            # The resumed turn keeps who asked it, and names its own id, as
+            # an `/interrupt` resume does.
+            current_conversation_id.set(ledger_conversation_id(principal, conversation_id))
+            current_conversation_key.set((principal, conversation_id))
+            current_turn_id.set(work.trace_id)
+            set_supplied_caller(current_conversation_caller())
+            set_supplied_turn(work.trace_id)
+            surface = cursor.state.get("surface")
+            work.take_identity(
+                account=account,
+                visitor=visitor,
+                caller=current_conversation_caller(),
+                surface=surface if isinstance(surface, str) else None,
+            )
+            saving = segment_id
+            try:
+                await studio.store.save(principal, conversation_id, work)
+            except StopPending:
+                saving = None
+                return await _answer_after_stop(
+                    studio,
+                    principal,
+                    conversation_id,
+                    hold,
+                    _not_open_turn_response(body.turn_index),
+                    turn=claiming,
+                )
+            except ConversationStale:
+                saving = None
+                return await _unclaimed(
+                    studio.store,
+                    principal,
+                    conversation_id,
+                    hold,
+                    _streaming_conflict_response(
+                        "another request is streaming on this conversation"
+                    ),
+                    turn=claiming,
+                )
+            saving = None
+        except BaseException as exc:
+            # As in `/interrupt`: a claim save that raised once it committed
+            # handed its segment to the live state, and one the live state
+            # does not hold may still have committed.
+            live = studio.store.current(principal, conversation_id)
+            held = (
+                segment_id is not None
+                and live is not None
+                and live.segment is not None
+                and live.segment.id == segment_id
+            )
+            await _release_claim(
+                studio.store,
+                principal,
+                conversation_id,
+                hold,
+                segment_id if held else None,
+                cause=exc,
+                turn=claiming,
+                unsure=None if held else saving,
+            )
+            raise
+
+        assert segment_id is not None
+        try:
+            claimed = await studio.turns.open_cursor(principal, conversation_id)
+            refusal = _resume_refusal(claimed, body.turn_index)
+            if refusal is not None:
+                await _release_claim(
+                    studio.store, principal, conversation_id, hold, segment_id, turn=claiming
+                )
+                return refusal
+            assert claimed is not None
+            work = studio.store.draft(principal, conversation_id)
+            left = [p for p in work.pending.values() if p.resuming_segment is not None]
+            for pending in left:
+                pending.resuming_segment = segment_id
+            if left:
+                try:
+                    await studio.store.save(principal, conversation_id, work)
+                except ConversationStale:
+                    await _release_claim(
+                        studio.store, principal, conversation_id, hold, segment_id, turn=claiming
+                    )
+                    return _tool_error_response(
+                        ToolError(
+                            error=ErrorCode.EDIT_CONFLICT,
+                            retry=RetryMode.REFRESH_THEN_RETRY,
+                            detail="the conversation changed before this resume was saved",
+                            fix="read the conversation's state and follow what it shows",
+                        ),
+                        status_code=409,
+                    )
+            else:
+                studio.store.drop_draft(principal, conversation_id)
+            conversation = studio.store.current(principal, conversation_id)
+            assert conversation is not None
+            answered = next(
+                (p for p in conversation.pending.values() if p.resuming_segment == segment_id),
+                None,
+            )
+            current_spec_uses.set(
+                _spec_use_sink(studio.store, principal, conversation_id, conversation.trace_id)
+            )
+            if answered is not None and studio.surface_recorder is not None:
+                studio.surface_recorder.set_step_order(
+                    ledger_conversation_id(principal, conversation_id),
+                    answered.step_order,
+                    answered.step_labels,
+                )
+            _set_turn_context(principal, conversation_id, conversation, settings)
+            approving = (
+                answered.card
+                if answered is not None
+                and answered.answer is not None
+                and answered.answer.get("decision") == InterruptDecision.APPROVE.value
+                else None
+            )
+            # The segment's owner takes the lease and the lock hold from here on.
+            return open_stream(
+                _SegmentWork(
+                    studio,
+                    principal=principal,
+                    conversation=conversation,
+                    cursor=claimed,
+                    segment_id=segment_id,
+                    approving=approving,
+                ),
+                owners=studio.owners,
+                store=studio.store,
+                conversation=conversation,
+                principal=principal,
+                conversation_id=conversation_id,
+                segment_id=segment_id,
+                hold=hold,
+                settle=studio.early_mints.settle if studio.early_mints is not None else None,
+            )
+        except BaseException as exc:
+            await _release_claim(
+                studio.store,
+                principal,
+                conversation_id,
+                hold,
+                segment_id,
+                cause=exc,
+                turn=claiming,
+            )
+            raise
+
     @router.post("/composition")
     async def composition(
         body: CompositionMutation, authorization: str | None = Header(default=None)
@@ -2803,5 +3172,25 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if isinstance(result, JSONResponse):
                 return result
             return JSONResponse(content=json.loads(result.model_dump_json(exclude_none=True)))
+
+    @router.get("/state")
+    async def state(
+        conversation_id: str,
+        since: int | None = Query(default=None, ge=0),
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        """The conversation as stored (`harness.wire.ConversationRead`), read
+        with no lock and no lease (`StudioStore.peek`), so it answers while a
+        turn streams on any instance and changes nothing. `since` names the
+        last turn the client holds; the closed turns after it come back,
+        oldest first, at most `MAX_CLOSED_SINCE`. An unknown conversation
+        answers 404 `not_found`. Members with no value are left out, as a
+        stream's frames leave them out."""
+        principal = principal_for(authorization, settings=settings)
+        stored = await studio.store.peek(principal, conversation_id)
+        if stored is None:
+            return _unknown_conversation_response(conversation_id)
+        read = _conversation_read(stored, since=since)
+        return JSONResponse(content=json.loads(read.model_dump_json(exclude_none=True)))
 
     return router
