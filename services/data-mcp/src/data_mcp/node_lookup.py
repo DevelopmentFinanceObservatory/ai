@@ -5,7 +5,8 @@
 `data_mcp.graph_wire` models. An entry is one envelope per kind (`ref`, `label`, `kind`,
 `types`, `description`, `links`, `gaps`, `built_from` and the kind's block), or a
 `NotHeldEntry` for a dcid this deployment's graph does not hold. A failed request fails the
-whole call.
+whole call. A ref that is not a dcid (`data_mcp.dcid.is_dcid`) is never sent, since the
+route refuses the whole batch for it; it is answered as a `NotHeldEntry`.
 
 `variable_text` is the line that stands for a variable in planner text: its `description`,
 else a line composed from its card's `definition`.
@@ -26,6 +27,7 @@ from pydantic import ValidationError
 
 from data_mcp.client import GRAPH_PREFIX
 from data_mcp.client_holder import get_client
+from data_mcp.dcid import bare_dcid, is_dcid
 from data_mcp.graph_wire import (
     AggregateNode,
     CodeNode,
@@ -81,11 +83,13 @@ async def describe_nodes(dcids: Sequence[str]) -> dict[str, NodeOutcome]:
     """Read every dcid in `dcids` through the node batch route, keyed by dcid.
 
     Args:
-        dcids: The dcids to look up. Deduplicated order-preservingly before dispatch, so
-            the returned mapping carries one entry per unique dcid.
+        dcids: The refs to look up. Deduplicated order-preservingly before dispatch, so
+            the returned mapping carries one entry per unique ref, in that order. Only
+            refs that are dcids are sent, each without its `dcid:` marker.
 
     Returns:
-        dcid -> the node's envelope, or a `NotHeldEntry` for a dcid the graph does not hold.
+        ref, as given -> the node's envelope, or a `NotHeldEntry` for a dcid the graph does
+        not hold and for a ref that is not a dcid.
 
     Raises:
         UpstreamError: a batch request failed. Propagates the first failure in dcid order,
@@ -94,14 +98,15 @@ async def describe_nodes(dcids: Sequence[str]) -> dict[str, NodeOutcome]:
         ValueError: a 2xx body answered a different number of dcids, or an entry named a
             different dcid than the one requested.
     """
-    unique_dcids = list(dict.fromkeys(dcids))
-    if not unique_dcids:
-        return {}
-    client = get_client()
+    unique_refs = list(dict.fromkeys(dcids))
+    bare = {ref: bare_dcid(ref) for ref in unique_refs}
+    unique_dcids = list(dict.fromkeys(dcid for dcid in bare.values() if is_dcid(dcid)))
     chunks = list(itertools.batched(unique_dcids, _MAX_DCIDS_PER_REQUEST, strict=False))
     responses = await asyncio.gather(
         *(
-            client.request("POST", _NODES_ROUTE, route=_NODES_ROUTE, json={"dcids": list(chunk)})
+            get_client().request(
+                "POST", _NODES_ROUTE, route=_NODES_ROUTE, json={"dcids": list(chunk)}
+            )
             for chunk in chunks
         ),
         return_exceptions=True,
@@ -125,7 +130,10 @@ async def describe_nodes(dcids: Sequence[str]) -> dict[str, NodeOutcome]:
                     f"the nodes route answered {entry.ref!r} for a request for {dcid!r}"
                 )
             outcomes[dcid] = entry
-    return outcomes
+    return {
+        ref: outcomes.get(bare[ref], NotHeldEntry(ref=ref, status="not_held"))
+        for ref in unique_refs
+    }
 
 
 def variable_text(node: StatVarNode) -> str | None:

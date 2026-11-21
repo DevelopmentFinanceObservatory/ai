@@ -14,13 +14,13 @@ module hands back. Rendering those outcomes into the digest lives in
 
 from __future__ import annotations
 
-import re
 from typing import Annotated
 
 from fastmcp.tools import ToolResult
 from pydantic import Field, ValidationError
 
 from data_mcp import node_lookup
+from data_mcp.dcid import DCID_MAX_LENGTH, bare_dcid, has_dot_segment, is_dcid
 from data_mcp.describe_digest import render_describe_digest
 from data_mcp.errors import UpstreamError
 from data_mcp.graph_wire import NotHeldEntry
@@ -30,22 +30,6 @@ from data_mcp.tool_errors import ToolRefusal, from_upstream_error, to_tool_resul
 # that cites it interpolates the real bound rather than a literal that could
 # drift from the check below.
 DESCRIBE_ID_CAP = 8
-
-# Mirrors the node batch route's own dcid grammar: one or more `/`-separated
-# segments, each drawn from `[A-Za-z0-9_.-]`. The route refuses a whole batch
-# that holds one malformed dcid, so validating each id locally, before
-# dispatch, names the offending id at its own `/ids/<index>` pointer.
-DCID_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)*$")
-
-# Other tools' own refusals quote a stat_var ref with this prefix, e.g.
-# `dcid:sdg/DC_TOF_HLTHL`. Stripping it before grammar validation lets that
-# exact quoted form work here unchanged.
-_DCID_PREFIX = "dcid:"
-
-
-def _strip_dcid_prefix(ids: list[str]) -> list[str]:
-    """Strip a leading `dcid:` prefix from each id, so the bare dcid reaches validation."""
-    return [dcid.removeprefix(_DCID_PREFIX) for dcid in ids]
 
 
 def _cap_and_grammar_refusal(ids: list[str]) -> ToolResult | None:
@@ -64,21 +48,25 @@ def _cap_and_grammar_refusal(ids: list[str]) -> ToolResult | None:
             )
         )
     for index, dcid in enumerate(ids):
-        if not DCID_PATTERN.fullmatch(dcid):
+        # The node batch route refuses a whole batch that holds one malformed dcid, so
+        # validating each id here, before dispatch, names the offending id at its own
+        # `/ids/<index>` pointer.
+        if not is_dcid(dcid):
             return to_tool_result(
                 ToolRefusal.request_invalid(
                     tool="describe",
                     pointer=f"/ids/{index}",
                     detail=(
                         f"{dcid!r} is not a well-formed dcid; expected one or more "
-                        "'/'-separated segments of letters, digits, '_', '.', or '-'"
+                        "'/'-separated segments of letters, digits, '_', '.', or '-', "
+                        f"in at most {DCID_MAX_LENGTH} characters"
                     ),
                 )
             )
         # The grammar above admits dots inside a segment, which stay legal,
         # but a segment that is exactly `.` or `..` is never a dcid. Refusing
         # it here names it malformed, where the route would call it unheld.
-        if any(segment in (".", "..") for segment in dcid.split("/")):
+        if has_dot_segment(dcid):
             return to_tool_result(
                 ToolRefusal.request_invalid(
                     tool="describe",
@@ -138,7 +126,9 @@ async def describe(
         A digest: one block per dcid, shaped by its node type, plus a
         trailing note for any dcid this deployment's graph does not hold.
     """
-    ids = _strip_dcid_prefix(ids)
+    # Other tools' own refusals quote a stat_var ref behind `ENTITY_DCID_MARKER`, e.g.
+    # `dcid:sdg/DC_TOF_HLTHL`; stripping it lets that exact quoted form work here unchanged.
+    ids = [bare_dcid(dcid) for dcid in ids]
     refusal = _cap_and_grammar_refusal(ids)
     if refusal is not None:
         return refusal

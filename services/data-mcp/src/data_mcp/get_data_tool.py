@@ -171,7 +171,9 @@ _SPEC_ID_PATTERN = r"^spec_[0-9a-f]{32}$"
 # entity-role namespace is lowercase-initial. A slash alone is not enough:
 # `Congo/Brazzaville` and `Bosnia/Herzegovina` are spoken names a caller types, so a
 # capitalised segment before the slash is a name to resolve. A bare dcid such as
-# `GroupOfSeven` has no slash and passes only behind `ENTITY_DCID_MARKER`.
+# `GroupOfSeven` has no slash and passes only behind `ENTITY_DCID_MARKER`. This decides what
+# `get_data` treats as a dcid rather than a name to resolve; `data_mcp.dcid.DCID_PATTERN`
+# decides what the nodes route accepts.
 _DCID_PATTERN = re.compile(r"^[a-z][A-Za-z0-9_.\-]*(?:/[A-Za-z0-9_.\-]+)+$")
 
 # What `get_data(stat_vars="sum")` asks apis for: `by` names the columns to keep,
