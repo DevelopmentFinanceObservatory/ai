@@ -65,6 +65,7 @@ from presentation_mcp import client as client_module
 from presentation_mcp import server
 from presentation_mcp.app_view import app_data, app_shell, notice_view, view_state
 from presentation_mcp.assembler_holder import get_assembler
+from presentation_mcp.chart_worker import ChartWorker
 from presentation_mcp.client import PlatformAssembler
 from presentation_mcp.errors import PlatformError, PlatformTransportError
 from presentation_mcp.platform_contract import (
@@ -681,6 +682,26 @@ async def test_a_platform_that_answers_on_the_third_attempt_mounts_every_tool_be
         assert server._health == {"status": "ok"}
 
     assert await mcp.list_tools(run_middleware=False) == []
+
+
+async def test_startup_ends_once_the_chart_worker_is_warm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cloud Run throttles an instance's CPU outside requests once startup
+    ends, so a warm-up still running then starves until it times out."""
+    monkeypatch.setattr(
+        server, "PlatformAssembler", _stub_platform_assembler(_PlatformDownAtBoot(failures=0))
+    )
+    monkeypatch.setattr(server, "settings", _required())
+    worker = ChartWorker(timeout_s=5.0, warm=True)
+    monkeypatch.setattr(server, "_chart_worker", worker)
+
+    async with server._lifespan(mcp):
+        warming = worker._warming
+        assert warming is not None
+        assert warming.done()
+        assert worker._process is not None
+        assert worker._process.is_alive()
 
 
 async def test_an_in_flight_fetch_is_cancelled_at_the_deadline(
