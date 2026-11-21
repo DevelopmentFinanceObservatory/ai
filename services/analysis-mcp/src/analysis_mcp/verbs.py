@@ -325,6 +325,7 @@ def _aggregate(a: Arguments) -> AggregateOpSpec:
         aggregation=a["aggregation"],
         group_by=tuple(a["group_by"]),
         unit=a["unit"],
+        allow_sparse_breakdowns=a["allow_sparse_breakdowns"],
     )
 
 
@@ -375,6 +376,8 @@ def _rank(a: Arguments) -> RankOpSpec:
             per_period=a["per_period"],
             limit=a["limit"],
             rolling=a["rolling"],
+            partition_by=tuple(a["partition_by"]),
+            allow_sparse_breakdowns=a["allow_sparse_breakdowns"],
         ),
         a["anchor_key"],
     )

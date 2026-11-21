@@ -569,6 +569,45 @@ def _filter(*predicates: dict[str, object], **fields: object) -> FilterOpSpec:
     return FilterOpSpec(frame_ref=SNAPSHOT_REF, predicates=predicates, **fields)
 
 
+@pytest.mark.parametrize(
+    ("unset", "set_", "stated"),
+    [
+        pytest.param(
+            _rank(),
+            _rank(partition_by=("financingRecipient", "crsPurpose")),
+            {"partition_by": ["crsPurpose", "financingRecipient"]},
+            id="rank-partition",
+        ),
+        pytest.param(
+            _rank(),
+            _rank(allow_sparse_breakdowns=True),
+            {"allow_sparse_breakdowns": True},
+            id="rank-sparse",
+        ),
+        pytest.param(
+            AggregateOpSpec(frame_ref=SNAPSHOT_REF, aggregation="sum"),
+            AggregateOpSpec(
+                frame_ref=SNAPSHOT_REF, aggregation="sum", allow_sparse_breakdowns=True
+            ),
+            {"allow_sparse_breakdowns": True},
+            id="aggregate-sparse",
+        ),
+    ],
+)
+def test_a_partition_and_the_sparse_flag_enter_the_preimage_only_when_set(
+    unset: RankOpSpec | AggregateOpSpec,
+    set_: RankOpSpec | AggregateOpSpec,
+    stated: dict[str, object],
+) -> None:
+    assert stated.keys().isdisjoint(build_op_spec_preimage(unset)["parameters"])
+    assert build_op_spec_preimage(set_)["parameters"].items() >= stated.items()
+
+
+def test_a_partition_naming_a_ranked_column_is_refused() -> None:
+    with pytest.raises(ValidationError, match="partition_by"):
+        _rank(partition_by=("reporter",))
+
+
 def test_the_rolling_rule_is_the_frame_grammars() -> None:
     assert get_args(RollingRef.model_fields["rule"].annotation) == (ANCHOR_RULE,)
 

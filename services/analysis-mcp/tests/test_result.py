@@ -23,6 +23,7 @@ def test_the_output_schema_declares_every_verb_result_field() -> None:
         "ranked_before_limit",
         "exclusions",
         "time",
+        "stat_vars_summed",
     }
     assert set(VERB_OUTPUT_SCHEMA["required"]) >= {
         "spec_id",

@@ -41,6 +41,7 @@ from dfo_frame_grammar.grammar import UnitCell
 
 from analysis_mcp.artifact import Exclusion, Interval, Time
 from analysis_mcp.execution_identity import ExecutionIdentity
+from analysis_mcp.result import StatVarsSummed
 from analysis_mcp.summary import (
     LIST_CAP,
     AggregateFacts,
@@ -900,8 +901,15 @@ def render_sum_of_digest(
     return "\n\n".join(sections)
 
 
-def _rank_line(rank: EntityRank, *, private: frozenset[tuple[str, str]]) -> str:
-    key_text = _key_text(rank.entity_key)
+def _rank_line(
+    rank: EntityRank,
+    *,
+    private: frozenset[tuple[str, str]],
+    within: frozenset[str] = frozenset(),
+) -> str:
+    """One entity's rank, value, rows and coverage, its key less the `within`
+    columns its partition's heading names."""
+    key_text = _key_text(tuple(pair for pair in rank.entity_key if pair[0] not in within))
     tag = " (private)" if any(pair in private for pair in rank.entity_key) else ""
     return (
         f"  #{rank.rank} {key_text}{tag}: {_format_number(rank.value)} "
@@ -909,11 +917,75 @@ def _rank_line(rank: EntityRank, *, private: frozenset[tuple[str, str]]) -> str:
     )
 
 
-def _rank_block(ranks: Sequence[EntityRank], *, private: frozenset[tuple[str, str]]) -> str:
+def _preview_counts(sizes: Sequence[int], cap: int) -> list[int]:
+    """How many of each partition's `sizes` entries a preview of `cap` lines shows:
+    each partition's first entry in order while the cap allows, then each one's
+    next, and so on, so every rank depth is shown across partitions before the
+    next."""
+    counts = [0] * len(sizes)
+    left = cap
+    while left:
+        grown = False
+        for index, size in enumerate(sizes):
+            if left and counts[index] < size:
+                counts[index] += 1
+                left -= 1
+                grown = True
+        if not grown:
+            break
+    return counts
+
+
+def _partitioned_rank_block(
+    ranks: Sequence[EntityRank],
+    *,
+    partition_by: Sequence[str],
+    private: frozenset[tuple[str, str]],
+) -> str:
+    """`ranks`, ranked within the partitions `partition_by` names, as one block per
+    partition under its key, the `LIST_CAP` lines shared across partitions
+    (`_preview_counts`). A partition shown in part says how many it holds, and the
+    partitions past the cap are named with their counts, up to `LIST_CAP` of them."""
+    within = frozenset(partition_by)
+    groups: dict[tuple[tuple[str, str], ...], list[EntityRank]] = {}
+    for rank in ranks:
+        key = tuple(pair for pair in rank.entity_key if pair[0] in within)
+        groups.setdefault(key, []).append(rank)
+    counts = _preview_counts([len(group) for group in groups.values()], LIST_CAP)
+    lines = [f"{len(ranks)} ranked entit(y/ies) in {len(groups)} partition(s):"]
+    omitted: list[tuple[KeyPairs, int]] = []
+    for (key, group), count in zip(groups.items(), counts, strict=True):
+        if not count:
+            omitted.append((key, len(group)))
+            continue
+        lines.append(f"  {_key_text(key)} ({count} of {len(group)} shown):")
+        lines.extend(
+            "  " + _rank_line(rank, private=private, within=within) for rank in group[:count]
+        )
+    if omitted:
+        named = "; ".join(f"{_key_text(key)} ({size})" for key, size in omitted[:LIST_CAP])
+        more = f"; and {len(omitted) - LIST_CAP} more" if len(omitted) > LIST_CAP else ""
+        lines.append(f"  ... {len(omitted)} partitions not shown: {named}{more}.")
+    if sum(counts) < len(ranks):
+        lines.append(
+            "  ... the result frame holds every entry; read it by the frame reference below."
+        )
+    return "\n".join(lines)
+
+
+def _rank_block(
+    ranks: Sequence[EntityRank],
+    *,
+    private: frozenset[tuple[str, str]],
+    partition_by: Sequence[str] = (),
+) -> str:
     """`ranks`, already in rank order, as a `_rank_line`-per-entity block
     capped at `LIST_CAP` -- shared by the collapse mode's own single block
     and by `_per_period_ranks_block`'s block-per-period call, one period's
-    own ranking at a time."""
+    own ranking at a time. Ranked within partitions, the lines are shared
+    across them (`_partitioned_rank_block`)."""
+    if partition_by:
+        return _partitioned_rank_block(ranks, partition_by=partition_by, private=private)
     shown = ranks[:LIST_CAP]
     lines = [_rank_line(rank, private=private) for rank in shown]
     block = "\n".join([f"{len(ranks)} ranked entit(y/ies):", *lines])
@@ -921,7 +993,10 @@ def _rank_block(ranks: Sequence[EntityRank], *, private: frozenset[tuple[str, st
 
 
 def _per_period_ranks_block(
-    entity_ranks: Sequence[EntityRank], *, private: frozenset[tuple[str, str]]
+    entity_ranks: Sequence[EntityRank],
+    *,
+    private: frozenset[tuple[str, str]],
+    partition_by: Sequence[str] = (),
 ) -> str:
     """One block per period, each capped and truncation-noted exactly like
     the collapse mode's single block. `entity_ranks` is already grouped by
@@ -937,7 +1012,10 @@ def _per_period_ranks_block(
             periods.append(rank.time_period)
         grouped.setdefault(rank.time_period, []).append(rank)
     blocks = [
-        f"{period}:\n  " + _rank_block(grouped[period], private=private).replace("\n", "\n  ")
+        f"{period}:\n  "
+        + _rank_block(grouped[period], private=private, partition_by=partition_by).replace(
+            "\n", "\n  "
+        )
         for period in periods
     ]
     return "\n".join(blocks)
@@ -947,6 +1025,7 @@ def render_rank_digest(
     *,
     rank_by: Sequence[str],
     result: RankFacts,
+    partition_by: Sequence[str] = (),
     op_spec_hash: str,
     content_version: str,
     execution_identity: ExecutionIdentity,
@@ -965,7 +1044,8 @@ def render_rank_digest(
 
     `result.limit` adds the kept and ranked counts to the header, and the rank
     block lists the entries the output frame holds. A caller who wants the
-    entries past the limit drops `limit`.
+    entries past the limit drops `limit`. `partition_by` names the columns the
+    ranking was split by in the header, and the limit is then per partition.
     """
     reduction_text = result.aggregation if result.aggregation is not None else "(raw value)"
     if result.window_start is None:
@@ -974,11 +1054,16 @@ def render_rank_digest(
         window_text = result.window_start
     else:
         window_text = f"{result.window_start}..{result.window_end}"
-    header = f"rank: {', '.join(rank_by)} by {reduction_text}, window {window_text}"
+    within = f" within each {', '.join(partition_by)}" if partition_by else ""
+    header = f"rank: {', '.join(rank_by)}{within} by {reduction_text}, window {window_text}"
     if result.per_period:
         header += ", per_period=True"
     if result.limit is not None:
-        scope, counted = (" per period", "rows") if result.per_period else ("", "entities")
+        scopes = [" per partition"] if partition_by else []
+        if result.per_period:
+            scopes.append(" per period")
+        scope = "".join(scopes)
+        counted = "rows" if result.per_period else "entities"
         header += (
             f", limit {result.limit}{scope} (kept {len(result.kept_ranks)} of "
             f"{len(result.entity_ranks)} ranked {counted})"
@@ -991,9 +1076,9 @@ def render_rank_digest(
     # end of the ranking from rank 1.
     private = frozenset(result.private_parties)
     ranks_block = (
-        _per_period_ranks_block(result.kept_ranks, private=private)
+        _per_period_ranks_block(result.kept_ranks, private=private, partition_by=partition_by)
         if result.per_period
-        else _rank_block(result.kept_ranks, private=private)
+        else _rank_block(result.kept_ranks, private=private, partition_by=partition_by)
     )
 
     unit_line = f"unit: {_unit_text(result.resolved_unit)}"
@@ -1533,6 +1618,15 @@ def _rolling_section(rolling: Rolling) -> str:
     return text
 
 
+def _summed_line(summed: Sequence[StatVarsSummed]) -> str:
+    """The line naming each dataset version the call read summed over its StatVars."""
+    reads = "; ".join(
+        f"{read.spec_id}, {read.content_version} added up over {read.count:,} StatVars"
+        for read in summed
+    )
+    return f"summed: {reads}."
+
+
 def digest_cells(summary: VerbSummary, *, heading: str | None = None) -> tuple[str, list[Cell]]:
     """`render_summary_digest` of `summary` with no labels, and the `(column, value)`
     cells it names, in the order it names them: the cells whose labels the digest can
@@ -1556,7 +1650,8 @@ def render_summary_digest(
     """The digest of a verb call the runner `summary` states, rendered by its
     verb's `render_*_digest` from the summary's facts, canonical parameters,
     identity, derived marker, exclusions and time, with the latest year its
-    relative periods were filled from (`_rolling_section`) before the identity.
+    relative periods were filled from (`_rolling_section`) and the StatVars each
+    summed read added up (`_summed_line`) before the identity.
     `heading`, when given, opens a `sum_of` or `quotient_of` digest in the verb's
     place. Every key's breakdown cell reads as its label in `labels`, else as its
     value."""
@@ -1588,7 +1683,10 @@ def _render_summary_digest(summary: VerbSummary, *, heading: str | None) -> str:
             }
         case RankFacts():
             render = render_rank_digest
-            own = {"rank_by": parameters.get("rank_by", ())}
+            own = {
+                "rank_by": parameters.get("rank_by", ()),
+                "partition_by": parameters.get("partition_by", ()),
+            }
         case FilterFacts():
             render = render_filter_digest
             own = {"predicate_count": len(parameters.get("predicates", ()))}
@@ -1616,8 +1714,12 @@ def _render_summary_digest(summary: VerbSummary, *, heading: str | None) -> str:
         exclusions=summary.exclusions,
         time=summary.time,
     )
-    if summary.rolling is None:
+    added = [
+        *([] if summary.rolling is None else [_rolling_section(summary.rolling)]),
+        *([_summed_line(summary.stat_vars_summed)] if summary.stat_vars_summed else []),
+    ]
+    if not added:
         return digest
     # Before the identity block, the one section every digest ends with.
     head, _, identity = digest.rpartition("\n\n")
-    return "\n\n".join([head, _rolling_section(summary.rolling), identity])
+    return "\n\n".join([head, *added, identity])

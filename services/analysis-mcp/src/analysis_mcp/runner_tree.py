@@ -125,6 +125,10 @@ _SECOND_SLOT: Mapping[Verb, str] = {
 # The op-spec frame slots, which the tree's `inputs` fill in place of `arguments`.
 _FRAME_SLOTS = frozenset({"verb", "frame_ref", *_SECOND_SLOT.values()})
 
+# Arguments a tree states only when set, so a call that leaves them at their default
+# sends the tree it sent before they existed, and the runner reads the default.
+_SENT_WHEN_SET: Mapping[str, object] = {"partition_by": (), "allow_sparse_breakdowns": False}
+
 # The content_version a bare `spec_id` argument is held under until the runner reads
 # the Spec (`newest_ref`). It names no version: `verb_tree` sends the Spec root in
 # its place, so it reaches no request.
@@ -375,6 +379,17 @@ def _level_step(
     return {"verb": str(Verb.FILTER), "arguments": arguments, "inputs": {"data": node}}
 
 
+def _arguments(op_spec: OpSpecVariant) -> dict[str, Any]:
+    """The tree `arguments` of `op_spec`: its parameters but its frame slots, `None`
+    ones and those `_SENT_WHEN_SET` names at their default left out."""
+    dumped = op_spec.model_dump(mode="json", exclude=set(_FRAME_SLOTS), exclude_none=True)
+    return {
+        name: value
+        for name, value in dumped.items()
+        if not (name in _SENT_WHEN_SET and getattr(op_spec, name) == _SENT_WHEN_SET[name])
+    }
+
+
 async def verb_tree(
     op_spec: OpSpecVariant,
     *,
@@ -388,7 +403,7 @@ async def verb_tree(
     pair is in `replaced` is sent as the root node it maps to, `place_level`
     filters each input to that level first, and `default_enrichment` is a public
     call's reading of a plain record (see the module docstring)."""
-    arguments = op_spec.model_dump(mode="json", exclude=set(_FRAME_SLOTS), exclude_none=True)
+    arguments = _arguments(op_spec)
     inputs: dict[str, Any] = {}
     refs_by_root: dict[Pair, tuple[FrameRef, ...]] = {}
     spec_roots: set[str] = set()

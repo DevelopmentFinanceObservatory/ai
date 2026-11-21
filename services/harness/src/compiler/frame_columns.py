@@ -517,19 +517,21 @@ def _one_unless_grouped(arguments: Mapping[str, JsonValue], input_count: int | N
 # - `get_data` reads no input. Asked to sum a family (`stat_vars="sum"`),
 #   apis collapses every member into one series under the family's own
 #   ref; otherwise the frame holds what the definition binds, unbounded here.
-# - `growth` and `rank` refuse an input holding several StatVars
-#   (`require_single_stat_var`) and stamp the one they read on every row.
-# - `share_of` refuses a side holding several and writes every row under its
+# - `growth` and `rank` read one StatVar and stamp it on every row. Over a
+#   retrieval holding several, dfo-apis' analysis runner sums the family into
+#   one first, or refuses `stat_var_unresolved` naming the fix
+#   (`planner.shapes.FrameShape.summed_on_read`).
+# - `share_of` reads one per side the same way and writes every row under its
 #   own StatVar.
 # - `aggregate` does the same unless `group_by` names `stat_var`, which keeps
 #   one group per StatVar of its input.
-# - `join` refuses a side holding several and writes each side's rows under
+# - `join` reads one per side the same way and writes each side's rows under
 #   that side's StatVar, so its result holds two, or one when both sides
 #   carry the same StatVar under different units or facets.
 # - `filter` keeps a subset of its input's rows.
 # - `compare` writes one series under its own StatVar, one row per period.
 # - `sum_of` writes one series under its own StatVar, one row per period.
-# - `quotient_of` refuses a side holding several and writes every row, one
+# - `quotient_of` reads one per side the same way and writes every row, one
 #   per key and period, under its own StatVar.
 _MOST_STAT_VARS: Mapping[ToolId, Callable[[Mapping[str, JsonValue], int | None], int | None]] = {
     ToolId(server="data-mcp", name="get_data"): _one_when_summed,
