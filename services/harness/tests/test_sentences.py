@@ -457,8 +457,13 @@ def test_a_fill_in_reads_only_the_member_its_code_names() -> None:
     assert failure_sentence(refused.code, refused.retry_mode) != failure_sentence(
         refused.code, refused.retry_mode, refused.fix
     )
-    # A stored frame that failed its check is the data's to read again narrower.
-    assert FAILURE_CLASS["frame_integrity_failed"] is not FailureClass.SYSTEM_FAULT
+    # A frame data-mcp minted that failed its check is read again narrower; any
+    # other is the system's fault.
+    minted = DataRefusal.frame_integrity_failed(spec_id="spec_x", content_version="v", reason="r")
+    assert FAILURE_CLASS[minted.code] is FailureClass.SYSTEM_FAULT
+    assert failure_sentence(minted.code, minted.retry_mode, minted.fix) != failure_sentence(
+        minted.code, minted.retry_mode
+    )
     # The user is told the latest year the series reach, not the one the plan counted from.
     behind = {"anchor": "2022", "planned_anchor": "2023", "remedy": "Ask again."}
     cause = failure_cause(ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN, behind)

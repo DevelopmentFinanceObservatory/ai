@@ -2025,7 +2025,8 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
         "code": "entity_ambiguous",
         "message": "more than one entity matches 'Kenya'",
         "retry_mode": "correct_and_retry",
-        "fix": {"candidates": ["country/KEN", "country/KEN-old"]},
+        # The `fix` keeps only what the user's sentence reads.
+        "fix": {},
         "disposition": "method_choice",
         "cause": "data",
         "wave_remedy": "replan",
@@ -2087,7 +2088,7 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
         "code": "over_ceiling",
         "message": "over the coverage ceiling: too many series.",
         "retry_mode": "correct_and_retry",
-        "fix": {"detail": "too many series"},
+        "fix": {},
         "disposition": "stop",
         "cause": "data",
         "wave_remedy": "user",
@@ -2146,12 +2147,7 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
         "message": "over the coverage ceiling: 2933 members. A narrower question "
         "resolves to a smaller definition.",
         "retry_mode": "correct_and_retry",
-        "fix": {
-            "cap": 700,
-            "ceiling_kind": "member_cardinality",
-            "count": 2933,
-            "detail": "2933 members",
-        },
+        "fix": {"ceiling_kind": "member_cardinality"},
         "disposition": "stop",
         "cause": "data",
         "wave_remedy": "user",
@@ -2244,7 +2240,7 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
         "code": "family_not_summed",
         "message": message,
         "retry_mode": "do_not_retry",
-        "fix": {"remedy": remedy},
+        "fix": {},
         "disposition": "stop",
         "cause": "data",
         "wave_remedy": "user",
@@ -2370,8 +2366,8 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
     also: tuple[_StopSpec, ...],
     dead_end: bool,
 ) -> None:
-    """A wave whose every stop is a dead end closes the turn on the first, with
-    no replan. An evidence stop is one when the StatVar family's digest moved
+    """A wave whose every stop is a dead end closes the turn on the stop that
+    decides its remedy, the first of the most severe, with no replan. An evidence stop is one when the StatVar family's digest moved
     since Search approved it and that move explains every error, a family
     grown past the one series approved included: a replan in the same turn
     approves the digest the turn already holds, so the turn closes on the
@@ -2400,9 +2396,8 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
         return
     assert _pending_interrupt(events) is None
     failed = _output_of(events, "execute")["failed_step"]
-    if primary is None:
-        assert failed["code"] == "spec_not_exportable"
-        return
+    # Another spec avoids `spec_not_exportable`, and the user has to accept a
+    # moved family, so the family decides the wave wherever it stands.
     assert failed["code"] == "stat_var_family_moved"
     gone = FAILURE_SENTENCES[FailureClass.SOURCE_GONE]
     assert failure_detail(failed) == f"{gone.cause}, {gone.advice}."

@@ -46,7 +46,13 @@ from enum import StrEnum
 from typing import Any, Literal, Self, cast
 
 from common.echoed_text import truncate_value
-from common.refusal import refusal_meta, refusal_text
+from common.refusal import (
+    MINTED_FRAME,
+    SERVICE_FAILURE,
+    SPEC_NOT_REGISTERED,
+    refusal_meta,
+    refusal_text,
+)
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from fastmcp.tools import ToolResult
 
@@ -214,16 +220,6 @@ class FacetIssue:
     # The issue's own cause, when apis sends one.
     code: str | None = None
     detail: str | None = None
-
-
-# The `fix.kind` of an `upstream_error`, which says whose failure it is. A
-# service failure is dfo-apis or a source behind it failing of itself: a 5xx,
-# a call with no status, or a response this service could not use. A refused
-# definition is one dfo-apis would not register (`ToolRefusal.spec_not_registered`).
-# An `upstream_error` with neither is a refusal dfo-apis stated under a code this
-# service does not map, about the request it was sent.
-SERVICE_FAILURE = "service_failure"
-SPEC_NOT_REGISTERED = "spec_not_registered"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -797,7 +793,12 @@ class ToolRefusal:
                 "get_data again with a narrower scope.entities or scope.window instead, "
                 "which mints a different content_version."
             ),
-            fix={"spec_id": spec_id, "content_version": content_version, "reason": reason},
+            fix={
+                "kind": MINTED_FRAME,
+                "spec_id": spec_id,
+                "content_version": content_version,
+                "reason": reason,
+            },
         )
 
     @classmethod
@@ -1843,10 +1844,14 @@ def from_upstream_error(exc: UpstreamError, *, tool: str) -> ToolRefusal:
     # a refusal whose own flag is false (apis `operations/worker.py`), so
     # a mapped cause keeps it too.
     retry_after_s = _derive_retry_after_s(exc) if exc.retryable or retried_in_place else None
-    # A failure with no status or a 5xx is the service's own. A failed
-    # operation retried in place names a source revision that moved, and a 4xx
-    # is a refusal of the request apis sent under a code this service does not map.
-    service_failure = not retried_in_place and (exc.status is None or exc.status >= 500)
+    # A failure with no status, no problem document or a 5xx is the service's
+    # own: a 4xx with no problem document comes from a proxy, an IAM check or a
+    # body limit in front of apis. A failed operation retried in place names a
+    # source revision that moved, and a 4xx problem is a refusal of the request
+    # under a code this service does not map.
+    service_failure = not retried_in_place and (
+        exc.status is None or exc.status >= 500 or exc.code is None
+    )
     return ToolRefusal.upstream_error(
         upstream_code=code,
         detail=exc.detail,

@@ -819,7 +819,10 @@ _FIX_SAMPLES: dict[str, tuple[str, dict[str, Any]]] = {
         "aggregate",
         {"spec_id": _SPEC, "content_version": _CV, "options": ["currency"]},
     ),
-    "upstream_error": ("aggregate", {"upstream_code": "x", "detail": "d", "retry_after_s": None}),
+    "upstream_error": (
+        "aggregate",
+        {"upstream_code": "x", "detail": "d", "retry_after_s": None, "service_failure": True},
+    ),
     "internal_error": ("aggregate", {"tool": "aggregate"}),
 }
 

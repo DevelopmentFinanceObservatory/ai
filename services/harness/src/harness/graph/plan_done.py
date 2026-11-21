@@ -19,7 +19,7 @@ from data_mcp import get_data_digest
 from data_mcp.tool_errors import ToolErrorCode
 from executor.classify import ExecutorCode
 from executor.ledger import RunLedger
-from executor.outcomes import RefusalKind, Remedy, StepRecord, remedy
+from executor.outcomes import Remedy, StepRecord, remedy
 from planner.plan import (
     Plan,
     SessionState,
@@ -283,29 +283,18 @@ def _worded_as(
     """The code, retry mode and `fix` the user's words for `failed`, a run's
     `failed_step`, are read from (`remedy`). A fault of the system reads as
     `internal_error`, whatever its code's class, so the user is never told
-    their question caused it. A stop waiting gets past reads as a service
-    that did not answer, with trying again shortly as its advice. Any other
-    reads the stop that decided its wave's remedy (`_deciding`)."""
-    match remedy(failed):
-        case Remedy.SYSTEM:
-            return ExecutorCode.INTERNAL_ERROR.value, None, None
-        case Remedy.WAIT:
-            return RefusalKind.TRANSPORT_FAILED.value, "retry_after_delay", None
-        case _:
-            deciding = _deciding(failed)
-            fix = deciding.get("fix")
-            return (
-                deciding.get("code"),
-                deciding.get("retry_mode"),
-                fix if isinstance(fix, Mapping) else None,
-            )
-
-
-def _deciding(failed: Mapping[str, Any]) -> Mapping[str, Any]:
-    """The stop of `failed`'s wave that decided its remedy: its
-    `deciding_stop`, or `failed` itself (`executor.outcomes.failed_step`)."""
-    deciding = failed.get("deciding_stop")
-    return deciding if isinstance(deciding, Mapping) else failed
+    their question caused it. Any other reads its own, so a stop waiting
+    gets past is told as its code tells it, with the advice to try again
+    shortly where its code gives none."""
+    past = remedy(failed)
+    if past is Remedy.SYSTEM:
+        return ExecutorCode.INTERNAL_ERROR.value, None, None
+    retry_mode = failed.get("retry_mode")
+    if past is Remedy.WAIT and retry_mode is None:
+        # A stop no tool refused, such as a transport stop, states no mode.
+        retry_mode = "retry_after_delay"
+    fix = failed.get("fix")
+    return failed.get("code"), retry_mode, fix if isinstance(fix, Mapping) else None
 
 
 def _user_sentence(failed: Mapping[str, Any]) -> str:
@@ -326,7 +315,7 @@ def _user_remedy(failed: Mapping[str, Any]) -> str | None:
     tool's or the evidence check's words: its `remedy`, for a failure the
     user or another plan gets past. A fault of the system and a service that
     did not answer leave the user nothing to do but what their sentence says."""
-    text = _deciding(failed).get("remedy")
+    text = failed.get("remedy")
     if not text or remedy(failed) in (Remedy.SYSTEM, Remedy.WAIT):
         return None
     return str(text)[:_HAND_BACK_CAP]

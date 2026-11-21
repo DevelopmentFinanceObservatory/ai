@@ -568,10 +568,8 @@ async def test_a_system_fault_ends_the_turn_worded_as_the_systems_fault(
     after_plan = agent_read(models.orchestrator.requests[-1])
     assert failure_sentence("internal_error") in after_plan
     assert failure_sentence("composed_unit_sum_unsupported") not in after_plan
-    assert "do not ask the user to change the question" in after_plan
     # The tool's remedy is for a question at fault, and none is.
     assert advice not in after_plan
-    assert "what they can do about it" not in after_plan
 
 
 @pytest.mark.parametrize(
@@ -622,14 +620,12 @@ async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_fai
     # The second stop leaves no note, since the turn's one new plan is spent.
     assert ended.cursor.state.get(ORCHESTRATOR_RETRY_NOTE_KEY) is None
     first, last = (agent_read(request) for request in models.orchestrator.requests[1:])
-    told = "Tell the user what they can do about it"
-    assert told not in first
     if "remedy" in fix:
         # The plan given back is the way past it, so the hand-back states no remedy.
         assert fix["remedy"] not in first
     if "remedy" in fix:
         assert failure_cause(code, fix) in last
-        assert f"{told}: {fix['remedy']}" in last
+        assert fix["remedy"] in last
     else:
         assert sentence in last
 
@@ -1102,23 +1098,24 @@ class _RefusingReplanner(ScriptedPlannerModel):
 
 
 @pytest.mark.parametrize(
-    ("surface", "given_back"),
+    ("surface", "told"),
     [
         # A method choice is the planner's to make, so another brief may make it.
-        (
-            RefusingGetDataSurface("entity_ambiguous", {"candidates": ["country/KEN"]}),
-            True,
-        ),
+        (RefusingGetDataSurface("entity_ambiguous", {"candidates": ["country/KEN"]}), None),
         # A result the run cannot use is the system's fault, which no brief avoids.
-        (_UnusableGetDataSurface(), False),
-        # A service that did not answer is waited out, not planned around.
-        (RefusingGetDataSurface("service_unavailable"), False),
+        (_UnusableGetDataSurface(), failure_sentence("internal_error")),
+        # A service that did not answer is waited out, not planned around, and
+        # told as its code tells it.
+        (
+            RefusingGetDataSurface("service_unavailable"),
+            failure_sentence("service_unavailable", "retry_after_delay"),
+        ),
     ],
     ids=["method-choice", "system-fault", "wait"],
 )
 async def test_a_planner_refusal_after_a_stop_gives_the_plan_back_only_when_a_new_plan_remedies_it(
     surface: ScriptedSurface,
-    given_back: bool,
+    told: str | None,
     pg_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1131,9 +1128,8 @@ async def test_a_planner_refusal_after_a_stop_gives_the_plan_back_only_when_a_ne
 
     assert ran.outcome is Outcome.DONE
     after_plan = agent_read(models.orchestrator.requests[-1])
-    assert "The planner could not make a plan" in after_plan
+    given_back = told is None
     assert bool(ran.cursor.state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")) is given_back
-    assert ("may be planned once more" in after_plan) is given_back
-    if isinstance(surface, RefusingGetDataSurface) and surface.retry_mode == "retry_after_delay":
-        assert "A data service did not answer" in after_plan
-        assert failure_sentence("transport_failed", "retry_after_delay") in after_plan
+    assert bool(ran.cursor.state.get(ORCHESTRATOR_RETRY_NOTE_KEY)) is given_back
+    if told is not None:
+        assert told in after_plan

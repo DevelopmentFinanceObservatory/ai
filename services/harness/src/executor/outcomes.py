@@ -440,20 +440,16 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
 
     `wave_remedy` is the most severe remedy (`stop_remedy`) of the stop and
     of each stop in `outcome.also_stopped`, so a new plan gets past the wave
-    only when it gets past every stop in it; `remedy` reads it. When a stop
-    in `also_stopped` decides it, that stop, stated alone, is the
-    `deciding_stop`, which the user's words for the failure are read from.
-    The first of the most severe decides, so the stop itself does whenever
-    it is among them.
+    only when it gets past every stop in it; `remedy` reads it. The step
+    named is the stop that decides it, the first of the most severe, so the
+    step, the code, the user's words and the remedy all name one stop: the
+    stop itself whenever it is among them.
     """
     stops = [_own_step(stop) for stop in (outcome, *outcome.also_stopped)]
     remedies = [stop_remedy(stop) for stop in stops]
     severity = list(Remedy)
     deciding = max(range(len(stops)), key=lambda index: severity.index(remedies[index]))
-    failed = {**stops[0], "wave_remedy": remedies[deciding].value}
-    if deciding:
-        failed["deciding_stop"] = stops[deciding]
-    return failed
+    return {**stops[deciding], "wave_remedy": remedies[deciding].value}
 
 
 def _own_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
@@ -604,8 +600,9 @@ _DATA_STOP_REMEDY: dict[str, Remedy] = {
     "capability_unavailable": Remedy.USER,
     "entity_not_found": Remedy.USER,
     # A definition the platform refused to register, or a refusal of the
-    # request under a code data-mcp does not map: another spec or request may
-    # avoid either. A service's own failure is the harness's (`is_upstream_fault`).
+    # request under a code the server does not map: another spec or request
+    # may avoid either. A service's own failure is the harness's
+    # (`is_upstream_fault`).
     "upstream_error": Remedy.REPLAN,
     # Tools no workflow step calls (`compiler.capabilities.EXCLUDED_TOOLS`).
     "skill_not_found": Remedy.USER,
@@ -616,8 +613,9 @@ _DATA_STOP_REMEDY: dict[str, Remedy] = {
     # analysis-mcp: a frame, unit, join or method a different plan avoids.
     "stat_var_unresolved": Remedy.REPLAN,
     "frame_too_large": Remedy.REPLAN,
-    # A stored frame that failed its integrity check: a narrower scope mints
-    # another content version, which gets past it.
+    # A frame data-mcp minted that failed its integrity check: a narrower
+    # scope mints another content version, which gets past it. Any other
+    # stored frame that fails is the store's fault (`is_store_fault`).
     "frame_integrity_failed": Remedy.REPLAN,
     "non_finite_result": Remedy.REPLAN,
     "frame_not_held": Remedy.REPLAN,

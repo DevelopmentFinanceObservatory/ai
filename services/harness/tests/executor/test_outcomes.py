@@ -247,6 +247,12 @@ def _upstream(status: int, *, retryable: bool = False) -> DataRefusal:
     return from_upstream_error(failure, tool="get_data")
 
 
+# data-mcp's minted frame that read back wrong, which a narrower scope mints anew.
+_MINTED_FRAME_FAILED = DataRefusal.frame_integrity_failed(
+    spec_id="spec_" + "0" * 32, content_version="v1", reason="digest"
+)
+
+
 def _every_stop() -> list[Refused]:
     """A stop for every code a stopped run can fail with: each server code under
     each retry mode its server answers it with, each `ceiling_kind` and each
@@ -267,6 +273,7 @@ def _every_stop() -> list[Refused]:
         for wait in (None, 1.0)
     ]
     stops.append(_tool_stop(_served(_SPEC_NOT_REGISTERED)))
+    stops.append(_tool_stop(_served(_MINTED_FRAME_FAILED)))
     stops.append(_tool_stop(parse_tool_failure({"retry_mode": "do_not_retry"})))
     stops += [
         _tool_stop(ToolFailure(code=code.value, message="m", retry_mode="do_not_retry"))
@@ -364,18 +371,45 @@ _GET_DATA = ToolId(server="data-mcp", name="get_data")
             Remedy.SYSTEM,
             id="codeless-refusal",
         ),
-        # A stored frame that failed its integrity check: a narrower scope
-        # mints another.
+        # A frame data-mcp minted that failed its integrity check: a narrower
+        # scope mints another. A frame analysis-mcp's store holds is the
+        # store's fault.
+        pytest.param(
+            _tool_stop(_served(_MINTED_FRAME_FAILED)), Remedy.REPLAN, id="minted-frame-failed"
+        ),
         pytest.param(
             _tool_stop(
                 _served(
-                    DataRefusal.frame_integrity_failed(
+                    AnalysisRefusal.frame_integrity_failed(
                         spec_id="spec_" + "0" * 32, content_version="v1", reason="digest"
                     )
                 )
             ),
+            Remedy.SYSTEM,
+            id="stored-frame-failed",
+        ),
+        # analysis-mcp's runner that failed of itself, or refused the request.
+        pytest.param(
+            _tool_stop(
+                _served(
+                    AnalysisRefusal.upstream_error(
+                        upstream_code=None, detail="d", retry_after_s=None, service_failure=True
+                    )
+                )
+            ),
+            Remedy.SYSTEM,
+            id="runner-failure",
+        ),
+        pytest.param(
+            _tool_stop(
+                _served(
+                    AnalysisRefusal.upstream_error(
+                        upstream_code="x", detail="d", retry_after_s=None, service_failure=False
+                    )
+                )
+            ),
             Remedy.REPLAN,
-            id="frame-integrity-failed",
+            id="runner-refusal",
         ),
         # A definition the platform refused, or a refusal of the request under
         # a code data-mcp does not map: another spec or request may avoid either.
@@ -504,10 +538,11 @@ def test_a_waves_remedy_is_its_most_severe_stops(
     wave = _issue_stop(primary).model_copy(update={"also_stopped": (_issue_stop(sibling),)})
     failed = failed_step(wave)
 
-    assert {stop_remedy(failed_step(stop)) for stop in (wave, *wave.also_stopped)} == {
+    assert {stop_remedy(failed_step(_issue_stop(code))) for code in (primary, sibling)} == {
         Remedy.USER,
         Remedy.REPLAN,
     }
     assert remedy(failed) is Remedy.USER
-    assert failed["code"] == primary.value
+    # The step, the code and the user's words name the stop that decides.
+    assert failed["code"] == EvidenceIssueCode.WINDOW_SHORT.value
     assert _user_sentence(failed) == failure_sentence(EvidenceIssueCode.WINDOW_SHORT.value)

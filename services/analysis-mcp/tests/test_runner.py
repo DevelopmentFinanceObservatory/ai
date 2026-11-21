@@ -34,6 +34,7 @@ from common.materialisation import (
     rendering,
     set_store,
 )
+from common.refusal import SERVICE_FAILURE
 from fastmcp.server.http import set_http_request
 from runner_replay import REPLIES_PATH
 from starlette.requests import Request
@@ -760,13 +761,21 @@ async def test_the_caller_is_named_beside_the_principal(
             httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
             "upstream_error",
             "retry_after_delay",
-            {"detail": "slow"},
+            {"detail": "slow", "kind": SERVICE_FAILURE},
         ),
         (
             httpx2.Response(502, text="bad gateway"),
             "upstream_error",
             "retry_after_delay",
-            {"detail": "dfo-apis answered 502 with no problem document"},
+            {"detail": "dfo-apis answered 502 with no problem document", "kind": SERVICE_FAILURE},
+        ),
+        # A 4xx with no problem document comes from a proxy or an IAM check in
+        # front of the runner, which failed of itself.
+        (
+            httpx2.Response(403, text="forbidden"),
+            "upstream_error",
+            "do_not_retry",
+            {"detail": "dfo-apis answered 403 with no problem document", "kind": SERVICE_FAILURE},
         ),
         (
             httpx2.Response(200, json={"status": "ready", "summary": {"verb": "aggregate"}}),
@@ -785,6 +794,7 @@ async def test_the_caller_is_named_beside_the_principal(
         "unmapped-code",
         "retryable-unmapped-code",
         "no-problem-document",
+        "no-problem-document-4xx",
         "summary-unreadable",
     ],
 )

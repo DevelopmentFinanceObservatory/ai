@@ -67,6 +67,7 @@ from harness.graph.state import (
     stored_sequence,
 )
 from harness.scope_choices import served_facts
+from harness.sentences import worded_fix
 from harness.turn.node import Next, Node, NodeCtx
 from harness.turn_records import SearchReading
 
@@ -421,7 +422,16 @@ def _failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> d
             outcome.refusal.value,
             outcome.detail,
         )
-    return failed_step(outcome)
+    return _worded_step(outcome)
+
+
+def _worded_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
+    """`outcome`'s `failed_step` as `execute` keeps it: its refusal's `fix`
+    holds only what the user's sentence for it reads (`worded_fix`)."""
+    failed = failed_step(outcome)
+    if isinstance(fix := failed.get("fix"), Mapping):
+        failed["fix"] = worded_fix(failed["code"], fix)
+    return failed
 
 
 def _without_figures(plan_version: int, *, run: dict[str, Any]) -> dict[str, Any]:
@@ -676,7 +686,7 @@ def execute_node(
         replans = int(ctx.state.get("replans", 0))
         if not dead_end and replans < MAX_REPLANS:
             ctx.state["replans"] = replans + 1
-            ctx.state[ORCHESTRATOR_REPLANNED_STOP_KEY] = shown_stop(failed_step(outcome), finished)
+            ctx.state[ORCHESTRATOR_REPLANNED_STOP_KEY] = shown_stop(_worded_step(outcome), finished)
             refusal = _planner_refusal(outcome, plan=finished, origins=windowed_origins(ctx.state))
             if finished.asks:
                 refusal["computed_asks"] = _computed_asks(finished, answers)
