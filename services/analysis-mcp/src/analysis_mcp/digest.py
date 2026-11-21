@@ -39,6 +39,7 @@ from dfo_frame_grammar.grammar import UnitCell
 
 from analysis_mcp.artifact import Exclusion, Interval, Time
 from analysis_mcp.execution_identity import ExecutionIdentity
+from analysis_mcp.result import StatVarsSummed
 from analysis_mcp.summary import (
     LIST_CAP,
     AggregateFacts,
@@ -920,6 +921,7 @@ def render_rank_digest(
     *,
     rank_by: Sequence[str],
     result: RankFacts,
+    partition_by: Sequence[str] = (),
     op_spec_hash: str,
     content_version: str,
     execution_identity: ExecutionIdentity,
@@ -938,7 +940,8 @@ def render_rank_digest(
 
     `result.limit` adds the kept and ranked counts to the header, and the rank
     block lists the entries the output frame holds. A caller who wants the
-    entries past the limit drops `limit`.
+    entries past the limit drops `limit`. `partition_by` names the columns the
+    ranking was split by in the header, and the limit is then per partition.
     """
     reduction_text = result.aggregation if result.aggregation is not None else "(raw value)"
     if result.window_start is None:
@@ -947,11 +950,16 @@ def render_rank_digest(
         window_text = result.window_start
     else:
         window_text = f"{result.window_start}..{result.window_end}"
-    header = f"rank: {', '.join(rank_by)} by {reduction_text}, window {window_text}"
+    within = f" within each {', '.join(partition_by)}" if partition_by else ""
+    header = f"rank: {', '.join(rank_by)}{within} by {reduction_text}, window {window_text}"
     if result.per_period:
         header += ", per_period=True"
     if result.limit is not None:
-        scope, counted = (" per period", "rows") if result.per_period else ("", "entities")
+        scopes = [" per partition"] if partition_by else []
+        if result.per_period:
+            scopes.append(" per period")
+        scope = "".join(scopes)
+        counted = "rows" if result.per_period else "entities"
         header += (
             f", limit {result.limit}{scope} (kept {len(result.kept_ranks)} of "
             f"{len(result.entity_ranks)} ranked {counted})"
@@ -1498,11 +1506,21 @@ def _rolling_section(rolling: Rolling) -> str:
     return text
 
 
+def _summed_line(summed: Sequence[StatVarsSummed]) -> str:
+    """The line naming each dataset version the call read summed over its StatVars."""
+    reads = "; ".join(
+        f"{read.spec_id}, {read.content_version} added up over {read.count:,} StatVars"
+        for read in summed
+    )
+    return f"summed: {reads}."
+
+
 def render_summary_digest(summary: VerbSummary, *, heading: str | None = None) -> str:
     """The digest of a verb call the runner `summary` states, rendered by its
     verb's `render_*_digest` from the summary's facts, canonical parameters,
     identity, derived marker, exclusions and time, with the latest year its
-    relative periods were filled from (`_rolling_section`) before the identity.
+    relative periods were filled from (`_rolling_section`) and the StatVars each
+    summed read added up (`_summed_line`) before the identity.
     `heading`, when given, opens a `sum_of` or `quotient_of` digest in the verb's
     place."""
     parameters = summary.parameters
@@ -1525,7 +1543,10 @@ def render_summary_digest(summary: VerbSummary, *, heading: str | None = None) -
             }
         case RankFacts():
             render = render_rank_digest
-            own = {"rank_by": parameters.get("rank_by", ())}
+            own = {
+                "rank_by": parameters.get("rank_by", ()),
+                "partition_by": parameters.get("partition_by", ()),
+            }
         case FilterFacts():
             render = render_filter_digest
             own = {"predicate_count": len(parameters.get("predicates", ()))}
@@ -1553,8 +1574,12 @@ def render_summary_digest(summary: VerbSummary, *, heading: str | None = None) -
         exclusions=summary.exclusions,
         time=summary.time,
     )
-    if summary.rolling is None:
+    added = [
+        *([] if summary.rolling is None else [_rolling_section(summary.rolling)]),
+        *([_summed_line(summary.stat_vars_summed)] if summary.stat_vars_summed else []),
+    ]
+    if not added:
         return digest
     # Before the identity block, the one section every digest ends with.
     head, _, identity = digest.rpartition("\n\n")
-    return "\n\n".join([head, _rolling_section(summary.rolling), identity])
+    return "\n\n".join([head, *added, identity])

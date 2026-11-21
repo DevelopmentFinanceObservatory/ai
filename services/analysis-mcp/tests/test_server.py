@@ -373,8 +373,8 @@ _IN_PROCESS_TWINS = {
 }
 
 
-# Each registered tool's full definition as a caller lists it, dumped from the
-# in-process tools at dfo-ai commit 22b57716.
+# Each registered tool's full definition as a caller lists it. A change to what a
+# caller reads, such as a new argument, updates it on purpose.
 _TOOL_SCHEMAS = Path(__file__).resolve().parent / "fixtures" / "tool_schemas.json"
 
 

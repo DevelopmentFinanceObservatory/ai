@@ -7,7 +7,9 @@ populations to `POST /api/datasets/analysis/anchor`. Each returns the runner's
 answer, or the `ToolRefusal` its reply maps to:
 
 - 200 from the analysis route is the stored frame's ref and the `summary` of
-  the call (`summary.VerbSummary`). From the anchor route it is `AnchorAnswer`.
+  the call (`summary.VerbSummary`), with each dataset version the runner read
+  summed over its StatVars (`stat_vars_summed`). From the anchor route it is
+  `AnchorAnswer`.
 - 202 is a root dataset still building, `ToolRefusal.analysis_pending` with the
   runner's `retry_after_s`.
 - A problem document keeps the runner's `code`, `detail`, `fix` and
@@ -105,6 +107,7 @@ from dfo_frame_grammar import shift_period
 from dfo_spec_kit.registry import REGISTRY
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from analysis_mcp.result import StatVarsSummed
 from analysis_mcp.settings import Settings
 from analysis_mcp.summary import RecomputedInput, ResolvedPeriod, Rolling, VerbSummary
 from analysis_mcp.tool_errors import RetryMode, ToolErrorCode, ToolRefusal
@@ -160,6 +163,8 @@ _SPEC_ROOT_CODES = _ROOT_CODES | {"spec_not_found"}
 _OVER_CEILING_CODE = "over_ceiling"
 _RESPONSE_INVALID = "response_invalid"
 
+# An answer's `stat_vars_summed`, one entry per dataset version read summed.
+_STAT_VARS_SUMMED: TypeAdapter[tuple[StatVarsSummed, ...]] = TypeAdapter(tuple[StatVarsSummed, ...])
 # An answer's `resolved_periods`, one entry per relative period of the recipe.
 _RESOLVED_PERIODS: TypeAdapter[tuple[ResolvedPeriod, ...]] = TypeAdapter(
     Annotated[tuple[ResolvedPeriod, ...], Field(min_length=1)]
@@ -668,10 +673,16 @@ def _ready_summary(
     if anchor is not None and (refusal := _uncovered(body, anchor)) is not None:
         return refusal
     try:
-        return VerbSummary.parse(body["summary"])
+        summary = VerbSummary.parse(body["summary"])
     except (ValidationError, KeyError) as exc:
         logger.warning("analysis runner summary unreadable: %s", exc)
         return _unusable(f"the analysis summary does not fit this service: {_unread_summary(exc)}")
+    try:
+        summed = _STAT_VARS_SUMMED.validate_python(body.get("stat_vars_summed") or ())
+    except ValidationError as exc:
+        logger.warning("analysis runner stat_vars_summed unreadable: %s", exc)
+        return _unusable("the analysis answer's stat_vars_summed do not fit this service")
+    return summary.model_copy(update={"stat_vars_summed": summed}) if summed else summary
 
 
 async def replay_derived(ref: FrameRef) -> FrameRef | ToolRefusal:

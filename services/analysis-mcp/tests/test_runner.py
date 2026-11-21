@@ -575,6 +575,38 @@ async def test_a_ready_answer_replies_with_its_summarys_verb_result_and_digest(
     assert f"spec_id={summary.spec_id}, content_version={summary.content_version}" in text
 
 
+async def test_the_statvars_a_summed_read_added_up_reach_the_result_and_the_digest(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    summed = [{"spec_id": _SPEC, "content_version": _DATASET_CV, "count": 1598}]
+    _install(
+        httpx2.Response(200, json={**_recorded_ready("aggregate"), "stat_vars_summed": summed})
+    )
+
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    assert result.is_error is False, result.content
+    assert result.structured_content is not None
+    assert result.structured_content["stat_vars_summed"] == summed
+    head, _, identity = result.content[0].text.rpartition("\n\n")
+    assert head.endswith(f"summed: {_SPEC}, {_DATASET_CV} added up over 1,598 StatVars.")
+    assert identity.startswith("frame reference:")
+
+
+async def test_an_answer_whose_summed_reads_do_not_fit_refuses_as_outside_the_contract(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    summed = [{"spec_id": _SPEC, "count": 0}]
+    _install(
+        httpx2.Response(200, json={**_recorded_ready("aggregate"), "stat_vars_summed": summed})
+    )
+
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "upstream_error"
+
+
 async def test_a_summary_tolerates_fields_dfo_apis_adds_to_its_exclusions_and_time(
     store: InMemoryMaterialisationStore,
 ) -> None:

@@ -13,7 +13,7 @@
       "readOnlyHint": true,
       "title": null
     },
-    "description": "Group a stored frame by `group_by` and reduce each group's `value` with `aggregation`.\n\nUse it to total or average a frame over one of its dimensions.\n\n`aggregate` skips absent grid cells, not null values. `Frame.build` cannot\nrepresent an in-frame null observation today (`value` must be finite,\n`status` is reserved), so \"coverage\" here means cells present versus\ncells expected for the grouped grain. Both figures land in the trace's\n`applied_policy` on every call. Unit and facet heterogeneity are checked\nbefore any number is computed. A heterogeneous unit refuses with\ncandidates to retry against via `unit`, and a heterogeneous facet\nrefuses naming a differently-scoped `frame_ref` to retry with instead. A\nresult below the configured coverage floor refuses rather than returning\na number computed from too sparse a grid. Under sum or mean with\n`time_period` outside `group_by`, every output row's `time_period` is\none span from the earliest to the latest period the call reduced\n(`2018/2022`), the same on every row.",
+    "description": "Group a stored frame by `group_by` and reduce each group's `value` with `aggregation`.\n\nUse it to total or average a frame over one of its dimensions.\n\n`aggregate` skips absent grid cells, not null values. `Frame.build` cannot\nrepresent an in-frame null observation today (`value` must be finite,\n`status` is reserved), so \"coverage\" here means cells present versus\ncells expected for the grouped grain. Both figures land in the trace's\n`applied_policy` on every call. Unit and facet heterogeneity are checked\nbefore any number is computed. A heterogeneous unit refuses with\ncandidates to retry against via `unit`, and a heterogeneous facet\nrefuses naming a differently-scoped `frame_ref` to retry with instead. A\nresult below the configured coverage floor refuses rather than returning\na number computed from too sparse a grid. Under sum or mean with\n`time_period` outside `group_by`, every output row's `time_period` is\none span from the earliest to the latest period the call reduced\n(`2018/2022`), the same on every row.\n\nA get_data frame or bare spec_id holding several StatVars is summed over\nthem first unless `group_by` names `stat_var`, keeping the breakdown\naxes it names. The digest gives the count summed.",
     "execution": null,
     "icons": null,
     "inputSchema": {
@@ -24,6 +24,11 @@
           "maxLength": 64,
           "minLength": 1,
           "type": "string"
+        },
+        "allow_sparse_breakdowns": {
+          "default": false,
+          "description": "True counts an empty cell of a breakdown column (stat_var_<axis>, such as stat_var_crsPurpose) as no flow, not a coverage gap. Set it for a flow that adds up, such as aid by purpose, or when a coverage_insufficient refusal's fix names it. Recipients, donors, years and stat_var still count every missing cell.",
+          "type": "boolean"
         },
         "frame_ref": {
           "additionalProperties": false,
@@ -43,7 +48,7 @@
         },
         "group_by": {
           "default": [],
-          "description": "Column names to group by before reducing. Empty groups the whole input frame into one row.",
+          "description": "Column names to group by before reducing. Empty groups the whole input frame into one row. crsPurpose names a summed frame's stat_var_crsPurpose.",
           "items": {
             "type": "string"
           },
@@ -264,10 +269,35 @@
           },
           "title": "Observation",
           "type": "object"
+        },
+        "StatVarsSummed": {
+          "description": "A dataset version a call read summed over its StatVars: its pair and how many\nStatVars with data the sum added, as dfo-apis' analysis answer states it.",
+          "properties": {
+            "content_version": {
+              "title": "Content Version",
+              "type": "string"
+            },
+            "count": {
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            },
+            "spec_id": {
+              "title": "Spec Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version",
+            "count"
+          ],
+          "title": "StatVarsSummed",
+          "type": "object"
         }
       },
       "additionalProperties": false,
-      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.\n- `stat_vars_summed`: each dataset version the call read summed over\n  more than one StatVar, with how many it summed. Empty when the call\n  summed none.",
       "properties": {
         "content_version": {
           "title": "Content Version",
@@ -331,6 +361,14 @@
           "minimum": 0,
           "title": "Stat Var Count",
           "type": "integer"
+        },
+        "stat_vars_summed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StatVarsSummed"
+          },
+          "title": "Stat Vars Summed",
+          "type": "array"
         },
         "time": {
           "discriminator": {
@@ -682,10 +720,35 @@
           },
           "title": "Observation",
           "type": "object"
+        },
+        "StatVarsSummed": {
+          "description": "A dataset version a call read summed over its StatVars: its pair and how many\nStatVars with data the sum added, as dfo-apis' analysis answer states it.",
+          "properties": {
+            "content_version": {
+              "title": "Content Version",
+              "type": "string"
+            },
+            "count": {
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            },
+            "spec_id": {
+              "title": "Spec Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version",
+            "count"
+          ],
+          "title": "StatVarsSummed",
+          "type": "object"
         }
       },
       "additionalProperties": false,
-      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.\n- `stat_vars_summed`: each dataset version the call read summed over\n  more than one StatVar, with how many it summed. Empty when the call\n  summed none.",
       "properties": {
         "content_version": {
           "title": "Content Version",
@@ -749,6 +812,14 @@
           "minimum": 0,
           "title": "Stat Var Count",
           "type": "integer"
+        },
+        "stat_vars_summed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StatVarsSummed"
+          },
+          "title": "Stat Vars Summed",
+          "type": "array"
         },
         "time": {
           "discriminator": {
@@ -1253,10 +1324,35 @@
           },
           "title": "Observation",
           "type": "object"
+        },
+        "StatVarsSummed": {
+          "description": "A dataset version a call read summed over its StatVars: its pair and how many\nStatVars with data the sum added, as dfo-apis' analysis answer states it.",
+          "properties": {
+            "content_version": {
+              "title": "Content Version",
+              "type": "string"
+            },
+            "count": {
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            },
+            "spec_id": {
+              "title": "Spec Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version",
+            "count"
+          ],
+          "title": "StatVarsSummed",
+          "type": "object"
         }
       },
       "additionalProperties": false,
-      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.\n- `stat_vars_summed`: each dataset version the call read summed over\n  more than one StatVar, with how many it summed. Empty when the call\n  summed none.",
       "properties": {
         "content_version": {
           "title": "Content Version",
@@ -1320,6 +1416,14 @@
           "minimum": 0,
           "title": "Stat Var Count",
           "type": "integer"
+        },
+        "stat_vars_summed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StatVarsSummed"
+          },
+          "title": "Stat Vars Summed",
+          "type": "array"
         },
         "time": {
           "discriminator": {
@@ -1827,10 +1931,35 @@
           },
           "title": "Observation",
           "type": "object"
+        },
+        "StatVarsSummed": {
+          "description": "A dataset version a call read summed over its StatVars: its pair and how many\nStatVars with data the sum added, as dfo-apis' analysis answer states it.",
+          "properties": {
+            "content_version": {
+              "title": "Content Version",
+              "type": "string"
+            },
+            "count": {
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            },
+            "spec_id": {
+              "title": "Spec Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version",
+            "count"
+          ],
+          "title": "StatVarsSummed",
+          "type": "object"
         }
       },
       "additionalProperties": false,
-      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.\n- `stat_vars_summed`: each dataset version the call read summed over\n  more than one StatVar, with how many it summed. Empty when the call\n  summed none.",
       "properties": {
         "content_version": {
           "title": "Content Version",
@@ -1894,6 +2023,14 @@
           "minimum": 0,
           "title": "Stat Var Count",
           "type": "integer"
+        },
+        "stat_vars_summed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StatVarsSummed"
+          },
+          "title": "Stat Vars Summed",
+          "type": "array"
         },
         "time": {
           "discriminator": {
@@ -2238,10 +2375,35 @@
           },
           "title": "Observation",
           "type": "object"
+        },
+        "StatVarsSummed": {
+          "description": "A dataset version a call read summed over its StatVars: its pair and how many\nStatVars with data the sum added, as dfo-apis' analysis answer states it.",
+          "properties": {
+            "content_version": {
+              "title": "Content Version",
+              "type": "string"
+            },
+            "count": {
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            },
+            "spec_id": {
+              "title": "Spec Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version",
+            "count"
+          ],
+          "title": "StatVarsSummed",
+          "type": "object"
         }
       },
       "additionalProperties": false,
-      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.\n- `stat_vars_summed`: each dataset version the call read summed over\n  more than one StatVar, with how many it summed. Empty when the call\n  summed none.",
       "properties": {
         "content_version": {
           "title": "Content Version",
@@ -2305,6 +2467,14 @@
           "minimum": 0,
           "title": "Stat Var Count",
           "type": "integer"
+        },
+        "stat_vars_summed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StatVarsSummed"
+          },
+          "title": "Stat Vars Summed",
+          "type": "array"
         },
         "time": {
           "discriminator": {
@@ -2661,10 +2831,35 @@
           },
           "title": "Observation",
           "type": "object"
+        },
+        "StatVarsSummed": {
+          "description": "A dataset version a call read summed over its StatVars: its pair and how many\nStatVars with data the sum added, as dfo-apis' analysis answer states it.",
+          "properties": {
+            "content_version": {
+              "title": "Content Version",
+              "type": "string"
+            },
+            "count": {
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            },
+            "spec_id": {
+              "title": "Spec Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version",
+            "count"
+          ],
+          "title": "StatVarsSummed",
+          "type": "object"
         }
       },
       "additionalProperties": false,
-      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.\n- `stat_vars_summed`: each dataset version the call read summed over\n  more than one StatVar, with how many it summed. Empty when the call\n  summed none.",
       "properties": {
         "content_version": {
           "title": "Content Version",
@@ -2729,6 +2924,14 @@
           "title": "Stat Var Count",
           "type": "integer"
         },
+        "stat_vars_summed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StatVarsSummed"
+          },
+          "title": "Stat Vars Summed",
+          "type": "array"
+        },
         "time": {
           "discriminator": {
             "mapping": {
@@ -2774,7 +2977,7 @@
       "readOnlyHint": true,
       "title": null
     },
-    "description": "Rank entities identified by `rank_by`, optionally reducing each\nentity's own rows with `aggregation` first.\n\nUse it to order entities by a value, such as the largest donors in a\nyear, and to keep the top or bottom few.\n\nRanks what's present. An entity absent from the window simply isn't\nranked. Competition ranking (\"1224\"). Entities sharing a value share a\nrank number, and the rank number never breaks a tie. The *order* two\ntied entities are listed in is broken deterministically by the frame\ngrammar's own total ordering over `rank_by`'s values. Refuses\n(`coverage_insufficient`, reusing `aggregate`'s own floor) when the\ngrid, every ranked entity times every distinct period any entity\ncontributes as reflected in the input data rather than the window's\nfull calendar range, falls below the configured coverage floor. A\nperiod where no entity has any data at all is invisible to this check.\n\nA window year given as {anchor: 'latest', offset: n} follows the data\nas growth's window years do.\n\nCollapsed, every output row's `time_period` is the extent of the\nperiods the window holds, such as `2018/2022`, or that one period when\nthe window holds only one. A frame whose rows carry one span, such as\na growth result, keeps that span; a window keeps a span row only when\nit covers every year of the span.\n\n`per_period=True` ranks each of the window's periods on its own instead\nof collapsing them: with no `limit`, the output frame's own `value`\ncolumn carries each entity's rank *position* per period, not its\nmeasured value, and no\nverb here may read that position as a quantity to ratio (`share_of`) or\ngrow at a percentage rate (`growth` with `change=\"relative\"`) or rank\nagain -- all three refuse (`derived_input_ordinal`) over this call's own\noutput, or over anything derived from it. A top or bottom N per period\nis this call with `limit` set.\n\n`limit` keeps the entities ranked at that position or better in the\noutput frame, every one tied at the boundary included, with their\nmeasured values in either mode: a limited per-period rank writes no\nordinal marker. Coverage and the floor check cover every ranked entity,\nand the rows left out are reported as a `beyond_limit` exclusion.",
+    "description": "Rank entities identified by `rank_by`, optionally reducing each\nentity's own rows with `aggregation` first.\n\nUse it to order entities by a value, such as the largest donors in a\nyear, and to keep the top or bottom few. With `partition_by`, it ranks\nand applies `limit` within each partition, such as the top 6 donors of\neach recipient.\n\nRanks what's present. An entity absent from the window simply isn't\nranked. Competition ranking (\"1224\"). Entities sharing a value share a\nrank number, and the rank number never breaks a tie. The *order* two\ntied entities are listed in is broken deterministically by the frame\ngrammar's own total ordering over `rank_by`'s values. Refuses\n(`coverage_insufficient`, reusing `aggregate`'s own floor) when the\ngrid, every ranked entity times every distinct period any entity\ncontributes as reflected in the input data rather than the window's\nfull calendar range, falls below the configured coverage floor. A\nperiod where no entity has any data at all is invisible to this check.\n\nA window year given as {anchor: 'latest', offset: n} follows the data\nas growth's window years do.\n\nCollapsed, every output row's `time_period` is the extent of the\nperiods the window holds, such as `2018/2022`, or that one period when\nthe window holds only one. A frame whose rows carry one span, such as\na growth result, keeps that span; a window keeps a span row only when\nit covers every year of the span.\n\n`per_period=True` ranks each of the window's periods on its own instead\nof collapsing them: with no `limit`, the output frame's own `value`\ncolumn carries each entity's rank *position* per period, not its\nmeasured value, and no\nverb here may read that position as a quantity to ratio (`share_of`) or\ngrow at a percentage rate (`growth` with `change=\"relative\"`) or rank\nagain -- all three refuse (`derived_input_ordinal`) over this call's own\noutput, or over anything derived from it. A top or bottom N per period\nis this call with `limit` set.\n\n`limit` keeps the entities ranked at that position or better in the\noutput frame, every one tied at the boundary included, with their\nmeasured values in either mode: a limited per-period rank writes no\nordinal marker. Coverage and the floor check cover every ranked entity,\nand the rows left out are reported as a `beyond_limit` exclusion.\n\nA get_data frame or bare spec_id holding several StatVars is summed over\nthem first unless `rank_by` names `stat_var`, keeping the breakdown\naxes `rank_by` and `partition_by` name. The digest gives the count summed.",
     "execution": null,
     "icons": null,
     "inputSchema": {
@@ -2783,6 +2986,11 @@
         "aggregation": {
           "description": "The reduction function to apply to each entity's own rows before ranking. Closed vocabulary: ['sum', 'mean', 'max', 'min']. Left None, each entity must already carry exactly one row within the window.",
           "type": "string"
+        },
+        "allow_sparse_breakdowns": {
+          "default": false,
+          "description": "True counts an empty cell of a breakdown column (stat_var_<axis>, such as stat_var_crsPurpose) as no flow, not a coverage gap. Set it for a flow that adds up, such as aid by purpose, or when a coverage_insufficient refusal's fix names it. Recipients, donors, years and stat_var still count every missing cell.",
+          "type": "boolean"
         },
         "anchor_key": {
           "description": "The handle of the stored record of the latest period this call's rolling periods were written from: rak_ and 32 hex digits. Required when the call is rolling and refused when it is not. It is no part of the result's identity.",
@@ -2811,10 +3019,18 @@
           "type": "object"
         },
         "limit": {
-          "description": "Keep only the entities ranked at this position or better: 10 keeps the highest 10, or the lowest 10 with ascending=True. Entities that share the value at the boundary are all kept, so more than limit can remain. Applies within each period when per_period=True, and the output's value is then the measured value, not the rank position. Left None, every ranked entity is kept.",
+          "description": "Keep only the entities ranked at this position or better: 10 keeps the highest 10, or the lowest 10 with ascending=True. Entities that share the value at the boundary are all kept, so more than limit can remain. Applies within each partition under partition_by. Applies within each period when per_period=True, and the output's value is then the measured value, not the rank position. Left None, every ranked entity is kept.",
           "maximum": 1000,
           "minimum": 1,
           "type": "integer"
+        },
+        "partition_by": {
+          "default": [],
+          "description": "Columns splitting the ranking: each partition is ranked on its own and limit applies within it, so rank_by=['origin'], partition_by=['destination'], limit=6 keeps each recipient's top 6 donors. Names no rank_by column.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "per_period": {
           "default": false,
@@ -2836,7 +3052,7 @@
           "type": "string"
         },
         "rank_by": {
-          "description": "Column names identifying each ranked entity.",
+          "description": "Column names identifying each ranked entity. crsPurpose names a summed frame's stat_var_crsPurpose.",
           "items": {
             "type": "string"
           },
@@ -3259,10 +3475,35 @@
           },
           "title": "Observation",
           "type": "object"
+        },
+        "StatVarsSummed": {
+          "description": "A dataset version a call read summed over its StatVars: its pair and how many\nStatVars with data the sum added, as dfo-apis' analysis answer states it.",
+          "properties": {
+            "content_version": {
+              "title": "Content Version",
+              "type": "string"
+            },
+            "count": {
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            },
+            "spec_id": {
+              "title": "Spec Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version",
+            "count"
+          ],
+          "title": "StatVarsSummed",
+          "type": "object"
         }
       },
       "additionalProperties": false,
-      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.\n- `stat_vars_summed`: each dataset version the call read summed over\n  more than one StatVar, with how many it summed. Empty when the call\n  summed none.",
       "properties": {
         "content_version": {
           "title": "Content Version",
@@ -3326,6 +3567,14 @@
           "minimum": 0,
           "title": "Stat Var Count",
           "type": "integer"
+        },
+        "stat_vars_summed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StatVarsSummed"
+          },
+          "title": "Stat Vars Summed",
+          "type": "array"
         },
         "time": {
           "discriminator": {
@@ -3919,10 +4168,35 @@
           },
           "title": "Observation",
           "type": "object"
+        },
+        "StatVarsSummed": {
+          "description": "A dataset version a call read summed over its StatVars: its pair and how many\nStatVars with data the sum added, as dfo-apis' analysis answer states it.",
+          "properties": {
+            "content_version": {
+              "title": "Content Version",
+              "type": "string"
+            },
+            "count": {
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            },
+            "spec_id": {
+              "title": "Spec Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version",
+            "count"
+          ],
+          "title": "StatVarsSummed",
+          "type": "object"
         }
       },
       "additionalProperties": false,
-      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.\n- `stat_vars_summed`: each dataset version the call read summed over\n  more than one StatVar, with how many it summed. Empty when the call\n  summed none.",
       "properties": {
         "content_version": {
           "title": "Content Version",
@@ -3986,6 +4260,14 @@
           "minimum": 0,
           "title": "Stat Var Count",
           "type": "integer"
+        },
+        "stat_vars_summed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StatVarsSummed"
+          },
+          "title": "Stat Vars Summed",
+          "type": "array"
         },
         "time": {
           "discriminator": {
@@ -4328,10 +4610,35 @@
           },
           "title": "Observation",
           "type": "object"
+        },
+        "StatVarsSummed": {
+          "description": "A dataset version a call read summed over its StatVars: its pair and how many\nStatVars with data the sum added, as dfo-apis' analysis answer states it.",
+          "properties": {
+            "content_version": {
+              "title": "Content Version",
+              "type": "string"
+            },
+            "count": {
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            },
+            "spec_id": {
+              "title": "Spec Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version",
+            "count"
+          ],
+          "title": "StatVarsSummed",
+          "type": "object"
         }
       },
       "additionalProperties": false,
-      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.",
+      "description": "What every verb tool returns as `structuredContent`.\n\n- `spec_id`/`content_version`: the `{spec_id, content_version}` pair the\n  next chained call's own `frame_ref` binds to.\n- `frame_content_version`: the stored output frame's own frame-grammar `cv_`.\n- `rows`: the stored frame's own row count, including 0. Named `rows` to\n  match `Exclusion.rows` and data-mcp's `Manifest.rows` -- one name for\n  the same concept across both servers.\n- `role_keys`: the frame's own role columns, sorted as `Frame.build` sorts\n  them -- `()` for a keyless verb output.\n- `stat_var_count`: distinct `stat_var`s the frame carries; 0 when\n  `rows` is 0.\n- `dropped_key_count`: how many keys of the first input (`frame_ref`)\n  the result holds no row for. For a keyed `quotient_of` or `share_of`,\n  the numerator keys with no denominator group, those sharing no period\n  with their group, and for `quotient_of` also those whose every\n  matched cell has a zero denominator. For a `join` on role columns,\n  the left side's entities that matched in no period. 0 for an\n  un-keyed call and for every other verb.\n- `right_dropped_key_count`: how many of a `join`'s right-side\n  (`right_frame_ref`) entities matched in no period. 0 for a join on\n  `time_period` alone and for every other verb.\n- `ranked_before_limit`: how many entries a `rank` call with a `limit`\n  ranked before the limit cut them to `rows`: entities, or entity\n  periods with `per_period`. `None` for a call with no `limit` and for\n  every other verb.\n- `exclusions`/`time`: as `Trace` carries them.\n- `stat_vars_summed`: each dataset version the call read summed over\n  more than one StatVar, with how many it summed. Empty when the call\n  summed none.",
       "properties": {
         "content_version": {
           "title": "Content Version",
@@ -4395,6 +4702,14 @@
           "minimum": 0,
           "title": "Stat Var Count",
           "type": "integer"
+        },
+        "stat_vars_summed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StatVarsSummed"
+          },
+          "title": "Stat Vars Summed",
+          "type": "array"
         },
         "time": {
           "discriminator": {

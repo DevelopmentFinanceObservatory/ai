@@ -8,7 +8,12 @@ from typing import Annotated
 from fastmcp.tools import ToolResult
 from pydantic import Field
 
-from analysis_mcp.op_spec import AGGREGATIONS, FrameRefArgument, PinnedUnit
+from analysis_mcp.op_spec import (
+    AGGREGATIONS,
+    ALLOW_SPARSE_BREAKDOWNS_DESCRIPTION,
+    FrameRefArgument,
+    PinnedUnit,
+)
 
 
 async def aggregate(
@@ -45,7 +50,7 @@ async def aggregate(
             default=(),
             description=(
                 "Column names to group by before reducing. Empty groups the whole input "
-                "frame into one row."
+                "frame into one row. crsPurpose names a summed frame's stat_var_crsPurpose."
             ),
         ),
     ] = (),
@@ -61,6 +66,9 @@ async def aggregate(
             ),
         ),
     ] = None,
+    allow_sparse_breakdowns: Annotated[
+        bool, Field(default=False, description=ALLOW_SPARSE_BREAKDOWNS_DESCRIPTION)
+    ] = False,
 ) -> ToolResult:
     """Group a stored frame by `group_by` and reduce each group's `value` with `aggregation`.
 
@@ -80,15 +88,21 @@ async def aggregate(
     one span from the earliest to the latest period the call reduced
     (`2018/2022`), the same on every row.
 
+    A get_data frame or bare spec_id holding several StatVars is summed over
+    them first unless `group_by` names `stat_var`, keeping the breakdown
+    axes it names. The digest gives the count summed.
+
     Args:
         frame_ref: The {spec_id, content_version} pair naming the input frame.
         aggregation: The reduction function. See the closed vocabulary above.
         group_by: Column names to group by. Empty reduces the whole frame to one row.
         unit: Pins the unit, to answer a prior unit_heterogeneous refusal.
+        allow_sparse_breakdowns: Count an empty breakdown cell as no flow.
 
     Returns:
         A digest: the computed numbers per group, the resolved unit, coverage,
-        any warnings, and the result's {spec_id, content_version} pair and
+        any warnings, the StatVars summed, and the
+        result's {spec_id, content_version} pair and
         identity fields. Under max or min, each group's line also carries the
         period that produced the value, in parentheses after it. The full
         result frame is never in the digest or in structured content.

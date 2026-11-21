@@ -35,6 +35,17 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
+class StatVarsSummed(BaseModel):
+    """A dataset version a call read summed over its StatVars: its pair and how many
+    StatVars with data the sum added, as dfo-apis' analysis answer states it."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    spec_id: str
+    content_version: str
+    count: int = Field(ge=1)
+
+
 class VerbResult(BaseModel):
     """What every verb tool returns as `structuredContent`.
 
@@ -63,6 +74,9 @@ class VerbResult(BaseModel):
       periods with `per_period`. `None` for a call with no `limit` and for
       every other verb.
     - `exclusions`/`time`: as `Trace` carries them.
+    - `stat_vars_summed`: each dataset version the call read summed over
+      more than one StatVar, with how many it summed. Empty when the call
+      summed none.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -78,6 +92,7 @@ class VerbResult(BaseModel):
     ranked_before_limit: int | None = Field(default=None, ge=0)
     exclusions: tuple[Exclusion, ...] = ()
     time: Time = Field(default_factory=Observation)
+    stat_vars_summed: tuple[StatVarsSummed, ...] = ()
 
 
 VERB_OUTPUT_SCHEMA: dict[str, Any] = VerbResult.model_json_schema(mode="serialization")
