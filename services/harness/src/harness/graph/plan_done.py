@@ -16,8 +16,9 @@ from typing import Any, NamedTuple, cast
 from analysis_mcp import digest as analysis_digest
 from data_mcp import get_data_digest
 from data_mcp.tool_errors import ToolErrorCode
+from executor.classify import HARNESS_FAULT_CODES, ExecutorCode, brief_can_avoid
 from executor.ledger import RunLedger
-from executor.outcomes import StepRecord
+from executor.outcomes import STOP_CAUSES, RefusalKind, StepRecord, StopCause
 from planner.plan import (
     Plan,
     SessionState,
@@ -47,6 +48,7 @@ from harness.graph.state import (
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_READINGS_KEY,
+    ORCHESTRATOR_RETRY_NOTE_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
     conversation_readings,
@@ -56,7 +58,7 @@ from harness.graph.state import (
     stored_mapping,
     stored_sequence,
 )
-from harness.sentences import DECLINE_REASONS
+from harness.sentences import DECLINE_REASONS, failure_sentence
 from harness.turn.node import Next, Node, NodeCtx
 from harness.turn_records import AlignedBasis, PlanAsk, PlanRecord, aligned_basis
 
@@ -266,6 +268,49 @@ def _give_plan_back(ctx: NodeCtx[GraphEvent]) -> bool:
     calls["plan_given_back"] = True
     ctx.state[ORCHESTRATOR_CALLS_KEY] = calls
     return True
+
+
+def _system_fault(code: object) -> bool:
+    """Whether a stopped run's `failed_step` `code` is a fault of the system
+    itself: one of `HARNESS_FAULT_CODES`, or a stop kind `STOP_CAUSES` lays on
+    the harness."""
+    if not isinstance(code, str):
+        return False
+    if code in HARNESS_FAULT_CODES:
+        return True
+    kind = RefusalKind(code) if code in set(RefusalKind) else None
+    return kind is not None and STOP_CAUSES[kind] is StopCause.HARNESS
+
+
+def _user_sentence(failed: Mapping[str, Any]) -> str:
+    """The sentence the user reads for `failed`, a run's `failed_step`
+    (`harness.sentences.failure_sentence`), worded from its code and, where
+    a tool refused, the refusal's `retry_mode` and `fix`. A fault of the system
+    (`_system_fault`) reads the system fault's sentence whatever its code's
+    class, so the user is never told their question caused it."""
+    code = failed.get("code")
+    if _system_fault(code):
+        return failure_sentence(ExecutorCode.INTERNAL_ERROR.value, failed.get("retry_mode"))
+    fix = failed.get("fix")
+    return failure_sentence(
+        code, failed.get("retry_mode"), fix if isinstance(fix, Mapping) else None
+    )
+
+
+def _retry_note(plan: Plan | None, failed: Mapping[str, Any], sentence: str) -> str:
+    """What the next plan card says before it, once `plan` stopped on `failed`
+    and the plan call was given back: the step it stopped at, by the label
+    its card showed, the user's `sentence` for the failure, and that the new
+    plan needs approving."""
+    label = None
+    if plan is not None and plan.translation is not None and plan.workflow is not None:
+        rows = plan_display.card_rows(plan)
+        label = next((row["label"] for row in rows if row["id"] == failed.get("step_id")), None)
+    where = f"the step {json.dumps(label)}" if label else "a step"
+    return (
+        f"The approved plan stopped at {where}. {sentence} This new plan is drafted to get "
+        "past it, so it needs your approval."
+    )
 
 
 def _ask_status(
@@ -744,7 +789,14 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
         says what to do with it as the result's text, and the rest as its
         structured fields. A step refused
         `capability_unavailable` marks its spec_id unavailable to `fetch`
-        for the rest of the turn and does not give the plan call back.
+        for the rest of the turn.
+
+        A stopped run gives the plan call back (`_give_plan_back`) only when
+        a different brief can avoid its failure (`executor.classify.brief_can_avoid`),
+        and leaves the next plan card a note naming the step it stopped at
+        (`ORCHESTRATOR_RETRY_NOTE_KEY`). Any other stopped run ends the turn:
+        the lead carries the user's sentence for the failure (`_user_sentence`)
+        for the agent to relay, and a fault of the system is told as one.
 
         When the plan call's last run stopped or did not complete, or the
         planner refused after a run stopped, each ask that run did not
@@ -928,9 +980,13 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
                 if failed.get(key)
             }
             partial = _partial_result(result.get("asks"), frames=bool(result["frames"]))
+            sentence = _user_sentence(failed)
+            fix = failed.get("fix")
+            avoidable = brief_can_avoid(
+                failed.get("code"), fix=fix if isinstance(fix, Mapping) else None
+            )
+            given_back = avoidable and _give_plan_back(ctx)
             if missing_capability:
-                # No brief avoids a capability the question needs, so the
-                # plan call is not given back.
                 lead = (
                     "The approved plan stopped at the step marked failed: this deployment "
                     "cannot do what that step needs, so the part of the question it serves "
@@ -947,8 +1003,17 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
                     "failed request unchanged; and say plainly what remains unanswered and "
                     "why, in the user's terms."
                 )
-                if _give_plan_back(ctx):
-                    lead += " A brief that avoids the failure may be planned once more."
+            if given_back:
+                ctx.state[ORCHESTRATOR_RETRY_NOTE_KEY] = _retry_note(plan, failed, sentence)
+                lead += " A brief that avoids the failure may be planned once more."
+            else:
+                # No other brief gets past the failure, or the turn's one
+                # retry is spent, so the turn ends on the user's sentence.
+                lead += f" No other plan this turn gets past it. Tell the user: {sentence}"
+                if _system_fault(failed.get("code")):
+                    lead += (
+                        " The fault is the system's: do not ask the user to change the question."
+                    )
             if "remedy" in result["failed_step"]:
                 lead += (
                     " Tell the user what they can do about it, as the failed step's remedy says it."

@@ -107,6 +107,11 @@ APPROVED_RUN_KEY = "orchestrator:approved_run"
 # Written by the `planner` node, cleared by `plan_start`, and handed to the
 # agent by `plan_done`, since the amendment reaches the planner alone.
 ORCHESTRATOR_AMENDMENTS_KEY = "orchestrator:amendments"
+# Why the turn's next plan card is a new attempt: the step the approved plan
+# stopped at and the user's sentence for its failure. Written by `plan_done`
+# when it gives the plan call back, and taken by the `planner` node onto the
+# next first draft as its `refusal_note`, which Studio shows before the card.
+ORCHESTRATOR_RETRY_NOTE_KEY = "orchestrator:retry_note"
 # The state a planner entry replanning for a pick on the plan card puts back
 # when the replan does not land (`harness.graph.planning`), written when the
 # replan pauses on a planner-side ask and cleared when the entry ends, so it

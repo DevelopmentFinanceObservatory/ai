@@ -2024,12 +2024,17 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
         "tool": "aggregate",
         "code": "entity_ambiguous",
         "message": "more than one entity matches 'Kenya'",
+        "retry_mode": "correct_and_retry",
+        "fix": {"candidates": ["country/KEN", "country/KEN-old"]},
     }
     # get_data ran and completed before the refusal; its frame is kept.
     assert executed["frame_refs"] == [REF_A]
     assert [step["digest"] for step in executed["step_summaries"]] == ["fetched"]
     _, body = handed_back(model)
-    assert body["failed_step"] == executed["failed_step"]
+    # The refusal's retry mode and `fix` word the user's sentence; the agent
+    # reads the rest.
+    shown = {k: v for k, v in executed["failed_step"].items() if k not in ("retry_mode", "fix")}
+    assert body["failed_step"] == shown
 
 
 async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_replan(
@@ -2076,6 +2081,8 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
         "tool": None,
         "code": "over_ceiling",
         "message": "over the coverage ceiling: too many series.",
+        "retry_mode": "correct_and_retry",
+        "fix": {"detail": "too many series"},
     }
     assert executed["frame_refs"] == [REF_A]
     _, body = handed_back(model)
@@ -2130,6 +2137,13 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
         "code": "over_ceiling",
         "message": "over the coverage ceiling: 2933 members. A narrower question "
         "resolves to a smaller definition.",
+        "retry_mode": "correct_and_retry",
+        "fix": {
+            "cap": 700,
+            "ceiling_kind": "member_cardinality",
+            "count": 2933,
+            "detail": "2933 members",
+        },
     }
     _, body = handed_back(model)
     assert (body["failed_step"]["step_id"], body["failed_step"]["code"]) == (
@@ -2218,6 +2232,8 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
         "tool": None,
         "code": "family_not_summed",
         "message": message,
+        "retry_mode": "do_not_retry",
+        "fix": {"remedy": remedy},
         "remedy": remedy,
     }
     assert executed["frame_refs"] == []
@@ -2515,6 +2531,8 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": "aggregate",
         "code": "entity_ambiguous",
         "message": "ambiguous",
+        "retry_mode": "correct_and_retry",
+        "fix": {},
     }
 
     rediscovery = RediscoveryNeeded(
@@ -2552,6 +2570,8 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": "get_data",
         "code": "rediscovery_needed",
         "message": "the source moved",
+        "retry_mode": "refresh_then_retry",
+        "fix": {},
     }
 
     refused = Refused(
@@ -2594,6 +2614,8 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": None,
         "code": "over_ceiling",
         "message": "over the coverage ceiling: too many series",
+        "retry_mode": "correct_and_retry",
+        "fix": {},
     }
 
     # A `REQUIREMENT_UNMET` stop carries `check_evidence`'s own findings as

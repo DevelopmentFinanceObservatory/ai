@@ -313,7 +313,14 @@ def card_rows(plan: Plan) -> list[dict[str, object]]:
         rows.append(
             {
                 "id": step.id,
-                "label": _card_label(requirement, shown, concepts=concepts, shapes=shapes),
+                # The shape's roles can name a copy the split added, which
+                # `shown` leaves out, so what it keeps apart is read off `plan`.
+                "label": _card_label(
+                    requirement,
+                    shown,
+                    concepts=concepts,
+                    kept=_kept_words(shapes[requirement.id], plan),
+                ),
                 "description": _with_result(description, result),
                 "args": dict(step.args),
                 "gives_answer": step.id == answer,
@@ -1438,10 +1445,11 @@ def _card_label(
     plan: Plan,
     *,
     concepts: Mapping[str, str],
-    shapes: Mapping[str, FrameShape],
+    kept: Sequence[str],
 ) -> str:
     """`requirement`'s short card label (`card_rows`). `concepts` names each
-    retrieval (`_concepts`) and `shapes` holds each result's shape."""
+    retrieval (`_concepts`) and `kept` is what its result keeps one figure
+    per (`_kept_words`)."""
 
     def of(requirement_id: str) -> str:
         return _concept_of(plan.requirement(requirement_id), plan, concepts)
@@ -1449,7 +1457,6 @@ def _card_label(
     def side(read: RequirementSide) -> str:
         return _side_named(read, of(read.input_id))
 
-    kept = _kept_words(shapes[requirement.id], plan)
     by = f" by {' and '.join(kept)}" if kept else ""
     match requirement:
         case DatasetRequirement():

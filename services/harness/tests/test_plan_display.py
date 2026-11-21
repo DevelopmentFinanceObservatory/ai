@@ -25,6 +25,7 @@ from harness.decision_pick import DecisionPick, decision_pick
 from harness.plan_display import (
     _card_label,
     _concepts,
+    _kept_words,
     _label,
     card_choice_text,
     card_decision_text,
@@ -3019,10 +3020,12 @@ def test_the_card_shows_one_row_per_step_the_model_wrote(decision: DecisionFacto
 
     steps = step_rows(plan)
 
+    cards = card_rows(plan)
     assert [row["id"] for row in steps] == ["debt", "total", "last_five"]
+    assert [row["id"] for row in cards] == ["debt", "total", "last_five"]
     assert [row["id"] for row in requirement_rows(plan)] == ["debt", "total", "last_five"]
     assert [row["id"] for row in operation_rows(plan)] == ["debt", "total", "last_five"]
-    assert "debt_history" not in repr([steps, requirement_rows(plan), operation_rows(plan)])
+    assert "debt_history" not in repr([steps, cards, requirement_rows(plan), operation_rows(plan)])
 
 
 def test_the_card_states_a_series_answer_over_the_years_the_plan_states(
@@ -4070,7 +4073,8 @@ def test_a_comparison_of_two_entities_of_one_retrieval_names_each_sides_entity(
     gap = plan.requirement("gap")
     us, uk = "grant equivalents for United States", "grant equivalents for United Kingdom"
 
-    card = _card_label(gap, plan, concepts=_concepts(plan).names, shapes=frame_shapes(plan))
+    kept = _kept_words(frame_shapes(plan)["gap"], plan)
+    card = _card_label(gap, plan, concepts=_concepts(plan).names, kept=kept)
 
     assert card == f"Compare {us} to {uk}"
     assert _label(gap, plan) == f"Compare {us} to {uk}"
@@ -4125,7 +4129,9 @@ def test_retrievals_named_alike_name_their_parties_once(
     concepts, shapes = _concepts(plan).names, frame_shapes(plan)
 
     shown = [
-        _card_label(requirement, plan, concepts=concepts, shapes=shapes)
+        _card_label(
+            requirement, plan, concepts=concepts, kept=_kept_words(shapes[requirement.id], plan)
+        )
         for requirement in plan.evidence_requirements
     ]
 

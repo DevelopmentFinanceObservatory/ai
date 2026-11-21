@@ -2202,7 +2202,7 @@ class _Translator:
             frames: list[Any] = []
             note = payload.get("refusal_note")
             if isinstance(note, str) and note:
-                # `harness.graph.planning`'s `planner` node sets this in two cases. Its
+                # `harness.graph.planning`'s `planner` node sets this in three cases. Its
                 # `"pending_refusal"` route (BUDGET_EXHAUSTED or
                 # QUESTION_FIXED), a refused amendment that still has a
                 # `PENDING_APPROVAL` plan on record re-offered unmodified,
@@ -2210,8 +2210,11 @@ class _Translator:
                 # what is still approvable, and this says why the user is
                 # seeing it again rather than the change they just asked
                 # for. An `"ok"` draft made over a plan the node could not
-                # read says so (`UNREADABLE_PLAN_NOTE`). Any other `"ok"`
-                # draft carries no `refusal_note` and gets no message here.
+                # read says so (`UNREADABLE_PLAN_NOTE`). The first draft
+                # after an approved plan stopped and `plan_done` gave the
+                # plan call back names the step it stopped at and why
+                # (`ORCHESTRATOR_RETRY_NOTE_KEY`). Any other `"ok"` draft
+                # carries no `refusal_note` and gets no message here.
                 frames.append(
                     MessageDelta(event="message.delta", seq=conversation.next_seq(), text=note)
                 )

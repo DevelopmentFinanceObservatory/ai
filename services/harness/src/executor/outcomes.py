@@ -424,7 +424,9 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
     `EvidenceIssueCode` when the evidence check did, `rediscovery_needed` for
     a source to discover again, and the stop's kind otherwise. A `remedy`
     says what the user can do: a tool's own (`_refused_step`), or the one
-    `ISSUE_REMEDIES` gives the evidence check's first error.
+    `ISSUE_REMEDIES` gives the evidence check's first error. A stop on a
+    tool's refusal also carries that refusal's `retry_mode` and `fix`, which
+    word the user's sentence for it (`harness.sentences.failure_sentence`).
     """
     if isinstance(outcome, MethodChoiceNeeded):
         return {
@@ -432,6 +434,7 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
             "tool": outcome.tool.name,
             "code": outcome.code,
             "message": outcome.refusal.message,
+            **_refusal_terms(outcome.refusal),
         }
     if isinstance(outcome, RediscoveryNeeded):
         return {
@@ -440,6 +443,7 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
             "code": outcome.kind,
             "message": outcome.refusal.message
             or f"the source for requirement {outcome.requirement_id!r} needs discovering again",
+            **_refusal_terms(outcome.refusal),
         }
     # `payload`, set on every `STEP_REFUSED` stop, carries the tool's own
     # `code` and `message` from its `ToolFailure`. `outcome.detail` wraps the
@@ -481,6 +485,11 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
     }
 
 
+def _refusal_terms(failure: ToolFailure) -> dict[str, Any]:
+    """`failure`'s `retry_mode` and its `fix`, as `failed_step` carries them."""
+    return {"retry_mode": failure.retry_mode, "fix": dict(failure.fix)}
+
+
 def _refused_step(*, step_id: str | None, failure: ToolFailure) -> dict[str, Any]:
     """`failed_step` for a step the tool itself refused.
 
@@ -495,6 +504,7 @@ def _refused_step(*, step_id: str | None, failure: ToolFailure) -> dict[str, Any
         "tool": None,
         "code": failure.code,
         "message": failure.message,
+        **_refusal_terms(failure),
     }
     remedy = failure.fix.get("remedy")
     if isinstance(remedy, str) and remedy:

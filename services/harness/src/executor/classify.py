@@ -362,6 +362,158 @@ HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
 }
 
 
+# Whether a different brief can avoid the failure an approved plan stopped on,
+# by the `code` of its `failed_step` (`executor.outcomes.failed_step`): a tool's
+# code, an `ExecutorCode`, an `executor.outcomes.RefusalKind`, an
+# `planner.records.EvidenceIssueCode`, or `rediscovery_needed`. Every such code
+# sits in exactly one of the two sets, and `tests/executor/test_classify.py`
+# fails when one is missing, so a new code is placed on purpose.
+#
+# A code is avoidable when a plan drafted from another brief, reading another
+# source, spec, scope or method, can answer the same question: the method
+# choices, the sources to discover again, and the stops whose correction is a
+# different spec. Not avoidable are the harness's own faults
+# (`HARNESS_FAULT_CODES`, and the anchor faults `executor.run` reports as
+# `internal_error`), faults of the run's approval, ledger or publication,
+# transient failures that waiting fixes, `capability_unavailable`, the codes of
+# tools no workflow step calls, a moved StatVar family the turn approves again
+# as it was, and facts of what the user named (a party not in the data, a
+# period the data does not reach), which only the user can change.
+BRIEF_AVOIDABLE_CODES = frozenset(
+    {
+        *METHOD_CHOICE_CODES,
+        *REDISCOVERY_CODES,
+        "rediscovery_needed",
+        # data-mcp
+        "facet_not_available",
+        "default_facet_undefined",
+        # Only for the ceiling kinds in `BRIEF_AVOIDABLE_CEILING_KINDS`.
+        "over_ceiling",
+        "spec_not_exportable",
+        "member_not_resolvable",
+        "node_not_held",
+        "rollup_not_summable",
+        # analysis-mcp
+        "stat_var_unresolved",
+        "frame_too_large",
+        "non_finite_result",
+        "frame_not_held",
+        "frame_expired",
+        "mixed_time_grain",
+        "filter_unit_conversion_unsupported",
+        "join_output_collision",
+        "derived_input_unusable",
+        "derived_input_unrecoverable",
+        "derived_input_ordinal",
+        "rolling_reanchor_unavailable",
+        "quotient_of_side_unit_unsupported",
+        "rendering_not_recorded",
+        "rolling_grain_unsupported",
+        # The run's own stops on the data it read.
+        "requirement_unmet",
+        "empty_answer",
+        # The evidence check's findings on what a retrieval holds.
+        "no_data_at_source",
+        "data_unverified",
+        "identity_unverified",
+        "entity_no_series",
+        "entity_unverified",
+        "entity_role_ambiguous",
+        "entity_role_mismatch",
+        "entity_role_unverified",
+        "group_read_as_total",
+        "open_axis_unresolved",
+        "window_short",
+        "period_unverified",
+        "scope_entities_unbound",
+        "scope_entities_wider",
+        "scope_window_short",
+        "unit_mismatch",
+        "unit_unverified",
+        "unit_price_basis_mismatch",
+        "unit_price_basis_unverified",
+        "source_mismatch",
+        "source_unverified",
+        "source_drift",
+        "rows_empty",
+        "coverage_gaps",
+        "grain_ambiguous",
+    }
+)
+
+BRIEF_UNAVOIDABLE_CODES = frozenset(
+    {
+        *TRANSIENT_CODES,
+        *HARNESS_FAULT_CODES,
+        *(code.value for code in ExecutorCode),
+        "capability_unavailable",
+        "entity_not_found",
+        "frame_integrity_failed",
+        "rolling_anchor_unresolved",
+        # Tools no workflow step calls (`compiler.capabilities.EXCLUDED_TOOLS`).
+        "skill_not_found",
+        "skill_resource_not_found",
+        "allowance_exhausted",
+        "provenance_unavailable",
+        "licence_not_redistributable",
+        "frame_unavailable",
+        # The run's approval, revision, tool surface and transport.
+        "not_approved",
+        "stale_revision",
+        "surface_changed",
+        "transport_failed",
+        "binding_invalid",
+        "step_refused",
+        "step_result_unusable",
+        "shape_mismatch",
+        "column_unbound",
+        "authorisation_expired",
+        "manifest_outside_authorisation",
+        "authorisation_mismatch",
+        "run_abandoned",
+        # The evidence check's findings no other brief changes this turn: the
+        # user's name as the data lists it, a family the turn approves again as
+        # it was, a rebound binding every search meets, and a manifest that
+        # read another pin or states no statistics.
+        "entity_missing",
+        "stat_var_family_moved",
+        "stat_var_membership_drift",
+        "source_pin_mismatch",
+        "statistics_unavailable",
+        # No check reports these as a failure.
+        "source_substituted",
+        "unit_matches",
+    }
+)
+
+
+# An `over_ceiling` by the `fix.ceiling_kind` it names, which decides whether
+# another brief avoids it. A narrower request (fewer rows, bytes or requests)
+# is a plan the model can draft. A member-cardinality or candidate-window
+# ceiling is fixed by the spec's own definition, and its remedy is the user
+# narrowing the topic or naming a breakdown, which a re-plan would choose for
+# them. Every `CeilingKind` sits in one of the two sets, and an `over_ceiling`
+# naming no kind, or one in neither, is not avoidable.
+BRIEF_AVOIDABLE_CEILING_KINDS = _NARROWABLE_CEILING_KINDS
+BRIEF_UNAVOIDABLE_CEILING_KINDS = frozenset({"member_cardinality", "candidate_window"})
+
+
+def brief_can_avoid(code: object, fix: Mapping[str, object] | None = None) -> bool:
+    """Whether a plan drafted from another brief can avoid the failure `code` names.
+
+    `code` is a stopped run's `failed_step` code, and `fix` the `fix` of the
+    refusal it stopped on, whose `ceiling_kind` decides an `over_ceiling`
+    (`BRIEF_AVOIDABLE_CEILING_KINDS`). A code in neither
+    `BRIEF_AVOIDABLE_CODES` nor `BRIEF_UNAVOIDABLE_CODES`, or none at all, is
+    not avoidable, so an unplaced code never costs the user a second approval.
+    """
+    if not isinstance(code, str) or code not in BRIEF_AVOIDABLE_CODES:
+        return False
+    if code == "over_ceiling":
+        return (fix or {}).get("ceiling_kind") in BRIEF_AVOIDABLE_CEILING_KINDS
+    return True
+
+
 def internal_fault(detail: str | None = None) -> dict[str, JsonValue]:
     """The refusal of a fault of the system itself, such as a bug: `internal_error`,
     `do_not_retry`, since the same turn meets it again, with `detail` for the log
