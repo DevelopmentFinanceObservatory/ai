@@ -898,13 +898,14 @@ def turn_standing(
     A live lease holds the turn whatever the cursor and the record say, so
     a reader waits for its holder. Otherwise a recorded turn is closed as
     its record states (`record_status`), since the record is what the
-    client was told: a cursor left open under it is one the closing write
-    stored before it closed cursors too, which `StudioStore.load` closes.
-    An unrecorded turn with no cursor was left by a segment that never
-    opened or recorded it, and reads `abandoned`, as the next turn records
-    it. A cursor closed under an open record is recorded as it closed
-    (`record_closed_turn`) by `load` and on `peek`'s copy, so it reads as
-    the cursor closed. A running cursor is resumable, and a paused one
+    client was told, whatever its cursor says: a write that commits a
+    record closes the cursor with it, and `StudioStore.load` closes a
+    cursor it finds open under a record. An unrecorded turn with no cursor
+    was left by a segment that never opened or recorded it, and reads
+    `abandoned`, as the next turn records it and as `StudioStore.peek`
+    records it on its copy. A cursor closed under an open record is
+    recorded as it closed (`record_closed_turn`) by `load` and on `peek`'s
+    copy, so it reads as the cursor closed. A running cursor is resumable, and a paused one
     stands as the pause's entry does (`pause_entry`)."""
     if lease_live:
         return TurnStanding(Standing.HELD)
@@ -1710,7 +1711,11 @@ class StudioStore:
 
         A turn whose cursor closed with its record left open and no lease
         live is shown recorded as `load` would record it
-        (`_record_closed_turn`), on the copy alone: nothing is written."""
+        (`_record_closed_turn`), and an unrecorded turn with no cursor and no
+        lease live, an Edit Card turn whose closing write failed or a turn
+        claimed and never opened, is shown recorded `abandoned`, as the next
+        turn records it (`ConversationState.begin_turn`). Both are on the
+        copy alone: nothing is written."""
         stored = await self._read(principal, conversation_id)
         if stored is None:
             return None
@@ -1720,8 +1725,11 @@ class StudioStore:
         _apply_delta(state, flat)
         lease = _row_segment(row)
         live = lease is not None and lease.expires_at > row.db_now
-        if disagreeing is not None and not live and not state.turn_recorded:
-            record_closed_turn(state, disagreeing)
+        if not live and state.turn_index and not state.turn_recorded:
+            if disagreeing is not None:
+                record_closed_turn(state, disagreeing)
+            elif status is None:
+                state.close_turn(final_text=state.turn_final_text, error="abandoned")
         return StoredConversation(
             state=state,
             turn_status=status,
@@ -1835,10 +1843,10 @@ class StudioStore:
         """Close the cursor of a turn whose record committed while the
         cursor stayed open, with the status the record states and the
         record's code as its error (`record_status`, `recorded_close_error`).
-        A closing write stored before `_close_segment` closed the cursor in
-        the same transaction leaves a row this way. One transaction under
-        the row lock, refused when the row moved past `version` or a lease
-        on it is live, so a writer since the read wins. A cursor that moved
+        Every write that commits a record closes the cursor in the same
+        transaction; this closes any cursor still found open under a record.
+        One transaction under the row lock, refused when the row moved past
+        `version` or a lease on it is live, so a writer since the read wins. A cursor that moved
         since the read is left as it stands."""
         record = durable.turns[-1]
         status = record_status(record)

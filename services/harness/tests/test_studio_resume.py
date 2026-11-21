@@ -20,10 +20,16 @@ import httpx2
 import pytest
 from compiler.surface import ProgressCallback, ToolCallResult
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from google.genai import types
 from harness import studio as studio_module
 from harness.scripted import ScriptedSurface
-from harness.studio import _conversation_read, _read_status, _resume_refusal
+from harness.studio import (
+    _carried_answer,
+    _conversation_read,
+    _read_status,
+    _resume_refusal,
+)
 from harness.studio_state import SEGMENT_TTL_S, ConversationState, _PendingInterrupt
 from harness.studio_store import (
     SegmentClose,
@@ -828,8 +834,8 @@ async def _closed_done(engine: AsyncEngine) -> tuple[FastAPI, Callable[[], Await
 async def _recorded_over_an_open_cursor(
     engine: AsyncEngine,
 ) -> tuple[FastAPI, Callable[[], Awaitable[None]]]:
-    """A row stored before the closing write closed the cursor with the
-    record: the turn recorded `failed`, its cursor left running."""
+    """A row holding a turn recorded `failed` with its cursor left running,
+    which `load` closes as the record states."""
     app, _ = orchestrator_app(
         plan_call("q with forks"), tool_surface=_BrokenSurface(), engine=engine
     )
@@ -1092,3 +1098,29 @@ async def _cursor_statuses(engine: AsyncEngine) -> list[str]:
         return list(
             (await conn.execute(text("SELECT status FROM turn_cursors ORDER BY id"))).scalars()
         )
+
+
+@pytest.mark.parametrize(
+    ("status", "error", "answered"),
+    [
+        pytest.param(404, "not_found", "edit_conflict", id="answer-no-longer-pending"),
+        pytest.param(422, "invalid_argument", "edit_conflict", id="answer-refused"),
+        pytest.param(409, "edit_conflict", "edit_conflict", id="plan-revision-stale"),
+        pytest.param(409, "transient_unavailable", "transient_unavailable", id="busy"),
+    ],
+)
+def test_a_carried_answers_refusal_is_the_resumes_own(
+    status: int, error: str, answered: str
+) -> None:
+    """`/resume` delegates a carried answer to the `/interrupt` retry. A
+    refusal of that retry other than a busy lease is the resume's own 409
+    `edit_conflict` on `/turn_index`, which tells the page to read again."""
+    refused = JSONResponse(content={"error": error, "retry": "do_not_retry"}, status_code=status)
+
+    response = _carried_answer(refused, 1)
+
+    body = json.loads(bytes(response.body))
+    assert body["error"] == answered
+    if answered == "edit_conflict":
+        assert response.status_code == 409
+        assert body["pointer"] == "/turn_index"

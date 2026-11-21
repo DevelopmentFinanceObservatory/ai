@@ -883,12 +883,17 @@ class PlannerAdapter:
         """What `__call__` answers for a refusal that ends the entry: its plain
         sentence (`harness.sentences.refusal_sentence`), which the planner and
         the orchestrator read, whether another plan for the same ask could
-        succeed, and its code."""
+        succeed, and its code. A `QUESTION_FIXED` refusal also carries the
+        user's new question as the call stated it, under `question`, when
+        the call stated one."""
+        detail = refused.get("detail")
+        question = detail.get("question") if isinstance(detail, Mapping) else None
         return {
             "refused": {
                 "text": refusal_sentence(refused),
                 "final": refused.get("code") in PlannerAdapter._FINAL_CODES,
                 "code": refused.get("code"),
+                **({"question": question} if isinstance(question, str) and question else {}),
             }
         }
 

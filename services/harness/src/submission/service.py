@@ -1946,7 +1946,7 @@ def _resolve_intent(
     if existing is None:
         return None, 1
     restart = starts_new_plan and (amends_version is None or amendment_entry)
-    blocked = _restart_blocked(existing, restart=restart) or _round_cap_blocked(
+    blocked = _restart_blocked(existing, restart=restart, question=question) or _round_cap_blocked(
         existing, rounds_so_far=rounds_so_far
     )
     if blocked is not None:
@@ -1959,8 +1959,13 @@ def _resolve_intent(
     return existing, rounds_so_far + 1
 
 
-def _restart_blocked(existing: Plan, *, restart: bool) -> dict[str, object] | None:
-    """Return the `QUESTION_FIXED` refusal for a restart, or `None`.
+def _restart_blocked(
+    existing: Plan, *, restart: bool, question: str | None
+) -> dict[str, object] | None:
+    """Return the `QUESTION_FIXED` refusal for a restart, or `None`. The
+    refusal's detail carries the call's `question`, the user's new question
+    in their own words, which the harness hands back as the next turn
+    (`harness.graph.planning`).
 
     Split out of `_resolve_intent` to keep its own branch count within this
     project's `PLR0911` budget.
@@ -1971,7 +1976,7 @@ def _restart_blocked(existing: Plan, *, restart: bool) -> dict[str, object] | No
         ProblemCode.QUESTION_FIXED,
         _QUESTION_FIXED_RESTART,
         outcome=Outcome.REFUSED,
-        detail={"version": existing.version},
+        detail={"version": existing.version, **({"question": question} if question else {})},
     )
 
 

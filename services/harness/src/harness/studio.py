@@ -1244,6 +1244,22 @@ def _cursor_standing(
     )
 
 
+def _carried_answer(response: Response, turn_index: int) -> Response:
+    """What `/resume` answers for the `/interrupt` retry it delegated a
+    carried answer to (`Standing.CARRY`): the stream, or a busy 409
+    `transient_unavailable`, as the retry answered, and the 409
+    `edit_conflict` `/resume` answers for any other refusal, a 404 for an
+    answer no longer pending, a 422, or a stale plan revision, since the
+    turn moved between the resume's read and the retry."""
+    if response.status_code == 409:
+        refused = json.loads(bytes(response.body))
+        if refused.get("error") != ErrorCode.EDIT_CONFLICT.value:
+            return response
+    elif response.status_code not in (404, 422):
+        return response
+    return _resume_conflict(f"turn {turn_index} moved before its answer was carried on")
+
+
 def _not_open_turn_response(turn_index: int) -> JSONResponse:
     """The 409 `edit_conflict` for a `/resume` of a turn that is not open."""
     return _resume_conflict(f"turn {turn_index} is not the conversation's open turn")
@@ -3183,11 +3199,14 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         if carry is not None:
             # The retry claims the conversation itself, outside this
             # request's cleanup, which holds no claim of its own here.
-            return await interrupt(
-                carry,
-                authorization=authorization,
-                x_dfo_account=x_dfo_account,
-                x_dfo_caller=x_dfo_caller,
+            return _carried_answer(
+                await interrupt(
+                    carry,
+                    authorization=authorization,
+                    x_dfo_account=x_dfo_account,
+                    x_dfo_caller=x_dfo_caller,
+                ),
+                body.turn_index,
             )
         assert segment_id is not None
         try:

@@ -2204,8 +2204,9 @@ class _Translator:
             note = payload.get("refusal_note")
             if isinstance(note, str) and note:
                 # `harness.graph.planning`'s `planner` node sets this in two cases. Its
-                # `"pending_refusal"` route (BUDGET_EXHAUSTED or
-                # QUESTION_FIXED), a refused amendment that still has a
+                # `"pending_refusal"` route (BUDGET_EXHAUSTED, or
+                # QUESTION_FIXED on an entry with no amendment to hand back
+                # as a new question), a refusal that still has a
                 # `PENDING_APPROVAL` plan on record re-offered unmodified,
                 # carries the refusal's sentence: the plan card below says
                 # what is still approvable, and this says why the user is

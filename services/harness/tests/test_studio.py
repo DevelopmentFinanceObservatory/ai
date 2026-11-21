@@ -3550,34 +3550,60 @@ async def test_a_new_question_typed_on_the_plan_card_ends_the_turn_and_hands_it_
 
 class _AskingThenRestartRefusingPlanner(_RestartRefusingPlanner):
     """`_RestartRefusingPlanner`, whose amendment entry first asks the user a
-    question and reads the answer as a different question."""
+    question, then refuses the answer as a different question the way a
+    real `PlannerAdapter` does, carrying the `question` its `starts_new_plan`
+    call stated (`stated`, none when `None`)."""
+
+    def __init__(self, schemas: list[ToolSchema], *, stated: str | None) -> None:
+        super().__init__(schemas)
+        self.stated = stated
 
     async def __call__(self, *, question: str, **kwargs: Any) -> dict[str, Any]:
         if self.calls > 0 and kwargs.get("answer") is None:
             return {"asked": {"call_id": "amend_ask", "args": {"message": "Which years?"}}}
-        return await super().__call__(question=question, **kwargs)
+        answer = await super().__call__(question=question, **kwargs)
+        if self.stated is not None and "refused" in answer:
+            answer["refused"]["question"] = self.stated
+        return answer
 
 
-async def test_a_new_question_answered_to_the_planner_on_an_amendment_is_handed_back(
+_GHANA = "Actually, what is Ghana's GDP?"
+_KENYA_ODA = "what was Kenya's ODA in 2023?"
+
+
+@pytest.mark.parametrize(
+    ("amended", "typed", "stated", "handed_back"),
+    [
+        pytest.param("show it for Kenya instead", _GHANA, _GHANA, _GHANA, id="answer-asks-it"),
+        pytest.param(_KENYA_ODA, "separately", _KENYA_ODA, _KENYA_ODA, id="amendment-asks-it"),
+        pytest.param(_KENYA_ODA, "separately", None, _KENYA_ODA, id="none-stated"),
+    ],
+)
+async def test_a_new_question_reached_through_a_planner_question_is_the_one_the_planner_states(
     real_schemas: list[ToolSchema],
+    amended: str,
+    typed: str,
+    stated: str | None,
+    handed_back: str,
 ) -> None:
     """The user amends the plan card, the planner asks which years, and the
-    user answers with a different question, which the planner reads as one
-    (`QUESTION_FIXED`). `done` hands back the answer, the user's latest
-    words, and the amendment is not sent as a question."""
+    planner reads the answer as a different question (`QUESTION_FIXED`).
+    `done` hands back the question the planner's `starts_new_plan` call
+    stated in the user's words, from the answer or the amendment, and the
+    amendment when it stated none. An answer that is no question, such as
+    "separately", is never handed back."""
     app = _app(
         *_plan("kenya debt"),
-        planner=_AskingThenRestartRefusingPlanner(schemas=real_schemas),
+        planner=_AskingThenRestartRefusingPlanner(schemas=real_schemas, stated=stated),
         tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
     )
-    typed = "Actually, what is Ghana's GDP?"
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("kenya debt"))
         plan = _frame(first, "plan.proposed")
         asked = await _stream(
             client,
             "/api/studio/interrupt",
-            _interrupt_body(plan["interrupt_id"], "amend", "show it for Kenya instead"),
+            _interrupt_body(plan["interrupt_id"], "amend", amended),
         )
         question = _frame(asked, "elicitation.request")
         answered = await _stream(
@@ -3592,7 +3618,37 @@ async def test_a_new_question_answered_to_the_planner_on_an_amendment_is_handed_
 
     assert question["questions"][0]["question"] == "Which years?"
     assert answered[-1]["event"] == "done"
-    assert answered[-1]["new_question"] == typed
+    assert answered[-1]["new_question"] == handed_back
+
+
+async def test_an_edit_card_turn_whose_closing_write_failed_reads_abandoned_with_its_record() -> (
+    None
+):
+    """An Edit Card turn has no cursor. Its closing write saves nothing, and
+    once the lease lapses the state read states the turn `abandoned`, as
+    the next turn records it, with its record in `closed_since`."""
+    clock = await StoreClock.start(_engine())
+    store = StudioStore(_engine(), **clock.store_kwargs)
+    app = _app(*_card(), store=store, **_edit_app(Finish.DONE))
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        _close_as(store, SegmentClose.FAILED)
+        await _stream(client, "/api/studio/turn", _edit_body("rename it"))
+        await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)
+        read = (
+            await client.get(
+                "/api/studio/state",
+                params={"conversation_id": CONVERSATION, "since": 1},
+                headers=AUTH,
+            )
+        ).json()
+
+    assert read["turn"]["index"] == 2
+    assert read["turn"]["status"] == "abandoned"
+    assert read["closed_total"] == 2
+    (closed,) = read["closed_since"]
+    assert closed["turn_index"] == 2
+    assert closed["error"] == "abandoned"
 
 
 async def test_a_set_aside_turn_whose_closing_write_failed_keeps_its_question(

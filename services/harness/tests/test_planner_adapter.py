@@ -4402,6 +4402,7 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
     assert result is not None and "refused" in result
     assert result["refused"]["code"] == ProblemCode.QUESTION_FIXED
     assert "own message" in result["refused"]["text"]
+    assert result["refused"]["question"] == "a different question"
     plan = load_plan(await harness.state())
     assert plan is not None
     assert plan.version == 3

@@ -50,7 +50,9 @@ _PROPOSE_PLAN_ARGUMENTS = {
     "question": (
         "The question this plan answers. Required on a first draft. This "
         "turn's question is fixed, so a patch either omits it or restates it "
-        "unchanged: it has to match the one already recorded."
+        "unchanged: it has to match the one already recorded. With "
+        "`starts_new_plan`, the user's new question in their own words, quoted "
+        "from their amendment or answer."
     ),
     "answer_mode": (
         "What kind of answer the requirements add up to. `series` answers a "
