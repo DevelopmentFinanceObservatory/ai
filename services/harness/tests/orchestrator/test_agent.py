@@ -153,6 +153,11 @@ def test_the_instruction_says_when_cards_come_off_and_that_pinned_ones_stay():
     assert "each turn's cards join the ones already on the canvas" in text
     assert "when the conversation turns to another subject" in text
     assert "remove_cards leaves pinned cards on the canvas and names them as kept_pinned" in text
+    # The ids of the earlier subject's cards come from the canvas listing.
+    assert (
+        "or turns to another subject so the earlier subject's cards come off, call recall "
+        "with part canvas first to see them and their ids" in text
+    )
 
 
 def test_the_instruction_keeps_a_measures_creditor_scope_in_the_reply():

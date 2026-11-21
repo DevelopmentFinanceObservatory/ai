@@ -1316,12 +1316,15 @@ def basis_line(
 ) -> str | None:
     """One line on how the turn's figures were counted, from its stored readings.
 
-    `None` when the turn used no part with scope choices. A part is used as
-    `_used_readings` reads it; its newest reading speaks for it. A compile
+    `None` when the turn used no part with scope choices or an elected
+    count. A part is used as `_used_readings` reads it; its newest reading
+    speaks for it. A compile
     alignment moved inputs onto speaks through its plan source's
     `PlanSource.aligned_basis`, the newest plan's, unless a reading of its
     own does. The stated pin's reading does not speak for it, since its
-    choices on the moved axes name the basis the compile left. Each
+    choices on the moved axes name the basis the compile left. A part whose
+    count search elected (`SearchReading.counted_as`) and that holds no
+    scope choice on `measure_basis` states that count first. Each
     scope choice of a used part gives one clause (`_choice_clause`), and
     each entry search left out of the part another. Parts whose
     clauses are the same share them. Otherwise the clauses every part
@@ -1349,21 +1352,32 @@ def basis_line(
         plans: The turn's plan records, as `PlanRecord` JSON.
     """
     used = newest_per_spec_id(
-        [reading for reading in _used_readings(readings, plans=plans) if reading.scope is not None]
+        [
+            reading
+            for reading in _used_readings(readings, plans=plans)
+            if reading.scope is not None or reading.counted_as
+        ]
     )
     narrowed = _newest_narrowings(plans)
     parts: dict[tuple[str, ...], list[str]] = {}
     for reading in used:
-        assert reading.scope is not None
         served = reading.fetch.served if reading.fetch is not None else None
-        clauses = _scope_clauses(
-            reading.scope, served, narrowed=narrowed.get(reading.spec_id or "", ())
+        clauses = (
+            _scope_clauses(reading.scope, served, narrowed=narrowed.get(reading.spec_id or "", ()))
+            if reading.scope is not None
+            else ()
         )
+        if reading.counted_as and not (
+            reading.scope is not None
+            and any(choice.axis == "measure_basis" for choice in reading.scope.choices)
+        ):
+            clauses = (reading.counted_as, *clauses)
         if clauses:
             parts.setdefault(clauses, []).append(
                 part_name(reading, specs.get(reading.spec_id or ""))
             )
-    for basis in _aligned_bases(plans, read={reading.spec_id for reading in used}):
+    scoped = {reading.spec_id for reading in used if reading.scope is not None}
+    for basis in _aligned_bases(plans, read=scoped):
         clauses = _scope_clauses(basis.scope, basis.served)
         if clauses:
             parts.setdefault(clauses, []).append(basis.name)
@@ -1533,12 +1547,15 @@ def part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
     part is named by Search's label for its block (`_served_name`), unquoted,
     or by Search's sentence for the pin when the block yields no label.
 
-    A part with no words of its own, or none left to name it by, is named
+    A part with no scope choices keeps its own words. A part with no words
+    of its own, or none left to name it by, is named
     by what its block measures (`_served_name`, else `measure_label`), else
     by the title of the dataset it counts from, else "these figures".
     """
+    words = reading.text or reading.sentence
     scope = reading.scope
-    assert scope is not None
+    if scope is None:
+        return f'"{words}"' if words else _unworded_name(block)
     active = {choice.axis: choice.active for choice in scope.choices}
     stated = [*scope.entries, *(dropped.entry for dropped in scope.dropped_entries)]
     repinned = any(
@@ -1550,7 +1567,6 @@ def part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
     )
     if repinned or contradicted:
         return _served_name(block) or reading.sentence or _unworded_name(block)
-    words = reading.text or reading.sentence
     return f'"{words}"' if words else _unworded_name(block)
 
 

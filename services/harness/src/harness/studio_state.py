@@ -126,17 +126,19 @@ _BLOCK_SHOWS_BYTES = (
 _SUBSET_RULE = "display order"
 # `recall(part="canvas")`'s listing (`ConversationState.canvas_listing_state`)
 # names cards in the order `ConversationState._canvas_rank` ranks them by the
-# turn that drew each card: the focus card, this turn's cards, the pinned cards,
-# then the earlier cards still on the canvas, newest turn first. The canvas
-# order, which the user changes, plays no part. `_DIGEST_BLOCK_CAP` cards come
-# in full, and past them each of the three groups names up to
-# `_LISTING_COMPACT_CAP` cards compactly (`_compact_entry`: id, type and title
-# inside `_COMPACT_FRAME_BYTES` of keys). A full or compact entry carries up to
+# turn that drew each card: this turn's cards on the canvas, the pinned cards,
+# the earlier cards still on the canvas, newest turn first, and then the cards
+# off the canvas, this turn's first and then newest turn first. The canvas
+# order, which the user changes, plays no part. `_DIGEST_BLOCK_CAP` cards on
+# the canvas come in full, and past them each of the three on-canvas groups
+# names up to `_LISTING_COMPACT_CAP` cards compactly (`_compact_entry`: id,
+# type and title inside `_COMPACT_FRAME_BYTES` of keys). The cards off the
+# canvas are named compactly a whole turn at a time while the turns fit
+# `_LISTING_COMPACT_CAP`. A full or compact entry carries up to
 # `_VIEW_FLAG_BYTES` of pinned / on_canvas / turn flags. A turn draws at most
 # `BUDGETS["make_charts"] * MAX_CHARTS_PER_CALL` cards (40), fewer than
-# `_DIGEST_BLOCK_CAP + _LISTING_COMPACT_CAP`, so every card of this turn is
-# named. The cards left, those off the canvas and any on it past the caps, are
-# counted by turn: the newest `_EARLIER_TURN_CAP` turns, each within
+# `_LISTING_COMPACT_CAP`, so every card of this turn is named. The cards left
+# are counted by turn: the newest `_EARLIER_TURN_CAP` turns, each within
 # `_EARLIER_ENTRY_BYTES`, and one more entry for the rest. The keys and counts
 # around the lists take up to `_LISTING_WRAPPER_BYTES`.
 _LISTING_COMPACT_CAP = 48
@@ -159,7 +161,7 @@ _COMPACT_ENTRY_BYTES = (
 CANVAS_LISTING_MAX_BYTES = (
     _LISTING_WRAPPER_BYTES
     + _DIGEST_BLOCK_CAP * _FULL_ENTRY_BYTES
-    + 3 * _LISTING_COMPACT_CAP * _COMPACT_ENTRY_BYTES
+    + 4 * _LISTING_COMPACT_CAP * _COMPACT_ENTRY_BYTES
     + (_EARLIER_TURN_CAP + 1) * _EARLIER_ENTRY_BYTES
 )
 # The canvas summary every turn opens with (`ConversationState.canvas_summary_state`):
@@ -294,18 +296,20 @@ def _tool_error_response(error: ToolError, *, status_code: int) -> JSONResponse:
 @dataclass(frozen=True)
 class _CanvasRank:
     """The conversation's cards as `ConversationState._canvas_rank` ranks them
-    for the canvas views. `this_turn` holds the cards the open turn drew, in
-    the order it drew them; `pinned` the other pinned cards, newest drawing
-    turn first; `on_canvas` the other cards on the canvas, newest drawing turn
-    first and each turn's in the order it drew them, with the cards of no
-    recorded turn last; `off_canvas` every other card, in the same order.
-    `turn_of` maps a card to the turn that last drew or revised it."""
+    for the canvas views. `this_turn` holds the cards on the canvas the open
+    turn drew, in the order it drew them; `pinned` the other pinned cards,
+    newest drawing turn first; `on_canvas` the other cards on the canvas,
+    newest drawing turn first and each turn's in the order it drew them, with
+    the cards of no recorded turn last; `off_canvas` the cards off the canvas
+    by the turn that drew them, the open turn's first, then newest turn first,
+    then the cards of no recorded turn under `None`. `turn_of` maps a card to
+    the turn that last drew or revised it."""
 
     focus: str | None
     this_turn: list[str]
     pinned: list[str]
     on_canvas: list[str]
-    off_canvas: list[str]
+    off_canvas: list[tuple[int | None, list[str]]]
     turn_of: dict[str, int]
     composed: set[str]
     pinned_ids: set[str]
@@ -657,17 +661,20 @@ class ConversationState:
         ranked += [
             cid for cid in reversed(self.components) if cid not in drawn_in and cid != focused
         ]
-        this_turn = by_turn.get(open_turn, []) if open_turn is not None else []
-        drawn_now = set(this_turn)
-        rest = [cid for cid in ranked if cid not in drawn_now]
-        pinned = [cid for cid in rest if cid in pinned_ids]
-        unpinned = [cid for cid in rest if cid not in pinned_ids]
+        drawn_now = by_turn.get(open_turn, []) if open_turn is not None else []
+        this_turn = [cid for cid in drawn_now if cid in composed]
+        drawn_ids = set(drawn_now)
+        earlier = [cid for cid in ranked if cid not in drawn_ids]
+        off: dict[int | None, list[str]] = {}
+        for cid in [*drawn_now, *earlier]:
+            if cid not in composed:
+                off.setdefault(drawn_in.get(cid), []).append(cid)
         return _CanvasRank(
             focus=focused,
             this_turn=this_turn,
-            pinned=pinned,
-            on_canvas=[cid for cid in unpinned if cid in composed],
-            off_canvas=[cid for cid in unpinned if cid not in composed],
+            pinned=[cid for cid in earlier if cid in pinned_ids],
+            on_canvas=[cid for cid in earlier if cid in composed and cid not in pinned_ids],
+            off_canvas=list(off.items()),
             turn_of=drawn_in,
             composed=composed,
             pinned_ids=pinned_ids,
@@ -723,17 +730,20 @@ class ConversationState:
         return summary
 
     def canvas_listing_state(self) -> dict[str, Any]:
-        """`recall(part="canvas")`'s listing, in `_canvas_rank`'s order. This
-        turn's cards, the pinned ones and then the earlier cards still on the
-        canvas take the `_DIGEST_BLOCK_CAP` full places (`blocks`). Past them
-        each of the three groups is named compactly up to `_LISTING_COMPACT_CAP`
-        (`titles`), so a card can be recalled or removed by id. Past that this
-        turn's and the pinned cards are counted (`this_turn_not_shown`,
-        `pinned_not_shown`), and every other card, off the canvas or past the
-        caps, is counted by the turn that drew it (`earlier`: turn, on_canvas,
-        off_canvas), the newest `_EARLIER_TURN_CAP` turns apart and the rest,
-        older turns' cards and those of no recorded turn, in one count
-        (`earlier_rest`). Bounded by `CANVAS_LISTING_MAX_BYTES`."""
+        """`recall(part="canvas")`'s listing, in `_canvas_rank`'s order, so a
+        card can be recalled or removed by id. This turn's cards on the canvas,
+        the pinned ones and then the earlier cards on the canvas take the
+        `_DIGEST_BLOCK_CAP` full places (`blocks`). Past them each of those
+        groups is named compactly up to `_LISTING_COMPACT_CAP` (`titles`), and
+        this turn's and the pinned cards past that are counted
+        (`this_turn_not_shown`, `pinned_not_shown`). The cards off the canvas
+        are named compactly a whole turn at a time while the turns fit
+        `_LISTING_COMPACT_CAP` (`off_canvas`). Every card left, on the canvas
+        past the caps or off it in a turn that did not fit, is counted by the
+        turn that drew it (`earlier`: turn, on_canvas, off_canvas), the newest
+        `_EARLIER_TURN_CAP` turns apart and the rest, older turns' cards and
+        those of no recorded turn, in one count (`earlier_rest`). Bounded by
+        `CANVAS_LISTING_MAX_BYTES`."""
         rank = self._canvas_rank()
         places = _DIGEST_BLOCK_CAP
         full: list[str] = []
@@ -753,13 +763,21 @@ class ConversationState:
             listing["this_turn_not_shown"] = unnamed[0]
         if unnamed[1]:
             listing["pinned_not_shown"] = unnamed[1]
+        turns_off = list(rank.off_canvas)
+        listed_off: list[str] = []
+        while turns_off and len(listed_off) + len(turns_off[0][1]) <= _LISTING_COMPACT_CAP:
+            listed_off += turns_off.pop(0)[1]
+        if listed_off:
+            listing["off_canvas"] = [self._compact_entry(rank, cid) for cid in listed_off]
         named = {*full, *titled}
         counted: dict[int | None, dict[str, int]] = {}
-        for cid in [*rank.on_canvas, *rank.off_canvas]:
+        for cid in rank.on_canvas:
             if cid not in named:
-                where = "on_canvas" if cid in rank.composed else "off_canvas"
                 count = counted.setdefault(rank.turn_of.get(cid), {})
-                count[where] = count.get(where, 0) + 1
+                count["on_canvas"] = count.get("on_canvas", 0) + 1
+        for turn, ids in turns_off:
+            count = counted.setdefault(turn, {})
+            count["off_canvas"] = count.get("off_canvas", 0) + len(ids)
         turns = sorted((turn for turn in counted if turn is not None), reverse=True)
         if newest := turns[:_EARLIER_TURN_CAP]:
             listing["earlier"] = [{"turn": turn} | counted[turn] for turn in newest]

@@ -256,12 +256,13 @@ readings or canvas card word for word, call recall, and do not answer from the
 summary or search again. The canvas digest only counts the cards on the user's
 canvas, the pinned ones among them, and the hidden ones. When the question
 refers to cards on the canvas ("that chart", "compare these", "make it a bar
-chart", "what's on my canvas", "clear the table"), call recall with part
-canvas first to see them, unless the digest's focus card is all the question
-needs. A new data question does not need it. Hidden cards are the
-conversation's cards not on the canvas, which the user can put back with Add
-in the chat. You may talk about one, but it is not on the canvas and no tool
-shows it again.
+chart", "what's on my canvas", "clear the table"), or turns to another
+subject so the earlier subject's cards come off, call recall with part canvas
+first to see them and their ids, unless the digest's focus card is all the
+question needs. A new data question on the subject already on the canvas
+does not need it. Hidden cards are the conversation's cards not on the
+canvas, which the user can put back with Add in the chat. You may talk about
+one, but it is not on the canvas and no tool puts it back.
 
 When the canvas digest names a focus_component_id, the user asked this
 question from that card, and "this", "it" or "here" mean that card. Answer

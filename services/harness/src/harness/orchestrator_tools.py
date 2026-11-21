@@ -1903,7 +1903,7 @@ def _nothing_removed_note(
     if already_off:
         sentences.append(
             "Those cards were already off the canvas."
-            if len(already_off) == len(component_ids)
+            if len(already_off) == len(set(component_ids))
             else "The cards in already_off were already off the canvas."
         )
     if missing:
@@ -2972,11 +2972,21 @@ def build_orchestrator_tools(
         `part`: "plan" for the plan records of a turn, "readings" for the
         search readings of a turn, "canvas" for the conversation's cards, or,
         with `component_id`, that one card's stored entry. The canvas listing
-        takes this turn's cards, then the pinned ones, then the other cards
-        on the canvas, newest turn first. The first come in full with their
-        facts under `blocks`, the next of each group by id, title and type
-        under `titles`, and each names the turn that drew it. Cards off the
-        canvas, and any past those, are counted by turn under `earlier`.
+        ranks cards by the turn that drew them, and each card it lists names
+        that turn:
+        - `blocks`: cards in full with their facts, while places remain:
+          this turn's cards on the canvas, then the pinned ones, then the
+          other cards on the canvas, newest turn first.
+        - `titles`: the next cards of those three groups, by id, title and
+          type.
+        - `this_turn_not_shown`, `pinned_not_shown`: how many of this turn's
+          and of the pinned cards neither list holds.
+        - `off_canvas`: cards off the canvas by id, title and type, a whole
+          turn at a time, this turn's first, then newest turn first.
+        - `earlier`: for each turn with cards no list holds, how many are on
+          the canvas (`on_canvas`) and how many off it (`off_canvas`).
+        - `earlier_rest`: the same two counts for older turns' cards and
+          cards of no recorded turn.
         For a plan or readings, `turn` is the turn's number as the
         conversation digest counts them; leave it out for the newest turn
         that has the part. A target that does not exist is refused with the
@@ -3056,7 +3066,9 @@ def build_orchestrator_tools(
                 HarnessCode.CARD_NOT_FOUND,
                 "No card of this conversation has those ids. Nothing changed.",
             )
-        already_off = [cid for cid in named if cid not in {*removed, *kept_pinned, *missing}]
+        # Each named id once, in the order named.
+        settled = {*removed, *kept_pinned, *missing}
+        already_off = [cid for cid in dict.fromkeys(named) if cid not in settled]
         answer: dict[str, Any] = {"removed": removed} | {
             key: ids
             for key, ids in (

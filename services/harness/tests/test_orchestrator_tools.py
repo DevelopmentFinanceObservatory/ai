@@ -5561,12 +5561,13 @@ async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
     tools, ctx = _tools(remove_cards=_remove_callable(state))
     await tools["remove_cards"](ctx, ["cmp_01"])
 
-    again = await tools["remove_cards"](ctx, ["cmp_01"])
+    again = await tools["remove_cards"](ctx, ["cmp_01", "cmp_01"])
     unknown = await tools["remove_cards"](ctx, ["cmp_99"])
 
-    assert {key: value for key, value in again.items() if key != "note"} == {
+    assert again == {
         "removed": [],
         "already_off": ["cmp_01"],
+        "note": "Those cards were already off the canvas.",
     }
     assert _stated(unknown) == ("card_not_found", "correct_and_retry")
     assert "cmp_99" not in unknown["error"]

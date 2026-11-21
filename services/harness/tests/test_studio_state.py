@@ -676,8 +676,16 @@ def _largest_canvas() -> ConversationState:
     )
     group = studio_state._DIGEST_BLOCK_CAP + studio_state._LISTING_COMPACT_CAP + 2
     # Oldest first: the pinned cards' turn, turns of one card off the canvas,
-    # a turn whose cards stay on the canvas, and the open turn.
-    sizes = [group, *[1] * (studio_state._EARLIER_TURN_CAP + 2), group, group]
+    # a turn whose cards fill the off-canvas places, a turn whose cards stay
+    # on the canvas, and the open turn.
+    sizes = [
+        group,
+        *[1] * (studio_state._EARLIER_TURN_CAP + 2),
+        studio_state._LISTING_COMPACT_CAP,
+        group,
+        group,
+    ]
+    off = range(1, len(sizes) - 2)
     state = ConversationState(conversation_id=CONVERSATION)
     blocks: list[CompositionBlock] = []
     for turn, size in enumerate(sizes):
@@ -688,7 +696,7 @@ def _largest_canvas() -> ConversationState:
                 title, summary, revision=9_999_999_999, shows=shows
             )
             cards.append({"component_id": component_id, "action": "created"})
-            if size > 1:
+            if turn not in off:
                 blocks.append(
                     CompositionBlock(
                         component_id=component_id,
@@ -711,6 +719,7 @@ def test_the_canvas_listing_stays_under_its_maximum_with_every_field_at_its_cap(
 
     assert len(listing["blocks"]) == studio_state._DIGEST_BLOCK_CAP
     assert len(listing["titles"]) == 3 * studio_state._LISTING_COMPACT_CAP
+    assert len(listing["off_canvas"]) == studio_state._LISTING_COMPACT_CAP
     assert len(listing["earlier"]) == studio_state._EARLIER_TURN_CAP
     assert "earlier_rest" in listing
     size = _serialised({"part": "canvas", **listing})
@@ -755,9 +764,10 @@ def test_the_canvas_listing_stays_under_its_maximum_however_large_the_inputs():
     assert _serialised(summary) <= CANVAS_SUMMARY_MAX_BYTES
 
 
-def test_a_card_taken_off_the_canvas_this_turn_is_named_and_says_so():
+def test_a_card_taken_off_the_canvas_this_turn_is_named_off_it_and_says_so():
     """A card this turn drew and the canvas no longer holds is still named,
-    flagged, so the model does not read it as on the canvas."""
+    after the cards on the canvas and flagged, so the model does not read it
+    as on the canvas."""
     state = _canvas({"cmp_01": _entry("Aid", _fact_summary()), "cmp_02": _entry("Debt", None)})
     assert state.composition is not None
     state.composition = _next_manifest(
@@ -766,9 +776,17 @@ def test_a_card_taken_off_the_canvas_this_turn_is_named_and_says_so():
 
     listing = state.canvas_listing_state()
 
-    assert [block["component_id"] for block in listing["blocks"]] == ["cmp_01", "cmp_02"]
+    assert [block["component_id"] for block in listing["blocks"]] == ["cmp_01"]
     assert "on_canvas" not in listing["blocks"][0]
-    assert listing["blocks"][1]["on_canvas"] is False
+    assert listing["off_canvas"] == [
+        {
+            "component_id": "cmp_02",
+            "type": "line_chart",
+            "title": "Debt",
+            "on_canvas": False,
+            "turn": 1,
+        }
+    ]
 
 
 def test_the_listing_marks_a_pinned_block():
@@ -877,8 +895,8 @@ def test_a_follow_up_turn_lists_the_earlier_cards_on_the_canvas_in_full():
 
 def test_a_card_left_on_the_canvas_is_named_ahead_of_removed_cards():
     """Turn 2's card stays on the canvas while turn 3's forty cards were taken
-    off: the next turn names the card, so `remove_cards` can take it by id,
-    and counts the removed ones."""
+    off: the next turn names the card in full, so `remove_cards` can take it
+    by id, and the removed ones after it."""
     state = _turns_of_cards(
         (1, False, True), (1, False, True), (40, False, False), (0, False, True)
     )
@@ -886,7 +904,10 @@ def test_a_card_left_on_the_canvas_is_named_ahead_of_removed_cards():
     listing = state.canvas_listing_state()
 
     assert [block["component_id"] for block in listing["blocks"]] == ["cmp_2_00", "cmp_1_00"]
-    assert listing["earlier"] == [{"turn": 3, "off_canvas": 40}]
+    assert [entry["component_id"] for entry in listing["off_canvas"]] == [
+        f"cmp_3_{n:02d}" for n in range(40)
+    ]
+    assert "earlier" not in listing
 
 
 @pytest.mark.parametrize("order", ["reversed", "pinned-last", "interleaved"])
@@ -919,22 +940,57 @@ def test_pinned_cards_past_the_compact_cap_are_counted():
 
 
 def test_earlier_cards_past_the_caps_are_counted_by_turn():
-    """Cards still on the canvas past the compact cap and cards off it are
-    counted by the turn that drew them, the newest turns apart and the rest
-    in one count."""
+    """Cards still on the canvas past the compact cap, and the turns of cards
+    off it past the one that fills the off-canvas places, are counted by the
+    turn that drew them, the newest turns apart and the rest in one count."""
     full, compact = studio_state._DIGEST_BLOCK_CAP, studio_state._LISTING_COMPACT_CAP
     cap = studio_state._EARLIER_TURN_CAP
     state = _turns_of_cards(
-        *[(1, False, False)] * (cap + 2), (full + compact + 3, False, True), (0, False, True)
+        *[(1, False, False)] * (cap + 2),
+        (compact, False, False),
+        (full + compact + 3, False, True),
+        (0, False, True),
     )
     state.components["cmp_unrecorded"] = _entry("Aid", None)
 
     listing = state.canvas_listing_state()
 
     assert len(_named_ids(listing)) == full + compact
-    assert listing["earlier"][0] == {"turn": cap + 3, "on_canvas": 3}
-    assert [count["turn"] for count in listing["earlier"]] == list(range(cap + 3, 3, -1))
+    assert {entry["turn"] for entry in listing["off_canvas"]} == {cap + 3}
+    assert len(listing["off_canvas"]) == compact
+    assert listing["earlier"][0] == {"turn": cap + 4, "on_canvas": 3}
+    assert [count["turn"] for count in listing["earlier"]] == [
+        cap + 4,
+        *range(cap + 2, 3, -1),
+    ]
     assert listing["earlier_rest"] == {"off_canvas": 4}
+
+
+def test_cards_this_turn_took_off_rank_behind_the_pinned_ones():
+    state = _turns_of_cards((3, True, True), (20, False, False))
+
+    listing = state.canvas_listing_state()
+
+    assert [block["component_id"] for block in listing["blocks"]] == [
+        f"cmp_1_{n:02d}" for n in range(3)
+    ]
+    assert [entry["component_id"] for entry in listing["off_canvas"]] == [
+        f"cmp_2_{n:02d}" for n in range(20)
+    ]
+
+
+def test_turns_of_cards_off_the_canvas_are_named_whole_or_counted():
+    """The off-canvas cards are named a whole turn at a time, newest first,
+    until a turn does not fit; it and the older turns are counted."""
+    compact = studio_state._LISTING_COMPACT_CAP
+    state = _turns_of_cards(
+        (5, False, False), (compact - 3, False, False), (2, False, False), (0, False, True)
+    )
+
+    listing = state.canvas_listing_state()
+
+    assert [entry["turn"] for entry in listing["off_canvas"]] == [3, 3, *[2] * (compact - 3)]
+    assert listing["earlier"] == [{"turn": 1, "off_canvas": 5}]
 
 
 def test_recall_without_a_component_lists_the_canvas():
@@ -950,7 +1006,7 @@ def test_recall_without_a_component_lists_the_canvas():
     assert [card["component_id"] for card in listing["blocks"]] == ["cmp_01", "cmp_02"]
     assert listing["blocks"][0]["pinned"] is True
     assert listing["blocks"][0]["turn"] == 2
-    assert listing["earlier"] == [{"turn": 1, "off_canvas": 1}]
+    assert [card["component_id"] for card in listing["off_canvas"]] == ["cmp_old"]
 
 
 def test_the_orchestrators_canvas_summary_counts_the_cards_and_names_none():

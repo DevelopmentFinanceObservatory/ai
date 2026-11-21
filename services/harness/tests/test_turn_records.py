@@ -925,6 +925,16 @@ def test_a_plan_steps_served_record_leaves_the_planners_ledger_text_as_it_was() 
     )
 
 
+def test_the_basis_line_states_the_count_search_elected_once() -> None:
+    """A part whose count search elected states it, with or without scope
+    choices, and a part whose scope holds a count basis states that alone."""
+    unscoped = _fetched({**_example_part(), "scope": None, "counted_as": "gross disbursements"})
+    scoped = _fetched({**_example_part(), "counted_as": "gross disbursements"})
+
+    assert basis_line([unscoped], specs={}, plans=[]) == "Counted as: gross disbursements."
+    assert basis_line([scoped], specs={}, plans=[]) == _EXAMPLE_LINE
+
+
 def test_the_basis_line_speaks_only_for_parts_with_scope_choices_the_turn_used() -> None:
     searched = SearchReading.from_part(_example_part()).model_dump(mode="json")
     refused = SearchReading.from_part(_example_part()).with_fetch({"code": "over_ceiling"})
