@@ -377,8 +377,11 @@ HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
 # `internal_error`), faults of the run's approval, ledger or publication,
 # transient failures that waiting fixes, `capability_unavailable`, the codes of
 # tools no workflow step calls, a moved StatVar family the turn approves again
-# as it was, and facts of what the user named (a party not in the data, a
-# period the data does not reach), which only the user can change.
+# as it was, and facts of the data the user has to accept or change the
+# question for: a party not in the data, a named party with no series, and a
+# period the data does not reach or confirm. An approval a changed plan or
+# tool surface made stale is avoidable: a plan drafted and approved afresh
+# gets past it.
 BRIEF_AVOIDABLE_CODES = frozenset(
     {
         *METHOD_CHOICE_CODES,
@@ -412,22 +415,22 @@ BRIEF_AVOIDABLE_CODES = frozenset(
         # The run's own stops on the data it read.
         "requirement_unmet",
         "empty_answer",
+        # An approval the plan or the tool surface moved past.
+        "not_approved",
+        "stale_revision",
+        "surface_changed",
         # The evidence check's findings on what a retrieval holds.
         "no_data_at_source",
         "data_unverified",
         "identity_unverified",
-        "entity_no_series",
         "entity_unverified",
         "entity_role_ambiguous",
         "entity_role_mismatch",
         "entity_role_unverified",
         "group_read_as_total",
         "open_axis_unresolved",
-        "window_short",
-        "period_unverified",
         "scope_entities_unbound",
         "scope_entities_wider",
-        "scope_window_short",
         "unit_mismatch",
         "unit_unverified",
         "unit_price_basis_mismatch",
@@ -457,10 +460,7 @@ BRIEF_UNAVOIDABLE_CODES = frozenset(
         "provenance_unavailable",
         "licence_not_redistributable",
         "frame_unavailable",
-        # The run's approval, revision, tool surface and transport.
-        "not_approved",
-        "stale_revision",
-        "surface_changed",
+        # The run's transport, bindings, results and authorisation.
         "transport_failed",
         "binding_invalid",
         "step_refused",
@@ -472,10 +472,15 @@ BRIEF_UNAVOIDABLE_CODES = frozenset(
         "authorisation_mismatch",
         "run_abandoned",
         # The evidence check's findings no other brief changes this turn: the
-        # user's name as the data lists it, a family the turn approves again as
-        # it was, a rebound binding every search meets, and a manifest that
-        # read another pin or states no statistics.
+        # user's name as the data lists it, a named party with no series, a
+        # period the data does not reach or confirm, a family the turn approves
+        # again as it was, a rebound binding every search meets, and a manifest
+        # that read another pin or states no statistics.
         "entity_missing",
+        "entity_no_series",
+        "window_short",
+        "scope_window_short",
+        "period_unverified",
         "stat_var_family_moved",
         "stat_var_membership_drift",
         "source_pin_mismatch",

@@ -14,7 +14,8 @@ from __future__ import annotations
 import dataclasses
 import json
 from datetime import UTC, datetime
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from analysis_mcp.digest import render_rank_digest
@@ -39,7 +40,9 @@ from harness.graph.plan_done import (
     StepSummary,
     _ask_status,
     _partial_result,
+    _retry_note,
     _stop_causes,
+    _user_sentence,
 )
 from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
@@ -590,7 +593,7 @@ async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_fai
     plan = Plan.model_validate_json(second.cursor.state["plan"])
     (failed,) = (row for row in card_rows(plan) if row["id"] == "retrieve")
     note = card.payload["refusal_note"]
-    assert json.dumps(failed["label"]) in note
+    assert f"“{failed['label']}”" in note
     assert sentence in note
     assert second.cursor.state.get(ORCHESTRATOR_RETRY_NOTE_KEY) is None
 
@@ -607,9 +610,8 @@ async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_fai
 @pytest.mark.parametrize(
     ("code", "fix"),
     [
-        # The user narrows the topic; a re-plan would narrow it for them. The
-        # sentence names that ceiling, not the class's "more than one request
-        # or chart can hold".
+        # Narrowing the topic is the user's call. The sentence names the
+        # ceiling the refusal's `fix` names.
         ("over_ceiling", {"ceiling_kind": "member_cardinality"}),
         ("place_levels_mixed", {}),
     ],
@@ -636,6 +638,36 @@ async def test_an_unavoidable_failure_ends_the_turn_on_its_sentence_with_no_seco
     after_plan = agent_read(models.orchestrator.requests[-1])
     assert failure_sentence(code, "do_not_retry", fix) in after_plan
     assert "planned once more" not in after_plan
+
+
+def test_the_retry_note_quotes_the_failed_steps_label_as_the_card_shows_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    label = "Fetch official development assistance for Côte d'Ivoire"
+    rows = [{"id": "retrieve", "label": label}, {"id": "totals", "label": "Total it"}]
+    monkeypatch.setattr(plan_done_module.plan_display, "card_rows", lambda plan: rows)
+    # `card_rows` is replaced, so the plan only has to state both compiled parts.
+    plan = cast(Plan, SimpleNamespace(translation=object(), workflow=object()))
+
+    note = _retry_note(plan, {"step_id": "retrieve"}, "The data holds indicators.")
+
+    assert f"“{label}”" in note
+
+
+@pytest.mark.parametrize(
+    ("code", "system"),
+    [
+        ("frame_integrity_failed", True),
+        ("binding_invalid", True),
+        # A fresh plan, approved again, gets past a changed tool surface.
+        ("surface_changed", False),
+        ("stale_revision", False),
+    ],
+)
+def test_only_a_fault_of_the_system_reads_as_one(code: str, system: bool) -> None:
+    internal = failure_sentence("internal_error", "do_not_retry")
+
+    assert (_user_sentence({"code": code, "retry_mode": "do_not_retry"}) == internal) is system
 
 
 async def test_a_plan_whose_frames_cannot_be_described_hands_back_the_reason_not_a_frame(

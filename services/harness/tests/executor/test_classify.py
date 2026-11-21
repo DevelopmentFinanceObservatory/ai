@@ -64,8 +64,8 @@ def test_every_code_either_server_can_answer_with_is_placed_exactly_once() -> No
 
 def test_every_code_a_stopped_run_can_fail_with_is_placed_on_one_side_of_brief_can_avoid() -> None:
     # A stopped run's `failed_step` code is a tool's, the executor's own, a
-    # stop's kind, an evidence finding, or `rediscovery_needed`. A new one
-    # must be placed deliberately rather than default to not avoidable.
+    # stop's kind, an evidence finding, or `rediscovery_needed`. Each sits in
+    # exactly one set, so a new code is placed on purpose.
     universe = (
         {code.value for code in DataCode}
         | {code.value for code in AnalysisCode}
@@ -107,6 +107,8 @@ def test_brief_can_avoid_an_over_ceiling_only_for_a_ceiling_another_request_narr
         ("facet_not_available", True),
         ("entity_ambiguous", True),
         ("rediscovery_needed", True),
+        ("surface_changed", True),
+        ("window_short", False),
         ("place_levels_mixed", False),
         ("internal_error", False),
         ("capability_unavailable", False),

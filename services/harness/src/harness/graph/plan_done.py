@@ -16,7 +16,12 @@ from typing import Any, NamedTuple, cast
 from analysis_mcp import digest as analysis_digest
 from data_mcp import get_data_digest
 from data_mcp.tool_errors import ToolErrorCode
-from executor.classify import HARNESS_FAULT_CODES, ExecutorCode, brief_can_avoid
+from executor.classify import (
+    BRIEF_AVOIDABLE_CODES,
+    HARNESS_FAULT_CODES,
+    ExecutorCode,
+    brief_can_avoid,
+)
 from executor.ledger import RunLedger
 from executor.outcomes import STOP_CAUSES, RefusalKind, StepRecord, StopCause
 from planner.plan import (
@@ -58,7 +63,7 @@ from harness.graph.state import (
     stored_mapping,
     stored_sequence,
 )
-from harness.sentences import DECLINE_REASONS, failure_sentence
+from harness.sentences import DECLINE_REASONS, FAILURE_CLASS, FailureClass, failure_sentence
 from harness.turn.node import Next, Node, NodeCtx
 from harness.turn_records import AlignedBasis, PlanAsk, PlanRecord, aligned_basis
 
@@ -257,10 +262,12 @@ def _hand_back_text(summary: StepSummary) -> str:
 
 
 def _give_plan_back(ctx: NodeCtx[GraphEvent]) -> bool:
-    """The first plan that could not be made or run gives the orchestrator
-    its plan call back (`BUDGETS`), for one brief that avoids the failure; a
-    second failure does not. Answers whether it gave the call back. The
-    workflow's own replan cap is untouched."""
+    """Give the orchestrator its plan call back (`BUDGETS`), once a turn, for
+    one brief that avoids the failure. It runs for a planner refusal the
+    planner did not mark final, and for a stopped run only when
+    `executor.classify.brief_can_avoid` holds. Answers whether it gave the
+    call back; the turn's second call answers no. The workflow's own replan
+    cap is untouched."""
     calls = dict(ctx.state.get(ORCHESTRATOR_CALLS_KEY) or {})
     if calls.get("plan_given_back"):
         return False
@@ -272,11 +279,13 @@ def _give_plan_back(ctx: NodeCtx[GraphEvent]) -> bool:
 
 def _system_fault(code: object) -> bool:
     """Whether a stopped run's `failed_step` `code` is a fault of the system
-    itself: one of `HARNESS_FAULT_CODES`, or a stop kind `STOP_CAUSES` lays on
-    the harness."""
-    if not isinstance(code, str):
+    itself: one of `HARNESS_FAULT_CODES`, a code `harness.sentences` words as
+    a system fault, or a stop kind `STOP_CAUSES` lays on the harness. A code
+    a fresh plan gets past (`BRIEF_AVOIDABLE_CODES`), such as an approval a
+    changed plan made stale, is none."""
+    if not isinstance(code, str) or code in BRIEF_AVOIDABLE_CODES:
         return False
-    if code in HARNESS_FAULT_CODES:
+    if code in HARNESS_FAULT_CODES or FAILURE_CLASS.get(code) is FailureClass.SYSTEM_FAULT:
         return True
     kind = RefusalKind(code) if code in set(RefusalKind) else None
     return kind is not None and STOP_CAUSES[kind] is StopCause.HARNESS
@@ -306,7 +315,7 @@ def _retry_note(plan: Plan | None, failed: Mapping[str, Any], sentence: str) -> 
     if plan is not None and plan.translation is not None and plan.workflow is not None:
         rows = plan_display.card_rows(plan)
         label = next((row["label"] for row in rows if row["id"] == failed.get("step_id")), None)
-    where = f"the step {json.dumps(label)}" if label else "a step"
+    where = f"the step “{label}”" if label else "a step"
     return (
         f"The approved plan stopped at {where}. {sentence} This new plan is drafted to get "
         "past it, so it needs your approval."
