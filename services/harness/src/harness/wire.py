@@ -1728,7 +1728,7 @@ STUDIO_FRAME_ADAPTER: TypeAdapter[StudioFrame] = TypeAdapter(StudioFrame)
 
 
 class TurnStatusName(StrEnum):
-    """Where a turn stands. `running` and `paused` are open; the rest are
+    """Where a turn stands. `running` and `paused` are open. The rest are
     closed."""
 
     RUNNING = "running"
@@ -1758,7 +1758,7 @@ class StoredCard(_WireModel):
     """A card a closed turn made or changed, as the conversation stores it:
     its type, title, revision and the `fact_summary` its
     `component.created` or `component.revised` frame carried. The stored
-    card holds no `payload` or `provenance`; the component id reads the
+    card holds no `payload` or `provenance`. The component id reads the
     resolved revision from the presentation platform."""
 
     component_id: str
@@ -1817,7 +1817,7 @@ class ConversationRead(_WireModel):
     manifest: CompositionManifest | None = None
 
 
-# The most closed turns one state read returns; a client that needs more
+# The most closed turns one state read returns. A client that needs more
 # reads again from the last one it got, up to `ConversationRead.closed_total`.
 # Each closed turn carries its cards, so the cap bounds the body.
 MAX_CLOSED_SINCE = 3

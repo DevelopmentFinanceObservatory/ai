@@ -630,11 +630,11 @@ Every stream, from `/turn`, `/interrupt` and `/resume`, names the index of the t
 | `pause`        | when `turn.status` is `paused`: the `interrupt_id` to answer, its `kind` (`plan` or `elicitation`), and `frames`, the frames the pause was sent as, its `plan.proposed` or `elicitation.request` last, each with the `seq` it went out with                                                                                                                                                                                                                                                                              |
 | `manifest`     | the composition manifest; absent when the conversation has no canvas                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
-`user_message` is the turn's record: the message, with a `(then: ...)` line for each amendment, answer or switch on the turn's cards.
+`user_message` is the turn's record. It holds the message, with a `(then: ...)` line for each amendment, answer or switch on the turn's cards.
 
 Each read returns at most 3 closed turns, since each carries its cards. A page that lacks turns reads again with `since` set to the last `turn_index` it got, until it holds `closed_total` turns.
 
-A closed turn's `cards` are the cards at their current revision: a card a later turn revised shows that revision's `type`, `title`, `revision` and `fact_summary`. The canvas shows current cards, so a page drawing a closed turn's cards draws what the canvas holds.
+A closed turn's `cards` are the cards at their current revision. A card a later turn revised shows that revision's `type`, `title`, `revision` and `fact_summary`. The canvas shows current cards, so a page drawing a closed turn's cards draws what the canvas holds.
 
 ### Where a turn stands
 
@@ -651,9 +651,9 @@ The server derives one standing for the latest turn from its stored record, its 
 
 A live lease holds the turn whatever its record and cursor say, so a turn whose segment is still writing its pause or its close reads `running` until the write lands. A closed turn's status is the one its record states, since the record is what the stream told the client: `done` with no `error`, `cancelled` or `abandoned` for those codes, and `failed` for any other `error`, `state_not_saved` included. A closed status always comes with the turn's record, which a read with a lower `since` returns in `closed_since`.
 
-The server writes a turn's record and closes its cursor in one transaction: the closing write that commits a record closes the cursor with the status the record states. A turn recorded with its cursor open reads closed by the record, and the next request that loads the conversation closes the cursor.
+The server writes a turn's record and closes its cursor in one transaction. The closing write that commits a record closes the cursor with the status the record states. A turn recorded with its cursor open reads closed by the record, and the next request that loads the conversation closes the cursor.
 
-One failure stays ambiguous. A turn whose work failed ends its stream on the work's `error` frame. When the closing write that stores its record fails too, the store holds the turn running with no lease, which is what an instance that died mid-turn leaves. The read then reports `running` with `lease_live: false`, and `turn.resume` runs the turn on, although the page already showed its error. The store cannot tell the two apart, so the page follows the read: it resumes the turn and shows the stream the resume opens.
+One failure stays ambiguous. A turn whose work failed ends its stream on the work's `error` frame. When the closing write that stores its record fails too, the store holds the turn running with no lease, which is what an instance that died mid-turn leaves. The read then reports `running` with `lease_live: false`, and `turn.resume` runs the turn on, although the page already showed its error. The store cannot tell the two apart, so the page follows the read. It resumes the turn and shows the stream the resume opens.
 
 ### `POST /api/studio/resume`
 
@@ -667,11 +667,11 @@ The route reads the standing before it claims the conversation and again after, 
 | a Stop is live for the turn                        | the turn closes `cancelled`, and the resume answers 409 `edit_conflict` |
 | unknown `conversation_id`                          | 404 `not_found`                                                         |
 
-Every 409 `edit_conflict` from `/resume` carries `refresh_then_retry` and `pointer: "/turn_index"`: read the state again and follow what it shows. A resume whose client also leaves leaves the turn open in the same way, for the next resume.
+Every 409 `edit_conflict` from `/resume` carries `refresh_then_retry` and `pointer: "/turn_index"`. Read the state again and follow what it shows. A resume whose client also leaves leaves the turn open in the same way, for the next resume.
 
 ## A new question on the plan card (delta 27, v1.12)
 
-Users type new questions into the plan card's revise box. The client sends them as `amend`, and the planner decides whether the text changes the plan or asks something else (`propose_plan`'s `starts_new_plan`, with or without `amends_version`). For a new question, the turn ends with its plan set aside unapproved: the new stream sends a `message.complete` saying the plan was set aside for a new question, which a client without this delta still shows, then `done` with `new_question` and no `plan.versioned` or new card. `new_question` is the user's latest words as sent: the `amend` text, or, when the planner asked a question about the amendment and the answer was the new question, the answer's text. The turn closes `done`, its pending interrupt is cleared, so a later answer to it gets 404, and the conversation's next turn sees that the plan was set aside for a new question.
+Users type new questions into the plan card's revise box. The client sends them as `amend`, and the planner decides whether the text changes the plan or asks something else (`propose_plan`'s `starts_new_plan`, with or without `amends_version`). For a new question, the turn ends with its plan set aside unapproved. The new stream sends a `message.complete` saying the plan was set aside for a new question, which a client without this delta still shows, then `done` with `new_question` and no `plan.versioned` or new card. `new_question` is the user's latest words as sent. That is the `amend` text or, when the planner asked a question about the amendment and the answer was the new question, the answer's text. The turn closes `done`, its pending interrupt is cleared, so a later answer to it gets 404, and the conversation's next turn sees that the plan was set aside for a new question.
 
 The client closes the card ("Taken as a new question") and sends `new_question` as the next `turn.request`, which is metered, opens its own trace, and plans or answers the question like any other. A state read's closed turn carries the same `new_question`, for a page that lost the stream before `done`. A client that ignores the field shows the message and loses the question. The delta adds one optional member, `done.new_question`, and keeps the existing frames, request kinds and turn statuses.
 

@@ -1282,7 +1282,7 @@ def _resume_conflict(detail: str) -> JSONResponse:
 def _stored_card(component_id: str, entry: Mapping[str, Any]) -> StoredCard | None:
     """The card `entry`, a conversation's stored component
     (`ConversationState.components`), for the state read. A `fact_summary`
-    that no longer validates is left out, and an entry with no type or title
+    that does not validate is left out, and an entry with no type or title
     gives no card."""
     if not entry.get("type") or not entry.get("title"):
         return None
