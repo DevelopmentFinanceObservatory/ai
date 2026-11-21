@@ -1640,8 +1640,12 @@ class ApplyChoiceSuggestion(_WireModel):
     """A chip that moves one scope choice of the answer's readings to another
     option: a click sends a `TurnRequest` with `apply_choice {choice_id,
     option_id, turn, spec_id}` and no message. `label` is the option's label,
-    `turn` the conversation turn whose answer offers the chip, counted from 1,
-    and `spec_id` the reading the chip switches."""
+    such as "health, CRS 120 alone" on the sector axis or "including imputed
+    multilateral" on the provider axis, after the part's name
+    (`harness.turn_records.part_name`) and a colon when the answer's chips
+    span several parts; the client builds the chip's action text from it.
+    `turn` is the conversation turn whose answer offers the chip, counted
+    from 1, and `spec_id` the reading the chip switches."""
 
     kind: Literal["apply_choice"]
     label: str

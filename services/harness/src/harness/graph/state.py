@@ -136,13 +136,13 @@ class TurnInput(BaseModel):
 
 
 class AskOption(BaseModel):
-    """One answer `ask_user` offers: its wording and, for a count or prices, its spec_id."""
+    """One answer `ask_user` offers: its wording and, for a part's candidate, its spec_id."""
 
     label: str = Field(description="the answer as the user reads it")
     spec_id: str | None = Field(
         default=None,
         description=(
-            "for a count or prices the result names, the spec_id it gives that reading; "
+            "for one of a part's candidates, the spec_id the search result gives it; "
             "leave it out for any other answer"
         ),
     )
