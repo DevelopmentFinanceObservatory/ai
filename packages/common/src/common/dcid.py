@@ -5,8 +5,8 @@ which is built from `routing.DcidConvertor.regex` and `routing.DCID_MAX_LENGTH`:
 `/`-separated segments, each drawn from `[A-Za-z0-9_.-]`, at most 512 characters. The nodes
 route refuses a whole batch that holds one id outside it.
 
-data-mcp's `get_data_tool._DCID_PATTERN` is a different test: it decides whether a ref a
-caller typed is a dcid for `get_data` rather than a name to resolve, and is narrower
+data-mcp's `get_data_tool._DCID_PATTERN` is a different test. It decides whether a ref a
+caller typed is a dcid for `get_data` or a name to resolve, and is narrower
 (lowercase-initial namespace). This module decides what the nodes route accepts, for data-mcp's
 node lookups and for the breakdown cell labels every service reads (`common.breakdown_labels`).
 """
@@ -27,8 +27,8 @@ def bare_dcid(ref: str) -> str:
 
 
 def has_dot_segment(ref: str) -> bool:
-    """Whether a `/`-separated segment of `ref` is exactly `.` or `..`, which no dcid has: the
-    pattern admits dots, but such a segment is a path traversal, never a node."""
+    """Whether a `/`-separated segment of `ref` is exactly `.` or `..`, which no dcid has. The
+    pattern admits dots, but such a segment is a path traversal."""
     return any(segment in (".", "..") for segment in ref.split("/"))
 
 

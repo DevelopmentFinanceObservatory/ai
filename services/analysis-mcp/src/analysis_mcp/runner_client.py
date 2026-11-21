@@ -804,7 +804,7 @@ def _derived_unread(answer: httpx2.Response | ToolRefusal) -> DerivedUnread:
 async def read_graph_nodes(dcids: list[str]) -> Sequence[Mapping[str, Any]]:
     """The entries `POST /api/graph/nodes` answers for one batch of `dcids`
     (`common.breakdown_labels.ReadNodes`) within `NODES_READ_TIMEOUT_S`, or none when
-    the read failed, which is logged: a digest then names the cells by their values."""
+    the read failed, which is logged. A digest then names the cells by their values."""
     answer = await runner_holder.get().post(
         NODES_PATH, {"dcids": dcids}, timeout_s=NODES_READ_TIMEOUT_S
     )

@@ -11,12 +11,11 @@ filter binds, and a label cell as it is.
 `NODE_BATCH_DCIDS`, and keeps a label only from a `code` node of the cell's own axis
 (`code.property`). Any other cell keeps its value: a label cell, which is no dcid or no code
 of the axis, and a dcid the graph does not hold or could not be read. The graph names a code
-with its system after it (`... (CRS Purpose)`); the label drops that suffix, so a dcid cell
-reads as the label cell dfo-apis writes from the code index today.
+with its system after it (`... (CRS Purpose)`). The label drops that suffix, so a dcid cell
+reads as the label cell dfo-apis writes from the code index.
 
 Each service passes its own `ReadNodes`, its client's post of one batch. A read that fails
-returns no entries, so text falls back to the cell values; the answer it labels stands either
-way. At most `MAX_LABELLED_CELLS` distinct dcids are read per call, which bounds one answer to
+returns no entries, so text falls back to the cell values and the answer it labels stands. At most `MAX_LABELLED_CELLS` distinct dcids are read per call, which bounds one answer to
 `MAX_LABELLED_CELLS / NODE_BATCH_DCIDS` node requests.
 """
 
@@ -83,7 +82,7 @@ def _labellable(cell: Cell) -> bool:
 
 def code_label(node: Mapping[str, Any], *, axis: str) -> str | None:
     """The label of `node`, a `/api/graph/nodes` entry, when it is a code of `axis`, without
-    the ` (<code system>)` the graph adds after it; None for any other node."""
+    the ` (<code system>)` the graph adds after it, or None for any other node."""
     code = node.get("code")
     label = node.get("label")
     if node.get("kind") != "code" or not isinstance(code, Mapping) or not isinstance(label, str):
@@ -106,7 +105,7 @@ async def label_cells(
     """The labels of those of `cells` that are code dcids of their breakdown axis.
 
     Only the first `max_cells` distinct dcids, in the order `cells` names them, are read,
-    in concurrent batches of `NODE_BATCH_DCIDS`; a cell past them keeps its value.
+    in concurrent batches of `NODE_BATCH_DCIDS`. A cell past them keeps its value.
     """
     wanted = [cell for cell in dict.fromkeys(cells) if _labellable(cell)]
     dcids = list(dict.fromkeys(bare_dcid(value) for _, value in wanted))[:max_cells]

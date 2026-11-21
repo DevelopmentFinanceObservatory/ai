@@ -203,8 +203,8 @@ _DEFINITION_STORE_SERVICE_NAME = "the definition store"
 # reserve unspent.
 _STATISTICS_FLOOR_S = 8.0
 _STATISTICS_RESERVE_S = 3.0
-# The breakdown cells' label read runs after those, out of the statistics reserve: it
-# must end with `_LABELS_RENDER_FLOOR_S` left for rendering, and waits at most
+# The breakdown cells' label read runs after the statistics read, inside its reserve. It
+# must end with `_LABELS_RENDER_FLOOR_S` left for rendering and waits at most
 # `NODES_READ_TIMEOUT_S`, so a statistics read that spent its whole share still leaves
 # the labels about 2s.
 _LABELS_RENDER_FLOOR_S = 1.0
