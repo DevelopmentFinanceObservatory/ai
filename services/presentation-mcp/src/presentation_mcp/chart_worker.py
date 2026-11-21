@@ -103,6 +103,13 @@ class ChartWorker:
         self._lock = asyncio.Lock()
         self._start_warming()
 
+    async def warmed(self) -> None:
+        """Wait for the warm-up in progress, if any. A warm-up ends within
+        `_WARM_TIMEOUT_S`, and one that fails logs a WARNING and ends, so this
+        returns either way."""
+        if self._warming is not None:
+            await self._warming
+
     async def stop(self) -> None:
         """Stop the worker: let it finish the render in hand and exit, for up
         to `_STOP_WAIT_S`, then kill it. A render still waiting its turn gets

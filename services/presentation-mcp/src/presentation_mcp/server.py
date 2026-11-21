@@ -887,11 +887,14 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
     calls `main()`. The harness's combined server at `/mcp/` mounts the same
     `mcp` object, and FastMCP counts a server's lifespan entries per object,
     so the worker starts once for both. The worker starts first so it boots
-    while the release is fetched.
+    while the release is fetched, and startup ends only once its warm-up has:
+    Cloud Run throttles an instance's CPU outside requests once startup ends,
+    and a warm-up still running then starves until it times out.
     """
     _chart_worker.start()
     try:
         async with _platform_lifespan():
+            await _chart_worker.warmed()
             yield
     finally:
         await _chart_worker.stop()
