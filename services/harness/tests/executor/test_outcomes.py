@@ -371,9 +371,9 @@ _GET_DATA = ToolId(server="data-mcp", name="get_data")
             Remedy.SYSTEM,
             id="codeless-refusal",
         ),
-        # A frame data-mcp minted that failed its integrity check: a narrower
-        # scope mints another. A frame analysis-mcp's store holds is the
-        # store's fault.
+        # A narrower scope gets past a frame data-mcp minted that failed its
+        # integrity check, since it mints another. A frame analysis-mcp's store
+        # holds is the store's fault.
         pytest.param(
             _tool_stop(_served(_MINTED_FRAME_FAILED)), Remedy.REPLAN, id="minted-frame-failed"
         ),
@@ -412,7 +412,7 @@ _GET_DATA = ToolId(server="data-mcp", name="get_data")
             id="runner-refusal",
         ),
         # A definition the platform refused, or a refusal of the request under
-        # a code data-mcp does not map: another spec or request may avoid either.
+        # a code data-mcp does not map, which another spec or request may avoid.
         pytest.param(
             _tool_stop(_served(_SPEC_NOT_REGISTERED)), Remedy.REPLAN, id="spec-not-registered"
         ),
@@ -511,7 +511,7 @@ def test_a_stopped_runs_remedy_follows_its_cause_its_disposition_and_its_code(
 
 def test_a_failed_step_with_no_wave_remedy_is_the_systems() -> None:
     """A failed step with no wave remedy is the system's, and so is a stop with
-    no cause: neither gives a second plan or tells the user the question was
+    no cause. Neither gives a second plan or tells the user the question was
     at fault."""
     stored = failed_step(_issue_stop(EvidenceIssueCode.UNIT_MISMATCH))
     assert remedy(stored) is Remedy.REPLAN

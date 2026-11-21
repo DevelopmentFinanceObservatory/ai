@@ -876,9 +876,8 @@ class ToolRefusal:
     ) -> Self:
         """A runner refusal under a code this module does not define, or a call the
         runner could not answer. `retry_after_s` is `None` when a retry is not
-        expected to succeed. `service_failure` says the runner failed of itself
-        rather than refusing the request, which `fix.kind` states
-        (`common.refusal.SERVICE_FAILURE`)."""
+        expected to succeed. `service_failure` is true when the runner itself failed,
+        and `fix.kind` then says so (`common.refusal.SERVICE_FAILURE`)."""
         retry = (
             f"Retry after {retry_after_s:.1f}s."
             if retry_after_s is not None

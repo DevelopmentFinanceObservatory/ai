@@ -495,7 +495,7 @@ def is_anchor_fault(failure: ToolFailure) -> bool:
 
 
 def is_upstream_fault(failure: ToolFailure) -> bool:
-    """Whether `failure` says an upstream service failed of itself: an
+    """Whether `failure` says an upstream service failed of itself. That is an
     `upstream_error` its server marks `SERVICE_FAILURE` (a 5xx, an answer with
     no problem document, a call that got no answer, or a response it could
     not use). A definition the platform refused and a refusal of the request
@@ -509,7 +509,7 @@ def is_upstream_fault(failure: ToolFailure) -> bool:
 def is_store_fault(failure: ToolFailure) -> bool:
     """Whether `failure` is a stored frame that failed its integrity check in
     the store itself. Only the frame data-mcp minted (`MINTED_FRAME`) is one a
-    narrower scope mints anew; analysis-mcp's and any other read the same
+    narrower scope mints anew. analysis-mcp's and any other read the same
     corrupted object for every plan."""
     return failure.code == FRAME_INTEGRITY_FAILED and failure.fix.get("kind") != MINTED_FRAME
 

@@ -1033,7 +1033,7 @@ def test_an_unmapped_upstream_failure_states_whether_the_service_failed(
     status: int, code: str | None, service_failure: bool
 ) -> None:
     """A 5xx, or a 4xx with no problem document from a proxy, an IAM check or a
-    body limit, is the service failing of itself; a 4xx problem refuses the
+    body limit, is the service failing of itself. A 4xx problem refuses the
     request."""
     refusal = from_upstream_error(
         UpstreamError(status=status, code=code, detail="d"), tool="get_data"
@@ -1618,8 +1618,8 @@ def test_each_factory_produces_its_exact_fix_key_set() -> None:
             ),
             {"role", "candidates", "candidate_count", "truncated"},
         ),
-        # An upstream failure states whose it is in `kind`: the service's own,
-        # or a definition the platform refused. A refusal of the request
+        # An upstream failure states whose it is in `kind`, either the service's
+        # own or a definition the platform refused. A refusal of the request
         # states none.
         (
             ToolRefusal.upstream_error(
@@ -1640,8 +1640,7 @@ def test_each_factory_produces_its_exact_fix_key_set() -> None:
             ),
             {"kind", "tool", "problems"},
         ),
-        # A minted frame that reads back wrong says so, which a frame another
-        # store holds does not.
+        # A minted frame that reads back wrong says so in `kind`.
         (
             ToolRefusal.frame_integrity_failed(
                 spec_id="spec_" + "1" * 32, content_version="cv_1", reason="r"

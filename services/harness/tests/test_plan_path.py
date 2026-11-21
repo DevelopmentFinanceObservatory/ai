@@ -531,7 +531,7 @@ async def test_a_stopped_plan_gives_the_plan_call_back_only_for_a_failure_a_brie
     """A capability the platform lacks fails any brief and any fetch of the
     step's data, so the plan call is not given back and the step's spec_id
     is refused to `fetch`. A fault of the system fails any brief too. Only a
-    failure another source or spec avoids gives the plan call back; any
+    failure another source or spec avoids gives the plan call back, and any
     other ends the turn on the user's sentence for it."""
     models = _planned("That part is unavailable.")
     driver = _driver(pg_engine, models, tool_surface=RefusingGetDataSurface(code))
@@ -585,7 +585,7 @@ async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_fai
 ) -> None:
     """The plan given back drafts a new card that says which step the
     approved plan stopped at and what happened there, the cause the
-    refusal's code and `fix` word, with the new plan as the way past it; its
+    refusal's code and `fix` word, with the new plan as the way past it. Its
     run stopping the same way ends the turn on the user's whole sentence,
     with no third card."""
     models = scripted_models(
@@ -621,7 +621,6 @@ async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_fai
     if "remedy" in fix:
         # The plan given back is the way past it, so the hand-back states no remedy.
         assert fix["remedy"] not in first
-    if "remedy" in fix:
         assert failure_cause(code, fix) in last
         assert fix["remedy"] in last
     else:
@@ -673,7 +672,7 @@ async def test_an_unavoidable_failure_ends_the_turn_on_its_sentence_with_no_seco
 def test_a_retry_note_survives_a_card_it_cannot_draw_and_words_a_stop_at_no_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A note never fails the turn: a card that cannot be drawn names "a step",
+    """A note never fails the turn. A card that cannot be drawn names "a step",
     and a stop at no step says the plan could not run."""
 
     def undrawable(plan: Plan) -> list[dict[str, object]]:

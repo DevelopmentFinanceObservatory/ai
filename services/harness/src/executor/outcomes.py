@@ -442,9 +442,9 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
 
     `wave_remedy` is the most severe remedy (`stop_remedy`) of the stop and
     of each stop in `outcome.also_stopped`, so a new plan gets past the wave
-    only when it gets past every stop in it; `remedy` reads it. The step
+    only when it gets past every stop in it, and `remedy` reads it. The step
     named is the stop that decides it, the first of the most severe, so the
-    step, the code, the user's words and the remedy all name one stop: the
+    step, the code, the user's words and the remedy all name one stop, the
     stop itself whenever it is among them.
     """
     stops = [stop_step(stop) for stop in (outcome, *outcome.also_stopped)]
@@ -455,8 +455,8 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
 
 
 def stop_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
-    """The step `outcome` itself stopped at, without its wave's siblings or remedy:
-    the record each stopped step keeps (`harness.graph.execute`)."""
+    """The step `outcome` itself stopped at, without its wave's siblings or remedy.
+    It is the record each stopped step keeps (`harness.graph.execute`)."""
     return {**_stopped_at(outcome), "cause": stop_cause(outcome).value}
 
 
@@ -558,11 +558,11 @@ class Remedy(StrEnum):
 
     # A plan drafted afresh, from another brief or approved again.
     REPLAN = "replan"
-    # Waiting: the same plan can run once a service recovers.
+    # The same plan can run once a service recovers.
     WAIT = "wait"
-    # The user, who accepts a fact of the data or changes the question.
+    # The user accepts a fact of the data or changes the question.
     USER = "user"
-    # Nothing the user or a plan does: the fault is the system's.
+    # The fault is the system's, and nothing the user or a plan does gets past it.
     SYSTEM = "system"
 
 
@@ -597,14 +597,14 @@ _DATA_STOP_REMEDY: dict[str, Remedy] = {
     "member_not_resolvable": Remedy.REPLAN,
     "rollup_not_summable": Remedy.REPLAN,
     # A member-cardinality or candidate-window ceiling is fixed by the spec's
-    # own definition: the user narrows the topic or names a breakdown. A
+    # own definition, so the user narrows the topic or names a breakdown. A
     # ceiling a narrower request avoids is a method choice.
     "over_ceiling": Remedy.USER,
     "capability_unavailable": Remedy.USER,
     "entity_not_found": Remedy.USER,
     # A definition the platform refused to register, or a refusal of the
-    # request under a code the server does not map: another spec or request
-    # may avoid either. A service's own failure is the harness's
+    # request under a code the server does not map, which another spec or
+    # request may avoid. A service's own failure is the harness's
     # (`is_upstream_fault`).
     "upstream_error": Remedy.REPLAN,
     # Tools no workflow step calls (`compiler.capabilities.EXCLUDED_TOOLS`).
@@ -616,8 +616,8 @@ _DATA_STOP_REMEDY: dict[str, Remedy] = {
     # analysis-mcp: a frame, unit, join or method a different plan avoids.
     "stat_var_unresolved": Remedy.REPLAN,
     "frame_too_large": Remedy.REPLAN,
-    # A frame data-mcp minted that failed its integrity check: a narrower
-    # scope mints another content version, which gets past it. Any other
+    # A narrower scope gets past a frame data-mcp minted that failed its
+    # integrity check, since it mints another content version. Any other
     # stored frame that fails is the store's fault (`is_store_fault`).
     "frame_integrity_failed": Remedy.REPLAN,
     "non_finite_result": Remedy.REPLAN,
@@ -708,8 +708,8 @@ def stop_remedy(failed: Mapping[str, object]) -> Remedy:
     the system's, except an approval a fresh plan gets past
     (`LAPSED_APPROVAL_KINDS`). A data stop a method choice or a rediscovery
     settles (`Disposition`) is re-planned. Any other is decided by its code
-    (`_DATA_STOP_REMEDY`), and an unplaced code is the user's, so it never
-    costs the user a second approval. A stop with no cause is the system's.
+    (`_DATA_STOP_REMEDY`), and an unplaced code is the user's, which asks for
+    no second approval. A stop with no cause is the system's.
     """
     cause = failed.get("cause")
     code = failed.get("code")

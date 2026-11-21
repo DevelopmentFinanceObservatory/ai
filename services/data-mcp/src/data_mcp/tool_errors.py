@@ -553,8 +553,8 @@ class ToolRefusal:
         trace_id: str | None = None,
         capability_version: str | None = None,
     ) -> Self:
-        """An upstream call that failed. `service_failure` says the service
-        failed of itself rather than refusing the request (`SERVICE_FAILURE`)."""
+        """An upstream call that failed. `service_failure` is true when the service
+        itself failed, and `fix.kind` then says so (`SERVICE_FAILURE`)."""
         message = (
             f"Upstream call failed ({upstream_code or 'unclassified'}): {detail}. "
             f"Retry after {retry_after_s:.1f}s."
@@ -738,8 +738,8 @@ class ToolRefusal:
         passed alone (`definition_registration`). Its message names `tool`, whose
         caller never asked for a registration. The same id reaches the same refusal, so
         it names no delay. It shares `upstream_error` with an upstream service's own
-        failures, and `fix.kind` (`SPEC_NOT_REGISTERED`) tells it apart: another
-        definition gets past it, which waiting on the service does not."""
+        failures, and `fix.kind` (`SPEC_NOT_REGISTERED`) tells it apart. Another
+        definition gets past it, and waiting on the service does not."""
         return cls(
             code=ToolErrorCode.UPSTREAM_ERROR,
             message=(
@@ -1845,10 +1845,10 @@ def from_upstream_error(exc: UpstreamError, *, tool: str) -> ToolRefusal:
     # a mapped cause keeps it too.
     retry_after_s = _derive_retry_after_s(exc) if exc.retryable or retried_in_place else None
     # A failure with no status, no problem document or a 5xx is the service's
-    # own: a 4xx with no problem document comes from a proxy, an IAM check or a
-    # body limit in front of apis. A failed operation retried in place names a
-    # source revision that moved, and a 4xx problem is a refusal of the request
-    # under a code this service does not map.
+    # own. A 4xx with no problem document comes from a proxy, an IAM check or a
+    # body limit in front of apis, and is the service's too. A failed operation
+    # retried in place names a source revision that moved, and a 4xx problem is
+    # a refusal of the request under a code this service does not map.
     service_failure = not retried_in_place and (
         exc.status is None or exc.status >= 500 or exc.code is None
     )

@@ -1208,8 +1208,8 @@ def failure_cause(code: object, fix: Mapping[str, object] | None = None) -> str:
     """What happened for a failure `code`, as one sentence without advice.
 
     The cause `failure_sentence` opens with, for a caller that offers its own
-    way past the failure, such as a new plan. A code in no class reads the
-    cause no class names.
+    way past the failure, such as a new plan. A code in no class reads
+    `_NO_CAUSE`.
     """
     text = _failure_text(code, fix)
     if text is None:
@@ -1224,7 +1224,7 @@ def failure_cause(code: object, fix: Mapping[str, object] | None = None) -> str:
 
 def _failure_text(code: object, fix: Mapping[str, object] | None) -> FailureText | None:
     """The text a failure `code` reads: its kind's, its own, its ceiling's, or
-    its class's; None for a code in no class."""
+    its class's. A code in no class has none, and the result is None."""
     failure_class = FAILURE_CLASS.get(code) if isinstance(code, str) else None
     if failure_class is None:
         return None

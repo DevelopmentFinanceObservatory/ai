@@ -170,9 +170,9 @@ def _is_dead_end(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> b
     later attempt gets past (`permanent_transport_stop`). A wave with any other stop replans.
 
     It answers another question than the wave's remedy
-    (`executor.outcomes.wave_remedy`). A dead end is a wave the planner cannot
-    get past by drafting the same brief again with the refusal in hand; the
-    remedy is whether a plan from another brief can. A tool's stop another
+    (`executor.outcomes.remedy`). A dead end is a wave the planner cannot
+    get past by drafting the same brief again with the refusal in hand. The
+    remedy says whether a plan from another brief can. A tool's stop another
     source avoids (`facet_not_available`) is a dead end whose remedy is
     `REPLAN`, so `plan_done` gives the orchestrator its plan call back. A step
     result the run could not use is no dead end, since the planner may draft

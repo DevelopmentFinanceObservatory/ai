@@ -2036,7 +2036,7 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
     assert [step["digest"] for step in executed["step_summaries"]] == ["fetched"]
     _, body = handed_back(model)
     # The refusal's retry mode and `fix` word the user's sentence, and its
-    # cause, disposition and wave's remedy decide what follows; the agent
+    # cause, disposition and wave's remedy decide what follows. The agent
     # reads the rest.
     hidden = ("retry_mode", "fix", "disposition", "cause", "wave_remedy")
     shown = {k: v for k, v in executed["failed_step"].items() if k not in hidden}
@@ -2367,8 +2367,9 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
     dead_end: bool,
 ) -> None:
     """A wave whose every stop is a dead end closes the turn on the stop that
-    decides its remedy, the first of the most severe, with no replan. An evidence stop is one when the StatVar family's digest moved
-    since Search approved it and that move explains every error, a family
+    decides its remedy, the first of the most severe, with no replan. An
+    evidence stop is one when the StatVar family's digest moved since Search
+    approved it and that move explains every error, a family
     grown past the one series approved included: a replan in the same turn
     approves the digest the turn already holds, so the turn closes on the
     source-gone sentence, which asks the user to ask again. A tool's `STOP`
@@ -3124,7 +3125,7 @@ def test_mark_masked_step_failed_corrects_every_sibling_a_wave_surfaced() -> Non
     _mark_masked_step_failed(recorder, primary, tools={})
     assert recorder.calls == [pin_record, empty_record]
 
-    # The milder stop first: its record keeps its own code although the
+    # With the milder stop first, its record keeps its own code although the
     # sibling decides the wave.
     swapped = sibling.model_copy(
         update={"also_stopped": (primary.model_copy(update={"also_stopped": ()}),)}

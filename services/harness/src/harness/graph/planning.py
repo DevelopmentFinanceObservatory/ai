@@ -288,8 +288,8 @@ async def _draft(
         _end_pick_entry(ctx)
     notes = [UNREADABLE_PLAN_NOTE] if unreadable else []
     if is_first_draft and (retry := ctx.state.get(ORCHESTRATOR_RETRY_NOTE_KEY)):
-        # The plan call `plan_done` gave back after an approved plan stopped:
-        # the card says which step stopped and why it needs approving again.
+        # `plan_done` gave the plan call back after an approved plan stopped.
+        # The card says which step stopped and why it needs approving again.
         notes.append(str(retry))
         ctx.state[ORCHESTRATOR_RETRY_NOTE_KEY] = None
     return Next(

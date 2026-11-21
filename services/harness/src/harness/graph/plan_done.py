@@ -266,7 +266,7 @@ def _give_plan_back(ctx: NodeCtx[GraphEvent]) -> bool:
     planner did not mark final, and for a stopped run, or a planner refusal
     to replan past one, only when a new plan is its remedy
     (`executor.outcomes.remedy`). Answers whether it gave the
-    call back; the turn's second call answers no. The workflow's own replan
+    call back, and the turn's second call answers no. The workflow's own replan
     cap is untouched."""
     calls = dict(ctx.state.get(ORCHESTRATOR_CALLS_KEY) or {})
     if calls.get("plan_given_back"):
@@ -282,8 +282,8 @@ def _worded_as(
 ) -> tuple[object, object, Mapping[str, object] | None]:
     """The code, retry mode and `fix` the user's words for `failed`, a run's
     `failed_step`, are read from (`remedy`). A fault of the system reads as
-    `internal_error`, whatever its code's class, so the user is never told
-    their question caused it. Any other reads its own, so a stop waiting
+    `internal_error`, whatever its code's class, so the user reads it as the
+    system's fault. Any other reads its own, so a stop waiting
     gets past is told as its code tells it, with the advice to try again
     shortly where its code gives none."""
     past = remedy(failed)
@@ -324,10 +324,10 @@ def _user_remedy(failed: Mapping[str, Any]) -> str | None:
 def _after_stop(
     ctx: NodeCtx[GraphEvent], failed: Mapping[str, Any], plan: Plan | None
 ) -> tuple[str, bool]:
-    """What follows a stopped run, `failed` its `failed_step` and `plan` the
-    plan it ran: the end of the lead the agent reads, and whether the plan
-    call was given back. Both a run that stopped and a planner that refused
-    to replan past a stop end here.
+    """What follows a stopped run, given `failed` (its `failed_step`) and `plan`
+    (the plan it ran). Returns the end of the lead the agent reads and whether
+    the plan call was given back. Both a run that stopped and a planner that
+    refused to replan past a stop end here.
 
     `REPLAN` gives the plan call back once a turn (`_give_plan_back`), and the
     next card's note names the step and what happened there
@@ -335,7 +335,7 @@ def _after_stop(
     the turn's new plan is spent, ends on the user's sentence for the failure
     (`_user_sentence`), or its cause and the failure's own remedy where it has
     one (`_user_remedy`). A fault of the system says the user's question is
-    not at fault.
+    sound.
     """
     past = remedy(failed)
     if past is Remedy.REPLAN and _give_plan_back(ctx):

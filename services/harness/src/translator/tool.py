@@ -759,8 +759,9 @@ def _run_would_stop(
     (`executor.outcomes.failed_step`, the stop of the wave that decides it):
     its `step_id`, the run's own `code` and `message`, and the requirement
     that step carries out. Its `action` refers the plan back with that code
-    as `stop_code`, by whose stop it is (its `cause`, `executor.outcomes.stop_cause`): as `surface_unavailable` when a later
-    try can get past it, as an internal failure when it is the harness's,
+    as `stop_code`, by whose stop it is (its `cause`, `executor.outcomes.stop_cause`).
+    That is `surface_unavailable` when a later try can get past it, an
+    internal failure when it is the harness's,
     and as `requirement_unmeetable` on that requirement when it is the
     data's, for the user to decide otherwise. A data stop that names no
     requirement is an internal failure too. The stop is logged with its
