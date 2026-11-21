@@ -132,6 +132,7 @@ from compiler.sources import (
 )
 from compiler.surface import ToolCallResult, ToolSurface, ToolSurfaceUnavailableError
 from data_mcp import node_lookup, resolution
+from data_mcp.dcid import bare_dcid
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition
 from data_mcp.errors import UpstreamError
@@ -1512,11 +1513,6 @@ def _dataset_requirement(plan: Plan, requirement_id: str) -> DatasetRequirement 
     return requirement
 
 
-def _bare_dcid(ref: str) -> str:
-    """`ref` with a `dcid:` prefix stripped, so a reference compares the same with or without it."""
-    return ref.removeprefix("dcid:")
-
-
 def _tried_source_ids(
     log: DiscoveryLog,
     requirement_key: str,
@@ -1592,8 +1588,8 @@ async def _describe_ids(
         fix = structured.get("fix")
         raw_dcids = fix.get("dcids") if isinstance(fix, Mapping) else None
         named = raw_dcids if isinstance(raw_dcids, Sequence) else ()
-        offenders = {_bare_dcid(str(dcid)) for dcid in named}
-        retry = [dcid for dcid in remaining if _bare_dcid(dcid) not in offenders]
+        offenders = {bare_dcid(str(dcid)) for dcid in named}
+        retry = [dcid for dcid in remaining if bare_dcid(dcid) not in offenders]
         if len(retry) == len(remaining):
             return (), True
         remaining = retry
@@ -1607,9 +1603,9 @@ def _definition_of(nodes: Sequence[Mapping[str, object]], dcid: str) -> str | No
     (`data_mcp.node_lookup.variable_text`). Reads by `ref`, `dcid:`-stripped, rather than by
     position: `describe` may answer fewer ids than asked, or in a different order.
     """
-    target = _bare_dcid(dcid)
+    target = bare_dcid(dcid)
     for node in nodes:
-        if _bare_dcid(str(node.get("ref", ""))) == target:
+        if bare_dcid(str(node.get("ref", ""))) == target:
             return described_variable_text(node)
     return None
 
