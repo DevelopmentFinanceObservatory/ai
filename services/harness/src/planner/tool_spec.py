@@ -9,11 +9,8 @@ call through both and then the body, over the `planner.call.PlannerCall` and
 that result and marks the call's span failed when the answer is an error.
 None of them reads a framework.
 
-The declaration and the conversion are the ones ADK's `FunctionTool` makes
-from an equivalent Python signature (google-adk 2.13, with
-`JSON_SCHEMA_FOR_FUNC_DECL` on and `FUNCTION_TOOL_ARG_VALIDATION` off, ADK's
-defaults), so the model reads the same bytes and a body receives the same
-values whichever serves it.
+The declaration is built from the parameters' own types, and a body receives
+the arguments converted to them.
 """
 
 from __future__ import annotations
@@ -121,13 +118,13 @@ def function_declaration(spec: ToolSpec) -> types.FunctionDeclaration:
     """The declaration the model is shown for `spec`.
 
     The parameters' schema is pydantic's schema of a model named
-    `<name>Params` whose fields are the parameters, as ADK builds a function
-    tool's, rewritten by `compact_schema` when `spec.compact` is set. A tool
-    with no parameters declares no schema. This is ADK's declaration on the
-    Gemini developer API, which the harness runs on. It carries no response
-    schema and keeps optional `anyOf` schemas as pydantic writes them. Vertex
-    AI rejects that form, and `harness.planner_model.refuse_vertex_ai` stops the
-    planner building when its model's google-genai client would use Vertex AI.
+    `<name>Params` whose fields are the parameters, rewritten by `compact_schema`
+    when `spec.compact` is set. A tool with no parameters declares no schema.
+    This is the declaration for the Gemini developer API, which the harness
+    runs on. It carries no response schema and keeps optional `anyOf` schemas
+    as pydantic writes them. Vertex AI rejects that form, and
+    `planner.model.refuse_vertex_ai` stops the planner building when its
+    model's google-genai client would use Vertex AI.
 
     Raises:
         ValueError: `spec` is compact and some parameter has no description.
@@ -157,7 +154,8 @@ def _validated(name: str, validate: Callable[[Any], Any], target: Any, value: An
 
 
 def _converted(name: str, annotation: Any, value: Any) -> Any:
-    """`value` converted to `annotation` where ADK converts it, else unchanged."""
+    """`value` converted to `annotation` where the declaration's types call
+    for it, else unchanged."""
     target = _strip_annotated(annotation)
     if get_origin(target) in (Union, UnionType):
         others = [_strip_annotated(arg) for arg in get_args(target) if arg is not type(None)]
@@ -212,8 +210,7 @@ def convert_arguments(spec: ToolSpec, raw: Mapping[str, Any]) -> dict[str, Any]:
 def missing_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> dict[str, str] | None:
     """The answer to a call whose `arguments` lack a parameter `spec` requires, or `None`.
 
-    The answer is ADK's own, word for word, naming each missing parameter
-    in declaration order.
+    The answer names each missing parameter in declaration order.
     """
     missing = [
         parameter.name
@@ -254,8 +251,8 @@ def run_tool(
     return spec.body(call, end_run, filled)
 
 
-# The `error.type` ADK records on a `FunctionTool`'s span when its answer holds
-# an `error` key.
+# The `error.type` a tool call's span records when its answer holds an `error`
+# key.
 _TOOL_ERROR = "TOOL_ERROR"
 
 
@@ -266,8 +263,7 @@ async def serve_tool(
 
     An answer that is a dict holding an `error` key, such as the refusal of a
     call missing a required argument (`missing_arguments`), marks the current
-    span, the call's, failed with `error.type` `TOOL_ERROR`, as ADK marks a
-    `FunctionTool`'s.
+    span, the call's, failed with `error.type` `TOOL_ERROR`.
     """
     answer = run_tool(spec, raw, call=call, end_run=end_run)
     if inspect.isawaitable(answer):

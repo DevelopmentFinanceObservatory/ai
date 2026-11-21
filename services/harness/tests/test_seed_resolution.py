@@ -5,7 +5,7 @@ spec_id, identity and operations, resolves the identity again through
 data-mcp's `resolve_definition`, and stores Search's answer as a definite
 search part the orchestrator's agent fetches or plans from. These tests run
 data-mcp in process over a `SearchStub` that answers from recorded Spec
-blocks.
+blocks, and the turn on the loop (`tests.graph_turns`) over Postgres.
 """
 
 from __future__ import annotations
@@ -32,38 +32,22 @@ from data_mcp.definition_store import (
 from data_mcp.definition_store import set_store as set_definition_store
 from data_mcp.server import mcp as data_mcp
 from data_mcp.settings import Settings as DataMcpSettings
+from executor.ledger import InMemoryRunLedger
 from fastmcp import Client
-from google.genai import types
-from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY, ORCHESTRATOR_SPECS_KEY
+from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, ORCHESTRATOR_SPECS_KEY
 from harness.mcp_client import _refusal_outcome
-from harness.scripted import ScriptedPlannerModel, ScriptedSurface
+from harness.scripted import ScriptedSurface
 from harness.seeds import SEED_STEP_TOOL, resolve_seed, take_seeds
-from harness.studio_translate import _node_name
-from planner.plan import SEEDS_STATE_KEY
+from harness.turn.loop import Outcome
 from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.discovery import resolved_spec
 
 from .data_mcp_definitions import DataMcpDefinitions, GroupsSearchStub, SearchStub
-from .orchestrator_fakes import (
-    CannedSearch,
-    RefusingPlanner,
-    ScriptLlm,
-    approve_answer,
-    call,
-    create_request_input_response,
-    fetch_call,
-    open_session,
-    orchestrator_app,
-    orchestrator_runner,
-    plan_call,
-    request_text,
-    run_turn,
-    single_pause,
-    stream,
-    studio_client,
-    turn_body,
-    visited_nodes,
-)
+from .graph_turns import agent_read, opening_graph, opening_nodes, visited
+from .plan_turns import approve_answer, plan_nodes
+from .scripted_genai import ScriptedGenai, Step, reply, text_part
+from .scripted_tools import ask_user_call, fetch_call, plan_call, scripted_orchestrator
+from .turn_driver import SegmentRun, TurnDriver, scripted_models
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -156,18 +140,19 @@ class _Steps:
 
 @dataclass(frozen=True)
 class _Turn:
-    """What one turn left: its session state, the steps `seed` recorded, the
-    nodes visited in order, and the agent's model."""
+    """What one turn left: its state as its nodes read it, the turn's spec
+    blocks under `ORCHESTRATOR_SPECS_KEY` among it, the steps `seed`
+    recorded, the nodes visited in order, and the agent's model."""
 
     state: dict[str, Any]
     steps: dict[str, dict[str, Any]]
     visited: list[str]
-    model: ScriptLlm
+    model: ScriptedGenai
 
     @property
     def read(self) -> str:
         """The text of the agent's first model request."""
-        return request_text(self.model.requests[0])
+        return agent_read(self.model.requests[0])
 
     @property
     def parts(self) -> list[dict[str, Any]]:
@@ -176,18 +161,43 @@ class _Turn:
         return json.loads(line)["parts"]
 
 
-async def _run(slot: object, surface: DataMcpDefinitions, *, on: str = "studio") -> _Turn:
-    """Run one turn on the orchestrator topology with `slot` in the seeds slot,
-    as `harness.studio` writes it, resolving seeds through `surface`, on the
-    `on` surface."""
-    steps = _Steps()
-    runner, model = orchestrator_runner(executor=steps, definition_surface=surface)
-    seeded = {} if slot is None else {SEEDS_STATE_KEY: json.dumps(slot)}
-    await open_session(runner, surface=on, **seeded)
-    events = await run_turn(runner, types.UserContent(_QUESTION))
-    held = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    assert held is not None
-    return _Turn(dict(held.state), steps.steps, visited_nodes(events), model)
+async def _turn(
+    engine: AsyncEngine,
+    slot: object,
+    *,
+    executor: _Steps,
+    definition_surface: DataMcpDefinitions,
+    script: Sequence[Step] = (reply(text_part("done")),),
+    on: str = "studio",
+) -> tuple[TurnDriver, SegmentRun, _Turn]:
+    """Open one turn of `_QUESTION` on the opening nodes with `slot` in the
+    seeds slot, as `harness.studio` opens it, resolving seeds through
+    `definition_surface`, on the `on` surface, the agent answering from
+    `script`; run it to its first pause or its end."""
+    models = scripted_models(orchestrator=script)
+    nodes = opening_nodes(
+        scripted_orchestrator(executor=executor, definition_surface=definition_surface),
+        models,
+        executor=executor,
+        definition_surface=definition_surface,
+    )
+    driver = TurnDriver(engine, graph=opening_graph(nodes))
+    inputs = {} if slot is None else {"seeds": slot}
+    run = await driver.turn(_QUESTION, inputs=inputs, state={"surface": on})
+    state = dict(run.cursor.state)
+    if specs := await driver.turns.specs(run.cursor):
+        state[ORCHESTRATOR_SPECS_KEY] = specs
+    turn = _Turn(state, executor.steps, visited(run.events), models.orchestrator)
+    return driver, run, turn
+
+
+async def _run(
+    engine: AsyncEngine, slot: object, surface: DataMcpDefinitions, *, on: str = "studio"
+) -> _Turn:
+    """Run one turn with `slot` in the seeds slot (`_turn`), its agent
+    answering at once."""
+    _, _, turn = await _turn(engine, slot, executor=_Steps(), definition_surface=surface, on=on)
+    return turn
 
 
 # The hand-back's opening, ahead of the parts.
@@ -198,6 +208,7 @@ _SEEDED = (
 
 
 async def test_a_seeded_turn_hands_the_agent_each_seed_as_a_definite_search_part(
+    pg_engine: AsyncEngine,
     definition_store: InMemoryDefinitionStore,
 ) -> None:
     """Both seeds reach the agent as definite parts with their operations, ahead of
@@ -205,7 +216,9 @@ async def test_a_seeded_turn_hands_the_agent_each_seed_as_a_definite_search_part
     del definition_store
     water = _block("water")
 
-    turn = await _run(_seeds([_KENYA, water]), DataMcpDefinitions(served=[_KENYA, water]))
+    turn = await _run(
+        pg_engine, _seeds([_KENYA, water]), DataMcpDefinitions(served=[_KENYA, water])
+    )
 
     assert turn.visited[:2] == ["seed", "orchestrate"]
     assert _SEEDED in turn.read
@@ -214,7 +227,6 @@ async def test_a_seeded_turn_hands_the_agent_each_seed_as_a_definite_search_part
         ("definite", water["spec_id"], [_RANK]),
     ]
     assert turn.steps["seeds"]["summary"] == "received 2 of 2 dataset(s) from Search"
-    assert turn.state[SEEDS_STATE_KEY] is None
     assert set(turn.state[ORCHESTRATOR_SPECS_KEY]) == {_KENYA["spec_id"], water["spec_id"]}
     assert [(r["spec_id"], r["origin"]) for r in turn.state[ORCHESTRATOR_SEARCHES_KEY]] == [
         (_KENYA["spec_id"], "seed"),
@@ -233,6 +245,7 @@ _SEEDED_ON_DOWNLOAD = (
 
 
 async def test_a_seeded_download_turn_hands_back_one_fetch_and_no_plan(
+    pg_engine: AsyncEngine,
     definition_store: InMemoryDefinitionStore,
 ) -> None:
     """On the download surface the hand-back follows the turn's budgets: it offers
@@ -241,7 +254,10 @@ async def test_a_seeded_download_turn_hands_back_one_fetch_and_no_plan(
     water = _block("water")
 
     turn = await _run(
-        _seeds([_KENYA, water]), DataMcpDefinitions(served=[_KENYA, water]), on="download"
+        pg_engine,
+        _seeds([_KENYA, water]),
+        DataMcpDefinitions(served=[_KENYA, water]),
+        on="download",
     )
 
     assert _SEEDED_ON_DOWNLOAD in turn.read
@@ -249,8 +265,10 @@ async def test_a_seeded_download_turn_hands_back_one_fetch_and_no_plan(
     assert [p["spec_id"] for p in turn.parts] == [_KENYA["spec_id"], water["spec_id"]]
 
 
-async def test_a_turn_with_no_seeds_reaches_the_agent_with_the_question_alone() -> None:
-    turn = await _run(None, DataMcpDefinitions())
+async def test_a_turn_with_no_seeds_reaches_the_agent_with_the_question_alone(
+    pg_engine: AsyncEngine,
+) -> None:
+    turn = await _run(pg_engine, None, DataMcpDefinitions())
 
     assert turn.visited[:2] == ["seed", "orchestrate"]
     assert turn.read.endswith(f"\n{_QUESTION}")
@@ -258,12 +276,12 @@ async def test_a_turn_with_no_seeds_reaches_the_agent_with_the_question_alone() 
     assert ORCHESTRATOR_SEARCHES_KEY not in turn.state
 
 
-async def test_a_single_reference_seed_spec_fails_its_step_and_the_agent_reads_the_question() -> (
-    None
-):
+async def test_a_single_reference_seed_spec_fails_its_step_and_the_agent_reads_the_question(
+    pg_engine: AsyncEngine,
+) -> None:
     reference = {"spec_id": _KENYA["spec_id"], "content_version": "cv_" + "0" * 32}
 
-    turn = await _run(reference, DataMcpDefinitions(served=[_KENYA]))
+    turn = await _run(pg_engine, reference, DataMcpDefinitions(served=[_KENYA]))
 
     assert turn.steps["seeds"]["refusal"]["code"] == "seed_reference_unused"
     assert turn.visited[:2] == ["seed", "orchestrate"]
@@ -271,6 +289,7 @@ async def test_a_single_reference_seed_spec_fails_its_step_and_the_agent_reads_t
 
 
 async def test_a_label_the_browser_changed_is_never_read_and_search_names_the_entity(
+    pg_engine: AsyncEngine,
     definition_store: InMemoryDefinitionStore,
 ) -> None:
     """The browser relabels Kenya's identity "Uganda". Search's answer for the identity
@@ -279,7 +298,7 @@ async def test_a_label_the_browser_changed_is_never_read_and_search_names_the_en
     del definition_store
     surface = DataMcpDefinitions(served=[_KENYA])
 
-    turn = await _run(_seeds([_forged_kenya()]), surface)
+    turn = await _run(pg_engine, _seeds([_forged_kenya()]), surface)
 
     assert turn.steps["seeds"]["outcome"] == "ok"
     stored = turn.state[ORCHESTRATOR_SPECS_KEY][_KENYA["spec_id"]]
@@ -349,7 +368,7 @@ _STALE_ANSWERS: dict[str, tuple[dict[str, Any] | None, str]] = {
 
 @pytest.mark.parametrize("answer", sorted(_STALE_ANSWERS))
 async def test_a_seed_search_no_longer_resolves_as_it_did_is_dropped_with_its_reason(
-    definition_store: InMemoryDefinitionStore, answer: str
+    pg_engine: AsyncEngine, definition_store: InMemoryDefinitionStore, answer: str
 ) -> None:
     """Search answers Kenya's identity with another spec_id, with no data, with a block
     that carries no definition, or with a refusal. The seed fails its step and the agent
@@ -361,7 +380,7 @@ async def test_a_seed_search_no_longer_resolves_as_it_did_is_dropped_with_its_re
         [other], answer={_KENYA["spec_id"]: envelope} if envelope is not None else None
     )
 
-    turn = await _run(_seeds([_KENYA, other]), DataMcpDefinitions(search=search))
+    turn = await _run(pg_engine, _seeds([_KENYA, other]), DataMcpDefinitions(search=search))
 
     refusal = turn.steps["seed-0"]["refusal"]
     assert refusal["code"] == "seed_dropped"
@@ -389,13 +408,15 @@ class _UnreachableStore:
         pass
 
 
-async def test_a_seed_data_mcp_cannot_resolve_fails_unavailable_and_the_agent_answers() -> None:
+async def test_a_seed_data_mcp_cannot_resolve_fails_unavailable_and_the_agent_answers(
+    pg_engine: AsyncEngine,
+) -> None:
     """The definition store is unreachable, so no seed can be resolved. The seed's
     step and the count fail `service_unavailable`, and the agent is told to answer
     from the question, which it does."""
     set_definition_store(_UnreachableStore())
     try:
-        turn = await _run(_seeds([_KENYA]), DataMcpDefinitions(served=[_KENYA]))
+        turn = await _run(pg_engine, _seeds([_KENYA]), DataMcpDefinitions(served=[_KENYA]))
     finally:
         set_definition_store(None)
 
@@ -412,6 +433,7 @@ async def test_a_seed_data_mcp_cannot_resolve_fails_unavailable_and_the_agent_an
 
 
 async def test_seeds_resolve_together_and_the_turn_waits_for_the_slowest(
+    pg_engine: AsyncEngine,
     definition_store: InMemoryDefinitionStore,
 ) -> None:
     """Each answer is held for a tenth of a recorded resolve's own time. The three
@@ -425,53 +447,12 @@ async def test_seeds_resolve_together_and_the_turn_waits_for_the_slowest(
     }
     search = SearchStub(blocks, delay_s=delay_s)
 
-    turn = await _run(_seeds(blocks), DataMcpDefinitions(search=search))
+    turn = await _run(pg_engine, _seeds(blocks), DataMcpDefinitions(search=search))
 
     assert [part["spec_id"] for part in turn.parts] == [block["spec_id"] for block in blocks]
     assert search.peak == len(blocks)
     added = max(end for _, end in search.spans) - min(start for start, _ in search.spans)
     assert max(delay_s.values()) <= added < 0.7 * sum(delay_s.values())
-
-
-async def test_a_seed_is_fetched_without_a_search_and_a_later_turns_planner_reads_it(
-    definition_store: InMemoryDefinitionStore, pg_engine: AsyncEngine
-) -> None:
-    """Over the studio routes: the agent fetches the seed's spec_id with no search,
-    and the next turn's planner reads the seed among the earlier readings, with the
-    fetch it served."""
-    del definition_store
-    search = CannedSearch()
-    planner = RefusingPlanner()
-    app, model = orchestrator_app(
-        fetch_call(_KENYA["spec_id"]),
-        types.Part.from_text(text="Here are the donors."),
-        plan_call("rank donors of education aid to Kenya"),
-        types.Part.from_text(text="I could not plan that."),
-        resolver=search,
-        planner=planner,
-        engine=pg_engine,
-        served=[_KENYA],
-    )
-    body = {**turn_body(_QUESTION), "seed_spec": _seeds([_KENYA])}
-
-    async with studio_client(app) as client:
-        first = await stream(client, "/api/studio/turn", body)
-        await stream(client, "/api/studio/turn", turn_body("rank them"))
-
-    steps = [f for f in first if f["event"] == "activity.step" and f.get("tool")]
-    assert [(f["tool"], f["status"]) for f in steps if f["status"] != "running"] == [
-        ("receive_seeds", "complete"),
-        ("fetch", "complete"),
-    ]
-    fetched = model.requests[1].contents[-1].parts[0].function_response
-    assert fetched.name == "fetch"
-    assert fetched.response["frames"]
-    assert search.calls == []
-    (readings,) = planner.readings
-    seeded = [r for r in readings if r["spec_id"] == _KENYA["spec_id"]]
-    assert [(r["origin"], r["status"], r["fetch"] is not None) for r in seeded] == [
-        ("seed", "definite", True)
-    ]
 
 
 async def test_a_seed_carries_a_sets_published_total_and_posts_it_to_no_one() -> None:
@@ -633,14 +614,14 @@ def _undefined(block: Mapping[str, Any]) -> dict[str, Any]:
     ],
 )
 async def test_a_seed_that_cannot_be_read_fails_its_own_step_and_the_other_reaches_the_agent(
-    definition_store: InMemoryDefinitionStore, bad: Any, code: str
+    pg_engine: AsyncEngine, definition_store: InMemoryDefinitionStore, bad: Any, code: str
 ) -> None:
     """A seed whose identity does not hash to its spec_id, whose definition names
     another spec_id, or that carries no definition fails its own step before
     anything is resolved; the seed beside it reaches the agent."""
     good = _block("education")
 
-    turn = await _run(_seeds([good, bad(good)]), DataMcpDefinitions(served=[good]))
+    turn = await _run(pg_engine, _seeds([good, bad(good)]), DataMcpDefinitions(served=[good]))
 
     assert turn.steps["seed-1"]["refusal"]["code"] == code
     assert turn.steps["seeds"]["summary"] == "received 1 of 2 dataset(s) from Search"
@@ -650,10 +631,11 @@ async def test_a_seed_that_cannot_be_read_fails_its_own_step_and_the_other_reach
 
 
 async def test_a_turn_with_no_seed_it_can_read_reaches_the_agent_with_the_question_alone(
+    pg_engine: AsyncEngine,
     definition_store: InMemoryDefinitionStore,
 ) -> None:
     del definition_store
-    turn = await _run(_seeds([_undefined(_block("education"))]), DataMcpDefinitions())
+    turn = await _run(pg_engine, _seeds([_undefined(_block("education"))]), DataMcpDefinitions())
 
     assert turn.steps["seed-0"]["refusal"]["code"] == "seed_invalid"
     assert turn.visited[:2] == ["seed", "orchestrate"]
@@ -674,14 +656,16 @@ class _RefusesOneSpec(InMemoryDefinitionStore):
         await super().put_many(definitions)
 
 
-async def test_a_seed_the_store_cannot_take_fails_unavailable_and_the_other_reaches_the_agent() -> (
-    None
-):
+async def test_a_seed_the_store_cannot_take_fails_unavailable_and_the_other_reaches_the_agent(
+    pg_engine: AsyncEngine,
+) -> None:
     education, water = _block("education"), _block("water")
     store = _RefusesOneSpec(education["spec_id"])
     set_definition_store(store)
     try:
-        turn = await _run(_seeds([education, water]), DataMcpDefinitions(served=[education, water]))
+        turn = await _run(
+            pg_engine, _seeds([education, water]), DataMcpDefinitions(served=[education, water])
+        )
     finally:
         set_definition_store(None)
 
@@ -694,7 +678,7 @@ async def test_a_seed_the_store_cannot_take_fails_unavailable_and_the_other_reac
 
 @pytest.mark.parametrize("contradicts", [False, True], ids=["a-copy", "another-block"])
 async def test_a_seed_naming_an_earlier_seed_s_spec_id_fails_its_own_step_and_the_first_stands(
-    definition_store: InMemoryDefinitionStore, contradicts: bool
+    pg_engine: AsyncEngine, definition_store: InMemoryDefinitionStore, contradicts: bool
 ) -> None:
     """One spec_id is one seed: a repeat is refused whether it copies the first
     or carries another `resolved` block and other operations under the same id."""
@@ -707,7 +691,7 @@ async def test_a_seed_naming_an_earlier_seed_s_spec_id_fails_its_own_step_and_th
         operations = (_RANK,)
     slot = [*_seeds([first], operations=()), *_seeds([repeat], operations=operations)]
 
-    turn = await _run(slot, DataMcpDefinitions(served=[first]))
+    turn = await _run(pg_engine, slot, DataMcpDefinitions(served=[first]))
 
     refusal = turn.steps["seed-1"]["refusal"]
     assert refusal["code"] == "seed_duplicate"
@@ -765,7 +749,7 @@ class _DataMcpGetData(_Steps):
 
 
 async def test_a_seed_is_stored_in_the_data_mcp_whose_get_data_retrieves_it(
-    definition_store: InMemoryDefinitionStore,
+    definition_store: InMemoryDefinitionStore, pg_engine: AsyncEngine
 ) -> None:
     """data-mcp holds a definition store apart from the one the harness process
     holds, as when it runs as its own service. The seed is stored in data-mcp's,
@@ -779,19 +763,53 @@ async def test_a_seed_is_stored_in_the_data_mcp_whose_get_data_retrieves_it(
         return _refused_mint(request)
 
     surface = DataMcpDefinitions(service, served=[block])
-    runner, _ = orchestrator_runner(
-        fetch_call(block["spec_id"]),
+    await _turn(
+        pg_engine,
+        _seeds([block]),
         executor=_DataMcpGetData(service, respond),
         definition_surface=surface,
+        script=[reply(fetch_call(block["spec_id"])), reply(text_part("done"))],
     )
-    await open_session(runner, **{SEEDS_STATE_KEY: json.dumps(_seeds([block]))})
-    await run_turn(runner, types.UserContent("population of Kenya"))
 
     assert await service.get(block["spec_id"], schema_version=1) is not None
     assert await definition_store.get(block["spec_id"], schema_version=1) is None
     (mint,) = posted
     assert mint["input"]["definition"]["identity"] == block["definition"]["identity"]
     assert [call["spec_id"] for call in surface.calls] == [block["spec_id"]]
+
+
+async def test_a_seeded_turn_takes_its_seeds_once_across_a_pause(
+    definition_store: InMemoryDefinitionStore, pg_engine: AsyncEngine
+) -> None:
+    """A seeded turn that pauses on `ask_user` resumes without running `seed`
+    again: one hand-back and one set of its steps across the turn, which then
+    completes. The hand-back follows the user's question in every request,
+    the resumed one included."""
+    del definition_store
+    steps = _Steps()
+    driver, paused, turn = await _turn(
+        pg_engine,
+        _seeds([_KENYA]),
+        executor=steps,
+        definition_surface=DataMcpDefinitions(served=[_KENYA]),
+        script=[
+            reply(ask_user_call("Which donors?", "DAC members", "All")),
+            reply(text_part("Here are the donors.")),
+        ],
+    )
+    resumed = await driver.answer(
+        {"answers": {"q1": {"kind": "option", "spec_id": "o1"}}}, to=paused.pause
+    )
+
+    assert "seed" not in visited(resumed.events)
+    assert [step for tool, step in steps.recorded if tool == SEED_STEP_TOOL] == ["seeds"]
+    model = turn.model
+    assert agent_read(model.requests[-1]).count(_SEEDED) == 1
+    for request in (model.requests[0], model.requests[-1]):
+        texts = ["".join(p.text or "" for p in c.parts or []) for c in request.content_list]
+        assert _SEEDED in texts[texts.index(_QUESTION) + 1]
+    assert resumed.outcome is Outcome.DONE
+    assert len(model.requests) == len(model.replies)
 
 
 class _Describes(_Steps):
@@ -802,114 +820,45 @@ class _Describes(_Steps):
         return {"outcome": "ok", "view": {"dimensions": [{"name": "observationAbout"}]}}
 
 
-def _ask_user_answer(pause: types.FunctionCall) -> dict[str, Any]:
-    return {"result": {"answers": {"q1": {"kind": "option", "spec_id": "o1"}}}}
-
-
-def _approval(pause: types.FunctionCall) -> dict[str, Any]:
-    assert pause.id == APPROVE_INTERRUPT
-    return {"result": approve_answer(pause.args["payload"]["revision"])}
-
-
-_PAUSES = {
-    "ask_user": (
-        lambda: call(
-            "ask_user",
-            questions=[
-                {
-                    "question": "Which donors?",
-                    "options": [{"label": "DAC members"}, {"label": "All"}],
-                }
-            ],
-        ),
-        _ask_user_answer,
-    ),
-    "plan": (
-        lambda: call(
-            "plan",
-            brief="rank donors of education aid to Kenya",
-            asks=["rank donors of education aid to Kenya"],
-        ),
-        _approval,
-    ),
-}
-
-
-@pytest.mark.parametrize("pausing", sorted(_PAUSES))
-async def test_a_seeded_turn_takes_its_seeds_once_across_a_pause(
-    definition_store: InMemoryDefinitionStore, pausing: str
+async def test_a_seeded_turn_takes_its_seeds_once_across_a_plan_approval(
+    definition_store: InMemoryDefinitionStore, pg_engine: AsyncEngine
 ) -> None:
-    """A seeded turn that pauses on `ask_user` or on a plan's approval resumes
-    without running `seed` again: one hand-back and one set of its steps
-    across the turn, which then completes. The hand-back follows the user's
-    question in every request, the resumed one included."""
+    """A seeded turn that pauses on a plan's approval resumes without running
+    `seed` again: one hand-back and one set of its steps across the turn,
+    which then completes. The hand-back follows the user's question in every
+    request, the resumed one included."""
     del definition_store
-    pausing_call, answer = _PAUSES[pausing]
     steps = _Describes()
-    runner, model = orchestrator_runner(
-        pausing_call(),
-        types.Part.from_text(text="Here are the donors."),
-        planner=ScriptedPlannerModel(),
+    surface = DataMcpDefinitions(served=[_KENYA])
+    models = scripted_models(
+        orchestrator=[
+            reply(plan_call("rank donors of education aid to Kenya")),
+            reply(text_part("Here are the donors.")),
+        ]
+    )
+    nodes = plan_nodes(
+        scripted_orchestrator(executor=steps, definition_surface=surface),
+        models,
+        run_ledger=InMemoryRunLedger(),
         tool_surface=ScriptedSurface(),
         executor=steps,
-        definition_surface=DataMcpDefinitions(served=[_KENYA]),
+        definition_surface=surface,
     )
-    await open_session(runner, **{SEEDS_STATE_KEY: json.dumps(_seeds([_KENYA]))})
+    driver = TurnDriver(pg_engine, graph=opening_graph(nodes))
 
-    pause = single_pause(await run_turn(runner, types.UserContent(_QUESTION)))
-    reply = create_request_input_response(pause.id, answer(pause))
-    resumed = await run_turn(runner, types.Content(role="user", parts=[reply]))
+    paused = await driver.turn(
+        _QUESTION, inputs={"seeds": _seeds([_KENYA])}, state={"surface": "studio"}
+    )
+    card = paused.pause
+    assert card.kind == "approve"
+    resumed = await driver.answer(approve_answer(card.payload["revision"]), to=card)
 
-    assert "seed" not in visited_nodes(resumed)
+    assert "seed" not in visited(resumed.events)
     assert [step for tool, step in steps.recorded if tool == SEED_STEP_TOOL] == ["seeds"]
-    assert request_text(model.requests[-1]).count(_SEEDED) == 1
+    model = models.orchestrator
+    assert agent_read(model.requests[-1]).count(_SEEDED) == 1
     for request in (model.requests[0], model.requests[-1]):
-        texts = ["".join(p.text or "" for p in c.parts or []) for c in request.contents]
+        texts = ["".join(p.text or "" for p in c.parts or []) for c in request.content_list]
         assert _SEEDED in texts[texts.index(_QUESTION) + 1]
-    assert not [e for e in resumed if e.error_code]
-    assert not [c for e in resumed for c in e.get_function_calls() if c.name == "adk_request_input"]
-    assert model.script == []
-
-
-async def test_a_turn_paused_without_a_seed_node_run_resumes_without_taking_its_seeds(
-    definition_store: InMemoryDefinitionStore,
-) -> None:
-    """A turn paused before the workflow had a `seed` node: its events carry no
-    `seed` run and its seeds slot still holds the seeds the host wrote. The
-    resume clears the slot, takes none of them, hands nothing back, and
-    completes."""
-    del definition_store
-    steps = _Steps()
-    runner, model = orchestrator_runner(
-        call(
-            "ask_user",
-            questions=[
-                {
-                    "question": "Which donors?",
-                    "options": [{"label": "DAC members"}, {"label": "All"}],
-                }
-            ],
-        ),
-        types.Part.from_text(text="Here are the donors."),
-        executor=steps,
-        definition_surface=DataMcpDefinitions(served=[_KENYA]),
-    )
-    await open_session(runner)
-    pause = single_pause(await run_turn(runner, types.UserContent(_QUESTION)))
-    held = runner.session_service.sessions["t"]["u"]["s"]
-    held.events = [e for e in held.events if _node_name(e) != "seed"]
-    held.state[SEEDS_STATE_KEY] = json.dumps(_seeds([_KENYA]))
-
-    reply = create_request_input_response(pause.id, _ask_user_answer(pause))
-    resumed = await run_turn(runner, types.Content(role="user", parts=[reply]))
-
-    # ADK runs `seed` live on the resume, since the turn's events hold no run of it.
-    assert "seed" in visited_nodes(resumed)
-    assert steps.recorded == []
-    assert _KENYA["spec_id"] not in request_text(model.requests[-1])
-    after = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    assert after is not None
-    assert after.state[SEEDS_STATE_KEY] is None
-    assert ORCHESTRATOR_SEARCHES_KEY not in after.state
-    assert not [e for e in resumed if e.error_code]
-    assert model.script == []
+    assert resumed.outcome is Outcome.DONE
+    assert len(model.requests) == len(model.replies)

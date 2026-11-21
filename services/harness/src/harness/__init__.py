@@ -1,4 +1,4 @@
-"""harness — agentic loop (Google ADK + FastAPI) powering the site's chat+canvas."""
+"""The agentic loop (Pydantic AI agents on Gemini + FastAPI) powering the site's chat+canvas."""
 
 from importlib.metadata import PackageNotFoundError, version
 

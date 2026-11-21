@@ -28,17 +28,29 @@ from common.telemetry import (
     turn_segment,
 )
 from harness.turn_budget import COMPLETION_START_TIME, TurnBudget
+from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
+from planner.model import planner_model
 from planner.plan import Plan
 from planner.settings import AGENT_NAME
 from planner.specs import PROPOSE_PLAN
 from planner.tool_spec import Parameter, ToolSpec
 
 from ..planner_expectations import expect, expectation_name, shared
-from ..scripted_genai import Reply, call_part, malformed_call_reply, reply, thought_part
+from ..planner_host import KEY
+from ..scripted_genai import (
+    Reply,
+    ScriptedGenai,
+    call_part,
+    malformed_call_reply,
+    reply,
+    thought_part,
+)
 from ..test_planner_adapter import _translated_plan
+from ..test_planner_model import MODEL as _PLANNER_MODEL
+from ..test_planner_model import _pai
 from ..test_planner_node import (
     _MODEL,
     _REFUSED,
@@ -55,14 +67,14 @@ from ..test_planner_node import (
 )
 
 _SESSION = "conv_01planner_spans"
-# Where a span's conversation is the session the run's workflow ran in.
+# Where a span's conversation is the conversation the entry's turn ran in.
 _THE_SESSION = "<the session>"
 
 # Langfuse's `LangfuseOtelSpanAttributes` names a span carries.
 _OBSERVATION_TYPE = "langfuse.observation.type"
 _USAGE_DETAILS = "langfuse.observation.usage_details"
 # The number of a call's attempts discarded for a malformed function call
-# (`harness.planner_model`).
+# (`harness.gemini_wire`).
 _MALFORMED_DISCARDED = "dfo.model.malformed_attempts_discarded"
 
 # The observation type Langfuse gives each GenAI operation
@@ -228,8 +240,7 @@ async def _spans(script: _Script, exporter: InMemorySpanExporter) -> list[Any]:
     exporter.clear()
     await _entry(script)
     spans = sorted(exporter.get_finished_spans(), key=lambda span: span.start_time or 0)
-    (workflow,) = [span for span in spans if span.name.startswith("invoke_workflow")]
-    session = str((workflow.attributes or {})["gen_ai.conversation.id"])
+    session = KEY.conversation_id
     return [
         _seen(span, session)
         for span in spans
@@ -308,10 +319,12 @@ async def test_langfuse_shows_each_entry_as_stored(
     shown = await _spans(_ENTRIES[entry](plan), exported_spans)
 
     put_in_place = [seen for seen in shown if seen["type"] == "span"]
-    assert len(put_in_place) == (1 if entry == "stopped" else 0)
+    assert len(put_in_place) == (1 if entry in {"stopped", "budget-closed"} else 0)
     for seen in put_in_place:
         assert seen["usage"] == {}
-        assert seen["output"][0]["parts"][0]["content"].startswith("Stopping this turn:")
+        assert "dfo.model.finish_reason" not in seen["budget"]
+    if entry == "stopped":
+        assert put_in_place[0]["output"][0]["parts"][0]["content"].startswith("Stopping this turn:")
     expect(expectation_name(request), _stored(shown, _TOOLS.get(entry, "span_tools")))
 
 
@@ -403,6 +416,27 @@ async def test_a_resent_calls_span_carries_both_attempts_usage(
         "total": 266,
     }
     assert call[_MALFORMED_DISCARDED] == 1
+
+
+async def test_a_call_closed_unsent_after_a_sent_attempt_without_usage_stays_a_generation(
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    """The first attempt is sent, ends malformed with no usage metadata, and is
+    retried. The call cap closes the retry before it sends. The span carries a
+    sent attempt, so it stays a generation."""
+    scripted = ScriptedGenai([malformed_call_reply(usage=None)])
+    model = planner_model(
+        _PLANNER_MODEL,
+        client=scripted.client,
+        budget=TurnBudget(model_time_s=60.0, model_calls_max=1, wall_s=60.0, first_chunk_s=30.0),
+    )
+
+    with trace.get_tracer(__name__).start_as_current_span("chat"):
+        await _pai(model)
+
+    (span,) = exported_spans.get_finished_spans()
+    assert len(scripted.requests) == 1
+    assert _OBSERVATION_TYPE not in (span.attributes or {})
 
 
 @pytest.mark.parametrize("capture", ["SPAN_ONLY", "EVENT_ONLY", "NO_CONTENT", None])

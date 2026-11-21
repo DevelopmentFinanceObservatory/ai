@@ -225,11 +225,12 @@ def _transient_retry(arguments: Mapping[str, Any], state: SessionState) -> Plan 
 def ask_refusal(args: Mapping[str, Any]) -> dict[str, object] | None:
     """The refusal an ask earns on its arguments alone, or `None` for one that pauses.
 
-    ADK hands the model's arguments over unchecked. A refusal answers the
+    The model's arguments arrive unchecked. A refusal answers the
     call at once, so the run goes on and Studio asks nothing. An ask this
     accepts ends the planner's run, and the graph's planner node pauses on
-    it with these arguments as its `RequestInput`'s `payload`, from which
-    Studio builds its question (`harness.studio_translate._planner_question`).
+    it with these arguments as its pause's `payload`
+    (`harness.graph.planning.planner_ask_pause`), from which Studio builds its
+    question (`harness.studio_translate._planner_question`).
     `message` is the question as text. Each of `candidates` is a
     mapping, read by its `spec_id` and `label`. `options` are
     `COMBINATION_OPTIONS` or `PRICES_OPTIONS` exactly, as a refusal's action
@@ -421,9 +422,11 @@ PENDING_ASK_STATE_KEY = "planner:pending_ask"
 class AcceptedAsk(NamedTuple):
     """An ask the planner made and its tool accepted, waiting for the user.
 
-    `call_id` is the id of the planner's `PLANNER_ASK` call, which the graph's
-    planner node pauses on as the interrupt id, so the user's answer carries
-    it. `args` are the call's arguments, the question as Studio shows it
+    `call_id` is the id of the planner's `PLANNER_ASK` call. The graph's
+    planner node pauses on the ask under an interrupt id the turn loop mints,
+    and the planner's tools read the user's answer to that pause as the
+    answer to this call (`planner.session.session_steps`). `args` are the
+    call's arguments, the question as Studio shows it
     (`harness.studio_translate._planner_question`).
     """
 

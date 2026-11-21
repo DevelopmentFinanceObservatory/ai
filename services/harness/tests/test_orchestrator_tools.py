@@ -43,8 +43,6 @@ from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
 from data_mcp.search_tool import MAX_PARTS, MAX_RAW_QUERY_CHARS, SearchContext
 from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar import Frame
-from google.adk.sessions.state import State
-from google.adk.tools import FunctionTool
 from harness import chart_binding, orchestrator_tools, planner_adapter
 from harness.chart_binding import (
     LINE_CHART_MAX_VALUES,
@@ -71,7 +69,6 @@ from harness.mcp_client import _presentation_refusal_outcome
 from harness.orchestrator_tools import (
     HANDED_OFF,
     Chart,
-    OrchestratorTool,
     build_orchestrator_tools,
 )
 from harness.reply_figures import card_result, drawn_series
@@ -98,6 +95,8 @@ from harness.wire import AddOp, CompositionActor, MutationOp, component_revised
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
 from orchestrator.agent import INSTRUCTION
+from orchestrator.call import OrchestratorCall
+from orchestrator.declarations import tool_declaration
 from planner.parties import PartyRole
 from planner.plan import (
     MAX_ASK_CHARS,
@@ -252,11 +251,7 @@ def _tools(
         remove_cards=remove_cards,
     )
     by_name = {fn.__name__: fn for fn in tools}
-    return by_name, SimpleNamespace(
-        state={"surface": surface_name},
-        invocation_id="inv_1",
-        actions=SimpleNamespace(skip_summarization=None),
-    )
+    return by_name, OrchestratorCall(state={"surface": surface_name}, turn_id="turn-1")
 
 
 # --- declarations ---------------------------------------------------------
@@ -266,7 +261,7 @@ def _declarations() -> dict[str, str]:
     """Each tool's function declaration as the model is sent it."""
     tools, _ = _tools()
     return {
-        name: json.dumps(FunctionTool(fn)._get_declaration().model_dump(exclude_none=True))
+        name: json.dumps(tool_declaration(fn).model_dump(exclude_none=True))
         for name, fn in tools.items()
     }
 
@@ -389,9 +384,7 @@ def test_validating_arguments_leaves_every_declaration_as_the_model_sees_it():
 
     assert set(wrapped) == set(tools) - {"explain_dfo"}
     for fn in wrapped.values():
-        declaration = FunctionTool(fn.__wrapped__)._get_declaration()
-        assert FunctionTool(fn)._get_declaration() == declaration
-        assert OrchestratorTool(fn)._get_declaration() == declaration
+        assert tool_declaration(fn) == tool_declaration(fn.__wrapped__)
 
 
 # --- argument validation ----------------------------------------------------
@@ -495,7 +488,7 @@ async def test_a_malformed_argument_is_an_error_for_the_model_and_runs_nothing(
 
 
 async def _fetch_without_spec_id(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
-    return await OrchestratorTool(tools["fetch"]).run_async(args={}, tool_context=ctx)
+    return await tools["fetch"](call=ctx)
 
 
 async def test_a_call_missing_a_required_argument_is_an_error_to_correct_and_runs_nothing():
@@ -530,7 +523,7 @@ async def test_a_parsed_search_sends_its_parts_and_no_raw_query(message, args):
     tools, ctx = _tools(resolver)
     token = current_user_message.set(message)
     try:
-        found = await OrchestratorTool(tools["search"]).run_async(args=args, tool_context=ctx)
+        found = await tools["search"](call=ctx, **args)
     finally:
         current_user_message.reset(token)
 
@@ -562,7 +555,7 @@ async def test_a_search_with_nothing_to_search_or_text_beside_several_parts_is_r
     resolver = _resolver(_digest())
     tools, ctx = _tools(resolver)
 
-    found = await OrchestratorTool(tools["search"]).run_async(args=args, tool_context=ctx)
+    found = await tools["search"](call=ctx, **args)
 
     assert _stated(found) == (HarnessCode.TOOL_ARGUMENTS_INVALID, "correct_and_retry")
     assert found["invalid"] == [invalid]
@@ -573,7 +566,7 @@ async def test_a_search_with_nothing_to_search_or_text_beside_several_parts_is_r
 def test_search_declares_parts_and_text_and_requires_neither():
     tools, _ = _tools()
 
-    declaration = OrchestratorTool(tools["search"])._get_declaration()
+    declaration = tool_declaration(tools["search"])
 
     assert declaration is not None
     declaration = declaration.model_dump(exclude_none=True)
@@ -596,12 +589,12 @@ async def test_calls_with_invalid_arguments_stop_at_their_budget(call):
     assert ctx.state[ORCHESTRATOR_CALLS_KEY] == {"invalid_arguments": BUDGETS["invalid_arguments"]}
 
 
-async def test_adk_function_tool_returns_the_argument_error_for_a_part_level_role():
+async def test_a_part_level_role_is_answered_with_the_argument_error():
     resolver = _resolver(_digest())
     tools, ctx = _tools(resolver)
     part = {"variable": "aid", "role": "to", "entities": [{"text": "Kenya"}]}
 
-    found = await FunctionTool(tools["search"]).run_async(args={"parts": [part]}, tool_context=ctx)
+    found = await tools["search"](call=ctx, parts=[part])
 
     assert found["invalid"] == [{"loc": "parts.0.role", "type": "extra_forbidden"}]
     assert '{"text": "Kenya", "role": "to"}' in found["error"]
@@ -1928,7 +1921,7 @@ async def test_a_redraw_of_a_series_on_the_canvas_as_the_turn_began_states_no_fi
         assert (await tools["remove_cards"](ctx, all_cards=True))["removed"]
     redrawn = await tools["make_charts"]([chart], ctx)
     named = await tools["make_charts"]([chart | {"state_values_for": ["country/NGA"]}], ctx)
-    ctx.invocation_id = "inv_2"
+    ctx.turn_id = "turn-2"
     next_turn = await tools["make_charts"]([chart], ctx)
 
     assert _figures(redrawn["charts"][0]) == []
@@ -2492,13 +2485,9 @@ class YieldingExecutor(FakeExecutor):
         return await super().__call__(tool=tool, args=args, on_progress=on_progress)
 
 
-def _sibling_calls(session_state: dict[str, Any], count: int) -> list[SimpleNamespace]:
-    """Contexts for `count` function calls of one model response, built the way
-    ADK builds them: each call's own state delta over the one session state."""
-    return [
-        SimpleNamespace(state=State(value=session_state, delta={}), invocation_id="inv_1")
-        for _ in range(count)
-    ]
+def _sibling_calls(session_state: dict[str, Any], count: int) -> list[OrchestratorCall]:
+    """Records for `count` function calls of one model response, over the one turn state."""
+    return [OrchestratorCall(state=session_state, turn_id="turn-1") for _ in range(count)]
 
 
 async def _session_with_frame(executor: FakeExecutor) -> tuple[dict[str, Any], Any]:
@@ -3707,7 +3696,7 @@ async def _draw_wide_twice(
     await tools["fetch"](SPEC_LIFE, ctx)
     results = [await tools["make_charts"]([_wide_chart(**first)], ctx)]
     if later_turn:
-        ctx.invocation_id = "inv_2"
+        ctx.turn_id = "turn-2"
     results.append(await tools["make_charts"]([_wide_chart(**second)], ctx))
     return executor, results
 
@@ -3748,7 +3737,7 @@ async def test_make_charts_reads_the_figures_asked_of_a_card_on_the_canvas(
     await tools["fetch"](SPEC_LIFE, ctx)
     await tools["make_charts"]([_wide_chart(type="bar_chart")], ctx)
     if later_turn:
-        ctx.invocation_id = "inv_2"
+        ctx.turn_id = "turn-2"
 
     again = await tools["make_charts"](
         [_wide_chart(type="bar_chart", state_values_for=["donor/19"])], ctx
@@ -3796,7 +3785,7 @@ async def test_make_charts_refuses_a_card_on_the_canvas_it_cannot_read_back(
     await tools["fetch"](SPEC_LIFE, ctx)
     await tools["make_charts"]([_wide_chart()], ctx)
     if later_turn:
-        ctx.invocation_id = "inv_2"
+        ctx.turn_id = "turn-2"
     executor.described = described
 
     again = await tools["make_charts"]([_wide_chart()], ctx)
@@ -3847,7 +3836,7 @@ async def test_make_charts_draws_again_a_card_remove_cards_took_off(
 
     removed = await tools["remove_cards"](ctx, ["cmp_01"], all_cards=all_cards)
     if later_turn:
-        ctx.invocation_id = "inv_2"
+        ctx.turn_id = "turn-2"
     again = await tools["make_charts"]([table, bars], ctx)
 
     assert removed["removed"] == (["cmp_01", "cmp_02"] if all_cards else ["cmp_01"])
@@ -3877,7 +3866,7 @@ async def test_make_charts_reads_a_card_the_user_added_back(
     )
     assert isinstance(applied, tuple)
     state.composition = _next_manifest(state.composition, applied[0], actor=CompositionActor.USER)
-    ctx.invocation_id = "inv_2"
+    ctx.turn_id = "turn-2"
 
     again = await tools["make_charts"]([_wide_chart()], ctx)
 
@@ -3906,7 +3895,7 @@ async def test_make_charts_draws_again_a_card_revised_since_it_was_drawn(
     )
     executor.cards["cmp_01"] = revised
     if later_turn:
-        ctx.invocation_id = "inv_2"
+        ctx.turn_id = "turn-2"
 
     again = await tools["make_charts"]([_wide_chart()], ctx)
 
@@ -4525,15 +4514,12 @@ def test_ask_user_records_the_question_and_refuses_a_second_hand_off():
     ]
 
     assert "refusal" in tools["ask_user"]([], ctx)
-    assert not ctx.actions.skip_summarization
     asked = tools["ask_user"](questions, ctx)
     later.state.update(ctx.state)
     second = tools["plan"]("Congo's GDP", ["Congo's GDP"], later)
 
     assert asked[HANDED_OFF] == "ask"
-    assert ctx.actions.skip_summarization is True
     assert HANDED_OFF not in second
-    assert not later.actions.skip_summarization
     assert pending_action(ctx.state) == PendingAsk(questions=questions)
     assert "already waiting on ask" in second["error"]
     assert _stated(second) == ("hand_off_pending", "do_not_retry")
@@ -4811,7 +4797,7 @@ async def _searched_france_kenya(
         definition_surface=definition_surface,
     )
     by_name = {fn.__name__: fn for fn in tools}
-    ctx = SimpleNamespace(state={"surface": "studio"}, invocation_id="inv_1")
+    ctx = OrchestratorCall(state={"surface": "studio"}, turn_id="turn-1")
     conversation = ConversationState(conversation_id="c1")
     current_recorded_identity.set(conversation.recorded_identity)
     await by_name["search"](ctx, [{"variable": "aid"}])
@@ -5806,7 +5792,7 @@ async def test_fetching_an_alternative_preserves_recorded_source_confirmation():
         definition_surface=surface,
     )
     by_name = {fn.__name__: fn for fn in tools}
-    ctx = SimpleNamespace(state={"surface": "studio"}, invocation_id="inv_1")
+    ctx = OrchestratorCall(state={"surface": "studio"}, turn_id="turn-1")
     conversation = ConversationState(conversation_id="c1")
     token = current_recorded_identity.set(conversation.recorded_identity)
     try:

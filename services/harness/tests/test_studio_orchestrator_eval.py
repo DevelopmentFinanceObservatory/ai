@@ -1,10 +1,10 @@
 """CI's share of the studio eval set (`evals/studio`, `--mode scripted`).
 
-The cases run the real workflow and planner adapter under a real ADK runner, with
-every model scripted, and check what each model was shown. Three things are
-held here: the cases report as marked (a pass, or an expected failure that
-still fails), each check and each stream invariant fails when the property it
-states is broken, and the case file can fail.
+The cases run the real turn graph, orchestrator agent and planner adapter on
+the turn loop, with every model scripted, and check what each model was shown.
+Three things are held here: the cases report as marked (a pass, or an expected
+failure that still fails), each check and each stream invariant fails when the
+property it states is broken, and the case file can fail.
 
 `evals/` sits outside the workspace, so its modules are loaded by file path.
 """
@@ -23,29 +23,26 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-from google.adk.events import Event
 from google.genai import types
 from harness.planner_run import failed_tool_answer
 from harness.reply_figures import card_result
 from harness.studio_state import ConversationState
 from harness.studio_translate import _RecordingExecutor, _Translator
+from orchestrator.run import ModelResponded, ToolsAnswered
 from planner.skills import GET_SKILL
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .orchestrator_fakes import (
+from .scripted_tools import (
     CannedSearch,
     chart,
     definite_envelope,
     fetch_call,
-    frame_for,
     make_charts_call,
-    orchestrator_app,
     search_call,
-    stream,
-    studio_client,
-    turn_body,
-    unconnected_store,
 )
+from .studio_routes import frame_for, orchestrator_app, stream, studio_client, turn_body
+from .translating import translated
+from .turn_driver import unconnected_store
 
 STUDIO_EVAL_DIR = Path(__file__).resolve().parents[3] / "evals" / "studio"
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -206,8 +203,10 @@ DECLINED = {"ask": "B", "declined": "the data found cannot answer this as asked"
 RAN = {"ask": "A", "answered_by": [{"step": "s1", "status": "data"}]}
 SPEC = "spec_" + "1" * 32
 READING = {"spec_id": SPEC, "window": {"start": 1990, "end": 2020}, "warnings": [{"code": "w_one"}]}
-FENCED = f"[dfo_analyst_graph] said:\n{checks.RELAY_MARKER}\nbody"
 CLOSING = 'The series rose. Would you like "Uganda" too?'
+REVISION = "f" * 64
+APPROVED = [[{"event": "plan.approved", "revision": REVISION}]]
+REFUSED = {**_step(SPEC), "outcome": "refused", "code": "facet_not_available"}
 TURN_ONE = [{"kind": "turn", "index": 1}, _request("orchestrator", "first")]
 
 
@@ -216,30 +215,60 @@ TURN_ONE = [{"kind": "turn", "index": 1}, _request("orchestrator", "first")]
     [
         (
             "approval_payload_absent_after_approval",
-            [],
-            [_step(), _request("orchestrator", "ok")],
+            APPROVED,
+            [_step(), _request("orchestrator", f"Plan {REVISION[:12]} (approved)")],
             False,
         ),
         (
             "approval_payload_absent_after_approval",
-            [],
-            [_step(), _request("orchestrator", f"called tool `{checks.REQUEST_INPUT_NAME}`")],
+            APPROVED,
+            [_step(), _request("planner", json.dumps({"approved": REVISION}))],
             True,
         ),
-        # A pause before the first step is the approval itself, and is not held against it.
         (
             "approval_payload_absent_after_approval",
-            [],
-            [_request("planner", checks.REQUEST_INPUT_NAME), _step()],
+            APPROVED,
+            [_step(), _request("orchestrator", "ok", system=REVISION)],
+            True,
+        ),
+        # The plan the planner proposes, before the approval, is not held against it.
+        (
+            "approval_payload_absent_after_approval",
+            APPROVED,
+            [_request("planner", REVISION), _step()],
             False,
         ),
-        # No step ran, so nothing was approved: a case that proves nothing fails.
-        ("approval_payload_absent_after_approval", [], [_request("orchestrator", "ok")], True),
-        ("no_relay_marker", [], [_request("orchestrator", "plain")], False),
-        ("no_relay_marker", [], [_request("orchestrator", FENCED)], True),
-        ("no_relay_marker", [], [_request("planner", "x", system=checks.RELAY_MARKER)], False),
-        ("planner_sees_no_relay_marker", [], [_request("orchestrator", FENCED)], False),
-        ("planner_sees_no_relay_marker", [], [_request("planner", FENCED)], True),
+        # No step ran, or nothing was approved: a case that proves nothing fails.
+        ("approval_payload_absent_after_approval", APPROVED, [_request("planner", "ok")], True),
+        ("approval_payload_absent_after_approval", [], [_step(), _request("planner", "ok")], True),
+        (
+            "refused_step_reaches_the_next_plan",
+            [],
+            [
+                REFUSED,
+                _request("orchestrator", "failed_step facet_not_available"),
+                _request("planner"),
+            ],
+            False,
+        ),
+        (
+            "refused_step_reaches_the_next_plan",
+            [],
+            [REFUSED, _request("orchestrator", "the plan ran"), _request("planner")],
+            True,
+        ),
+        (
+            "refused_step_reaches_the_next_plan",
+            [],
+            [_request("planner"), REFUSED, _request("orchestrator", "facet_not_available")],
+            True,
+        ),
+        (
+            "refused_step_reaches_the_next_plan",
+            [],
+            [_step(), _request("orchestrator", "facet_not_available"), _request("planner")],
+            True,
+        ),
         (
             "planner_first_message_carries_search_evidence",
             [],
@@ -404,7 +433,8 @@ def test_every_case_can_fail() -> None:
     for case in cases:
         label = case["id"]
         assert len(case.get("xfail", "x" * 21)) > 20, f"{label}: xfail without a reason"
-        assert not checks.check_names(case.get("checks", ["no_relay_marker"]), label=label)
+        if "checks" in case:
+            assert not checks.check_names(case["checks"], label=label)
         assert (
             case.get("rubrics") or case.get("checks") or any(t.get("expect") for t in case["turns"])
         )
@@ -911,10 +941,11 @@ async def test_a_count_explain_dfo_read_grounds_the_reply_that_quotes_it() -> No
     )
     frames = [
         frame.model_dump(mode="json")
-        for part in (types.Part(function_call=call), types.Part(function_response=read))
-        for frame in await translator.translate(
-            Event(author="dfo_orchestrator", content=types.Content(parts=[part]))
+        for event in (
+            ModelResponded(parts=(types.Part(function_call=call),)),
+            ToolsAnswered(answers=(read,), state={}),
         )
+        for frame in await translated(translator, event)
     ]
 
     assert _ungrounded(frames, "DFO holds 108,905 indicators in 92 datasets.") == []

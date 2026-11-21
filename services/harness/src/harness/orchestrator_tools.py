@@ -7,14 +7,14 @@ draws on the canvas through the graph's own presentation checks;
 with `path`; `recall` returns an earlier turn's plan record,
 readings or a canvas component in full; `explain_dfo` reads dfo-faq, DFO's
 own description of itself, beside the live counts of what DFO holds
-(`harness.dfo_faq`). `ask_user` and `plan` record one pending action for
-the workflow's `route` node (`harness.graph`) to act on once the model's
-turn ends: a pause for the user's answer, or the plan path.
+(`harness.dfo_faq`). `ask_user` and `plan` record one pending action and
+hand off (`orchestrator.call.HANDED_OFF`): the orchestrator's run ends on the
+call, and the turn pauses for the user's answer or runs the plan path.
 
 The model sees digests only: part readings, frame views, one-line
 summaries, and of a drawn card what it holds and the figures a reply may
 state (`harness.reply_figures`). It sees no rows. Frames are named to it by short
-ids (`harness.graph.state.frame_id_for`) kept in session state, so `make_charts`
+ids (`harness.graph.state.frame_id_for`) kept in the turn's state, so `make_charts`
 can only draw a frame `fetch` or an executed plan produced this turn, after
 `describe_frame` answered for it. `search` also stores every part it
 read, failed ones included, as a `harness.turn_records.SearchReading`
@@ -53,7 +53,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import FunctionType
-from typing import Annotated, Any, Literal, Protocol, get_args, get_type_hints, override
+from typing import Annotated, Any, Literal, Protocol, get_args, get_type_hints
 
 import httpx2
 import pyarrow as pa
@@ -80,9 +80,9 @@ from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar import FrameError
 from dfo_frame_grammar.grammar import TimeGrain
 from dfo_frame_grammar.rolling import RollingError
-from google.adk.tools import FunctionTool, ToolContext
 from mcp import MCPError
 from mcp.types import REQUEST_TIMEOUT
+from orchestrator.call import HANDED_OFF, OrchestratorCall
 from planner.parties import (
     PartyRole,
     column_party_roles,
@@ -191,18 +191,14 @@ logger = logging.getLogger(__name__)
 # fetch that served no observations.
 _FETCHES_KEY = "orchestrator:fetches"
 # The ids of the series the canvas drew as a turn began, with the turn's
-# invocation id: {"invocation", "ids"}.
+# id (`OrchestratorCall.turn_id`): {"turn", "ids"}.
 _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # The cards `make_charts` drew this turn that are still on the canvas:
-# {"invocation", "drawn"}, `drawn` mapping `_card_identity` to the card's
+# {"turn", "drawn"}, `drawn` mapping `_card_identity` to the card's
 # {"component_id", "revision"}, the revision it was drawn as; a card the harness
 # could not read back also holds "unreadable": True and is not on the canvas.
 # `remove_cards` drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
-# The key of the result of an `ask_user` or `plan` call that recorded its
-# action; the Studio stream holds back later text only after one of these,
-# and `harness.graph.orchestrate` answers the call whose last result holds it.
-HANDED_OFF = "handed_off"
 # The identity member each `get_data` scope member replaces.
 _SCOPE_REPLACES = {"entities": "entities", "window": "requested_window", "facets": "facets"}
 # Skills a search result names, as shown to the model, as data-mcp's search
@@ -1018,12 +1014,12 @@ def _coordinate_rows(held: _FrameRows, *, series: Sequence[DrawnSeries]) -> list
     return with_coordinates(series, rows)
 
 
-def _budgets(tool_context: ToolContext) -> dict[str, int]:
-    return turn_budgets(tool_context.state)
+def _budgets(call: OrchestratorCall) -> dict[str, int]:
+    return turn_budgets(call.state)
 
 
-def _used(tool_context: ToolContext, key: str) -> int:
-    return int((tool_context.state.get(ORCHESTRATOR_CALLS_KEY) or {}).get(key, 0))
+def _used(call: OrchestratorCall, key: str) -> int:
+    return int((call.state.get(ORCHESTRATOR_CALLS_KEY) or {}).get(key, 0))
 
 
 def _failed(
@@ -1087,31 +1083,29 @@ def _figures_unread() -> dict[str, Any]:
     }
 
 
-def _spend(
-    tool_context: ToolContext, tool: str, *, named: str | None = None
-) -> dict[str, Any] | None:
+def _spend(call: OrchestratorCall, tool: str, *, named: str | None = None) -> dict[str, Any] | None:
     """Count one call under the budget `tool`; the failed answer when it is
     spent. The answer names the call as `named`, which defaults to `tool`."""
-    used = _used(tool_context, tool)
-    if used >= _budgets(tool_context)[tool]:
+    used = _used(call, tool)
+    if used >= _budgets(call)[tool]:
         return _failed(
             HarnessCode.TOOL_BUDGET_SPENT,
             f"{named or tool} has been called {used} time(s) this turn, its limit. {_ANSWER_NOW}",
         )
-    count_call(tool_context.state, tool)
+    count_call(call.state, tool)
     return None
 
 
-def _charts_spent(tool_context: ToolContext) -> dict[str, Any] | None:
+def _charts_spent(call: OrchestratorCall) -> dict[str, Any] | None:
     """The failed answer when either of make_charts' budgets is spent."""
-    budgets = _budgets(tool_context)
-    drew = _used(tool_context, "make_charts")
+    budgets = _budgets(call)
+    drew = _used(call, "make_charts")
     if drew >= budgets["make_charts"]:
         return _failed(
             HarnessCode.TOOL_BUDGET_SPENT,
             f"make_charts has drawn charts in {drew} call(s) this turn, its limit. {_ANSWER_NOW}",
         )
-    failed = _used(tool_context, "make_charts_failed")
+    failed = _used(call, "make_charts_failed")
     if failed >= budgets["make_charts_failed"]:
         return _failed(
             HarnessCode.TOOL_BUDGET_SPENT,
@@ -1154,17 +1148,29 @@ def _argument_problems(
     return problems
 
 
+def raised_answer(tool: str, error: Exception) -> dict[str, Any]:
+    """The answer to `tool` raising `error`: the tool's name and the exception's
+    class, under the code `raised`, so a tool that breaks costs the model one
+    tool result and the turn goes on. The exception's message stays out of the
+    answer, since it can carry internal URLs or data."""
+    failure = type(error).__name__
+    return _failed(
+        HarnessCode.RAISED,
+        f"{tool} failed inside DFO ({failure}). Do not repeat this call. {_ANSWER_NOW}",
+    )
+
+
 def _invalid_arguments(
-    tool_context: ToolContext, name: str, problems: Sequence[tuple[dict[str, str], str]]
+    call: OrchestratorCall, name: str, problems: Sequence[tuple[dict[str, str], str]]
 ) -> dict[str, Any]:
     """Return argument problems, bounded by the turn's invalid-call budget."""
-    used = _used(tool_context, "invalid_arguments")
-    if used >= _budgets(tool_context)["invalid_arguments"]:
+    used = _used(call, "invalid_arguments")
+    if used >= _budgets(call)["invalid_arguments"]:
         return _failed(
             HarnessCode.TOOL_BUDGET_SPENT,
             f"{name}: {used} call(s) this turn had invalid arguments, the limit. {_ANSWER_NOW}",
         )
-    count_call(tool_context.state, "invalid_arguments")
+    count_call(call.state, "invalid_arguments")
     return {
         **_failed(
             HarnessCode.TOOL_ARGUMENTS_INVALID,
@@ -1173,43 +1179,6 @@ def _invalid_arguments(
         ),
         "invalid": [entry for entry, _ in problems],
     }
-
-
-class OrchestratorTool(FunctionTool):
-    """An orchestrator tool as ADK runs it, with a call that lacks a required
-    argument answered by `_invalid_arguments`.
-
-    ADK's `FunctionTool.run_async` answers such a call itself, before the
-    tool or its `_validated_arguments` wrapper runs, with an `{"error": ...}`
-    that states no code. This answers it first: `tool_arguments_invalid`
-    with `correct_and_retry`, one `{"loc": <name>, "type": "missing"}` entry
-    per missing argument, counted against `BUDGETS["invalid_arguments"]`.
-    The required arguments are the function's parameters without a default,
-    other than `tool_context`, which ADK supplies. The declaration is
-    `FunctionTool`'s own.
-    """
-
-    def __init__(self, func: Callable[..., Any]) -> None:
-        super().__init__(func)
-        self.required_arguments = tuple(
-            name
-            for name, parameter in inspect.signature(self.func).parameters.items()
-            if parameter.default is inspect.Parameter.empty
-            and parameter.kind
-            not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-            and name != "tool_context"
-        )
-
-    @override
-    async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
-        if missing := [name for name in self.required_arguments if name not in args]:
-            logger.warning("orchestrator %s: missing %s", self.name, ", ".join(missing))
-            return _invalid_arguments(
-                tool_context,
-                self.name,
-                [({"loc": name, "type": "missing"}, f"{name}: Field required") for name in missing],
-            )
-        return await super().run_async(args=args, tool_context=tool_context)
 
 
 # `search`'s refusals of a call that sends nothing to search, `text` beside
@@ -1324,10 +1293,12 @@ def _offer_text_retries(
 def _validated_arguments(
     tool: FunctionType, *, hints: ArgumentHints | None = None
 ) -> Callable[..., Any]:
-    """`tool` wrapped to validate every argument but `tool_context` before it runs.
+    """`tool` wrapped to validate every argument but `call` before it runs.
 
-    ADK hands a function tool the model's arguments as parsed JSON, whatever
-    the annotations say. The wrapper validates them with pydantic and calls
+    The orchestrator hands a tool the model's arguments as parsed JSON, whatever
+    the annotations say (`orchestrator.agent`). A call that lacks a required
+    argument is answered first, one `{"loc": <name>, "type": "missing"}` entry
+    per missing argument. The wrapper validates the rest with pydantic and calls
     `tool` with the validated values. If any fail, it returns the problems as
     `{"error": <prose>, "invalid": [{"loc", "type"}, ...]}` under the code
     `tool_arguments_invalid`, with `hints` appended to the prose of the
@@ -1339,16 +1310,28 @@ def _validated_arguments(
     signature = inspect.signature(tool)
     annotations = get_type_hints(tool)
     adapters = {
-        name: _adapter(annotations[name]) for name in signature.parameters if name != "tool_context"
+        name: _adapter(annotations[name]) for name in signature.parameters if name != "call"
     }
     if not adapters:
         return tool
+    required = tuple(
+        name
+        for name, parameter in signature.parameters.items()
+        if name in adapters and parameter.default is inspect.Parameter.empty
+    )
 
     def bind(
         args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> inspect.BoundArguments | dict[str, Any]:
         """The call's arguments, validated, or the error the model is given."""
-        bound = signature.bind(*args, **kwargs)
+        bound = signature.bind_partial(*args, **kwargs)
+        if missing := [name for name in required if name not in bound.arguments]:
+            logger.warning("orchestrator %s: missing %s", tool.__name__, ", ".join(missing))
+            return _invalid_arguments(
+                bound.arguments["call"],
+                tool.__name__,
+                [({"loc": name, "type": "missing"}, f"{name}: Field required") for name in missing],
+            )
         problems: list[tuple[dict[str, str], str]] = []
         for name, value in bound.arguments.items():
             if name not in adapters:
@@ -1360,7 +1343,7 @@ def _validated_arguments(
                 problems += _argument_problems(name, exc, hints or {})
         if not problems:
             return bound
-        return _invalid_arguments(bound.arguments["tool_context"], tool.__name__, problems)
+        return _invalid_arguments(bound.arguments["call"], tool.__name__, problems)
 
     if inspect.iscoroutinefunction(tool):
 
@@ -1418,7 +1401,7 @@ def _asks_refusal(asks: Sequence[str]) -> dict[str, Any] | None:
 
 
 def _breakdowns_missing(
-    tool_context: ToolContext, asks: Sequence[AskedOutput]
+    call: OrchestratorCall, asks: Sequence[AskedOutput]
 ) -> dict[str, Any] | None:
     """The refusal of a `plan` call whose asks leave out a party this turn's search held open, or None.
 
@@ -1445,7 +1428,7 @@ def _breakdowns_missing(
     totalled = [role for ask in asks for role in ask.over]
     held: dict[str, str] = {}
     shared: dict[str, str] = {}
-    for stored in stored_sequence(tool_context.state, ORCHESTRATOR_SEARCHES_KEY):
+    for stored in stored_sequence(call.state, ORCHESTRATOR_SEARCHES_KEY):
         reading = SearchReading.model_validate(stored)
         if reading.status in SETTLED_STATUSES and reading.spec_id:
             text = reading.text or reading.spec_id
@@ -1472,7 +1455,7 @@ def _breakdowns_missing(
         for column, text in shared.items()
         if not party_among(column, totalled)
     ]
-    return _invalid_arguments(tool_context, "plan", problems) if problems else None
+    return _invalid_arguments(call, "plan", problems) if problems else None
 
 
 def _share_repair(column: str) -> str:
@@ -1522,11 +1505,11 @@ def _asks_across_years(asks: Sequence[AskedOutput]) -> list[int]:
     return [number for number, ask in enumerate(asks) if ask.across_years]
 
 
-def _named_spec_ids(tool_context: ToolContext) -> set[str]:
+def _named_spec_ids(call: OrchestratorCall) -> set[str]:
     """Every spec_id this turn's search results named: each part's own and each
     candidate's (`ORCHESTRATOR_SPECS_KEY`), and each other count and other
     prices a part's result offers (`measure_choice`)."""
-    specs = stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY)
+    specs = stored_mapping(call.state, ORCHESTRATOR_SPECS_KEY)
     named = set(specs)
     for block in specs.values():
         choice = measure_choice(block or {})
@@ -1610,35 +1593,33 @@ def _questions_refusal(
     }
 
 
-def _pend(tool_context: ToolContext, action: PendingAsk | PendingPlan) -> dict[str, Any]:
+def _pend(call: OrchestratorCall, action: PendingAsk | PendingPlan) -> dict[str, Any]:
     """Record `action` as the turn's pending action, unless one is pending.
 
-    A recorded action skips the model call that would only end the turn: the
-    workflow's `route` node acts on it once the turn ends. The record stands
-    as the call's result until the hand-back replaces it, a later response
-    under the call's id (`harness.graph.orchestrate`). The refusal of a
-    second hand-off goes back to the model.
+    A recorded action ends the agent's run on the call, which waits deferred
+    for its hand-back (`orchestrator.agent`): the planner's result or the
+    user's answer becomes the call's result. The refusal of a second hand-off
+    goes back to the model.
     """
-    pending = pending_action(tool_context.state)
+    pending = pending_action(call.state)
     if pending is not None:
         return _failed(
             HarnessCode.HAND_OFF_PENDING,
             f"This turn is already waiting on {pending.kind}; one hand-off per turn. "
             "End your turn now.",
         )
-    tool_context.state[ORCHESTRATOR_PENDING_KEY] = action.model_dump(mode="json")
-    tool_context.actions.skip_summarization = True
+    call.state[ORCHESTRATOR_PENDING_KEY] = action.model_dump(mode="json")
     return {
         "status": "Recorded. End your turn now; the result replaces this record.",
         HANDED_OFF: action.kind,
     }
 
 
-def _spec_block(tool_context: ToolContext, spec_id: str) -> Mapping[str, Any] | None:
+def _spec_block(call: OrchestratorCall, spec_id: str) -> Mapping[str, Any] | None:
     """The spec block this turn's search returned for `spec_id`, else the one
     an earlier turn of the conversation stored (`earlier_block`); `None`
     when neither did."""
-    block = stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY).get(spec_id)
+    block = stored_mapping(call.state, ORCHESTRATOR_SPECS_KEY).get(spec_id)
     return block if block is not None else earlier_block(spec_id)
 
 
@@ -1717,7 +1698,7 @@ def _empty_outcome(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _attach_fetch(
-    tool_context: ToolContext,
+    call: OrchestratorCall,
     result: dict[str, Any],
     *,
     served: Mapping[str, Any] | None = None,
@@ -1739,7 +1720,7 @@ def _attach_fetch(
     count it reads.
     """
     spec_id = result["spec_id"]
-    state = tool_context.state
+    state = call.state
     searches = [
         SearchReading.model_validate(stored)
         for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY)
@@ -1935,21 +1916,21 @@ def build_orchestrator_tools(
     `harness.studio_state.make_remove_cards` returns; left unset, the tool
     says it is not available.
     """
-    # One lock per invocation, held by a make_charts call from its budget
+    # One lock per turn, held by a make_charts call from its budget
     # check to its count, so concurrent calls draw one after another and each
     # is admitted on exact counts, and by remove_cards while it takes cards
     # off and drops them from the turn's drawn cards. An entry lasts while a
     # call holds its lock.
     chart_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
-    def _canvas_lock(tool_context: ToolContext) -> asyncio.Lock:
-        lock = chart_locks.get(tool_context.invocation_id)
+    def _canvas_lock(call: OrchestratorCall) -> asyncio.Lock:
+        lock = chart_locks.get(call.turn_id)
         if lock is None:
-            lock = chart_locks[tool_context.invocation_id] = asyncio.Lock()
+            lock = chart_locks[call.turn_id] = asyncio.Lock()
         return lock
 
     async def search(
-        tool_context: ToolContext,
+        call: OrchestratorCall,
         parts: list[SearchPart] | None = None,
         text: str | None = None,
     ) -> dict[str, Any]:
@@ -2066,21 +2047,21 @@ def build_orchestrator_tools(
         if text is None and not parts:
             logger.warning("orchestrator search: neither parts nor text")
             return _invalid_arguments(
-                tool_context, "search", [({"loc": "parts", "type": "missing"}, _NOTHING_TO_SEARCH)]
+                call, "search", [({"loc": "parts", "type": "missing"}, _NOTHING_TO_SEARCH)]
             )
         if text is not None and parts and len(parts) > 1:
             logger.warning("orchestrator search: text with %d parts", len(parts))
             return _invalid_arguments(
-                tool_context, "search", [({"loc": "parts", "type": "too_long"}, _TEXT_WITH_PARTS)]
+                call, "search", [({"loc": "parts", "type": "too_long"}, _TEXT_WITH_PARTS)]
             )
         if text is not None and len(text) > MAX_RAW_QUERY_CHARS:
             logger.warning("orchestrator search: text of %d characters", len(text))
             return _invalid_arguments(
-                tool_context,
+                call,
                 "search",
                 [({"loc": "text", "type": "string_too_long"}, _TEXT_TOO_LONG)],
             )
-        spent = _spend(tool_context, "search")
+        spent = _spend(call, "search")
         if spent:
             return spent
         parts = parts or []
@@ -2091,7 +2072,7 @@ def build_orchestrator_tools(
                 digest = await resolver(
                     question=None,
                     parts=[part.model_dump(exclude_none=True) for part in parts],
-                    context=_search_context(tool_context.state),
+                    context=_search_context(call.state),
                 )
         except ResolverError as exc:
             # The service's own code and retry mode word the user's line for
@@ -2103,16 +2084,16 @@ def build_orchestrator_tools(
         digests = digest.get("part_digests") or []
         tied = len(parts) == len(digests)
         readings = store_search(
-            tool_context.state,
+            call.state,
             digest,
             asked=[_asked_roles(part) for part in parts] if tied else [],
             held_open=[_open_roles(part) for part in parts] if tied else [],
             share_sides=[_share_sides(part) for part in parts] if tied else [],
         )
         if text is not None:
-            _record_text_searched(tool_context.state, parts)
+            _record_text_searched(call.state, parts)
         else:
-            _offer_text_retries(tool_context.state, parts, readings, tied=tied)
+            _offer_text_retries(call.state, parts, readings, tied=tied)
         found: dict[str, Any] = {"kind": digest.get("kind") or "resolution", "parts": readings}
         if not readings:
             found["status"] = digest.get("status")
@@ -2128,7 +2109,7 @@ def build_orchestrator_tools(
 
     async def fetch(  # noqa: PLR0911 -- one distinct refusal per way a fetch fails
         spec_id: str,
-        tool_context: ToolContext,
+        call: OrchestratorCall,
         scope: FetchScope | None = None,
         stat_vars: Literal["sum", "separate"] | None = None,
         breakdown: Breakdown | None = None,
@@ -2155,7 +2136,7 @@ def build_orchestrator_tools(
         as an earlier fetch this turn returns that fetch's result, with
         `same_data_as` naming its spec_id.
         """
-        unavailable = (tool_context.state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {}).get(spec_id)
+        unavailable = (call.state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {}).get(spec_id)
         if unavailable is not None:
             return {
                 "spec_id": spec_id,
@@ -2163,7 +2144,7 @@ def build_orchestrator_tools(
                 "again, with or without that option, does not answer the part that needed it.",
                 "code": ToolErrorCode.CAPABILITY_UNAVAILABLE.value,
             }
-        spent = _spend(tool_context, "fetch")
+        spent = _spend(call, "fetch")
         if spent:
             return spent
         # The arguments that shape the frame, kept on the reading so a chip
@@ -2184,9 +2165,9 @@ def build_orchestrator_tools(
         reading = stat_vars or (
             "separate"
             if breakdown is not None
-            else stored_mapping(tool_context.state, ORCHESTRATOR_READINGS_KEY).get(spec_id)
+            else stored_mapping(call.state, ORCHESTRATOR_READINGS_KEY).get(spec_id)
         )
-        block = _spec_block(tool_context, spec_id)
+        block = _spec_block(call, spec_id)
         if block is None:
             try:
                 block = await _recorded_block(definition_surface, spec_id)
@@ -2194,8 +2175,8 @@ def build_orchestrator_tools(
                 logger.warning("fetch: no block for %s on record: %s", spec_id, exc)
                 return _unresolved_refusal(spec_id, exc)
             if block is not None:
-                tool_context.state[ORCHESTRATOR_SPECS_KEY] = with_blocks(
-                    stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY), {spec_id: block}
+                call.state[ORCHESTRATOR_SPECS_KEY] = with_blocks(
+                    stored_mapping(call.state, ORCHESTRATOR_SPECS_KEY), {spec_id: block}
                 )
         source = None
         if block:
@@ -2210,9 +2191,9 @@ def build_orchestrator_tools(
         if breakdown is not None:
             args["breakdown"] = breakdown.model_dump()
         key = _fetch_key(args, block)
-        earlier = (tool_context.state.get(_FETCHES_KEY) or {}).get(key)
+        earlier = (call.state.get(_FETCHES_KEY) or {}).get(key)
         if earlier is not None:
-            frames = stored_mapping(tool_context.state, ORCHESTRATOR_FRAMES_KEY)
+            frames = stored_mapping(call.state, ORCHESTRATOR_FRAMES_KEY)
             found = (
                 {**earlier, "spec_id": spec_id, "same_data_as": earlier["spec_id"]}
                 if earlier.get("refusal")
@@ -2224,7 +2205,7 @@ def build_orchestrator_tools(
                     "same_data_as": earlier["spec_id"],
                 }
             )
-            _attach_fetch(tool_context, found, served=earlier.get("served"), args=shaped)
+            _attach_fetch(call, found, served=earlier.get("served"), args=shaped)
             return found
         try:
             data = await executor(tool="get_data", args=args)
@@ -2256,7 +2237,7 @@ def build_orchestrator_tools(
                     "answer without this data.",
                     "code": HarnessCode.TRANSIENT_UNAVAILABLE.value,
                 }
-            _attach_fetch(tool_context, refused)
+            _attach_fetch(call, refused)
             return refused
         if data.get("outcome") == "ok" and data.get("rows") == 0:
             # A mint that served no observations is refused as `empty_result`.
@@ -2271,17 +2252,17 @@ def build_orchestrator_tools(
             }
             refused.update({k: refusal[k] for k in ("retry_mode", "fix") if refusal.get(k)})
             if refused["code"] == ToolErrorCode.CAPABILITY_UNAVAILABLE.value:
-                tool_context.state[ORCHESTRATOR_UNAVAILABLE_KEY] = {
-                    **(tool_context.state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {}),
+                call.state[ORCHESTRATOR_UNAVAILABLE_KEY] = {
+                    **(call.state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {}),
                     spec_id: refused["refusal"],
                 }
             elif refused["code"] == HarnessCode.EMPTY_RESULT:
                 # Kept for the turn, so the same fetch again answers from here.
-                tool_context.state[_FETCHES_KEY] = {
-                    **(tool_context.state.get(_FETCHES_KEY) or {}),
+                call.state[_FETCHES_KEY] = {
+                    **(call.state.get(_FETCHES_KEY) or {}),
                     key: refused,
                 }
-            _attach_fetch(tool_context, refused)
+            _attach_fetch(call, refused)
             return refused
         described: list[DescribedFrame] = []
         unavailable: list[str] = []
@@ -2295,12 +2276,12 @@ def build_orchestrator_tools(
             "spec_id": spec_id,
             "summary": data.get("summary"),
             **_period_note_entry(data),
-            "frames": register_frames(tool_context.state, described, fetch_args=args),
+            "frames": register_frames(call.state, described, fetch_args=args),
         }
         if unavailable:
             found["frames_unavailable"] = unavailable
         else:
-            fetches = dict(tool_context.state.get(_FETCHES_KEY) or {})
+            fetches = dict(call.state.get(_FETCHES_KEY) or {})
             fetches[key] = {
                 "spec_id": spec_id,
                 "summary": found["summary"],
@@ -2308,22 +2289,22 @@ def build_orchestrator_tools(
                 "frames": [entry["frame"] for entry in found["frames"]],
                 **({"served": data["served"]} if data.get("served") else {}),
             }
-            tool_context.state[_FETCHES_KEY] = fetches
-        _attach_fetch(tool_context, found, served=data.get("served"), args=shaped)
+            call.state[_FETCHES_KEY] = fetches
+        _attach_fetch(call, found, served=data.get("served"), args=shaped)
         return found
 
-    def _canvas_series(tool_context: ToolContext) -> list[str]:
+    def _canvas_series(call: OrchestratorCall) -> list[str]:
         """The ids of the series the cards on the canvas drew as the turn
         began: every series of every card, as `canvas_series` gives them.
         `make_charts` and `remove_cards`, the tools that change the canvas,
         each read it before they act, and the first read of a turn is kept
         for the rest of it."""
-        held = tool_context.state.get(_CANVAS_SERIES_KEY) or {}
-        if held.get("invocation") == tool_context.invocation_id:
+        held = call.state.get(_CANVAS_SERIES_KEY) or {}
+        if held.get("turn") == call.turn_id:
             return held["ids"]
         ids = list(canvas_series()) if canvas_series is not None else []
-        tool_context.state[_CANVAS_SERIES_KEY] = {
-            "invocation": tool_context.invocation_id,
+        call.state[_CANVAS_SERIES_KEY] = {
+            "turn": call.turn_id,
             "ids": ids,
         }
         return ids
@@ -2416,19 +2397,17 @@ def build_orchestrator_tools(
             entry["note"] = " ".join(notes)
         return entry
 
-    async def _draw(charts: list[Chart], tool_context: ToolContext) -> list[dict[str, Any]]:
+    async def _draw(charts: list[Chart], call: OrchestratorCall) -> list[dict[str, Any]]:
         """Draw `charts`, up to `MAX_CHARTS_PER_CALL`, and count the call as one
         that drew or read a chart or one that did neither. A chart whose card
         is on the canvas, drawn this turn or an earlier one, is not drawn
         again: its figures are read from the card's head revision
         (`_stored_card`), and a card that cannot be read is refused."""
-        frames = stored_mapping(tool_context.state, ORCHESTRATOR_FRAMES_KEY)
-        on_canvas = _canvas_series(tool_context)
-        held_cards = tool_context.state.get(_DRAWN_CARDS_KEY) or {}
+        frames = stored_mapping(call.state, ORCHESTRATOR_FRAMES_KEY)
+        on_canvas = _canvas_series(call)
+        held_cards = call.state.get(_DRAWN_CARDS_KEY) or {}
         drawn_cards: dict[str, dict[str, Any]] = (
-            dict(held_cards["drawn"])
-            if held_cards.get("invocation") == tool_context.invocation_id
-            else {}
+            dict(held_cards["drawn"]) if held_cards.get("turn") == call.turn_id else {}
         )
         canvas = {
             _card_identity(card["intent"]): {
@@ -2443,8 +2422,8 @@ def build_orchestrator_tools(
         def _remember_drawn(identity: str, card: dict[str, Any]) -> None:
             """Record `card` as drawn for `identity` this turn."""
             drawn_cards[identity] = card
-            tool_context.state[_DRAWN_CARDS_KEY] = {
-                "invocation": tool_context.invocation_id,
+            call.state[_DRAWN_CARDS_KEY] = {
+                "turn": call.turn_id,
                 "drawn": drawn_cards,
             }
 
@@ -2621,7 +2600,7 @@ def build_orchestrator_tools(
                 chart,
                 asked,
                 frame,
-                tool_context.state,
+                call.state,
                 executor,
                 dimension=dimension[0],
             )
@@ -2754,12 +2733,10 @@ def build_orchestrator_tools(
             # covers cancellation and anything raised outside the per-chart
             # `try`. A failed write is caught above. A call that read a card
             # on the canvas gave figures, so it counts as one that drew.
-            count_call(
-                tool_context.state, "make_charts" if landed or read else "make_charts_failed"
-            )
+            count_call(call.state, "make_charts" if landed or read else "make_charts_failed")
         return drawn
 
-    async def make_charts(charts: list[Chart], tool_context: ToolContext) -> dict[str, Any]:
+    async def make_charts(charts: list[Chart], call: OrchestratorCall) -> dict[str, Any]:
         """Draw charts on the user's canvas.
 
         Returns for each chart drawn what it holds and its reply_figures, or
@@ -2770,19 +2747,19 @@ def build_orchestrator_tools(
         refusal is about it. A chart drawn whose values could not be read
         back says so under the code `figures_unread`.
         """
-        async with _canvas_lock(tool_context):
-            spent = _charts_spent(tool_context)
+        async with _canvas_lock(call):
+            spent = _charts_spent(call)
             if spent:
                 return spent
             if not charts:
-                count_call(tool_context.state, "make_charts_failed")
+                count_call(call.state, "make_charts_failed")
                 return _failed(
                     HarnessCode.TOOL_ARGUMENTS_INVALID,
                     "make_charts needs at least one chart. It only adds charts; it "
                     "cannot remove or clear cards on the canvas. Nothing changed.",
                 )
             with _derived_reads_once():
-                drawn = await _draw(charts, tool_context)
+                drawn = await _draw(charts, call)
         result: dict[str, Any] = {"charts": drawn}
         if len(charts) > MAX_CHARTS_PER_CALL:
             result["not_drawn"] = (
@@ -2791,7 +2768,7 @@ def build_orchestrator_tools(
             )
         return result
 
-    def ask_user(questions: list[AskQuestion], tool_context: ToolContext) -> dict[str, Any]:
+    def ask_user(questions: list[AskQuestion], call: OrchestratorCall) -> dict[str, Any]:
         """Ask the user one to three questions before going on, with the likely
         answers to each. The user sees them together in one pause and answers
         each by picking an option, writing their own answer, or leaving it to
@@ -2805,23 +2782,23 @@ def build_orchestrator_tools(
         your turn after calling ask_user. Every answer comes back as this
         call's result.
         """
-        parts = open_parts(tool_context.state)
+        parts = open_parts(call.state)
         questions = [prices_question(question, parts) for question in questions]
-        blocks = stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY)
+        blocks = stored_mapping(call.state, ORCHESTRATOR_SPECS_KEY)
         refused = _questions_refusal(
             questions,
-            _named_spec_ids(tool_context),
+            _named_spec_ids(call),
             parts,
             {part: measure_key(blocks[part]) for part in parts if part in blocks},
         )
         if refused:
             return refused
-        spent = _spend(tool_context, "ask_user")
+        spent = _spend(call, "ask_user")
         if spent:
             return spent
-        return _pend(tool_context, PendingAsk(questions=list(questions)))
+        return _pend(call, PendingAsk(questions=list(questions)))
 
-    def plan(brief: str, asks: list[AskedOutput], tool_context: ToolContext) -> dict[str, Any]:
+    def plan(brief: str, asks: list[AskedOutput], call: OrchestratorCall) -> dict[str, Any]:
         """Hand a question to the planner, which builds a plan that
         constructs the answer from the data. The user approves the plan
         before it runs.
@@ -2845,14 +2822,14 @@ def build_orchestrator_tools(
         call's result.
         """
         texts = [ask.text for ask in asks]
-        refused = _asks_refusal(texts) or _breakdowns_missing(tool_context, asks)
+        refused = _asks_refusal(texts) or _breakdowns_missing(call, asks)
         if refused:
             return refused
-        spent = _spend(tool_context, "plan")
+        spent = _spend(call, "plan")
         if spent:
             return spent
         return _pend(
-            tool_context,
+            call,
             PendingPlan(
                 brief=brief,
                 asks=[text.strip() for text in texts],
@@ -2861,7 +2838,7 @@ def build_orchestrator_tools(
             ),
         )
 
-    async def read_skill(arguments: dict[str, Any], tool_context: ToolContext) -> dict[str, Any]:
+    async def read_skill(arguments: dict[str, Any], call: OrchestratorCall) -> dict[str, Any]:
         """data-mcp's `get_skill` text for one call, or the refusal's message.
 
         A call that does not complete, `compiler.surface`'s per-tool timeout or
@@ -2871,7 +2848,7 @@ def build_orchestrator_tools(
         """
         reads_file = "path" in arguments
         spent = _spend(
-            tool_context,
+            call,
             "get_skill_file" if reads_file else "get_skill",
             named="get_skill reading a file" if reads_file else "get_skill reading a first page",
         )
@@ -2906,7 +2883,7 @@ def build_orchestrator_tools(
 
     async def get_skill(
         skill_id: Annotated[str, Field(description="The id of a skill a search result named.")],
-        tool_context: ToolContext,
+        call: OrchestratorCall,
         path: Annotated[
             str | None,
             Field(
@@ -2932,7 +2909,7 @@ def build_orchestrator_tools(
             arguments["offset"] = offset
         if digest is not None:
             arguments["digest"] = digest
-        return await read_skill(arguments, tool_context)
+        return await read_skill(arguments, call)
 
     async def explain_dfo() -> dict[str, Any]:
         """What the Development Finance Observatory is and what this assistant
@@ -2956,7 +2933,7 @@ def build_orchestrator_tools(
 
     async def recall(
         part: RecallPart,
-        tool_context: ToolContext,
+        call: OrchestratorCall,
         turn: int | None = None,
         component_id: str | None = None,
     ) -> dict[str, Any]:
@@ -2974,7 +2951,7 @@ def build_orchestrator_tools(
         values that do.
         """
         listing = part == "canvas" and component_id is None
-        spent = _spend(tool_context, "recall_canvas" if listing else "recall")
+        spent = _spend(call, "recall_canvas" if listing else "recall")
         if spent:
             return spent
         if recall_part is None:
@@ -2990,15 +2967,15 @@ def build_orchestrator_tools(
                 "legal": exc.legal,
             }
 
-    def _forget_drawn(tool_context: ToolContext, removed: list[str]) -> None:
+    def _forget_drawn(call: OrchestratorCall, removed: list[str]) -> None:
         """Drop the cards `removed` took off from the turn's drawn cards, so a
         later `make_charts` of one draws it again."""
-        held = tool_context.state.get(_DRAWN_CARDS_KEY) or {}
-        if not removed or held.get("invocation") != tool_context.invocation_id:
+        held = call.state.get(_DRAWN_CARDS_KEY) or {}
+        if not removed or held.get("turn") != call.turn_id:
             return
         gone = set(removed)
-        tool_context.state[_DRAWN_CARDS_KEY] = {
-            "invocation": tool_context.invocation_id,
+        call.state[_DRAWN_CARDS_KEY] = {
+            "turn": call.turn_id,
             "drawn": {
                 identity: card
                 for identity, card in held["drawn"].items()
@@ -3007,7 +2984,7 @@ def build_orchestrator_tools(
         }
 
     async def remove_cards_tool(
-        tool_context: ToolContext,
+        call: OrchestratorCall,
         component_ids: list[str] | None = None,
         all_cards: bool = False,
     ) -> dict[str, Any]:
@@ -3018,7 +2995,7 @@ def build_orchestrator_tools(
         the ids taken off; a named card already off the canvas needs nothing,
         and an id this conversation never held is named back.
         """
-        spent = _spend(tool_context, "remove_cards")
+        spent = _spend(call, "remove_cards")
         if spent:
             return spent
         if remove_cards is None:
@@ -3030,12 +3007,12 @@ def build_orchestrator_tools(
                 HarnessCode.TOOL_ARGUMENTS_INVALID,
                 "Name the cards to take off, or set all_cards. Nothing changed.",
             )
-        _canvas_series(tool_context)
-        async with _canvas_lock(tool_context):
+        _canvas_series(call)
+        async with _canvas_lock(call):
             removed, missing = await remove_cards(
                 component_ids=component_ids or [], all_cards=all_cards
             )
-            _forget_drawn(tool_context, removed)
+            _forget_drawn(call, removed)
         if not removed and missing and len(missing) == len(component_ids or []):
             return _failed(
                 HarnessCode.CARD_NOT_FOUND,
@@ -3070,4 +3047,4 @@ def build_orchestrator_tools(
     ]
 
 
-__all__ = ["TOOL_NAMES", "Chart", "Resolver", "build_orchestrator_tools"]
+__all__ = ["TOOL_NAMES", "Chart", "Resolver", "build_orchestrator_tools", "raised_answer"]

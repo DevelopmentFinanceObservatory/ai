@@ -40,8 +40,18 @@ holds more than a handful of frames awaiting a `write_component`, so the
 per-bucket cap is headroom.
 
 The store is in-process, so a frame's provenance lives on the instance that
-recorded it. `StudioStore` keeps conversations in Postgres, where any
-instance reads them; this store has no shared backend.
+recorded it. A card's lineage also lives with the card: each card write
+commits the `CardLineage` of the frame it was drawn from
+(`harness.studio_store.StudioStore.change_canvas`), and a write on a frame
+this store does not hold puts the stored one back first
+(`ProvenanceStore.restore`, called by `harness.mcp_client.McpExecutor`), so
+an edit on another instance or after a restart finds the card's frame here.
+The lineage of each frame an open turn's state names is stored with the
+turn too (`harness.turn.store.TurnStore`), and put back when a segment on
+another instance or after a restart takes the turn over
+(`ProvenanceStore.restore_frame`), so a card drawn after a pause finds the
+frames the turn fetched or built before it. A frame no card was drawn from
+and no open turn names has no stored lineage.
 """
 
 from __future__ import annotations
@@ -49,16 +59,17 @@ from __future__ import annotations
 import logging
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
-from typing import Any
+from typing import Any, Protocol
 
 from data_mcp.stat_var_list import with_stat_var_list
 from fastmcp.exceptions import ResourceError
 
 logger = logging.getLogger(__name__)
 
-# Per-conversation entry ceiling; least-recently-used eviction past it.
+# Per-conversation ceiling on the entries outside the keys the conversation's
+# open turn names (`ProvenanceStore.keep`); least-recently-used eviction past it.
 _MAX_MANIFESTS_PER_CONVERSATION = 64
 
 # Global ceiling on the number of conversation buckets held at once;
@@ -127,6 +138,98 @@ class _Entry:
 
     lineage: Lineage
     stat_var_count: int | None = None
+    # The store's write counter when this entry was stored under its key
+    # (`ProvenanceStore.held`).
+    generation: int = 0
+
+
+# The `write_component` outcome key `harness.mcp_client.McpExecutor` hands a
+# drawn card's `CardLineage` under, taken off the outcome before anything else
+# reads it (`harness.studio_translate._RecordingExecutor`).
+CARD_LINEAGE_KEY = "card_lineage"
+
+# The `write_component` argument a caller that already read a revised card's
+# stored intent names the card's frame under (`harness.studio_edit`), so the
+# executor need not read it again. Taken off before the call is sent.
+CARD_FRAME_KEY = "card_frame_ref"
+
+
+@dataclass(frozen=True, slots=True)
+class CardLineage:
+    """The lineage of the frame card `component_id` was drawn from, as the
+    card's write commits it with the card.
+
+    `frame` is the frame the platform's resolved revision names
+    (`provenance.inputs[0]`), and `requested` the frame the write named when
+    that is another pair: a rolling card written on a replayed frame
+    (`harness.rolling_cards`), or a retrieval named by its `frame_ref` and
+    served under another pair (`retrieval_frame_ref`). `lineage` holds every member whole, manifest
+    included, and `stat_var_count` the count `ProvenanceStore.alias` stored,
+    `None` when it stored none.
+    """
+
+    component_id: str
+    frame: _FrameKey
+    lineage: Lineage
+    stat_var_count: int | None = None
+    requested: _FrameKey | None = None
+
+    def members_json(self) -> list[dict[str, Any]]:
+        """`lineage` as the JSON list the card's lineage row stores."""
+        return lineage_json(self.lineage)
+
+
+def lineage_json(lineage: Lineage) -> list[dict[str, Any]]:
+    """`lineage` as the JSON list a stored lineage row holds: each member's
+    frame key and whole manifest, read back by `lineage_from_json`."""
+    return [
+        {
+            "spec_id": member.spec_id,
+            "content_version": member.content_version,
+            "manifest": member.manifest,
+        }
+        for member in lineage
+    ]
+
+
+class CardLineageDecodeError(ValueError):
+    """A stored card lineage that does not decode as `CardLineage.members_json`
+    wrote it."""
+
+
+def lineage_from_json(members: Any) -> Lineage:
+    """The `Lineage` `CardLineage.members_json` wrote.
+
+    Raises:
+        CardLineageDecodeError: `members` is not that shape.
+    """
+    if not isinstance(members, list) or not members:
+        raise CardLineageDecodeError("stored lineage members are not a non-empty list")
+    try:
+        return tuple(
+            ProvenanceInput(member["spec_id"], member["content_version"], dict(member["manifest"]))
+            for member in members
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CardLineageDecodeError(f"stored lineage members do not decode: {exc!r}") from exc
+
+
+class CardLineages(Protocol):
+    """The lineages stored with a conversation's cards
+    (`harness.studio_store.StudioStore`)."""
+
+    async def card_lineage(
+        self,
+        principal: str,
+        conversation_id: str,
+        *,
+        component_id: str | None = None,
+        frame: _FrameKey | None = None,
+    ) -> CardLineage | None:
+        """The stored lineage of card `component_id`, else of a card drawn
+        from `frame`, else of a card whose write named `frame`; `None` when
+        none is stored or none decodes."""
+        ...
 
 
 class ProvenanceStore:
@@ -141,6 +244,13 @@ class ProvenanceStore:
         # a distinction `get`'s bare `None` cannot carry without changing
         # its return type for every caller.
         self._evicted: OrderedDict[tuple[str, _FrameKey], None] = OrderedDict()
+        # Bumped by every store of an entry under a key (`held`).
+        self._generations = 0
+        # Per conversation with a running segment that names frames, each
+        # such segment's token and the keys it keeps (`keep`).
+        self._kept: dict[str, dict[int, frozenset[_FrameKey]]] = {}
+        # The last token `segment_token` handed out.
+        self._segments = 0
 
     def put(
         self,
@@ -245,6 +355,75 @@ class ProvenanceStore:
         )
         return True
 
+    def restore(self, *, conversation: str, card: CardLineage) -> None:
+        """Put a stored card's lineage back under its frame, and under the
+        frame its write named, wherever the store holds none."""
+        for key in dict.fromkeys(key for key in (card.frame, card.requested) if key is not None):
+            self.restore_frame(
+                conversation=conversation,
+                frame=key,
+                lineage=card.lineage,
+                stat_var_count=card.stat_var_count,
+            )
+
+    def restore_frame(
+        self,
+        *,
+        conversation: str,
+        frame: _FrameKey,
+        lineage: Lineage,
+        stat_var_count: int | None = None,
+        overwrite: bool = False,
+    ) -> int | None:
+        """Put a stored `lineage`, with the count stored beside it, back under
+        `frame` when the store holds none there, or over the entry it holds
+        when `overwrite`, and return the generation it was stored at (`held`).
+        `None` when the store already held an entry for `frame` and kept it."""
+        if not overwrite and self._entry(conversation, frame) is not None:
+            return None
+        self._store(conversation=conversation, key=frame, entry=_Entry(lineage, stat_var_count))
+        return self._generations
+
+    def segment_token(self) -> int:
+        """A token for a segment starting now, unlike every token handed out
+        before, which the segment keeps frames under (`keep`)."""
+        self._segments += 1
+        return self._segments
+
+    def keep(self, *, conversation: str, keys: Sequence[_FrameKey], token: int) -> None:
+        """Hold `keys`, the frames the conversation's running segment of
+        `token` names, outside the per-conversation bound, in place of the
+        keys that segment held before: the bound counts only entries no
+        running segment keeps, and eviction past it drops the least recently
+        used of those, so the bucket holds at most the bound plus the kept
+        keys. Each segment's keys are its own, and an empty `keys` removes
+        them; another segment's keep or release leaves them.
+
+        A paused turn has no running segment, so its frames are evictable
+        while it waits: its rows hold their lineage, and the segment that
+        resumes it restores them (`harness.turn.store.TurnStore.
+        restore_frame_lineage`).
+
+        `_kept` holds an entry only for a segment that keeps frames, which
+        `release` removes when the segment ends, and a conversation dropped
+        past `_MAX_CONVERSATIONS` drops its entries. The turn's tool budgets
+        (`harness.graph.state.BUDGETS`) bound each segment's keys, so the
+        store stays bounded."""
+        if keys:
+            self._kept.setdefault(conversation, {})[token] = frozenset(keys)
+        else:
+            self.release(conversation=conversation, token=token)
+
+    def release(self, *, conversation: str, token: int) -> None:
+        """End the keep of the segment of `token`: the frames no other running
+        segment keeps count against the per-conversation bound again."""
+        segments = self._kept.get(conversation)
+        if segments is None:
+            return
+        segments.pop(token, None)
+        if not segments:
+            del self._kept[conversation]
+
     def _store(self, *, conversation: str, key: _FrameKey, entry: _Entry) -> None:
         bucket = self._by_conversation.get(conversation)
         if bucket is None:
@@ -252,6 +431,7 @@ class ProvenanceStore:
             self._by_conversation[conversation] = bucket
             while len(self._by_conversation) > _MAX_CONVERSATIONS:
                 evicted_id, evicted_bucket = self._by_conversation.popitem(last=False)
+                self._kept.pop(evicted_id, None)
                 for evicted_key in evicted_bucket:
                     self._record_eviction(evicted_id, evicted_key)
                 logger.warning(
@@ -263,10 +443,17 @@ class ProvenanceStore:
                 )
         else:
             self._by_conversation.move_to_end(conversation)
-        bucket[key] = entry
+        self._generations += 1
+        bucket[key] = replace(entry, generation=self._generations)
         bucket.move_to_end(key)
-        while len(bucket) > _MAX_MANIFESTS_PER_CONVERSATION:
-            evicted_key, _ = bucket.popitem(last=False)
+        if len(bucket) <= _MAX_MANIFESTS_PER_CONVERSATION:
+            return
+        # The kept keys, each segment's few, joined only when over the bound.
+        kept: set[_FrameKey] = set().union(*self._kept.get(conversation, {}).values())
+        others = [held for held in bucket if held not in kept]
+        while len(others) > _MAX_MANIFESTS_PER_CONVERSATION:
+            evicted_key = others.pop(0)
+            del bucket[evicted_key]
             self._record_eviction(conversation, evicted_key)
             logger.warning(
                 "provenance: dropped frame %r for conversation %r past the "
@@ -292,6 +479,32 @@ class ProvenanceStore:
         its manifest resolved or summed."""
         entry = self._entry(conversation, (spec_id, content_version))
         return entry.stat_var_count if entry is not None else None
+
+    def last_generation(self) -> int:
+        """The generation the store's most recent store of an entry was given
+        (`held`); every later store gives a greater one."""
+        return self._generations
+
+    def drop(self, *, conversation: str, spec_id: str | None, content_version: str | None) -> None:
+        """Forget the lineage held for the frame `(spec_id, content_version)`,
+        if any: a frame the caller knows has no lineage it can vouch for."""
+        bucket = self._by_conversation.get(conversation)
+        if bucket is not None:
+            bucket.pop((spec_id, content_version), None)
+
+    def held(
+        self, *, conversation: str, spec_id: str | None, content_version: str | None
+    ) -> tuple[Lineage, int | None, int] | None:
+        """The lineage, count (`stat_var_count`) and generation held for the
+        frame `(spec_id, content_version)`, read from one entry, or `None` for
+        a frame the store does not hold. The generation is a number that
+        changes whenever the entry is stored again (`put`, `put_retrieval`,
+        `alias`, `restore`, `restore_frame`) and stays the same while it is
+        unchanged, whatever objects `get` hands out."""
+        entry = self._entry(conversation, (spec_id, content_version))
+        if entry is None:
+            return None
+        return entry.lineage, entry.stat_var_count, entry.generation
 
     def _entry(self, conversation: str, key: _FrameKey) -> _Entry | None:
         """The entry held for `key`, marked most recently used."""
@@ -578,9 +791,15 @@ def _year(value: object) -> int | None:
 
 
 __all__ = [
+    "CARD_FRAME_KEY",
+    "CARD_LINEAGE_KEY",
+    "CardLineage",
+    "CardLineageDecodeError",
+    "CardLineages",
     "Lineage",
     "ProvenanceInput",
     "ProvenanceStore",
+    "lineage_from_json",
     "merged_manifest",
     "summed_stat_var_count",
 ]

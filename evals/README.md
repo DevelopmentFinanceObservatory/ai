@@ -5,10 +5,11 @@ credential and **never run in CI**. CI's gates live in each service's own
 `tests/` directory and use no model.
 
 `evals/agents/harness_translator_v1/` holds the translation fixtures: the cases
-in `harness-translator-v1.evalset.json`, the canned discovery stub, and the
-`workflow_outcome` metric. No model runs them. `services/harness/tests/test_eval_outcomes.py`
-drives each case's expected outcome through the real translator functions in CI,
-and `test_eval_outcome_metric.py` tests the metric.
+in `harness-translator-v1.evalset.json`, the canned discovery stub, and
+`outcome_metric.matches_subset`, which matches an outcome to a case's expectation.
+No model runs them. `services/harness/tests/test_eval_outcomes.py` drives each
+case's expected outcome through the real translator functions in CI, and
+`test_eval_outcome_metric.py` tests the matcher.
 
 `evals/studio/` (harness-studio-orchestrator-v1) evals the studio's HTTP
 surface with its own runner. Its deterministic contract layer runs in CI, its

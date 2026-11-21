@@ -13,8 +13,8 @@ and with a typed `problem` on a refusal. A `describe` answer never reaches a
 model at all: `fetch_definitions` keeps one `definition` string per source out
 of it.
 
-What holds the boundary is that the models' tools are `FunctionTool`s over
-Python functions. An ADK `McpTool`, whose dumped `CallToolResult` would carry
+What holds the boundary is that the models' tools are declared from
+Python functions. A tool built from an MCP tool, whose dumped `CallToolResult` would carry
 `structuredContent` into a prompt, is built nowhere in this repo.
 """
 

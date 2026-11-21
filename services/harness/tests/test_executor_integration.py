@@ -57,6 +57,7 @@ from harness.server import create_app
 from harness.settings import ANALYSIS_MCP_MOUNT_PATH, DATA_MCP_MOUNT_PATH, Settings
 from harness.studio_translate import _RecordingSurface
 from harness.tool_contracts import HarnessCode
+from orchestrator.call import OrchestratorCall
 from planner.operations import (
     AggregateOperation,
     FilterOperation,
@@ -1528,7 +1529,7 @@ class _Studio:
     stand-in, and each replay's populations and analysis calls."""
 
     tools: dict[str, Any]
-    context: SimpleNamespace
+    context: OrchestratorCall
     executor: McpExecutor
     platform: _Platform
     run_frame: dict[str, Any]
@@ -1666,10 +1667,7 @@ async def studio(
         tools = build_orchestrator_tools(resolver=_no_search, executor=executor)
         yield _Studio(
             tools={tool.__name__: tool for tool in tools},
-            context=SimpleNamespace(
-                state=state,
-                invocation_id="inv_1",
-            ),
+            context=OrchestratorCall(state=state, turn_id="turn-1"),
             executor=executor,
             platform=platform,
             run_frame=run_frame,
@@ -2570,7 +2568,7 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
                     ),
                 }
             ],
-            SimpleNamespace(state=state, invocation_id="inv_1"),
+            OrchestratorCall(state=state, turn_id="turn-1"),
         )
         held = await get_frame_store().get(answer.store)
         assert held is not None

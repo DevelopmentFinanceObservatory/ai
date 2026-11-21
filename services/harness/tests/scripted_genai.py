@@ -2,9 +2,9 @@
 
 `ScriptedGenai` holds a list of `Reply` objects. Each `generate_content_stream`
 call on its `client` answers with the next reply and records the request it was
-sent. Pydantic AI's `GoogleProvider(client=...)` and ADK's `Gemini(client=...)`
-both accept the client and run their own request building and response parsing
-against it, so the recorded requests are what each would put on the wire.
+sent. Pydantic AI's `GoogleProvider(client=...)` accepts the client and runs its
+own request building and response parsing against it, so the recorded requests
+are what it would put on the wire.
 
 The part builders (`text_part`, `call_part`, `thought_part`), `usage_metadata`,
 `reply` and `Reply` describe a response; `Reply` options make a stream stall, fail
@@ -281,7 +281,7 @@ async def _stream(step: Reply) -> AsyncIterator[types.GenerateContentResponse]:
 
 
 def _chunk(step: Reply, parts: list[types.Part], *, final: bool) -> types.GenerateContentResponse:
-    # Each chunk gets a copy because ADK writes its own call ids into the parts it is handed.
+    # Each chunk gets a copy because a consumer may write call ids into the parts it is handed.
     parts = copy.deepcopy(parts)
     if step.prompt_feedback is not None:
         return types.GenerateContentResponse(prompt_feedback=step.prompt_feedback)

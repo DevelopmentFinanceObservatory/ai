@@ -1,40 +1,41 @@
-"""ADK events and executor records, projected onto the v1 wire frames.
+"""The turn's events and executor records, projected onto the v1 wire frames.
 
-The translator keys on the graph's node names and on ADK's
-`adk_request_input` interrupt events, so it depends only on
-`harness.graph`'s topology. A pausing node's `RequestInput` carries its
-payload in the interrupt event's function call args, which is everything
-`plan.proposed` / `elicitation.request` need.
+The translator reads the events a turn segment emits
+(`harness.turn.loop.run_segment`'s `emit`): the loop's own
+(`harness.turn.events`: a node done, the turn paused, the turn failed) and
+the graph's nodes' (`harness.graph.events`). A pause carries its kind and
+payload, which is everything `plan.proposed` / `elicitation.request` need,
+and the wire interrupt id the loop minted for it.
 
 Tool-call progress (`activity.step`, `component.created`) comes from the
 `_RecordingExecutor` wrapper around the injected executor and the
 `_RecordingSurface` wrapper around the tool surface: the graph's nodes make
-their calls in-node and yield their result at the end, so the recorders
-capture each call as it happens and the translator drains them whenever the
-next ADK event arrives. A result carrying a `"component"` member becomes a
+their calls in-node, so the recorders capture each call as it happens. Each
+event the segment emits takes the calls recorded before it
+(`_EventRecords`, `_Translator.translate_recorded`), so a stream that falls
+behind the segment shows each call where it happened. A result carrying a `"component"` member becomes a
 `component.created` frame and a composition update.
 
-While a plan step runs, `execute` relays the executor's report of the
-step's start and each progress report the call sends as its own event
-(`harness.graph.state.STEP_PROGRESS_KEY` on `custom_metadata`), which
-becomes a `running` `activity.step` whose `detail` gives the step's place
-on the plan card and then the report's message or the card row's
-description (`_plan_step_detail`). A plan step keeps one wire `step_id`
-from its first report to its final `complete` or `failed` frame, so the
-Activity feed holds one line per step and updates it in place. A step whose
-line is still running when the execute node's output arrives, with no
-record to close it, closes there as failed.
+While a plan step runs, `execute` emits the executor's report of the
+step's start and each progress report the call sends (`StepProgress`),
+which becomes a `running` `activity.step` whose `detail` gives the step's
+place on the plan card and then the report's message or the card row's
+description (`_plan_step_detail`). A stream that falls behind keeps only
+each step's latest report. A plan step keeps one wire `step_id` from its
+first report to its final `complete` or `failed` frame, so the Activity
+feed holds one line per step and updates it in place. A step whose line is
+still running when the execute node finishes, with no record to close it,
+closes there as failed.
 
-The planner node has no such recorder -- its work happens inside a
-`PlannerModel`'s own model round trips, not through the tool surface.
-Its agent's function-call events reach the runner stream as each call is
-made, so each call it makes becomes a status line ("Checking the plan
-against the data", "Reworking the draft", ...) the moment it
-happens, after the "Working on a plan" line the node opens as a draft
-starts. One status line runs at a time; the next one, the plan card, a
-pause or the segment's end completes it. The planner's own `on_progress` reports, which
-the node can only relay once the draft is done (`harness.graph`'s
-`planner` node), say the same thing late and are not shown.
+The planner node has no such recorder: its work happens inside a
+`PlannerModel`'s own model round trips, not through the tool surface. It
+emits each model response as it arrives and each response's answers once
+they are in (`PlannerResponse`, `PlannerAnswers`), so each call it makes
+becomes a status line ("Checking the plan against the data", "Reworking the
+draft", ...) the moment it happens, after the "Working on a plan" line the
+node opens as a draft starts (`PlannerStarted`). One status line runs at a
+time; the next one, the plan card, a pause or the segment's end completes
+it.
 """
 
 from __future__ import annotations
@@ -62,15 +63,14 @@ from compiler.surface import (
 )
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from executor.artifacts import declared_ranked_before_limit
-from executor.classify import internal_fault
 from executor.outcomes import RefusalKind
 from executor.run import RESULT_RECEIVED, current_step_id
-from google.adk.events import Event
-from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
+from google.genai import types
+from orchestrator.run import ModelResponded, TextDelta, ToolsAnswered
 from planner.phrasing import entities_phrase
 from planner.plan import PLAN_STATE_KEY, DatasetRequirement, Decision
 from planner.plan import Plan as PlannerPlan
-from planner.settings import AGENT_NAME as PLANNER_AGENT_NAME
+from planner.pydantic_agent import PlannerAnswers, PlannerResponse
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.tools import PLAN_WRITES, running_plan_write
@@ -79,20 +79,22 @@ from pydantic import ValidationError
 
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
+from harness.fatal_codes import stated_refusal, wire_error
+from harness.graph.events import AgentStatus, GraphEvent, PlannerStarted, StepProgress
 from harness.graph.interfaces import Executor
+from harness.graph.orchestrate import HAND_OFF_EDGES
 from harness.graph.state import (
-    APPROVE_INTERRUPT,
+    APPROVE_PAUSE,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
-    ORCHESTRATOR_STATUS_FAILURE_KEY,
-    ORCHESTRATOR_STATUS_KEY,
-    PLANNER_STARTED_KEY,
-    STEP_PROGRESS_KEY,
 )
 from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
 from harness.orchestrator_tools import HANDED_OFF
 from harness.provenance import (
+    CARD_FRAME_KEY,
+    CARD_LINEAGE_KEY,
+    CardLineage,
     ProvenanceStore,
     manifest_with_stat_vars,
     retrieval_frame_ref,
@@ -102,8 +104,6 @@ from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
 from harness.sentences import DROPPED_REASON, MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
     ConversationState,
-    DatabaseUnavailable,
-    SegmentLost,
     _PendingChoice,
     _PendingInterrupt,
     _PendingOption,
@@ -113,9 +113,9 @@ from harness.studio_state import (
 from harness.studio_state import (
     land_component as state_land_component,
 )
-from harness.studio_store import StudioStore
+from harness.studio_store import StudioStore, keep_turn_records
 from harness.tool_contracts import HarnessCode, harness_refusal
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
 from harness.wire import (
     ActivityStep,
@@ -291,53 +291,102 @@ STREAM_RETRY_AFTER_S = 30
 
 
 def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame:
+    """The stream-fatal error frame for `exc`, the error a turn ended on
+    (`_fatal_frame`): the refusal it states, the MCP call whose pinned
+    timeout it hit (`timeout_tool`/`timeout_key`, set by
+    `mcp_client._call_tool`), and whether a later attempt may not meet it
+    (`compiler.surface.transient`)."""
+    timeout_tool = getattr(exc, "timeout_tool", None)
+    return _fatal_frame(
+        conversation,
+        refusal=getattr(exc, "refusal", None),
+        timeout_tool=timeout_tool,
+        timeout_key=getattr(exc, "timeout_key", None) or timeout_tool,
+        transient=transient(exc),
+    )
+
+
+def closed_on_reply(
+    conversation: ConversationState, text: str, *, suggestions: bool
+) -> list[MessageComplete | Suggestions | Done]:
+    """Record the turn closed on `text`, its reply, and return the frames
+    that close its stream, numbered: `message.complete`, an empty
+    `suggestions` when `suggestions`, and `done`. For a turn that runs no
+    agent, such as an Edit Card or a declined plan."""
+    conversation.turn_final_text = text
+    conversation.close_turn(final_text=text)
+    frames: list[MessageComplete | Suggestions | Done] = [
+        MessageComplete(event="message.complete", seq=conversation.next_seq(), text=text)
+    ]
+    if suggestions:
+        frames.append(Suggestions(event="suggestions", seq=conversation.next_seq(), items=[]))
+    frames.append(
+        Done(
+            event="done",
+            seq=conversation.next_seq(),
+            trace_id=conversation.trace_id,
+            composition=conversation.composition,
+        )
+    )
+    return frames
+
+
+def recorded_fatal(conversation: ConversationState, error: Mapping[str, Any]) -> ErrorFrame:
+    """The stream-fatal error frame for a turn that closed on the error its
+    cursor records (`harness.turn.loop.failure`), the frame `_stream_fatal`
+    gives the exception it was recorded from."""
+    timeout_tool = error.get("timeout_tool")
+    return _fatal_frame(
+        conversation,
+        refusal=error.get("refusal"),
+        timeout_tool=timeout_tool,
+        timeout_key=error.get("timeout_key") or timeout_tool,
+        transient=bool(error.get("transient")),
+    )
+
+
+def _fatal_frame(
+    conversation: ConversationState,
+    *,
+    refusal: Mapping[str, Any] | None,
+    timeout_tool: str | None,
+    timeout_key: str | None,
+    transient: bool,
+) -> ErrorFrame:
     """A stream-fatal error frame. A resolver refusal keeps its real code
     when the wire grammar knows it (e.g. `capability_unavailable` on an
-    identity-reproduction failure); a timed-out MCP call (`timeout_tool`/
-    `timeout_key`, set by `mcp_client._call_tool`) becomes its own synthetic
-    refusal so a repeat of the exact same call stops being told to wait, and
-    reaches the wire as `transient_unavailable` whatever its own code.
+    identity-reproduction failure); a timed-out MCP call (`timeout_tool`,
+    `timeout_key`) becomes its own synthetic refusal so a repeat of the
+    exact same call stops being told to wait, and reaches the wire as
+    `transient_unavailable` whatever its own code.
 
     A code the wire grammar has no member for, e.g.
     `executor.outcomes.RefusalKind.SURFACE_CHANGED`, which fires when a
     plan step's tool has changed since the plan was compiled, still
     honours the refusal's own `retry_mode` rather than defaulting to a
     transient one: `retry_after_delay` (or no `retry_mode` at all, for a
-    `transient`) becomes `transient_unavailable`, anything else
+    `transient` error) becomes `transient_unavailable`, anything else
     becomes `capability_unavailable`, the closest true member, so a
     do-not-retry refusal is never told to the user as a reason to retry.
 
-    An exception that states no refusal reads as `internal_error`, not to be
-    retried, unless `transient` holds for it, which reads as `raised` and
+    An error that states no refusal reads as `internal_error`, not to be
+    retried, unless it is `transient`, which reads as `raised` and
     `retry_after_delay`.
 
     The frame's `detail`, which Studio shows as the reply, is the sentence
     for the refusal's own code under the retry mode the frame states
     (`failure_detail`). The refusal's `fix.detail` and `message` are written
     for a model or an operator and stay in the log the caller writes, as the
-    turn's trace id does.
+    turn's trace id does. The conversation's record of the turn closes on
+    the frame's code and detail, also when the turn's own close could not
+    be written. The record holds the error the user saw, and whatever
+    closes the turn later leaves it as it is.
     """
-    timeout_tool = getattr(exc, "timeout_tool", None)
     if timeout_tool is not None:
-        timeout_key = getattr(exc, "timeout_key", None) or timeout_tool
-        refusal = _timeout_refusal(conversation, tool=timeout_tool, key=timeout_key)
-        wire_code = ErrorCode.TRANSIENT_UNAVAILABLE.value
+        refusal = _timeout_refusal(conversation, tool=timeout_tool, key=timeout_key or timeout_tool)
     else:
-        refusal = getattr(exc, "refusal", None) or ({} if transient(exc) else internal_fault())
-        wire_code = refusal.get("code")
-    try:
-        error_code = ErrorCode(wire_code)
-        retry = RetryMode(refusal.get("retry_mode", RetryMode.DO_NOT_RETRY))
-    except ValueError:
-        try:
-            retry = RetryMode(refusal.get("retry_mode", RetryMode.RETRY_AFTER_DELAY))
-        except ValueError:
-            retry = RetryMode.RETRY_AFTER_DELAY
-        error_code = (
-            ErrorCode.TRANSIENT_UNAVAILABLE
-            if retry is RetryMode.RETRY_AFTER_DELAY
-            else ErrorCode.CAPABILITY_UNAVAILABLE
-        )
+        refusal = stated_refusal(refusal, transient=transient)
+    error_code, retry = wire_error(refusal, timed_out=timeout_tool is not None)
     stated = refusal if refusal.get("code") else {**refusal, "code": HarnessCode.RAISED.value}
     detail = failure_detail({**stated, "retry_mode": retry.value})
     conversation.close_turn(
@@ -357,64 +406,16 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
     )
 
 
-# What a user reads when a stream's segment is lost (`segment_lost_frame`).
+# What a user reads when a stream ends with its turn left as stored: the
+# lease is another instance's, or its closing write did not commit
+# (`harness.studio_stream`).
 SEGMENT_LOST_DETAIL = failure_sentence(ErrorCode.TRANSIENT_UNAVAILABLE, RetryMode.RETRY_AFTER_DELAY)
 
 
-def segment_lost_frame(conversation: ConversationState) -> ErrorFrame:
-    """The frame that ends a stream whose segment is lost: another instance
-    took it over, or this one could not reach the database before the
-    lease's deadline (`DatabaseUnavailable`). Either way the turn is left as
-    stored, so the client retries after a delay. One frame for every place
-    that loss surfaces: the heartbeat (`_sse_stream`), a checkpoint, a
-    frame-number reservation and a canvas write."""
-    return ErrorFrame(
-        event="error",
-        seq=conversation.next_seq(),
-        error=ToolError(
-            error=ErrorCode.TRANSIENT_UNAVAILABLE,
-            retry=RetryMode.RETRY_AFTER_DELAY,
-            detail=SEGMENT_LOST_DETAIL,
-            retry_after_seconds=STREAM_RETRY_AFTER_S,
-        ),
-    )
-
-
-def _checkpoint_failed_frame(conversation: ConversationState, exc: Exception) -> ErrorFrame:
-    """The stream-fatal frame a stream yields when its state cannot be saved.
-    `StudioRunner._checkpointed` yields it, in place of the frame it would
-    have carried, when a checkpoint before a pause or terminal frame, or a
-    frame-number reservation, fails. It also ends a turn or edit stream when
-    a card's canvas write (`StudioStore.change_canvas`) raises `SegmentLost`
-    or `DatabaseUnavailable`.
-
-    `SegmentLost` means another instance's claim has outlived this one's TTL
-    and owns the conversation. `DatabaseUnavailable` means the database
-    stayed unreachable until the lease's deadline, so no close could be
-    saved. In both cases the turn is left as stored and the stream ends as
-    it does when the heartbeat's renewals fail (`segment_lost_frame`).
-    Anything else (a database error) closes the turn, since nothing else
-    will finish it. The turn's record names `state_not_saved`, and the
-    frame, whose grammar has no such member, the transient code."""
-    if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
-        return segment_lost_frame(conversation)
-    refusal = harness_refusal(
-        code=HarnessCode.STATE_NOT_SAVED, message=f"the turn's state could not be saved: {exc}"
-    )
-    detail = failure_detail(refusal)
-    conversation.close_turn(
-        final_text=conversation.turn_final_text or detail, error=refusal["code"]
-    )
-    return ErrorFrame(
-        event="error",
-        seq=conversation.next_seq(),
-        error=ToolError(
-            error=ErrorCode.TRANSIENT_UNAVAILABLE,
-            retry=RetryMode.RETRY_AFTER_DELAY,
-            detail=detail,
-            retry_after_seconds=STREAM_RETRY_AFTER_S,
-        ),
-    )
+# The arguments a call record leaves out: the write token, a grant the
+# platform issued, and the card's frame, the executor's own hint that it
+# strips before sending (`harness.mcp_client.McpExecutor`).
+_UNRECORDED_ARGS = frozenset({WRITE_TOKEN_KEY, CARD_FRAME_KEY})
 
 
 @dataclass
@@ -444,6 +445,62 @@ class _ExecutorRecord:
     # that never became a `land_component` call: a plan-step surface record,
     # or a write whose component failed validation.
     land: bool = False
+    # The write token a create returned, taken off its result before anyone
+    # reads it (`_RecordingExecutor._take_write_token`), for the stream's
+    # owner to keep in the conversation with the card.
+    write_token: str | None = None
+    # The lineage of the frame a drawn card rests on, taken off its result
+    # with the write token, which the card's write commits with the card.
+    card_lineage: CardLineage | None = None
+
+
+class _Records:
+    """Records by conversation, in the order their calls finished: an
+    append-only queue that the task running a segment fills and that the
+    segment's stream owner alone drains (`take`). `count` is how many records
+    a conversation has had appended, which an event carries
+    (`_EventRecords`), so that the owner takes exactly the records made
+    before it. The counts never start afresh while the segment's stream
+    owner runs: an event still queued holds a count from before any drain,
+    so a count reused after a drain emptied the queue would hand that
+    event a record made after it. Once the owner ends, no event of the
+    segment is left to drain, and `forget` drops the conversation's records
+    and counts."""
+
+    def __init__(self) -> None:
+        self.items: list[_ExecutorRecord] = []
+        self._appended: dict[str, int] = {}
+        self._taken: dict[str, int] = {}
+
+    def append(self, record: _ExecutorRecord) -> None:
+        self.items.append(record)
+        conversation = record.conversation
+        self._appended[conversation] = self._appended.get(conversation, 0) + 1
+
+    def count(self, conversation: str) -> int:
+        return self._appended.get(conversation, 0)
+
+    def forget(self, conversation: str) -> None:
+        """Drop this conversation's records and counts."""
+        self.items = [record for record in self.items if record.conversation != conversation]
+        self._appended.pop(conversation, None)
+        self._taken.pop(conversation, None)
+
+    def take(self, conversation: str, upto: int | None = None) -> list[_ExecutorRecord]:
+        """This conversation's records, preserving order: every one, or the
+        ones appended before its `upto`th."""
+        mine = [record for record in self.items if record.conversation == conversation]
+        taken = self._taken.get(conversation, 0)
+        count = len(mine) if upto is None else max(0, min(len(mine), upto - taken))
+        took = mine[:count]
+        kept = {id(record) for record in mine[count:]}
+        self.items = [
+            record
+            for record in self.items
+            if record.conversation != conversation or id(record) in kept
+        ]
+        self._taken[conversation] = taken + count
+        return took
 
 
 def _raised_refusal(exc: BaseException) -> dict[str, Any]:
@@ -468,22 +525,20 @@ def _raised_refusal(exc: BaseException) -> dict[str, Any]:
 class _RecordingExecutor:
     """Wraps the injected executor so every call becomes wire progress.
 
-    The graph's execute node loops in-node and yields once at the end, so
-    per-call progress can't come from ADK events; it comes from here. The
-    wrapper is per-runner (the workflow closes over it) while turns of
-    DIFFERENT conversations run concurrently, so every record is tagged
-    with the conversation that made it and drained by tag; within one
-    conversation the lock serialises turns and the graph runs nodes
-    sequentially.
+    The graph's nodes make their calls in-node and report no call as an
+    event, so per-call progress comes from here. The wrapper is per-runner
+    (the graph closes over it) while turns of DIFFERENT conversations run
+    concurrently, so every record is tagged with the conversation that made
+    it and drained by tag. Within one conversation the lock serialises turns
+    and the graph runs nodes sequentially.
 
-    `store` is where `_keep_write_token` finds the current conversation and
-    where the translator writes the cards a drain lands.
+    `store` is where the translator writes the cards a drain lands.
     """
 
     def __init__(self, executor: Executor, *, store: StudioStore) -> None:
         self._executor = executor
         self._store = store
-        self._records: list[_ExecutorRecord] = []
+        self._records = _Records()
 
     @property
     def store(self) -> StudioStore:
@@ -498,10 +553,16 @@ class _RecordingExecutor:
         Never touches the conversation itself; a component with no matching
         record (this capability called directly, not through `__call__`
         first) leaves nothing to stamp and is silently a no-op."""
-        for record in reversed(self._records):
+        if (record := self._record_for(component)) is not None:
+            record.land = True
+
+    def _record_for(self, component: dict[str, Any]) -> _ExecutorRecord | None:
+        """The latest record whose result carries this exact `component`
+        object, matched by identity, or `None`."""
+        for record in reversed(self._records.items):
             if record.result.get("component") is component:
-                record.land = True
-                break
+                return record
+        return None
 
     async def __call__(
         self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
@@ -519,8 +580,9 @@ class _RecordingExecutor:
                 tool, args, {"outcome": "refusal", "refusal": _raised_refusal(exc)}, started=started
             )
             raise
-        self._keep_write_token(tool=tool, args=args, result=result)
-        self._record(tool, args, result, started=started)
+        token = self._take_write_token(tool=tool, args=args, result=result)
+        lineage = result.pop(CARD_LINEAGE_KEY, None)
+        self._record(tool, args, result, started=started, write_token=token, card_lineage=lineage)
         return result
 
     def record_step(
@@ -543,35 +605,37 @@ class _RecordingExecutor:
         *,
         started: float,
         step_id: str | None = None,
+        write_token: str | None = None,
+        card_lineage: CardLineage | None = None,
     ) -> None:
         """Record one call; its step is `step_id`, or the current step when that is `None`."""
         self._records.append(
             _ExecutorRecord(
                 tool=tool,
-                args={key: value for key, value in args.items() if key != WRITE_TOKEN_KEY},
+                args={key: value for key, value in args.items() if key not in _UNRECORDED_ARGS},
                 result=result,
                 duration_ms=int((time.monotonic() - started) * 1000),
                 conversation=current_conversation_id.get(),
                 step_id=step_id if step_id is not None else current_step_id.get(),
+                write_token=write_token,
+                card_lineage=card_lineage,
             )
         )
 
-    def _keep_write_token(self, *, tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
-        """Move a create's write token off `result` into the current
-        conversation's `write_tokens`, before the record, the graph or the
-        Edit Card route can read the result. The token is the grant
-        `harness.studio_edit` needs to revise that component; a token with
-        no conversation to hold it is dropped, and that component's later
-        edits recreate it instead. A successful create that returns no
-        token is logged at error level, since that card is rebuilt as a
-        new card on its next edit. The token is set on the live state, so
-        the card's own write (`StudioStore.change_canvas`, which commits
-        every durable field the live state changed) stores it with the
-        card."""
+    def _take_write_token(
+        self, *, tool: str, args: dict[str, Any], result: dict[str, Any]
+    ) -> str | None:
+        """Move a create's write token off `result`, before the record, the
+        graph or the Edit Card route can read the result, into the call's
+        record (`_ExecutorRecord.write_token`). The token is the grant
+        `harness.studio_edit` needs to revise that component. The stream's
+        owner keeps it in the conversation with the card. A successful
+        create that returns no token is logged at error level, since that
+        card is rebuilt as a new card on its next edit."""
         token = result.pop(WRITE_TOKEN_KEY, None)
         component = result.get("component")
         if not isinstance(component, dict):
-            return
+            return None
         if not token:
             if tool == "write_component" and "component_id" not in args:
                 logger.error(
@@ -580,23 +644,35 @@ class _RecordingExecutor:
                     component.get("component_id"),
                     current_conversation_id.get(),
                 )
-            return
-        key = current_conversation_key.get()
-        conversation = self._store.current(*key) if key is not None else None
-        if conversation is None:
-            logger.warning(
-                "dropping the write token for component_id=%r: no conversation is loaded "
-                "to hold it",
-                component.get("component_id"),
-            )
-            return
-        conversation.write_tokens[str(component["component_id"])] = str(token)
+            return None
+        return str(token)
 
-    def drain(self, conversation: str) -> list[_ExecutorRecord]:
-        """Take (only) this conversation's records, preserving order."""
-        mine = [record for record in self._records if record.conversation == conversation]
-        self._records = [record for record in self._records if record.conversation != conversation]
-        return mine
+    def write_token(self, component: dict[str, Any]) -> str | None:
+        """The write token of the recorded write that returned `component`
+        (matched by identity, as `land_component` matches), read without
+        taking the record."""
+        record = self._record_for(component)
+        return record.write_token if record is not None else None
+
+    def card_lineage(self, component: dict[str, Any]) -> CardLineage | None:
+        """The frame lineage of the recorded write that returned `component`
+        (matched by identity, as `write_token` matches)."""
+        record = self._record_for(component)
+        return record.card_lineage if record is not None else None
+
+    def count(self, conversation: str) -> int:
+        """How many records this conversation has had appended (`_Records`)."""
+        return self._records.count(conversation)
+
+    def drain(self, conversation: str, upto: int | None = None) -> list[_ExecutorRecord]:
+        """Take (only) this conversation's records, preserving order: every
+        one, or those appended before its `upto`th (`_Records.take`)."""
+        return self._records.take(conversation, upto)
+
+    def release(self, conversation: str) -> None:
+        """Drop this conversation's records and counts once its segment's
+        stream owner has ended (`_Records.forget`)."""
+        self._records.forget(conversation)
 
     async def aclose(self) -> None:
         """Release the wrapped executor's resources, if it holds any.
@@ -697,7 +773,7 @@ class _RecordingSurface:
     def __init__(self, surface: ToolSurface, *, provenance: ProvenanceStore | None = None) -> None:
         self._surface = surface
         self._provenance = provenance
-        self._records: list[_ExecutorRecord] = []
+        self._records = _Records()
         # The latest approved plan's workflow step order, by conversation
         # (this wrapper is per-runner and shared across conversations, the
         # same reason `_records` is conversation-tagged). Read by
@@ -844,7 +920,7 @@ class _RecordingSurface:
         }
         records = [
             record
-            for record in self._records
+            for record in self._records.items
             if record.conversation == conversation and record.step_id == step_id
         ]
         # The latest complete record is the step's own call; an earlier one
@@ -943,15 +1019,29 @@ class _RecordingSurface:
         )
         return lineage[0].manifest if lineage is not None else None
 
-    def drain(self, conversation: str) -> list[_ExecutorRecord]:
-        """Take (only) this conversation's records, preserving order, and
-        forget its calls still in flight, whose run has ended."""
-        mine = [record for record in self._records if record.conversation == conversation]
-        self._records = [record for record in self._records if record.conversation != conversation]
+    def drain(self, conversation: str, upto: int | None = None) -> list[_ExecutorRecord]:
+        """Take (only) this conversation's records, preserving order: every
+        one, or those appended before its `upto`th (`_Records.take`). Taking
+        every one also forgets its calls still in flight, whose run has
+        ended."""
+        if upto is None:
+            self._in_flight = {
+                key: started for key, started in self._in_flight.items() if key[0] != conversation
+            }
+        return self._records.take(conversation, upto)
+
+    def release(self, conversation: str) -> None:
+        """Drop this conversation's records, counts and calls still in
+        flight once its segment's stream owner has ended
+        (`_Records.forget`)."""
         self._in_flight = {
             key: started for key, started in self._in_flight.items() if key[0] != conversation
         }
-        return mine
+        self._records.forget(conversation)
+
+    def count(self, conversation: str) -> int:
+        """How many records this conversation has had appended (`_Records`)."""
+        return self._records.count(conversation)
 
     def set_step_order(
         self,
@@ -981,33 +1071,8 @@ class _RecordingSurface:
 
 
 # ---------------------------------------------------------------------------
-# ADK events -> wire frames
+# Turn events -> wire frames
 # ---------------------------------------------------------------------------
-
-
-def _node_name(event: Event) -> str:
-    path = event.node_info.path if event.node_info else ""
-    return path.split("/")[-1].split("@")[0]
-
-
-def _request_input_call(event: Event) -> tuple[str, dict[str, Any]] | None:
-    """The (interrupt id, `RequestInput` dump) a pausing node's interrupt
-    event carries. The dump is keyed by RequestInput's camelCase aliases;
-    the id is the function call's own `id` (set to the interrupt id by
-    ADK's `create_request_input_event`).
-
-    None for a partial event. A streamed model call reaches the runner
-    first as partial chunks and then as one aggregated non-partial event,
-    and the runner saves only the non-partial one to the session. A pause
-    frame built from a chunk would name a call the session may never hold,
-    so `/interrupt`'s answer to it would match no call."""
-    if event.partial or not (event.content and event.content.parts):
-        return None
-    for part in event.content.parts:
-        call = part.function_call
-        if call is not None and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
-            return str(call.id or ""), dict(call.args or {})
-    return None
 
 
 def _facts(*facts: Any) -> str | None:
@@ -1356,7 +1421,7 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
 def _planner_question(args: dict[str, Any]) -> ElicitationQuestion:
     """The planner's ask as the frame's one question, `q1`. Its call's
     arguments, which its tool accepted (`planner.tools.ask_refusal`) and
-    carries as its `RequestInput`'s `payload`, are the question directly:
+    the planner node's pause carries as its `payload`, are the question directly:
     `message`, `candidates`, `options`, `recommended_spec_id` and `rationale`.
     `options` are fixed choices that are no source, such as whether to add
     two datasets (`submission.service.COMBINATION_OPTIONS`). The planner reads
@@ -1400,19 +1465,57 @@ class _StatusLine:
     note: str | None = None
 
 
+# The events a turn segment emits: the loop's own and the graph's nodes'.
+type SegmentEvent = GraphEvent | TurnEvent
+
+# How many records each recorder held for the conversation when an event was
+# emitted, the executor's and the surface's (`None` with no surface), or
+# `None` for an event that takes no records.
+type RecordMarks = tuple[int, int | None] | None
+
+
+class _EventRecords:
+    """The half of a segment's translation that runs in the task running
+    the segment. It marks each event with how many calls the recorders
+    held for the conversation as it was emitted (`RecordMarks`), and reads
+    nothing else. The stream's owner takes those calls when it translates
+    the event (`_Translator.translate_recorded`)."""
+
+    def __init__(
+        self, recorder: _RecordingExecutor, surface_recorder: _RecordingSurface | None = None
+    ) -> None:
+        self._recorder = recorder
+        self._surface_recorder = surface_recorder
+
+    def recorded(self, event: SegmentEvent) -> tuple[SegmentEvent, RecordMarks]:
+        """`event` with its marks: none for a plan step's progress report,
+        which takes no calls (`_Translator._translate`)."""
+        if isinstance(event, StepProgress):
+            return event, None
+        conversation = current_conversation_id.get()
+        surface = self._surface_recorder
+        return event, (
+            self._recorder.count(conversation),
+            surface.count(conversation) if surface is not None else None,
+        )
+
+
 class _Translator:
-    """One turn segment's ADK-event-to-wire-frame translation.
+    """One turn segment's translation of its events into wire frames.
 
     Stateful over the segment: `paused` is set when a pausing frame
     (plan.proposed / elicitation.request) is emitted, which tells the route
     the stream must end without `done` (contract delta 1).
 
-    The agent's tool calls run through the recording executor and surface,
-    so their steps and cards arrive through `_drain_recorder`; the plan
-    path's events (the planner's status lines, the executor's step
-    progress, the approval and clarify interrupts) go to
-    `_plan_path_frames`. On top of those, the agent's own events stream as
-    they happen:
+    It runs in the stream owner's task. Each event the segment emits
+    arrives marked with how many calls the recorders held as it was emitted
+    (`_EventRecords`), and the translator takes those calls and translates
+    them, then the event, in order (`translate_recorded`). The agent's tool
+    calls run through the recording executor and surface, so their steps and
+    cards arrive as the records each event took (`_record_frames`). The plan
+    path's events (the planner's status lines, the executor's step progress,
+    the approval and clarify pauses) go to `_plan_path_frames`. On top of
+    those, the agent's own events stream as they happen:
 
     - one running status line (an `activity.step` with no `tool`) whenever
       the agent works and no tool step runs. After a batch of tool results
@@ -1439,8 +1542,8 @@ class _Translator:
       only if no later call of the tool completed;
     - answer text, as `message.delta` chunks, the last model call's text
       being the turn's `message.complete`: text before a tool call is
-      interim, and text after a hand-off to the user or the planner would
-      sit above the question or the plan card, so neither is the answer;
+      interim, and a run ends on its hand-off to the user or the planner,
+      so no text of it sits above the question or the plan card;
     - an orchestrator node's own status line ("Reading your question") as a
       running step until the next thing happens; a plan hand-back shows a
       failed step and then "Reading why no plan was made" when the planner
@@ -1477,8 +1580,8 @@ class _Translator:
         self._final_text = ""
         self.paused = False
         # Whether the planner's latest entry replans for a pick on the plan
-        # card (`PLANNER_STARTED_KEY`'s `"pick"`), so a question it asks
-        # resumes a stoppable replan.
+        # card (`PlannerStarted.pick`). Its drafted plan keeps the planner
+        # decisions' labels (`_node_done`).
         self._pick_replan = False
         # The running status line.
         self._status: _StatusLine | None = None
@@ -1522,72 +1625,114 @@ class _Translator:
         # place among them, by call id.
         self._calls = 0
         self._call_order: dict[str, int] = {}
-        # The kind of hand-off ("plan", "ask") the agent's tools recorded.
-        self._handed_off: str | None = None
+        # The calls of the agent's latest model response that no
+        # `ToolsAnswered` has answered yet, as (call id, tool), in call order.
+        self._unanswered: list[tuple[str, str]] = []
         # The highest composition revision this stream has sent.
         self._sent_revision = 0
 
-    async def _plan_path_frames(self, event: Event) -> list[Any]:
+    async def translate_recorded(self, event: SegmentEvent, marks: RecordMarks) -> list[Any]:
+        """The frames of `event`, emitted with `marks` (`_EventRecords`):
+        those of the calls recorded before it, then its own."""
+        records = [] if marks is None else self._take_records(marks)
+        return await self._translate(event, records)
+
+    async def _translate(self, event: SegmentEvent, records: list[_ExecutorRecord]) -> list[Any]:
+        """The frames of `event`: those of `records`, the calls recorded
+        before it, then its own."""
+        # A paused segment ends on its pause frame.
+        if self.paused:
+            return []
+        match event:
+            case StepProgress():
+                # Mid-run, the run's records wait for the execute node's
+                # end. A report can arrive after the call it describes has
+                # returned and been recorded, so taking records here could
+                # close a step's line before this frame reopens it. Also,
+                # `harness.graph.execute` may amend a finished step's
+                # record (`_RecordingSurface.mark_step_failed`) once the
+                # whole run is over.
+                return [*self._close_starting(), self._running_step(event)]
+            case TurnFailed(error=error):
+                # The calls the failed node finished since the last event,
+                # a plan step's among them, show before the turn's error.
+                return [
+                    *await self._record_frames(records),
+                    _stream_fatal(self._conversation, error),
+                ]
+            case ToolsAnswered(answers=answers, state=state):
+                keep_turn_records(self._conversation, state)
+                return await self._agent_answers(self._answered(answers), records)
+            case NodeDone(node="orchestrate", label=label) if label in HAND_OFF_EDGES.values():
+                # A hand-off no `ToolsAnswered` drew: the response made the
+                # hand-off call alone.
+                return await self._agent_answers(self._answered(()), records)
+            case PlannerAnswers(state=state):
+                keep_turn_records(self._conversation, state)
+        frames: list[Any] = await self._record_frames(records)
+        match event:
+            case AgentStatus():
+                frames.extend(self._agent_status(event))
+            case TextDelta(text=text):
+                frames.extend(self._agent_text(text))
+            case ModelResponded(parts=parts):
+                frames.extend(self._agent_response(parts))
+            case _:
+                frames.extend(self._plan_path_frames(event))
+        return frames
+
+    def _plan_path_frames(self, event: SegmentEvent) -> list[Any]:
         """Frames for an event of the plan path: the planner's status lines,
-        a plan step's progress, the approval and clarify interrupts."""
-        step_progress = (
-            event.custom_metadata.get(STEP_PROGRESS_KEY) if event.custom_metadata else None
-        )
-        if isinstance(step_progress, dict):
-            # Mid-call: records wait for the node's own result event. A
-            # report can arrive after the call it describes has returned and
-            # been recorded, so draining here could close a step's line
-            # before this frame reopens it; and `harness.graph`'s `execute`
-            # may still amend a finished step's record
-            # (`_RecordingSurface.mark_step_failed`) once the whole run is over.
-            return [*self._close_starting(), self._running_step(step_progress)]
-        frames: list[Any] = await self._drain_recorder()
-        interrupt = _request_input_call(event)
-        if interrupt is not None:
-            adk_id, args = interrupt
-            frames.extend(self._close_status())
-            if adk_id == APPROVE_INTERRUPT:
-                frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
-            frames.extend(self._interrupt_frames(adk_id, args))
-            return frames
-        if event.author == PLANNER_AGENT_NAME and not event.partial:
-            calls = event.get_function_calls()
-            runs = running_plan_write([call.name or "" for call in calls])
-            for place, call in enumerate(calls):
-                # A plan write after the response's first is refused unrun,
-                # so it opens no line.
-                if call.name in PLAN_WRITES and place != runs:
-                    continue
-                frames.extend(self._planner_call_status(call.name or ""))
-            responses = event.get_function_responses()
-            for response in responses:
-                if response.name == PROPOSE_PLAN:
-                    recorded = event.actions.state_delta.get(PLAN_STATE_KEY)
-                    frames.extend(self._proposal_answered(response.response or {}, recorded))
-            if any(response.name in _SKILL_READS for response in responses):
-                # The skill read is over and the planner's next model call starts.
-                frames.extend(self._end_note())
-            return frames
-        node = _node_name(event)
-        # The planner node's other `custom_metadata` events, the adapter's
-        # late `progress` reports, carry no output and add no frame.
-        started = event.custom_metadata.get(PLANNER_STARTED_KEY) if event.custom_metadata else None
-        if node == "planner" and isinstance(started, dict):
-            # The planner drafts the plan again, an amendment's or an execute
-            # replan's, and may reuse the requirement ids the choice ids are
-            # built from, so no earlier card's labels describe its choices.
-            # A pick's replan that raises, is stopped or is refused leaves the
-            # plan unchanged, so it drops them only once it lands, and then
-            # only the scope choices' (below).
-            self._pick_replan = bool(started.get("pick"))
-            if not self._pick_replan:
-                self._conversation.turn_choice_baseline = {}
-            label = "Revising the plan" if started.get("revising") else _WORKING_ON_PLAN
-            frames.extend(self._open_status(label))
-        output = event.output if isinstance(event.output, dict) else None
-        if output is None:
-            return frames
-        if node == "approve" and event.actions.route == "approved":
+        a node's end, the approval and clarify pauses."""
+        frames: list[Any] = []
+        match event:
+            case Paused():
+                frames.extend(self._close_status())
+                if event.kind == APPROVE_PAUSE:
+                    frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
+                frames.extend(self._interrupt_frames(event))
+            case PlannerResponse(parts=parts):
+                calls = [part.function_call for part in parts if part.function_call is not None]
+                runs = running_plan_write([call.name or "" for call in calls])
+                for place, call in enumerate(calls):
+                    # A plan write after the response's first is refused
+                    # unrun, so it opens no line.
+                    if call.name in PLAN_WRITES and place != runs:
+                        continue
+                    frames.extend(self._planner_call_status(call.name or ""))
+            case PlannerAnswers(answers=answers, state=state):
+                for answer in answers:
+                    if answer.name == PROPOSE_PLAN:
+                        frames.extend(
+                            self._proposal_answered(
+                                answer.response or {}, state.get(PLAN_STATE_KEY)
+                            )
+                        )
+                if any(answer.name in _SKILL_READS for answer in answers):
+                    # The skill read is over and the planner's next model call starts.
+                    frames.extend(self._end_note())
+            case PlannerStarted(revising=revising, pick=pick):
+                # The planner drafts the plan again, an amendment's or an
+                # execute replan's, and may reuse the requirement ids the
+                # choice ids are built from, so no earlier card's labels
+                # describe its choices. A pick's replan that raises, is
+                # stopped or is refused leaves the plan unchanged, so it drops
+                # them only once it lands, and then only the scope choices'
+                # (`_node_done`).
+                self._pick_replan = pick
+                if not pick:
+                    self._conversation.turn_choice_baseline = {}
+                frames.extend(
+                    self._open_status("Revising the plan" if revising else _WORKING_ON_PLAN)
+                )
+            case NodeDone(node=node, label=label, output=output) if isinstance(output, dict):
+                frames.extend(self._node_done(node, label, output))
+        return frames
+
+    def _node_done(self, node: str, label: str, output: dict[str, Any]) -> list[Any]:
+        """Frames for node `node` finishing on edge `label` with `output`."""
+        frames: list[Any] = []
+        if node == "approve" and label == "approved":
             if self._approving is not None:
                 frames.append(
                     plan_approved(
@@ -1599,8 +1744,8 @@ class _Translator:
                 self._approving = None
             frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._open_status(_STARTING_PLAN))
-        if node == "planner":
-            if event.actions.route == "ok":
+        elif node == "planner":
+            if label == "ok":
                 # A drafted plan, whose requirement ids, and so its scope
                 # choice ids, may be reused. A planner decision's row is
                 # named by its slot and its options by their labels, so a
@@ -1608,14 +1753,31 @@ class _Translator:
                 # user switched names the label it was switched from.
                 self._conversation.turn_choice_baseline = (
                     {
-                        choice_id: label
-                        for choice_id, label in self._conversation.turn_choice_baseline.items()
+                        choice_id: choice_label
+                        for choice_id, choice_label in (
+                            self._conversation.turn_choice_baseline.items()
+                        )
                         if choice_id.startswith(plan_display.DECISION_CHOICE_PREFIX)
                     }
                     if self._pick_replan
                     else {}
                 )
             frames.extend(self._close_status())
+        elif node == "execute":
+            # The run's records came with this event, so a line still
+            # running belongs to a step that recorded nothing.
+            frames.extend(self._close_unrecorded_steps(output))
+            if label == "ok":
+                # The plan ran. `plan_done` describes its frames, then the
+                # agent reads them under the label of the step that gives
+                # the answer.
+                frames.extend(
+                    self._open_status(ORCHESTRATOR_PLAN_RAN_STATUS, detail=self._answer_detail)
+                )
+            # A replan runs a plan of its own, whose steps may reuse these
+            # ids, so each of its steps opens a line of its own.
+            self._answer_step = self._answer_detail = None
+            self._wire_step_ids.clear()
         return frames
 
     def _planner_call_status(self, name: str) -> list[ActivityStep]:
@@ -1746,15 +1908,14 @@ class _Translator:
             self._wire_step_ids[step] = wire_id
         return wire_id
 
-    def _running_step(self, progress: dict[str, Any]) -> ActivityStep:
-        """A step's progress report (`harness.graph.execute._step_progress_event`) as a
-        `running` frame on the step's own wire id, with `_plan_step_detail` as
-        `detail`. The label matches the one the step's final frame carries
-        (`_drain_recorder`), since the Activity feed names a line from its
-        first frame."""
-        tool = str(progress.get("tool") or "")
-        step = str(progress.get("step_id"))
-        if progress.get("gives_answer") is True:
+    def _running_step(self, progress: StepProgress) -> ActivityStep:
+        """A step's progress report as a `running` frame on the step's own
+        wire id, with `_plan_step_detail` as `detail`. The label matches the
+        one the step's final frame carries (`_record_frames`), since the
+        Activity feed names a line from its first frame."""
+        tool = progress.tool
+        step = progress.step_id
+        if progress.gives_answer is True:
             self._answer_step = step
         seq = self._conversation.next_seq()
         plan_labels = (
@@ -1775,7 +1936,7 @@ class _Translator:
             detail=_plan_step_detail(progress),
         )
 
-    def _close_unrecorded_steps(self, output: object) -> list[ActivityStep]:
+    def _close_unrecorded_steps(self, output: Mapping[str, Any]) -> list[ActivityStep]:
         """A `failed` frame for each plan step whose line is still running
         at the execute node's output, timed from its first report: the run
         ended with no record of the step, as when the ledger could not record
@@ -1783,7 +1944,7 @@ class _Translator:
         states, read as a step that did not finish is read
         (`_RecordingSurface.mark_step_failed`), and the generic one when it
         states none."""
-        run = output.get("run") if isinstance(output, Mapping) else None
+        run = output.get("run")
         code = run.get("code") if isinstance(run, Mapping) else None
         now = time.monotonic()
         frames = [
@@ -1804,22 +1965,24 @@ class _Translator:
         """Frames for every call recorded since the last drain."""
         return await self._record_frames(self._take_records())
 
-    def _take_records(self) -> list[_ExecutorRecord]:
-        """Every call recorded since the last drain, plan steps first."""
+    def _take_records(self, marks: tuple[int, int | None] | None = None) -> list[_ExecutorRecord]:
+        """The calls recorded since the last drain, plan steps first: every
+        one, or those recorded before `marks` (`_EventRecords`)."""
         conversation = current_conversation_id.get()
-        records = list(self._recorder.drain(conversation))
+        executor_mark, surface_mark = marks if marks is not None else (None, None)
+        records = list(self._recorder.drain(conversation, executor_mark))
         if self._surface_recorder is not None:
             # Plan steps (the surface) precede the executor's own calls
             # within any one segment, so this ordering matches
             # what actually ran; the two never both hold records at once in
-            # practice, since draining happens between every ADK event. A
+            # practice, since every event takes the records before it. A
             # wave's steps finish, and get recorded, in whatever order the
             # event loop schedules them (`executor.run._Run.execute` gathers
             # a wave concurrently), so the surface's own records are
             # stable-sorted into the latest plan's step order before
             # numbering; a record whose `step_id` that order does not name
             # sorts after every named one, in the order it was recorded.
-            surface_records = self._surface_recorder.drain(conversation)
+            surface_records = self._surface_recorder.drain(conversation, surface_mark)
             order = self._surface_recorder.step_order(conversation)
             position = {step_id: index for index, step_id in enumerate(order)}
             surface_records = sorted(
@@ -1903,6 +2066,8 @@ class _Translator:
                         land=record.land,
                         intent=record.args.get("intent"),
                         created=created,
+                        write_token=record.write_token,
+                        card_lineage=record.card_lineage,
                     )
                 )
         return frames
@@ -1914,6 +2079,8 @@ class _Translator:
         land: bool,
         created: ComponentCreated,
         intent: dict[str, Any] | None = None,
+        write_token: str | None = None,
+        card_lineage: CardLineage | None = None,
     ) -> list[Any]:
         """Frames for `component`, which passed the `component.created` wire
         contract (`created` is the frame `_record_frames` built from it).
@@ -1928,28 +2095,51 @@ class _Translator:
         goes out. `land=True` against an `auto_add=False` conversation
         resolves to `"held"` inside `harness.studio_state.land_component`
         itself, also only `component.created`, and writes the card's entry
-        with no block."""
+        with no block. The card's `write_token` is kept with it, in its
+        write, and its `card_lineage` commits in that write. A card that does
+        not land keeps its token in the conversation for the closing write,
+        and stores no lineage."""
         created.seq = self._conversation.next_seq()
         if not land:
+            if write_token:
+                self._conversation.write_tokens[created.component_id] = write_token
             return [created]
-        if await self._land(component, intent=intent) != "created":
+        landed = await self._land(
+            component, intent=intent, write_token=write_token, card_lineage=card_lineage
+        )
+        if landed != "created":
             return [created]
         # Read with no await since the landing, so this is the manifest it wrote.
         return [created, *self._composition_update()]
 
     async def _land(
-        self, component: dict[str, Any], *, intent: dict[str, Any] | None
+        self,
+        component: dict[str, Any],
+        *,
+        intent: dict[str, Any] | None,
+        write_token: str | None,
+        card_lineage: CardLineage | None = None,
     ) -> Literal["created", "held"]:
         """`harness.studio_state.land_component` on the current
         conversation, inside the store's card write
         (`StudioStore.change_canvas`), which hands it the canvas as stored
         and commits the block it appends with the card's digest entry, turn
-        line and write token. A held card appends no block, and its entry,
-        line and token commit the same way."""
+        line, write token and frame lineage (`card_lineage`). A held card
+        appends no block, and its entry, line and token commit the same way,
+        with no lineage."""
         key = current_conversation_key.get()
         assert key is not None, "a card lands only inside a conversation's stream"
+
+        def land(work: ConversationState) -> Literal["created", "held"]:
+            if write_token:
+                work.write_tokens = {
+                    **work.write_tokens,
+                    str(component["component_id"]): write_token,
+                }
+            return state_land_component(work, component, intent=intent)
+
         return await self._recorder.store.change_canvas(
-            *key, lambda work: state_land_component(work, component, intent=intent)
+            *key, land, lineage=card_lineage, landed=lambda landed: landed == "created"
         )
 
     def _composition_update(self) -> list[CompositionUpdated]:
@@ -1980,8 +2170,14 @@ class _Translator:
             )
         ]
 
-    def _interrupt_frames(self, adk_id: str, args: dict[str, Any]) -> list[Any]:
-        """Every wire model either branch below returns is `extra="forbid"`,
+    def _interrupt_frames(self, pause: Paused) -> list[Any]:
+        """The frame of `pause`, under the wire interrupt id the turn loop
+        minted for it: the plan card for an `approve` pause, the questions
+        for any other. A pause the conversation already holds, which a
+        stream whose client never read it translated, is sent as that stream
+        sent it (`_PendingInterrupt.frames`).
+
+        Every wire model either branch below returns is `extra="forbid"`,
         so building one is real work that can raise. Both branches write
         `conversation.pending[wire_id]` only after every model they are
         about to return has already been built successfully: written any
@@ -1990,10 +2186,19 @@ class _Translator:
         mirrored rule on delete, at `harness.studio`'s `/interrupt` route,
         keeps a record from being lost the same way)."""
         conversation = self._conversation
-        payload = args.get("payload") or {}
-        wire_id = _wire_id("int")
+        payload = pause.payload
+        wire_id = pause.interrupt_id
         self.paused = True
-        if adk_id == APPROVE_INTERRUPT:
+        shown = conversation.pending.get(wire_id)
+        if shown is not None and shown.frames:
+            # A stream whose client never read this pause translated it and
+            # stored what it sent: the replay of the pause
+            # (`harness.studio._replay_pause`) sends the same frames, the
+            # lineage as that stream left it, under fresh `seq`s.
+            return [
+                frame.model_copy(update={"seq": conversation.next_seq()}) for frame in shown.frames
+            ]
+        if pause.kind == APPROVE_PAUSE:
             frames: list[Any] = []
             note = payload.get("refusal_note")
             if isinstance(note, str) and note:
@@ -2198,7 +2403,7 @@ class _Translator:
             )
             frames.append(card)
             conversation.pending[wire_id] = _PendingInterrupt(
-                adk_id=adk_id,
+                adk_id=wire_id,
                 kind="plan",
                 plan_version=version,
                 plan_revision=revision,
@@ -2206,14 +2411,15 @@ class _Translator:
                 step_labels=step_labels,
                 choices=choices,
                 card=card,
+                frames=tuple(frames),
             )
             return frames
-        # The workflow's own `ask` node raises a `RequestInput` whose `payload`
-        # carries one to three `questions`, each with its `candidates`. A
-        # lone question is dismissed with the whole pause. Each of several
-        # may be left to the agent instead. The planner node's pause on the
-        # planner's ask carries the ask call's arguments as `payload`, one
-        # question (`_planner_question`).
+        # The graph's own `ask` node pauses with a `payload` that carries one
+        # to three `questions`, each with its `candidates`. A lone question
+        # is dismissed with the whole pause. Each of several may be left to
+        # the agent. The planner node's pause on the planner's ask carries
+        # the ask call's arguments as `payload`, one question
+        # (`_planner_question`).
         asked = payload.get("questions")
         if asked:
             several = len(asked) > 1
@@ -2234,11 +2440,9 @@ class _Translator:
                 for question in asked
             ]
             skippable = not several
-            pick_replan = False
         else:
             questions = [_planner_question(payload)]
             skippable = True
-            pick_replan = self._pick_replan
         frame = ElicitationRequest(
             event="elicitation.request",
             seq=conversation.next_seq(),
@@ -2247,7 +2451,7 @@ class _Translator:
             skippable=skippable,
         )
         conversation.pending[wire_id] = _PendingInterrupt(
-            adk_id=adk_id,
+            adk_id=wire_id,
             kind="elicitation",
             questions=tuple(
                 _PendingQuestion(
@@ -2259,7 +2463,7 @@ class _Translator:
                 for question in questions
             ),
             skippable=skippable,
-            pick_replan=pick_replan,
+            frames=(frame,),
         )
         return [frame]
 
@@ -2341,80 +2545,55 @@ class _Translator:
             and record.result.get("outcome") != "refusal"
         )
 
-    async def translate(self, event: Event) -> list[Any]:
-        # A paused segment ends on its pause frame; the planner relays its
-        # queued progress after pausing.
-        if self.paused:
+    def _agent_status(self, event: AgentStatus) -> list[ActivityStep]:
+        """An agent run starts under the status line `event` names: whatever
+        the agent wrote before was interim. A plan hand-back with no plan
+        shows the failed step first."""
+        self._final_text = ""
+        self._unanswered = []
+        frames: list[ActivityStep] = []
+        if event.text == ORCHESTRATOR_PLAN_FAILED_STATUS:
+            frames.extend(self._close_status())
+            code = event.failure.get("code") if isinstance(event.failure, Mapping) else None
+            detail = failure_detail({"code": code})
+            frames.append(
+                self._failed_step(
+                    _PLAN_MADE, self._step(None, _PLAN_FAILED, StepStatus.FAILED, detail=detail)
+                )
+            )
+        # The agent reads the planner's answer under its own line. A plan
+        # hand-back's status is the line the execute node's end opened,
+        # which keeps running.
+        frames.extend(self._open_status(event.text))
+        return frames
+
+    def _agent_text(self, text: str) -> list[Any]:
+        """Answer text as the model streams it."""
+        if not text:
             return []
-        status = (
-            event.custom_metadata.get(ORCHESTRATOR_STATUS_KEY) if event.custom_metadata else None
+        frames: list[Any] = self._close_status()
+        self._streamed_text = True
+        self._final_text += text
+        frames.append(
+            MessageDelta(event="message.delta", seq=self._conversation.next_seq(), text=text)
         )
-        if isinstance(status, str):
-            # An agent run starts: whatever it wrote before was interim.
-            self._final_text = ""
-            self._handed_off = None
-            frames = await self._drain_recorder()
-            if status == ORCHESTRATOR_PLAN_FAILED_STATUS:
-                frames.extend(self._close_status())
-                failure = (event.custom_metadata or {}).get(ORCHESTRATOR_STATUS_FAILURE_KEY)
-                code = failure.get("code") if isinstance(failure, Mapping) else None
-                detail = failure_detail({"code": code})
-                frames.append(
-                    self._failed_step(
-                        _PLAN_MADE, self._step(None, _PLAN_FAILED, StepStatus.FAILED, detail=detail)
-                    )
-                )
-                # The agent reads the planner's answer under its own line.
-                frames.extend(self._open_status(status))
-            else:
-                # A plan hand-back's status is the line the execute node's
-                # result opened, which keeps running.
-                frames.extend(self._open_status(status))
-            return frames
-        if event.author != ORCHESTRATOR_AGENT_NAME:
-            frames = await self._plan_path_frames(event)
-            if _node_name(event) == "execute" and event.output is not None:
-                # `_plan_path_frames` drained the run's records, so a line
-                # still running belongs to a step that recorded nothing.
-                frames.extend(self._close_unrecorded_steps(event.output))
-                if event.actions.route == "ok":
-                    # The plan ran: `plan_done` describes its frames, then the
-                    # agent reads them under the label of the step that
-                    # gives the answer.
-                    frames.extend(
-                        self._open_status(ORCHESTRATOR_PLAN_RAN_STATUS, detail=self._answer_detail)
-                    )
-                # A replan runs a plan of its own, whose steps may reuse these
-                # ids, so each of its steps opens a line of its own.
-                self._answer_step = self._answer_detail = None
-                self._wire_step_ids.clear()
-            return frames
-        records = self._take_records()
-        frames: list[Any] = await self._record_frames(records)
-        parts = event.content.parts if event.content and event.content.parts else []
+        return frames
+
+    def _agent_response(self, parts: Sequence[types.Part]) -> list[Any]:
+        """A finished model response: its text, unless it streamed already,
+        and a running step for each call it makes."""
+        frames: list[Any] = []
         text = "".join(part.text or "" for part in parts if part.text and not part.thought)
-        if event.partial:
-            if text and not self._handed_off:
-                frames.extend(self._close_status())
-                self._streamed_text = True
-                self._final_text += text
-                frames.append(
-                    MessageDelta(
-                        event="message.delta", seq=self._conversation.next_seq(), text=text
-                    )
-                )
-            return frames
-        # A finished model call: its text arrived already as partials unless
-        # the model sent it in one piece.
-        if text and not self._streamed_text and not self._handed_off:
+        if text and not self._streamed_text:
             frames.extend(self._close_status())
             self._final_text += text
             frames.append(
                 MessageDelta(event="message.delta", seq=self._conversation.next_seq(), text=text)
             )
         self._streamed_text = False
-        calls = event.get_function_calls()
-        if calls and not self._handed_off:
+        calls = [part.function_call for part in parts if part.function_call is not None]
+        self._unanswered = [(call.id or "", call.name or "") for call in calls]
+        if calls:
             self._final_text = ""
             # A skill read shows no step, so the line it ran under keeps
             # running and notes the read until its answer comes.
@@ -2422,7 +2601,7 @@ class _Translator:
                 frames.extend(self._close_status())
             else:
                 frames.extend(self._note_status(_READING_NOTE))
-        for call in event.get_function_calls():
+        for call in calls:
             name = call.name or ""
             args = call.args or {}
             self._calls += 1
@@ -2442,18 +2621,54 @@ class _Translator:
                 detail,
             )
             frames.append(frame)
+        return frames
+
+    def _answered(self, answers: Sequence[types.FunctionResponse]) -> list[types.FunctionResponse]:
+        """The answers of the agent's latest response's calls, in call order:
+        each of `answers` that answers one, and, for a hand-off call none of
+        them answers, the record of its hand-off.
+
+        Pydantic AI answers every call of a response but a deferred one, and
+        the agent's tools defer a call only on a hand-off they recorded
+        (`orchestrator.agent`), so such a call handed off, and the run ends
+        on it.
+        An answer to no call of the response is the hand-back a resumed run
+        opens on, which its status line shows (`_agent_status`)."""
+        by_id = {answer.id or "": answer for answer in answers}
+        responses = []
+        for call_id, name in self._unanswered:
+            if call_id in by_id:
+                responses.append(by_id[call_id])
+            elif name in HAND_OFF_EDGES:
+                responses.append(
+                    types.FunctionResponse(
+                        id=call_id, name=name, response={HANDED_OFF: HAND_OFF_EDGES[name]}
+                    )
+                )
+        self._unanswered = []
+        return responses
+
+    async def _agent_answers(
+        self, responses: list[types.FunctionResponse], records: list[_ExecutorRecord]
+    ) -> list[Any]:
+        """The frames of `records`, the calls the answered tools made, then
+        each of `responses` closing its call's step, then the status line the
+        agent's next model call runs under."""
+        frames: list[Any] = await self._record_frames(records)
         # What the agent's next model call reads: (tool, arguments, result,
         # failed, the call's running detail unless its step failed) for each
         # response a status line can name.
         read: list[tuple[str, dict[str, Any], dict[str, Any], bool, str | None]] = []
-        # The asks of a plan hand-off this batch answered.
+        # The asks of a plan hand-off this batch answered, and the kind of
+        # hand-off ("plan", "ask") the agent's tools recorded.
         planned: str | None = None
-        for response in event.get_function_responses():
+        handed_off: str | None = None
+        for response in responses:
             # A hand-off counts once the tool recorded it; a refused or
             # failed one leaves the model to answer, and that text shows.
             answer = response.response or {}
             if answer.get(HANDED_OFF):
-                self._handed_off = str(answer[HANDED_OFF])
+                handed_off = str(answer[HANDED_OFF])
             # A failure's reason is written for the model, so its line
             # shows the sentence for its code.
             failed = "error" in answer or "refusal" in answer
@@ -2525,14 +2740,14 @@ class _Translator:
             if response.name in _READING_STAGES:
                 kept = None if status is StepStatus.FAILED else running
                 read.append((response.name or "", args, answer, failed, kept))
-        if not event.get_function_responses():
+        if not responses:
             return frames
-        if self._handed_off == "plan":
+        if handed_off == "plan":
             # The planner node opens this same line as it starts, which
             # keeps this one running through the hand-off.
             frames.extend(self._open_status(_WORKING_ON_PLAN, detail=planned))
-        elif self._handed_off is None:
-            responded = {response.name or "" for response in event.get_function_responses()}
+        elif handed_off is None:
+            responded = {response.name or "" for response in responses}
             frames.extend(self._reading_status(read, records, responded))
         # A skill read the line noted is over: the agent's next model call starts.
         frames.extend(self._end_note())
@@ -3102,7 +3317,7 @@ def _explain_detail(answer: dict[str, Any]) -> str | None:
     return None if counts in (None, COUNTS_UNAVAILABLE) else str(counts)
 
 
-def _plan_step_detail(progress: Mapping[str, Any]) -> str | None:
+def _plan_step_detail(progress: StepProgress) -> str | None:
     """A plan step's running detail: the report's message then `step <i> of
     <n>`, or, when the report has no message, `step <i> of <n>` then the card
     row's description, joined with " · " and cut at a word to
@@ -3114,20 +3329,21 @@ def _plan_step_detail(progress: Mapping[str, Any]) -> str | None:
     description shows. A step with no place on the card
     (`harness.graph.execute._card_places`) shows the message alone, that one
     included. Every running frame of the step carries the whole detail,
-    since the relay keeps only a step's latest report. A field of the wrong
-    type counts as absent.
+    since a stream that falls behind keeps only a step's latest report
+    (`harness.studio_stream.Emit`). A field of the wrong type counts as
+    absent.
     """
-    message = progress.get("message")
+    message = progress.message
     message = message.strip() if isinstance(message, str) else ""
     message = message or None
-    position, count = progress.get("position"), progress.get("count")
+    position, count = progress.position, progress.count
     if not (type(position) is int and type(count) is int and 1 <= position <= count):
         return _cut_at_word(message, _LINE_DETAIL_CAP) if message else None
     place = f"step {position} of {count}"
     room = _LINE_DETAIL_CAP - len(place) - len(" \u00b7 ")
     if message and message != RESULT_RECEIVED:
         return f"{_cut_at_word(message, room)} \u00b7 {place}"
-    description = progress.get("description")
+    description = progress.description
     described = description.strip().removesuffix(".") if isinstance(description, str) else ""
     return f"{place} \u00b7 {_cut_at_word(described, room)}" if described else place
 

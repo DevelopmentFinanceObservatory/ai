@@ -6,16 +6,14 @@ closed a model call (`PlannerRun.model_answered`). Before each model request
 it says whether the run asks the user, stops, or leaves the request to the
 model (`PlannerRun.next_request`). The answer is a `Directive`: `Ask` with the
 `PLANNER_ASK` call's arguments, or `Stop` with the refusal the run ends on.
-`harness.planner_adapter` makes one for each planner run, `harness.planner_node`
-drives it through the planner's model hooks, and
-`harness.planner_node.directive_turn` builds the model turn each directive
-stands for.
+`harness.planner_adapter` makes one for each planner run, drives it through
+the planner's model hooks, and builds the model turn each directive stands
+for (`harness.planner_adapter.directive_turn`).
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -110,20 +108,13 @@ class PlannerRun:
     `ready_to_break` says the run stops before its next generation, on
     `refused`.
 
-    `on_progress`, when given, receives one report per tool answer, naming
-    `agent` and the tool. `on_tool_answered`, when given, receives each
-    tool's name and the answer the model reads (`tool_answered`).
+    `on_tool_answered`, when given, receives each tool's name and the answer
+    the model reads (`tool_answered`).
     """
 
     def __init__(
-        self,
-        *,
-        agent: str,
-        on_progress: Callable[[dict[str, Any]], None] | None = None,
-        on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
+        self, *, on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None
     ) -> None:
-        self._agent = agent
-        self._on_progress = on_progress
         self._on_tool_answered = on_tool_answered
         self.submitted: dict[str, Any] | None = None
         self.refused: dict[str, Any] | None = None
@@ -134,15 +125,9 @@ class PlannerRun:
         # for a referral the user decides (`_user_decided_ask`).
         self._ask: dict[str, Any] | None = None
         self._events = 0
-        # The clock a progress report's `duration_ms` measures against. It
-        # resets each time a report fires, so a report covers everything
-        # since the last one, including the thinking the model call that
-        # produced this one spent before emitting a function call. Nothing
-        # here sees a call start, so it cannot time one call alone.
-        self._last_progress = time.monotonic()
 
     def tool_answered(self, name: str, answer: dict[str, Any] | None) -> None:
-        """Record what tool `name` answered: progress, then what the answer settles.
+        """Record what tool `name` answered, and what the answer settles.
 
         A terminal refusal (`_is_terminal_refusal`) ends the turn, a
         `translation` is the verdict on the plan the call recorded, and
@@ -151,8 +136,7 @@ class PlannerRun:
 
         The run's `on_tool_answered` observer is told the name and answer before
         any of that, on every answer: a tool's own, a refusal of its arguments,
-        and `tool_failed`'s for a tool that raised. What it raises propagates,
-        as what `on_progress` raises does.
+        and `tool_failed`'s for a tool that raised. What it raises propagates.
 
         Every answer is recorded, however many the run has had. The cap
         `_MAX_EVENTS` applies in `next_request`.
@@ -160,16 +144,6 @@ class PlannerRun:
         self._events += 1
         if self._on_tool_answered is not None:
             self._on_tool_answered(name, answer)
-        if self._on_progress is not None:
-            now = time.monotonic()
-            self._on_progress(
-                {
-                    "agent": self._agent,
-                    "tools": [name],
-                    "duration_ms": int((now - self._last_progress) * 1000),
-                }
-            )
-            self._last_progress = now
         if _is_terminal_refusal(answer):
             # The proposal refused with a code that records nothing and
             # leaves nothing correctable within this entry: the round cap

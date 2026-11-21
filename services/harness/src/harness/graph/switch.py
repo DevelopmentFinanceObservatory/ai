@@ -55,9 +55,12 @@ refusal's code, one sentence saying why (`harness.sentences.
 refusal_reason` for a refused revision) and whether the same switch can
 succeed if asked again (`retryable`), and leaves the plan, the planner's
 drafting state and the turn's readings as they were (`_RESTORED_KEYS`). A
-switch the user stops (`SWITCH_STOP`, which the studio sets on a Stop
-while the switch runs) ends the same way under `SWITCH_CANCELLED`, so the
-card stays answerable.
+switch the user stops ends the same way under `SWITCH_CANCELLED`, so the
+card stays answerable: the revision runs under the turn's `StopScope`
+(`harness.turn.node.NodeCtx.stop`), so the first Stop while it runs ends
+the revision and the node returns its offer, which the loop writes with the
+state put back. A second Stop ends the turn. A switch that raises closes
+the turn with nothing it wrote stored.
 
 A chip under an answer applies one option the same way, with no plan
 (`apply_stored_choice`): the `seed` node posts the stored reading's base
@@ -71,15 +74,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
-from contextvars import ContextVar
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
 from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
 from data_mcp.scope import ScopeEntry
-from google.adk import Context, Event
+from orchestrator.call import OrchestratorCall
 from planner.plan import (
     AlignedInput,
     DatasetRequirement,
@@ -114,7 +116,9 @@ from translator.discovery import (
 )
 
 from harness.decision_pick import picks_the_chosen_option
+from harness.graph.events import GraphEvent
 from harness.graph.interfaces import PlannerModel
+from harness.graph.orchestrate import turn_id
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -137,6 +141,7 @@ from harness.scope_choices import (
 )
 from harness.sentences import StopCode
 from harness.tool_contracts import resolver_digest
+from harness.turn.node import Next, Node, NodeCtx
 from harness.turn_records import CHIP_STALE_NOTE, SearchReading, stored_choice
 
 logger = logging.getLogger(__name__)
@@ -167,8 +172,10 @@ _DRAFTING_PREFIXES = ("planner:", "translator:")
 # puts back too: the plan, and the readings `store_search` stores for the
 # switched sources and for the datasets the revision searches
 # (`harness.planner_adapter.store_searched_pin_readings`), with their blocks. Each
-# maps to the value it is put back as when unset, since the studio reads the
-# readings and blocks as a list and a mapping (`harness.studio`).
+# maps to the value it is put back as when unset, since the readers take the
+# readings and blocks as a list and a mapping. The blocks are the turn's whole
+# spec mapping, which the turn store writes as given (`harness.turn.store`), so
+# a block the revision added is deleted and one it rewrote is put back.
 _RESTORED_KEYS: Mapping[str, Any] = {
     "plan": None,
     ORCHESTRATOR_SEARCHES_KEY: [],
@@ -184,11 +191,6 @@ APPLY_CHOICE_STEP_TOOL = "apply_choice"
 SCOPE_CHOICE_NOT_APPLIED = "scope_choice_not_applied"
 # The code of a switch the user stopped while it ran.
 SWITCH_CANCELLED = "switch_cancelled"
-
-# Set by the studio when the user stops the stream a plan-card switch runs
-# on (`harness.studio`): the `switch` node then abandons the revision and
-# offers the plan unchanged. `None` outside such a stream.
-SWITCH_STOP: ContextVar[asyncio.Event | None] = ContextVar("switch_stop", default=None)
 
 
 class _Pick(TypedDict):
@@ -253,12 +255,10 @@ class _Switched:
     block: Mapping[str, Any] | None = None
 
 
-def switch_node(
-    *, planner: PlannerModel, definition_surface: ToolSurface
-) -> Callable[[Context, Any], AsyncIterator[Any]]:
+def switch_node(*, planner: PlannerModel, definition_surface: ToolSurface) -> Node[GraphEvent]:
     """The `switch` node, revising with `planner` and posting through `definition_surface`."""
 
-    async def switch(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
+    async def switch(ctx: NodeCtx[GraphEvent], node_input: Any) -> Next:
         """Apply the switch `node_input` carries (`{"switch": {"choice_id", "option_id"}}`) and offer the plan again.
 
         One route out, `"offer"`, to the `approve` node: the revised plan
@@ -271,8 +271,8 @@ def switch_node(
         plan = readable_plan(ctx, ctx.state.get("plan"))
         assert plan is not None, "approve routes a switch only for a plan it read"
         choice_id, option_id = str(pick.get("choice_id")), str(pick.get("option_id"))
-        # The state as it stood, which a switch that fails, is stopped or
-        # ends on any other error leaves as it found.
+        # The state as it stood, which a switch that fails or is stopped
+        # leaves as it found.
         before = _restorable_state(ctx)
         try:
             # A `resolve_definition` call this turn already made is served its
@@ -292,12 +292,10 @@ def switch_node(
         except SwitchFailedError as exc:
             _restore(ctx, before)
             output = switch_failed_offer(plan, choice_id=choice_id, option_id=option_id, error=exc)
-        except BaseException:
-            _restore(ctx, before)
-            raise
-        yield Event(output=output, route="offer")
+        return Next("offer", output)
 
-    return switch
+    # A stopped switch offers the unchanged plan, whose pause records the Stop.
+    return Node(run=switch, stop_edges=frozenset({"offer"}))
 
 
 def switch_failed_offer(
@@ -327,14 +325,21 @@ def switch_failed_offer(
     }
 
 
-async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> dict[str, Any]:
-    """`revision`'s payload, unless the user stops the switch first (`SWITCH_STOP`).
+async def _unless_stopped(
+    ctx: NodeCtx[GraphEvent], revision: Awaitable[dict[str, Any]]
+) -> dict[str, Any]:
+    """`revision`'s payload, unless the user stops the switch first.
 
-    A stopped revision is cancelled and awaited without taking its outcome, so
-    a revision that ends in any way once the Stop came, an error its cleanup
-    raises included, ends stopped, as does one that finishes in the same wait
-    as the Stop. The `switch` node puts the state it wrote back, so the plan
-    stands unchanged. A cancellation of the node itself,
+    The revision runs while the node holds the turn's `StopScope` open
+    (`harness.turn.node.NodeCtx.stop`), so the first Stop sets the scope's
+    event and ends the revision, not the turn. The scope closes as soon as
+    the revision or the Stop ends the wait, before any cleanup, so a Stop
+    the scope took always ends the switch stopped and a later one ends the
+    turn. A stopped revision is cancelled and awaited without taking its
+    outcome, so a revision that ends in any way once the Stop came, an error
+    its cleanup raises included, ends stopped, as does one that finishes in
+    the same wait as the Stop. The `switch` node puts the state it wrote
+    back, so the plan stands unchanged. A cancellation of the node itself,
     while the revision unwinds, still cancels the node. A pick's replan
     that ended on the planner's question to the user (`{"asked": ...}`,
     `harness.graph.interfaces.PlannerModel`) stays paused though the Stop came in
@@ -345,15 +350,21 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
         SwitchFailedError: Under `SWITCH_CANCELLED` when the user stopped
             the switch, else as `revision` raises it.
     """
-    stop = SWITCH_STOP.get()
     running = asyncio.ensure_future(revision)
-    stopped = asyncio.ensure_future(stop.wait()) if stop is not None else None
+    stopped: asyncio.Future[Any] | None = None
     finished: set[asyncio.Future[Any]] = set()
+    was_stopped = False
     try:
-        finished, _ = await asyncio.wait(
-            {running, *([stopped] if stopped is not None else [])},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        # The scope closes as the wait returns, before any cleanup awaits, so
+        # a Stop either lands while the revision can still be stopped or
+        # finds the scope closed and ends the turn.
+        async with ctx.stop.open() as stop:
+            stopped = asyncio.ensure_future(stop.wait())
+            racing: set[asyncio.Future[Any]] = {running, stopped}
+            try:
+                finished, _ = await asyncio.wait(racing, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                was_stopped = stop.is_set()
     finally:
         unfinished = {
             waiting for waiting in (running, stopped) if waiting is not None and not waiting.done()
@@ -363,11 +374,7 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
         if unfinished:
             # Raises nothing the tasks raise. A cancellation of the node raises.
             await asyncio.wait(unfinished)
-    if (
-        running in finished
-        and not running.cancelled()
-        and (stopped not in finished or _asked(running))
-    ):
+    if running in finished and not running.cancelled() and (not was_stopped or _asked(running)):
         return running.result()
     error = None if running.cancelled() else running.exception()
     if error is not None:
@@ -388,7 +395,7 @@ def _asked(running: asyncio.Future[Any]) -> bool:
 
 
 async def _switched_plan(
-    ctx: Context,
+    ctx: NodeCtx[GraphEvent],
     plan: PlannerPlan,
     *,
     choice_id: str,
@@ -605,7 +612,7 @@ def _exact_codes(digest: Mapping[str, Any]) -> frozenset[str]:
     return exact_codes(part["spec_block"])
 
 
-def _readings(ctx: Context) -> list[SearchReading]:
+def _readings(ctx: NodeCtx[GraphEvent]) -> list[SearchReading]:
     """The conversation's stored readings, newest first: this turn's, then earlier turns'."""
     readings: list[SearchReading] = []
     for item in reversed(conversation_readings(ctx.state)):
@@ -946,19 +953,19 @@ def _pin_source(
     return replaced.model_copy(update={"block": block, "earlier_turn": False, "warnings": ()})
 
 
-def _restorable_state(ctx: Context) -> dict[str, Any]:
-    """A copy of the state a switch that fails, is stopped or raises puts back:
+def _restorable_state(ctx: NodeCtx[GraphEvent]) -> dict[str, Any]:
+    """A copy of the state a switch that fails or is stopped puts back:
     the drafting state (`_DRAFTING_PREFIXES`, less the resolved parts and their times) and
     `_RESTORED_KEYS`."""
-    state = ctx.state.to_dict()
+    state = ctx.state
     kept = {key: value for key, value in state.items() if _drafting(key)}
     kept |= {key: state.get(key, unset) for key, unset in _RESTORED_KEYS.items()}
     return json.loads(json.dumps(kept))
 
 
-def _restore(ctx: Context, before: Mapping[str, Any]) -> None:
+def _restore(ctx: NodeCtx[GraphEvent], before: Mapping[str, Any]) -> None:
     """Put the state back as `before` holds it, clearing any drafting key written since."""
-    for key in ctx.state.to_dict():
+    for key in list(ctx.state):
         if _drafting(key) and key not in before:
             ctx.state[key] = None
     for key, value in before.items():
@@ -973,7 +980,7 @@ def _drafting(key: str) -> bool:
 
 
 async def apply_stored_choice(
-    ctx: Context,
+    ctx: NodeCtx[GraphEvent],
     *,
     choice_id: str,
     option_id: str,
@@ -1097,7 +1104,11 @@ async def apply_stored_choice(
     # One fetch per way the answer fetched the reading, one after another, as
     # the agent's own calls run.
     fetched = [
-        await fetch(spec_id=switched.spec_id, tool_context=ctx, **shaped)
+        await fetch(
+            spec_id=switched.spec_id,
+            call=OrchestratorCall(state=ctx.state, turn_id=turn_id(ctx.key)),
+            **shaped,
+        )
         for shaped in (reading.fetch.args if reading.fetch is not None else ()) or ({},)
     ]
     held = choice.active_option

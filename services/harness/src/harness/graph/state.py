@@ -1,11 +1,10 @@
-"""The orchestrator workflow's session-state contract.
+"""The turn's state contract.
 
-The keys and statuses the workflow's nodes and the orchestrator's tools
-(`harness.orchestrator_tools`) read and write, the session-state schema
-(`GraphState`), the one pending action the agent leaves for `route`, the
+The keys and statuses the turn's nodes and the orchestrator's tools
+(`harness.orchestrator_tools`) read and write, the inputs a turn opens with
+(`TurnInput`), the one pending action the agent's hand-off records, the
 tools' budgets, and the helpers more than one node reads: the stored plan
-(`readable_plan`), a JSON slot (`state_json`), the interrupt event
-(`interrupt_event`), the answers to a clarify interrupt (`resume_answers`),
+(`readable_plan`), the answers to the agent's question (`resume_answers`),
 and the read-only reads of the large containers (`stored_mapping`,
 `stored_sequence`).
 """
@@ -20,51 +19,37 @@ from collections.abc import (
 )
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Annotated, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple
 
 from data_mcp.search_tool import MAX_PARTS
-from google.adk import Context, Event
-from google.adk.events import RequestInput
-from google.adk.sessions import State
-from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from planner.plan import AskBreakdown, SessionState, scope_unread, stored_plan, with_blocks
 from planner.plan import Plan as PlannerPlan
-from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
 
 from harness.tool_contracts import (
     reading_facts,
 )
+from harness.turn.store import SPECS_KEY, FrameKey, FrameKeys
 from harness.turn_records import Origin, SearchReading, open_prices
 
-# The ADK app name every stored conversation's sessions are keyed under.
-AGENT_NAME = "dfo_analyst_graph"
+if TYPE_CHECKING:
+    from harness.turn.node import NodeCtx
 
-# Interrupt ids are stable strings: ADK matches a resuming function response
-# to its interrupt by id, and `ask` and `approve` reuse their id across rounds.
-CLARIFY_INTERRUPT = "clarify"
-APPROVE_INTERRUPT = "approve"
+# The kind of the pause the `approve` node puts the plan card to the user
+# under, read by `harness.studio_translate` to tell the plan card from a
+# question.
+APPROVE_PAUSE: Final = "approve"
 
-
-# The `custom_metadata` key a relayed step progress report travels under on
-# `execute`'s events (`_step_progress_event`), read by
-# `harness.studio_translate._Translator.translate`.
-STEP_PROGRESS_KEY = "step_progress"
-
-# The `custom_metadata` key the `planner` node's first event travels under,
-# as it starts a draft: `{"revising": bool}`, true when the draft revises a
-# plan already on record, with `"pick": True` added when it replans for a
-# pick on the plan card. Read by `harness.studio_translate._Translator`.
-PLANNER_STARTED_KEY = "planner_started"
-
-# The orchestrator's session state (`create_root_workflow`'s
-# `orchestrator`), written by its tools (`harness.orchestrator_tools`) and
-# read by the workflow's nodes. Prefixed, so `GraphState` never validates it.
+# The orchestrator's turn state, written by its tools
+# (`harness.orchestrator_tools`) and read by the turn's nodes.
 ORCHESTRATOR_FRAMES_KEY = "orchestrator:frames"  # frame id -> {"ref", "view", "store_ref"}
-ORCHESTRATOR_SPECS_KEY = "orchestrator:specs"  # spec_id -> its search spec block
-ORCHESTRATOR_PENDING_KEY = "orchestrator:pending"  # the turn's one pending action
+# spec_id -> its search spec block, kept by the turn store as rows of their own.
+ORCHESTRATOR_SPECS_KEY = SPECS_KEY
+# The action the agent's `plan` or `ask_user` call recorded, which the
+# `orchestrate` node takes once the run hands off (`pending_action`).
+ORCHESTRATOR_PENDING_KEY = "orchestrator:pending"
 ORCHESTRATOR_CALLS_KEY = "orchestrator:calls"  # tool name -> calls this turn
 ORCHESTRATOR_BRIEF_KEY = "orchestrator:brief"  # the question the planner drafts for
-ORCHESTRATOR_ASKED_KEY = "orchestrator:asked"  # the question `ask` is waiting on
 ORCHESTRATOR_READINGS_KEY = "orchestrator:readings"  # spec_id -> a plan step's stat_vars reading
 # Every search part this turn read, oldest first, as `SearchReading` JSON
 # (`harness.turn_records`), failed parts included; `fetch` adds its outcome
@@ -88,14 +73,19 @@ ORCHESTRATOR_SPEC_WARNINGS_KEY = "orchestrator:spec_warnings"
 # prior_ledger_state`; unset when no earlier turn read any. The blocks
 # themselves resolve through `planner.plan.earlier_block`.
 ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
+# The orchestrator's conversation while its run waits on a hand-back, as
+# `orchestrator.run.StoredHistory` JSON, written and taken by the
+# `orchestrate` node.
+ORCHESTRATOR_HISTORY_KEY = "orchestrator:history"
 # spec_id -> the refusal message of a fetch or a plan step that read it and
 # was refused `capability_unavailable` this turn; `fetch` refuses it again
 # without a call.
 ORCHESTRATOR_UNAVAILABLE_KEY = "orchestrator:unavailable"
-# The chip a turn applies, as `{"choice_id", "option_id"}` JSON
-# (`harness.wire.ApplyChoice`), seeded by `harness.studio` for a turn
-# requested with `apply_choice`; `seed` applies it
-# (`harness.graph.switch.apply_stored_choice`) and `turn_budgets` reads it.
+# The chip a turn applies, `{"choice_id", "option_id", "spec_id"}`
+# (`harness.wire.ApplyChoice`), in the opening state of a turn requested
+# with `apply_choice`; `seed` applies it
+# (`harness.graph.switch.apply_stored_choice`) and `turn_budgets` reads it,
+# the orchestrator's tools included, so it is state rather than an input.
 APPLY_CHOICE_STATE_KEY = "apply_choice"
 # The chip `seed` applied this turn: `{"choice_id", "option_id",
 # "from_option_id", "spec_id"}`, the option it moved from and the spec_id
@@ -107,6 +97,11 @@ ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
 # computed that ask (`_kept_asks`), written by `execute` when a run stops and
 # read by `plan_done`; cleared by `plan_start` and `plan_done`.
 ORCHESTRATOR_KEPT_ASKS_KEY = "orchestrator:kept_asks"
+# The run the studio's interrupt route admitted with the approval of the
+# plan `approve` last approved (`harness.studio`), or None when it admitted
+# none: written by `approve.decide` on every approval and read by `execute`,
+# which then finds the run and its stored plan already there.
+APPROVED_RUN_KEY = "orchestrator:approved_run"
 # The user's words for each amendment of this plan call's plan that the
 # planner drafted, in order, each cut to `planner.plan.MAX_QUESTION_CHARS`.
 # Written by the `planner` node, cleared by `plan_start`, and handed to the
@@ -118,30 +113,26 @@ ORCHESTRATOR_AMENDMENTS_KEY = "orchestrator:amendments"
 # is set only while such a replan is paused. Outside the drafting prefixes
 # the restore resets (`harness.graph.switch._DRAFTING_PREFIXES`).
 PICK_REPLAN_KEY = "switch:pick_replan"
-# The `custom_metadata` key an orchestrator node's own status line travels
-# under ("Reading your question"), read by `studio_translate._Translator`.
-ORCHESTRATOR_STATUS_KEY = "orchestrator_status"
 # The status a plan hand-back carries when the planner made no plan, and
 # when the approved plan ran; `studio_translate._Translator` shows the first as
 # a failed step and the second as nothing.
 ORCHESTRATOR_PLAN_FAILED_STATUS = "Reading why no plan was made"
-# The `custom_metadata` key under which the planner's refusal travels beside
-# that status. It holds `{"code"}`, which selects the failed step's sentence.
-ORCHESTRATOR_STATUS_FAILURE_KEY = "orchestrator_status_failure"
 ORCHESTRATOR_PLAN_RAN_STATUS = "Reading the plan's results"
 
 
-# The branch the approval and `ask` interrupts are stamped with. No agent runs
-# on it or under it, so ADK's branch filter keeps the interrupt's payload out
-# of every model request; the browser reads the interrupt off the event stream.
-_INTERRUPT_BRANCH = "dfo_interrupts"
+class TurnInput(BaseModel):
+    """What a turn opens with, fixed for the turn: the user's `message`, the
+    canvas and conversation digests, as the JSON text the conversation wrote
+    and the agent reads, and the seeds slot, the Search results a "... in
+    Studio" action handed over (each seed as `harness.seeds.seeds_slot`
+    keeps it, or the one reference `harness.wire.TurnRequest.seed_spec` also
+    takes). The rest of what a turn opens with, which the orchestrator's
+    tools also read, is opening state (`turn_budgets`)."""
 
-
-def interrupt_event(request: RequestInput) -> Event:
-    """`request` as its interrupt event, on `_INTERRUPT_BRANCH`."""
-    event = create_request_input_event(request)
-    event.branch = _INTERRUPT_BRANCH
-    return event
+    message: str
+    canvas_digest: str | None = None
+    conversation_digest: str | None = None
+    seeds: list[Any] | dict[str, Any] | None = None
 
 
 class AskOption(BaseModel):
@@ -158,9 +149,9 @@ class AskOption(BaseModel):
 
 
 def ask_options(options: list[Any]) -> list[dict[str, Any]]:
-    """Persisted `ask_user` options as `AskOption` dicts. A question paused
-    before options carried a spec_id stored each option as its bare label,
-    which reads here as an option without one."""
+    """The `ask_user` options the model sent as `AskOption` dicts. Gemini
+    does not hold a call's arguments to the declaration, so an option sent
+    as its bare label reads here as an option without a spec_id."""
     return [{"label": option} if isinstance(option, str) else option for option in options]
 
 
@@ -187,18 +178,6 @@ class PendingAsk(BaseModel):
     kind: Literal["ask"] = "ask"
     questions: list[AskQuestion]
 
-    @model_validator(mode="before")
-    @classmethod
-    def _one_question(cls, data: Any) -> Any:
-        """A stored single-question action, `{kind, question, options}`, reads
-        as a call with that one question."""
-        if isinstance(data, dict) and "questions" not in data and "question" in data:
-            return {
-                "kind": data.get("kind", "ask"),
-                "questions": [{"question": data["question"], "options": data.get("options")}],
-            }
-        return data
-
 
 class PendingPlan(BaseModel):
     """`plan` asked: the workflow runs the plan path on the brief, holding the
@@ -213,37 +192,25 @@ class PendingPlan(BaseModel):
     asks_across_years: list[int] = []
 
 
-def _stored(state: SessionState, key: str) -> Any:
-    """What `state` holds under `key`, as `State.get` reads it (the pending
-    delta first, then the session's value), without the copy ADK's `State`
-    takes of a dict or list on its first read to find writes made into it
-    later. `State.to_dict` merges the two layers without that copy."""
-    if isinstance(state, State):
-        return state.to_dict().get(key)
-    return state.get(key)
-
-
 def stored_mapping(state: SessionState, key: str) -> Mapping[str, Any]:
     """The dict `state` holds under `key` as a read-only view, empty when
     the key is unset.
 
     For the large containers a turn reads many times (frames, spec blocks,
-    readings, the prior ledger): ADK's `State` deep-copies a dict on its
-    first read and compares it with that copy whenever the event's delta is
-    read, which costs milliseconds per read at their sizes. An assignment
-    through the view raises `TypeError`, as no write made through it would
-    reach the event's delta. Its entries are the stored objects, so a
-    change is built on a copy (`dict(view)`, `{**entry, ...}`) and assigned
-    to the key.
+    readings, the prior ledger). An assignment through the view raises
+    `TypeError`, so every change is an assignment to the key, which the
+    orchestrator's `harness.gemini_agent.RecordingState` records. Its
+    entries are the stored objects, so a change is built on a copy
+    (`dict(view)`, `{**entry, ...}`) and assigned to the key.
     """
-    return MappingProxyType(_stored(state, key) or {})
+    return MappingProxyType(state.get(key) or {})
 
 
 def stored_sequence(state: SessionState, key: str) -> tuple[Any, ...]:
     """The list `state` holds under `key` as a tuple, empty when the key is
-    unset. Read without ADK's copy, as `stored_mapping` reads a dict, and
-    a tuple has no method that changes it in place."""
-    return tuple(_stored(state, key) or ())
+    unset. A tuple has no method that changes it in place, as
+    `stored_mapping`'s view has none."""
+    return tuple(state.get(key) or ())
 
 
 def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
@@ -372,23 +339,17 @@ def resume_answers(result: Any) -> dict[str, dict[str, Any]] | None:
     """The clarify interrupt's resume value as one answer per question id, or
     None when the user dismissed the whole pause (`{"skip": True}`).
 
-    The value is `{"answers": {question id: answer}}`, each answer
+    The value `harness.studio`'s `/interrupt` route resumes a clarify with
+    is `{"answers": {question id: answer}}`, each answer
     `{"kind": "option", "spec_id"}`, `{"kind": "text", "text"}` or
-    `{"kind": "skipped"}`. A single-question reply is the answer for `q1`:
-    `{"spec_id"}` for a pick, `{"text"}` for the user's own words, or a bare
-    candidate id.
+    `{"kind": "skipped"}`. Any other value, such as the plan card's answer,
+    answers no question.
     """
     if not isinstance(result, dict):
-        return {"q1": {"kind": "option", "spec_id": str(result)}}
+        return {}
     if result.get("skip"):
         return None
-    if "answers" in result:
-        return dict(result["answers"] or {})
-    if result.get("text"):
-        return {"q1": {"kind": "text", "text": result["text"]}}
-    if result.get("spec_id"):
-        return {"q1": {"kind": "option", "spec_id": result["spec_id"]}}
-    return {"q1": {"kind": "skipped"}}
+    return dict(result.get("answers") or {})
 
 
 _PENDING_ACTION = TypeAdapter(Annotated[PendingAsk | PendingPlan, Field(discriminator="kind")])
@@ -434,8 +395,7 @@ def turn_budgets(state: Any) -> dict[str, int]:
     """The calls this turn may make of each orchestrator tool:
     `APPLY_CHOICE_BUDGETS` on a turn applying a chip
     (`APPLY_CHOICE_STATE_KEY`), `DOWNLOAD_BUDGETS` on the download surface,
-    `BUDGETS` otherwise. `state` is any mapping-like read of session state
-    (`Context.state`, a dict)."""
+    `BUDGETS` otherwise. `state` is the turn's state."""
     if state.get(APPLY_CHOICE_STATE_KEY):
         return APPLY_CHOICE_BUDGETS
     return DOWNLOAD_BUDGETS if state.get("surface") == "download" else BUDGETS
@@ -451,8 +411,8 @@ def count_call(state: Any, tool: str) -> None:
 
 
 def pending_action(state: Any) -> PendingAsk | PendingPlan | None:
-    """The one action the orchestrator asked the workflow for this turn, or None.
-    `state` is any mapping-like read of session state (`Context.state`, a dict)."""
+    """The one action the agent's run recorded (`ORCHESTRATOR_PENDING_KEY`),
+    or None. `state` is the turn's state."""
     raw = state.get(ORCHESTRATOR_PENDING_KEY)
     return _PENDING_ACTION.validate_python(raw) if raw else None
 
@@ -531,6 +491,30 @@ def frame_store_ref(entry: Mapping[str, Any]) -> dict[str, Any]:
     return entry["ref"]
 
 
+def frame_store_keys(state: Mapping[str, Any]) -> FrameKeys:
+    """The lineage store keys of the frames in `state`
+    (`ORCHESTRATOR_FRAMES_KEY`): each entry's `ref` and `store_ref`, in order
+    and each once, which the turn store keeps the lineage of
+    (`harness.turn.store.FrameLineage`). A pair with a member missing names
+    no key, and so does a frames value or entry that is not a mapping, which
+    `FrameKeys.skipped` describes for the caller to report."""
+    frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+    if not isinstance(frames, Mapping):
+        return FrameKeys(keys=[], skipped=[], container=type(frames).__name__)
+    keys: dict[FrameKey, None] = {}
+    skipped: list[str] = []
+    for frame_id, entry in frames.items():
+        if not isinstance(entry, Mapping):
+            skipped.append(f"{frame_id}:{type(entry).__name__}")
+            continue
+        for ref in (entry.get("ref"), entry.get("store_ref")):
+            if isinstance(ref, Mapping):
+                spec_id, content_version = ref.get("spec_id"), ref.get("content_version")
+                if isinstance(spec_id, str) and isinstance(content_version, str):
+                    keys[(spec_id, content_version)] = None
+    return FrameKeys(keys=list(keys), skipped=skipped)
+
+
 def store_search(
     state: SessionState,
     digest: Mapping[str, Any],
@@ -573,7 +557,7 @@ def store_search(
     skill_ids = [skill["id"] for skill in digest.get("skills") or []]
     observed_at = datetime.now(UTC)
     readings = []
-    found: dict[str, dict[str, Any]] = {}
+    found: dict[str, Mapping[str, Any]] = {}
     for index, part in enumerate(digest.get("part_digests") or []):
         reading = {
             key: value
@@ -630,30 +614,6 @@ def conversation_readings(state: SessionState) -> list[dict[str, Any]]:
     ]
 
 
-def state_json(ctx: Context, key: str, default: Any = None) -> Any:
-    """Decode a JSON blob out of session state, `default` when absent."""
-    raw = ctx.state.get(key)
-    return json.loads(raw) if raw else default
-
-
-class GraphState(BaseModel):
-    """Session-state schema for the workflow (validated on every delta)."""
-
-    surface: str | None = None
-    canvas_digest: str | None = None
-    conversation_digest: str | None = None
-    # The Search results a "... in Studio" action handed over, as JSON: each
-    # seed as `seeds_slot` keeps it, or the one reference `TurnRequest.seed_spec`
-    # also takes. Host-seeded fresh per turn under `planner.plan.SEEDS_STATE_KEY`;
-    # `seed` reads it once and clears it.
-    seeds: str | None = None
-    # The chip a turn applies, as JSON, under `APPLY_CHOICE_STATE_KEY`.
-    apply_choice: str | None = None
-    awaiting_approve: bool = False
-    plan: str | None = None
-    replans: int = 0
-
-
 # What the plan card opens with when the plan the user held was stored in a
 # shape this release does not read, and the question was planned again.
 UNREADABLE_PLAN_NOTE = (
@@ -671,7 +631,7 @@ UNREADABLE_PLAN_UNPLANNED_NOTE = (
 )
 
 
-def readable_plan(ctx: Context, raw: str | None) -> PlannerPlan | None:
+def readable_plan(ctx: NodeCtx[Any], raw: str | None) -> PlannerPlan | None:
     """The plan `raw` holds, `ctx.state["plan"]` as a node read it; `None` when it holds none.
 
     A plan stored in a shape `planner.plan.Plan` rejects is none

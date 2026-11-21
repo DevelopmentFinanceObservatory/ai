@@ -7,14 +7,6 @@ dependencies = []
 
 [tool.uv]
 package = false
-# google-adk 2.13.0 caps opentelemetry-api and opentelemetry-sdk at <=1.44.
-# 1.45.1 fixes unbounded tracestate parsing, which fastmcp reaches through a
-# caller's `_meta.tracestate`. Remove this override once google-adk allows
-# >=1.45.1.
-override-dependencies = [
-    "opentelemetry-api>=1.45.1",
-    "opentelemetry-sdk>=1.45.1",
-]
 
 [tool.uv.workspace]
 members = ["packages/*", "services/*"]
@@ -69,6 +61,7 @@ select = [
     "ERA",               # eradicate (commented-out code)
     "PERF",              # perflint
     "ANN",               # flake8-annotations (require type hints on public APIs)
+    "TID251",            # banned-api (see flake8-tidy-imports below)
 ]
 
 ignore = [
@@ -92,6 +85,12 @@ unfixable = []
 "**/tests/**/*.py" = ["ANN", "PLR2004"]
 # Notebooks: don't require annotations; allow REPL-style patterns.
 "**/*.ipynb" = ["ANN", "F401", "F811", "E402"]
+
+# The harness runs its agents on Pydantic AI and its turns on its own tables;
+# nothing in the workspace imports google-adk.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"google.adk".msg = "google-adk is not a dependency of this workspace"
+"google_adk".msg = "google-adk is not a dependency of this workspace"
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

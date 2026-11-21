@@ -7,8 +7,6 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import (
-    AsyncIterator,
-    Callable,
     Mapping,
     Sequence,
 )
@@ -20,7 +18,6 @@ from data_mcp import get_data_digest
 from data_mcp.tool_errors import ToolErrorCode
 from executor.ledger import RunLedger
 from executor.outcomes import StepRecord
-from google.adk import Context
 from planner.plan import (
     Plan,
     SessionState,
@@ -35,6 +32,7 @@ from planner.plan import (
 from harness import plan_display
 from harness.chart_binding import MAX_SERIES_PER_COMPONENT
 from harness.graph.delivery import Delivery, deliver, frame_read
+from harness.graph.events import GraphEvent
 from harness.graph.interfaces import (
     Executor,
 )
@@ -59,6 +57,7 @@ from harness.graph.state import (
     stored_sequence,
 )
 from harness.sentences import DECLINE_REASONS
+from harness.turn.node import Next, Node, NodeCtx
 from harness.turn_records import AlignedBasis, PlanAsk, PlanRecord, aligned_basis
 
 # Characters of planner text one hand-back to the orchestrator may carry per
@@ -255,7 +254,7 @@ def _hand_back_text(summary: StepSummary) -> str:
     return text[:_HAND_BACK_CAP]
 
 
-def _give_plan_back(ctx: Context) -> bool:
+def _give_plan_back(ctx: NodeCtx[GraphEvent]) -> bool:
     """The first plan that could not be made or run gives the orchestrator
     its plan call back (`BUDGETS`), for one brief that avoids the failure; a
     second failure does not. Answers whether it gave the call back. The
@@ -725,13 +724,11 @@ def _aligned_bases(state: SessionState) -> dict[str, AlignedBasis]:
     return bases
 
 
-def plan_done_node(
-    *, executor: Executor, run_ledger: RunLedger
-) -> Callable[[Context, dict[str, Any]], AsyncIterator[dict[str, Any]]]:
+def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEvent]:
     """The `plan_done` node, describing each final frame through `executor`
     and deciding the delivery of a run completed in `run_ledger`."""
 
-    async def plan_done(ctx: Context, node_input: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+    async def plan_done(ctx: NodeCtx[GraphEvent], node_input: dict[str, Any]) -> Next:
         """What the agent reads once its plan has run, or could not be made:
         the final-step frames, described and registered under ids it can
         chart (never an intermediate step's, nor a derived one that is not
@@ -764,11 +761,12 @@ def plan_done_node(
         `amendments` (`ORCHESTRATOR_AMENDMENTS_KEY`).
 
         A completed run's delivery is decided by its own final frames
-        (`harness.graph.delivery.deliver`): once the session holds the
-        output, which it does when the yield returns, a run whose frames
-        were all read is recorded delivered; one with a frame left unread is
-        recorded undelivered, says so in its standing, and the next turn
-        lists it again (`harness.graph.resume`)."""
+        (`harness.graph.delivery.deliver`): a run whose frames were all read
+        is recorded delivered once the cursor holding the hand-back commits
+        (`NodeCtx.after_commit`); one with a frame left unread is recorded
+        undelivered before the hand-back is written, says so in its
+        standing, and the next turn lists it again
+        (`harness.graph.resume`)."""
         # `execute` writes the kept asks when a run of this plan call stops,
         # and `plan_start` clears them, so a mapping here, even an empty one,
         # says a run of this call stopped.
@@ -863,8 +861,7 @@ def plan_done_node(
                 + (" A brief that avoids the problem may be planned once more." if again else ""),
                 body={**listing, **amendments},
             )
-            yield refused.model_dump(mode="json")
-            return
+            return Next("next", refused.model_dump(mode="json"))
         plan = readable_plan(ctx, ctx.state.get("plan"))
         wholes = plan_display.share_wholes(plan) if plan is not None else {}
         # Final step id -> its output's status, as `_ask_status` reports it.
@@ -972,8 +969,8 @@ def plan_done_node(
             text=lead,
             body={**result, **record, **amendments},
         )
-        yield ran_back.model_dump(mode="json")
         if delivery is not None:
-            await delivery.acknowledge()
+            ctx.after_commit(delivery.acknowledge)
+        return Next("next", ran_back.model_dump(mode="json"))
 
-    return plan_done
+    return Node(run=plan_done)

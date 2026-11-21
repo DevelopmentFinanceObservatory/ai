@@ -55,7 +55,7 @@ LAST_FIVE = RollingWindow(
 
 
 class _Context:
-    """A stand-in for ADK's `ToolContext`: only `.state` is read."""
+    """A stand-in for a tool call's context: only `.state` is read."""
 
     def __init__(self, plan: Plan, *sources: SelectedSource) -> None:
         """`sources` settle `plan`'s dataset requirements, one each, in plan order."""

@@ -40,8 +40,8 @@ logger = logging.getLogger(__name__)
 _CONNECTOR_DRIVER = "asyncpg"
 
 # asyncpg's `command_timeout`, in seconds, on every connection of the runtime
-# engine: the longest any statement may wait for the server, a COMMIT
-# included, before the call raises `TimeoutError`. A COMMIT that a write runs
+# engine (`DatabaseHandle.engine`): the longest any statement may wait for the
+# server, a COMMIT included, before the call raises `TimeoutError`. A COMMIT that a write runs
 # to the end under cancellation (`harness.studio_store`) would otherwise wait
 # on a stalled connection until TCP gives up. A call that passes its own
 # `timeout` replaces it: `harness.db.migrate.apply_pending` passes
@@ -49,17 +49,39 @@ _CONNECTOR_DRIVER = "asyncpg"
 # call, is bounded by its statements' `statement_timeout` and that wait.
 COMMAND_TIMEOUT_S = 90.0
 
+# The pool of `DatabaseHandle.lineage_engine`: three connections and no
+# overflow, for the card lineage reads and the turn frame lineage restores of
+# the turns that resume at once. A read that finds it busy waits at most
+# `pool_timeout`, inside its caller's budget
+# (`harness.mcp_client._LINEAGE_READ_BUDGET_S` and
+# `harness.turn.store._FRAME_LINEAGE_READ_BUDGET_S`, 2 s each), which lets
+# the caller go on without it.
+_LINEAGE_POOL: dict[str, Any] = {"pool_size": 3, "max_overflow": 0, "pool_timeout": 1.5}
+
+# asyncpg's bound on each statement over the lineage engine, cleanup's
+# rollback included, so a read the caller abandoned on a stalled statement
+# ends and gives its connection back.
+_LINEAGE_COMMAND_TIMEOUT_S = 3.0
+
 
 @dataclass
 class DatabaseHandle:
-    """The engine plus its async teardown.
+    """The engines plus their async teardown.
 
-    `aclose` disposes the engine and, on the Cloud SQL Connector path, closes
-    the connector the engine's connections were dialled through. Call it from
-    the harness lifespan's shutdown phase.
+    `engine` holds the session store's pool. `lineage_engine` is a pool of
+    three connections, no overflow, on the same settings, for the best-effort
+    lineage reads: a card's (`StudioStore.card_lineage`) and a resuming
+    turn's frames' (`harness.turn.store.TurnStore.restore_frame_lineage`), so
+    those reads never take a connection the lease renewals, cursor writes and
+    card writes need, and several turns resuming at once do not queue on one
+    connection.
+    `aclose` disposes both and, on the Cloud SQL Connector path, closes the
+    connector their connections were dialled through. Call it from the
+    harness lifespan's shutdown phase.
     """
 
     engine: AsyncEngine
+    lineage_engine: AsyncEngine
     aclose: Callable[[], Awaitable[None]]
 
 
@@ -83,7 +105,9 @@ class _ConnectorSource:
     _connector: Any = field(default=None, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
-    async def connect(self) -> Any:
+    async def connect(self, **driver_kwargs: Any) -> Any:
+        """A new connection, with `driver_kwargs` passed on to asyncpg over
+        its `command_timeout` of `command_timeout_s`."""
         if self._connector is None:
             async with self._lock:
                 if self._connector is None:
@@ -98,7 +122,7 @@ class _ConnectorSource:
             user=self.runtime_db_user,
             db=self.database,
             enable_iam_auth=True,
-            command_timeout=self.command_timeout_s,
+            **{"command_timeout": self.command_timeout_s, **driver_kwargs},
         )
 
     async def aclose(self) -> None:
@@ -118,17 +142,55 @@ def build_database(*, settings: Settings) -> DatabaseHandle | None:
     if settings.database_url is not None:
         logger.info("Using the database at DATABASE_URL")
         # `pool_pre_ping` drops a connection the server closed while it sat in
-        # the pool.
-        # Only asyncpg takes `command_timeout`; another driver's connect
-        # would refuse it.
-        asyncpg = make_url(settings.database_url).get_driver_name() == _CONNECTOR_DRIVER
+        # the pool. `hide_parameters` keeps bound values (a turn's transcript)
+        # out of the errors a failed statement raises, and so out of the logs.
         engine = create_async_engine(
             settings.database_url,
             pool_pre_ping=True,
-            connect_args={"command_timeout": COMMAND_TIMEOUT_S} if asyncpg else {},
+            hide_parameters=True,
+            connect_args=_command_timeout(settings.database_url, COMMAND_TIMEOUT_S),
         )
-        return DatabaseHandle(engine=engine, aclose=engine.dispose)
+        lineage_engine = build_lineage_engine(settings.database_url)
+
+        async def aclose_url() -> None:
+            await engine.dispose()
+            await lineage_engine.dispose()
+
+        return DatabaseHandle(engine=engine, lineage_engine=lineage_engine, aclose=aclose_url)
     return None
+
+
+def build_lineage_engine(
+    url: str, *, async_creator: Callable[[], Awaitable[Any]] | None = None
+) -> AsyncEngine:
+    """The engine of `DatabaseHandle.lineage_engine` over `url`: a pool of
+    three connections, no overflow, a bounded checkout wait and a bounded statement
+    (`_LINEAGE_POOL`, `_LINEAGE_COMMAND_TIMEOUT_S`). With `async_creator`,
+    which then sets the statement bound itself, connections come from it."""
+    if async_creator is not None:
+        return create_async_engine(
+            url,
+            async_creator=async_creator,
+            pool_pre_ping=True,
+            hide_parameters=True,
+            **_LINEAGE_POOL,
+        )
+    return create_async_engine(
+        url,
+        pool_pre_ping=True,
+        hide_parameters=True,
+        connect_args=_command_timeout(url, _LINEAGE_COMMAND_TIMEOUT_S),
+        **_LINEAGE_POOL,
+    )
+
+
+def _command_timeout(url: str, seconds: float) -> dict[str, float]:
+    """The `connect_args` that bound each statement on `url` at `seconds`:
+    asyncpg's `command_timeout`, which only asyncpg takes, so a URL on
+    another driver connects without it. The connector always dials asyncpg
+    (`_ConnectorSource`)."""
+    asyncpg = make_url(url).get_driver_name() == _CONNECTOR_DRIVER
+    return {"command_timeout": seconds} if asyncpg else {}
 
 
 def _build_connector_backed_database(*, settings: Settings) -> DatabaseHandle:
@@ -158,11 +220,17 @@ def _build_connector_backed_database(*, settings: Settings) -> DatabaseHandle:
         pool_size=settings.session_store_pool_size,
         max_overflow=settings.session_store_max_overflow,
         pool_pre_ping=True,
+        hide_parameters=True,
+    )
+    lineage_engine = build_lineage_engine(
+        "postgresql+asyncpg://",
+        async_creator=lambda: source.connect(command_timeout=_LINEAGE_COMMAND_TIMEOUT_S),
     )
 
     async def aclose() -> None:
         await engine.dispose()
+        await lineage_engine.dispose()
         await source.aclose()
 
     logger.info("Using the database over the Cloud SQL Connector")
-    return DatabaseHandle(engine=engine, aclose=aclose)
+    return DatabaseHandle(engine=engine, lineage_engine=lineage_engine, aclose=aclose)

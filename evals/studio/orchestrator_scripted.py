@@ -1,20 +1,23 @@
-"""The studio, scripted: real workflow, real planner adapter, no model.
+"""The studio, scripted: real turn graph, real agents, no model.
 
 This module builds the studio `harness.server` serves and replaces only what
 a model or an upstream would answer:
 
-- the orchestrator agent's model answers from a script of tool calls and
-  text, one entry per model call, across every turn of a case;
+- the orchestrator agent is the real Pydantic AI agent
+  (`orchestrator.agent.orchestrator_agent`) on its real model
+  (`orchestrator.model.orchestrator_model`), whose google-genai client
+  (`harness.scripted.scripted_client`) answers from a script of tool calls
+  and text, one entry per model call, across every turn of a case;
 - the planner is the real `harness.planner_adapter.PlannerAdapter`, its model
-  calls answered by a scripted google-genai client
-  (`harness.scripted.scripted_client`). Its model either proposes the canned plan `harness.scripted_plan` builds,
-  through a `propose_plan` that declares the plan on record ready
+  calls answered by a scripted google-genai client. Its model either proposes
+  the canned plan `harness.scripted_plan` builds, through a `propose_plan`
+  that declares the plan on record ready
   (`harness.scripted.use_compiled_proposals`), so the adapter renders its real
-  first message and the workflow's approval, execution and hand-back nodes
-  run as served, or, when the case scripts it (`planner`),
-  answers from that script and drives the real `propose_plan`, whose
-  translation discovers through the case's canned `translator_search`
-  results and compiles against the real servers' tool schemas;
+  first message and the graph's approval, execution and hand-back nodes run
+  as served. When the case scripts the planner (`planner`), it answers from
+  that script and drives the real `propose_plan`, whose translation
+  discovers through the case's canned `translator_search` results and
+  compiles against the real servers' tool schemas;
 - search answers from the case's canned envelopes, run through the digest the
   served resolver builds (`harness.tool_contracts.resolver_digest`);
 - the tool surface and executor are `harness.scripted`'s, wrapped to log
@@ -29,14 +32,7 @@ routes (`create_studio_router`), the surface a browser uses.
 from __future__ import annotations
 
 import copy
-from collections.abc import (
-    AsyncGenerator,
-    AsyncIterator,
-    Awaitable,
-    Callable,
-    Mapping,
-    Sequence,
-)
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -49,15 +45,12 @@ from data_mcp.server import mcp as data_mcp
 from executor.ledger import InMemoryRunLedger
 from executor.run import no_label_refs
 from fastapi import FastAPI
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_response import LlmResponse
-from google.adk.sessions import BaseSessionService, InMemorySessionService
-from google.adk.sessions.base_session_service import GetSessionConfig
 from google.genai import types
-from harness.graph.state import AGENT_NAME, ORCHESTRATOR_SPECS_KEY
-from harness.graph.workflow import create_root_workflow
+from harness.conversation import current_conversation_id
+from harness.graph.events import GraphEvent
+from harness.graph.workflow import studio_graph
 from harness.orchestrator_tools import build_orchestrator_tools
-from harness.planner_adapter import PlannerAdapter
+from harness.planner_adapter import PlannerAdapter, content_on_spans
 from harness.scripted import (
     SCRIPTED_SPEC,
     ModelRequest,
@@ -72,12 +65,16 @@ from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
 from harness.studio_store import StudioStore
 from harness.tool_contracts import ResolverError, resolver_digest
+from harness.turn.loop import Graph
+from harness.turn.node import NodeCtx
+from harness.turn.store import TurnStore
+from harness.turn_budget import current_turn_budget
 from harness.wiring import handing_back_planner_failures
-from orchestrator.agent import create_orchestrator_agent
+from orchestrator.agent import orchestrator_agent
+from orchestrator.model import orchestrator_model
 from planner.plan import Plan, SessionState, save_plan
 from planner.specs import planner_specs
 from planner.tool_spec import ToolSpec
-from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.tool import build_translate
 
@@ -87,6 +84,8 @@ from translator.tool import build_translate
 _EXHAUSTED_TEXT = "done"
 # The bearer token sent when `Settings` names none: the studio accepts any non-empty one.
 _TOKEN = "orchestrator-eval"
+# The model name the scripted orchestrator's requests carry.
+_ORCHESTRATOR_MODEL = "orchestrator-script"
 
 
 class Log:
@@ -145,36 +144,28 @@ def _part_from_step(step: Mapping[str, Any]) -> types.Part:
     return types.Part.from_text(text=step["text"])
 
 
-class OrchestratorLlm(BaseLlm):
-    """Answers each orchestrator model call with the next scripted part."""
+class OrchestratorScript:
+    """The orchestrator's model from the case's `orchestrator` script, one part per model call."""
 
-    model: str = "orchestrator-script"
-    script: list[types.Part] = Field(default_factory=list)
-    log: Any = None
+    def __init__(self, *, script: list[types.Part], log: Log) -> None:
+        self._script = script
+        self._log = log
 
-    async def generate_content_async(
-        self, llm_request: Any, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse]:
-        del stream
-        instruction = llm_request.config.system_instruction if llm_request.config else None
-        self.log.record_request(
-            "orchestrator",
-            system=instruction if isinstance(instruction, str) else "",
-            contents=llm_request.contents,
+    def __call__(self, request: ModelRequest) -> types.Part:
+        self._log.record_request(
+            "orchestrator", system=request.system_text, contents=request.contents
         )
-        if self.script:
-            part = self.script.pop(0)
-        else:
-            self.log.exhausted.append("orchestrator")
-            part = types.Part.from_text(text=_EXHAUSTED_TEXT)
-        yield LlmResponse(content=types.Content(role="model", parts=[part]))
+        if self._script:
+            return self._script.pop(0)
+        self._log.exhausted.append("orchestrator")
+        return types.Part.from_text(text=_EXHAUSTED_TEXT)
 
 
 class OfferedPlans:
     """The planner's model when the case scripts none: it proposes the plan it
     was handed, once per entry.
 
-    The plan is written into the session's planner state the way a translated
+    The plan is written into the turn's planner state the way a translated
     `propose_plan` leaves a compiled plan there, then a `propose_plan` call
     declares it ready (`harness.scripted.use_compiled_proposals`). Every other
     generation closes the run.
@@ -227,7 +218,12 @@ class ScriptedPairPlanner:
         self._spec_id = spec_id
 
     async def __call__(
-        self, *, ctx: Any, question: str, prior_plan: dict[str, Any] | None = None, **kwargs: Any
+        self,
+        *,
+        ctx: NodeCtx[GraphEvent],
+        question: str,
+        prior_plan: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         plan = scripted_plan(question, spec_id=self._spec_id)
         if prior_plan is not None:
@@ -235,8 +231,12 @@ class ScriptedPairPlanner:
             plan = plan.model_copy(
                 update={"version": prior_version + 1, "previous_version": prior_version}
             )
-        self._plans.offer(ctx.session.state, plan)
+        self._plans.offer(ctx.state, plan)
         return await self._adapter(ctx=ctx, question=question, prior_plan=prior_plan, **kwargs)
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        """The adapter's own revision, which calls no model."""
+        return await self._adapter.revise(**kwargs)
 
 
 def search_envelope(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -470,49 +470,13 @@ def _planner_adapter(
     )
 
 
-class _NoAdk:
-    """The eval's conversations start in the tables, and ADK never held them."""
-
-    async def reimport(self, principal: str, conversation_id: str) -> None:
-        del principal, conversation_id
-
-    async def moved(self, principal: str, conversation_id: str) -> bool:
-        del principal, conversation_id
-        return False
-
-    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-        del session_id
-        return specs
-
-
-def _session_turn_specs(
-    sessions: BaseSessionService,
-) -> Callable[[str, str], Awaitable[dict[str, Any]]]:
-    """The store's `turn_specs` reader over the eval's own session service:
-    the spec blocks turn session `session_id` holds, as stored."""
-
-    async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
-        session = await sessions.get_session(
-            app_name=AGENT_NAME,
-            user_id=principal,
-            session_id=session_id,
-            config=GetSessionConfig(num_recent_events=0),
-        )
-        return dict((session.state.get(ORCHESTRATOR_SPECS_KEY) or {}) if session else {})
-
-    return turn_specs
-
-
-def build_studio(
-    scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine
-) -> tuple[FastAPI, OrchestratorLlm, CannedResolver]:
-    """The studio for one case: the app, its model and its resolver. Its
-    conversations are stored on `engine`."""
+def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) -> FastAPI:
+    """The studio for one case, its conversations and turns stored on `engine`."""
     settings = Settings()
-    sessions = InMemorySessionService()
-
-    orchestrator_llm = OrchestratorLlm(
-        script=[_part_from_step(step) for step in scenario["orchestrator"]], log=log
+    orchestrator_genai = scripted_client(
+        OrchestratorScript(
+            script=[_part_from_step(step) for step in scenario["orchestrator"]], log=log
+        )
     )
     resolver = CannedResolver(copy.deepcopy(scenario.get("search") or []))
     planner_script = scenario.get("planner")
@@ -543,41 +507,44 @@ def build_studio(
         )
         planner = handing_back_planner_failures(adapter)
 
-    def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
-        agent = create_orchestrator_agent(
-            model_name="unused",
-            tools=build_orchestrator_tools(
-                resolver=resolver, executor=recorder, surface=surface_recorder
-            ),
-        ).model_copy(update={"model": orchestrator_llm})
-        return create_root_workflow(
+    # Each conversation's runs are its own, as the served `StudioRunLedger`
+    # keeps them.
+    run_ledger = InMemoryRunLedger(scope=current_conversation_id.get)
+
+    def create_graph(recorder: Any, surface_recorder: Any) -> Graph[GraphEvent]:
+        tools = build_orchestrator_tools(
+            resolver=resolver, executor=recorder, surface=surface_recorder
+        )
+        return studio_graph(
             planner=planner,
-            orchestrator=agent,
+            orchestrator=orchestrator_agent(tools, include_content=content_on_spans()),
+            # One model per orchestrator run, on the turn's budget, as served.
+            model=lambda: orchestrator_model(
+                _ORCHESTRATOR_MODEL, client=orchestrator_genai, budget=current_turn_budget.get()
+            ),
+            tools=tools,
             executor=recorder,
             tool_surface=surface_recorder,
             definition_surface=surface,
             publisher=scripted_publish_result,
-            run_ledger=InMemoryRunLedger(),
+            run_ledger=run_ledger,
             max_concurrent_steps=settings.executor_max_concurrent_steps,
             fetch_series_stats=scripted_fetch_series_stats,
             label_refs=no_label_refs,
         )
 
+    store = StudioStore(engine)
     studio = StudioRunner(
-        create_workflow=create_workflow,
+        create_graph=create_graph,
         executor=LoggingExecutor(log=log),
-        session_service=sessions,
-        store=StudioStore(
-            engine,
-            adk=_NoAdk(),
-            turn_specs=_session_turn_specs(sessions),
-        ),
+        store=store,
+        turns=TurnStore(engine, clock=store.now),
         tool_surface=surface,
     )
     app = FastAPI()
     app.state.settings = settings
     app.include_router(create_studio_router(studio, settings=settings))
-    return app, orchestrator_llm, resolver
+    return app
 
 
 @asynccontextmanager
@@ -587,7 +554,7 @@ async def orchestrator_client(
     """An in-process client on the studio for `scenario`, and its log. The
     studio stores its conversations on `engine`."""
     log = Log()
-    app, _llm, _resolver = build_studio(scenario, log=log, engine=engine)
+    app = build_studio(scenario, log=log, engine=engine)
     token = app.state.settings.studio_api_token or _TOKEN
     transport = httpx2.ASGITransport(app=app)
     async with httpx2.AsyncClient(

@@ -33,7 +33,7 @@ nothing and records nothing. The approval gate is the harness workflow's
 `approve` node.
 
 An unreadable surface comes back as a typed problem the planner can act on.
-These run inside ADK tool calls, where a raise ends the planner entry on a
+These run inside planner tool calls, where a raise ends the planner entry on a
 final `planner_tool_failed` refusal, set in `harness.planner_adapter`.
 `DuplicateToolNameError` propagates, since a tool name served twice is a
 misconfiguration retrying cannot resolve.

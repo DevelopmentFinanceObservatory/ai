@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import ipaddress
 import logging
 import re
@@ -11,6 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
+import asyncpg
 import httpx2
 import uvicorn
 from analysis_mcp.server import mcp as analysis_mcp
@@ -26,31 +28,36 @@ from fastapi.responses import JSONResponse
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.utilities.lifespan import combine_lifespans
-from google.adk.sessions import DatabaseSessionService
+from google import genai
 from mcp import MCPError
 from mcp.shared._httpx_utils import McpHttpClientFactory
-from orchestrator.agent import create_orchestrator_agent
+from orchestrator.agent import orchestrator_agent
+from orchestrator.model import orchestrator_model
 from presentation_mcp.server import mcp as presentation_mcp
+from pydantic_ai.models.google import GoogleModel
+from sqlalchemy import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.routing import get_route_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocketClose
 
 from harness import __version__
-from harness.adk_import import open_turn_specs, reimport_on_access
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
+from harness.db.engine import DatabaseHandle, build_database
 from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.early_mint import EarlyMints
 from harness.generative import GeminiEdit
-from harness.graph.workflow import create_root_workflow
+from harness.graph.events import GraphEvent
+from harness.graph.state import frame_store_keys
+from harness.graph.workflow import studio_graph
 from harness.live_refresh import build_live_refresh, create_live_refresh_router
 from harness.mcp_client import McpExecutor, McpResolver
 from harness.orchestrator_tools import build_orchestrator_tools
-from harness.prefix_cache import PrefixCache
+from harness.planner_adapter import content_on_spans
+from harness.prefix_cache import PrefixCache, gemini_model_name
 from harness.provenance import ProvenanceStore
 from harness.run_ledger import StudioRunLedger
-from harness.session_store import build_session_service
 from harness.settings import (
     ANALYSIS_MCP_MOUNT_PATH,
     COMBINED_MCP_MOUNT_PATH,
@@ -66,6 +73,9 @@ from harness.studio_state import (
     make_remove_cards,
 )
 from harness.studio_store import StudioStore
+from harness.turn.loop import Graph
+from harness.turn.store import FrameLineage, TurnStore
+from harness.turn_budget import current_turn_budget
 from harness.wiring import build_planner, handing_back_planner_failures
 
 logger = logging.getLogger(__name__)
@@ -173,23 +183,20 @@ def _loopback_only(app: ASGIApp) -> ASGIApp:
     return guarded
 
 
-# Total wall-clock budget `_lifespan` gives the startup database steps
-# (`DatabaseSessionService.prepare_tables`, then `apply_pending`), one
-# deadline the second step inherits what the first left of. A runtime
-# identity's IAM grant can still be propagating when a fresh revision
-# starts, taking minutes rather than seconds to land; Cloud Run's default
-# startup probe window is 240 s, so this leaves headroom for the rest of
-# startup.
+# Total wall-clock budget `_lifespan` gives the startup migrations
+# (`apply_pending`). A runtime identity's IAM grant can still be propagating
+# when a fresh revision starts, taking minutes rather than seconds to land;
+# Cloud Run's default startup probe window is 240 s, so this leaves headroom
+# for the rest of startup.
 _STARTUP_DB_RETRY_BUDGET_S = 120.0
-_PREPARE_TABLES_INITIAL_BACKOFF_S = 1.0
-_PREPARE_TABLES_MAX_BACKOFF_S = 30.0
+_STARTUP_INITIAL_BACKOFF_S = 1.0
+_STARTUP_MAX_BACKOFF_S = 30.0
 
 
 async def _retry_startup_step(
     name: str,
     step: Callable[[], Awaitable[object]],
     *,
-    attempt_timeout_s: float | None,
     budget_s: float,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], float] = time.monotonic,
@@ -197,25 +204,20 @@ async def _retry_startup_step(
 ) -> None:
     """Run the awaitable `step()` returns, retrying with bounded exponential backoff.
 
-    Each attempt is bounded by `attempt_timeout_s` unless it is None. A
-    failed attempt is logged with its exception and followed by a `sleep`
-    pause that doubles up to `_PREPARE_TABLES_MAX_BACKOFF_S`, capped so it
+    A failed attempt is logged with its exception and followed by a `sleep`
+    pause that doubles up to `_STARTUP_MAX_BACKOFF_S`, capped so it
     never pushes the call past `budget_s` total. The last exception is
     re-raised once no time remains in the budget, and an exception in `fatal`
     is re-raised at once. `sleep` and `now` are parameters for tests to
     replace real waiting and a real clock with instant, deterministic fakes.
     """
     deadline = now() + budget_s
-    backoff_s = _PREPARE_TABLES_INITIAL_BACKOFF_S
+    backoff_s = _STARTUP_INITIAL_BACKOFF_S
     attempt = 0
     while True:
         attempt += 1
         try:
-            if attempt_timeout_s is None:
-                await step()
-            else:
-                async with asyncio.timeout(attempt_timeout_s):
-                    await step()
+            await step()
             return
         except fatal:
             raise
@@ -236,34 +238,25 @@ async def _retry_startup_step(
                 remaining_s,
             )
             await sleep(min(backoff_s, remaining_s))
-            backoff_s = min(backoff_s * 2, _PREPARE_TABLES_MAX_BACKOFF_S)
+            backoff_s = min(backoff_s * 2, _STARTUP_MAX_BACKOFF_S)
 
 
-async def _prepare_tables_with_retries(
-    session_service: DatabaseSessionService,
-    *,
-    connect_timeout_s: float,
-    budget_s: float,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    now: Callable[[], float] = time.monotonic,
-) -> None:
-    """Retry `prepare_tables` under `_retry_startup_step`'s budget, each
-    attempt bounded by `connect_timeout_s`, the deadline of one connector
-    dial."""
-    await _retry_startup_step(
-        "prepare_tables",
-        session_service.prepare_tables,
-        attempt_timeout_s=connect_timeout_s,
-        budget_s=budget_s,
-        sleep=sleep,
-        now=now,
-    )
+class _MigrationRefusedError(RuntimeError):
+    """A migration raised a SQLSTATE beginning `DFA`, its own refusal to run
+    against this database. The database does not change by waiting. The
+    message leads with the SQLSTATE."""
+
+    def __init__(self, sqlstate: str, message: str) -> None:
+        super().__init__(f"{sqlstate}: {message}")
+        self.sqlstate = sqlstate
 
 
 async def _apply_migrations_with_retries(
     engine: AsyncEngine,
     *,
     budget_s: float,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    now: Callable[[], float] = time.monotonic,
 ) -> None:
     """Retry `apply_pending` under `_retry_startup_step`'s budget. An
     attempt has no bound of its own. `apply_pending` bounds each statement
@@ -273,38 +266,53 @@ async def _apply_migrations_with_retries(
     within it.
     A failed attempt leaves no lock behind, because `apply_pending` holds
     a transaction-level lock. A `MigrationChecksumError` is a fault in the
-    files, so it propagates at once."""
+    files, and a migration's own refusal (a SQLSTATE beginning `DFA`) a fact
+    about the database, so each propagates at once."""
+
+    async def attempt() -> None:
+        try:
+            await apply_pending(engine)
+        except asyncpg.PostgresError as exc:
+            sqlstate = getattr(exc, "sqlstate", None) or ""
+            if sqlstate.startswith("DFA"):
+                raise _MigrationRefusedError(sqlstate, str(exc)) from exc
+            raise
+
     await _retry_startup_step(
         "apply_pending",
-        lambda: apply_pending(engine),
-        attempt_timeout_s=None,
+        attempt,
         budget_s=budget_s,
-        fatal=(MigrationChecksumError,),
+        sleep=sleep,
+        now=now,
+        fatal=(MigrationChecksumError, _MigrationRefusedError),
     )
+
+
+def _postgres_database(settings: Settings) -> DatabaseHandle:
+    """The database `settings` selects (`harness.db.engine.build_database`).
+    Raises `RuntimeError` when it selects none, or a `database_url` for
+    another database than Postgres, before building an engine for it."""
+    url = settings.database_url
+    postgres = url is None or make_url(url).get_backend_name() == "postgresql"
+    database = build_database(settings=settings) if postgres else None
+    if database is None:
+        raise RuntimeError(
+            "the studio stores conversations in Postgres: set DATABASE_URL to a Postgres "
+            "URL or the SESSION_STORE_* variables of the Cloud SQL Connector"
+        )
+    return database
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
-    init_telemetry(service_name=SERVICE_NAME)
-    # Runs at startup: an instance that can't reach its database fails its
-    # startup probe (`DatabaseSessionService.prepare_tables`'s own docstring
-    # recommends this for latency-sensitive services), since every studio
-    # route needs the session service. It's a no-op after the first call, so
-    # this costs nothing beyond startup. `_prepare_tables_with_retries`
-    # bounds each attempt by `session_store_connect_timeout_s` and retries
-    # transient failures; both steps share one deadline.
-    deadline = time.monotonic() + _STARTUP_DB_RETRY_BUDGET_S
-    await _prepare_tables_with_retries(
-        app.state.session_service,
-        connect_timeout_s=app.state.settings.session_store_connect_timeout_s,
-        budget_s=_STARTUP_DB_RETRY_BUDGET_S,
-    )
-    # The harness's own tables, in the same Postgres database as ADK's
-    # (`create_app` refuses any other database).
+    # Runs at startup, so an instance that can't reach its database, or whose
+    # tables are behind this release's migrations, fails its startup probe.
+    # Every studio route needs the conversation tables. `create_app` refuses
+    # any database but Postgres.
     await _apply_migrations_with_retries(
-        app.state.session_service_engine,
-        budget_s=max(0.0, deadline - time.monotonic()),
+        app.state.database_engine,
+        budget_s=_STARTUP_DB_RETRY_BUDGET_S,
     )
     # A 401 from a mounted app reaches an MCP client as a raised `MCPError`,
     # not a tool result: `raise_on_error=False` on `call_tool` doesn't catch
@@ -328,13 +336,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "check MCP_API_TOKEN (and MCP_AUTH_DISABLED) agree across this process"
         ) from exc
     yield
-    # Early mints still running are cancelled before the clients they call
-    # through close. apis finishes any mint already posted.
+    # Early mints still running are cancelled first, before the clients they
+    # call through close. apis finishes any mint already posted. No closing
+    # write reads a mint, and cancelling them ends at once every owner's wait
+    # for its stream's mints (`harness.early_mint.EarlyMints.settle`), so the
+    # wait below spends its budget on closing writes alone.
     try:
         if app.state.early_mints is not None:
             await app.state.early_mints.aclose()
     except Exception:
         logger.exception("failed to cancel the early mints during shutdown")
+    # The owners of Studio streams still running finish their closing writes
+    # before anything they use closes. Past a graceful-shutdown timeout the
+    # server stops waiting for their responses, and the event loop's teardown
+    # would cancel an owner mid-write (`harness.studio_stream.LiveOwners`).
+    try:
+        await app.state.studio.owners.wait()
+    except Exception:
+        logger.exception("failed to wait for the studio stream owners during shutdown")
     # `StudioRunner.aclose` releases the studio executor's resources, which
     # are `McpExecutor`'s long-lived per-conversation presentation-mcp
     # clients, the one long-lived client this process opens (every other MCP
@@ -349,15 +368,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.live_refresh.aclose()
     except Exception:
         logger.exception("failed to close the live refresh clients during shutdown")
-    # Disposes whatever `build_session_service` opened for the session
-    # service above: the engine for the plain-`DATABASE_URL` backend, and the
-    # engine plus the connector for the Cloud SQL Connector path
-    # (`harness.session_store.SessionServiceHandle`). Guarded the same way as
-    # the studio close above.
+    # Disposes whatever `build_database` opened: the engine for the
+    # plain-`DATABASE_URL` backend, and the engine plus the connector for the
+    # Cloud SQL Connector path (`harness.db.engine.DatabaseHandle`). Guarded
+    # the same way as the studio close above.
     try:
-        await app.state.session_service_aclose()
+        await app.state.database_aclose()
     except Exception:
-        logger.exception("failed to close the session service during shutdown")
+        logger.exception("failed to close the database during shutdown")
 
 
 def create_app(
@@ -366,12 +384,13 @@ def create_app(
 ) -> FastAPI:
     """Build the harness FastAPI app.
 
-    Builds the session service eagerly so wiring failures surface at
-    startup rather than on first request. `settings` is injectable for
+    Builds the database engine eagerly so wiring failures surface at
+    startup rather than on first request, and refuses a missing database or
+    one that is not Postgres. `settings` is injectable for
     tests.
 
     Logging is configured here as well as in the lifespan, so eager
-    construction below, which logs its session-service choice, has its
+    construction below, which logs its database choice, has its
     output captured ahead of the logging module's pre-configuration
     defaults. `configure_logging` is idempotent, so the lifespan's call is
     a no-op.
@@ -397,7 +416,12 @@ def create_app(
     ASGI-integration contract for sub-app mounting.
     """
     configure_logging()
+    # Runs before the agents are built. A backend coming up says whether
+    # their spans carry message content (`common.telemetry`), which the
+    # planner reads as it is built (`harness.planner_adapter.PlannerAdapter`).
+    init_telemetry(service_name=SERVICE_NAME)
     resolved_settings = settings or Settings()
+    model_name = resolved_model_name(resolved_settings.model_name)
 
     # Every mounted `FastMCP(...)` already carries a `BearerTokenVerifier`:
     # the three singletons from import time (see `common.auth`'s own module
@@ -439,19 +463,20 @@ def create_app(
     app.state.settings = resolved_settings
     # `create_app` needs the `aclose` half too, for `_lifespan`'s shutdown
     # phase.
-    session_service_handle = build_session_service(settings=resolved_settings)
-    app.state.session_service = session_service_handle.service
-    app.state.session_service_engine = session_service_handle.engine
-    app.state.session_service_aclose = session_service_handle.aclose
+    database = _postgres_database(resolved_settings)
+    engine = database.engine
+    app.state.database_engine = engine
+    app.state.database_aclose = database.aclose
 
     # Built before the studio stack, which replays a card's frame through it.
     live_refresh = build_live_refresh(settings=resolved_settings)
     app.state.live_refresh = live_refresh
 
-    # The studio stack: the orchestrator agent and its workflow behind the
-    # v1 wire contract (docs/studio-contract-v1.md). Resolver/executor speak
-    # MCP to the mounts below over loopback; the agents build their genai
-    # clients lazily, so construction here stays keyless. A missing
+    # The studio stack: the turn graph, its orchestrator agent and planner,
+    # behind the v1 wire contract (docs/studio-contract-v1.md).
+    # Resolver/executor speak MCP to the mounts below over loopback; the
+    # agents build their genai clients lazily, so construction here stays
+    # keyless. A missing
     # GOOGLE_API_KEY fails the first turn, visibly, as a stream-fatal error
     # frame. The planner node is the planner with
     # `translator.tool.build_translate`'s translation attached to
@@ -480,11 +505,17 @@ def create_app(
     # `McpExecutor`'s own direct-fetch writer land in the same store
     # component assembly reads from -- see `harness.provenance`.
     provenance = ProvenanceStore()
+    # The store exists before the executor, which reads the lineage stored
+    # with each card through it, and before the graph, because the recall
+    # function is bound to it (conversation resolved per request via
+    # contextvar).
+    store = StudioStore(engine, lineage_engine=database.lineage_engine)
     # The executor replays a rolling frame through the refresh's clients when
     # a card draws other series than the frame's latest period was taken over.
     executor = McpExecutor(
         settings=resolved_settings,
         provenance=provenance,
+        card_lineages=store,
         card_replay=live_refresh.replay,
         dataset_versions=live_refresh.dataset_versions,
     )
@@ -507,23 +538,6 @@ def create_app(
         )
     else:
         logger.info("early mints: off (EARLY_MINT=false)")
-    # The store exists before the workflow because the recall function is
-    # bound to it (conversation resolved per request via contextvar).
-    engine = session_service_handle.engine
-    if engine.dialect.name != "postgresql":
-        raise RuntimeError(
-            "the studio stores conversations in Postgres: set DATABASE_URL to a Postgres "
-            "URL or the SESSION_STORE_* variables of the Cloud SQL Connector"
-        )
-    # The previous release may still finish turns on ADK while this one
-    # serves, so each load first brings the conversation up to date with its
-    # ADK ledger session (`harness.adk_import.reimport_on_access`), and an
-    # open turn's spec blocks are read as the import reads them.
-    store = StudioStore(
-        engine,
-        turn_specs=open_turn_specs(engine),
-        adk=reimport_on_access(engine),
-    )
     # Built once and threaded into both the `execute` node below and
     # `build_planner`'s planner (which reads skills through it and
     # passes it on to the translator), so the two compile against one set
@@ -535,31 +549,40 @@ def create_app(
     prefix_cache = PrefixCache() if resolved_settings.studio_prefix_cache else None
     logger.info("orchestrator thinking level: %s", resolved_settings.orchestrator_thinking_level)
 
-    def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
-        # Runs are kept in the conversation's `runs` table, and a run
-        # completes once its derived results are published with their
-        # replay recipes.
-        run_ledger = StudioRunLedger(store)
+    @functools.cache
+    def genai_client() -> genai.Client:
+        # Built at the first model call, so construction here stays keyless.
+        return genai.Client()
+
+    def model() -> GoogleModel:
+        # One per orchestrator run, on the turn's budget (`harness.turn_budget`).
+        return orchestrator_model(
+            model_name,
+            client=genai_client(),
+            budget=current_turn_budget.get(),
+            prefix_cache=prefix_cache,
+        )
+
+    # Runs are kept in the conversation's `runs` table, and a run completes
+    # once its derived results are published with their replay recipes.
+    run_ledger = StudioRunLedger(store)
+
+    def create_graph(recorder: Any, surface_recorder: Any) -> Graph[GraphEvent]:
         # The orchestrator's tools run through the same recorder and
         # recording surface as the `execute` node, so their steps and cards
         # reach the wire.
-        orchestrator = create_orchestrator_agent(
-            model_name=resolved_settings.model_name,
-            prefix_cache=prefix_cache,
-            thinking_level=resolved_settings.orchestrator_thinking_level,
-            tools=build_orchestrator_tools(
-                resolver=McpResolver(settings=resolved_settings),
-                executor=recorder,
-                surface=surface_recorder,
-                dfo_faq_surface=tool_surface,
-                definition_surface=tool_surface,
-                recall_part=make_recall_part(store),
-                canvas_series=make_canvas_series(store),
-                canvas_cards=make_canvas_cards(store),
-                remove_cards=make_remove_cards(store),
-            ),
+        tools = build_orchestrator_tools(
+            resolver=McpResolver(settings=resolved_settings),
+            executor=recorder,
+            surface=surface_recorder,
+            dfo_faq_surface=tool_surface,
+            definition_surface=tool_surface,
+            recall_part=make_recall_part(store),
+            canvas_series=make_canvas_series(store),
+            canvas_cards=make_canvas_cards(store),
+            remove_cards=make_remove_cards(store),
         )
-        return create_root_workflow(
+        return studio_graph(
             # A planner that cannot plan hands its reason back to the agent
             # and the turn goes on.
             planner=handing_back_planner_failures(
@@ -567,7 +590,15 @@ def create_app(
                     settings=resolved_settings, surface=tool_surface, prefix_cache=prefix_cache
                 )
             ),
-            orchestrator=orchestrator,
+            # Its spans carry the messages as the planner's do
+            # (`content_on_spans`).
+            orchestrator=orchestrator_agent(
+                tools,
+                thinking_level=resolved_settings.orchestrator_thinking_level,
+                include_content=content_on_spans(),
+            ),
+            model=model,
+            tools=tools,
             executor=recorder,
             # The recorded wrapper, not the bare `tool_surface` above: the
             # `execute` node must run against the same recorder that turns
@@ -587,17 +618,23 @@ def create_app(
         )
 
     studio = StudioRunner(
-        create_workflow=create_workflow,
+        create_graph=create_graph,
         executor=executor,
-        session_service=app.state.session_service,
         store=store,
+        turns=TurnStore(
+            engine,
+            clock=store.now,
+            lineage=FrameLineage(source=provenance, frame_keys=frame_store_keys),
+            lineage_engine=database.lineage_engine,
+        ),
         edit_model=GeminiEdit(
-            model_name=resolved_settings.model_name,
+            model_name=model_name,
             timeout_s=resolved_settings.turn_model_time_s,
         ),
         tool_surface=tool_surface,
         provenance=provenance,
         early_mints=early_mints,
+        run_ledger=run_ledger,
     )
     app.state.studio = studio
     app.include_router(create_studio_router(studio, settings=resolved_settings))
@@ -641,10 +678,56 @@ def create_app(
     return app
 
 
+class ModelNameRefusedError(RuntimeError):
+    """`MODEL_NAME` names no model the Gemini developer API serves."""
+
+
+def resolved_model_name(name: str) -> str:
+    """`name` as the Gemini developer API is sent it: any `Gemini:` class
+    prefix dropped (`harness.prefix_cache.gemini_model_name`), so the
+    orchestrator and Edit Card call one model under one name.
+
+    A leading `models/` is dropped, so `models/gemini-3.8-flash` names the
+    same model as its bare name.
+
+    Raises:
+        ModelNameRefusedError: `name` names no Gemini model, names none after its
+            `Gemini:` prefix, or is a Vertex AI resource path, which the
+            developer API serves no model under.
+    """
+    resolved = gemini_model_name(name.removeprefix("models/"))
+    if resolved is not None:
+        resolved = resolved.removeprefix("models/")
+    if not resolved:
+        raise ModelNameRefusedError(f"MODEL_NAME {name!r} names no Gemini model.")
+    if resolved.startswith("projects/"):
+        raise ModelNameRefusedError(
+            f"MODEL_NAME {name!r} is a Vertex AI resource path, and the harness runs on "
+            "the Gemini developer API, which serves no model by that name. Name the "
+            "model as the developer API does: models/... or its bare name, with an "
+            "optional Gemini: prefix."
+        )
+    return resolved
+
+
+# Seconds `uvicorn` waits for open responses after SIGTERM before it cancels
+# them, which makes each stream's owner cut its turn and write its close.
+# Cloud Run sends SIGKILL 10 s after SIGTERM, and the lifespan shutdown starts
+# only once the drain ends: 1 s drain + up to `SHUTDOWN_WAIT_S` (7 s) for the
+# owners' closing writes + about 0.5 s to close the engines = 8.5 s, which
+# leaves 1.5 s of margin.
+GRACEFUL_SHUTDOWN_S = 1
+
+
 def main() -> None:
     """Entry point for the `harness-server` console script."""
     settings = Settings()
-    uvicorn.run(create_app(settings=settings), host="0.0.0.0", port=settings.port)
+    uvicorn.run(
+        create_app(settings=settings),
+        host="0.0.0.0",
+        port=settings.port,
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_S,
+    )
 
 
 if __name__ == "__main__":

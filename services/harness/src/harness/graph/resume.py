@@ -20,11 +20,11 @@ is the one the turn that admitted it wrote.
 
 A completed run's delivery is decided by `harness.graph.delivery.deliver`, as
 `plan_done` decides it for a run that completes in its own turn:
-`Resumed.acknowledge`, called once the hand-back is in the session, records
-each run whose frames were all read `executor.ledger.Delivered`, and a run
-with a frame left unread is recorded `executor.ledger.Undelivered`, its
-standing carrying `harness.graph.delivery.RESULT_UNDELIVERED`, and is listed again by the next turn
-until the delivery bound ends it.
+`Resumed.acknowledge`, called once the hand-back is in the turn's cursor,
+records each run whose frames were all read `executor.ledger.Delivered`, and
+a run with a frame left unread is recorded `executor.ledger.Undelivered`, its
+standing carrying `harness.graph.delivery.RESULT_UNDELIVERED`, and is listed
+again by the next turn until the delivery bound ends it.
 
 Carrying a run on never ends the turn. A run whose stored submission is
 missing or unreadable is recorded failed (`run_record_unreadable`); a fault
@@ -34,9 +34,11 @@ first time; anything the run ledger's store raises is
 which is logged and leaves the run as it is, for the next turn to carry on
 until the resume bound (`executor.ledger.MAX_PUBLICATION_RESUMES`,
 `MAX_PENDING_AGE`) ends it; any other exception is logged and the run
-recorded failed (`resume_failed`), so no later turn tries it again. The
-`seed` node calls this, so its `_turn_ran_before` guard keeps a resumed turn
-from doing it twice.
+recorded failed (`resume_failed`), so no later turn tries it again. A Stop
+that cancels the turn while a run is carried on ends the run, recorded
+failed; a client that left leaves it unfinished for the turn after
+(`harness.turn.node.StopScope.turn_stopped`). The `seed` node calls this, as
+the turn's first node.
 """
 
 from __future__ import annotations
@@ -67,7 +69,6 @@ from executor.run import (
     load_submission,
     resume_run,
 )
-from google.adk import Context
 
 from harness.graph.answer import (
     answer_frames,
@@ -77,10 +78,12 @@ from harness.graph.answer import (
     stored_run_plan,
 )
 from harness.graph.delivery import Delivery, deliver
+from harness.graph.events import GraphEvent
 from harness.graph.interfaces import Executor
 from harness.graph.plan_done import HandBack, StepSummary
 from harness.plan_display import share_wholes
 from harness.tool_contracts import HarnessCode
+from harness.turn.node import NodeCtx
 
 logger = logging.getLogger(__name__)
 
@@ -101,14 +104,14 @@ _RESUMED_LEAD = (
 class Resumed:
     """The runs carried on: `hand_back` is what the agent reads, and
     `acknowledge` records each completed run it delivers `Delivered`. Call
-    it only once the conversation has recorded `hand_back`; a run it could
-    not record is delivered again the next turn."""
+    it only once the turn's cursor holds `hand_back`; a run it could not
+    record is delivered again the next turn."""
 
     hand_back: dict[str, str]
     acknowledge: Callable[[], Awaitable[None]]
 
 
-type ResumeRuns = Callable[[Context], Awaitable[Resumed | None]]
+type ResumeRuns = Callable[[NodeCtx[GraphEvent]], Awaitable[Resumed | None]]
 
 
 def run_resumer(
@@ -126,7 +129,7 @@ def run_resumer(
     a completed run's frames through `executor` so the agent can chart them.
     Without a `tool_surface`, no run is carried on."""
 
-    async def resume(ctx: Context) -> Resumed | None:
+    async def resume(ctx: NodeCtx[GraphEvent]) -> Resumed | None:
         """The hand-back naming each run carried on and its standing, or
         `None` when the ledger holds no unfinished run or cannot be read."""
         if tool_surface is None:
@@ -169,7 +172,7 @@ def run_resumer(
         return Resumed(hand_back=hand_back, acknowledge=acknowledge)
 
     async def carry_on(
-        ctx: Context, run: RunRecord, surface: ToolSurface
+        ctx: NodeCtx[GraphEvent], run: RunRecord, surface: ToolSurface
     ) -> tuple[dict[str, Any], Delivery | None]:
         """Carry `run` on, and return its standing as the agent reads it and,
         for a completed run, its delivery by that standing."""
@@ -190,6 +193,7 @@ def run_resumer(
             max_concurrent_steps=max_concurrent_steps,
             fetch_series_stats=fetch_series_stats,
             label_refs=label_refs,
+            cancel_ends_run=lambda: ctx.stop.turn_stopped,
         )
         async with store_faults(run.run_id):
             finished = await run_ledger.get(run.run_id)
