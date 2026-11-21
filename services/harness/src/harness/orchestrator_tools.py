@@ -1724,7 +1724,7 @@ def _attach_fetch(
     count or in other prices is a sibling, and its reading names the
     reading it is a sibling of (`SearchReading.sibling_of`) and the count
     it reads. Another count names the count Search elected for the part
-    (`_elected_count`), never another count read in its place, and a fetch
+    (`_elected_count`), and a fetch
     of a count Search elected, or of one any reading holds as its own
     count, is no sibling: its reading states its block's own count.
     """
@@ -1810,7 +1810,7 @@ def _offering(
     `spec_id` keeps to it: `None` for a candidate, a `SiblingReading` for
     another count (axis `what`) or the same count in other prices (axis
     `unit`). Each reading's candidates, other counts and other prices are
-    read together, so an earlier reading never outranks a later one.
+    read together, so the newest reading offering `spec_id` wins.
     `None` when no reading offers `spec_id`."""
     for reading in readings:
         if any(candidate.spec_id == spec_id for candidate in reading.candidates):
@@ -1830,9 +1830,9 @@ def _elected_count(readings: Sequence[SearchReading], offering: SearchReading) -
     `offering`'s own, unless it is another count of a part
     (`SearchReading.other_count_of`): then the count that names, followed
     back through `readings`, newest first, to a reading that is no other
-    count. A reading stored before another count always named the elected
-    one can name another count in its place, which this follows past; a
-    link that loops or leaves `readings` ends at the last spec_id it named.
+    count. A stored reading can name another count in place of the elected
+    one, which this follows past. A link that loops or leaves `readings`
+    ends at the last spec_id it named.
     """
     assert offering.spec_id is not None
     current, seen = offering, {offering.spec_id}

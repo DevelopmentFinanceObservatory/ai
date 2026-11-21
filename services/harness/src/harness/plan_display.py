@@ -1704,7 +1704,7 @@ def pinned_choice_id(plan: Plan, pinned: Collection[str], axis: str) -> str | No
 
 
 # The axis a count row's id names (`count_choice_id`). No scope axis takes this
-# name, so a count row's id never meets a scope choice's.
+# name, so a count row's id cannot equal a scope choice's.
 COUNT_AXIS = "count"
 
 

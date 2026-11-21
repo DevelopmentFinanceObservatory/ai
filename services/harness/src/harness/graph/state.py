@@ -89,8 +89,8 @@ ORCHESTRATOR_UNAVAILABLE_KEY = "orchestrator:unavailable"
 APPLY_CHOICE_STATE_KEY = "apply_choice"
 # The chip `seed` applied this turn: `{"choice_id", "option_id",
 # "from_option_id", "spec_id"}`, the option it moved from and the spec_id
-# Search compiled; for a count chip, the spec_id of the count it moved from
-# and of the count it moved to. `harness.studio` keeps it with the turn's record
+# Search compiled. For a count chip, they are the spec_ids of the count it
+# moved from and of the count it moved to. `harness.studio` keeps it with the turn's record
 # (`ConversationState.turn_applied_choice`), where the next turn reads whether
 # the user kept it.
 ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"

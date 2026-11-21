@@ -403,10 +403,10 @@ def _chip_label(conversation: ConversationState, pick: ApplyChoice) -> str | JSO
     not offer, or one Search cannot serve, is refused 422
     `switch_option_unavailable`, as a plan card's switch is. A count chip
     (`harness.turn_records.is_count_choice`) is read the same way from its
-    count choice (`harness.turn_records.stored_count`): stale when the part
-    no longer reads the count of `ApplyChoice.spec_id`, since a later fetch
-    read one of its other counts, and its option is one of the other counts
-    that reading offers. `detail` is copy the client shows.
+    count choice (`harness.turn_records.stored_count`). It is stale when the
+    part reads a count other than that of `ApplyChoice.spec_id`, since a
+    later fetch read one of its other counts, and its option must be one of
+    the other counts that reading offers. `detail` is copy the client shows.
     """
     answered = [
         number

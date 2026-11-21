@@ -9338,13 +9338,13 @@ async def test_a_count_chip_fetches_the_other_count_as_the_answer_fetched_it() -
     """The answer counted gross disbursements and Search offered net ones, so
     its first chip switches the count. Clicking it fetches the net count's
     spec_id over the answer's years, resolving its definition on record with
-    no scope entries, and records the chip applied; the turn's reading is the
+    no scope entries, and records the chip applied. The turn's reading is the
     net count, read as the gross count's other count. The same chip again is
-    stale, since the part no longer reads the gross count. The net answer
-    offers the gross count back, and clicking that reads the first spec_id
-    again, with the definition the first search recorded, as the count
-    Search elected: it offers net again, and a plan pinning it from the
-    ledger states how it is counted, gross chosen beside net."""
+    stale, since the part reads the net count. The net answer offers the
+    gross count back, and clicking that reads the first spec_id again, with
+    the definition the first search recorded, as the count Search elected.
+    It offers net again, and a plan pinning it from the ledger states how it
+    is counted, gross chosen beside net."""
     app, executor, search = _count_chip_app(_text("Net, it was less."), _text("Gross again."))
     gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
     async with _client(app) as client:
@@ -9440,7 +9440,7 @@ async def test_a_count_chip_fetches_the_other_count_as_the_answer_fetched_it() -
 async def test_a_count_chip_that_cannot_apply_is_refused_with_its_constraint(
     pick: dict[str, str], constraint: str
 ) -> None:
-    """A count the part does not offer is unavailable; a chip naming a reading
+    """A count the part does not offer is unavailable. A chip naming a reading
     the choice is not on, or the count the part already reads, is stale. Each
     is a 422 before any stream, and Search is asked nothing."""
     app, _, search = _count_chip_app()

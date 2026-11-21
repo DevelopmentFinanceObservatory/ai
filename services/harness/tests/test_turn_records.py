@@ -1133,8 +1133,8 @@ def _net_reading(offering: dict[str, Any]) -> dict[str, Any]:
 
 def test_a_part_offering_another_count_offers_its_count_chip_first() -> None:
     """The count chip runs before every scope chip, and the cut to four keeps
-    it; once the part reads the other count, its offering reading offers no
-    count chip and is no longer the count the choice is on."""
+    it. Once the part reads the other count, its offering reading offers no
+    count chip and the choice is on the other count."""
     gross = _fetched(_counted_part())
     choice_id = f"{gross['spec_id']}:count"
 

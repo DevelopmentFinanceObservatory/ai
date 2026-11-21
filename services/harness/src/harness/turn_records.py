@@ -1408,7 +1408,7 @@ def basis_line(
 # (`SearchReading.alternatives`), which Search offers as datasets of their own
 # rather than as a scope choice of the part. No scope axis
 # (`data_mcp.scope.ScopeAxis`) takes this name, so a count choice's id
-# (`count_choice_id`) never meets a scope choice's. A plan card's count row
+# (`count_choice_id`) cannot equal a scope choice's. A plan card's count row
 # names the same axis (`harness.plan_display.count_choice_id`).
 COUNT_AXIS = plan_display.COUNT_AXIS
 # The order chips take by axis, and how many an answer offers.

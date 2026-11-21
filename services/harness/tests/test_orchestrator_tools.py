@@ -4944,8 +4944,8 @@ async def test_a_round_trip_through_another_count_reads_the_elected_count_as_ele
 async def test_this_turns_offer_of_another_count_outranks_an_earlier_turns_candidate() -> None:
     """An earlier turn left the count open, listing gross and net as candidates.
     This turn's search finds gross with net as another count, and a fetch of
-    net reads it as that offer: the other count of gross, in this turn's
-    words, not the earlier candidate's."""
+    net reads it as that offer, the other count of gross in this turn's
+    words."""
     gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
     surface = _BySpecId({FRANCE_KENYA_NET: _net_family_envelope()})
     open_count = SearchReading.from_part(

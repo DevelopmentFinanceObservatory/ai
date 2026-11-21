@@ -1284,7 +1284,7 @@ async def _apply_other_count(
     under `ORCHESTRATOR_APPLIED_KEY`, with the count it moved from and the
     spec_id it moved to.
 
-    A chip whose part no longer reads `spec_id` (`CHIP_STALE_NOTE`), or
+    A chip whose part reads a count other than `spec_id` (`CHIP_STALE_NOTE`), or
     whose option is not one of the other counts offered, fetches nothing and
     fails its step, as `apply_stored_choice` fails a scope chip.
     """
