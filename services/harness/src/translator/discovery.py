@@ -2883,8 +2883,14 @@ async def _source_from_resolve_pin(
     the window of the search that found it.
 
     A whole (`DatasetRequirement.whole_of`) is never searched for
-    (`_settled_whole`).
+    (`_settled_whole`), and one with no pin, or pinned to a compile of another
+    dataset than its part's, is referred back before any reader runs
+    (`_whole_referral`).
     """
+    if requirement.whole_of is not None and (
+        referred := _whole_referral(state, plan=plan, requirement=requirement)
+    ):
+        return referred
     read = await _pin_source(
         state,
         plan=plan,
@@ -2944,39 +2950,22 @@ async def _settled_whole(
     left open (`planner.source_reads.compile_whole`), so that pin is its
     source, whatever it holds on that side: a whole covers what its part
     covers (`planner.plan.whole_read`), and a search for it could only find
-    another population. A problem a reader met is returned as it is. The
-    whole is referred back as unmeetable (`_unsettled_whole`) where it states
-    no pin, where no reader holds its pin over its period, a pin read only
-    off the discovery log included, whose identity carries the window of the
-    search that found it, and where its pin was compiled from another dataset
-    than the one its part is pinned to now, which is checked first, since a
-    compile from the part's own dataset may read. A pin compiled from that
-    dataset whose spec block is on record and does not read as a source, as
-    one naming a class of party this release does not know, is refused
-    (`SEARCH_REFUSED`), which ends the turn as Search not answering
-    (`translator.mechanical._settle_discovery`): the part's block carries the
-    same field, so settling the part again cannot help.
+    another population. The caller has already referred back a whole with no
+    pin or one compiled from another dataset (`_whole_referral`). A problem a
+    reader met is returned as it is. The whole is referred back as unmeetable
+    (`_unsettled_whole`) where no reader holds its pin over its period, a pin
+    read only off the discovery log included, whose identity carries the
+    window of the search that found it. A pin whose spec block is on record
+    and does not read as a source, as one naming a class of party this
+    release does not know, is refused (`SEARCH_REFUSED`), which ends the turn
+    as Search not answering (`translator.mechanical._settle_discovery`): the
+    part's block carries the same field, so settling the part again cannot
+    help.
     """
     if isinstance(read, dict):
         return read
     assert requirement.whole_of is not None
     part = requirement.whole_of.part
-    if requirement.source_spec_id is None:
-        return _unsettled_whole(
-            requirement,
-            f"{requirement.id!r} is the whole of {part!r}, counted from its part's dataset "
-            "with no search, and states no pin to that count",
-        )
-    records = _PinRecords(state)
-    origin = _whole_origin(records, requirement)
-    settled = _settled_part_pins(records, plan, part)
-    if origin is not None and origin not in settled:
-        return _unsettled_whole(
-            requirement,
-            f"{requirement.id!r} is the whole of {part!r}, and its pin "
-            f"{requirement.source_spec_id!r} was counted from {origin!r}, while {part!r} is "
-            f"pinned to {sorted(settled)!r}",
-        )
     if read is None or not read[1]:
         if (unread := _unreadable_block(state, plan=plan, requirement=requirement)) is not None:
             return unread
@@ -2999,6 +2988,34 @@ async def _settled_whole(
         warnings=[],
         budget_remaining=DISCOVERY_CALL_BUDGET - log.calls(plan_revision(plan)),
     )
+
+
+def _whole_referral(
+    state: SessionState, *, plan: Plan, requirement: DatasetRequirement
+) -> dict[str, object] | None:
+    """The whole `requirement` referred back (`_unsettled_whole`) where it states no
+    pin, or where its pin was compiled from another dataset than the one its part is
+    pinned to now; `None` otherwise. Neither needs a reader, so a compile of the
+    part's own dataset is asked for before any reader's answer about this one."""
+    assert requirement.whole_of is not None
+    part = requirement.whole_of.part
+    if requirement.source_spec_id is None:
+        return _unsettled_whole(
+            requirement,
+            f"{requirement.id!r} is the whole of {part!r}, counted from its part's dataset "
+            "with no search, and states no pin to that count",
+        )
+    records = _PinRecords(state)
+    origin = _whole_origin(records, requirement)
+    settled = _settled_part_pins(records, plan, part)
+    if origin is not None and origin not in settled:
+        return _unsettled_whole(
+            requirement,
+            f"{requirement.id!r} is the whole of {part!r}, and its pin "
+            f"{requirement.source_spec_id!r} was counted from {origin!r}, while {part!r} is "
+            f"pinned to {sorted(settled)!r}",
+        )
+    return None
 
 
 def _unreadable_block(

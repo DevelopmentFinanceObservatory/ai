@@ -13787,7 +13787,7 @@ async def test_constant_prices_restated_with_their_base_year_land_as_the_user_s_
     """The plan restated with the unit the refusal names is admitted. It
     records constant prices as the user's decision on the part, fixing the
     price basis alone, cited by the requirement, and compiles against the
-    constant-price series."""
+    constant-price series, which binds France as the donor the plan names."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     constant = _constant_block()
@@ -13798,6 +13798,7 @@ async def test_constant_prices_restated_with_their_base_year_land_as_the_user_s_
         update={
             "source_spec_id": _CONSTANT_GROSS,
             "unit": Unit(currency="USD", prices="constant", base_year=2023),
+            "entities": (*dataset.entities, Entity(name="France", role="donor")),
         }
     )
 

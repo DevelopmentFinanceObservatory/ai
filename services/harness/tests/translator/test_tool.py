@@ -27,6 +27,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
+import translator.discovery
 import translator.tool
 from compiler.compile import CompileIssue, CompileIssueCode, CompileResult
 from compiler.sources import DiscoveryStatus, source_from_spec_block
@@ -1609,12 +1610,14 @@ _SPEC_ELSEWHERE = "spec_" + "9" * 32
         ("read-off-the-log", "share_whole_underivable"),
         ("compiled-block-unreadable", "search_refused"),
         ("unreadable-from-another-dataset", "share_whole_underivable"),
+        ("unavailable-from-another-dataset", "share_whole_underivable"),
     ],
 )
 async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
     draft: DraftFactory,
     requirement: RequirementFactory,
     context_holding: ContextHolding,
+    monkeypatch: pytest.MonkeyPatch,
     pinned: str,
     answered: str,
 ) -> None:
@@ -1626,7 +1629,9 @@ async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
     from its part. A compile whose block names a class of party this release does
     not know is refused as the unreadable answer it is, since its part's search
     answers the same way, unless it was compiled from another dataset, which a
-    compile from its part's may read."""
+    compile from its part's may read. A compile of another dataset is referred
+    back before any reader of its pin runs, so a reader that cannot reach Search
+    has no say."""
     g7 = Entity(name="Group of Seven", role="donor")
     period = Period(start=1960, end=2024)
     whole = requirement(
@@ -1662,7 +1667,21 @@ async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
     save_pin_sources(
         context.state, {SPEC_G7_AFRICA: PinSource(block=_G7_AFRICA_BLOCK, settled=True)}
     )
-    elsewhere = pinned in {"compiled-from-another-dataset", "unreadable-from-another-dataset"}
+    elsewhere = pinned in {
+        "compiled-from-another-dataset",
+        "unreadable-from-another-dataset",
+        "unavailable-from-another-dataset",
+    }
+    read: list[str] = []
+    if pinned == "unavailable-from-another-dataset":
+
+        async def unavailable(
+            *_: object, requirement: DatasetRequirement, **__: object
+        ) -> dict[str, object]:
+            read.append(requirement.id)
+            return {"outcome": Outcome.TRANSIENT.value, "code": "surface_unavailable"}
+
+        monkeypatch.setattr(translator.discovery, "_pin_source", unavailable)
     origin = _SPEC_ELSEWHERE if elsewhere else SPEC_G7_AFRICA
     save_alignments(
         context.state,
@@ -1705,6 +1724,7 @@ async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
     )
 
     assert surface.calls == {}
+    assert read == []
     if answered == "definite":
         assert (found["status"], found["sources"][0]["spec_id"]) == (
             "definite",

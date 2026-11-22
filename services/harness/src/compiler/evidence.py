@@ -83,7 +83,7 @@ from data_mcp.manifest import Manifest
 from data_mcp.series_statistics import continuing_method, series_index
 from dfo_frame_grammar.columnar import array_kernel, scalar_kernel, unit_codes
 from dfo_frame_grammar.grammar import DEFLATION_BASES
-from planner.parties import Party, across_party, flow_side, place_qualified_party
+from planner.parties import Party, across_party, flow_side, place_qualified_party, role_party
 from planner.phrasing import pluralize
 from planner.plan import DatasetRequirement, Entity, Unit, truncate
 
@@ -440,7 +440,7 @@ def check_evidence(
         issues.extend(_series_issues(requirement, evidence, approved))
     issues.extend(_entity_issues(requirement, evidence, approved))
     issues.extend(_period_issues(requirement, evidence))
-    issues.extend(_scope_issues(requirement, evidence))
+    issues.extend(_scope_issues(requirement, evidence, approved))
     if at_discovery or evidence.has_data is not False:
         # A retrieval with no rows says nothing about its source's unit.
         issues.extend(_unit_issues(requirement, evidence))
@@ -1435,7 +1435,9 @@ def _asked_for(period: Period, evidence: RetrievalEvidence) -> str:
 
 
 def _scope_issues(
-    requirement: DatasetRequirement, evidence: RetrievalEvidence
+    requirement: DatasetRequirement,
+    evidence: RetrievalEvidence,
+    approved: SelectedSource | None,
 ) -> list[EvidenceIssue]:
     """Compare the identity document's own scope with the requirement.
 
@@ -1447,33 +1449,93 @@ def _scope_issues(
     axis its resolved role names (`compiler.sources.identity_side`), and with
     no other axis's. A named entity on an axis the identity leaves unbound,
     such as a recipient beside a donor the identity binds, is checked against
-    the source's entities alone (`_entity_findings`). Once a named entity is
-    compared, an axis the identity binds where the requirement names no one,
-    such as the recipients beside a donor it names, is bound wider than the
-    requirement (`SCOPE_ENTITIES_WIDER`).
+    the source's entities alone (`_entity_findings`).
+
+    An axis the identity binds where the requirement names no one is one the
+    requirement asks for whole (`_named_axes`). A ref there that the source
+    states as that side's total (`_side_totals`), as Search binds an open
+    donor side to `DACOfficialDonors`, says nothing; any other ref narrows the
+    data to part of the side, which leaves out what the requirement asks for
+    (`SCOPE_ENTITIES_UNBOUND`). `approved` is the source the plan was
+    approved with, whose named sets state the totals at run time, since a
+    manifest states none.
     """
     if not evidence.identity:
         return []
     issues: list[EvidenceIssue] = []
     bound = _identity_entities(evidence.identity.get("entities"))
     if bound is not None:
-        named: dict[str, set[str]] = {}
-        for entity in requirement.entities:
-            for one in named_members(entity, evidence):
-                axis = identity_side(one.role)
-                if axis in bound:
-                    named.setdefault(axis, set()).add(one.ref)
-        for axis in sorted(named):
+        named, placed = _named_axes(requirement, evidence)
+        for axis in sorted(named.keys() & bound.keys()):
             issues.extend(_scope_entity_issues(requirement, named[axis], bound[axis]))
-        if named:
+        if placed:
+            totals = _side_totals(approved or evidence)
             issues.extend(
-                _unnamed_axis_issue(requirement, axis, bound[axis])
+                _open_axis_issue(requirement, axis, narrowing)
                 for axis in sorted(bound.keys() - named.keys())
+                if (narrowing := bound[axis] - totals.get(axis, set()))
             )
     requested = evidence.identity.get("requested_window")
     if isinstance(requested, dict):
         issues.extend(_scope_window_issues(requirement, requested))
     return issues
+
+
+# The identity axis each side a requirement's role word names sits on
+# (`planner.parties.role_party`).
+_AXIS_OF_PARTY: Mapping[Party, str] = {
+    "giving": "origin",
+    "receiving": "destination",
+    "place": "place",
+}
+
+
+def _named_axes(
+    requirement: DatasetRequirement, evidence: RetrievalEvidence
+) -> tuple[dict[str, set[str]], bool]:
+    """The refs `requirement` names on each identity axis (`compiler.sources.identity_side`),
+    and whether every entity it names sits on an axis something shows.
+
+    An entity is on the axis of each member of the source it names
+    (`named_members`) and on the axis its role word places it
+    (`planner.parties.role_party`), with no ref there when it names no
+    member, so a donor the source does not resolve still names the donor
+    side, and the finding on it is the entity check's. An entity with neither,
+    such as a place the source does not resolve, could sit on any axis.
+    """
+    named: dict[str, set[str]] = {}
+    placed = True
+    for entity in requirement.entities:
+        members = named_members(entity, evidence)
+        for one in members:
+            named.setdefault(identity_side(one.role), set()).add(one.ref)
+        party = role_party(entity.role) if entity.role else None
+        if party is not None:
+            named.setdefault(_AXIS_OF_PARTY[party], set())
+        elif not members:
+            placed = False
+    return named, placed
+
+
+def _side_totals(source: SelectedSource | RetrievalEvidence) -> dict[str, set[str]]:
+    """The refs `source` states as a side's total, by identity axis.
+
+    Each named set Search reads as a total (`ResolvedGroup.reads_total`)
+    states its own: the party it publishes as the set's total (`total`), or,
+    for a union of totals read as one population, the entities the source
+    resolves on the set's role column.
+    """
+    totals: dict[str, set[str]] = {}
+    for group in source.groups:
+        if not group.reads_total:
+            continue
+        refs = (
+            {group.total}
+            if group.total is not None
+            else {one.ref for one in source.entities if one.role == group.role}
+        )
+        totals.setdefault(identity_side(group.role), set()).update(refs)
+    return totals
 
 
 def _identity_entities(entities: JsonValue) -> dict[str, set[str]] | None:
@@ -1485,14 +1547,14 @@ def _identity_entities(entities: JsonValue) -> dict[str, set[str]] | None:
     `financingRecipient`), so each key is read as the axis it names, and a
     key outside that set, such as a declared `reporter` role, as an axis of
     its own. An axis no key binds a ref on is one the definition does not
-    bind: Search answers it with what the side reads as, such as the total it
-    counts an open recipient side as, and states that among the source's
-    entities. A required entity sitting on such an axis is
-    checked against those entities (`_entity_findings`), so the scope check
-    says nothing about it. An empty map, or one with no ref under any key,
-    states none exactly as an absent member does: data-mcp writes
-    `entities: {}` to clear the filter, which is an unfiltered definition
-    wider than the requirement, not one binding nothing.
+    bind, and the source states among its entities what Search reads the
+    side as. A required entity sitting on such an axis is checked against
+    those entities (`_entity_findings`), so the scope check says nothing
+    about it. An empty map, or one with no ref under any key, states none
+    exactly as an absent member does: data-mcp writes `entities: {}` to clear
+    the filter, which is an unfiltered definition wider than the requirement,
+    not one binding nothing. dfo-apis refuses a role with an empty list at
+    Search and at the mint alike, so a key with no ref binds nothing.
     """
     if not isinstance(entities, dict):
         return None
@@ -1508,20 +1570,21 @@ def _identity_entities(entities: JsonValue) -> dict[str, set[str]] | None:
     return bound or None
 
 
-def _unnamed_axis_issue(
-    requirement: DatasetRequirement, axis: str, bound: set[str]
+def _open_axis_issue(
+    requirement: DatasetRequirement, axis: str, narrowing: set[str]
 ) -> EvidenceIssue:
-    """The finding on the refs `bound` an identity binds on `axis`, where the
-    requirement names no one: the definition is bound wider than it."""
+    """The finding on the refs `narrowing` an identity binds on `axis`, where the
+    requirement names no one and the source states none of them as the side's
+    total: the definition leaves out every other party on the side."""
     return EvidenceIssue(
-        code=EvidenceIssueCode.SCOPE_ENTITIES_WIDER,
-        severity=Severity.WARNING,
+        code=EvidenceIssueCode.SCOPE_ENTITIES_UNBOUND,
+        severity=Severity.ERROR,
         requirement_id=requirement.id,
         detail=(
-            f"the definition also binds {sorted(bound)!r} on {axis!r}, "
-            "where the requirement names no one"
+            f"the definition binds {sorted(narrowing)!r} on {axis!r}, where the "
+            "requirement names no one, so it leaves out every other party there"
         ),
-        found=sorted(bound),
+        found=sorted(narrowing),
         required=[],
     )
 

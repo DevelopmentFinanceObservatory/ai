@@ -33,7 +33,6 @@ from compiler.evidence import (
 )
 from compiler.sources import (
     bound_refs,
-    identity_side,
     member_digest,
     source_from_spec_block,
     stat_var_reading,
@@ -524,21 +523,6 @@ def test_an_identity_binding_the_donor_alone_compares_only_the_donor(
     assert found == codes
 
 
-def test_a_recipient_is_never_compared_with_the_donors_an_identity_binds(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    # Kenya the recipient beside an identity binding Kenya as the donor: the
-    # recipient axis is unbound, so the scope check says nothing about it.
-    kenya_giving = ResolvedEntity(role="origin", ref="country/KEN", label="Kenya")
-    identity = _identity(entities={"origin": ["country/KEN"]})
-
-    found = _scope_codes(
-        requirement(), source(identity=identity, entities=(kenya_giving, KENYA_DESTINATION))
-    )
-
-    assert found == []
-
-
 def test_a_named_entity_is_compared_with_its_own_axis_alone(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
@@ -563,21 +547,176 @@ def test_a_named_entity_is_compared_with_its_own_axis_alone(
     assert issue.required == ["country/KEN"]
 
 
-def test_an_axis_the_identity_binds_with_no_party_named_there_is_wider(
+KENYA_DESTINATION = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
+_OFFICIAL_DONORS = ResolvedEntity(
+    role="origin", ref="DACOfficialDonors", label="official donors (DAC)"
+)
+_OFFICIAL_DONORS_TOTAL = ResolvedGroup(
+    role="origin",
+    label="official donors (DAC)",
+    total="DACOfficialDonors",
+    whole_of=("official",),
+)
+_PRIVATE_DONORS = ResolvedEntity(role="origin", ref="DACPrivateDonors", label="private donors")
+_EVERY_DONOR = ResolvedGroup(role="origin", label="all donors", whole_of=("official", "private"))
+_US_GIVING = ResolvedEntity(role="origin", ref="country/USA", label="United States")
+_KENYA_GIVING = ResolvedEntity(role="origin", ref="country/KEN", label="Kenya")
+
+
+@pytest.mark.parametrize(
+    ("named", "on_source", "groups", "entities", "found"),
+    [
+        (
+            [],
+            (KENYA_DESTINATION, _OFFICIAL_DONORS),
+            (_OFFICIAL_DONORS_TOTAL,),
+            {"origin": ["DACOfficialDonors"], "destination": ["country/KEN"]},
+            [],
+        ),
+        (
+            [],
+            (KENYA_DESTINATION, _OFFICIAL_DONORS, _PRIVATE_DONORS),
+            (_EVERY_DONOR,),
+            {"origin": ["DACOfficialDonors", "DACPrivateDonors"], "destination": ["country/KEN"]},
+            [],
+        ),
+        (
+            [],
+            (KENYA_DESTINATION, _OFFICIAL_DONORS),
+            (),
+            {"origin": ["DACOfficialDonors"], "destination": ["country/KEN"]},
+            [("scope_entities_unbound", ["DACOfficialDonors"])],
+        ),
+        (
+            [],
+            (KENYA_DESTINATION, _US_GIVING),
+            (_OFFICIAL_DONORS_TOTAL,),
+            {"origin": ["country/USA"], "destination": ["country/KEN"]},
+            [("scope_entities_unbound", ["country/USA"])],
+        ),
+        (
+            [],
+            (_KENYA_GIVING, KENYA_DESTINATION),
+            (),
+            {"origin": ["country/KEN"]},
+            [("scope_entities_unbound", ["country/KEN"])],
+        ),
+        (
+            [Entity(name="United States", role="donor")],
+            (_US_GIVING,),
+            (),
+            {"origin": ["country/USA"], "destination": ["country/GHA"]},
+            [("scope_entities_unbound", ["country/GHA"])],
+        ),
+    ],
+    ids=[
+        "the-donor-sides-total",
+        "a-union-of-totals",
+        "a-total-no-set-states",
+        "one-donor",
+        "kenya-as-the-donor",
+        "ghana-beside-the-us",
+    ],
+)
+def test_an_axis_the_requirement_names_no_one_on_is_asked_for_whole(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    named: list[Entity],
+    on_source: tuple[ResolvedEntity, ...],
+    groups: tuple[ResolvedGroup, ...],
+    entities: dict[str, list[str]],
+    found: list[tuple[str, list[str]]],
+) -> None:
+    """Kenya's debt service, or US aid, on an identity binding a side the requirement
+    names no one on. A ref the source states as that side's total, Search's
+    official donors or the totals of every donor, says nothing; any other ref,
+    such as one donor, Kenya as the giver, or Ghana beside the US, narrows the data
+    to part of the side and is an error."""
+    asked = requirement(entities=named) if named else requirement()
+    held = source(identity=_identity(entities=entities), entities=on_source, groups=groups)
+
+    issues = check_evidence(asked, evidence_from_source(held))
+
+    assert [
+        (issue.code.value, issue.found) for issue in issues if issue.code.value.startswith("scope")
+    ] == found
+    assert all(
+        issue.severity is Severity.ERROR
+        for issue in issues
+        if issue.code is EvidenceIssueCode.SCOPE_ENTITIES_UNBOUND
+    )
+
+
+_UNBOUND = ("scope_entities_unbound", "error")
+
+
+@pytest.mark.parametrize(
+    ("asked", "codes"),
+    [
+        ({"entities": [Entity(name="Kenya", role="recipient")]}, [_UNBOUND]),
+        ({"entities": [Entity(name="Kenya")]}, []),
+        ({"entities": [], "across": ("recipient",)}, [_UNBOUND, _UNBOUND]),
+    ],
+    ids=["a-role-placing-it", "no-role", "every-recipient"],
+)
+def test_an_entity_the_source_does_not_resolve_keeps_the_axis_its_role_names(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    asked: dict[str, object],
+    codes: list[tuple[str, str]],
+) -> None:
+    """Kenya, on a source resolving no entity and an identity binding the US as the
+    donor and Kenya as the recipient. A recipient names the receiving side, so
+    only the donor side is asked for whole, and the US narrows it. A name with no
+    role could sit on either side, so neither is read as asked for whole. A
+    requirement across every recipient names no one, and asks for both sides
+    whole."""
+    identity = _identity(entities={"origin": ["country/USA"], "destination": ["country/KEN"]})
+
+    assert _scope_codes(requirement(**asked), source(identity=identity, entities=())) == codes
+
+
+def test_at_run_time_the_approved_source_states_the_side_totals(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
-    """US aid, on an identity binding the US and Ghana as the recipient. The donor
-    matches; the recipients bound where the requirement names none are recorded
-    as a definition wider than it."""
-    us = ResolvedEntity(role="origin", ref="country/USA", label="United States")
-    identity = _identity(entities={"origin": ["country/USA"], "destination": ["country/GHA"]})
-    aid = requirement(entities=[Entity(name="United States", role="donor")])
+    """A manifest states no named set, so a retrieval of Kenya's aid from Search's
+    official donors reads the donor side's total off the source the plan was
+    approved with."""
+    approved = source(
+        identity=_identity(
+            entities={"origin": ["DACOfficialDonors"], "destination": ["country/KEN"]}
+        ),
+        entities=(KENYA_DESTINATION, _OFFICIAL_DONORS),
+        groups=(_OFFICIAL_DONORS_TOTAL,),
+    )
+    retrieved = evidence_from_source(approved).model_copy(
+        update={"origin": "manifest", "groups": ()}
+    )
 
-    issues = check_evidence(aid, evidence_from_source(source(identity=identity, entities=(us,))))
+    def unbound(issues: list[EvidenceIssue]) -> list[object]:
+        return [i.found for i in issues if i.code is EvidenceIssueCode.SCOPE_ENTITIES_UNBOUND]
 
-    assert errors(issues) == []
-    (issue,) = [i for i in issues if i.code is EvidenceIssueCode.SCOPE_ENTITIES_WIDER]
-    assert issue.found == ["country/GHA"]
+    assert unbound(check_evidence(requirement(), retrieved, approved=approved)) == []
+    assert unbound(check_evidence(requirement(), retrieved)) == [["DACOfficialDonors"]]
+
+
+def test_a_declared_role_named_like_an_axis_is_an_axis_of_its_own(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    """Kenya's GDP, on an identity binding Kenya as the place and Ghana under a
+    declared role spelled `place`. Ghana sits on that role's own axis, where the
+    requirement names no one, and not beside Kenya on the place axis."""
+    kenya = ResolvedEntity(role="observationAbout", ref="country/KEN", label="Kenya")
+    identity = _identity(entities={"observationAbout": ["country/KEN"], "place": ["country/GHA"]})
+
+    issues = check_evidence(
+        requirement(entities=[Entity(name="Kenya")]),
+        evidence_from_source(source(identity=identity, entities=(kenya,))),
+    )
+
+    assert [(i.code, i.found) for i in issues if i.code.value.startswith("scope")] == [
+        (EvidenceIssueCode.SCOPE_ENTITIES_UNBOUND, ["country/GHA"])
+    ]
 
 
 _US_REPORTING = ResolvedEntity(role="reporter", ref="country/USA", label="United States")
@@ -586,11 +725,11 @@ _US_REPORTING = ResolvedEntity(role="reporter", ref="country/USA", label="United
 @pytest.mark.parametrize(
     ("entities", "named", "codes"),
     [
-        ({"reporter": ["country/KEN"]}, (), []),
+        ({"reporter": ["country/KEN"]}, (), [("scope_entities_unbound", "error")]),
         (
             {"destination": ["country/KEN"], "reporter": ["country/GBR"]},
             (),
-            [("scope_entities_wider", "warning")],
+            [("scope_entities_unbound", "error")],
         ),
         ({"destination": ["country/KEN"], "reporter": []}, (), []),
         (
@@ -617,7 +756,8 @@ def test_an_identity_key_outside_the_axis_table_is_an_axis_of_its_own(
 ) -> None:
     """A role dfo-apis declares, such as `reporter`, keys an identity on an axis of
     its own: its refs are compared only with a party resolved under that role, and
-    never with Kenya the recipient. A key with no ref binds nothing."""
+    never with Kenya the recipient. Where the requirement names no reporter, a
+    reporter bound narrows the data. A key with no ref binds nothing."""
     wanted = (
         requirement(entities=[Entity(name="United States", role="reporter")])
         if named
@@ -644,10 +784,16 @@ def _identity_entity_maps(value: object) -> Iterator[dict[str, object]]:
             yield from _identity_entity_maps(child)
 
 
+# The roles a dataset declares that a recorded identity keys its refs by outside
+# `IDENTITY_KEY_AXES`, each compared as an axis of its own
+# (`compiler.sources.identity_side`). No recorded answer keys one yet.
+_RECORDED_DECLARED_ROLES: frozenset[str] = frozenset()
+
+
 def test_every_identity_entity_map_on_record_lists_refs_by_axis() -> None:
     # The recorded Search and mint answers the tests and evals replay key every
-    # identity's refs by a key `compiler.sources.identity_side` reads: one of
-    # `IDENTITY_KEY_AXES`, or a declared role compared as an axis of its own.
+    # identity's refs by a key of `IDENTITY_KEY_AXES` or a declared role listed
+    # above, so a recording keying another role has to be read before it lands.
     root = Path(__file__).resolve().parents[4]
     files = [
         *(root / "services" / "harness" / "tests" / "fixtures").rglob("*.json"),
@@ -661,8 +807,8 @@ def test_every_identity_entity_map_on_record_lists_refs_by_axis() -> None:
     assert [
         found for found in maps if not all(isinstance(refs, list) for refs in found.values())
     ] == []
-    for key in {key for found in maps for key in found}:
-        assert identity_side(key) == IDENTITY_KEY_AXES.get(key, key)
+    keys = {key for found in maps for key in found}
+    assert sorted(keys - IDENTITY_KEY_AXES.keys() - _RECORDED_DECLARED_ROLES) == []
 
 
 def test_an_identity_bound_wider_than_the_requirement_is_a_warning(
@@ -2514,7 +2660,6 @@ def test_a_manifest_with_no_rows_gets_no_unit_finding(
 DONORS = OpenEntityAxis(column="origin", member_count=55)
 RECIPIENTS = OpenEntityAxis(column="destination", member_count=140)
 COUNTRIES = OpenEntityAxis(column="observationAbout", member_count=193)
-KENYA_DESTINATION = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
 
 
 def test_no_open_axis_answers_a_party_word() -> None:

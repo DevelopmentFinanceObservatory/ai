@@ -1196,6 +1196,9 @@ def readable_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...] | 
 # these columns alone (`parties_outside`).
 WHOLE_COLUMNS: Mapping[str, str] = {"donor": "origin", "recipient": "destination"}
 
+# The prefix of the axis an identity key outside `IDENTITY_KEY_AXES` names (`identity_side`).
+_DECLARED_ROLE_AXIS = "role:"
+
 # A total holding a whole population can leave out this class of party and still
 # hold every party a part names. A residual names no party (`common.place_type`).
 _NOT_A_PARTY_CLASS = "residual"
@@ -1219,9 +1222,11 @@ def identity_side(key: str) -> str:
     """The axis a role column or a key of an identity's `entities` names
     (`common.place_type.IDENTITY_KEY_AXES`), so `origin`, `financingProvider` and
     `creditor` are one axis. A key outside that table, such as a role dfo-apis
-    declares as `reporter`, is an axis of its own, compared only with parties
-    resolved under that same role."""
-    return IDENTITY_KEY_AXES.get(key, key)
+    declares as `reporter`, is an axis of its own, `role:reporter`, compared only
+    with parties resolved under that same role. dfo-apis spells a role in letters,
+    digits and underscores alone, so the colon keeps a declared role named `place`
+    off the place axis."""
+    return IDENTITY_KEY_AXES.get(key) or f"{_DECLARED_ROLE_AXIS}{key}"
 
 
 def open_side_column(axes: Iterable[OpenEntityAxis] | None, role: str) -> str | None:
