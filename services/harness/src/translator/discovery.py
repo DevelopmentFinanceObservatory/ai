@@ -2949,11 +2949,13 @@ async def _settled_whole(
     no pin, where no reader holds its pin over its period, a pin read only
     off the discovery log included, whose identity carries the window of the
     search that found it, and where its pin was compiled from another dataset
-    than the one its part is pinned to now. A pin whose spec block is on
-    record and does not read as a source, as one naming a class of party this
-    release does not know, is refused as the search answering it would be
-    (`SEARCH_REFUSED`): the part's block carries the same field, so settling
-    the part again cannot help.
+    than the one its part is pinned to now, which is checked first, since a
+    compile from the part's own dataset may read. A pin compiled from that
+    dataset whose spec block is on record and does not read as a source, as
+    one naming a class of party this release does not know, is refused
+    (`SEARCH_REFUSED`), which ends the turn as Search not answering
+    (`translator.mechanical._settle_discovery`): the part's block carries the
+    same field, so settling the part again cannot help.
     """
     if isinstance(read, dict):
         return read
@@ -2965,6 +2967,16 @@ async def _settled_whole(
             f"{requirement.id!r} is the whole of {part!r}, counted from its part's dataset "
             "with no search, and states no pin to that count",
         )
+    records = _PinRecords(state)
+    origin = _whole_origin(records, requirement)
+    settled = _settled_part_pins(records, plan, part)
+    if origin is not None and origin not in settled:
+        return _unsettled_whole(
+            requirement,
+            f"{requirement.id!r} is the whole of {part!r}, and its pin "
+            f"{requirement.source_spec_id!r} was counted from {origin!r}, while {part!r} is "
+            f"pinned to {sorted(settled)!r}",
+        )
     if read is None or not read[1]:
         if (unread := _unreadable_block(state, plan=plan, requirement=requirement)) is not None:
             return unread
@@ -2975,16 +2987,6 @@ async def _settled_whole(
             f"{requirement.period.start} to {requirement.period.end}: the part's search "
             "answered a narrower question, or nothing on record describes the pin over "
             "those years",
-        )
-    records = _PinRecords(state)
-    origin = _whole_origin(records, requirement)
-    settled = _settled_part_pins(records, plan, part)
-    if origin is not None and origin not in settled:
-        return _unsettled_whole(
-            requirement,
-            f"{requirement.id!r} is the whole of {part!r}, and its pin "
-            f"{requirement.source_spec_id!r} was counted from {origin!r}, while {part!r} is "
-            f"pinned to {sorted(settled)!r}",
         )
     source, _ = read
     log = await _record_honoured_pin(state, plan=plan, requirement=requirement, source=source)
@@ -3002,9 +3004,9 @@ async def _settled_whole(
 def _unreadable_block(
     state: SessionState, *, plan: Plan, requirement: DatasetRequirement
 ) -> dict[str, object] | None:
-    """The refusal of a search whose envelope could not be read, for the pin of
-    `requirement` whose spec block on record (`_resolve_pin_block`) does not read as a
-    source; `None` where none is on record or it reads."""
+    """The refusal for the pin of `requirement` whose spec block on record
+    (`_resolve_pin_block`) does not read as a source; `None` where none is on record
+    or it reads."""
     block = _resolve_pin_block(_PinRecords(state), plan=plan, requirement=requirement)
     if block is None:
         return None
@@ -3013,7 +3015,8 @@ def _unreadable_block(
     except ValueError as exc:
         return problem(
             ProblemCode.SEARCH_REFUSED,
-            "data-mcp answered with an envelope that could not be read.",
+            f"The spec block on record for {requirement.id!r}'s pin "
+            f"{requirement.source_spec_id!r} could not be read as a source.",
             outcome=Outcome.REFUSED,
             detail={
                 "parse_error": str(exc),

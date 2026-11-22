@@ -9,6 +9,7 @@ from typing import Any
 
 import pyarrow as pa
 import pytest
+from common.place_type import IDENTITY_KEY_AXES
 from compiler.evidence import (
     _UNREADABLE_UNIT_CHARS,
     EvidenceIssueCode,
@@ -562,55 +563,106 @@ def test_a_named_entity_is_compared_with_its_own_axis_alone(
     assert issue.required == ["country/KEN"]
 
 
-@pytest.mark.parametrize("key", ["counterpart", "sector"])
-@pytest.mark.parametrize(
-    "bound",
-    [["country/KEN"], ["country/GHA"], ["CRSPurposeCode120"]],
-    ids=["binds-kenya", "binds-ghana", "binds-a-code"],
-)
-def test_an_identity_keying_entities_on_no_axis_is_one_error_for_the_source(
-    requirement: RequirementFactory, source: SourceFactory, key: str, bound: list[str]
+def test_an_axis_the_identity_binds_with_no_party_named_there_is_wider(
+    requirement: RequirementFactory, source: SourceFactory
 ) -> None:
-    # dfo-apis mints no such key, so nothing says which side its refs sit on,
-    # whatever they are and whoever the requirement names.
-    identity = _identity(entities={"origin": ["country/USA"], key: bound})
-    issues = check_evidence(requirement(), evidence_from_source(source(identity=identity)))
+    """US aid, on an identity binding the US and Ghana as the recipient. The donor
+    matches; the recipients bound where the requirement names none are recorded
+    as a definition wider than it."""
+    us = ResolvedEntity(role="origin", ref="country/USA", label="United States")
+    identity = _identity(entities={"origin": ["country/USA"], "destination": ["country/GHA"]})
+    aid = requirement(entities=[Entity(name="United States", role="donor")])
 
-    (issue,) = errors(issues)
-    assert issue.code is EvidenceIssueCode.IDENTITY_UNVERIFIED
-    assert issue.found == [key]
+    issues = check_evidence(aid, evidence_from_source(source(identity=identity, entities=(us,))))
+
+    assert errors(issues) == []
+    (issue,) = [i for i in issues if i.code is EvidenceIssueCode.SCOPE_ENTITIES_WIDER]
+    assert issue.found == ["country/GHA"]
 
 
-def _identity_entity_keys(value: object) -> Iterator[str]:
-    """The keys of every identity's `entities` map in `value`, a parsed JSON document:
-    a map of lists beside the identity's `slots` or `shape`."""
+_US_REPORTING = ResolvedEntity(role="reporter", ref="country/USA", label="United States")
+
+
+@pytest.mark.parametrize(
+    ("entities", "named", "codes"),
+    [
+        ({"reporter": ["country/KEN"]}, (), []),
+        (
+            {"destination": ["country/KEN"], "reporter": ["country/GBR"]},
+            (),
+            [("scope_entities_wider", "warning")],
+        ),
+        ({"destination": ["country/KEN"], "reporter": []}, (), []),
+        (
+            {"reporter": ["country/GBR"]},
+            (_US_REPORTING,),
+            [("scope_entities_unbound", "error"), ("scope_entities_wider", "warning")],
+        ),
+        ({"reporter": ["country/USA"]}, (_US_REPORTING,), []),
+    ],
+    ids=[
+        "binds-kenya-elsewhere",
+        "binds-another-reporter-unnamed",
+        "binds-no-reporter",
+        "binds-another-reporter",
+        "binds-the-reporter",
+    ],
+)
+def test_an_identity_key_outside_the_axis_table_is_an_axis_of_its_own(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    entities: dict[str, list[str]],
+    named: tuple[ResolvedEntity, ...],
+    codes: list[tuple[str, str]],
+) -> None:
+    """A role dfo-apis declares, such as `reporter`, keys an identity on an axis of
+    its own: its refs are compared only with a party resolved under that role, and
+    never with Kenya the recipient. A key with no ref binds nothing."""
+    wanted = (
+        requirement(entities=[Entity(name="United States", role="reporter")])
+        if named
+        else requirement()
+    )
+    on_source = named or (KENYA_DESTINATION,)
+
+    found = _codes(wanted, source(identity=_identity(entities=entities), entities=on_source))
+
+    assert [one for one in found if one[0].startswith(("scope", "identity"))] == codes
+
+
+def _identity_entity_maps(value: object) -> Iterator[dict[str, object]]:
+    """Every identity's `entities` map in `value`, a parsed JSON document: a map
+    beside the identity's `slots` or `shape`."""
     if isinstance(value, dict):
         entities = value.get("entities")
-        if (
-            isinstance(entities, dict)
-            and ("slots" in value or "shape" in value)
-            and all(isinstance(refs, list) for refs in entities.values())
-        ):
-            yield from entities
+        if isinstance(entities, dict) and ("slots" in value or "shape" in value):
+            yield entities
         for child in value.values():
-            yield from _identity_entity_keys(child)
+            yield from _identity_entity_maps(child)
     elif isinstance(value, list):
         for child in value:
-            yield from _identity_entity_keys(child)
+            yield from _identity_entity_maps(child)
 
 
-def test_every_identity_entity_key_on_record_names_an_axis() -> None:
+def test_every_identity_entity_map_on_record_lists_refs_by_axis() -> None:
     # The recorded Search and mint answers the tests and evals replay key every
-    # identity by an axis `compiler.sources.identity_side` reads.
+    # identity's refs by a key `compiler.sources.identity_side` reads: one of
+    # `IDENTITY_KEY_AXES`, or a declared role compared as an axis of its own.
     root = Path(__file__).resolve().parents[4]
     files = [
         *(root / "services" / "harness" / "tests" / "fixtures").rglob("*.json"),
         *(root / "evals").rglob("*.json"),
     ]
-    keys = {key for path in files for key in _identity_entity_keys(json.loads(path.read_text()))}
+    maps = [
+        found for path in files for found in _identity_entity_maps(json.loads(path.read_text()))
+    ]
 
-    assert keys
-    assert {key for key in keys if identity_side(key) is None} == set()
+    assert maps
+    assert [
+        found for found in maps if not all(isinstance(refs, list) for refs in found.values())
+    ] == []
+    for key in {key for found in maps for key in found}:
+        assert identity_side(key) == IDENTITY_KEY_AXES.get(key, key)
 
 
 def test_an_identity_bound_wider_than_the_requirement_is_a_warning(

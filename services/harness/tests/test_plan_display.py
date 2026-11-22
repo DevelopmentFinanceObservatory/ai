@@ -4041,8 +4041,9 @@ def test_the_sum_over_a_whole_s_open_side_is_a_card_row_of_its_own(
     [
         (DAC_DONORS, [("official donors (DAC)", "DACOfficialDonors")], ()),
         (ALL_DONORS, [], ("donor",)),
-        # The donors bound, with no entity stated for them: the whole covers the side.
-        ({"entities": DAC_DONORS["entities"][:1]}, [], ("donor",)),
+        # The donors bound with no entity stated for them: the whole names no donor
+        # and leaves no side open, so compile reads no open axis it cannot resolve.
+        ({"entities": DAC_DONORS["entities"][:1]}, [], ()),
     ],
     ids=["donors-bound", "donors-open", "donors-bound-unstated"],
 )

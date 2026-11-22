@@ -77,7 +77,6 @@ from typing import Literal, NamedTuple, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
-from common.place_type import IdentityAxis
 from common.price_basis import price_basis_reading
 from data_mcp.dcid import bare_dcid, is_dcid
 from data_mcp.manifest import Manifest
@@ -1448,78 +1447,83 @@ def _scope_issues(
     axis its resolved role names (`compiler.sources.identity_side`), and with
     no other axis's. A named entity on an axis the identity leaves unbound,
     such as a recipient beside a donor the identity binds, is checked against
-    the source's entities alone (`_entity_findings`). An identity keying its
-    `entities` by a key on no axis is one error for the source, whatever it
-    binds there, since nothing says which side those refs sit on.
+    the source's entities alone (`_entity_findings`). Once a named entity is
+    compared, an axis the identity binds where the requirement names no one,
+    such as the recipients beside a donor it names, is bound wider than the
+    requirement (`SCOPE_ENTITIES_WIDER`).
     """
     if not evidence.identity:
         return []
     issues: list[EvidenceIssue] = []
-    entities = evidence.identity.get("entities")
-    if unknown := _unknown_entity_keys(entities):
-        issues.append(
-            EvidenceIssue(
-                code=EvidenceIssueCode.IDENTITY_UNVERIFIED,
-                severity=Severity.ERROR,
-                requirement_id=requirement.id,
-                detail=(
-                    f"source {evidence.spec_id}'s identity binds entities under {unknown!r}, "
-                    "which name no side of a flow or place, so what it binds cannot be "
-                    "compared with the requirement"
-                ),
-                found=unknown,
-            )
-        )
-    elif (bound := _identity_entities(entities)) is not None:
-        named: dict[IdentityAxis, set[str]] = {}
+    bound = _identity_entities(evidence.identity.get("entities"))
+    if bound is not None:
+        named: dict[str, set[str]] = {}
         for entity in requirement.entities:
             for one in named_members(entity, evidence):
                 axis = identity_side(one.role)
-                if axis is not None and axis in bound:
+                if axis in bound:
                     named.setdefault(axis, set()).add(one.ref)
         for axis in sorted(named):
             issues.extend(_scope_entity_issues(requirement, named[axis], bound[axis]))
+        if named:
+            issues.extend(
+                _unnamed_axis_issue(requirement, axis, bound[axis])
+                for axis in sorted(bound.keys() - named.keys())
+            )
     requested = evidence.identity.get("requested_window")
     if isinstance(requested, dict):
         issues.extend(_scope_window_issues(requirement, requested))
     return issues
 
 
-def _unknown_entity_keys(entities: JsonValue) -> list[str]:
-    """The keys of an identity's `entities` on no axis (`compiler.sources.identity_side`),
-    sorted; empty where every key names one or it states no map."""
-    if not isinstance(entities, dict):
-        return []
-    return sorted(key for key in entities if identity_side(key) is None)
-
-
-def _identity_entities(entities: JsonValue) -> dict[IdentityAxis, set[str]] | None:
+def _identity_entities(entities: JsonValue) -> dict[str, set[str]] | None:
     """The refs an identity's `entities` binds, by the axis each key names
     (`compiler.sources.identity_side`); `None` when it states none.
 
     Search keys an identity by axis (`observationAbout`, `origin`,
     `destination`) and the mint by the caller's graph role (`creditor`,
-    `financingRecipient`), so each key is read as the axis it names. An
-    axis it leaves out is one the definition does not bind: Search answers
-    it with what the side reads as, such as the total it counts an open
-    recipient side as, and states that among the source's entities. A
-    required entity sitting on such an axis is checked against those
-    entities (`_entity_findings`), so the scope check says nothing about it.
-    An empty map, or one with no list under any key, states none exactly as
-    an absent member does: data-mcp writes `entities: {}` to clear the
-    filter, which is an unfiltered definition wider than the requirement, not
-    one binding nothing. A key on no axis is left out (`_unknown_entity_keys`).
+    `financingRecipient`), so each key is read as the axis it names, and a
+    key outside that set, such as a declared `reporter` role, as an axis of
+    its own. An axis no key binds a ref on is one the definition does not
+    bind: Search answers it with what the side reads as, such as the total it
+    counts an open recipient side as, and states that among the source's
+    entities. A required entity sitting on such an axis is
+    checked against those entities (`_entity_findings`), so the scope check
+    says nothing about it. An empty map, or one with no ref under any key,
+    states none exactly as an absent member does: data-mcp writes
+    `entities: {}` to clear the filter, which is an unfiltered definition
+    wider than the requirement, not one binding nothing.
     """
     if not isinstance(entities, dict):
         return None
-    bound: dict[IdentityAxis, set[str]] = {}
+    bound: dict[str, set[str]] = {}
     for key, values in entities.items():
-        axis = identity_side(key)
-        if axis is not None and isinstance(values, list):
-            bound.setdefault(axis, set()).update(
-                value for value in values if isinstance(value, str)
-            )
+        refs = (
+            {value for value in values if isinstance(value, str)}
+            if isinstance(values, list)
+            else set()
+        )
+        if refs:
+            bound.setdefault(identity_side(key), set()).update(refs)
     return bound or None
+
+
+def _unnamed_axis_issue(
+    requirement: DatasetRequirement, axis: str, bound: set[str]
+) -> EvidenceIssue:
+    """The finding on the refs `bound` an identity binds on `axis`, where the
+    requirement names no one: the definition is bound wider than it."""
+    return EvidenceIssue(
+        code=EvidenceIssueCode.SCOPE_ENTITIES_WIDER,
+        severity=Severity.WARNING,
+        requirement_id=requirement.id,
+        detail=(
+            f"the definition also binds {sorted(bound)!r} on {axis!r}, "
+            "where the requirement names no one"
+        ),
+        found=sorted(bound),
+        required=[],
+    )
 
 
 def _scope_entity_issues(

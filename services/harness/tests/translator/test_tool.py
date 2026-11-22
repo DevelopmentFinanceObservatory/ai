@@ -1608,6 +1608,7 @@ _SPEC_ELSEWHERE = "spec_" + "9" * 32
         ("no-pin", "share_whole_underivable"),
         ("read-off-the-log", "share_whole_underivable"),
         ("compiled-block-unreadable", "search_refused"),
+        ("unreadable-from-another-dataset", "share_whole_underivable"),
     ],
 )
 async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
@@ -1624,7 +1625,8 @@ async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
     refer the whole back, so the plan is proposed again and the whole compiled
     from its part. A compile whose block names a class of party this release does
     not know is refused as the unreadable answer it is, since its part's search
-    answers the same way."""
+    answers the same way, unless it was compiled from another dataset, which a
+    compile from its part's may read."""
     g7 = Entity(name="Group of Seven", role="donor")
     period = Period(start=1960, end=2024)
     whole = requirement(
@@ -1660,7 +1662,8 @@ async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
     save_pin_sources(
         context.state, {SPEC_G7_AFRICA: PinSource(block=_G7_AFRICA_BLOCK, settled=True)}
     )
-    origin = _SPEC_ELSEWHERE if pinned == "compiled-from-another-dataset" else SPEC_G7_AFRICA
+    elsewhere = pinned in {"compiled-from-another-dataset", "unreadable-from-another-dataset"}
+    origin = _SPEC_ELSEWHERE if elsewhere else SPEC_G7_AFRICA
     save_alignments(
         context.state,
         [
@@ -1682,7 +1685,7 @@ async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
         )
     else:
         block = json.loads(json.dumps(_G7_EVERY_RECIPIENT_BLOCK))
-        if pinned == "compiled-block-unreadable":
+        if pinned in {"compiled-block-unreadable", "unreadable-from-another-dataset"}:
             block["resolved"]["entity_groups"]["destination"]["whole_of"] = ["sovereign_fund"]
         save_aligned_pin(
             context.state,
