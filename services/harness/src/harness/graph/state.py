@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import (
     Mapping,
     Sequence,
@@ -22,9 +23,9 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple
 
 from data_mcp.search_tool import MAX_PARTS
-from planner.plan import AskBreakdown, SessionState, scope_unread, stored_plan, with_blocks
+from planner.plan import AskBreakdown, SessionState, Unit, scope_unread, stored_plan, with_blocks
 from planner.plan import Plan as PlannerPlan
-from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
+from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, ValidationError
 from submission.prices_choice import measure_key
 
 from harness.tool_contracts import (
@@ -33,7 +34,9 @@ from harness.tool_contracts import (
 from harness.turn.store import SPECS_KEY, FrameKey, FrameKeys
 from harness.turn_records import Origin, PricesForm, SearchReading, open_prices, prices_form
 from harness.unit_offer import unit_offer
-from harness.wire import UnitOffer
+from harness.wire import UnitChoice, UnitOffer
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from harness.turn.node import NodeCtx
@@ -79,6 +82,12 @@ ORCHESTRATOR_UNIT_SETTLED_KEY = "orchestrator:unit_settled"
 # covered (`unit_reads`, `record_unit_read`), so the prices the user chose
 # reach the re-read series (`planner.call.prices_chosen`).
 ORCHESTRATOR_UNIT_READ_KEY = "orchestrator:unit_read"
+# Each part a unit question covered -> the series the agent fetches for it
+# and the unit that series is served in after the answer, as `ServedUnit`
+# JSON (`units_served`, `record_unit_served`): the chosen unit when Search
+# serves or re-reads it, the served unit when Search refuses the re-read.
+# Plan admission holds the part to that unit (`planner.call.prices_chosen`).
+ORCHESTRATOR_UNIT_SERVED_KEY = "orchestrator:unit_served"
 # The search readings of the conversation's earlier turns, with the warnings
 # of the spec_ids they name and the spec_ids whose block an earlier turn
 # stored, seeded by `harness.studio` from `ConversationState.
@@ -308,6 +317,41 @@ def record_unit_read(state: SessionState, part: str, spec_id: str) -> None:
     reads = unit_reads(state)
     reads[part] = list(dict.fromkeys([*reads.get(part, ()), spec_id]))
     state[ORCHESTRATOR_UNIT_READ_KEY] = reads
+
+
+class ServedUnit(BaseModel):
+    """What a part a unit question covered is fetched as after the answer:
+    `spec_id`, the series the agent was told to fetch, and `unit`, the unit
+    that series is served in, `None` when its unit cannot be read as one a
+    plan states (`planner.plan.Unit`)."""
+
+    spec_id: str
+    unit: Unit | None
+
+
+def units_served(state: SessionState) -> dict[str, ServedUnit]:
+    """The series and unit each part a unit question covered this turn is
+    fetched as (`ORCHESTRATOR_UNIT_SERVED_KEY`), by the part."""
+    return {
+        str(part): ServedUnit.model_validate(served)
+        for part, served in stored_mapping(state, ORCHESTRATOR_UNIT_SERVED_KEY).items()
+    }
+
+
+def record_unit_served(
+    state: SessionState, part: str, spec_id: str, unit: UnitChoice | None
+) -> None:
+    """Record that `part`, which a unit question covered, is fetched as
+    `spec_id`, served in `unit`. A unit no plan can state is recorded as none."""
+    stated: Unit | None = None
+    if unit is not None:
+        try:
+            stated = Unit.model_validate(unit.model_dump(mode="json"))
+        except ValidationError:
+            logger.warning("served unit %r is no unit a plan states", unit)
+    served = {name: one.model_dump(mode="json") for name, one in units_served(state).items()}
+    served[part] = ServedUnit(spec_id=spec_id, unit=stated).model_dump(mode="json")
+    state[ORCHESTRATOR_UNIT_SERVED_KEY] = served
 
 
 def _reading_prices(reading: SearchReading) -> dict[str, Any]:

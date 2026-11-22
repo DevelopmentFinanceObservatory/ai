@@ -25,7 +25,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
@@ -55,6 +55,7 @@ from harness.turn_records import (
 )
 from harness.wire import (
     AddOp,
+    ClientFeature,
     ComponentType,
     CompositionActor,
     CompositionBlock,
@@ -62,6 +63,8 @@ from harness.wire import (
     CompositionManifest,
     ElicitationInput,
     ErrorCode,
+    LayoutHint,
+    LayoutHintType,
     PinOp,
     PlanApproved,
     PlanProposed,
@@ -335,8 +338,16 @@ class _PendingQuestion:
     skippable: bool = False
     # How the question is answered, which names the answer kinds it takes.
     input: ElicitationInput = ElicitationInput.SINGLE_SELECT
-    # A unit question's offer, which a unit answer must lie inside.
+    # A unit question's offer, which a unit answer must lie inside. A unit
+    # question sent as a `single_select` keeps it too: its options are the
+    # offer's whole units (`harness.unit_offer.whole_units`).
     unit: UnitOffer | None = None
+    # The form the question takes for a client that renders every form, when
+    # the frame sent another because the client declared it does not render
+    # this one (`ConversationState.client_features`): `unit` or
+    # `multi_select` for a question sent as a `single_select`. `None` when
+    # `input` is the question's own form.
+    native_input: ElicitationInput | None = None
 
 
 @dataclass(frozen=True)
@@ -571,6 +582,11 @@ class ConversationState:
     renew_now: asyncio.Event | None = None
     # The current turn's auto-add preference (delta 11); reset per turn.
     auto_add: bool = True
+    # The question forms the latest turn or interrupt request declared the
+    # client renders (`harness.wire.TurnRequest.client_features`). Stored, so
+    # a resume on another instance asks in the same forms. A conversation
+    # stored before features were kept holds none.
+    client_features: frozenset[ClientFeature] = field(default_factory=frozenset)
     # Digest entries for every component this conversation streamed,
     # keyed by component_id: {type, title, revision, fact_summary}.
     # Feeds the models' canvas context and the composition "add" op.
@@ -2074,16 +2090,24 @@ def _replace_block(
     *,
     old_component_id: str,
     component: dict[str, Any],
+    retitle: Callable[[str], str] | None = None,
 ) -> bool:
-    """Swap the named card's block for `component`, in place, keeping the
-    block's `pinned` flag.
+    """Swap the named card's block for `component`, in place. The new block
+    keeps the old one's `pinned` flag and card meta (`CardMeta`, the user's
+    note and labels), and a layout hint naming the old card names the new one
+    in its place, so nothing on the canvas stays on the old id.
+
+    `retitle` marks a unit change: it rewrites the words of the kept meta's
+    subtitle, description and axis labels that name the old unit
+    (`harness.card_unit.retitled`), and a `comparison` hint, which aligns its
+    members' units, drops the card, a hint left with fewer than two members
+    going with it. A `row` hint keeps the card.
 
     True iff the canvas shows `component` in the slot: a block was
     replaced, or the canvas already held `component`'s block. A card that
     was never composed (auto_add=false, or removed since) has no block to
-    swap. The caller's component still streams as component.created and is
-    not added to the canvas here. The Edit Card route's recreate
-    (`harness.studio_edit`) names the existing component_id whose slot the
+    swap. The Edit Card route's recreate and a card's unit change
+    (`harness.studio_edit`) name the existing component_id whose slot the
     new component takes over, inside the store's canvas write.
     """
     previous = conversation.composition
@@ -2091,16 +2115,46 @@ def _replace_block(
     if previous is None or index is None:
         # A canvas that already shows the new block reads the swap done.
         return _block_index(previous, component["component_id"]) is not None
+    new_id = component["component_id"]
     blocks = [block.model_copy(deep=True) for block in previous.blocks]
+    meta = blocks[index].meta
+    if meta is not None and retitle is not None:
+        meta = meta.model_copy(
+            update={
+                name: retitle(text)
+                for name in ("subtitle", "description", "x_label", "y_label")
+                if isinstance(text := getattr(meta, name), str)
+            }
+        )
     blocks[index] = CompositionBlock(
-        component_id=component["component_id"],
+        component_id=new_id,
         revision=int(component["revision"]),
         type=component["type"],
         title=_block_title(component),
         pinned=blocks[index].pinned,
+        meta=meta,
     )
-    conversation.composition = _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
+    hints = previous.layout_hints
+    if hints is not None:
+        hints = [
+            hint.model_copy(update={"members": members})
+            for hint in hints
+            if len(members := _swapped_members(hint, old_component_id, new_id, retitle)) >= 2
+        ]
+    conversation.composition = _next_manifest(
+        previous, blocks, actor=CompositionActor.MODEL, layout_hints=hints
+    )
     return True
+
+
+def _swapped_members(
+    hint: LayoutHint, old_id: str, new_id: str, retitle: Callable[[str], str] | None
+) -> list[str]:
+    """`hint`'s members with `old_id` named `new_id`, or left out of a
+    `comparison` hint when `retitle` marks a unit change."""
+    if retitle is not None and hint.type is LayoutHintType.COMPARISON:
+        return [member for member in hint.members if member != old_id]
+    return [new_id if member == old_id else member for member in hint.members]
 
 
 def _recount(blocks: list[CompositionBlock]) -> CompositionCounts:

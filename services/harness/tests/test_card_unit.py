@@ -157,6 +157,43 @@ _CURRENT_EUR = UnitChoice(currency="EUR", prices=UnitPrices.CURRENT)
             _CONSTANT_2023_USD,
             "Aid to Kenya in constant 2023 USD",
         ),
+        (
+            "Aid to Kenya (constant US dollars)",
+            _CONSTANT_2023_USD,
+            _CURRENT_EUR,
+            "Aid to Kenya (current euros)",
+        ),
+        (
+            "Constant 2023 US dollars to Kenya",
+            _CONSTANT_2023_USD,
+            _CURRENT_EUR,
+            "Current euros to Kenya",
+        ),
+        (
+            "Aid to Kenya, constant 2022 USD",
+            _CONSTANT_2022_USD,
+            _CURRENT_EUR,
+            "Aid to Kenya, current EUR",
+        ),
+        (
+            "ODA to Kenya (constant 2022, USD millions)",
+            _CONSTANT_2022_USD,
+            _CONSTANT_2023_USD,
+            "ODA to Kenya (constant 2023, USD millions)",
+        ),
+        ("ODA to Kenya, constant 2022", _CONSTANT_2022_USD, _CURRENT_USD, "ODA to Kenya, current"),
+        (
+            "ODA to Kenya in current prices, 2010 prices",
+            _CURRENT_USD,
+            _CONSTANT_2023_USD,
+            "ODA to Kenya in constant 2023 prices, 2010 prices",
+        ),
+        (
+            "ODA to Kenya in current prices, 2010 prices",
+            _CONSTANT_2022_USD,
+            _CONSTANT_2023_USD,
+            "ODA to Kenya in current prices, 2010 prices",
+        ),
     ],
     ids=[
         "whole-unit",
@@ -170,6 +207,13 @@ _CURRENT_EUR = UnitChoice(currency="EUR", prices=UnitPrices.CURRENT)
         "us-dollars-to-euros",
         "name-opens-the-title",
         "current-currency-code",
+        "basis-without-year-and-currency",
+        "unit-words-open-the-title",
+        "basis-and-code-to-another-currency",
+        "basis-alone-before-a-currency",
+        "basis-alone-to-current",
+        "another-year-before-prices-stands",
+        "another-basis-stands",
     ],
 )
 def test_a_title_names_the_new_unit_where_it_named_the_old(

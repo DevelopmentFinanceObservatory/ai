@@ -85,6 +85,11 @@ class JudgeError(Exception):
     """The judge model stayed unavailable through its retries; the case is unscored."""
 
 
+# The question forms the Studio website declares it renders
+# (`harness.wire.TurnRequest.client_features`).
+_CLIENT_FEATURES = ["unit_question", "multi_select"]
+
+
 def _request(kind: str, conversation_id: str, **members: Any) -> dict[str, Any]:
     body = {"kind": kind, "schema_version": 1, "conversation_id": conversation_id}
     body.update({key: value for key, value in members.items() if value is not None})
@@ -142,6 +147,7 @@ async def _run_message_turn(
             component_ref=component_ref,
             auto_add=turn.get("auto_add"),
             seed_spec=turn.get("seed_spec"),
+            client_features=_CLIENT_FEATURES,
         ),
     )
     violations += checks.check_segment(segment, label="turn stream")
@@ -195,6 +201,7 @@ async def _run_message_turn(
                 conversation_id,
                 interrupt_id=pause["interrupt_id"],
                 decision=decision,
+                client_features=_CLIENT_FEATURES,
                 **reply,
             ),
         )

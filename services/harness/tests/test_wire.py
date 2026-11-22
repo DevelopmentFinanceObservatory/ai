@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from harness.unit_offer import unit_words, whole_units
 from harness.wire import (
     MAX_OPERATION_PHRASE_CHARS,
     MAX_SEED_COUNT,
@@ -33,6 +34,7 @@ from harness.wire import (
     STUDIO_REQUEST_ADAPTER,
     ActivityStep,
     CancelRequest,
+    ClientFeature,
     ComponentCreated,
     ComponentRevised,
     CompositionMutation,
@@ -62,8 +64,10 @@ from harness.wire import (
     Surface,
     TextAnswer,
     TurnRequest,
+    UnitOffer,
     check_resolved_bounds,
     component_fault,
+    declared_features,
 )
 from pydantic import ValidationError
 
@@ -90,6 +94,7 @@ EVENT_FIXTURES = {
     "event-18-elicitation-unit.json": ElicitationRequest,
     "event-19-component-unit-change.json": ComponentCreated,
     "event-20-elicitation-multi-select.json": ElicitationRequest,
+    "event-21-elicitation-unit-pick.json": ElicitationRequest,
 }
 
 REQUEST_FIXTURES = {
@@ -110,6 +115,8 @@ REQUEST_FIXTURES = {
     "request-15-interrupt-unit.json": InterruptResponse,
     "request-16-turn-apply-unit.json": TurnRequest,
     "request-17-interrupt-options.json": InterruptResponse,
+    "request-18-interrupt-unit-pick.json": InterruptResponse,
+    "request-19-turn-client-features.json": TurnRequest,
 }
 
 
@@ -165,6 +172,40 @@ def test_fixtures_that_omit_optional_flags_parse_to_the_contract_defaults() -> N
     assert open_ended.questions[0].allow_free_text is True
     assert open_ended.questions[0].skippable is False
     assert open_ended.skippable is True
+
+
+@pytest.mark.parametrize("name", ["request-01-turn.json", "request-12-interrupt-answers.json"])
+def test_a_request_without_client_features_states_none(name: str) -> None:
+    """A client that predates `client_features` sends none, which leaves the
+    conversation's set as it was (`harness.studio`)."""
+    request = STUDIO_REQUEST_ADAPTER.validate_python(_load(name))
+
+    assert isinstance(request, TurnRequest | InterruptResponse)
+    assert request.client_features is None
+
+
+def test_a_feature_the_harness_does_not_know_is_ignored() -> None:
+    raw = {**_load("request-19-turn-client-features.json")}
+    raw["client_features"] = [*raw["client_features"], "charts_in_3d"]
+
+    request = STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+    assert isinstance(request, TurnRequest)
+    assert declared_features(request.client_features) == {
+        ClientFeature.UNIT_QUESTION,
+        ClientFeature.MULTI_SELECT,
+    }
+
+
+def test_the_unit_pick_fixture_offers_the_unit_fixture_s_whole_units() -> None:
+    """The unit question a client without `unit_question` gets names the
+    whole units of the typed question's start currency, the start first."""
+    offer = UnitOffer.model_validate(_unit_question()["unit"])
+    (pick,) = _load("event-21-elicitation-unit-pick.json")["questions"]
+
+    assert [(option["id"], option["label"]) for option in pick["options"]] == [
+        (option_id, unit_words(unit, offer)) for option_id, unit in whole_units(offer).items()
+    ]
 
 
 def test_turn_request_surface_defaults_to_studio() -> None:

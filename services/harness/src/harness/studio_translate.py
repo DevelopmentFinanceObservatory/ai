@@ -120,9 +120,11 @@ from harness.studio_store import StudioStore, keep_turn_records
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
+from harness.unit_offer import unit_words, whole_units
 from harness.wire import (
     ActivityStep,
     ApplyChoiceSuggestion,
+    ClientFeature,
     ComponentCreated,
     CompositionUpdated,
     Done,
@@ -1449,35 +1451,77 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     return PlannerPlan.model_validate(fields)
 
 
-def _asked_question(question: Mapping[str, Any], *, skippable: bool) -> ElicitationQuestion:
+def _asked_question(
+    question: Mapping[str, Any], *, skippable: bool, features: frozenset[ClientFeature]
+) -> ElicitationQuestion:
     """One question of the `ask` node's pause as the frame asks it: a unit
     question, whose entry carries `unit` (`harness.graph.state.ask_questions`),
     with its offer and no options or free text; any other with its candidates
     as options, and room for the user's own words; a `multi_select` one lets
-    the user tick several."""
+    the user tick several.
+
+    A client that declared no `unit_question` feature gets the unit question
+    as a `single_select` over the offer's whole units (`whole_units`), keeping
+    the offer and no free text; one that declared no `multi_select` gets a
+    `multi_select` question as a `single_select` (`ConversationState.client_features`).
+    """
     if unit := question.get("unit"):
+        offer = UnitOffer.model_validate(unit["offer"])
+        if ClientFeature.UNIT_QUESTION in features:
+            return ElicitationQuestion(
+                id=str(question["id"]),
+                question=str(question["question"]),
+                input=ElicitationInput.UNIT,
+                allow_free_text=False,
+                skippable=skippable,
+                unit=offer,
+            )
         return ElicitationQuestion(
             id=str(question["id"]),
             question=str(question["question"]),
-            input=ElicitationInput.UNIT,
+            input=ElicitationInput.SINGLE_SELECT,
+            options=[
+                ElicitationOption(id=option_id, label=unit_words(choice, offer))
+                for option_id, choice in whole_units(offer).items()
+            ],
             allow_free_text=False,
             skippable=skippable,
-            unit=UnitOffer.model_validate(unit["offer"]),
         )
+    multi = bool(question.get("multi_select")) and ClientFeature.MULTI_SELECT in features
     return ElicitationQuestion(
         id=str(question["id"]),
         question=str(question["question"]),
-        input=(
-            ElicitationInput.MULTI_SELECT
-            if question.get("multi_select")
-            else ElicitationInput.SINGLE_SELECT
-        ),
+        input=ElicitationInput.MULTI_SELECT if multi else ElicitationInput.SINGLE_SELECT,
         options=[
             ElicitationOption(id=str(candidate["spec_id"]), label=str(candidate["label"]))
             for candidate in question["candidates"]
         ],
         allow_free_text=True,
         skippable=skippable,
+    )
+
+
+def _kept_question(asked: ElicitationQuestion, entry: Mapping[str, Any] | None) -> _PendingQuestion:
+    """`asked` as `/interrupt` checks its answer, `entry` the `ask` node's
+    question it was built from (`None` for the planner's ask). A unit question
+    keeps its offer, and one sent in another form than its own keeps that form
+    as `native_input`, which turns its `option` answer back into a unit or a
+    one-item `options` answer (`harness.studio._resume_answer`)."""
+    offer = entry.get("unit") if entry is not None else None
+    if offer:
+        native: ElicitationInput | None = ElicitationInput.UNIT
+    elif entry is not None and entry.get("multi_select"):
+        native = ElicitationInput.MULTI_SELECT
+    else:
+        native = None
+    return _PendingQuestion(
+        id=asked.id,
+        question=asked.question,
+        options={option.id: option.label for option in asked.options or ()},
+        skippable=asked.skippable,
+        input=asked.input,
+        unit=UnitOffer.model_validate(offer["offer"]) if offer else None,
+        native_input=None if asked.input is native else native,
     )
 
 
@@ -2544,7 +2588,10 @@ class _Translator:
         asked = payload.get("questions")
         if asked:
             several = len(asked) > 1
-            questions = [_asked_question(question, skippable=several) for question in asked]
+            questions = [
+                _asked_question(question, skippable=several, features=conversation.client_features)
+                for question in asked
+            ]
             skippable = not several
         else:
             questions = [_planner_question(payload)]
@@ -2560,15 +2607,8 @@ class _Translator:
             adk_id=wire_id,
             kind="elicitation",
             questions=tuple(
-                _PendingQuestion(
-                    id=question.id,
-                    question=question.question,
-                    options={option.id: option.label for option in question.options or ()},
-                    skippable=question.skippable,
-                    input=question.input,
-                    unit=question.unit,
-                )
-                for question in questions
+                _kept_question(question, entry)
+                for question, entry in zip(questions, asked or [None], strict=True)
             ),
             skippable=skippable,
             frames=(frame,),

@@ -86,6 +86,7 @@ from harness.turn.store import TurnStatus, TurnStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
 from harness.wire import (
     AddOp,
+    ClientFeature,
     ComponentType,
     CompositionActor,
     CompositionBlock,
@@ -135,6 +136,15 @@ _UNIT_QUESTION = _PendingQuestion(
     ),
 )
 
+
+# The same question sent to a client that renders no unit question: a pick
+# among the offer's whole units, which keeps the offer and its own form.
+_UNIT_AS_PICK = dataclasses.replace(
+    _UNIT_QUESTION,
+    input=ElicitationInput.SINGLE_SELECT,
+    options={"USD-constant-2023": "Constant 2023 US dollars", "USD-current": "Current US dollars"},
+    native_input=ElicitationInput.UNIT,
+)
 
 _ACCOUNT = "a" * 64
 _VISITOR = "ip:" + "b" * 32
@@ -2018,6 +2028,7 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
     state.seq = 7
     state.trace_id = "tr_seed"
     state.auto_add = False
+    state.client_features = frozenset({ClientFeature.MULTI_SELECT})
     state.turn_user_message = "how much aid did Kenya receive?"
     state.turn_final_text = "Kenya received $1.2B in 2023."
     state.turn_recorded = True
@@ -2037,6 +2048,7 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
                 id="q1", question="Which count?", options={"spec_a": "Net"}, skippable=True
             ),
             _UNIT_QUESTION,
+            _UNIT_AS_PICK,
         ),
         skippable=True,
         step_order=("step_b", "step_a"),
@@ -2072,6 +2084,7 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
     assert loaded.seq == 7
     assert loaded.trace_id == "tr_seed"
     assert loaded.auto_add is False
+    assert loaded.client_features == {ClientFeature.MULTI_SELECT}
     assert loaded.turn_user_message == state.turn_user_message
     assert loaded.turn_final_text == state.turn_final_text
     assert loaded.turn_recorded is True
@@ -2091,6 +2104,7 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
             id="q1", question="Which count?", options={"spec_a": "Net"}, skippable=True
         ),
         _UNIT_QUESTION,
+        _UNIT_AS_PICK,
     )
     assert (pending.skippable, pending.legacy) == (True, False)
     assert pending.step_order == ("step_b", "step_a")

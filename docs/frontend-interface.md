@@ -109,19 +109,20 @@ The server answers `/turn`, `/interrupt` and `/resume` with Server-Sent Events. 
 
 ### 4.1 `turn.request` → POST `/api/studio/turn`
 
-| Field             | Type                                    | Notes                                                                  |
-| ----------------- | --------------------------------------- | ---------------------------------------------------------------------- |
-| `kind`            | `"turn.request"`                        | required                                                               |
-| `schema_version`  | `1`                                     | required                                                               |
-| `conversation_id` | string                                  | required                                                               |
-| `message`         | string                                  | the user's text; required unless `apply_choice` or `apply_unit` is set |
-| `surface`         | `"studio"` \| `"download"` \| `"embed"` | optional; default `"studio"`                                           |
-| `component_ref`   | object \| null                          | optional; see section 8                                                |
-| `seed_spec`       | list of `Seed` \| null                  | optional; 1 to 6 Search results to start from; see 4.1.1               |
-| `auto_add`        | boolean                                 | optional; default `true`; see section 9                                |
-| `apply_choice`    | object \| null                          | optional; a clicked suggestion chip; see 4.1.2                         |
-| `apply_unit`      | object \| null                          | optional; a card's unit change; see 4.1.4                              |
-| `after_turn`      | integer \| null                         | optional; the turn this request follows; see 4.1.3                     |
+| Field             | Type                                    | Notes                                                                           |
+| ----------------- | --------------------------------------- | ------------------------------------------------------------------------------- |
+| `kind`            | `"turn.request"`                        | required                                                                        |
+| `schema_version`  | `1`                                     | required                                                                        |
+| `conversation_id` | string                                  | required                                                                        |
+| `message`         | string                                  | the user's text; required unless `apply_choice` or `apply_unit` is set          |
+| `surface`         | `"studio"` \| `"download"` \| `"embed"` | optional; default `"studio"`                                                    |
+| `component_ref`   | object \| null                          | optional; see section 8                                                         |
+| `seed_spec`       | list of `Seed` \| null                  | optional; 1 to 6 Search results to start from; see 4.1.1                        |
+| `auto_add`        | boolean                                 | optional; default `true`; see section 9                                         |
+| `apply_choice`    | object \| null                          | optional; a clicked suggestion chip; see 4.1.2                                  |
+| `apply_unit`      | object \| null                          | optional; a card's unit change; see 4.1.4                                       |
+| `after_turn`      | integer \| null                         | optional; the turn this request follows; see 4.1.3                              |
+| `client_features` | list of string                          | optional; the question forms the page renders; absent keeps the list; see 4.1.5 |
 
 #### 4.1.1 Seeds from Search
 
@@ -295,7 +296,15 @@ Send `turn.request` with `apply_unit: {component_id, spec_id, turn, unit}`: the 
 
 The server refuses a change it cannot apply with 422 `constraint_violation` before the stream starts, its `pointer` starting `/apply_unit` and its `detail` written for the user: `scope_choice_stale` when the card has left the canvas or no longer reads `spec_id`, `unit_not_offered` for a unit outside the offer or the unit the card already shows. `turn` decides nothing, so a card from any earlier turn can change unit.
 
-Otherwise the stream runs with no model call: `activity.step` frames, a `component.created` for the redrawn card, with a new `component_id` and a fresh `unit_change` that starts on the new unit, a `composition.updated` whose manifest holds it in the old card's slot, then `suggestions` and `done`, with no `message.complete`: the redrawn card is the reply, so show no assistant text for the turn. A step that fails ends on a failed `activity.step` and a `message.complete` that begins "The card is unchanged.", and the card stays as it was. The change counts as a turn. A state read gives its `reply` as empty and its `user_message` as "Change Aid to Kenya to constant 2023 US dollars.".
+Otherwise the stream runs with no model call: `activity.step` frames, a `component.created` for the redrawn card, with a new `component_id`, `replaces` naming the old card, and a fresh `unit_change` that starts on the new unit, a `composition.updated` whose manifest holds it in the old card's slot, then `suggestions` and `done`, with no `message.complete`: the redrawn card is the reply, so show no assistant text for the turn. Swap the old card for the new one where it stands: the widget keeps its turn, pin, position, size and note under the new `component_id`, and the change does not advance the turn the canvas hides earlier cards by. Take the title from the new card, which names the new unit where the old title named the old one; a title the page overrides on its side moves with the card. The new block keeps the old block's `pinned` and `meta`, with the words of `meta`'s `subtitle`, `description`, `x_label` and `y_label` that named the old unit naming the new one. A `row` entry of `layout_hints` names the new card; a `comparison` entry, which aligns its members' units, drops it, and goes when fewer than two members remain. A step that fails ends on a failed `activity.step` and a `message.complete` that begins "The card is unchanged.", and the card stays as it was. A card removed while the change runs ends on a failed `activity.step` and a `message.complete` saying "This card is no longer on the canvas, so nothing changed.", with no `component.created`. The change counts as a turn. A state read gives its `reply` as empty and its `user_message` as "Change Aid to Kenya to constant 2023 US dollars.".
+
+#### 4.1.5 `client_features`
+
+`client_features` lists the question forms the page renders: `"unit_question"` for a question whose `input` is `unit`, and `"multi_select"` for one whose `input` is `multi_select`. The server ignores a value it does not know. Send both on every `turn.request` and `interrupt.response`. The conversation keeps the list the latest request carrying the field declared, and every question the turn asks, before and after a resume and on any server instance, takes the forms it names. A request without the field leaves the list as it was; a new conversation starts with none.
+
+A page that declares no `"unit_question"` gets a unit question as a `single_select` with no `unit` and no free text. Its options are both price bases of the offer's start currency, or, when that currency serves one basis, of the first offered currency that serves both, the start's basis first, such as `USD-constant-2023` "Constant 2023 US dollars" and `USD-current` "Current US dollars". An `option` answer moves the reading to that unit, as a `unit` answer does. A page that declares no `"multi_select"` gets a multi-select question as a `single_select` with the same options and free text, and an `option` answer counts as one tick. A question keeps the form it was sent in, and its answer is checked against that form whatever the answering request declares.
+
+The harness deploys before the website. A harness that predates the field refuses it with 422, and a page opened before the website deployed sends none and gets the `single_select` forms on a conversation no newer page declared features for.
 
 ### 4.2 `interrupt.response` → POST `/api/studio/interrupt`
 
@@ -311,6 +320,7 @@ Otherwise the stream runs with no model call: `activity.step` frames, a `compone
 | `choice_id`       | string \| null                                                                 | required for `switch`: the decision's `choice_id`; forbidden otherwise                                                      |
 | `option_id`       | string \| null                                                                 | required for `switch`: one of that decision's `options[].option_id`; forbidden otherwise                                    |
 | `plan_revision`   | string \| null                                                                 | required for `switch`, optional for `approve`: the `revision` of the `plan.proposed` the user answered; forbidden otherwise |
+| `client_features` | list of string                                                                 | optional; the question forms the page renders, as in 4.1.5; absent keeps the list                                           |
 
 Each answer in `answers` is one of:
 
@@ -482,7 +492,7 @@ Every frame has `event` and `seq`. The other fields per type:
 | `plan.versioned`      | `plan_version_id`, `version`, `supersedes`, `changed[]?`                                                                                                                                                           | A new plan replaces the card `supersedes` names; a new `plan.proposed` follows, except that a new plan in the same turn (`plan.proposed.new_plan`) has no `plan.versioned` before it. `version` rises after an amend and is 1, which can be lower than the superseded version, when the plan was drafted again.                                                                                                                                                                                                          |
 | `plan.approved`       | `plan_version_id`, `version`, `revision?`, `title`, `summary?`, `steps[]`, `choices[]`, `caveats[]`                                                                                                                | The plan the user approved. Sent once the run has accepted the `approve` answer. A retried answer whose approval the run already took, and a `turn.resume`, send it again as their first frame. Key it by `revision`, ignore one the page holds, and attach it to the message that stream produces.                                                                                                                                                                                                                      |
 | `activity.step`       | `step_id`, `label`, `status`, `detail?`, `tool?`, `duration_ms?`, `produced?`, `progress?`                                                                                                                         | One execution step for the Activity feed. `step_id` is `s` plus the `seq` of the step's first frame, unique across the turn's segments; match a step's later frames by it, not by position. On the stream after an approval the plan steps run first; each plan step's final frame arrives in plan order, though steps that run at the same time may send their `running` frames in another order. Each plan step's `label` is that step's `label` on the plan card. A plan-step reference on this frame is a follow-up. |
-| `component.created`   | `component_id`, `revision`, `type`, `catalog_version`, `min_catalog_version`, `payload`, `fact_summary`, `provenance`, `created_from?`, `unit_change?`                                                             | A new card exists; `unit_change` (4.1.4) when its unit can change.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `component.created`   | `component_id`, `revision`, `type`, `catalog_version`, `min_catalog_version`, `payload`, `fact_summary`, `provenance`, `created_from?`, `unit_change?`, `replaces?`                                                | A new card exists; `unit_change` (4.1.4) when its unit can change; `replaces` names the card whose slot it took.                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `component.revised`   | `component_id`, `revision`, `changed[]`, `fact_summary`, `payload?`                                                                                                                                                | An existing card has a new revision. When `payload` is absent, keep your cached payload and apply the `changed` fields from the new `fact_summary`/frame.                                                                                                                                                                                                                                                                                                                                                                |
 | `composition.updated` | `manifest`                                                                                                                                                                                                         | The canvas changed. Re-render from this manifest.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `elicitation.request` | `interrupt_id`, `questions[]` (1 to 3), `skippable`                                                                                                                                                                | One to three questions for the user. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                            |
@@ -673,7 +683,9 @@ it, so its raw frame is not served. The card's own points are in `payload.compon
   `{currencies[], presets[], start}` shaped as in 4.1.4; its answer is
   `{"kind": "unit", ...}`. Any question that is `skippable` takes
   `{"kind": "skipped"}`; skipping a unit question goes on with the unit the
-  offer starts on (`start`).
+  offer starts on (`start`). A page that does not declare
+  `"unit_question"` or `"multi_select"` in `client_features` gets those
+  questions as `single_select` (4.1.5).
 
 ## 6. Pauses and resumes
 
@@ -781,9 +793,11 @@ Edit Card panel's "Describe your edits" text):
   when the card is on the canvas), `message.complete`, `suggestions`,
   `done`.
 - For a type or window change, the platform cannot revise the card. The
-  stream sends `component.created` for a replacement card. The new block
-  takes the replaced block's slot on the canvas. The replaced component
-  stays readable at its earlier revisions.
+  stream sends `component.created` for a replacement card, with `replaces`
+  naming the card whose slot it took when that card was on the canvas. The
+  new block takes the replaced block's slot, pin and `meta` on the canvas;
+  map the old card to the new one in place. The replaced component stays
+  readable at its earlier revisions.
 - An impossible edit ends with an honest `message.complete` and no
   component frame.
 - To implement quick type-switch icons, send the same edit request with a

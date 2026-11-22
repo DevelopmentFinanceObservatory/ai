@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from harness.unit_offer import served_unit, unit_offer, unit_words
-from harness.wire import UnitChoice, UnitPrices
+from harness.unit_offer import served_unit, unit_offer, unit_words, whole_units
+from harness.wire import UnitChoice, UnitCurrency, UnitOffer, UnitPrices
 
 
 def _currency(code: str, noun: str, *, low: int = 2000, high: int = 2023) -> dict[str, Any]:
@@ -104,3 +104,40 @@ def test_a_constant_request_without_a_base_year_reads_as_no_served_unit() -> Non
     }
 
     assert served_unit(block) is None
+
+
+_EUR_CURRENT_ONLY = UnitCurrency(code="EUR", name="euros", prices=[UnitPrices.CURRENT])
+_USD_BOTH = UnitCurrency(
+    code="USD",
+    name="US dollars",
+    prices=[UnitPrices.CURRENT, UnitPrices.CONSTANT],
+    base_year_min=2000,
+    base_year_max=2023,
+)
+_CURRENT_EUR = UnitChoice(currency="EUR", prices=UnitPrices.CURRENT)
+_CONSTANT_2015_USD = UnitChoice(currency="USD", prices=UnitPrices.CONSTANT, base_year=2015)
+
+
+@pytest.mark.parametrize(
+    ("currencies", "start", "options"),
+    [
+        (
+            [_USD_BOTH, _EUR_CURRENT_ONLY],
+            _CONSTANT_2015_USD,
+            ["USD-constant-2015", "USD-current"],
+        ),
+        (
+            [_EUR_CURRENT_ONLY, _USD_BOTH],
+            _CURRENT_EUR,
+            ["USD-current", "USD-constant-2023"],
+        ),
+        ([_EUR_CURRENT_ONLY], _CURRENT_EUR, ["EUR-current"]),
+    ],
+    ids=["start-currency-serves-both", "first-currency-serving-both", "no-currency-serves-both"],
+)
+def test_whole_units_offer_both_bases_the_start_s_basis_first(
+    currencies: list[UnitCurrency], start: UnitChoice, options: list[str]
+) -> None:
+    offer = UnitOffer(currencies=currencies, presets=[c.code for c in currencies], start=start)
+
+    assert list(whole_units(offer)) == options

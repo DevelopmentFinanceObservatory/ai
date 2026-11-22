@@ -904,6 +904,21 @@ class ApplyChoice(_WireModel):
     spec_id: str = Field(min_length=1)
 
 
+class ClientFeature(StrEnum):
+    """A question form a client declares it renders (`TurnRequest.client_features`,
+    `InterruptResponse.client_features`): `unit_question`, a question whose
+    `input` is `unit`; `multi_select`, one whose `input` is `multi_select`."""
+
+    UNIT_QUESTION = "unit_question"
+    MULTI_SELECT = "multi_select"
+
+
+def declared_features(values: list[str]) -> frozenset[ClientFeature]:
+    """The features among `values` this release knows; an unknown value is ignored."""
+    known = {feature.value for feature in ClientFeature}
+    return frozenset(ClientFeature(value) for value in values if value in known)
+
+
 class TurnRequest(_WireModel):
     """POST /api/studio/turn -- start or continue a turn.
 
@@ -932,6 +947,15 @@ class TurnRequest(_WireModel):
     card's unit change (`ApplyUnit`) and cannot come with `apply_choice`. A
     request carries `message`, `apply_choice` or `apply_unit`.
 
+    `client_features` names the question forms the client renders
+    (`ClientFeature`); a value the harness does not know is ignored. The
+    conversation keeps the set the latest request carrying the field
+    declared, and every question the turn asks, before and after a resume,
+    takes the forms it holds. A request without the field leaves the set
+    as it was, empty on a new conversation. A unit question becomes a `single_select` over whole units when
+    `unit_question` is missing, a `multi_select` one a `single_select` when
+    `multi_select` is missing (`harness.studio_translate._asked_question`).
+
     `after_turn` is a precondition: the index of the turn this request
     follows, as a state read reports it (0 before the first turn). The
     request is refused 409 `edit_conflict` with `constraint_id`
@@ -956,6 +980,7 @@ class TurnRequest(_WireModel):
     apply_choice: ApplyChoice | None = None
     apply_unit: ApplyUnit | None = None
     after_turn: int | None = Field(default=None, ge=0)
+    client_features: list[str] | None = None
 
     @model_validator(mode="after")
     def _a_chip_comes_alone(self) -> TurnRequest:
@@ -1082,8 +1107,10 @@ class InterruptResponse(_WireModel):
     `PlanProposed.revision` the user saw), all three. An `approve` may carry
     `plan_revision` alone, and is refused when it is not the paused plan's;
     without one it approves the paused plan, as older clients do. Every
-    other decision carries none of them. The response to this POST is a NEW SSE stream
-    continuing the same turn (delta 1).
+    other decision carries none of them. `client_features` is
+    `TurnRequest.client_features`: when present, it replaces the set the
+    conversation keeps for the questions the resumed turn asks next. The response to this
+    POST is a NEW SSE stream continuing the same turn (delta 1).
     """
 
     kind: Literal["interrupt.response"]
@@ -1103,6 +1130,7 @@ class InterruptResponse(_WireModel):
     choice_id: str | None = Field(default=None, min_length=1)
     option_id: str | None = Field(default=None, min_length=1)
     plan_revision: str | None = Field(default=None, min_length=1)
+    client_features: list[str] | None = None
 
     @model_validator(mode="after")
     def _switch_members_come_with_switch(self) -> InterruptResponse:
@@ -1589,6 +1617,10 @@ class ComponentCreated(_WireModel):
     created_from: CreatedFrom | None = None
     # Set only when the card reads from one convertible spec.
     unit_change: UnitChange | None = None
+    # The card this one took the canvas slot of (a unit change, or an Edit Card
+    # rebuild): the new card holds that card's block, pin, card meta and layout
+    # hint membership, and the old card leaves the canvas.
+    replaces: str | None = None
 
 
 def component_created(component: dict[str, Any], *, step_id: str) -> ComponentCreated:

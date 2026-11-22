@@ -203,3 +203,37 @@ def offered_unit_refusal(offer: UnitOffer, unit: UnitChoice) -> str | None:
                 f"{currency.base_year_max} for {unit.currency}"
             )
     return None
+
+
+def whole_units(offer: UnitOffer) -> dict[str, UnitChoice]:
+    """The whole units a client that renders no unit question picks among, by option id.
+
+    Each basis of one currency: the start's when it serves both bases, else
+    the first offered currency that does, else the start's alone. The unit on
+    the start's basis comes first, the start itself when its currency is the
+    one. A constant unit takes the start's base year when the currency's
+    range holds it, else the currency's latest. An id names the unit,
+    "USD-current" or "USD-constant-2023".
+    """
+    start = offer.start
+    own = next(c for c in offer.currencies if c.code == start.currency)
+    both = next((c for c in (own, *offer.currencies) if set(c.prices) == set(UnitPrices)), own)
+    ordered = sorted(both.prices, key=lambda prices: prices is not start.prices)
+    units = []
+    for prices in ordered:
+        if prices is UnitPrices.CURRENT:
+            units.append(UnitChoice(currency=both.code, prices=prices))
+            continue
+        assert both.base_year_min is not None and both.base_year_max is not None
+        year = start.base_year
+        if year is None or not both.base_year_min <= year <= both.base_year_max:
+            year = both.base_year_max
+        units.append(UnitChoice(currency=both.code, prices=prices, base_year=year))
+    return {
+        "-".join(
+            str(part)
+            for part in (unit.currency, unit.prices.value, unit.base_year)
+            if part is not None
+        ): unit
+        for unit in units
+    }

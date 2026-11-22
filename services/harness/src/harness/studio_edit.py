@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from common.mcp_telemetry import WRITE_TOKEN_KEY
@@ -44,6 +45,7 @@ from pydantic import BaseModel
 
 from harness.card_unit import (
     CARD_UNIT_KEY,
+    UNIT_GONE_NOTE,
     UnitMove,
     card_unit_change,
     retitled,
@@ -56,6 +58,7 @@ from harness.provenance import CARD_FRAME_KEY, CardLineage
 from harness.scope_choices import mark_planner_axes
 from harness.studio_state import (
     ConversationState,
+    _block_index,
     _block_title,
     _digest_entry,
     _next_manifest,
@@ -75,6 +78,7 @@ from harness.unit_offer import unit_words
 from harness.unit_switch import UnitRefused, UnitResubmitted, resubmit_unit
 from harness.wire import (
     ActivityStep,
+    ComponentCreated,
     CompositionActor,
     CompositionUpdated,
     StepProduced,
@@ -144,8 +148,42 @@ class CanvasChange:
     specs: Mapping[str, Any] | None = None
 
 
+class SwapLanded(Enum):
+    """Where a card written to take another's slot (`CardSwap`) landed."""
+
+    # In the old card's slot, which it now holds.
+    SWAPPED = "swapped"
+    # Nowhere: the old card holds no block (held, or removed), and the new
+    # card is kept off the canvas.
+    HELD = "held"
+    # Nowhere and not kept: the old card left the canvas and the swap needed its slot.
+    GONE = "gone"
+
+
+@dataclass(frozen=True)
+class CardSwap:
+    """A card written to take card `replaces`' slot, the last event of the
+    edit that wrote it. `swap` runs on the canvas as stored and makes the
+    write (`StudioStore.change_canvas`), with `lineage` and `specs` as
+    `CanvasChange` has them. Only once it commits are `step`, the step that
+    produced the card, and `created`, its `component.created`, published,
+    `created` naming `replaces` when the card took its slot, and the edit
+    ends on `closed`. A swap that finds the slot gone, when `gone` is given,
+    writes nothing and the edit ends on `gone`, a failed step and its
+    closing, with nothing published."""
+
+    step: ActivityStep
+    created: ComponentCreated
+    replaces: str
+    swap: Callable[[ConversationState], SwapLanded]
+    lineage: CardLineage | None
+    specs: Mapping[str, Any] | None
+    closed: EditClosed
+    gone: tuple[ActivityStep, EditClosed] | None = None
+
+
 # An edit emits a frame to number or one of the events above.
-type EditEvent = BaseModel | EditClosed | EditFailed | CanvasChange
+type EditEvent = BaseModel | EditClosed | EditFailed | CanvasChange | CardSwap
 
 
 async def edit_events(
@@ -179,16 +217,15 @@ async def edit_event_frames(
     event: EditEvent, *, conversation: ConversationState, store: StudioStore
 ) -> list[BaseModel]:
     """The frames of `event`, numbered, with what it changes written: the
-    turn's record for its end, and the card for a card write. A card write
+    turn's record for its end, and the card for a card write. A card swap's
+    frames follow its write (`_swap_frames`). A card write
     fenced out by another instance's takeover, or one that cannot reach the
     database before the lease's deadline, raises `SegmentLost` or
     `DatabaseUnavailable`, and the stream ends as a lost lease does."""
     c = conversation
     match event:
-        case EditClosed(text=text, shown=shown, user_display=user_display):
-            return [
-                *closed_on_reply(c, text, suggestions=True, say=shown, user_display=user_display)
-            ]
+        case EditClosed():
+            return _closed_frames(c, event)
         case EditFailed(error=error):
             return [_stream_fatal(c, error)]
         case CanvasChange(change=change, lineage=lineage, specs=specs):
@@ -204,8 +241,58 @@ async def edit_event_frames(
                     event="composition.updated", seq=c.next_seq(), manifest=c.composition
                 )
             ]
+        case CardSwap():
+            return await _swap_frames(event, conversation=c, store=store)
         case _:
             return [event.model_copy(update={"seq": c.next_seq()})]
+
+
+async def _swap_frames(
+    event: CardSwap, *, conversation: ConversationState, store: StudioStore
+) -> list[BaseModel]:
+    """The frames of `event`, a card swap, once its write commits: none of the
+    card's before it, so a client never shows a card the canvas does not
+    hold. A write that raises publishes nothing."""
+    c = conversation
+    key = current_conversation_key.get()
+    assert key is not None, "an edit runs only inside a conversation's stream"
+    landed = await store.change_canvas(
+        *key,
+        event.swap,
+        lineage=event.lineage,
+        landed=lambda landed: landed is SwapLanded.SWAPPED,
+    )
+    if landed is SwapLanded.GONE:
+        assert event.gone is not None, "only a swap that needs its slot finds it gone"
+        step, closed = event.gone
+        return [step.model_copy(update={"seq": c.next_seq()}), *_closed_frames(c, closed)]
+    if event.specs:
+        c.turn_specs = {**c.turn_specs, **event.specs}
+    replaces = event.replaces if landed is SwapLanded.SWAPPED else None
+    frames: list[BaseModel] = [
+        event.step.model_copy(update={"seq": c.next_seq()}),
+        event.created.model_copy(update={"seq": c.next_seq(), "replaces": replaces}),
+    ]
+    if landed is SwapLanded.SWAPPED:
+        frames.append(
+            CompositionUpdated(
+                event="composition.updated", seq=c.next_seq(), manifest=c.composition
+            )
+        )
+    return [*frames, *_closed_frames(c, event.closed)]
+
+
+def _closed_frames(conversation: ConversationState, closed: EditClosed) -> list[BaseModel]:
+    """The frames that end the edit on `closed`, with the turn recorded."""
+    return [
+        *closed_on_reply(
+            conversation,
+            closed.text,
+            suggestions=True,
+            say=closed.shown,
+            user_display=closed.user_display,
+        )
+    ]
 
 
 async def unit_events(
@@ -290,11 +377,21 @@ async def _unit_flow(
         return
     yield _step("u2", label)
 
+    # The card left the canvas while its new unit was read: the change is
+    # refused as the route refuses a card off the canvas, and nothing is
+    # written.
+    gone = (_step("u3", "Redraw the card", failed=UNIT_GONE_NOTE), EditClosed(UNIT_GONE_NOTE))
+    if _block_index(conversation.composition, move.component_id) is None:
+        for event in gone:
+            yield event
+        return
+
+    def retitle(text: str) -> str:
+        return retitled(text, old=move.served, new=move.unit, offer=move.offer)
+
     intent = {**stored, "frame_ref": frame_refs[0]}
     if isinstance(stored.get("title"), str):
-        intent["title"] = retitled(
-            stored["title"], old=move.served, new=move.unit, offer=move.offer
-        )
+        intent["title"] = retitle(stored["title"])
     held = intent.get("order")
     if isinstance(held, dict) and "period" in held:
         # The new unit can hold values at other periods than the old.
@@ -313,20 +410,25 @@ async def _unit_flow(
         work.turn_user_message = record_line
         work.turn_readings = [*work.turn_readings, *readings]
 
-    for event in _swapped(
+    # The card shows the change; the record keeps the sentence and the
+    # spec_id for the next turn's model, and a state read shows neither.
+    closed = EditClosed(
+        f"The card now shows {in_sentence}.", shown=False, user_display=display_line
+    )
+    yield _swapped(
         recorder,
         conversation,
         component=written["component"],
         old_component_id=move.component_id,
         step_id="u3",
         step_label="Redraw the card",
+        closed=closed,
         specs={resubmitted.spec_id: block},
         also=record,
-    ):
-        yield event
-    # The card shows the change; the record keeps the sentence and the
-    # spec_id for the next turn's model, and a state read shows neither.
-    yield EditClosed(f"The card now shows {in_sentence}.", shown=False, user_display=display_line)
+        retitle=retitle,
+        # The card left the canvas while it was written.
+        gone=gone,
+    )
 
 
 def _read_again(move: UnitMove, resubmitted: UnitResubmitted) -> list[dict[str, Any]]:
@@ -493,17 +595,15 @@ async def _edit_flow(
         for frame in _refused("e2", step_label, lead, written):
             yield frame
         return
-    for event in _swapped(
+    yield _swapped(
         recorder,
         c,
         component=written["component"],
         old_component_id=component_id,
         step_id="e2",
         step_label=step_label,
-    ):
-        yield event
-    for frame in _close(closing):
-        yield frame
+        closed=EditClosed(closing),
+    )
 
 
 def _swapped(
@@ -514,18 +614,26 @@ def _swapped(
     old_component_id: str,
     step_id: str,
     step_label: str,
+    closed: EditClosed,
     specs: Mapping[str, Any] | None = None,
     also: Callable[[ConversationState], None] | None = None,
-) -> list[EditEvent]:
-    """The events of `component`, a card written to take card
-    `old_component_id`'s slot: the step `step_id`, labelled `step_label`,
-    that produced it, its `component.created` naming that step, and the
-    write that swaps it in, with its digest
-    entry, turn line and write token. A card whose unit can change carries
-    its `unit_change` and keeps its `UnitCard` with its entry
+    retitle: Callable[[str], str] | None = None,
+    gone: tuple[ActivityStep, EditClosed] | None = None,
+) -> CardSwap:
+    """The swap of `component`, a card written to take card
+    `old_component_id`'s slot, ending the edit on `closed`: the step
+    `step_id`, labelled `step_label`, that produced it, its
+    `component.created` naming that step, and the write that swaps it in,
+    with its digest entry, turn line and write token. A card whose unit can
+    change carries its `unit_change` and keeps its `UnitCard` with its entry
     (`harness.card_unit`), its Search block read from `specs` and else from
     the conversation. `also` makes the write's other changes, and `specs`
-    joins the turn's blocks once it commits."""
+    joins the turn's blocks once it commits. `retitle` marks a unit change,
+    which `_replace_block` carries into the slot's card meta and layout
+    hints. Given `gone`, the swap needs the old card's slot: a canvas that
+    no longer holds it, read under the write's lock, takes only the new
+    card's write token, so the conversation keeps the card it wrote off the
+    canvas, and the edit ends on `gone`."""
     created = component_created(component, step_id=step_id)
     token = recorder.write_token(component)
     lineage = recorder.card_lineage(component)
@@ -537,9 +645,15 @@ def _swapped(
         created.unit_change = card_unit_change(card, block)
     kept = card.as_json() if card is not None and created.unit_change is not None else None
 
-    def recreate(work: ConversationState) -> bool:
+    def swap(work: ConversationState) -> SwapLanded:
         if token:
             work.write_tokens = {**work.write_tokens, created.component_id: token}
+        if (
+            gone is not None
+            and _block_index(work.composition, old_component_id) is None
+            and _block_index(work.composition, created.component_id) is None
+        ):
+            return SwapLanded.GONE
         entry = _digest_entry(component)
         if kept is not None:
             entry[CARD_UNIT_KEY] = kept
@@ -555,19 +669,25 @@ def _swapped(
         )
         if also is not None:
             also(work)
-        return _replace_block(work, old_component_id=old_component_id, component=component)
+        swapped = _replace_block(
+            work, old_component_id=old_component_id, component=component, retitle=retitle
+        )
+        return SwapLanded.SWAPPED if swapped else SwapLanded.HELD
 
-    # The step frame goes first. Frames are numbered in the order they are
-    # yielded, and the step precedes the card it produced on the wire.
-    return [
-        _step(
+    return CardSwap(
+        step=_step(
             step_id,
             step_label,
             produced=StepProduced(component_id=created.component_id, revision=created.revision),
         ),
-        created,
-        CanvasChange(recreate, lineage=lineage, specs=specs),
-    ]
+        created=created,
+        replaces=old_component_id,
+        swap=swap,
+        lineage=lineage,
+        specs=specs,
+        closed=closed,
+        gone=gone,
+    )
 
 
 def _step(

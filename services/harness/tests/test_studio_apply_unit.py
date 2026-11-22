@@ -17,9 +17,12 @@ import pytest
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from compiler.surface import ProgressCallback, ToolCallResult, ToolId
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from harness.card_unit import UNIT_GONE_NOTE
 from harness.graph.state import frame_id_for
 from harness.provenance import CARD_LINEAGE_KEY, CardLineage, ProvenanceInput
+from harness.studio_state import DatabaseUnavailable
 from harness.studio_store import StudioStore
+from harness.wire import CompositionManifest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .resolved_revision import resolved_revision
@@ -36,6 +39,7 @@ from .test_studio import (
     _frame,
     _france_kenya_converted,
     _interrupt_body,
+    _mutation_body,
     _stream,
     _turn_body,
 )
@@ -505,3 +509,216 @@ async def test_a_unit_change_that_cannot_apply_is_refused_before_the_stream(
     body = response.json()
     assert (body["constraint_id"], body["pointer"]) == (constraint, pointer)
     assert len(app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns) == 1
+
+
+_SIBLING_TITLE = "France's aid to Kenya by sector"
+# The title the user gave the card through Edit Card: the platform's stored intent holds it.
+_EDITED_TITLE = "What France gives Kenya, current US dollars"
+
+
+def _two_cards_app(pg_engine: AsyncEngine) -> Any:
+    """An app whose first turn draws two cards on one frame, the second a sibling."""
+    return _app(
+        search_call("aid from France to Kenya"),
+        fetch_call(_SPEC, stat_vars="sum"),
+        make_charts_call(
+            chart(frame_id_for(_REF), type_="stat_card", title=_TITLE),
+            chart(frame_id_for(_REF), type_="stat_card", title=_SIBLING_TITLE),
+        ),
+        text_part("Here are the cards."),
+        resolver=CannedSearch(_ENVELOPE),
+        executor=ScriptedExecutor(
+            [
+                {"outcome": "ok", "frame_refs": [_REF], "summary": "fetched"},
+                _VIEW,
+                _written("cmp_01unit0001", _REF, _TITLE),
+                _written("cmp_01unit0009", _REF, _SIBLING_TITLE),
+            ]
+        ),
+        tool_surface=_Search(),  # ty: ignore[invalid-argument-type] -- the one tool the change reads
+        engine=pg_engine,
+    )
+
+
+def _redraw(
+    *, before_fetch: Any = None, before_write: Any = None, calls: list[str] | None = None
+) -> Any:
+    """The executor of a unit change on card cmp_01unit0001, whose stored title
+    is the user's edit, redrawn as cmp_01unit0002; `before_fetch` and
+    `before_write` run first when the new unit is fetched and when the redraw
+    is written. `calls` collects the tools called."""
+
+    async def answer(*, tool: str, args: dict[str, Any], **_: Any) -> dict[str, Any]:
+        if calls is not None:
+            calls.append(tool)
+        if tool == "describe_component":
+            return _described("cmp_01unit0001", _REF, _EDITED_TITLE)
+        if tool == "get_data":
+            if before_fetch is not None:
+                await before_fetch()
+            return {"outcome": "ok", "frame_refs": [_new_ref(args["spec_id"])], "summary": "ok"}
+        assert tool == "write_component"
+        if before_write is not None:
+            await before_write()
+        return _written("cmp_01unit0002", args["intent"]["frame_ref"], args["intent"]["title"])
+
+    return answer
+
+
+@pytest.mark.parametrize(
+    ("hint", "kept"),
+    [
+        ("row", [{"type": "row", "members": ["cmp_01unit0002", "cmp_01unit0009"]}]),
+        ("comparison", []),
+    ],
+    ids=["row-names-the-new-card", "comparison-drops-it"],
+)
+async def test_a_unit_change_keeps_the_sibling_and_the_cards_own_canvas_state(
+    pg_engine: AsyncEngine, hint: str, kept: list[dict[str, Any]]
+) -> None:
+    """Of two cards drawn by one answer, the one whose unit changes is
+    replaced in its slot: `component.created` names the card it replaces, the
+    new card keeps the old one's pin, note and the user's title, each in the
+    new unit where it named the old, a row hint over both names the new card,
+    a comparison hint, which aligns units, drops it and with it the hint, and
+    the sibling stays as it was."""
+    app = _two_cards_app(pg_engine)
+    note = {
+        "subtitle": "Current US dollars",
+        "description": "Gross disbursements.",
+        "y_label": "USD, current prices",
+    }
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        manifest = _frame(first, "done")["composition"]
+        arranged = await client.post(
+            "/api/studio/composition",
+            json=_mutation_body(
+                manifest,
+                [
+                    {"op": "pin", "component_id": "cmp_01unit0001"},
+                    {"op": "set_card_meta", "component_id": "cmp_01unit0001", "meta": note},
+                    {
+                        "op": "set_layout_hints",
+                        "layout_hints": [
+                            {"type": hint, "members": ["cmp_01unit0001", "cmp_01unit0009"]}
+                        ],
+                    },
+                ],
+            ),
+            headers=AUTH,
+        )
+        assert arranged.status_code == 200
+        app.state.studio.recorder._executor = _redraw()
+        frames = await _stream(
+            client, "/api/studio/turn", _apply_body("cmp_01unit0001", _SPEC, _CONSTANT_2023)
+        )
+
+    created = _frame(frames, "component.created")
+    assert (created["component_id"], created["replaces"]) == ("cmp_01unit0002", "cmp_01unit0001")
+    before = {block["component_id"]: block for block in arranged.json()["blocks"]}
+    after = _frame(frames, "done")["composition"]
+    new, sibling = after["blocks"]
+    assert sibling == before["cmp_01unit0009"]
+    assert new["component_id"] == "cmp_01unit0002"
+    assert (new["pinned"], new["meta"]) == (
+        True,
+        {
+            "subtitle": "Constant 2023 US dollars",
+            "description": "Gross disbursements.",
+            "y_label": "USD, constant 2023 prices",
+        },
+    )
+    assert new["title"] == "What France gives Kenya, constant 2023 US dollars"
+    assert after["layout_hints"] == kept
+
+
+async def test_a_unit_change_whose_canvas_write_fails_publishes_no_card(
+    pg_engine: AsyncEngine,
+) -> None:
+    app = _two_cards_app(pg_engine)
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = _redraw()
+
+        async def unavailable(*_: Any, **__: Any) -> Any:
+            raise DatabaseUnavailable("the canvas could not be written")
+
+        app.state.studio.store.change_canvas = unavailable
+        frames = await _stream(
+            client, "/api/studio/turn", _apply_body("cmp_01unit0001", _SPEC, _CONSTANT_2023)
+        )
+
+    events = [frame["event"] for frame in frames]
+    assert "component.created" not in events
+    assert not [f for f in frames if f["event"] == "activity.step" and f.get("produced")]
+    assert events[-1] == "error"
+
+
+async def test_a_card_removed_while_its_unit_changes_is_refused_and_nothing_is_published(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The user removes the card while its new unit is read: the swap finds
+    no slot under the canvas lock, so the turn ends on the stale refusal's
+    sentence, and neither the redrawn card nor its digest entry appears."""
+    app = _two_cards_app(pg_engine)
+    store: StudioStore = app.state.studio.store
+
+    async def remove() -> None:
+        def without(manifest: CompositionManifest | None, _: Any) -> CompositionManifest:
+            assert manifest is not None
+            blocks = [b for b in manifest.blocks if b.component_id != "cmp_01unit0001"]
+            return manifest.model_copy(update={"blocks": blocks, "revision": manifest.revision + 1})
+
+        await store.mutate_composition(PRINCIPAL, CONVERSATION, without)
+
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = _redraw(before_write=remove)
+        frames = await _stream(
+            client, "/api/studio/turn", _apply_body("cmp_01unit0001", _SPEC, _CONSTANT_2023)
+        )
+
+    assert "component.created" not in [frame["event"] for frame in frames]
+    failed = [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
+    assert [(f["step_id"], f["detail"]) for f in failed] == [("u3", UNIT_GONE_NOTE)]
+    assert _frame(frames, "message.complete")["text"] == UNIT_GONE_NOTE
+    blocks = _frame(frames, "done")["composition"]["blocks"]
+    assert [block["component_id"] for block in blocks] == ["cmp_01unit0009"]
+    conversation = store.current(PRINCIPAL, CONVERSATION)
+    assert conversation is not None
+    assert "cmp_01unit0002" not in conversation.components
+    # The card written off the canvas stays the conversation's.
+    assert "cmp_01unit0002" in conversation.write_tokens
+
+
+async def test_a_card_removed_before_its_redraw_is_refused_and_never_written(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The user removes the card while its new unit is fetched: the change
+    ends on the stale refusal's sentence and `write_component` is never
+    called."""
+    app = _two_cards_app(pg_engine)
+    store: StudioStore = app.state.studio.store
+
+    async def remove() -> None:
+        def without(manifest: CompositionManifest | None, _: Any) -> CompositionManifest:
+            assert manifest is not None
+            blocks = [b for b in manifest.blocks if b.component_id != "cmp_01unit0001"]
+            return manifest.model_copy(update={"blocks": blocks, "revision": manifest.revision + 1})
+
+        await store.mutate_composition(PRINCIPAL, CONVERSATION, without)
+
+    calls: list[str] = []
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = _redraw(before_fetch=remove, calls=calls)
+        frames = await _stream(
+            client, "/api/studio/turn", _apply_body("cmp_01unit0001", _SPEC, _CONSTANT_2023)
+        )
+
+    assert calls == ["describe_component", "get_data"]
+    assert "component.created" not in [frame["event"] for frame in frames]
+    failed = [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
+    assert [(f["step_id"], f["detail"]) for f in failed] == [("u3", UNIT_GONE_NOTE)]
+    assert _frame(frames, "message.complete")["text"] == UNIT_GONE_NOTE

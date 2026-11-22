@@ -289,7 +289,9 @@ Three turn shapes beyond the plain data question:
   (type/window edits: the platform cannot revise those, so a NEW component
   takes the replaced block's slot; the replaced component stays readable at
   its prior revisions) → `composition.updated` (only if the card was on the
-  canvas) → `message.complete` → `suggestions` → `done`. An impossible
+  canvas) → `message.complete` → `suggestions` → `done`. A `component.created`
+  that took a block's slot names the card it replaced in `replaces`; it is
+  sent only after the canvas write that swaps it in commits. An impossible
   edit (e.g. selecting data the card's frame doesn't hold) closes with an
   honest `message.complete` and no component frame.
 - **Card follow-up**: `component_ref.intent: "follow_up"` scopes the turn:
@@ -776,6 +778,29 @@ The answer is `{"kind": "unit", "currency", "prices", "base_year?"}`, with the s
 
 A `multi_select` question has `options` set and `allow_free_text` is `true`. Its answer is `{"kind": "options", "option_ids": [...]}` with at least one id and no repeats; `{"kind": "text"}` and `{"kind": "skipped"}` stay valid. A single `option` answer to a `multi_select` question, and an `options` answer to any other, is refused with 422. Each id must be one the question offered. The agent asks one when several answers can hold together, and offers labels only, so the answer elects no reading. It reads "The user chose: Health; Water", and the turn's record keeps the same labels.
 
+### Question forms a client declares
+
+`turn.request` and `interrupt.response` gain `client_features`, an optional list of strings: `"unit_question"` when the client renders a question whose `input` is `unit`, and `"multi_select"` when it renders one whose `input` is `multi_select`. The harness ignores a value it does not know. The conversation stores the list the latest request carrying the field declared (`ConversationState.client_features`); a request without it leaves the list as it was, empty on a new conversation, and every question the turn asks, before and after a resume and on any instance, takes the forms it names (`harness.studio_translate._asked_question`).
+
+Without `"unit_question"`, a unit question is sent as `input: "single_select"` with no `unit` and `allow_free_text: false`. Its options are both price bases of the offer's start currency, or, when that currency serves one basis, of the first offered currency that serves both, the start's basis first, each id naming its unit (`harness.unit_offer.whole_units`). A constant unit takes the start's base year when the currency's range holds it, else the currency's latest.
+
+```json
+{
+  "id": "q1",
+  "question": "Which unit should Kenya's debt service be shown in?",
+  "input": "single_select",
+  "options": [
+    { "id": "USD-constant-2023", "label": "Constant 2023 US dollars" },
+    { "id": "USD-current", "label": "Current US dollars" }
+  ],
+  "skippable": true
+}
+```
+
+An `option` answer to it resumes as the unit its option names, as a `unit` answer does, and a `text` answer is refused with 422. Without `"multi_select"`, a multi-select question is sent as `input: "single_select"` with the same options and free text, and an `option` answer resumes as a one-item `options` answer. A question keeps the form it was sent in (`_PendingQuestion.input`, with its own form as `native_input`), so its answer is checked against that form whatever the answering request declares.
+
+The harness deploys before the website: a harness without the field refuses it with 422, and a page opened before the website deployed sends none and gets the `single_select` forms on a conversation no newer page declared features for. The website sends both features on every turn and interrupt request.
+
 ### A card's unit change
 
 `component.created` gains an optional `unit_change`, a `UnitChange`: the `spec_id` of the one reading the card draws from, which is the card's `provenance.inputs[0].spec_id`, and the offer its unit can move within. `offer.start` is the card's current unit. It is set when the card draws the frame of one `get_data` retrieval, with no `scope`, of a spec Search converts; a card on a derived frame, or on a retrieval whose rendering the harness cannot map back to `get_data`'s arguments, carries none. `component.revised` does not carry it.
@@ -784,7 +809,7 @@ A client moves the card with `turn.request` carrying `apply_unit`, an `ApplyUnit
 
 The route answers 422 `constraint_violation` before any stream starts when the change cannot apply. `constraint_id` is `scope_choice_stale` (pointer `/apply_unit`) when the card is no longer on the canvas or its `provenance.inputs[0].spec_id` is not `spec_id`, and `unit_not_offered` (pointer `/apply_unit/unit`) for a unit outside the card's offer or the unit it already shows. `detail` is copy for the user. `turn` is not checked beyond its range, so a card from any earlier turn, a pinned one included, can change unit, also on a reopened conversation.
 
-Otherwise the change runs in code, with no model call, as the Edit Card route does (`harness.studio_edit.unit_events`). Search reads the card's spec in the new unit, `get_data` fetches the new spec with the arguments that shaped the card's frame, and the card is written again from its stored intent on the new frame. Its title names the new unit where it named the old. The stream sends `activity.step` frames, a `component.created` for the new card with a fresh `unit_change` whose `offer.start` is the new unit, a `composition.updated` whose manifest holds the new card in the old card's slot, `suggestions` and `done`. The stream sends no `message.complete`: the redrawn card is the answer. The turn's record keeps the sentence "The card now shows constant 2023 US dollars." for the next turn's model, and a state read gives the turn's `reply` as empty, as the stream sent it. A step that fails ends the stream on its failed step and a `message.complete` that begins "The card is unchanged.". The change counts as a turn. Its record reads "Changed Aid to Kenya to constant 2023 US dollars (spec\_…).", and the new reading joins the turn's readings, so the next turn's model reads the card in the new unit under its new spec_id. A state read gives the turn's `user_message` as "Change Aid to Kenya to constant 2023 US dollars.", with no spec_id.
+Otherwise the change runs in code, with no model call, as the Edit Card route does (`harness.studio_edit.unit_events`). Search reads the card's spec in the new unit, `get_data` fetches the new spec with the arguments that shaped the card's frame, and the card is written again from its stored intent on the new frame. Its title names the new unit where it named the old, and a title the client overrides moves with the card. The stream sends `activity.step` frames, a `component.created` for the new card with a fresh `unit_change` whose `offer.start` is the new unit, a `composition.updated` whose manifest holds the new card in the old card's slot, `suggestions` and `done`. `component.created` names the old card in `replaces` and is sent only after the canvas write that swaps the new card in commits. The new block keeps the old block's `pinned` flag and `meta`, the words of `meta`'s `subtitle`, `description`, `x_label` and `y_label` that named the old unit naming the new one (`harness.card_unit.retitled`). A `row` entry of `layout_hints` that named the old card names the new one; a `comparison` entry, which aligns its members' units, drops it, and goes when fewer than two members remain. A card that leaves the canvas while its new unit is read ends the stream on a failed `activity.step` and a `message.complete` saying "This card is no longer on the canvas, so nothing changed.", with no `component.created`. The stream sends no `message.complete` when the change lands: the redrawn card is the answer. The turn's record keeps the sentence "The card now shows constant 2023 US dollars." for the next turn's model, and a state read gives the turn's `reply` as empty, as the stream sent it. A step that fails ends the stream on its failed step and a `message.complete` that begins "The card is unchanged.". The change counts as a turn. Its record reads "Changed Aid to Kenya to constant 2023 US dollars (spec\_…).", and the new reading joins the turn's readings, so the next turn's model reads the card in the new unit under its new spec_id. A state read gives the turn's `user_message` as "Change Aid to Kenya to constant 2023 US dollars.", with no spec_id.
 
 `schema_version` stays 1.
 
@@ -908,4 +933,4 @@ Fixture values that are samples:
    row stating how a pinned source is counted gains `choice_id`
    `"<requirement id>:count"`, so a switch can name it (see "Count chips and
    count rows on the plan card").
-1. `elicitation.request` questions gain `input: "unit"` with a `unit` offer, and `multi_select` is emitted; answers gain `{kind: "unit", ...}` and `{kind: "options", option_ids}`. `component.created` gains `unit_change`; `turn.request` gains `apply_unit`, which comes alone (see "A unit question, a card's unit change and several answers").
+1. `elicitation.request` questions gain `input: "unit"` with a `unit` offer, and `multi_select` is emitted; answers gain `{kind: "unit", ...}` and `{kind: "options", option_ids}`. `turn.request` and `interrupt.response` gain `client_features`; a client that declares no `unit_question` or `multi_select` gets those questions as `single_select` (see "Question forms a client declares"). `component.created` gains `unit_change` and `replaces`; `turn.request` gains `apply_unit`, which comes alone (see "A unit question, a card's unit change and several answers").

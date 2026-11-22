@@ -12,5 +12,9 @@
         "o2"
       ]
     }
-  }
+  },
+  "client_features": [
+    "unit_question",
+    "multi_select"
+  ]
 }

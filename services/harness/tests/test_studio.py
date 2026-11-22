@@ -183,7 +183,15 @@ from .scripted_tools import (
     search_call,
 )
 from .store_clock import StoreClock
-from .studio_routes import AUTH, ScriptLlm, orchestrator_app, stream, studio_client, turn_body
+from .studio_routes import (
+    AUTH,
+    CLIENT_FEATURES,
+    ScriptLlm,
+    orchestrator_app,
+    stream,
+    studio_client,
+    turn_body,
+)
 from .test_orchestrator_tools import FRANCE_KENYA, FRANCE_KENYA_NET, _net_family_envelope
 from .test_turn_records import _top_donors
 from .turn_driver import CONVERSATION
@@ -538,6 +546,7 @@ def _interrupt_body(
         "conversation_id": CONVERSATION,
         "interrupt_id": interrupt_id,
         "decision": decision,
+        "client_features": CLIENT_FEATURES,
     }
     if payload is not None:
         body["payload"] = payload
@@ -6126,7 +6135,9 @@ async def test_a_card_rebuilt_after_it_left_the_canvas_is_not_put_back_on_it() -
         {"title": "Aid to Kenya, 2018-2024"}, removed=True
     )
 
-    assert _frame(frames, "component.created")["component_id"] == "cmp_01test0002"
+    created = _frame(frames, "component.created")
+    assert created["component_id"] == "cmp_01test0002"
+    assert "replaces" not in created
     assert "composition.updated" not in _events(frames)
     assert _frame(frames, "done")["composition"]["blocks"] == []
 
@@ -6762,7 +6773,7 @@ async def test_component_ref_edit_recreate_replaces_the_block_in_place() -> None
         frames = await _stream(client, "/api/studio/turn", _edit_body("make it a line chart"))
 
     created = _frame(frames, "component.created")
-    assert created["component_id"] == "cmp_01test0002"
+    assert (created["component_id"], created["replaces"]) == ("cmp_01test0002", "cmp_01test0001")
     manifest = _frame(frames, "done")["composition"]
     assert [b["component_id"] for b in before["blocks"]] == ["cmp_01test0001", "cmp_01test0003"]
     # Replaced in its own slot; the pinned neighbour is untouched.
@@ -7670,6 +7681,135 @@ async def test_a_unit_question_takes_a_unit_inside_its_offer(
     assert "The user chose constant 2023 US dollars." in agent_read(_model(app).requests[-1])
     (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
     assert record["user"] == "France's aid to Kenya\n(then: Constant 2023 US dollars)"
+
+
+async def test_a_client_that_renders_no_unit_question_picks_a_whole_unit() -> None:
+    """A turn that declares no `unit_question` feature gets the unit question
+    as a single choice among the start currency's whole units, the start
+    first, with no free text. A pick resumes as the unit it names, as a unit
+    answer does, and a written answer is refused."""
+    envelope = _france_kenya_converted()
+    spec_id = envelope["parts"][0]["spec"]["spec_id"]
+    app = _app(
+        search_call("aid from France to Kenya"),
+        call_part(
+            "ask_user", {"questions": [{"question": "In which prices?", "unit_of": spec_id}]}
+        ),
+        _text("Done."),
+        resolver=CannedSearch(envelope),
+    )
+    async with _client(app) as client:
+        first = await _stream(
+            client,
+            "/api/studio/turn",
+            {**_turn_body("France's aid to Kenya"), "client_features": []},
+        )
+        elicitation = _frame(first, "elicitation.request")
+        (question,) = elicitation["questions"]
+        assert (question["input"], question.get("unit"), question["allow_free_text"]) == (
+            "single_select",
+            None,
+            False,
+        )
+        assert [(o["id"], o["label"]) for o in question["options"]] == [
+            ("USD-constant-2023", "Constant 2023 US dollars"),
+            ("USD-current", "Current US dollars"),
+        ]
+        old_tab = {**_interrupt_body(elicitation["interrupt_id"], "answer"), "client_features": []}
+        written = await client.post(
+            "/api/studio/interrupt",
+            json={**old_tab, "answers": {"q1": {"kind": "text", "text": "euros"}}},
+            headers=AUTH,
+        )
+        assert written.status_code == 422
+        second = await _stream(
+            client, "/api/studio/interrupt", {**old_tab, "answers": {"q1": _pick("USD-current")}}
+        )
+
+    assert _events(second)[-1] == "done"
+    assert "The user chose current US dollars." in agent_read(_model(app).requests[-1])
+    (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+    assert record["user"] == "France's aid to Kenya\n(then: Current US dollars)"
+
+
+async def test_a_client_that_renders_no_multi_select_picks_one_option() -> None:
+    """A turn that declares no `multi_select` feature gets a multi-select
+    question as a single choice with free text. One pick resumes as one tick,
+    and several ticks are refused."""
+    app = _app(
+        call_part(
+            "ask_user",
+            {
+                "questions": [
+                    {
+                        "question": "Which sectors?",
+                        "multi_select": True,
+                        "options": [{"label": "Health"}, {"label": "Water"}],
+                    }
+                ]
+            },
+        ),
+        _text("Done."),
+    )
+    async with _client(app) as client:
+        first = await _stream(
+            client, "/api/studio/turn", {**_turn_body("ambiguous q"), "client_features": []}
+        )
+        elicitation = _frame(first, "elicitation.request")
+        (question,) = elicitation["questions"]
+        assert (question["input"], question["allow_free_text"]) == ("single_select", True)
+        ids = [option["id"] for option in question["options"]]
+        old_tab = {**_interrupt_body(elicitation["interrupt_id"], "answer"), "client_features": []}
+        ticks = await client.post(
+            "/api/studio/interrupt",
+            json={**old_tab, "answers": {"q1": {"kind": "options", "option_ids": ids}}},
+            headers=AUTH,
+        )
+        assert ticks.status_code == 422
+        second = await _stream(
+            client, "/api/studio/interrupt", {**old_tab, "answers": {"q1": _pick(ids[1])}}
+        )
+
+    assert _events(second)[-1] == "done"
+    assert "The user chose: Water" in agent_read(_model(app).requests[-1])
+    (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+    assert record["user"] == "ambiguous q\n(then: Water)"
+
+
+async def test_an_interrupt_without_client_features_keeps_the_turn_s_features() -> None:
+    """The turn declares every question form and its answer declares none:
+    the question the resumed turn asks next keeps the form the turn's
+    request named."""
+    sectors = {
+        "question": "Which sectors?",
+        "multi_select": True,
+        "options": [{"label": "Health"}, {"label": "Water"}],
+    }
+    app = _app(
+        call_part("ask_user", {"questions": [sectors]}),
+        call_part("ask_user", {"questions": [{**sectors, "question": "And which years?"}]}),
+        _text("Done."),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        elicitation = _frame(first, "elicitation.request")
+        (question,) = elicitation["questions"]
+        assert question["input"] == "multi_select"
+        unstated = _interrupt_body(elicitation["interrupt_id"], "answer")
+        del unstated["client_features"]
+        second = await _stream(
+            client,
+            "/api/studio/interrupt",
+            {
+                **unstated,
+                "answers": {
+                    "q1": {"kind": "options", "option_ids": [question["options"][0]["id"]]}
+                },
+            },
+        )
+
+    (asked,) = _frame(second, "elicitation.request")["questions"]
+    assert asked["input"] == "multi_select"
 
 
 async def test_a_question_that_is_the_only_one_cannot_be_skipped_alone() -> None:

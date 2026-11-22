@@ -251,61 +251,62 @@ def stored_reading(
 
 
 def retitled(title: str, *, old: UnitChoice, new: UnitChoice, offer: UnitOffer) -> str:
-    """`title` with the words that name `old` naming `new`: the whole unit as
-    `unit_words` writes it, then the price basis ("constant 2022 prices",
-    "2022 prices", "constant 2022", "current prices", "current USD") and the
-    currency, by its code and by the name `offer` gives it, written as
-    `offer` writes it. Any other words stand."""
+    """`title` with each phrase that names `old` naming `new` in the same shape.
+
+    A phrase is the currency `old` is served in, by its code or by the name
+    `offer` gives it, after an optional price basis; a price basis followed by
+    "prices"; or, when `old` is constant, "constant <base year>" alone. The
+    basis is the one `old` is served in: "constant" or "constant <base
+    year>" when `old` is constant, "current" when it is current, and "<base
+    year>" before "prices" when it is constant. The whole phrase is written
+    again from `new`, its basis in the words `unit_words` gives it
+    ("constant 2023", "current"): the basis and the new currency, by code or
+    by name as the phrase named the old one, the basis and "prices", or the
+    basis alone. A currency named with no basis is named alone, and a year
+    before "prices" stays a bare year when `new` is constant. Any other words
+    stand, another basis and a year alone among them.
+    """
     names = {currency.code: currency.name for currency in offer.currencies}
-    old_name, new_name = names.get(old.currency), names.get(new.currency)
-    retitled = _replace(title, unit_words(old, offer), unit_words(new, offer))
-    constant = new.prices is UnitPrices.CONSTANT
+    old_name = names.get(old.currency)
+    new_name = names.get(new.currency, new.currency)
+    words = unit_words(new, offer)
+    new_basis = words[: len(words) - len(new_name) - 1].lower()
     if old.prices is UnitPrices.CONSTANT:
-        year = old.base_year
-        prices = f"{new.base_year} prices" if constant else "current prices"
-        for phrase, replacement in (
-            (f"constant {year} prices", f"constant {prices}" if constant else prices),
-            (f"{year} prices", prices),
-            (f"constant {year}", f"constant {new.base_year}" if constant else "current"),
-        ):
-            retitled = _replace(retitled, phrase, replacement)
-    elif constant:
-        retitled = _replace(retitled, "current prices", f"constant {new.base_year} prices")
-        for word in dict.fromkeys(w for w in (old.currency, old_name) if w):
-            retitled = _replace(retitled, f"current {word}", f"constant {new.base_year} {word}")
-    if old.currency != new.currency:
-        retitled = _replace(retitled, old.currency, new.currency, keep_case=False)
-        if old_name and new_name:
-            retitled = _replace_name(retitled, old_name, new_name)
-    return retitled
-
-
-def _replace(text: str, phrase: str, replacement: str, *, keep_case: bool = True) -> str:
-    """`text` with each whole-word `phrase`, in any case, replaced; with
-    `keep_case`, a match opening on a capital opens the replacement on one."""
+        year = re.escape(str(old.base_year))
+        basis = rf"constant(?:\s+{year})?"
+        priced = rf"{basis}|{year}"
+        alone = rf"|(?P<alone>constant\s+{year})"
+    else:
+        basis = priced = "current"
+        alone = ""
+    currencies = [rf"(?P<code>(?-i:{re.escape(old.currency)}))"]
+    if old_name:
+        currencies.append(rf"(?P<name>{re.escape(old_name)})")
+    pattern = (
+        rf"(?<!\w)(?:(?:(?P<basis>{basis})\s+)?(?:{'|'.join(currencies)})"
+        rf"|(?P<prices>{priced})\s+prices{alone})(?!\w)"
+    )
 
     def swap(match: re.Match[str]) -> str:
-        if keep_case and match.group(0)[:1].isupper():
-            return replacement[:1].upper() + replacement[1:]
-        if keep_case:
-            return replacement[:1].lower() + replacement[1:]
-        return replacement
+        said = match.group(0)
+        if match.groupdict().get("alone") is not None:
+            phrase = new_basis
+        elif match.group("prices") is not None:
+            bare_year = match.group("prices")[:1].isdigit() and new.base_year is not None
+            phrase = f"{new.base_year if bare_year else new_basis} prices"
+        elif match.group("basis") is not None:
+            currency = new.currency if match.group("code") is not None else new_name
+            phrase = f"{new_basis} {currency}"
+        elif match.group("code") is not None:
+            return new.currency
+        else:
+            # A name opens on a capital only where it opens the title, or
+            # where the title capitalises a name written lower-case.
+            assert old_name is not None
+            if match.start() == 0 or (said[:1].isupper() and old_name[:1].islower()):
+                return new_name[:1].upper() + new_name[1:]
+            return new_name
+        opener = phrase[:1].upper() if said[:1].isupper() else phrase[:1]
+        return opener + phrase[1:]
 
-    pattern = rf"(?<!\w){re.escape(phrase)}(?!\w)"
-    return re.sub(pattern, swap, text, flags=0 if not keep_case else re.IGNORECASE)
-
-
-def _replace_name(text: str, old_name: str, new_name: str) -> str:
-    """`text` with each whole-word `old_name`, in any case, replaced by
-    `new_name` as Search writes it ("US dollars", "euros"). The first letter
-    is raised only where the match opens `text`, or where it is capitalised
-    while `old_name` is written lower-case."""
-
-    def swap(match: re.Match[str]) -> str:
-        opens_capital = match.group(0)[:1].isupper() and old_name[:1].islower()
-        if match.start() == 0 or opens_capital:
-            return new_name[:1].upper() + new_name[1:]
-        return new_name
-
-    pattern = rf"(?<!\w){re.escape(old_name)}(?!\w)"
-    return re.sub(pattern, swap, text, flags=re.IGNORECASE)
+    return re.sub(pattern, swap, title, flags=re.IGNORECASE)

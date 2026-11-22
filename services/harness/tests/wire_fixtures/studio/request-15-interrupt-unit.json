@@ -11,5 +11,9 @@
       "prices": "constant",
       "base_year": 2023
     }
-  }
+  },
+  "client_features": [
+    "unit_question",
+    "multi_select"
+  ]
 }

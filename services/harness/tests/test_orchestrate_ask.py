@@ -25,12 +25,14 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
     AskQuestion,
+    ServedUnit,
     ask_questions,
     open_parts,
     prices_forms,
     settle_unit,
     unit_reads,
     unit_settled,
+    units_served,
 )
 from harness.turn.loop import Outcome
 from harness.turn.node import NodeCtx, StopScope, TurnKey
@@ -38,6 +40,7 @@ from harness.turn.transcript import Transcript
 from harness.turn_records import CandidateReading, SearchReading, WindowReading
 from orchestrator.run import ToolsAnswered
 from planner.call import _picks
+from planner.plan import Unit
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .graph_turns import agent_read, given, opening_graph, opening_nodes, visited
@@ -712,6 +715,63 @@ async def test_a_count_read_again_in_a_unit_keeps_the_part_s_roles_and_no_pair_n
     assert "search once for that reading" not in handed.output["text"]
     assert {_FK_GROSS, _FK_NET} <= set(unit_settled(state))
     assert unit_reads(state) == {_FK_GROSS: [posted["spec_id"]]}
+
+
+@pytest.mark.parametrize(
+    ("unit", "refusal", "served"),
+    [
+        ({"currency": "USD", "prices": "current"}, None, {"currency": "USD", "prices": "current"}),
+        (
+            {"currency": "USD", "prices": "constant", "base_year": 2020},
+            None,
+            {"currency": "USD", "prices": "constant", "base_year": 2020},
+        ),
+        (
+            {"currency": "EUR", "prices": "constant", "base_year": 2020},
+            {"code": "requested_option_unavailable"},
+            {"currency": "USD", "prices": "current"},
+        ),
+    ],
+    ids=["served", "read-again", "refused"],
+)
+async def test_a_unit_answer_records_the_series_fetched_and_the_unit_it_is_served_in(
+    unit: dict[str, Any], refusal: dict[str, object] | None, served: dict[str, Any]
+) -> None:
+    """The part is served in the chosen unit, re-read in it, or refused it by
+    Search. The `ask` node records the series the agent fetches for the part
+    and the unit that series is served in: the chosen unit, or, when Search
+    refused it, the unit the part is served in, so plan admission holds the
+    plan to what the agent fetches (`planner.call.prices_chosen`)."""
+    search = _UnitSearch(refusal=refusal)
+    state: dict[str, Any] = {
+        ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: _FRANCE_KENYA},
+        ORCHESTRATOR_SEARCHES_KEY: [_open_reading(_FK_GROSS, text=_AID)],
+    }
+    ctx = NodeCtx(
+        key=TurnKey("user-1", "conv", 1),
+        inputs={"message": "Aid to Kenya since 2018?"},
+        state=state,
+        transcript=Transcript(),
+        emit=lambda event: None,
+        stop=StopScope(),
+    )
+    node = ask_node(definition_surface=search)
+    assert node.resume is not None
+
+    await node.resume(
+        ctx,
+        {"questions": [{"question": "In which prices?", "unit_of": _FK_GROSS}]},
+        _answers(q1={"kind": "unit", **unit}),
+    )
+
+    fetched = search.posted[0]["spec_id"] if search.posted and refusal is None else _FK_GROSS
+    assert units_served(state) == {
+        _FK_GROSS: ServedUnit(spec_id=fetched, unit=Unit.model_validate(served))
+    }
+    # The series fetched is a reading on record with its block, which the
+    # planner's entry shows it (`harness.planner_adapter`'s pin sources).
+    assert fetched in state[ORCHESTRATOR_SPECS_KEY]
+    assert fetched in [reading["spec_id"] for reading in state[ORCHESTRATOR_SEARCHES_KEY]]
 
 
 def _ask_user_answer(run: SegmentRun) -> dict[str, Any]:

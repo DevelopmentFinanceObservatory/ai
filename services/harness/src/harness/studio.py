@@ -100,6 +100,7 @@ from harness.run_ledger import ApprovedRun, StudioRunLedger
 from harness.seeds import seeds_slot
 from harness.settings import Settings
 from harness.studio_edit import (
+    CardSwap,
     EditClosed,
     EditEvent,
     EditFailed,
@@ -177,7 +178,7 @@ from harness.turn.store import (
 )
 from harness.turn_budget import start_turn_budget
 from harness.turn_records import CHIP_STALE_NOTE, is_count_choice, stored_choice, stored_count
-from harness.unit_offer import offered_unit_refusal, unit_words
+from harness.unit_offer import offered_unit_refusal, unit_words, whole_units
 from harness.wire import (
     MAX_CLOSED_SINCE,
     MAX_TURN_REQUEST_BYTES,
@@ -215,6 +216,7 @@ from harness.wire import (
     TurnStatusName,
     UnitAnswer,
     UnitChoice,
+    declared_features,
 )
 
 logger = logging.getLogger(__name__)
@@ -285,13 +287,26 @@ _ANSWER_KINDS: dict[ElicitationInput, frozenset[str]] = {
 }
 
 
+def _answer_kinds(question: _PendingQuestion) -> frozenset[str]:
+    """The answer kinds `question` takes: those of the input its frame sent
+    (`_ANSWER_KINDS`), save free text on a unit question sent as a
+    `single_select`, which offers none."""
+    kinds = _ANSWER_KINDS[question.input]
+    if question.native_input is ElicitationInput.UNIT:
+        return kinds - {"text"}
+    return kinds
+
+
 def _answers_refusal(
     questions: tuple[_PendingQuestion, ...], answers: dict[str, ElicitationAnswer]
 ) -> str | None:
     """What is wrong with `answers` to `questions`, or `None`. Valid answers
     name every question exactly once, each of a kind its question's input
     takes (`_ANSWER_KINDS`), pick only that question's offered options, name
-    a unit inside a unit question's offer, and skip only a skippable question."""
+    a unit inside a unit question's offer, and skip only a skippable question.
+    A question is checked in the form its frame sent (`_PendingQuestion.input`),
+    so a unit or `multi_select` question sent as a `single_select` takes one
+    `option`."""
     asked = [question.id for question in questions]
     missing = [question_id for question_id in asked if question_id not in answers]
     extra = sorted(set(answers) - set(asked))
@@ -305,7 +320,7 @@ def _answers_refusal(
 
 def _answer_refusal(question: _PendingQuestion, answer: ElicitationAnswer) -> str | None:
     """What is wrong with `answer` to `question` (`_answers_refusal`), or `None`."""
-    kinds = _ANSWER_KINDS[question.input]
+    kinds = _answer_kinds(question)
     if answer.kind not in kinds:
         return f"question {question.id!r} is answered by {sorted(kinds)}, not {answer.kind!r}"
     match answer:
@@ -699,18 +714,35 @@ def _given_answers(
     return {question.id: TextAnswer(kind="text", text=body.payload)}
 
 
-def _resume_answer(answer: ElicitationAnswer) -> dict[str, Any]:
-    """One answer as the graph reads it (`harness.graph.state.resume_answers`):
-    a pick names its candidate id, several picks theirs, a unit its parts."""
-    match answer:
+def _native_answer(question: _PendingQuestion, answer: ElicitationAnswer) -> ElicitationAnswer:
+    """`answer` in the form of `question`'s own input. A pick on a question
+    sent in another form (`_PendingQuestion.native_input`) is, on a unit
+    question, the whole unit the option names (`whole_units`), and on a
+    `multi_select` one, one tick. Any other answer is itself."""
+    if not isinstance(answer, OptionAnswer):
+        return answer
+    if question.native_input is ElicitationInput.UNIT and question.unit is not None:
+        unit = whole_units(question.unit)[answer.option_id]
+        return UnitAnswer(kind="unit", **unit.model_dump())
+    if question.native_input is ElicitationInput.MULTI_SELECT:
+        return OptionsAnswer(kind="options", option_ids=[answer.option_id])
+    return answer
+
+
+def _resume_answer(question: _PendingQuestion, answer: ElicitationAnswer) -> dict[str, Any]:
+    """One answer to `question` as the graph reads it
+    (`harness.graph.state.resume_answers`): a pick names its candidate id,
+    several picks theirs, a unit its parts, each in the form of the
+    question's own input (`_native_answer`)."""
+    match _native_answer(question, answer):
         case OptionAnswer(option_id=option_id):
             return {"kind": "option", "spec_id": option_id}
         case OptionsAnswer(option_ids=option_ids):
             return {"kind": "options", "spec_ids": list(option_ids)}
-        case UnitAnswer():
+        case UnitAnswer() as unit:
             return {
                 "kind": "unit",
-                **_answered_unit(answer).model_dump(mode="json", exclude_none=True),
+                **_answered_unit(unit).model_dump(mode="json", exclude_none=True),
             }
         case TextAnswer(text=text):
             return {"kind": "text", "text": text}
@@ -1155,7 +1187,8 @@ class _EditWork:
     A card's unit change (`harness.studio_edit.unit_events`) runs as this
     work too, `events` giving its events in place of the edit's.
 
-    The edit ends on its reply and `done`, or on a stream-fatal `error`
+    The edit ends on its reply and `done`, a card swap
+    (`harness.studio_edit.CardSwap`) carrying its reply, or on a stream-fatal `error`
     frame that records the turn failed, and the work ends `done` or
     `failed`. A heartbeat that reads a Stop first cancels the edit and the
     work ends `cancelled`. One that finds the lease another's, or cannot
@@ -1194,7 +1227,7 @@ class _EditWork:
             nonlocal ended
             async for event in self._events():
                 emit(event)
-                if isinstance(event, (EditClosed, EditFailed)):
+                if isinstance(event, (EditClosed, EditFailed, CardSwap)):
                     ended = event
 
         editing = asyncio.create_task(edit())
@@ -1209,7 +1242,7 @@ class _EditWork:
                 editing.cancel()
                 await asyncio.wait({editing})
             if ended is not None:
-                return Outcome.DONE if isinstance(ended, EditClosed) else Outcome.FAILED
+                return Outcome.FAILED if isinstance(ended, EditFailed) else Outcome.DONE
             if editing.cancelled():
                 return heartbeat.result()
             editing.result()
@@ -2514,6 +2547,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 _spec_use_sink(studio.store, principal, body.conversation_id, work.trace_id)
             )
             work.auto_add = body.auto_add
+            if body.client_features is not None:
+                work.client_features = declared_features(body.client_features)
             work.turn_user_message = user_message
             if moved is not None:
                 # The change is the user's pick, not words Search should read.
@@ -3095,6 +3130,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     turn=claiming,
                 )
             pending = work.pending[body.interrupt_id]
+            # The resumed turn asks its next questions in the forms this
+            # request declares, when it declares any; the pending one keeps
+            # the form it was sent in.
+            if body.client_features is not None:
+                work.client_features = declared_features(body.client_features)
             admission: Callable[[AsyncConnection, int], Awaitable[None]] | None = None
             # A switch revises the plan and approves nothing, so it leaves
             # no approval record.
@@ -3235,7 +3275,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     given = _given_answers(pending, body)
                     answer = {
                         "answers": {
-                            question.id: _resume_answer(given[question.id])
+                            question.id: _resume_answer(question, given[question.id])
                             for question in pending.questions
                         }
                     }

@@ -52,6 +52,7 @@ from harness.graph.state import (
     pending_action,
     priced_options,
     record_unit_read,
+    record_unit_served,
     resume_answers,
     settle_unit,
     store_search,
@@ -397,7 +398,9 @@ async def _part_in_unit(
     serve is a sentence telling the agent to fetch as served and say so.
 
     The part, and the count, are settled on every path, so the question is
-    not asked of them again."""
+    not asked of them again, and the series fetched for the part is recorded
+    with the unit it is served in (`record_unit_served`): `unit`, unless
+    Search refuses it, when the series keeps the unit it is served in."""
     words = _in_sentence(unit_words(unit, offer))
     block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(part) or {}
     reading = _latest_reading(state, part)
@@ -410,6 +413,7 @@ async def _part_in_unit(
     settle_unit(state, part, target)
     served = served_unit(block)
     if count is None and served == unit:
+        record_unit_served(state, part, part, unit)
         return f"{label} ({part}) is served in {words}: fetch it as it stands."
     result = await resubmit_unit(
         surface,
@@ -419,6 +423,7 @@ async def _part_in_unit(
         label=label,
     )
     if isinstance(result, UnitRefused):
+        record_unit_served(state, part, target, served_unit(target_block))
         as_served = f", in {_in_sentence(unit_words(served, offer))}," if served is not None else ""
         return (
             f"Search could not serve {words} for {label}: {result.reason} Fetch {target} as "
@@ -426,6 +431,7 @@ async def _part_in_unit(
         )
     settle_unit(state, result.spec_id)
     record_unit_read(state, part, result.spec_id)
+    record_unit_served(state, part, result.spec_id, unit)
     digest = resolver_digest({"parts": [dict(result.part)]})
     for read in digest.get("part_digests") or ():
         read["variable"] = label
