@@ -5628,10 +5628,15 @@ def _remove_callable(state: ConversationState):
 
 def _two_card_canvas() -> ConversationState:
     state = ConversationState(conversation_id="c1")
-    for cid in ("cmp_01", "cmp_02"):
+    for cid, title in (("cmp_01", "Aid to Kenya"), ("cmp_02", "Aid to Ghana")):
         land_component(
             state,
-            {"component_id": cid, "revision": 1, "type": "line_chart", "title": "Aid"},
+            {
+                "component_id": cid,
+                "revision": 1,
+                "type": "line_chart",
+                "payload": {"component": {"title": {"text": title}}},
+            },
         )
     return state
 
@@ -5642,7 +5647,11 @@ async def test_remove_cards_takes_named_cards_off_and_says_which_it_never_held()
 
     answer = await tools["remove_cards"](ctx, ["cmp_01", "cmp_99", "cmp_99"])
 
-    assert answer == {"removed": ["cmp_01"], "not_in_conversation": ["cmp_99"]}
+    assert answer == {
+        "removed": ["cmp_01"],
+        "not_in_conversation": ["cmp_99"],
+        "titles": {"cmp_01": "Aid to Kenya"},
+    }
     assert state.composition is not None
     assert [b.component_id for b in state.composition.blocks] == ["cmp_02"]
 
@@ -5659,7 +5668,10 @@ async def test_remove_cards_clears_the_canvas_and_refuses_a_call_that_names_noth
     named = await tools["remove_cards"](ctx, ["cmp_99"], all_cards=True)
 
     assert _stated(nothing) == ("tool_arguments_invalid", "correct_and_retry")
-    assert cleared == {"removed": ["cmp_01", "cmp_02"]}
+    assert cleared == {
+        "removed": ["cmp_01", "cmp_02"],
+        "titles": {"cmp_01": "Aid to Kenya", "cmp_02": "Aid to Ghana"},
+    }
     assert again == {"removed": [], "note": "The canvas was already empty."}
     assert {key: value for key, value in named.items() if key != "note"} == {
         "removed": [],
@@ -5680,13 +5692,18 @@ async def test_remove_cards_leaves_a_pinned_card_and_names_it():
     assert pinned_only["removed"] == []
     assert pinned_only["kept_pinned"] == ["cmp_01"]
     assert "Unpin from Canvas" in pinned_only["note"]
-    assert cleared == {"removed": ["cmp_02"], "kept_pinned": ["cmp_01"]}
+    assert cleared == {
+        "removed": ["cmp_02"],
+        "kept_pinned": ["cmp_01"],
+        "titles": {"cmp_02": "Aid to Ghana", "cmp_01": "Aid to Kenya"},
+    }
     assert [b.component_id for b in state.composition.blocks] == ["cmp_01"]
     assert {key: value for key, value in mixed.items() if key != "note"} == {
         "removed": [],
         "kept_pinned": ["cmp_01"],
         "already_off": ["cmp_02"],
         "not_in_conversation": ["cmp_99"],
+        "titles": {"cmp_01": "Aid to Kenya"},
     }
 
 

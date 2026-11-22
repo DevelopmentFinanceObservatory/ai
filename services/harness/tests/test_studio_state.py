@@ -1052,7 +1052,7 @@ def test_removing_cards_takes_the_named_blocks_off_and_reports_the_rest():
 
     removal = remove_cards(state, ["cmp_02", "cmp_99"], all_cards=False)
 
-    assert removal == (["cmp_02"], ["cmp_99"], [])
+    assert removal[:3] == (["cmp_02"], ["cmp_99"], [])
     assert state.composition is not None and before is not None
     assert [b.component_id for b in state.composition.blocks] == ["cmp_01", "cmp_03"]
     assert state.composition.revision == before.revision + 1
@@ -1088,7 +1088,7 @@ def test_a_call_naming_only_pinned_cards_changes_nothing():
     state.composition.blocks[0].pinned = True
     before = state.composition.revision
 
-    assert remove_cards(state, ["cmp_01"], all_cards=False) == ([], [], ["cmp_01"])
+    assert remove_cards(state, ["cmp_01"], all_cards=False)[:3] == ([], [], ["cmp_01"])
     assert state.composition.revision == before
     assert state.take_unreported_removal() is False
 
@@ -1097,7 +1097,7 @@ def test_a_card_already_off_the_canvas_is_not_reported_missing():
     state = _canvas({"cmp_01": _entry("Aid", None)})
     state.components["cmp_hidden"] = _entry("Hidden", None)
 
-    assert remove_cards(state, ["cmp_hidden"], all_cards=False) == ([], [], [])
+    assert remove_cards(state, ["cmp_hidden"], all_cards=False)[:3] == ([], [], [])
     assert state.take_unreported_removal() is False
 
 
@@ -1106,10 +1106,10 @@ def test_removing_every_card_leaves_an_empty_canvas_the_digest_states():
 
     removal = remove_cards(state, [], all_cards=True)
 
-    assert removal == (["cmp_01", "cmp_02"], [], [])
+    assert removal[:3] == (["cmp_01", "cmp_02"], [], [])
     listing = state.canvas_listing_state()
     assert all(block["on_canvas"] is False for block in listing["blocks"])
-    assert remove_cards(state, [], all_cards=True) == ([], [], [])
+    assert remove_cards(state, [], all_cards=True) == ([], [], [], {})
 
 
 def test_a_focus_that_names_no_stored_component_stays_out_of_the_summary():
@@ -3193,7 +3193,11 @@ async def test_a_card_write_commits_only_the_fields_its_change_made(new_store) -
     remove = studio_state.make_remove_cards(store)
     token = current_conversation_key.set(("principal", CONVERSATION))
     try:
-        assert await remove(component_ids=["cmp_two"], all_cards=False) == (["cmp_two"], [], [])
+        assert (await remove(component_ids=["cmp_two"], all_cards=False))[:3] == (
+            ["cmp_two"],
+            [],
+            [],
+        )
     finally:
         current_conversation_key.reset(token)
 
@@ -3602,7 +3606,7 @@ async def test_a_removal_whose_commit_lost_its_acknowledgement_reports_the_cards
         current_conversation_key.reset(token)
 
     assert faults == [1]
-    assert result == (["cmp_two"], [], [])
+    assert result[:3] == (["cmp_two"], [], [])
     assert state.take_unreported_removal() is True
     assert state.composition is not None and state.composition.blocks == []
     reloaded = await new_store().load("principal", CONVERSATION)
@@ -3686,7 +3690,7 @@ async def test_a_retried_removal_of_every_card_keeps_a_card_the_user_added_meanw
     result = await _remove_all(store_a)
 
     assert faults == [1]
-    assert result == (["cmp_two"], [], [])
+    assert result[:3] == (["cmp_two"], [], [])
     assert state.take_unreported_removal() is True
     reloaded = await new_store().load("principal", CONVERSATION)
     assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
@@ -3735,7 +3739,7 @@ async def test_overlapping_canvas_changes_each_land_once_when_the_first_lost_its
 
     assert faults == [1]
     assert landing[0].done()
-    assert result == (["cmp_two"], [], [])
+    assert result[:3] == (["cmp_two"], [], [])
     reloaded = await new_store().load("principal", CONVERSATION)
     assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
     assert state.composition == reloaded.composition

@@ -1960,6 +1960,46 @@ def _nothing_removed_note(
     return " ".join(sentences)
 
 
+_REMOVAL_KEYS = frozenset({"removed", "kept_pinned", "titles", "note"})
+
+
+def removal_reply(answer: Mapping[str, Any]) -> str | None:
+    """The reply to a turn whose only call was `remove_cards`, written from
+    the call's `answer`: each card taken off and each pinned card kept, by
+    title, and how the user unpins a kept one. None for an answer that holds
+    anything else (a refusal, `already_off`, `not_in_conversation`) or names
+    no card, which the model answers instead."""
+    if not answer.keys() <= _REMOVAL_KEYS:
+        return None
+    removed = answer.get("removed") or []
+    kept = answer.get("kept_pinned") or []
+    titles = answer.get("titles") or {}
+    if not (removed or kept) or any(cid not in titles for cid in [*removed, *kept]):
+        return None
+    sentences: list[str] = []
+    if removed:
+        sentences.append(f"I took {_quoted_list([titles[cid] for cid in removed])} off the canvas.")
+    if len(kept) == 1:
+        sentences.append(
+            f'"{titles[kept[0]]}" is pinned, so it stays. To remove it, choose Unpin from '
+            "Canvas in its menu, then ask again."
+        )
+    elif kept:
+        sentences.append(
+            f"{_quoted_list([titles[cid] for cid in kept])} are pinned, so they stay. To remove "
+            "one, choose Unpin from Canvas in its menu, then ask again."
+        )
+    return " ".join(sentences)
+
+
+def _quoted_list(titles: Sequence[str]) -> str:
+    """`titles` quoted and joined: "A", "A" and "B", or "A", "B", and "C"."""
+    quoted = [f'"{title}"' for title in titles]
+    if len(quoted) < 3:
+        return " and ".join(quoted)
+    return f"{', '.join(quoted[:-1])}, and {quoted[-1]}"
+
+
 def build_orchestrator_tools(
     *,
     resolver: Resolver,
@@ -3082,7 +3122,8 @@ def build_orchestrator_tools(
         canvas lists; set `all_cards` to take off every card the user has
         not pinned. A pinned card stays on the canvas, since only the user
         unpins it. Returns the ids taken off and, as `kept_pinned`, the
-        pinned cards left in place; a named card already off the canvas
+        pinned cards left in place, with each one's title under `titles`; a
+        named card already off the canvas
         needs nothing and is named back as `already_off`, and an id this
         conversation never held is named back as `not_in_conversation`. When
         nothing came off, `note` says what each named id met.
@@ -3101,7 +3142,7 @@ def build_orchestrator_tools(
             )
         _canvas_series(call)
         async with _canvas_lock(call):
-            removed, missing, kept_pinned = await remove_cards(
+            removed, missing, kept_pinned, titles = await remove_cards(
                 component_ids=component_ids or [], all_cards=all_cards
             )
             _forget_drawn(call, removed)
@@ -3123,6 +3164,8 @@ def build_orchestrator_tools(
             )
             if ids
         }
+        if removed or kept_pinned:
+            answer["titles"] = {cid: titles[cid] for cid in [*removed, *kept_pinned]}
         if not removed:
             answer["note"] = _nothing_removed_note(
                 named,
@@ -3153,4 +3196,11 @@ def build_orchestrator_tools(
     ]
 
 
-__all__ = ["TOOL_NAMES", "Chart", "Resolver", "build_orchestrator_tools", "raised_answer"]
+__all__ = [
+    "TOOL_NAMES",
+    "Chart",
+    "Resolver",
+    "build_orchestrator_tools",
+    "raised_answer",
+    "removal_reply",
+]
