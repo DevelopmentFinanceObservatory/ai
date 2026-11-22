@@ -128,15 +128,16 @@ _SUBSET_RULE = "display order"
 # names cards in the order `ConversationState._canvas_rank` ranks them by the
 # turn that drew each card: this turn's cards on the canvas, the pinned cards,
 # the earlier cards still on the canvas, newest turn first, and then the cards
-# off the canvas, this turn's first and then newest turn first. The canvas
-# order, which the user changes, plays no part in the rank. Each card on the
-# canvas states its place in it. `_DIGEST_BLOCK_CAP` cards on the canvas come
-# in full, and past them each of the three on-canvas groups names up to
+# off the canvas, this turn's first and then newest turn first. The
+# manifest's block order plays no part, and no card states a place on the
+# canvas: Studio keeps where each card sits on the client, so the manifest's
+# order is not the order the user sees. `_DIGEST_BLOCK_CAP` cards on the
+# canvas come in full, and past them each of the three on-canvas groups names up to
 # `_LISTING_COMPACT_CAP` cards compactly (`_compact_entry`: id, type and title
 # inside `_COMPACT_FRAME_BYTES` of keys). The cards off the canvas are named
 # compactly a whole turn at a time while the turns fit `_LISTING_COMPACT_CAP`.
-# A full or compact entry carries up to `_VIEW_FLAG_BYTES` of pinned, position
-# or on_canvas, and turn flags. A turn draws at most
+# A full or compact entry carries up to `_VIEW_FLAG_BYTES` of pinned,
+# on_canvas and turn flags. A turn draws at most
 # `BUDGETS["make_charts"] * MAX_CHARTS_PER_CALL` cards (40), fewer than
 # `_LISTING_COMPACT_CAP`, so every card of this turn is named. The cards left
 # are counted by turn: the newest `_EARLIER_TURN_CAP` turns, each within
@@ -144,7 +145,7 @@ _SUBSET_RULE = "display order"
 # around the lists take up to `_LISTING_WRAPPER_BYTES`.
 _LISTING_COMPACT_CAP = 48
 _COMPACT_FRAME_BYTES = 48
-_VIEW_FLAG_BYTES = 64
+_VIEW_FLAG_BYTES = 56
 _EARLIER_TURN_CAP = 16
 _EARLIER_ENTRY_BYTES = 80
 _LISTING_WRAPPER_BYTES = 256
@@ -304,9 +305,8 @@ class _CanvasRank:
     the cards of no recorded turn last; `off_canvas` the cards off the canvas
     by the turn that drew them, the open turn's first, then newest turn first,
     then the cards of no recorded turn under `None`. `turn_of` maps a card to
-    the turn that last drew or revised it, and `composed` each card on the
-    canvas to its position there, from 1, in the order the user arranged
-    them."""
+    the turn that last drew or revised it, and `composed` holds the cards on
+    the canvas."""
 
     focus: str | None
     this_turn: list[str]
@@ -314,7 +314,7 @@ class _CanvasRank:
     on_canvas: list[str]
     off_canvas: list[tuple[int | None, list[str]]]
     turn_of: dict[str, int]
-    composed: dict[str, int]
+    composed: set[str]
     pinned_ids: set[str]
 
 
@@ -633,8 +633,8 @@ class ConversationState:
         """Rank the conversation's cards for the canvas views by the turn that
         drew each one: a card drawn, recreated or revised in turn n belongs to
         turn n (`turns[n - 1]["cards"]`), and one the open turn touched to the
-        open turn (`turn_components`). The canvas order plays no part, so the
-        user's reordering changes no card's rank. `focus`, when it names a
+        open turn (`turn_components`). The manifest's block order plays no
+        part. `focus`, when it names a
         stored card, is held apart from every group for the summary to show
         whole."""
         drawn_in: dict[str, int] = {}
@@ -649,13 +649,10 @@ class ConversationState:
                     drawn_in.pop(card_id, None)
                     drawn_in[card_id] = number
         open_turn = len(self.turns) + 1 if not self.turn_recorded else None
-        composed: dict[str, int] = {}
+        composed: set[str] = set()
         pinned_ids: set[str] = set()
         if self.composition is not None:
-            composed = {
-                block.component_id: index
-                for index, block in enumerate(self.composition.blocks, start=1)
-            }
+            composed = {block.component_id for block in self.composition.blocks}
             pinned_ids = {block.component_id for block in self.composition.blocks if block.pinned}
         focused = focus if focus is not None and focus in self.components else None
         # Newest turn first, each turn's cards in the order it drew them, then
@@ -688,16 +685,12 @@ class ConversationState:
         )
 
     def _view_flags(self, rank: _CanvasRank, component_id: str) -> dict[str, Any]:
-        """What a canvas view says of a card beside its own fields: pinned, its
-        place among the canvas's cards in the order the user arranged them
-        (`position`, from 1) or that it is not on the canvas, and the turn that
-        drew it, each only when it applies."""
+        """What a canvas view says of a card beside its own fields: pinned, not
+        on the canvas, and the turn that drew it, each only when it applies."""
         flags: dict[str, Any] = {}
         if component_id in rank.pinned_ids:
             flags["pinned"] = True
-        if component_id in rank.composed:
-            flags["position"] = rank.composed[component_id]
-        else:
+        if component_id not in rank.composed:
             flags["on_canvas"] = False
         if component_id in rank.turn_of:
             flags["turn"] = rank.turn_of[component_id]
@@ -742,7 +735,7 @@ class ConversationState:
 
     def canvas_listing_state(self) -> dict[str, Any]:
         """`recall(part="canvas")`'s listing, in `_canvas_rank`'s order, so a
-        card can be recalled or removed by id, each with its canvas position
+        card can be recalled or removed by id, each with its flags
         (`_view_flags`). This turn's cards on the canvas, the pinned ones and
         then the earlier cards on the canvas take the `_DIGEST_BLOCK_CAP` full
         places (`blocks`). Past them each of those groups is named compactly
