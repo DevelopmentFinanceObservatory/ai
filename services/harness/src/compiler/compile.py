@@ -1884,6 +1884,8 @@ class _Build:
         read as every source its shape rests on, and each source behind the
         numerator is checked against the sources behind the denominator together,
         so a denominator summing several datasets holds a party one of them holds.
+        A numerator narrowed to one entity (`Side.entity`) is that entity on its
+        column, so only the parties the name resolves to there are checked.
         A side whose sources are all the numerator's, or one whose sources are not
         all known or state no identity, is not read, and a source stating no
         identity is logged. Where a denominator source
@@ -1904,33 +1906,42 @@ class _Build:
             == {source.spec_id for source in denominators}
         ):
             return
+        if any(source.identity is None for source in denominators):
+            logger.info(
+                "share %r: a denominator source states no identity, so the parties its "
+                "numerator names are not checked",
+                operation.id,
+            )
+            return
+        unread = [source.spec_id for source in numerators if source.identity is None]
+        if unread:
+            logger.info(
+                "share %r: numerator sources %s state no identity, so the parties they name "
+                "are not checked",
+                operation.id,
+                unread,
+            )
+        narrowed = self._share_part_narrowed(operation)
+        if narrowed is False:
+            return
         outside: list[str] = []
         for axis, column in WHOLE_COLUMNS.items():
-            whole = [source_whole_side(source, column) for source in denominators]
-            if any(side is None for side in whole):
-                logger.info(
-                    "share %r: a denominator source states no identity, so its %s side is "
-                    "not checked for the parties its numerator names",
-                    operation.id,
-                    axis,
-                )
-                return
+            whole = [
+                side
+                for source in denominators
+                if (side := source_whole_side(source, column)) is not None
+            ]
             for numerator in numerators:
                 part = source_whole_side(numerator, column)
                 if part is None:
-                    logger.info(
-                        "share %r: numerator source %s states no identity, so the %s "
-                        "parties it names are not checked",
-                        operation.id,
-                        numerator.spec_id,
-                        axis,
-                    )
                     continue
                 labels = {entity.ref: entity.label for entity in numerator.entities}
                 for party in part.bound:
+                    if narrowed is not None and column == narrowed[0] and party not in narrowed[1]:
+                        continue
                     held = parties_outside(
                         (party,),
-                        [side for side in whole if side is not None],
+                        whole,
                         part_group=part.group,
                         part_readable=part.group is not None or party_class(party) is not None,
                         bound_is_exact=False,
@@ -1954,6 +1965,25 @@ class _Build:
             f"would not be a part of its whole{whole_of}",
             operation_id=operation.id,
         )
+
+    def _share_part_narrowed(
+        self, operation: ShareOfOperation
+    ) -> tuple[str, frozenset[str]] | Literal[False] | None:
+        """The role column and refs `operation.numerator.entity` narrows the numerator to,
+        for `_check_share_holds_part`.
+
+        `None` when the numerator names no entity, so every party its sources bind
+        is the part. `False` when the name does not resolve on the numerator's
+        frame (`_frame_entity`), which the side check reports, so the part is
+        unknown and not checked.
+        """
+        side = operation.numerator
+        if side.entity is None:
+            return None
+        members = self._frame_entity(operation.id, side.input, side.entity)
+        if not isinstance(members, tuple):
+            return False
+        return members[0].role, frozenset(one.ref for one in members)
 
     def _sources_behind(self, op_id: str) -> tuple[SelectedSource, ...]:
         """Every source the shape at `op_id` rests on, none where a retrieval it rests on

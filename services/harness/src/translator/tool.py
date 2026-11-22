@@ -460,8 +460,10 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE: (
         "where the share is a part of its whole, make the denominator a dataset requirement "
         "stating `whole_of` with the numerator's requirement as its `part` and the side it "
-        "leaves open as its `axis`, which is counted from the part's own dataset; otherwise "
-        "give the denominator entities that hold every party the numerator names"
+        "leaves open as its `axis`, which is counted from the part's own dataset; where it "
+        "is one measure set against another that does not hold it, replace the share with a "
+        "`quotient_of`; otherwise give the denominator entities that hold every party the "
+        "numerator names"
     ),
     CompileIssueCode.WHOLE_SUM_UNMATCHED: (
         "propose the plan again with the whole as it stands, so `propose_plan` reads the "
@@ -1354,7 +1356,7 @@ def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str,
 
     def prose(entry: dict[str, object]) -> dict[str, object]:
         return entry | {
-            field: authored_text(text, split.names())
+            field: authored_text(text, split.names(), sums=split.summing())
             for field in ("reason", "repair")
             if isinstance(text := entry.get(field), str)
         }

@@ -67,7 +67,7 @@ from harness.graph.execute import (
     _replan_refusal,
     record_served_scopes,
 )
-from harness.graph.plan_done import frame_unavailable_reason, plan_done_node
+from harness.graph.plan_done import authored_report, frame_unavailable_reason, plan_done_node
 from harness.graph.state import (
     APPROVE_PAUSE,
     ORCHESTRATOR_FRAMES_KEY,
@@ -1901,6 +1901,33 @@ async def test_a_share_frame_is_registered_with_the_whole_its_plan_divides_by(
     await plan_done.run(ctx, node_input)
 
     assert ctx.state[ORCHESTRATOR_FRAMES_KEY][frame_id_for(REF_A)]["whole"] == named
+
+
+def test_a_report_names_an_added_sum_by_the_whole_it_sums(
+    decision: Callable[..., Decision],
+) -> None:
+    """A stop on the sum `propose_plan` adds over a whole's open side names the
+    whole the model wrote, in the report's ids and its prose; a spec id is kept."""
+    plan = us_share_of_kenya_oda(decision, whole=ALL_DONORS, numerator=US_DONOR, whole_of=True)
+    assert [entry.sum_id for entry in plan.whole_sums] == ["all_oda_sum"]
+    assert not plan.rolling_copies
+
+    report = authored_report(
+        {
+            "step_id": "all_oda_sum",
+            "requirement_id": "all_oda_sum",
+            "message": "step all_oda_sum read no rows",
+            "spec_id": "all_oda_sum",
+        },
+        plan,
+    )
+
+    assert report == {
+        "step_id": "all_oda",
+        "requirement_id": "all_oda",
+        "message": "step all_oda read no rows",
+        "spec_id": "all_oda_sum",
+    }
 
 
 async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(

@@ -345,8 +345,8 @@ MAX_PLAN_REQUIREMENTS = 24
 # The most requirements a plan holds: the model writes at most
 # `MAX_PLAN_REQUIREMENTS` (`Plan._record_fits_the_size_limit`), `propose_plan`
 # adds a sum for at most half of them, since each sums a whole the model wrote
-# beside its part (`WholeSum`), and `whole_history_split` copies each of these at
-# most once.
+# with its part and a share reading it (`WholeSum`, `_whole_read_fault`), and
+# `whole_history_split` copies each of these at most once.
 MAX_HELD_REQUIREMENTS = 3 * MAX_PLAN_REQUIREMENTS
 
 # The most asks one brief may list, and the longest each may run. An ask is a
@@ -2650,8 +2650,8 @@ def stated_coverage_fault(whole: DatasetRequirement) -> str | None:
 
     A whole covers what its part covers with one side left open (`whole_read`),
     so `entities` or `across` on it could only disagree with that. A proposal
-    stating either is refused (`submission.service._Patch`). A plan stored
-    with them still loads, and reads them as derived.
+    stating either is refused (`submission.service._Patch`), and a plan stored
+    with them loads without them (`Plan._wholes_state_no_coverage`).
     """
     if whole.whole_of is None:
         return None
@@ -2663,6 +2663,20 @@ def stated_coverage_fault(whole: DatasetRequirement) -> str | None:
         f"{whole.whole_of.part!r} covers with the {whole.whole_of.axis} left open as one "
         f"total; drop its {' and '.join(f'`{field}`' for field in stated)}"
     )
+
+
+def _coverage_dropped(requirement: object) -> object:
+    """`requirement`, a requirement or its serialised form, without the `entities` and
+    `across` it states where it is a whole (`Plan._wholes_state_no_coverage`)."""
+    if isinstance(requirement, DatasetRequirement):
+        if requirement.whole_of is None or not (requirement.entities or requirement.across):
+            return requirement
+        return requirement.model_copy(update={"entities": (), "across": ()})
+    if isinstance(requirement, Mapping) and requirement.get("whole_of") is not None:
+        return {
+            key: value for key, value in requirement.items() if key not in {"entities", "across"}
+        }
+    return requirement
 
 
 def whole_read(whole: DatasetRequirement, part: DatasetRequirement) -> DatasetRequirement:
@@ -3220,6 +3234,14 @@ class HistorySplit(NamedTuple):
         clones = {copy: wholes.get(origin, origin) for copy, origin in self.origins().items()}
         return clones | wholes
 
+    def summing(self) -> frozenset[str]:
+        """The ids `names` maps to a whole because they sum it: each added aggregate
+        and each clone of one (`authored_text`'s `sums`)."""
+        wholes = sum_origins(self.sums)
+        return frozenset(wholes) | {
+            copy for copy, origin in self.origins().items() if origin in wholes
+        }
+
 
 def copy_origins(copies: Iterable[RollingCopy]) -> dict[str, str]:
     """Each copy's id in `copies` mapped to the id of the requirement it copies."""
@@ -3236,7 +3258,9 @@ def origin_of(split: HistorySplit, step_id: str) -> str:
     return split.names().get(step_id, step_id)
 
 
-def authored_text(text: str, origins: Mapping[str, str]) -> str:
+def authored_text(
+    text: str, origins: Mapping[str, str], *, sums: Collection[str] = frozenset()
+) -> str:
     """`text` naming, in place of each copy `origins` maps, the requirement it copies.
 
     `origins` maps each copy's id to its origin's (`copy_origins`,
@@ -3247,6 +3271,10 @@ def authored_text(text: str, origins: Mapping[str, str]) -> str:
     holding one: a path or dcid segment (`dc/topic/aid_history`,
     `/aid_history.csv`) or a prefixed name (`dc:aid_history`), where a `/`,
     `.` or `:` joins it to another identifier character or a `/` follows.
+    `sums` are the ids of `origins` that sum their whole (`HistorySplit.summing`).
+    Where `text` names one of them beside its whole, it reads "the sum of" the
+    whole, inside the quotes around the id, so the sentence still tells the
+    two apart.
     Outward text built on the split plan reads through it: the refusals its
     rules raise (`Plan`'s validation), the referrals the translator hands
     back (`translator.tool.authored_answer`), and the prose of what a run
@@ -3255,11 +3283,27 @@ def authored_text(text: str, origins: Mapping[str, str]) -> str:
     if not origins:
         return text
     copy_id = re.compile(
-        r"(?<![A-Za-z0-9_/.:])("
-        + "|".join(map(re.escape, origins))
-        + r")(?![A-Za-z0-9_/]|[.:][A-Za-z0-9_])"
+        "(['\"`]?)" + _identifier_in_prose("|".join(map(re.escape, origins))) + r"\1"
     )
-    return copy_id.sub(lambda match: origins[match[1]], text)
+    beside = {
+        hidden
+        for hidden in sums
+        if hidden in origins
+        and re.search(_identifier_in_prose(re.escape(origins[hidden])), text) is not None
+    }
+
+    def named(match: re.Match[str]) -> str:
+        quote, hidden = match[1], match[2]
+        name = f"{quote}{origins[hidden]}{quote}"
+        return f"the sum of {name}" if hidden in beside else name
+
+    return copy_id.sub(named, text)
+
+
+def _identifier_in_prose(alternatives: str) -> str:
+    """A pattern matching one of `alternatives` as a whole identifier in prose, in a
+    group of its own, as `authored_text` reads ids."""
+    return rf"(?<![A-Za-z0-9_/.:])({alternatives})(?![A-Za-z0-9_/]|[.:][A-Za-z0-9_])"
 
 
 def whole_history_split(
@@ -3742,11 +3786,14 @@ def _dataset_shape(
     state, then one open dimension per `across` word, then the breakdown's.
 
     A whole's side it opens is one more role dimension, closed, under the
-    role phrase `opened` (`opened_role`): the side's one total.
+    role phrase `opened` (`opened_role`), read as the side's one total.
 
     A role phrase one entity states alone, not as a set's members, is
     `single`. The plan cannot tell whether Search binds the name to one party,
-    so `submission.service._rank_roles_expand` and the compiler check it.
+    so `submission.service._rank_roles_expand` and the compiler check it. The
+    opened side is not `single`: no entity of the whole states it, so
+    `_rank_roles_expand` has no name to check, and a rank over another of the
+    whole's roles states a reduction.
 
     Its years run on past `period` with `period_end_open`, and start at
     `first_year` for a read of its dataset's whole history, the first year
@@ -4933,6 +4980,22 @@ class Plan(StrictModel):
     approved_revision: str | None = None
     approved_at: Annotated[datetime | None, HASHED_WHEN_SET] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _wholes_state_no_coverage(cls, data: Any) -> Any:
+        """Drop the `entities` and `across` a whole states, which its part settles
+        (`stated_coverage_fault`).
+
+        A proposal stating them is refused (`submission.service._Patch`), so only
+        a plan stored before that refusal holds them. It loads without them, so the
+        plan shown to the model for an amendment
+        (`harness.planner_adapter._as_authored`) never states them
+        and the amendment repeating what it was shown is not refused.
+        """
+        if not isinstance(data, Mapping) or not (requirements := data.get("evidence_requirements")):
+            return data
+        return {**data, "evidence_requirements": [_coverage_dropped(r) for r in requirements]}
+
     @field_validator("question")
     @classmethod
     def _question_is_stated(cls, question: str) -> str:
@@ -4963,7 +5026,8 @@ class Plan(StrictModel):
         planner's brief can carry. The message names the measured size and the
         parts that take the most of it, so the model can shorten those. Both
         limits measure the plan the model wrote (`authored`), without the
-        copies `whole_history_split` adds. The size leaves out the scope
+        copies `whole_history_split` adds or the sums `propose_plan` adds over a
+        whole's open side (`Plan.whole_sums`). The size leaves out the scope
         decisions and the decisions qualifying the answer that `propose_plan`
         writes (`is_scope_choice`, `Decision.caveat`): the model cannot shorten
         them, and `MAX_PLAN_DECISIONS` and the requirements bound how many a
@@ -5826,7 +5890,7 @@ def _naming_origins(error: ValueError, split: HistorySplit) -> ValueError:
     an `UnsupportedPlanError` or a plain `ValueError`
     (`_check_requirement_graph`). Each comes back as its own kind.
     """
-    message = authored_text(str(error), split.names())
+    message = authored_text(str(error), split.names(), sums=split.summing())
     if isinstance(error, RollingPlanError):
         named = dict.fromkeys(origin_of(split, step_id) for step_id in error.requirement_ids)
         return RollingPlanError(

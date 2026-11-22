@@ -6219,6 +6219,35 @@ def test_authored_text_renames_a_copy_named_in_prose_and_keeps_refs(text: str, n
     assert authored_text(text, {"aid_history": "aid"}) == named
 
 
+@pytest.mark.parametrize(
+    ("text", "named"),
+    [
+        pytest.param("step 'total_sum' failed.", "step 'total' failed.", id="alone"),
+        pytest.param(
+            "aggregate 'total_sum' reads 'total'.",
+            "aggregate the sum of 'total' reads 'total'.",
+            id="beside-its-whole-quoted",
+        ),
+        pytest.param(
+            "total_sum_history reads total.",
+            "the sum of total reads total.",
+            id="a-copy-beside-its-whole",
+        ),
+        pytest.param(
+            "aid_history reads total_sum and aid.",
+            "aid reads total and aid.",
+            id="a-copy-beside-its-origin",
+        ),
+    ],
+)
+def test_authored_text_tells_a_sum_named_beside_its_whole_apart(text: str, named: str) -> None:
+    """A sum `propose_plan` added is named as its whole, and as the sum of its whole
+    where the text names the whole too, so the sentence keeps two parties."""
+    origins = {"total_sum": "total", "total_sum_history": "total", "aid_history": "aid"}
+
+    assert authored_text(text, origins, sums={"total_sum", "total_sum_history"}) == named
+
+
 def test_rolling_years_refused_on_a_copy_name_the_requirement_the_model_wrote(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
@@ -7485,7 +7514,7 @@ def test_a_whole_covers_its_parts_parties_with_the_side_it_opens_as_one_total(
     """G7 aid to Africa over G7 aid to every recipient: the whole states no
     entities and no `across`, and reads as its part's donor with the recipients
     one closed total, so the share divides by it directly. A whole a stored
-    session states coverage on reads the same way and still loads."""
+    session states coverage on loads without it and reads the same way."""
     plan = _plan(
         decision(),
         question="G7 aid to Africa as a share of its total aid since the earliest year",
@@ -7493,12 +7522,20 @@ def test_a_whole_covers_its_parts_parties_with_the_side_it_opens_as_one_total(
         evidence_requirements=_g7_africa_share(whole=whole, pooled=pooled),
     )
 
+    loaded = plan.requirement(whole.id)
+    assert isinstance(loaded, DatasetRequirement)
+    assert (loaded.entities, loaded.across) == ((), ())
     shape = frame_shapes(plan)[whole.id]
     assert [(role.role, role.open) for role in shape.roles] == [
         ("donor", False),
         ("recipient", False),
     ]
-    assert Plan.model_validate_json(plan.model_dump_json()) == plan
+    stored = json.loads(plan.model_dump_json())
+    stated = _G7_WHOLE_STATED.model_dump(mode="json", include={"entities", "across"})
+    for requirement in stored["evidence_requirements"]:
+        if requirement["id"] == whole.id:
+            requirement.update(stated)
+    assert Plan.model_validate_json(json.dumps(stored)) == plan
 
 
 def test_a_summed_whole_reads_its_side_open_and_its_sum_closes_it(
@@ -7582,7 +7619,7 @@ def test_a_plan_whose_whole_sums_are_not_its_wholes_aggregates_is_refused(
 ) -> None:
     written = _g7_africa_share(whole=_G7_WHOLE)
 
-    with pytest.raises(ValidationError, match="sum"):
+    with pytest.raises(ValidationError) as refused:
         _plan(
             decision(),
             question="G7 aid to Africa as a share of its total aid since the earliest year",
@@ -7590,6 +7627,9 @@ def test_a_plan_whose_whole_sums_are_not_its_wholes_aggregates_is_refused(
             evidence_requirements=requirements or with_whole_sums(written, sums),
             whole_sums=sums,
         )
+    assert [(error["type"], error["loc"]) for error in refused.value.errors()] == [
+        ("value_error", ())
+    ]
 
 
 def test_a_copy_of_a_whole_s_sum_is_named_as_the_whole() -> None:
@@ -7607,6 +7647,7 @@ def test_a_copy_of_a_whole_s_sum_is_named_as_the_whole() -> None:
 
     assert origin_of(split, "total_sum_history") == "total"
     assert origin_of(split, "total_sum") == "total"
+    assert split.summing() == {"total_sum", "total_sum_history"}
 
 
 def test_requirements_dropping_a_whole_drop_its_sum(decision: DecisionFactory) -> None:
@@ -7676,11 +7717,11 @@ def test_a_part_naming_the_set_it_read_across_keeps_its_whole_s_sum(
 )
 def test_a_proposal_stating_coverage_on_a_whole_is_refused(stated: dict[str, Any]) -> None:
     """A whole covers what its part covers with one side left open, so a proposal
-    stating its `entities` or `across` is refused, naming the field to drop."""
+    stating its `entities` or `across` is refused."""
     whole = {**_G7_WHOLE.model_dump(mode="json"), **stated}
     part = _g7_africa_share(whole=_G7_WHOLE)[0].model_dump(mode="json")
 
-    with pytest.raises(ValidationError, match="`whole_of`") as raised:
+    with pytest.raises(ValidationError) as raised:
         _Patch.model_validate(
             {
                 "decisions": [],
@@ -7693,7 +7734,9 @@ def test_a_proposal_stating_coverage_on_a_whole_is_refused(stated: dict[str, Any
                 "across_years": [],
             }
         )
-    assert next(iter(stated)) in str(raised.value)
+    assert [(error["type"], error["loc"]) for error in raised.value.errors()] == [
+        ("value_error", ())
+    ]
 
 
 @pytest.mark.parametrize(

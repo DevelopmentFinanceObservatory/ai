@@ -9004,6 +9004,73 @@ def test_a_share_divides_by_a_whole_that_holds_its_part(
     assert _codes(result) == codes
 
 
+@pytest.mark.parametrize(
+    ("narrowed_to", "codes"),
+    [
+        pytest.param("Kenya", [], id="kenya-inside"),
+        pytest.param("United States", [Code.SHARE_PART_OUTSIDE_WHOLE], id="united-states-outside"),
+    ],
+)
+def test_a_share_checks_only_the_entity_its_numerator_narrows_to(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    source: SourceFactory,
+    narrowed_to: str,
+    codes: list[Code],
+) -> None:
+    """G7 aid to Kenya and the United States, narrowed to one of them, over G7 aid
+    to Africa. Kenya is inside Africa, so the share holds its part even though the
+    numerator's source also binds the United States; narrowed to the United
+    States, the part is outside the whole."""
+    united_states = ResolvedEntity(role="destination", ref="country/USA", label="United States")
+    g7 = Entity(name="G7", role="donor")
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[
+            g7,
+            Entity(name="Kenya", role="recipient"),
+            Entity(name="United States", role="recipient"),
+        ],
+    )
+    total = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[g7, Entity(name="Africa", role="recipient")],
+    )
+    summed = derived_requirement(id="summed", input_id="total")
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid", entity=narrowed_to),
+        denominator=RequirementSide(input_id="summed"),
+    )
+
+    result = build(
+        _draft([decision()], [aid, total, summed, share]),
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            _aggregate(id="summed", requirement_id="summed", input="fetch_total"),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="fetch", entity=narrowed_to),
+                denominator=Side(input="summed"),
+            ),
+            terminal=["share"],
+        ),
+        discovered={
+            "aid": _flow_source(source, SPEC_KENYA, recipients=[_KENYA, united_states]),
+            "total": _flow_source(source, SPEC_OTHER, recipients=[_AFRICA], groups=[_AFRICA_GROUP]),
+        },
+    )
+
+    assert _codes(result) == codes
+
+
 _DAC_DEVELOPING = ResolvedEntity(
     role="destination", ref="DACDevelopingCountries", label="developing countries (DAC)"
 )
