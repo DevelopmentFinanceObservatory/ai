@@ -36,6 +36,7 @@ from harness.studio_store import (
     Standing,
     StoredConversation,
     StudioStore,
+    TurnMoved,
     TurnStanding,
     record_status,
     turn_standing,
@@ -1223,3 +1224,50 @@ def test_a_carried_answers_refusal_is_the_resumes_own(
     if answered == "edit_conflict":
         assert response.status_code == 409
         assert body["pointer"] == "/turn_index"
+
+
+async def test_a_follow_up_sent_from_two_pages_begins_one_turn(pg_engine: AsyncEngine) -> None:
+    """Two pages each send the question turn 1 handed back, both naming turn 1
+    as the turn it follows (`after_turn`). The first begins turn 2; the second
+    finds the latest turn moved and is refused 409 `edit_conflict` with
+    `constraint_id` `turn_moved`, beginning no turn."""
+    app, _ = orchestrator_app(_text("One."), _text("Two."), _text("Three."), engine=pg_engine)
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("first"))
+        follow_up = {**turn_body("what was Kenya's ODA in 2023?"), "after_turn": 1}
+        first = await stream(client, "/api/studio/turn", follow_up)
+        second = await client.post("/api/studio/turn", json=follow_up, headers=AUTH)
+        read = (await _state(client)).json()
+
+    assert _events(first)[-1] == "done"
+    assert second.status_code == 409
+    refused = second.json()
+    assert (refused["error"], refused["constraint_id"], refused["pointer"]) == (
+        "edit_conflict",
+        "turn_moved",
+        "/after_turn",
+    )
+    assert read["closed_total"] == 2
+    assert read["turn"]["index"] == 2
+
+
+async def test_the_after_turn_check_reads_the_row_under_the_claims_lock(
+    pg_engine: AsyncEngine,
+) -> None:
+    """An instance that loaded the conversation at turn 1 claims a turn after
+    turn 1 once another instance has begun and ended turn 2. Its loaded copy
+    still says turn 1, and the claim, which reads the row under its lock, is
+    refused `TurnMoved` naming turn 2."""
+    app, _ = orchestrator_app(_text("One."), _text("Two."), engine=pg_engine)
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("first"))
+    stale = StudioStore(pg_engine)
+    loaded = await stale.load(PRINCIPAL, CONVERSATION)
+    assert loaded is not None and loaded.turn_index == 1
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", {**turn_body("second"), "after_turn": 1})
+
+    with pytest.raises(TurnMoved) as moved:
+        await stale.claim_turn_lease(PRINCIPAL, CONVERSATION, after_turn=1)
+
+    assert moved.value.latest == 2

@@ -4658,7 +4658,8 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
     write, completes. B's same answer is refused while A's segment
     lease is still live, and resumes the turn once it expires (an injected
     clock), without a second `ApprovalRecord` and past every `seq` A's dead
-    attempt may already have sent."""
+    attempt may already have sent. B's retry sends the approval A's attempt
+    took first, since A's client may never have read it."""
     clock = await StoreClock.start(_engine())
     store_a = StudioStore(
         _engine(),
@@ -4702,8 +4703,11 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
     # The turn's first segment numbered from 0 and A's dead resume from the
     # block after it, so B's resume starts past both blocks.
     assert resumed[0]["seq"] >= 2 * SEQ_BLOCK
-    # A's dead attempt sent the approved plan once the approve node took it.
-    assert "plan.approved" not in _events(resumed)
+    # A's dead attempt took the approval, and its client may never have read
+    # the `plan.approved` it sent, so B's retry sends it first, once.
+    assert _events(resumed).count("plan.approved") == 1
+    assert _events(resumed)[0] == "plan.approved"
+    assert resumed[0]["revision"] == plan["revision"]
 
     reloaded = await StudioStore(
         _engine(),

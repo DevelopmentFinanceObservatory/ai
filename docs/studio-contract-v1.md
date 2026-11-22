@@ -12,7 +12,7 @@ explains the protocol around them, and `services/harness/tests/test_wire.py`
 pins the two together against the fixtures in
 `services/harness/tests/wire_fixtures/studio/`.
 
-v1 records its design decisions as numbered deltas (1–27; 16 is folded
+v1 records its design decisions as numbered deltas (1–28; 16 is folded
 into 11). The deltas are marked where they apply and listed in the delta
 index at the end.
 
@@ -47,9 +47,8 @@ Every studio request carries:
   verification check is one function in `harness/auth.py`, where full JWT
   validation plugs in later without touching routes.
 - `conversation_id` in the body: client-minted, stable for one
-  conversation. `session_id`, its earlier name, parses as a
-  deprecated alias in v1 (the fixtures still use it). Sending both
-  spellings in one body is refused.
+  conversation. `session_id`, its earlier name, is an unknown member and
+  is refused.
 
 Server-side conversation state is keyed on (principal derived from the
 token, `conversation_id`), so conversations are isolated per principal.
@@ -109,7 +108,8 @@ union). `GET /api/studio/state` takes query parameters and no body.
   (optional, default `true`; delta 11): when `false`, components the turn
   creates still stream as `component.created` but are NOT appended to the
   composition; the client adds them later with an `add` op (the Auto-add
-  toggle and the "✓ Added" chip).
+  toggle and the "✓ Added" chip). `after_turn` (optional; delta 28) names
+  the turn the request follows.
 - **`interrupt.response`** resumes a paused turn: `interrupt_id` echoed
   verbatim from the pausing frame, `decision` ∈
   `approve | amend | reject | answer | skip`. `payload` carries the
@@ -161,21 +161,21 @@ each in `wire_fixtures/studio/` (elicitation has three: the plain
 question, the skippable free-text question, and two questions in one
 pause; `plan.proposed` has a second showing a failed switch).
 
-| `event`               | What it is                                                                                                                                                                                                        |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `message.delta`       | append to the streaming assistant message; text is GitHub-flavored Markdown (delta 15)                                                                                                                            |
-| `message.complete`    | final text for the turn's message                                                                                                                                                                                 |
-| `plan.proposed`       | the plan awaiting approval; **pauses and ends the stream** (delta 1)                                                                                                                                              |
-| `plan.versioned`      | a new plan replaces the one `supersedes` names; a fresh `plan.proposed` follows. `version` can be lower than the superseded one (see below)                                                                       |
-| `plan.approved`       | the plan the user approved; sent by the segment whose `approve` node takes the approval and by no answer retry after it, and again as the first frame of a `turn.resume`; a page keys it by `revision` (delta 22) |
-| `activity.step`       | one execution step, the only progress channel; `step_id` is the call's position within the stream (see `docs/frontend-interface.md`)                                                                              |
-| `component.created`   | a new card: opaque `payload` + `fact_summary` + inline `provenance`                                                                                                                                               |
-| `component.revised`   | new revision under the same `component_id`                                                                                                                                                                        |
-| `composition.updated` | the authoritative canvas manifest                                                                                                                                                                                 |
-| `elicitation.request` | one to three clarifying questions; **pauses and ends the stream** (delta 1)                                                                                                                                       |
-| `suggestions`         | follow-up chips (may be empty in v1; delta 8)                                                                                                                                                                     |
-| `error`               | stream-fatal tool error (delta 4)                                                                                                                                                                                 |
-| `done`                | turn complete: `trace_id` + final composition or null, and `new_question` (delta 27)                                                                                                                              |
+| `event`               | What it is                                                                                                                                                                                                                                      |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `message.delta`       | append to the streaming assistant message; text is GitHub-flavored Markdown (delta 15)                                                                                                                                                          |
+| `message.complete`    | final text for the turn's message                                                                                                                                                                                                               |
+| `plan.proposed`       | the plan awaiting approval; **pauses and ends the stream** (delta 1)                                                                                                                                                                            |
+| `plan.versioned`      | a new plan replaces the one `supersedes` names; a fresh `plan.proposed` follows. `version` can be lower than the superseded one (see below)                                                                                                     |
+| `plan.approved`       | the plan the user approved; sent by the segment whose `approve` node takes the approval, and again as the first frame of an answer retry or `turn.resume` that carries on a turn which already took it; a page keys it by `revision` (delta 22) |
+| `activity.step`       | one execution step, the only progress channel; `step_id` is the call's position within the stream (see `docs/frontend-interface.md`)                                                                                                            |
+| `component.created`   | a new card: opaque `payload` + `fact_summary` + inline `provenance`                                                                                                                                                                             |
+| `component.revised`   | new revision under the same `component_id`                                                                                                                                                                                                      |
+| `composition.updated` | the authoritative canvas manifest                                                                                                                                                                                                               |
+| `elicitation.request` | one to three clarifying questions; **pauses and ends the stream** (delta 1)                                                                                                                                                                     |
+| `suggestions`         | follow-up chips (may be empty in v1; delta 8)                                                                                                                                                                                                   |
+| `error`               | stream-fatal tool error (delta 4)                                                                                                                                                                                                               |
+| `done`                | turn complete: `trace_id` + final composition or null, and `new_question` (delta 27)                                                                                                                                                            |
 
 `component.created.payload` / `component.revised.payload` are the platform's resolved revision, passed through verbatim as the envelope `{schema_version, catalog_version, component_id, revision, provenance, component}` that dfo-spec-kit's `envelope.schema.json` defines. `payload.component` is the resolved component for its type, points included, and `payload.provenance` is the platform's provenance for that revision, authoritative for the card's back. The member is opaque to this contract, which does not restate its shape.
 
@@ -675,6 +675,16 @@ Users type new questions into the plan card's revise box. The client sends them 
 
 The client closes the card ("Taken as a new question") and sends `new_question` as the next `turn.request`, which is metered, opens its own trace, and plans or answers the question like any other. A state read's closed turn carries the same `new_question`, for a page that lost the stream before `done`. A client that ignores the field shows the message and loses the question. The delta adds one optional member, `done.new_question`, and keeps the existing frames, request kinds and turn statuses.
 
+## A turn that names the turn it follows (delta 28, v1.13)
+
+A page that sends a closed turn's `new_question` as the next turn sends it automatically, and two pages open on one conversation can both send it. `turn.request` gains an optional `after_turn`, the index of the turn the request follows, as a state read's `turn.index` or the stream's `x-dfo-turn-index` header gives it (0 before the first turn). The server compares it with the conversation's latest turn index under the row lock every turn's claim takes, in the claim's transaction, so of two requests naming the same turn at most one begins a turn. The other is answered 409:
+
+```json
+{"error": "edit_conflict", "retry": "refresh_then_retry", "constraint_id": "turn_moved", "pointer": "/after_turn", "detail": "the request follows turn 3, and the conversation's latest turn is 4", "fix": "read the conversation's state and show the turns it holds"}
+```
+
+`constraint_id: "turn_moved"` tells this refusal apart from a busy conversation, which answers 409 `transient_unavailable` with `retry_after_seconds`. A busy refusal comes first while another request's stream holds the conversation; once that stream ends, the retry answers `turn_moved`. On `turn_moved` the page reads the state, shows the turns it lacks, and does not send the question again. The check begins no turn, meters nothing and writes nothing. A request without `after_turn` is admitted as before.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -718,7 +728,7 @@ Fixture values that are samples:
 1. `activity.step status=failed` is recoverable; a top-level `error` frame
    is stream-fatal and `done` does not follow.
 1. `Authorization: Bearer <token>` + client-minted `conversation_id` on
-   every request (`session_id` accepted as deprecated alias);
+   every request;
    `composition.mutate` gains `conversation_id`; conversation state keyed
    per principal; each conversation maps to its own platform
    `x-dfo-session` server-side.
@@ -786,3 +796,4 @@ Fixture values that are samples:
    earlier plan card in the turn reads as a new plan with its own `plan_version_id`.
 1. `POST /api/studio/resume` (`turn.resume`) carries on a running turn whose client left, on a new stream; `GET /api/studio/state` reads the conversation as stored (turn status and lease, closed turns after `since` with `closed_total`, the open pause and its frames, the manifest) with no lease; every stream names its turn in the `x-dfo-turn-index` header.
 1. `done` gains an optional `new_question`: an `amend` whose text asks a different question ends the turn, its plan set aside, and the client sends the text as the next `turn.request`.
+1. `turn.request` gains an optional `after_turn`, the turn it follows; a request whose `after_turn` is not the conversation's latest turn is refused 409 `edit_conflict` with `constraint_id: "turn_moved"` and begins no turn.

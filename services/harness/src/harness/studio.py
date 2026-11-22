@@ -128,6 +128,7 @@ from harness.studio_store import (
     StopPending,
     StoredConversation,
     StudioStore,
+    TurnMoved,
     TurnStanding,
     pause_entry,
     record_closed_turn,
@@ -1128,6 +1129,24 @@ def _close_work(
     runner.recorder.release(current_conversation_id.get())
     if runner.surface_recorder is not None:
         runner.surface_recorder.release(current_conversation_id.get())
+
+
+def _turn_moved_response(*, after_turn: int | None, latest: int) -> JSONResponse:
+    """The 409 `edit_conflict` (`constraint_id` `turn_moved`) for a `/turn`
+    whose `after_turn` is not the conversation's latest turn, `latest`: a
+    request on another page began a turn since the page read the state."""
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.EDIT_CONFLICT,
+            retry=RetryMode.REFRESH_THEN_RETRY,
+            constraint_id="turn_moved",
+            pointer="/after_turn",
+            detail=f"the request follows turn {after_turn}, and the conversation's latest "
+            f"turn is {latest}",
+            fix="read the conversation's state and show the turns it holds",
+        ),
+        status_code=409,
+    )
 
 
 def _streaming_conflict_response(detail: str, *, retry_after_seconds: int = 5) -> JSONResponse:
@@ -2234,7 +2253,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             leasing = _wire_id("seg")
             try:
                 lease = await studio.store.claim_turn_lease(
-                    principal, body.conversation_id, segment_id=leasing
+                    principal, body.conversation_id, segment_id=leasing, after_turn=body.after_turn
                 )
             except SegmentBusy as exc:
                 # Each refusal is raised before the claim's COMMIT.
@@ -2248,6 +2267,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         "another request is streaming on this conversation",
                         retry_after_seconds=exc.retry_after_seconds,
                     ),
+                    turn=begun,
+                )
+            except TurnMoved as exc:
+                leasing = None
+                return await _unclaimed(
+                    studio.store,
+                    principal,
+                    body.conversation_id,
+                    hold,
+                    _turn_moved_response(after_turn=body.after_turn, latest=exc.latest),
                     turn=begun,
                 )
             except StopPending:
@@ -3052,8 +3081,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             _set_turn_context(principal, body.conversation_id, conversation, settings)
             # The approved plan goes out when the graph's `approve` node takes
             # the approval. A retry finds that node run already when the dead
-            # attempt's write of it committed, and sends none.
+            # attempt's write of it committed, and sends it first instead, since
+            # the client that left may never have read it.
             approving = pending.card if body.decision is InterruptDecision.APPROVE else None
+            taken = _taken_approval(conversation, cursor, approving)
             # The segment's owner takes the lease and the lock hold from here on.
             return open_stream(
                 _SegmentWork(
@@ -3072,7 +3103,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         if paused_here and cursor.pause is not None
                         else None
                     ),
-                    approving=approving,
+                    approving=None if taken is not None else approving,
+                    restored=() if taken is None else (taken,),
                 ),
                 owners=studio.owners,
                 store=studio.store,

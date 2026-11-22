@@ -75,6 +75,27 @@ async def test_every_task_validates_and_the_set_covers_every_kind() -> None:
     assert faults == {}
 
 
+@pytest.mark.parametrize("wrong", [False, True], ids=["as-recorded", "expecting-other-words"])
+async def test_each_amendment_task_hands_back_the_message_it_names(wrong: bool) -> None:
+    """A scripted planner names each amendment task's message as asking a new
+    question, and the turn hands back that message's words. A task expecting other
+    words than the named message's is reported."""
+    entry.quiet_logs()
+    tasks = entry.load_amendment_tasks()
+    assert tasks
+
+    faults = {}
+    for task in tasks:
+        amendment = task.amendment
+        if wrong:
+            amendment = amendment.model_copy(update={"new_question": "a question nobody asked"})
+        found = await validate.check_amendment(task.model_copy(update={"amendment": amendment}))
+        if found:
+            faults[task.id] = found
+
+    assert sorted(faults) == (sorted(task.id for task in tasks) if wrong else []), faults
+
+
 def _search_reworded(task: Any) -> dict[str, Any]:
     searches = [search.model_dump() for search in task.searches]
     searches[0]["parts"][0]["variable"] += " (reworded)"

@@ -52,6 +52,7 @@ from entry import (
     Task,
     TranslationCalls,
     first_year_gaps,
+    load_amendment_tasks,
     load_recording,
     load_tasks,
     period_reductions,
@@ -62,6 +63,7 @@ from entry import (
     tool_calls,
 )
 from google.genai import Client, types
+from harness.graph.state import NEW_QUESTION_KEY
 from harness.turn_events import PLANNER_ASK
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION
 
@@ -350,6 +352,43 @@ async def check_task(task: Task) -> list[str]:
     return faults
 
 
+async def check_amendment(task: Task) -> list[str]:
+    """Every fault in amendment task `task`: a scripted planner that asks about the
+    amendment when the task scripts an answer, then reads the named message as a new
+    question (`starts_new_plan` with `new_question_in`), ends the entry on it, and the
+    turn hands back the task's `new_question`."""
+    amendment = task.amendment
+    assert amendment is not None
+    if amendment.new_question_in is None:
+        return []
+    restart = (
+        "propose_plan",
+        {
+            "starts_new_plan": True,
+            "new_question_in": amendment.new_question_in,
+            "amends_version": amendment.prior_plan["version"],
+        },
+    )
+    script: list[Step] = [[restart]]
+    if amendment.answer is not None:
+        script.insert(0, [(PLANNER_ASK, {"message": "What would you like to ask?"})])
+    try:
+        run = await run_entry(
+            task,
+            load_recording(task.recording_id),
+            prefix_cache=None,
+            client=ScriptedModel(script).client,
+            timeout_s=60.0,
+        )
+    except Exception as exc:
+        return [f"entry: {type(exc).__name__}: {exc}"]
+    faults = [run.error] if run.error else []
+    handed_back = run.state.get(NEW_QUESTION_KEY)
+    if handed_back != amendment.new_question:
+        faults.append(f"handed back {handed_back!r}, not {amendment.new_question!r}")
+    return faults
+
+
 def coverage_faults(tasks: Sequence[Task]) -> list[str]:
     """What the set lacks or leaves lying: tasks, a kind nothing requires, a kind with no
     neighbour task, refusal tasks, and recorded files no task uses."""
@@ -422,6 +461,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     quiet_logs()
     tasks = load_tasks()
+    amendments = load_amendment_tasks(tasks=tasks)
     if args.show:
         task = next((task for task in tasks if task.id == args.show), None)
         if task is None:
@@ -431,9 +471,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.only:
         wanted = set(args.only.split(","))
         tasks = [task for task in tasks if task.id in wanted]
-        if missing := wanted - {task.id for task in tasks}:
+        amendments = [task for task in amendments if task.id in wanted]
+        if missing := wanted - {task.id for task in [*tasks, *amendments]}:
             raise SystemExit(f"unknown task ids {sorted(missing)}")
     faults = asyncio.run(check_all(tasks, report=_print, coverage=not args.only))
+    for amendment in amendments:
+        if found := asyncio.run(check_amendment(amendment)):
+            faults[amendment.id] = found
+        print(f"{'FAIL' if found else 'ok  '}  amendment   {amendment.id}")
+        for fault in found:
+            print(f"      {fault}")
     for gap in faults.get("", []):
         print(f"GAP   {gap}")
     by_kind = Counter(task.kind for task in tasks)

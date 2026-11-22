@@ -774,6 +774,16 @@ class StopPending(ConversationStale):
     (`save(stopping=True)`)."""
 
 
+class TurnMoved(Exception):  # noqa: N818 -- named for the wire 409
+    """`StudioStore.claim_turn_lease` found the conversation's latest turn
+    is not the one the request names as the turn it follows (`after_turn`):
+    another request began a turn since. `latest` is the row's turn index."""
+
+    def __init__(self, conversation_id: str, *, latest: int) -> None:
+        super().__init__(f"conversation {conversation_id}'s latest turn is {latest}")
+        self.latest = latest
+
+
 class ConversationExists(Exception):  # noqa: N818 -- named for the race it reports
     """`StudioStore.create` lost the race to create the conversation."""
 
@@ -1953,7 +1963,12 @@ class StudioStore:
         return segment.id
 
     async def claim_turn_lease(
-        self, principal: str, conversation_id: str, *, segment_id: str | None = None
+        self,
+        principal: str,
+        conversation_id: str,
+        *,
+        segment_id: str | None = None,
+        after_turn: int | None = None,
     ) -> TurnLease:
         """Claim the conversation's lease for a new turn and write the lease
         alone, under the row lock, emptying the canvas write ids recorded
@@ -1970,7 +1985,10 @@ class StudioStore:
 
         `segment_id` is the lease's id, minted here when not given, so a
         caller that names it can drop the lease of a claim whose COMMIT may
-        have landed though the call raised. The COMMIT and the bookkeeping
+        have landed though the call raised. `after_turn`, when given, is the
+        turn the new one must follow: the claim is refused when the row's
+        turn index, read under the row lock that orders every claim, is
+        another. The COMMIT and the bookkeeping
         after it run in one task to the end (`harness.db.commit.committing`),
         so a cancel of the caller during the COMMIT lands the claim with the
         live state holding its segment.
@@ -1982,6 +2000,7 @@ class StudioStore:
                 row as locked.
             StopPending: a Stop is live for the conversation's open turn
                 (`StopState.live`).
+            TurnMoved: the row's turn index is not `after_turn`.
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
@@ -1998,6 +2017,8 @@ class StudioStore:
             stored_lease = _row_segment(row)
             if stored_lease is not None and stored_lease.expires_at > row.db_now:
                 raise ConversationStale(conversation_id)
+            if after_turn is not None and row.turn_index != after_turn:
+                raise TurnMoved(conversation_id, latest=row.turn_index)
             if (await _stop_state(conn, row, lease_live=False)).live:
                 raise StopPending(conversation_id)
             claimed = (

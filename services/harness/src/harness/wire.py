@@ -27,11 +27,9 @@ its own (`harness.seeds.seeds_slot`),
 so one bad seed fails its own step rather than the request.
 
 `conversation_id` is delta 5: the frontend client mints the conversation
-identifier and sends `Authorization: Bearer <token>` alongside it. The
-`session_id` is accepted as a deprecated parsing alias in v1
-(the fixtures still use it); serialisation always writes
-`conversation_id`. The bearer token itself travels in the header, never in
-these bodies -- see `harness.auth`.
+identifier and sends `Authorization: Bearer <token>` alongside it. The bearer
+token itself travels in the header, never in these bodies -- see
+`harness.auth`.
 """
 
 from __future__ import annotations
@@ -43,7 +41,6 @@ from typing import Annotated, Any, Literal, cast, get_args
 
 from common.place_type import PartyClass
 from pydantic import (
-    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -342,11 +339,6 @@ class CompositionManifest(_WireModel):
 # ---------------------------------------------------------------------------
 # Requests -- discriminated on `kind`
 # ---------------------------------------------------------------------------
-
-# Delta 5: the client mints `conversation_id`; `session_id` is
-# accepted as a deprecated parsing alias in v1. Serialisation always
-# writes `conversation_id`.
-_CONVERSATION_ID = Field(validation_alias=AliasChoices("conversation_id", "session_id"))
 
 
 class ComponentRefIntent(StrEnum):
@@ -853,11 +845,18 @@ class TurnRequest(_WireModel):
     search (`harness.graph.switch.apply_stored_choice`). It cannot come with
     a message, seeds or a card reference. A request carries `message` or
     `apply_choice`.
+
+    `after_turn` is a precondition: the index of the turn this request
+    follows, as a state read reports it (0 before the first turn). The
+    request is refused 409 `edit_conflict` with `constraint_id`
+    `turn_moved` when the conversation's latest turn is another, checked
+    under the row lock every turn's claim takes, so of two pages sending the
+    same follow-up after turn N at most one begins a turn.
     """
 
     kind: Literal["turn.request"]
     schema_version: Literal[1]
-    conversation_id: str = _CONVERSATION_ID
+    conversation_id: str
     message: str = ""
     surface: Surface = Surface.STUDIO
     component_ref: ComponentRef | None = None
@@ -869,6 +868,7 @@ class TurnRequest(_WireModel):
     # with a composition.mutate "add" op (the Auto-add toggle).
     auto_add: bool = True
     apply_choice: ApplyChoice | None = None
+    after_turn: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _a_chip_comes_alone(self) -> TurnRequest:
@@ -962,7 +962,7 @@ class InterruptResponse(_WireModel):
 
     kind: Literal["interrupt.response"]
     schema_version: Literal[1]
-    conversation_id: str = _CONVERSATION_ID
+    conversation_id: str
     interrupt_id: str
     decision: InterruptDecision
     # The amendment text of a plan's `amend`. An elicitation opened before
@@ -1076,7 +1076,7 @@ class CompositionMutation(_WireModel):
 
     kind: Literal["composition.mutate"]
     schema_version: Literal[1]
-    conversation_id: str = _CONVERSATION_ID
+    conversation_id: str
     # Optional (delta 11): omitted targets the conversation's current
     # composition -- and, for `add` ops, bootstraps an empty one when the
     # conversation has no canvas yet (auto_add=false's first component).
@@ -1093,7 +1093,7 @@ class CancelRequest(_WireModel):
 
     kind: Literal["turn.cancel"]
     schema_version: Literal[1]
-    conversation_id: str = _CONVERSATION_ID
+    conversation_id: str
 
 
 class ResumeRequest(_WireModel):
@@ -1104,7 +1104,7 @@ class ResumeRequest(_WireModel):
 
     kind: Literal["turn.resume"]
     schema_version: Literal[1]
-    conversation_id: str = _CONVERSATION_ID
+    conversation_id: str
     turn_index: int = Field(ge=1)
 
 
