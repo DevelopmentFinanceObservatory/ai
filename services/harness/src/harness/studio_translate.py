@@ -1221,11 +1221,11 @@ def _choice_members(
     (`plan_display.switchable_decision`) takes `plan_display.
     decision_choice_id`, and each option `plan_display.decision_option_id`,
     its label in the card's words (`named`) and status "available", the
-    chosen one active. The row of how a pinned source's flow is counted
+    chosen one active. The row of how pinned sources' flows are counted
     (`plan_display.count_choice_id`) takes that id, and each count it offers
-    the id `plan_display.decision_option_id` gives its label, with status
-    "available", since Search offered each beside the source. Empty for any
-    other decision.
+    (`plan_display.count_options`) the id `plan_display.decision_option_id`
+    gives its label, with status "available", since Search offered each
+    beside every source of the row. Empty for any other decision.
     """
     if decision is None:
         return {}
@@ -1239,7 +1239,7 @@ def _choice_members(
                     label=named(option),
                     status="available",
                 )
-                for option in decision.options
+                for option in plan_display.count_options(plan, decision)
             ],
         }
     if decision.scope is not None:

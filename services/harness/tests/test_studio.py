@@ -9314,12 +9314,15 @@ async def test_a_chip_is_shown_applied_and_kept_and_each_step_is_recorded(
     ]
 
 
-def _count_chip_app(*script: types.Part) -> tuple[FastAPI, ScriptedExecutor, SearchStub]:
+def _count_chip_app(
+    *script: types.Part, executor: ScriptedExecutor | None = None
+) -> tuple[FastAPI, ScriptedExecutor, SearchStub]:
     """An app whose first turn searches aid from France to Kenya, which Search
     counts as gross disbursements and offers as net disbursements too, fetches
-    it over two years and answers, then runs `script`. Search answers the net
-    count's definition. Returns the app, the executor and the Search stub."""
-    executor = ScriptedExecutor()
+    it over two years and answers, then runs `script`, its calls answered by
+    `executor`. Search answers the net count's definition. Returns the app,
+    the executor and the Search stub."""
+    executor = executor or ScriptedExecutor()
     gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
     search = SearchStub(answer={FRANCE_KENYA_NET: _net_family_envelope(), gross: FRANCE_KENYA})
     app = _app(
@@ -9428,6 +9431,54 @@ async def test_a_count_chip_fetches_the_other_count_as_the_answer_fetched_it() -
     )
 
 
+class _RefusingOne(ScriptedExecutor):
+    """A `ScriptedExecutor` whose `get_data` refuses `spec_id` as data-mcp
+    refuses a fetch it cannot serve just now."""
+
+    def __init__(self, spec_id: str) -> None:
+        super().__init__()
+        self.spec_id = spec_id
+
+    async def __call__(
+        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
+    ) -> dict[str, Any]:
+        if tool == "get_data" and args.get("spec_id") == self.spec_id:
+            self.calls.append({"tool": tool, "args": args})
+            return {
+                "outcome": "refusal",
+                "refusal": {
+                    "code": "upstream_error",
+                    "retry_mode": "retry_after_delay",
+                    "message": "The data service did not answer.",
+                },
+            }
+        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+
+
+async def test_a_count_chip_whose_fetch_is_refused_is_recorded_as_not_applied() -> None:
+    """Clicking the net count's chip fetches it and data-mcp refuses the
+    fetch: the chip is recorded as not applied and its step fails."""
+    app, executor, _ = _count_chip_app(
+        _text("That could not be counted."), executor=_RefusingOne(FRANCE_KENYA_NET)
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("aid from France to Kenya"))
+        chip = _frame(first, "suggestions")["items"][0]
+        refused = await _stream(client, "/api/studio/turn", _chip_body(chip))
+        turns = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+
+    assert chip["option_id"] == FRANCE_KENYA_NET
+    fetched = [call["args"]["spec_id"] for call in executor.calls if call["tool"] == "get_data"]
+    assert fetched[:2] == [FRANCE_KENYA["parts"][0]["spec"]["spec_id"], FRANCE_KENYA_NET]
+    assert "spec_id" not in turns[1]["applied_choice"]
+    steps = [
+        frame
+        for frame in refused
+        if frame["event"] == "activity.step" and frame.get("tool") == "apply_choice"
+    ]
+    assert [step["status"] for step in steps][-1] == "failed"
+
+
 @pytest.mark.parametrize(
     ("pick", "constraint"),
     [
@@ -9473,6 +9524,37 @@ async def test_a_chip_search_refuses_is_recorded_as_not_applied(
     assert "spec_id" not in turns[1]["applied_choice"]
     assert "scope_choice.not_applied" in events
     assert "scope_choice.applied" not in events
+
+
+async def test_a_chip_whose_fetch_is_refused_is_recorded_as_not_applied(
+    otlp_spans: InMemorySpanExporter,
+) -> None:
+    """Search compiles the chip's reading and data-mcp refuses its fetch: the
+    chip is recorded as not applied and its step fails."""
+    executor = _RefusingOne(_switched_answer(_hashed_scope())[0])
+    app, _, search = _chip_app(_text("That could not be counted."), executor=executor)
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("health aid to Africa"))
+        (chip,) = [
+            c for c in _frame(first, "suggestions")["items"] if c["option_id"] == "sector:120+130"
+        ]
+        refused = await _stream(client, "/api/studio/turn", _chip_body(chip))
+        turns = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+
+    events = [event.name for span in otlp_spans.get_finished_spans() for event in span.events]
+    assert len(search.posted) == 1
+    assert [call["args"]["spec_id"] for call in executor.calls if call["tool"] == "get_data"][
+        -1
+    ] == executor.spec_id
+    assert "spec_id" not in turns[1]["applied_choice"]
+    assert "scope_choice.not_applied" in events
+    assert "scope_choice.applied" not in events
+    steps = [
+        frame
+        for frame in refused
+        if frame["event"] == "activity.step" and frame.get("tool") == "apply_choice"
+    ]
+    assert [step["status"] for step in steps][-1] == "failed"
 
 
 async def test_a_chip_applies_only_on_the_answer_it_was_offered_with() -> None:

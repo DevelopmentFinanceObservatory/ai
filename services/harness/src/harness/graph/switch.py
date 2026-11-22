@@ -48,12 +48,12 @@ one's name.
 The card names a choice by its row's id (`harness.plan_display.choice_id`),
 which every switch of the conversation keeps.
 
-A switch of the row stating how a pin is counted
-(`harness.plan_display.count_choice_id`) moves the pin to another count
-Search already named beside it, a dataset with a definition on record, so
-it posts nothing to Search: every requirement stating the pin is re-pinned
-to the other count and the plan revised with the user's pick held
-(`_switched_count`).
+A switch of the row stating how pins are counted
+(`harness.plan_display.count_choice_id`) moves every pin the row stands for
+to its other count Search already named beside it, a dataset with a
+definition on record, so it posts nothing to Search: every requirement
+stating one of those pins is re-pinned to that pin's other count in one
+revision, with the user's pick held (`_switched_count`).
 
 A switch Search refuses (`requested_option_unavailable`,
 `conflicting_requested_options`), or one that fails anywhere else, offers
@@ -142,6 +142,7 @@ from harness.plan_display import choice_id as row_choice_id
 from harness.plan_display import (
     chosen_count_decision,
     chosen_scope_decision,
+    count_options,
     decision_option_id,
     listed_together,
     pinned_choice_id,
@@ -155,7 +156,7 @@ from harness.scope_choices import (
     switch_entries,
 )
 from harness.sentences import StopCode
-from harness.tool_contracts import resolver_digest
+from harness.tool_contracts import HarnessCode, resolver_digest
 from harness.turn.node import Next, Node, NodeCtx
 from harness.turn_records import (
     CHIP_STALE_NOTE,
@@ -164,6 +165,7 @@ from harness.turn_records import (
     stored_choice,
     stored_count,
 )
+from harness.wire import RetryMode
 
 logger = logging.getLogger(__name__)
 
@@ -575,47 +577,63 @@ async def _switched_count(
     """The `approve` payload of `plan` revised for a switch of its count row
     (`harness.plan_display.count_choice_id`) to the count `option_id` names.
 
-    The row's decision states how the pin it fixes is counted, a windowed copy
-    read as the pin it copies. Each other count it offers is a dataset Search
-    already named beside that pin, with a definition on record
-    (`_count_spec_ids`), so nothing is posted to Search: every requirement
-    stating the pin (`submission.service.statement`) is re-pinned to the
-    other count's spec_id (`planner.plan.repinned`), and the plan is revised
-    with no model call, the user's pick of that count held
+    The row states how the pins it stands for are counted
+    (`harness.plan_display.listed_together`), each pin `decision` or one
+    listed with it, a windowed copy read as the pin it copies. The row's
+    counts are those every pin offers (`harness.plan_display.count_options`),
+    and each pin's other count is a dataset Search already named beside it,
+    with a definition on record (`_count_spec_ids`), so nothing is posted to
+    Search: every requirement stating any of the pins
+    (`submission.service.statement`) is re-pinned to its pin's other count
+    (`planner.plan.repinned`) in one revision, and the plan is revised with
+    no model call, the user's pick of each count held
     (`PlannerModel.revise`'s `picked`), so the measure decision admission
-    writes for the new pin is the user's. Nothing else moves.
+    writes for each new pin is the user's. Nothing else moves.
 
     Raises:
         SwitchFailedError: If the row offers no count under `option_id`, no
-            record names that count's spec_id, no requirement states the pin,
-            or the revision is refused.
+            record names that count's spec_id for one of its pins, no
+            requirement states a pin, or the revision is refused.
     """
-    assert decision.fixes is not None and decision.fixes.source_spec_id is not None
     state = cast(SessionState, ctx.state)
     to_origin = {copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()}
-    pinned = decision.fixes.source_spec_id
-    pin = to_origin.get(pinned, pinned)
-    label = next((o for o in decision.options if decision_option_id(o) == option_id), option_id)
-    new = _count_spec_ids(ctx, pin).get(label)
-    if new is None or new == pin:
+    label = next(
+        (o for o in count_options(plan, decision) if decision_option_id(o) == option_id), None
+    )
+    if label is None:
         raise SwitchFailedError(
-            f"Search does not offer {label} for this source.", code=_OPTION_UNAVAILABLE
+            f"Search does not offer {option_id} for this source.", code=_OPTION_UNAVAILABLE
         )
+    moves: dict[str, str] = {}
+    for member in listed_together(plan, decision.slot) or (decision,):
+        assert member.fixes is not None and member.fixes.source_spec_id is not None
+        pinned = member.fixes.source_spec_id
+        pin = to_origin.get(pinned, pinned)
+        new = _count_spec_ids(ctx, pin).get(label)
+        if new is None or new == pin:
+            raise SwitchFailedError(
+                f"Search does not offer {label} for this source.", code=_OPTION_UNAVAILABLE
+            )
+        moves[pin] = new
     stated = _statement_of(plan, state)
-    block = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY).get(new) or earlier_block(new)
-    requirements = [
-        repinned(requirement, new, exact_codes(block)).model_dump(mode="json")
-        for requirement in stated.evidence_requirements
-        if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id == pin
-    ]
-    if not requirements:
+    blocks = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)
+    requirements: list[dict[str, Any]] = []
+    for requirement in stated.evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement):
+            continue
+        new = moves.get(requirement.source_spec_id or "")
+        if new is None:
+            continue
+        block = blocks.get(new) or earlier_block(new)
+        requirements.append(repinned(requirement, new, exact_codes(block)).model_dump(mode="json"))
+    if {r["source_spec_id"] for r in requirements} != set(moves.values()):
         raise _choice_gone()
     revised = await planner.revise(
         ctx=ctx,
         prior_plan=plan.model_dump(mode="json"),
         evidence_requirements=requirements,
-        inherits={new: pin},
-        picked=(new,),
+        inherits={new: pin for pin, new in moves.items()},
+        picked=tuple(moves.values()),
     )
     if "plan" not in revised:
         refused = revised.get("refused") or {}
@@ -629,10 +647,9 @@ async def _switched_count(
     revised_plan = PlannerPlan.model_validate(revised["plan"])
     ctx.state["plan"] = revised_plan.model_dump_json()
     logger.info(
-        "plan count switched: choice_id=%s from=%s to=%s version=%d",
+        "plan count switched: choice_id=%s moves=%s version=%d",
         choice_id,
-        pin,
-        new,
+        moves,
         revised_plan.version,
     )
     return {
@@ -1146,9 +1163,9 @@ async def apply_stored_choice(
     fetched the reading, with that fetch's arguments (`FetchReading.args`:
     its places, period and reading of the family), so the chip changes the
     chosen option alone. Its frames, served scope and step reach the turn as
-    any fetch's do. The chip applied is
+    any fetch's do. Once every fetch returned data, the chip applied is
     recorded under `ORCHESTRATOR_APPLIED_KEY`, with the option it moved from
-    and the spec_id Search compiled.
+    and the spec_id Search compiled, and its step succeeds.
 
     A chip that cannot be applied, because no reading holds the choice or
     the newest one is not `spec_id` (`CHIP_STALE_NOTE`, as the studio refuses
@@ -1157,7 +1174,9 @@ async def apply_stored_choice(
     switch shows, and the `APPLY_CHOICE_STEP_TOOL` step fails with it under
     the code the switch reports (`SwitchFailedError.code`), to be retried
     after a delay where the same chip can succeed later
-    (`SwitchFailedError.retryable`) and otherwise not to be retried.
+    (`SwitchFailedError.retryable`) and otherwise not to be retried. A fetch
+    refused fails the chip the same way under the fetch's code (`_fetched`),
+    with nothing recorded as applied.
 
     A count chip (`is_count_choice`) is applied by `_apply_other_count`.
 
@@ -1215,6 +1234,10 @@ async def apply_stored_choice(
         held_open=[reading.open_roles],
         share_sides=[reading.share_over],
     )
+    try:
+        fetched = await _fetched(ctx, fetch, spec_id=switched.spec_id, reading=reading, label=label)
+    except SwitchFailedError as exc:
+        return _not_applied(record_step, args=args, label=label, error=exc)
     ctx.state[ORCHESTRATOR_APPLIED_KEY] = {
         **args,
         "from_option_id": choice.active,
@@ -1231,16 +1254,6 @@ async def apply_stored_choice(
         args=args,
         result={"outcome": "ok", "frame_refs": [], "summary": f"counting {label}"},
     )
-    # One fetch per way the answer fetched the reading, one after another, as
-    # the agent's own calls run.
-    fetched = [
-        await fetch(
-            spec_id=switched.spec_id,
-            call=OrchestratorCall(state=ctx.state, turn_id=turn_id(ctx.key)),
-            **shaped,
-        )
-        for shaped in (reading.fetch.args if reading.fetch is not None else ()) or ({},)
-    ]
     held = choice.active_option
     moved = [
         f"Search also moved {entry['from_label']} to {entry['to_label']}: {entry['reason']}"
@@ -1280,13 +1293,14 @@ async def _apply_other_count(
     is resubmitted. Its spec_id is fetched with the orchestrator's `fetch`
     tool once for each way the answer fetched the part
     (`FetchReading.args`), and the fetch reads it as the offering reading's
-    other count (`SearchReading.sibling_of`). The chip applied is recorded
-    under `ORCHESTRATOR_APPLIED_KEY`, with the count it moved from and the
-    spec_id it moved to.
+    other count (`SearchReading.sibling_of`). Once every fetch returned
+    data, the chip applied is recorded under `ORCHESTRATOR_APPLIED_KEY`, with
+    the count it moved from and the spec_id it moved to.
 
     A chip whose part reads a count other than `spec_id` (`CHIP_STALE_NOTE`), or
     whose option is not one of the other counts offered, fetches nothing and
-    fails its step, as `apply_stored_choice` fails a scope chip.
+    fails its step, as `apply_stored_choice` fails a scope chip. A fetch
+    refused fails it the same way under the fetch's code (`_fetched`).
     """
     args = _Pick(choice_id=choice_id, option_id=option_id)
     counted = stored_count(conversation_readings(ctx.state), choice_id)
@@ -1308,6 +1322,7 @@ async def _apply_other_count(
             raise SwitchFailedError(
                 f"Search does not offer {label} for this source.", code=_OPTION_UNAVAILABLE
             )
+        fetched = await _fetched(ctx, fetch, spec_id=option_id, reading=reading, label=label)
     except SwitchFailedError as exc:
         return _not_applied(record_step, args=args, label=label, error=exc)
     ctx.state[ORCHESTRATOR_APPLIED_KEY] = {**args, "from_option_id": spec_id, "spec_id": option_id}
@@ -1319,14 +1334,6 @@ async def _apply_other_count(
         args=args,
         result={"outcome": "ok", "frame_refs": [], "summary": f"counting {label}"},
     )
-    fetched = [
-        await fetch(
-            spec_id=option_id,
-            call=OrchestratorCall(state=ctx.state, turn_id=turn_id(ctx.key)),
-            **shaped,
-        )
-        for shaped in (reading.fetch.args if reading.fetch is not None else ()) or ({},)
-    ]
     held = f" in place of {reading.counted_as}" if reading.counted_as else ""
     lead = (
         f'The user chose to count "{reading.text or reading.sentence or spec_id}" as {label}'
@@ -1339,6 +1346,54 @@ async def _apply_other_count(
         "status": f"Counting {label}",
         "text": "\n".join([lead, *(json.dumps(result) for result in fetched)]),
     }
+
+
+# The codes of a fetch refusal that can pass if the same fetch is made later:
+# `fetch` words these "Fetch it again" and states no retry mode of its own.
+_RETRYABLE_FETCH_CODES = frozenset(
+    {HarnessCode.TRANSIENT_UNAVAILABLE.value, HarnessCode.DEADLINE_EXCEEDED.value}
+)
+
+
+async def _fetched(
+    ctx: NodeCtx[GraphEvent],
+    fetch: Callable[..., Awaitable[dict[str, Any]]],
+    *,
+    spec_id: str,
+    reading: SearchReading,
+    label: str,
+) -> list[dict[str, Any]]:
+    """The results of fetching `spec_id` with the orchestrator's `fetch` tool
+    once for each way the answer fetched `reading` (`FetchReading.args`),
+    one after another, as the agent's own calls run.
+
+    Raises:
+        SwitchFailedError: At the first fetch refused (a result stating a
+            `code`), under that code, retryable when the refusal's retry
+            mode or its code says the same fetch can pass later. Later
+            fetches are not made.
+    """
+    fetched: list[dict[str, Any]] = []
+    for shaped in (reading.fetch.args if reading.fetch is not None else ()) or ({},):
+        result = await fetch(
+            spec_id=spec_id,
+            call=OrchestratorCall(state=ctx.state, turn_id=turn_id(ctx.key)),
+            **shaped,
+        )
+        code = result.get("code")
+        if code:
+            retryable = (
+                result.get("retry_mode") == RetryMode.RETRY_AFTER_DELAY
+                or code in _RETRYABLE_FETCH_CODES
+            )
+            raise SwitchFailedError(
+                f"The data counted as {label} could not be fetched"
+                f"{' just now' if retryable else ''}.",
+                code=str(code),
+                retryable=retryable,
+            )
+        fetched.append(result)
+    return fetched
 
 
 def _not_applied(

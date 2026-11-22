@@ -609,17 +609,20 @@ ignores it and an older harness omits it.
 - The row stating how a pinned source's flow is counted ("How the flow is
   counted.", with options such as "gross disbursements" and "net
   disbursements") carries `choice_id` `"<requirement id>:count"`,
-  `active_option_id` and `options`, as any switchable row does. The
-  requirement is the first pinning the source, so the id survives every
-  switch of the count. Each option's `option_id` is derived from its
+  `active_option_id` and `options`, as any switchable row does. Sources
+  counted the same way, such as a share's numerator and denominator, share
+  one row, which offers only the counts every one of them offers. The
+  requirement is the first pinning a source of the row, so the id survives
+  every switch of the count. Each option's `option_id` is derived from its
   label, as a planner decision's is (`"option_"` and the first 12 hex
   digits of the label's SHA-256), and its `status` is `available`, since
-  Search offered each count beside the source.
+  Search offered each count beside every source of the row.
 - A client switches it as it switches a scope row: `interrupt.response`
   with `decision: "switch"` and `{choice_id, option_id}`. The harness
-  re-pins every requirement on the source to the other count, a dataset
-  Search already named, and offers the revised plan with no `moved`
-  entries; the row then holds the chosen count as the user's choice. A
+  re-pins every requirement on every source of the row to that source's
+  other count, a dataset Search already named, in one revision, and offers
+  the revised plan with no `moved` entries; the row then holds the chosen
+  count as the user's choice. A
   switch to the count the row already holds is refused as any such switch
   is, and the plan is re-offered with `switch_failed`.
 - `plan.approved.choices[]` carries the row under the same `choice_id`.

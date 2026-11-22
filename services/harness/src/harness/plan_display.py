@@ -24,10 +24,11 @@ decision's words, and `FIXED_VALUE_WORDS` the words for an option the
 planner wrote as a value a decision fixes, and `place_level_words` the same
 words for the level of place a filter keeps on a role; `choice_id` gives a scope
 choice's row the id every switch keeps; `count_choice_id` gives the row of
-how a pinned source's flow is counted its id, and `chosen_count_decision`
-finds that row again; and `switchable_decision`, `decision_choice_id` and
-`decision_option_id` give a planner decision the card offers to switch its
-row's id and its options' ids, the last a count row's options' ids too.
+how pinned sources' flows are counted its id, `count_options` the counts
+it offers, and `chosen_count_decision` finds that row again; and
+`switchable_decision`, `decision_choice_id` and `decision_option_id` give a
+planner decision the card offers to switch its row's id and its options'
+ids, the last a count row's options' ids too.
 
 In `step_rows`, which the plan record and the planner read, a step's `label`
 names the work a workflow step does and the entity it does
@@ -1711,27 +1712,46 @@ COUNT_AXIS = "count"
 def count_choice_id(plan: Plan, decision: Decision) -> str | None:
     """The id the plan card gives the row of `decision` when it states how a
     pinned source's flow is counted (`planner.plan.is_search_pin`) among at
-    least two counts: `"<requirement id>:count"`, the requirement the first of
-    `plan` citing it. `None` for any other decision, and for one no
-    requirement cites.
+    least two counts every source of the row offers (`count_options`):
+    `"<requirement id>:count"`, the requirement the first of `plan` citing a
+    decision the row stands for (`_row_slots`). `None` for any other
+    decision, and for one no requirement cites.
 
-    Admission writes the decision on the pin each requirement states
-    (`submission.service._measure_decisions`) and a switch re-pins those
-    requirements and keeps their ids, so the row keeps its id through every
-    switch of its count. Its options take `decision_option_id`.
+    The row stands for every pin counted the same way (`listed_together`),
+    so each of its decisions has the row's id, and a switch of the row
+    re-pins them all. Admission writes the decision on the pin each
+    requirement states (`submission.service._measure_decisions`) and a
+    switch re-pins those requirements and keeps their ids, so the row keeps
+    its id through every switch of its count. Its options take
+    `decision_option_id`.
     """
-    if not is_search_pin(decision) or len(decision.options) < 2:
+    if not is_search_pin(decision) or len(count_options(plan, decision)) < 2:
         return None
+    row = _row_slots(plan, decision)
     first = next(
         (
             requirement
             for requirement in plan.evidence_requirements
             if isinstance(requirement, DatasetRequirement)
-            and decision.slot in requirement.decision_ids
+            and not row.isdisjoint(requirement.decision_ids)
         ),
         None,
     )
     return f"{first.id}:{COUNT_AXIS}" if first is not None else None
+
+
+def count_options(plan: Plan, decision: Decision) -> tuple[str, ...]:
+    """The counts the card's row for search pin `decision` offers: those of
+    the decision the row lists (`listed_together`) that every decision of
+    the row offers too, in its order. Pins counted alike can offer
+    different other counts, and a count one of them lacks cannot be
+    switched to for all of them."""
+    members = listed_together(plan, decision.slot) or (decision,)
+    listed = _listed_slots(plan).get(decision.slot, decision.slot)
+    shown = next((member for member in members if member.slot == listed), decision)
+    return tuple(
+        option for option in shown.options if all(option in member.options for member in members)
+    )
 
 
 def chosen_count_decision(plan: Plan, choice: str) -> Decision | None:

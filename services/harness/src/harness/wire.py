@@ -1171,10 +1171,10 @@ class PlanDecision(_WireModel):
     fields (`harness.plan_display.switchable_decision`) has `choice_id`
     `"decision/<slot>"` and option ids derived from each option's label
     (`harness.plan_display.decision_option_id`), the same on every plan
-    that offers that label. The decision stating how a pinned source's flow
-    is counted has `choice_id` `"<requirement id>:count"`
-    (`harness.plan_display.count_choice_id`) and its options' ids derived
-    the same way.
+    that offers that label. The decision stating how pinned sources' flows
+    are counted has `choice_id` `"<requirement id>:count"`
+    (`harness.plan_display.count_choice_id`), one row for every source
+    counted the same way, and its options' ids derived the same way.
     A decision without `choice_id` cannot be switched.
     """
 
