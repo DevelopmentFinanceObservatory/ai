@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from analysis_mcp.op_spec import Predicate as RunnerPredicate
 from common.unit_refs import PERCENT_UNIT
 from compiler.capabilities import CAPABILITIES, ToolCapability
 from compiler.compile import CompileIssueCode, CompileResult, compile_plan
@@ -86,6 +87,7 @@ from planner.records import (
     EvidenceIssueCode,
     GrowthChange,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -1670,23 +1672,37 @@ def test_degenerate_sides_are_detected_across_a_filter(
     assert Code.DEGENERATE_SIDES in _codes(result)
 
 
-def test_a_filter_step_writes_a_value_threshold_predicate(
+@pytest.mark.parametrize(
+    ("predicate", "written"),
+    [
+        pytest.param(
+            ValueThreshold(op="gt", value=0),
+            {"kind": "ordered_threshold", "column": "value", "op": "gt", "value": 0},
+            id="a-value-threshold",
+        ),
+        pytest.param(
+            PeriodIn(years=(2020, 2000)),
+            {"kind": "category_match", "column": "time_period", "values": ["2000", "2020"]},
+            id="years-asked-for-apart",
+        ),
+    ],
+)
+def test_a_filter_step_writes_its_predicate(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     requirement: RequirementFactory,
+    predicate: ValueThreshold | PeriodIn,
+    written: dict[str, Any],
 ) -> None:
     filter_req = FilterRequirement(
         id="filtered",
         decision_ids=["measure"],
         input_id="annual_debt_service",
-        predicates=(ValueThreshold(op="gt", value=0),),
+        predicates=(predicate,),
     )
-    plan = _draft([decision()], [requirement(), filter_req])
+    plan = _draft([decision()], [requirement(period=Period(start=2000, end=2020)), filter_req])
     filter_op = FilterOperation(
-        id="filtered",
-        requirement_id="filtered",
-        input="debt",
-        predicates=(ValueThreshold(op="gt", value=0),),
+        id="filtered", requirement_id="filtered", input="debt", predicates=(predicate,)
     )
 
     result = build(plan, _translation(_retrieve(), filter_op, terminal=["filtered"]))
@@ -1695,10 +1711,10 @@ def test_a_filter_step_writes_a_value_threshold_predicate(
     assert result.workflow is not None
     step = result.workflow.steps[1]
     assert step.tool.name == "filter"
-    assert step.args == {
-        "predicates": [{"kind": "ordered_threshold", "column": "value", "op": "gt", "value": 0}]
-    }
+    assert step.args == {"predicates": [written]}
     assert step.bindings == {"frame_ref": Binding(from_step="debt", output=ArtifactKind.FRAME_REF)}
+    # The runner's own filter vocabulary takes what the step writes.
+    TypeAdapter(RunnerPredicate).validate_python(written)
 
 
 def test_a_filter_step_writes_a_category_match_predicate_from_a_resolved_entity(
@@ -6104,6 +6120,224 @@ def test_a_second_open_axis_holding_one_member_leaves_the_rank_to_compile(
     assert result.workflow is not None
     rank = result.workflow.steps[-1]
     assert rank.args == {"rank_by": ["origin"], "ascending": False, "aggregation": "mean"}
+
+
+def _rank_named_donors_with_destination_open(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    recipients: int | None,
+    *,
+    reduction: Reduction | None,
+) -> CompileResult:
+    """Each year's ranking of two named donors' humanitarian aid, from a source
+    resolving both on `origin` and leaving every recipient open on `destination`."""
+    donors = (
+        ResolvedEntity(role="origin", ref="country/FRA", label="France"),
+        ResolvedEntity(role="origin", ref="country/DEU", label="Germany"),
+    )
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="humanitarian aid",
+        entities=[Entity(name=donor.label, role="donor") for donor in donors],
+        period=Period(start=2019, end=2023),
+    )
+    fields: dict[str, Any] = {
+        "id": "ranked",
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "axis": "donor",
+        "per_period": True,
+        "reduction": reduction,
+    }
+    rank_req = RankRequirement(decision_ids=["measure", "population"], input_id="aid", **fields)
+    ranked = RankOperation(requirement_id="ranked", input="fetch", **fields)
+    plan = _draft([decision(), _population_decision(decision)], [aid, rank_req])
+    recipients_open = source(
+        entities=donors,
+        open_entity_axes=(OpenEntityAxis(column="destination", member_count=recipients),),
+    )
+    return build(
+        plan,
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            ranked,
+            terminal=["ranked"],
+        ),
+        discovered={"aid": recipients_open},
+    )
+
+
+@pytest.mark.parametrize("recipients", [163, None])
+def test_a_rank_with_no_reduction_over_an_open_party_it_does_not_keep_is_refused(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    recipients: int | None,
+) -> None:
+    # Each named donor holds one row per recipient a year, which analysis-mcp's
+    # rank refuses at run time. The compiler refuses it before approval.
+    result = _rank_named_donors_with_destination_open(
+        build, decision, source, recipients, reduction=None
+    )
+
+    assert _codes(result) == [Code.RANK_REDUCTION_REQUIRED]
+    assert result.issues[0].requirement_id == "ranked"
+    assert "'destination'" in result.issues[0].reason
+
+
+@pytest.mark.parametrize(
+    ("recipients", "reduction", "aggregation"),
+    [(163, Reduction.SUM, "sum"), (1, None, None)],
+    ids=["summed-over-recipients", "one-recipient"],
+)
+def test_a_rank_over_an_open_party_it_does_not_keep_compiles_with_one_row_per_entity(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    recipients: int,
+    reduction: Reduction | None,
+    aggregation: str | None,
+) -> None:
+    result = _rank_named_donors_with_destination_open(
+        build, decision, source, recipients, reduction=reduction
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    assert result.workflow.steps[-1].args.get("aggregation") == aggregation
+
+
+_DAC_HUMANITARIAN_BLOCK = (
+    Path(__file__).parent.parent / "fixtures" / "search_spec_dac_humanitarian.json"
+)
+
+
+@pytest.mark.parametrize(
+    ("reduction", "codes"),
+    [(None, [Code.RANK_REDUCTION_REQUIRED]), (Reduction.SUM, [])],
+    ids=["no-reduction", "summed"],
+)
+def test_humanitarian_aid_by_dac_donor_ranks_only_with_a_reduction(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    reduction: Reduction | None,
+    codes: list[Code],
+) -> None:
+    # The plan the Studio recorded for "humanitarian aid by DAC donor in 2019 and
+    # 2023", over dev `search`'s own block. The DAC group binds `origin` and the
+    # 163 recipients stay open on `destination`, so each donor holds one row per
+    # recipient a year until the rank sums them.
+    block = json.loads(_DAC_HUMANITARIAN_BLOCK.read_text())["spec"]
+    dac = source_from_spec_block(block)
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="humanitarian aid",
+        entities=[Entity(name="Development Assistance Committee", role="donor", members=True)],
+        period=Period(start=2019, end=2023),
+        stat_vars=StatVarReading.SUM,
+    )
+    fields: dict[str, Any] = {
+        "id": "ranked",
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "axis": "donor",
+        "per_period": True,
+        "limit": 10,
+        "reduction": reduction,
+    }
+    plan = _draft(
+        [decision(), _population_decision(decision)],
+        [
+            aid,
+            RankRequirement(decision_ids=["measure", "population"], input_id="aid", **fields),
+        ],
+    )
+
+    result = build(
+        plan,
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=dac.spec_id),
+            RankOperation(requirement_id="ranked", input="fetch", **fields),
+            terminal=["ranked"],
+        ),
+        discovered={"aid": dac},
+    )
+
+    assert _codes(result) == codes
+
+
+_IDA_RECORDING = (
+    Path(__file__).parents[4]
+    / "evals"
+    / "planner_entry"
+    / "recordings"
+    / "rank-top-ida-recipients-2022.json"
+)
+
+
+@pytest.mark.parametrize(
+    ("donor", "codes"),
+    [
+        pytest.param("International Development Association", [], id="ida-one-party"),
+        pytest.param(
+            "Development Assistance Committee",
+            [Code.RANK_REDUCTION_REQUIRED],
+            id="dac-read-as-its-members",
+        ),
+    ],
+)
+def test_a_rank_of_recipients_beside_one_named_donor_needs_no_reduction_only_for_one_party(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    donor: str,
+    codes: list[Code],
+) -> None:
+    # "The top ten recipients of IDA's disbursements in 2022" over `search`'s own
+    # block. IDA binds `origin` alone, so each recipient holds one row. The DAC
+    # block binds the group's 32 members there, so each recipient holds 32.
+    if donor.startswith("International"):
+        (search,) = json.loads(_IDA_RECORDING.read_text())["searches"]
+        block = search["envelope"]["parts"][0]["spec"]
+        year = 2022
+    else:
+        block = json.loads(_DAC_HUMANITARIAN_BLOCK.read_text())["spec"]
+        year = 2023
+    flows = source_from_spec_block(block)
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="gross disbursements",
+        entities=[Entity(name=donor, role="donor")],
+        across=("recipient",),
+        period=Period(start=year, end=year),
+        stat_vars=StatVarReading.SUM,
+    )
+    fields: dict[str, Any] = {
+        "id": "ranked",
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "axis": "recipient",
+        "limit": 10,
+    }
+    plan = _draft(
+        [decision(), _population_decision(decision)],
+        [aid, RankRequirement(decision_ids=["measure", "population"], input_id="aid", **fields)],
+    )
+
+    result = build(
+        plan,
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=flows.spec_id),
+            RankOperation(requirement_id="ranked", input="fetch", **fields),
+            terminal=["ranked"],
+        ),
+        discovered={"aid": flows},
+    )
+
+    assert _codes(result) == codes
 
 
 def test_a_whole_side_over_an_open_axis_beside_a_named_entity_is_refused(

@@ -536,9 +536,6 @@ def plan_record(
             chosen=option_names[0],
             resolved_by=ResolvedBy.PLANNER_DEFAULT,
             rationale="r",
-            # The rank cites this decision, and a population rank needs a
-            # decision that fixes it.
-            fixes=DecisionFixes(among=RankAmong.POPULATION) if index == 19 else None,
         )
         for index, slot in enumerate(slots)
     ]

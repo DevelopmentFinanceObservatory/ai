@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -90,6 +91,7 @@ from planner.plan import (
     load_plan,
     period_window,
     plan_revision,
+    ranks_among_settled,
     restated_to_anchors,
     restated_translation,
     retrieves_period,
@@ -111,6 +113,7 @@ from planner.records import (
     GroupBy,
     GrowthChange,
     OpenPeriodFault,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -948,16 +951,6 @@ def test_rank_window_needs_both_years_or_neither() -> None:
         )
 
 
-def test_a_rank_needs_among_stated() -> None:
-    with pytest.raises(ValidationError, match="among"):
-        RankRequirement(
-            id="rank",
-            decision_ids=["measure"],
-            input_id="annual_debt_service",
-            direction=RankDirection.HIGHEST_FIRST,
-        )
-
-
 def test_comparison_sides_must_differ() -> None:
     with pytest.raises(ValidationError, match="minuend and subtrahend must differ"):
         ComparisonRequirement(
@@ -1124,11 +1117,72 @@ def test_a_calculation_the_question_states_outright_cites_no_decision(
 
 def test_a_draft_names_every_field_a_decision_fixes_but_the_pin() -> None:
     # Code alone writes the pin and the user's prices for a part
-    # (`submission.prices_choice`).
+    # (`submission.prices_choice`), and a rank's `among` is the one its input
+    # admits (`ranks_among_settled`).
     assert set(get_args(FixedField)) == set(DecisionFixes.model_fields) - {
         "source_spec_id",
         "prices",
+        "among",
     }
+
+
+def _choice_draft(fixes: tuple[str, ...], options: list[str]) -> DecisionDraft:
+    return DecisionDraft.model_validate(
+        {
+            "slot": "choice",
+            "description": "d",
+            "options": options,
+            "chosen": options[0],
+            "resolved_by": ResolvedBy.PLANNER_DEFAULT,
+            "rationale": "r",
+            "fixes": fixes,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("fixes", "options", "values"),
+    [
+        (("reduction",), ["the yearly sum", "mean"], "['sum', 'mean', 'max', 'min']"),
+        (("direction",), ["highest_first", "lowest"], "['highest_first', 'lowest_first']"),
+        (("denominator_scope",), ["pooled", "of its own total"], "['per_axis', 'pooled']"),
+        (("change",), ["relative_change", "absolute"], "['relative', 'absolute']"),
+        (("stat_vars",), ["sum", "one series each"], "['sum', 'separate']"),
+    ],
+    ids=["reduction", "direction", "denominator_scope", "change", "stat_vars"],
+)
+def test_a_decision_fixing_one_enum_field_lists_its_values_as_options(
+    fixes: tuple[str, ...], options: list[str], values: str
+) -> None:
+    """The card words each value of the field, so an option that is none
+    would print as the planner wrote it; the refusal names the values."""
+    with pytest.raises(ValidationError, match=re.escape(f"values {values}; replace")):
+        _choice_draft(fixes, options)
+
+
+@pytest.mark.parametrize(
+    ("fixes", "options"),
+    [
+        (("reduction",), ["sum", "mean"]),
+        (("reduction", "period"), ["summed over 2015-2024", "averaged over 2015-2024"]),
+        (("period",), ["2015-2024", "2018-2024"]),
+    ],
+    ids=["the-fields-values", "beside-another-field", "a-field-of-no-enum"],
+)
+def test_a_decision_fixing_one_enum_field_with_its_values_or_more_fields_is_admitted(
+    fixes: tuple[str, ...], options: list[str]
+) -> None:
+    assert _choice_draft(fixes, options).options == tuple(options)
+
+
+def test_a_draft_cannot_fix_a_ranks_among() -> None:
+    """The deployed slug options `among_population`/`among_named` printed as
+    'among population' on the card; a draft names no `among` at all."""
+    with pytest.raises(ValidationError) as refused:
+        _choice_draft(("among",), ["among_population", "among_named"])
+
+    (error,) = refused.value.errors()
+    assert (error["type"], error["loc"]) == ("literal_error", ("fixes", 0))
 
 
 @pytest.mark.parametrize(
@@ -2410,22 +2464,99 @@ def test_a_series_of_every_place_needs_no_level(
     assert plan.answer_mode is AnswerMode.SERIES
 
 
-def test_a_rank_over_across_beside_a_named_entity_states_a_reduction(
+_KENYA_2022: dict[str, Any] = {
+    "entities": (Entity(name="Kenya", role="recipient"),),
+    "across": ("donor",),
+    "period": Period(start=2022, end=2022),
+}
+
+
+@pytest.mark.parametrize(
+    ("dataset", "rank", "refusal"),
+    [
+        pytest.param({}, {}, None, id="kenya-alone-in-2022"),
+        pytest.param(
+            {"period": Period(start=2015, end=2022)},
+            {"per_period": True},
+            None,
+            id="kenya-alone-each-year-ranked-apart",
+        ),
+        pytest.param(
+            {
+                "entities": (
+                    Entity(name="Kenya", role="recipient"),
+                    Entity(name="Uganda", role="recipient"),
+                )
+            },
+            {},
+            "more than one role, which needs a reduction",
+            id="two-recipients",
+        ),
+        pytest.param(
+            {"entities": (Entity(name="Africa", role="recipient", members=True),)},
+            {},
+            "more than one role, which needs a reduction",
+            id="a-set-read-as-its-members",
+        ),
+        pytest.param(
+            {"entities": (), "across": ("donor", "recipient")},
+            {},
+            "more than one role, which needs a reduction",
+            id="another-party-left-open",
+        ),
+        pytest.param(
+            {"breakdown": Breakdown(dimension="sector", level=0)},
+            {},
+            "more than one role, which needs a reduction",
+            id="a-breakdown-beside-the-axis",
+        ),
+        pytest.param(
+            {"period": Period(start=2015, end=2022)},
+            {},
+            "ranks entities over 2015-2022 with no reduction",
+            id="kenya-alone-over-several-years",
+        ),
+    ],
+)
+def test_a_rank_with_no_reduction_beside_another_role_needs_one_value_per_ranked_entity(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    dataset: dict[str, Any],
+    rank: dict[str, Any],
+    refusal: str | None,
+) -> None:
+    """ "Top donors to Kenya in 2022": Kenya, one entity, leaves one row per
+    donor, so the rank needs no reduction. Each other axis that can repeat a
+    donor's rows needs one: a second recipient, a set read as its members, a
+    second open party, a breakdown, or several years ranked together. Whether
+    the name binds one party on the source is `submission.service`'s check
+    (`tests/planner/test_rank_roles.py`)."""
+    aid = requirement(**(_KENYA_2022 | dataset))
+    ranked = _rank(aid.id, axis="donor", **rank)
+    if refusal is not None:
+        with pytest.raises(ValidationError, match=refusal):
+            _plan(_population_decision(decision), evidence_requirements=[aid, ranked])
+        return
+
+    plan = _plan(_population_decision(decision), evidence_requirements=[aid, ranked])
+
+    assert plan.requirement("ranked").reduction is None
+
+
+def test_a_rank_over_two_roles_names_its_axis_and_may_state_a_reduction(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
-    # "Top donors to Kenya": Kenya's recipient role and every donor are two
-    # role dimensions, so ranking donors collapses the recipient rows first.
     dataset = requirement(
-        entities=[Entity(name="Kenya", role="recipient")],
-        across=("donor",),
-        period=Period(start=2022, end=2022),
-    )
-
-    with pytest.raises(ValidationError, match="more than one role, which needs a reduction"):
-        _plan(
-            _population_decision(decision),
-            evidence_requirements=[dataset, _rank(dataset.id, axis="donor")],
+        **(
+            _KENYA_2022
+            | {
+                "entities": (
+                    Entity(name="Kenya", role="recipient"),
+                    Entity(name="Uganda", role="recipient"),
+                )
+            }
         )
+    )
     with pytest.raises(ValidationError, match=r"roles are \['donor', 'recipient'\]"):
         _plan(
             _population_decision(decision),
@@ -2642,19 +2773,58 @@ def test_among_named_with_a_narrowing_filter_validates(
     assert plan.requirement("ranked").among == RankAmong.NAMED
 
 
-def test_among_population_with_no_decision_fixing_it_fails(
+@pytest.mark.parametrize(("narrowed", "among"), [(False, "population"), (True, "named")])
+def test_a_rank_stating_no_among_takes_the_one_its_axis_admits(
+    decision: DecisionFactory, requirement: RequirementFactory, narrowed: bool, among: str
+) -> None:
+    # Each value is refused where the other holds, 'named' over an axis no
+    # filter narrowed and 'population' over a narrowed one, so the input decides.
+    dataset = requirement()
+    named = FilterRequirement(
+        id="named_entities",
+        decision_ids=["measure"],
+        input_id=dataset.id,
+        predicates=(EntityIn(names=["Kenya"], role="debtor"),),
+    )
+    ranked = _rank(named.id if narrowed else dataset.id, among=None, reduction=Reduction.MEAN)
+    stated = [dataset, named, ranked] if narrowed else [dataset, ranked]
+
+    settled = ranks_among_settled([ranked], graph=stated)
+
+    assert [one.among for one in settled] == [RankAmong(among)]  # type: ignore[union-attr]
+    plan = _plan(
+        _population_decision(decision) if among == "population" else decision(),
+        evidence_requirements=[*stated[:-1], *settled],
+    )
+    assert plan.requirement("ranked").among == RankAmong(among)
+
+
+def test_a_rank_stating_no_among_over_an_input_it_cannot_shape_is_refused(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
     dataset = requirement()
+    unsettled = _rank(dataset.id, among=None, reduction=Reduction.MEAN)
 
-    with pytest.raises(ValidationError, match="cites no decision whose `fixes` names `among`"):
-        _plan(
-            decision(),  # fixes=None
-            evidence_requirements=[
-                dataset,
-                _rank(dataset.id, among=RankAmong.POPULATION, reduction=Reduction.MEAN),
-            ],
-        )
+    assert ranks_among_settled([unsettled], graph=[unsettled]) == [unsettled]
+    with pytest.raises(ValidationError, match="admits only among='population'"):
+        _plan(decision(), evidence_requirements=[dataset, unsettled])
+
+
+def test_a_population_rank_needs_no_decision_fixing_among(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """The input admits one `among`, so no decision chooses it."""
+    dataset = requirement()
+
+    plan = _plan(
+        decision(),  # fixes=None
+        evidence_requirements=[
+            dataset,
+            _rank(dataset.id, among=RankAmong.POPULATION, reduction=Reduction.MEAN),
+        ],
+    )
+
+    assert plan.requirement("ranked").among is RankAmong.POPULATION  # type: ignore[union-attr]
 
 
 def test_a_keyed_share_of_needs_a_denominator_scope() -> None:
@@ -4641,6 +4811,7 @@ def test_json_without_answer_mode_loads_as_series(
         FilterRequirement,
         ValueThreshold,
         PeriodThreshold,
+        PeriodIn,
         EntityIn,
     ],
     ids=lambda cls: cls.__name__,
@@ -4652,7 +4823,7 @@ def test_the_json_schema_advertises_kind_as_required(tagged: type[TaggedModel]) 
 
 
 def test_the_plan_schema_advertises_kind_as_required_for_every_tagged_part() -> None:
-    # Ten requirements, the four predicates a filter carries, and the ten
+    # Ten requirements, the five predicates a filter carries, and the ten
     # operations a plan's `translation` holds.
     definitions = Plan.model_json_schema()["$defs"]
     tagged = {
@@ -4661,7 +4832,7 @@ def test_the_plan_schema_advertises_kind_as_required_for_every_tagged_part() -> 
         if "kind" in schema.get("properties", {})
     }
 
-    assert len(tagged) == 24
+    assert len(tagged) == 25
     assert all(schema["required"][0] == "kind" for schema in tagged.values())
 
 
@@ -7349,3 +7520,56 @@ def test_a_proposal_stating_coverage_on_a_whole_is_refused(stated: dict[str, Any
             }
         )
     assert next(iter(stated)) in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("first", "last"),
+    [pytest.param(2019, 2023, id="2019-and-2023"), pytest.param(2000, 2020, id="2000-and-2020")],
+)
+def test_years_asked_for_apart_are_one_listed_filter_over_the_range(
+    decision: DecisionFactory, requirement: RequirementFactory, first: int, last: int
+) -> None:
+    """ "2000 and 2020" read 2000-2020 and keep the two years, whatever lies
+    between: one `period_in` filter, with no predicate per year dropped."""
+    dataset = requirement(id="aid", period=Period(start=first, end=last))
+    kept = FilterRequirement(
+        id="two_years",
+        decision_ids=["measure"],
+        input_id="aid",
+        predicates=(PeriodIn(years=(last, first)),),
+    )
+
+    plan = _plan(decision(), evidence_requirements=[dataset, kept])
+
+    assert plan.requirement("two_years").predicates == (PeriodIn(years=(first, last)),)  # type: ignore[union-attr]
+    shape = frame_shapes(plan)["two_years"]
+    assert shape.period == Period(start=first, end=last)
+    assert shape.drift.excluded == frozenset(range(first + 1, last))
+
+
+def test_a_listed_year_the_input_does_not_hold_is_refused(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    dataset = requirement(id="aid", period=Period(start=2000, end=2020))
+    kept = FilterRequirement(
+        id="two_years",
+        decision_ids=["measure"],
+        input_id="aid",
+        predicates=(PeriodIn(years=(1999, 2020)),),
+    )
+
+    with pytest.raises(ValidationError, match="keeps 1999, which 2000-2020 does not hold"):
+        _plan(decision(), evidence_requirements=[dataset, kept])
+
+
+def test_a_listed_set_of_years_takes_no_rolling() -> None:
+    with pytest.raises(ValidationError, match="rolling"):
+        FilterRequirement.model_validate(
+            {
+                "id": "two_years",
+                "input_id": "aid",
+                "predicates": [
+                    {"kind": "period_in", "years": [2019, 2023], "rolling": {"offset": 0}}
+                ],
+            }
+        )

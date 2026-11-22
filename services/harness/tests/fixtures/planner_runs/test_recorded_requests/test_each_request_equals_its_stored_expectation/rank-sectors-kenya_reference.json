@@ -30,38 +30,6 @@
     "answer_mode": "computed",
     "decisions": [
       {
-        "slot": "all_sectors",
-        "description": "Which sectors the ranking compares.",
-        "options": [
-          "every sector",
-          "a named list of sectors"
-        ],
-        "chosen": "every sector",
-        "resolved_by": "planner_default",
-        "rationale": "The question names no list, so every member is ranked.",
-        "fixes": {
-          "period": null,
-          "unit": null,
-          "entities": null,
-          "across": null,
-          "measure": null,
-          "source_spec_id": null,
-          "stat_vars": null,
-          "reduction": null,
-          "group_by": null,
-          "window_start": null,
-          "window_end": null,
-          "direction": null,
-          "predicates": null,
-          "among": "population",
-          "axis": null,
-          "denominator_scope": null,
-          "change": null,
-          "per_period": null,
-          "limit": null
-        }
-      },
-      {
         "slot": "source_spec_639066eae7326cde2740c4e568c90dfa",
         "description": "How the flow is counted.",
         "options": [
@@ -136,9 +104,7 @@
       {
         "kind": "rank",
         "id": "top_sectors",
-        "decision_ids": [
-          "all_sectors"
-        ],
+        "decision_ids": [],
         "input_id": "oda",
         "direction": "highest_first",
         "among": "population",

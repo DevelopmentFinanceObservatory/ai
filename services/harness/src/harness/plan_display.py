@@ -118,6 +118,7 @@ from planner.records import (
     GroupBy,
     GrowthChange,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -1521,6 +1522,9 @@ def _card_filter_label(requirement: FilterRequirement, concept: str) -> str:
     levels = [p.level for p in requirement.predicates if isinstance(p, PlaceLevel)]
     if levels:
         return f"Keep {pluralize(level_noun(levels[0]))}"
+    listed = [p for p in requirement.predicates if isinstance(p, PeriodIn)]
+    if listed:
+        return f"Keep {_listed_years(listed[0], 'and')}"
     return f"Filter {concept}"
 
 
@@ -2183,7 +2187,10 @@ def _reads_whole(
     if isinstance(requirement, DatasetRequirement):
         return (requirement,)
     if isinstance(requirement, FilterRequirement):
-        if not all(isinstance(predicate, PeriodThreshold) for predicate in requirement.predicates):
+        if not all(
+            isinstance(predicate, PeriodThreshold | PeriodIn)
+            for predicate in requirement.predicates
+        ):
             return None
     elif isinstance(requirement, RankRequirement | AggregateRequirement):
         if requirement.reduction not in (None, Reduction.SUM):
@@ -2309,6 +2316,12 @@ def _following(rolling: RollingWindow | None) -> str:
     return f", the {end} following the newest year"
 
 
+def _listed_years(listed: PeriodIn, conjunction: str) -> str:
+    """`listed`'s years in words: "2019", "2019 and 2023", "2000, 2010 and 2020"."""
+    *first, last = map(str, listed.years)
+    return f"{', '.join(first)} {conjunction} {last}" if first else last
+
+
 def _predicate_phrase(predicate: Predicate) -> str:
     if isinstance(predicate, EntityIn):
         subject = predicate.role or "the entity"
@@ -2316,6 +2329,8 @@ def _predicate_phrase(predicate: Predicate) -> str:
     if isinstance(predicate, PeriodThreshold):
         following = _FOLLOWING if predicate.rolling is not None else ""
         return f"the year is {_THRESHOLD_WORDS[predicate.op]} {predicate.year}{following}"
+    if isinstance(predicate, PeriodIn):
+        return f"the year is {_listed_years(predicate, 'or')}"
     if isinstance(predicate, ValueThreshold):
         return f"the value is {_THRESHOLD_WORDS[predicate.op]} {predicate.value}"
     if isinstance(predicate, PlaceLevel):
@@ -2612,6 +2627,9 @@ def _label_filter(requirement: FilterRequirement, plan: Plan) -> str:
     levels = [p.level for p in requirement.predicates if isinstance(p, PlaceLevel)]
     if levels:
         return f"Keep {pluralize(level_noun(levels[0]))}"
+    listed = [p for p in requirement.predicates if isinstance(p, PeriodIn)]
+    if listed:
+        return f"Keep {_listed_years(listed[0], 'and')}"
     upstream = plan.requirement(requirement.input_id)
     return f"Filter {_measure_of(upstream, plan)}"
 
@@ -2863,6 +2881,8 @@ def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
     # The source counts every place on a place axis, so a level kept from it
     # is named without a count.
     level = _place_level_word(requirement, plan)
+    # `Plan` validation refuses a rank stating no `among` (`planner.plan._rank_shape`).
+    assert requirement.among is not None
     among_text = among_phrase(
         requirement.among,
         across=(level or role) if covering is not None or by_breakdown else None,
@@ -2912,7 +2932,9 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
     narrowing = narrowing_step(denominator, plan)
     if narrowing is not None and not (
         isinstance(narrowing, FilterRequirement)
-        and all(isinstance(p, PeriodThreshold | PlaceLevel) for p in narrowing.predicates)
+        and all(
+            isinstance(p, PeriodThreshold | PeriodIn | PlaceLevel) for p in narrowing.predicates
+        )
     ):
         return (
             f"Share of {measure} as one figure overall, divided by one total of {divisor} "

@@ -311,6 +311,7 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
         case (
             CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
             | CompileIssueCode.RANK_AXIS_REQUIRED
+            | CompileIssueCode.RANK_REDUCTION_REQUIRED
             | CompileIssueCode.SHARE_AXIS_REQUIRED
             | CompileIssueCode.SHARE_KEY_UNKNOWN
             | CompileIssueCode.QUOTIENT_AXIS_REQUIRED
@@ -371,6 +372,11 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "calculation takes"
     ),
     CompileIssueCode.RANK_AXIS_REQUIRED: "set the rank's `axis` to the role it ranks on",
+    CompileIssueCode.RANK_REDUCTION_REQUIRED: (
+        "state the rank's `reduction`, 'sum' for an amount, to collapse each entity's rows "
+        "over that party to one value, or name the members of the party the answer needs "
+        "in the dataset requirement's `entities`"
+    ),
     CompileIssueCode.SHARE_AXIS_REQUIRED: (
         "set the share's `axis` to the role it is taken per, or name the numerator's "
         f"`entity`, or {pooling_remedy(one_figure=True, each_side=True)}"

@@ -44,9 +44,12 @@ import itertools
 import json
 import logging
 import re
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, MutableMapping, Sequence
 from contextvars import ContextVar
+from dataclasses import replace
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, overload
 
 import rfc8785
@@ -83,6 +86,7 @@ from planner.records import (
     OpenPeriodFault,
     OptionStatus,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     Predicate,
@@ -894,7 +898,6 @@ FixedField = Literal[
     "window_end",
     "direction",
     "predicates",
-    "among",
     "axis",
     "denominator_scope",
     "change",
@@ -905,12 +908,24 @@ FixedField = Literal[
 
 # `settle_decisions` builds the `Decision` from a draft, reading each named
 # field's value off the requirements that cite it.
+# The fields a draft names whose value is one member of an enum. A decision fixing one of
+# them alone chooses between that enum's values, and the plan card words each value
+# (`harness.plan_display.FIXED_VALUE_WORDS`).
+ENUM_FIXED_FIELDS: Mapping[str, type[StrEnum]] = {
+    "stat_vars": StatVarReading,
+    "reduction": Reduction,
+    "direction": RankDirection,
+    "denominator_scope": DenominatorScope,
+    "change": GrowthChange,
+}
+
+
 class DecisionDraft(_Choice):
     """One methodological choice, as a proposal states it: the fields it fixes, by name."""
 
     fixes: tuple[FixedField, ...] | None = Field(
         default=None,
-        max_length=len(DecisionFixes.model_fields.keys() - {"prices"}),
+        max_length=len(get_args(FixedField)),
         description=(
             "The requirement fields this decision settles, by name, whenever it settles "
             "what a requirement carries: the period, the unit, the entities, the measure, "
@@ -918,6 +933,24 @@ class DecisionDraft(_Choice):
             "requirements citing it. Empty when it is a rationale only."
         ),
     )
+
+    @model_validator(mode="after")
+    def _options_are_the_fields_values(self) -> DecisionDraft:
+        """Reject an option that is no value of the one enum field this decision fixes (`ENUM_FIXED_FIELDS`).
+
+        The card shows each value in its own words, which a slug such as
+        "among_population" never matches.
+        """
+        if self.fixes is None or len(self.fixes) != 1 or self.fixes[0] not in ENUM_FIXED_FIELDS:
+            return self
+        (field,) = self.fixes
+        values = [value.value for value in ENUM_FIXED_FIELDS[field]]
+        if unknown := [option for option in self.options if option not in values]:
+            raise ValueError(
+                f"decision {self.slot!r} fixes `{field}` alone, so each option is one of its "
+                f"values {values!r}; replace {unknown!r}"
+            )
+        return self
 
 
 # What a declared whole leaves open: the part's sector, or the party it names on one
@@ -1251,7 +1284,8 @@ class AggregateRequirement(TaggedModel):
             "entities named, plus a breakdown's codes when the input has them; an `across` "
             "party is summed), breakdown (its codes alone), or two of them. Without period, "
             "the years reduce to one figure per group. Empty reduces every row to one figure, "
-            "over every year, party and code."
+            "over every year, party and code. Over an input naming no entity, `entity` keeps "
+            "nothing: rank that input, or group by period alone."
         ),
     )
 
@@ -1436,13 +1470,15 @@ class RankRequirement(TaggedModel):
     direction: RankDirection = Field(
         description="Which end of the ranking comes first: the highest value or the lowest."
     )
-    among: RankAmong = Field(
+    among: RankAmong | None = Field(
+        default=None,
         description=(
             "Who this rank compares an entity against: 'named' for exactly the entities a "
             "filter has narrowed to, 'population' for every entity the retrieved definition "
             "holds: every member of the party its `across` states, or, where entities are "
-            "named, those entities as the focus among the rest."
-        )
+            "named, those entities as the focus among the rest. Unset takes the one value "
+            "the input admits: 'named' over an axis a filter narrowed, else 'population'."
+        ),
     )
     axis: str | None = Field(
         default=None,
@@ -1453,8 +1489,8 @@ class RankRequirement(TaggedModel):
     reduction: Reduction | None = Field(
         default=None,
         description=(
-            "How to collapse an entity's rows to one value first. Required when the input "
-            "carries more than one role, to collapse the other role's rows, and required "
+            "How to collapse an entity's rows to one value first. Required when a role "
+            "other than the axis holds several parties, to collapse that role's rows, and "
             "when the window leaves an entity more than one row."
         ),
     )
@@ -1703,7 +1739,11 @@ class FilterRequirement(TaggedModel):
     predicates: tuple[Predicate, ...] = Field(
         min_length=1,
         max_length=MAX_PREDICATES,
-        description="The conditions a row has to satisfy, all of them, to survive this filter.",
+        description=(
+            "The conditions a row has to satisfy, all of them, to survive this filter. Years "
+            "asked for apart, as 2019 and 2023, are a `period_in` listing them, over a "
+            "dataset whose `period` runs from the first to the last."
+        ),
     )
 
     @model_validator(mode="after")
@@ -1761,6 +1801,18 @@ EvidenceRequirement = Annotated[
 def is_dataset(requirement: EvidenceRequirement) -> bool:
     """Return whether `requirement` is a `DatasetRequirement`."""
     return isinstance(requirement, DatasetRequirement)
+
+
+def answer_mode_of(requirements: Sequence[EvidenceRequirement]) -> AnswerMode:
+    """The one `AnswerMode` `requirements` validate under as its definition reads.
+
+    `series` where a dataset requirement is unread by every other one, which
+    is then the answer and which `computed` refuses; `computed` where every
+    dataset requirement feeds a calculation, whose result is the answer.
+    """
+    read = {input_id for requirement in requirements for input_id in inputs_of(requirement)}
+    unread = any(is_dataset(r) and r.id not in read for r in requirements)
+    return AnswerMode.SERIES if unread else AnswerMode.COMPUTED
 
 
 def inputs_of(requirement: EvidenceRequirement) -> tuple[Identifier, ...]:
@@ -3475,6 +3527,10 @@ def _dataset_shape(
     A whole's side it opens is one more role dimension, closed, under the
     role phrase `opened` (`opened_role`): the side's one total.
 
+    A role phrase one entity states alone, not as a set's members, is
+    `single`. The plan cannot tell whether Search binds the name to one party,
+    so `submission.service._rank_roles_expand` and the compiler check it.
+
     Its years run on past `period` with `period_end_open`, and start at
     `first_year` for a read of its dataset's whole history, the first year
     the dataset holds on record (`_build_shapes`).
@@ -3491,8 +3547,15 @@ def _dataset_shape(
         {entity.role for entity in requirement.entities} | ({opened} if opened else set()),
         key=lambda role: (role is None, role),
     )
+    stating = Counter(entity.role for entity in requirement.entities)
     roles = tuple(
-        RoleDimension(role=name, requirement_id=requirement.id, place=place_role(name))
+        RoleDimension(
+            role=name,
+            requirement_id=requirement.id,
+            place=place_role(name),
+            single=stating[name] == 1
+            and not any(entity.members for entity in requirement.entities if entity.role == name),
+        )
         for name in role_names
     )
     roles = (
@@ -3654,6 +3717,11 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
     axis_role = _selected_role(input_shape.roles, requirement.axis)
+    if requirement.among is None:
+        raise ValueError(
+            f"{requirement.id!r} states no `among`, and axis {axis_role.role!r} admits only "
+            f"among={_admitted_among(axis_role).value!r}; state it"
+        )
     if requirement.among is RankAmong.NAMED and not axis_role.narrowed:
         raise ValueError(
             f"{requirement.id!r} states among='named', but axis {axis_role.role!r} carries no "
@@ -3674,13 +3742,129 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
     )
 
 
+def _admitted_among(axis_role: RoleDimension) -> RankAmong:
+    """The one `among` a rank over `axis_role` may state.
+
+    A filter that narrowed the axis to named entities leaves only them to
+    rank, so the rank is 'named', and `_rank_shape` refuses 'named' over an
+    axis no filter narrowed. Over any other axis the rank is 'population',
+    which `planner.shapes.rejects` refuses over a narrowed one.
+    """
+    return RankAmong.NAMED if axis_role.narrowed else RankAmong.POPULATION
+
+
+def ranks_among_settled(
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    graph: Sequence[EvidenceRequirement],
+    first_years: Sequence[FirstYear] = (),
+) -> list[EvidenceRequirement]:
+    """`requirements`, each rank stating no `among` given the one its input admits.
+
+    `graph` is every requirement the plan will state, which a rank's input
+    chain is read from. The input's shape is built from the requirements
+    that chain reads alone (`_build_shapes`), each dataset requirement
+    `first_years` names starting at its first year on record, as the split
+    can read it (`whole_history_split`), and gives `_admitted_among` the
+    axis the rank keeps. A rank whose input shape cannot be built, or whose
+    axis names no role of it, keeps `among` unset, and `Plan` validation
+    refuses the fault that stops it.
+    """
+    by_id = {requirement.id: requirement for requirement in graph}
+    whole_history = {first.requirement_id: first.year for first in first_years}
+    settled: list[EvidenceRequirement] = []
+    for requirement in requirements:
+        among = (
+            _among_of_input(requirement, by_id, whole_history)
+            if isinstance(requirement, RankRequirement) and requirement.among is None
+            else None
+        )
+        settled.append(
+            requirement if among is None else requirement.model_copy(update={"among": among})
+        )
+    return settled
+
+
+def _among_of_input(
+    rank: RankRequirement,
+    by_id: Mapping[str, EvidenceRequirement],
+    whole_history: Mapping[str, int],
+) -> RankAmong | None:
+    """The `among` `rank`'s input admits, or `None` when its shape or axis cannot be read."""
+    chain: dict[str, EvidenceRequirement] = {}
+    pending = [rank.input_id]
+    while pending:
+        requirement_id = pending.pop()
+        if requirement_id in chain or requirement_id not in by_id:
+            continue
+        chain[requirement_id] = by_id[requirement_id]
+        pending.extend(inputs_of(by_id[requirement_id]))
+    try:
+        shapes = _build_shapes(
+            chain,
+            whole_history={key: year for key, year in whole_history.items() if key in chain},
+            origins={},
+        )
+    except ValueError:
+        return None
+    shape = shapes.get(rank.input_id)
+    if shape is None:
+        return None
+    if rank.axis is None:
+        axis_role = shape.roles[0] if len(shape.roles) == 1 else None
+    else:
+        axis_role = role_named(shape.roles, rank.axis)
+    return None if axis_role is None else _admitted_among(axis_role)
+
+
+def _other_roles_single(requirement: RankRequirement, input_shape: FrameShape) -> bool:
+    """Whether every role of `input_shape` but the one `requirement` ranks by is `single`."""
+    axis_role = (
+        None if requirement.axis is None else role_named(input_shape.roles, requirement.axis)
+    )
+    return axis_role is not None and all(
+        role.single for role in input_shape.roles if role is not axis_role
+    )
+
+
+def rank_single_roles(plan: Plan) -> list[tuple[RankRequirement, RoleDimension]]:
+    """Each rank of `plan` stating no `reduction` over an input of several roles, with each other role it rests on.
+
+    Plan validation admits such a rank only where every other role is
+    `single` (`_rank_reduction_reason`); whether each name binds one party
+    is a fact of the source (`submission.service._rank_roles_expand`). The
+    shapes are those of the plan as it runs (`split_of`), which validation
+    built, and each rank and role is named by the model's requirement
+    (`origin_of`), once.
+    """
+    split = split_of(plan)
+    shapes = _split_shapes(split)
+    found: dict[tuple[str, str | None, str], tuple[RankRequirement, RoleDimension]] = {}
+    for requirement in split.requirements:
+        if not isinstance(requirement, RankRequirement) or requirement.reduction is not None:
+            continue
+        shape = shapes.get(requirement.input_id)
+        if shape is None or len(shape.roles) < 2 or requirement.axis is None:
+            continue
+        rank = plan.requirement(origin_of(split, requirement.id))
+        assert isinstance(rank, RankRequirement)
+        axis_role = role_named(shape.roles, requirement.axis)
+        for role in shape.roles:
+            if role is axis_role or not role.single:
+                continue
+            origin = replace(role, requirement_id=origin_of(split, role.requirement_id))
+            found.setdefault((rank.id, origin.role, origin.requirement_id), (rank, origin))
+    return list(found.values())
+
+
 def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape) -> str | None:
     """Return why `requirement` needs a reduction it does not state, or `None` when it has enough.
 
     A rank orders entities by one value each. An axis over an input carrying
-    more than one role always needs a reduction, in either mode, to collapse
-    the other role's rows to one value per axis entity per (period, in
-    per-period mode). Short of that, `per_period=True` ranks each period on
+    more than one role needs a reduction, in either mode, to collapse the
+    other roles' rows to one value per axis entity per (period, in
+    per-period mode), unless each other role is `single` and so holds one
+    row per axis entity already. Short of that, `per_period=True` ranks each period on
     its own and never needs a reduction just to collapse years together;
     `per_period=False` needs one unless its input holds one row per entity,
     or the years of its input its window keeps (`_years_read`) are one and
@@ -3693,7 +3877,7 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
     """
     if requirement.reduction is not None:
         return None
-    if len(input_shape.roles) > 1:
+    if len(input_shape.roles) > 1 and not _other_roles_single(requirement, input_shape):
         return (
             f"{requirement.id!r} ranks by axis {requirement.axis!r} over an input carrying more "
             "than one role, which needs a reduction to collapse the other role's rows to one "
@@ -3862,8 +4046,8 @@ def keeps_one_level(predicates: Iterable[Predicate]) -> bool:
 
 
 def states_period_threshold(predicates: Iterable[Predicate]) -> bool:
-    """Whether `predicates` state a `PeriodThreshold`, which compares each row's year."""
-    return any(isinstance(predicate, PeriodThreshold) for predicate in predicates)
+    """Whether `predicates` state a `PeriodThreshold` or a `PeriodIn`, which read each row's year."""
+    return any(isinstance(predicate, PeriodThreshold | PeriodIn) for predicate in predicates)
 
 
 def _check_side_entity_is_named(
@@ -4154,32 +4338,31 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
 def _check_population_claims_are_cited(
     requirements: Iterable[EvidenceRequirement], decisions_by_slot: dict[str, Decision]
 ) -> None:
-    """Reject a population-wide claim no cited decision states structurally.
+    """Reject a pooled share no cited decision states structurally.
 
-    A rank stating `among='population'` and a keyed share_of stating
-    `denominator_scope='pooled'` are each a figure computed over entities
-    nobody named, so either needs a cited `Decision` whose own `fixes` states
-    the same claim. Every slot in `decision_ids` is already known to name a
+    A keyed share_of stating `denominator_scope='pooled'` divides by a total
+    over entities nobody named, so it needs a cited `Decision` whose own
+    `fixes` states 'pooled'. A rank's `among` needs none: its input admits
+    one value (`_admitted_among`), and the rank's step states the population
+    it ranks. Every slot in `decision_ids` is already known to name a
     decision the plan makes.
     """
     for requirement in requirements:
-        if isinstance(requirement, RankRequirement) and requirement.among is RankAmong.POPULATION:
-            field, value = "among", RankAmong.POPULATION
-        elif (
+        if not (
             isinstance(requirement, ShareOfRequirement)
             and requirement.denominator_scope is DenominatorScope.POOLED
         ):
-            field, value = "denominator_scope", DenominatorScope.POOLED
-        else:
             continue
         cited = (decisions_by_slot[slot] for slot in requirement.decision_ids)
         if not any(
-            decision.fixes is not None and getattr(decision.fixes, field) == value
+            decision.fixes is not None
+            and decision.fixes.denominator_scope is DenominatorScope.POOLED
             for decision in cited
         ):
             raise ValueError(
-                f"{requirement.id!r} states {field}={value!r}, a claim over entities nobody "
-                f"named, but cites no decision whose `fixes` names `{field}`"
+                f"{requirement.id!r} holds denominator_scope='pooled', a total over entities "
+                "nobody named, but cites no decision whose `fixes` names `denominator_scope`; "
+                "cite one"
             )
 
 
@@ -4405,10 +4588,10 @@ class Plan(StrictModel):
             "Whether the answer is a computed figure or the series itself. `series` (the "
             "default, and what a plan persisted before this field existed means) leaves an "
             "unread dataset requirement as the answer in its own right; `computed` requires "
-            "every dataset requirement to feed a calculation. The planner's proposal tool requires the "
-            "model to pass this explicitly on a first draft, so the default "
-            "only governs a plan built another way, such as a legacy record deserialising "
-            "without the field."
+            "every dataset requirement to feed a calculation. The planner's proposal tool reads "
+            "a first draft stating none from its requirements (`answer_mode_of`), so the "
+            "default only governs a plan built another way, such as a legacy record "
+            "deserialising without the field."
         ),
     )
     # Past `MAX_PLAN_DECISIONS`, a plan carries the decisions qualifying its answer
@@ -4602,8 +4785,8 @@ class Plan(StrictModel):
         every dataset requirement feeds a calculation. Then every requirement
         states each value a decision it cites fixes
         (`_check_requirements_honour_their_decisions`), and a population-wide
-        claim (`among='population'`, `denominator_scope='pooled'`) has to cite
-        a decision whose `fixes` states it. Last, each ask the plan
+        share (`denominator_scope='pooled'`) has to cite a decision whose
+        `fixes` states it. Last, each ask the plan
         carries is answered or declined exactly once, an answer naming any
         requirement the plan states, one another reads included
         (`_check_asks_accounted`), and an answer keeps in one output every
@@ -5395,7 +5578,7 @@ def unstated_result_scopes(plan: Plan) -> list[ResultScopeGap]:
     role by name (`_operand_roles`: a rank ordering it, a share or quotient
     keyed on it, or a place-level filter on it, since `_filter_shape`
     refuses an `EntityIn` naming a member of an open role, by
-    `unknown_names`), or, like `among='population'`
+    `unknown_names`), or, like `denominator_scope='pooled'`
     (`_check_population_claims_are_cited`), the dataset requirement that
     opened the role cites a decision whose `fixes` states its `across`, every
     word of it. An ask the result answers states the scope too when it
@@ -5715,8 +5898,8 @@ def period_licences_held(
 
     `named` is the `across_years` of the `propose_plan` call that states
     `plan`, the steps whose years the user's own words, as the planner read
-    them, ask to combine. Only a call made where the planner reads those
-    words names any (`submission.service.admit`). A licence of `previous`,
+    them, ask to combine. `submission.service.admit` empties it for a call
+    made where the planner reads none of those words. A licence of `previous`,
     the plan the call amends, holds while `plan` states a step of its id and
     kind that combines its years with the licensed reduction
     (`_keeps_licence`), whatever years it reads: a replan that narrows the
@@ -5750,25 +5933,6 @@ def period_licences_held(
     }
     held.update((name, licence) for name, licence in granted.items() if licence is not None)
     return tuple(held[step_id] for step_id in steps if step_id in held)
-
-
-def licences_restated(
-    named: Sequence[str],
-    *,
-    requirements: Sequence[EvidenceRequirement],
-    previous: Plan | None,
-) -> frozenset[str]:
-    """The steps of `named` whose licence `previous` already holds, as `requirements` state them.
-
-    Naming such a step grants nothing `period_licences_held` would not
-    carry anyway.
-    """
-    held = set(previous.period_licences) if previous is not None else set()
-    return frozenset(
-        requirement.id
-        for requirement in requirements
-        if requirement.id in named and _licence_for(requirement) in held
-    )
 
 
 def _keeps_licence(step: EvidenceRequirement | None, licence: PeriodLicence) -> bool:

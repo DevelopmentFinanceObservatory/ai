@@ -42,22 +42,7 @@
   "reference_payload": {
     "question": "Compare external debt across every African country, all at once, 2020 to 2024",
     "answer_mode": "computed",
-    "decisions": [
-      {
-        "slot": "every_african_country",
-        "description": "Which countries the 2024 ranking compares.",
-        "options": [
-          "every African country with data",
-          "a named list of countries"
-        ],
-        "chosen": "every African country with data",
-        "resolved_by": "planner_default",
-        "rationale": "The question asks for every African country, so every member is ranked.",
-        "fixes": [
-          "among"
-        ]
-      }
-    ],
+    "decisions": [],
     "evidence_requirements": [
       {
         "kind": "dataset",
@@ -94,9 +79,7 @@
         "input_id": "debt_2024",
         "direction": "highest_first",
         "among": "population",
-        "decision_ids": [
-          "every_african_country"
-        ]
+        "decision_ids": []
       }
     ],
     "answered": [
@@ -120,22 +103,7 @@
       "payload": {
         "question": "Compare external debt across every African country, all at once, 2020 to 2024",
         "answer_mode": "computed",
-        "decisions": [
-          {
-            "slot": "every_african_country",
-            "description": "Which countries the 2024 ranking compares.",
-            "options": [
-              "every African country with data",
-              "a named list of countries"
-            ],
-            "chosen": "every African country with data",
-            "resolved_by": "planner_default",
-            "rationale": "The question asks for every African country, so every member is ranked.",
-            "fixes": [
-              "among"
-            ]
-          }
-        ],
+        "decisions": [],
         "evidence_requirements": [
           {
             "kind": "dataset",
@@ -161,9 +129,7 @@
             "direction": "highest_first",
             "among": "population",
             "per_period": true,
-            "decision_ids": [
-              "every_african_country"
-            ]
+            "decision_ids": []
           }
         ],
         "answered": [

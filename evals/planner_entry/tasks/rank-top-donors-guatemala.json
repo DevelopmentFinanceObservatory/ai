@@ -53,20 +53,6 @@
         "fixes": [
           "limit"
         ]
-      },
-      {
-        "slot": "every_donor",
-        "description": "Which donors the ranking compares.",
-        "options": [
-          "every donor",
-          "a named list of donors"
-        ],
-        "chosen": "every donor",
-        "resolved_by": "planner_default",
-        "rationale": "The question names no list, so every donor is ranked.",
-        "fixes": [
-          "among"
-        ]
       }
     ],
     "evidence_requirements": [
@@ -100,8 +86,7 @@
         "window_start": 2024,
         "window_end": 2024,
         "decision_ids": [
-          "top_n",
-          "every_donor"
+          "top_n"
         ]
       }
     ],
