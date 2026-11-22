@@ -715,6 +715,7 @@ async def test_a_count_read_again_in_a_unit_keeps_the_part_s_roles_and_no_pair_n
     assert "search once for that reading" not in handed.output["text"]
     assert {_FK_GROSS, _FK_NET} <= set(unit_settled(state))
     assert unit_reads(state) == {_FK_GROSS: [posted["spec_id"]]}
+    assert units_served(state)[_FK_GROSS].count == _FK_NET
 
 
 @pytest.mark.parametrize(

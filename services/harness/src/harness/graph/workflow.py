@@ -106,8 +106,9 @@ def studio_graph(
     run's derived results with their replay recipes before it completes
     (`executor.completion`); with `None`, a run with a derived result never
     completes. `definition_surface` reaches the data-mcp `seed` resolves
-    each seed's identity again through, and that `switch` and the chip post
-    a switched scope choice through. `max_concurrent_steps`,
+    each seed's identity again through, that `switch` and the chip post
+    a switched scope choice through, and that `ask` and `planner` re-read a
+    part in a unit through. `max_concurrent_steps`,
     `fetch_series_stats` and `label_refs` are
     `executor.run.execute_approved_plan`'s keywords of those names.
     `early_mints` starts each card's retrievals when `approve` offers it
@@ -131,7 +132,7 @@ def studio_graph(
         "orchestrate": orchestrate_node(orchestrator=orchestrator, model=model),
         "ask": ask_node(definition_surface=definition_surface),
         "plan_start": planning.plan_start,
-        "planner": planning.planner_node(planner=planner),
+        "planner": planning.planner_node(planner=planner, definition_surface=definition_surface),
         "approve": approve_node(early_mints=early_mints),
         "switch": switch_node(planner=planner, definition_surface=definition_surface),
         "execute": execute_node(

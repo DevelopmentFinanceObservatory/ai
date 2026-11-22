@@ -1203,7 +1203,7 @@ async def run_entry(
         return result
 
     async def drive() -> None:
-        drafting = planner_node(planner=planner)
+        drafting = planner_node(planner=planner, definition_surface=surface)
         opened = await plan_start.run(ctx, action.model_dump(mode="json"))
         assert isinstance(opened, Next)
         # The planner node runs on its input as the loop stored it with the cursor.

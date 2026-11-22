@@ -668,8 +668,8 @@ async def test_a_state_the_turn_store_refuses_ends_the_entry_with_the_steps_own_
     task = _task(_PLAIN)
     real = entry.planner_node
 
-    def planner_node(*, planner: Any) -> Any:
-        node = real(planner=planner)
+    def planner_node(*, planner: Any, definition_surface: Any) -> Any:
+        node = real(planner=planner, definition_surface=definition_surface)
 
         async def run(ctx: Any, node_input: Any) -> Any:
             ctx.state["unstorable"] = value

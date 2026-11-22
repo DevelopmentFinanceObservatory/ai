@@ -13068,7 +13068,7 @@ def test_a_plan_in_another_unit_than_the_user_chose_is_refused_and_told_the_seri
     part, and Search re-read it in that unit. A plan pinning a series of the
     part in the same prices but another currency or base year is refused,
     told the unit and the re-read series to pin; one pinning that series in
-    that unit lands."""
+    that unit lands, stating the user's choice as one decision on the part."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_blocks(ctx, *shown())
@@ -13094,6 +13094,11 @@ def test_a_plan_in_another_unit_than_the_user_chose_is_refused_and_told_the_seri
     )
 
     assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    prices = [d.slot for d in plan.decisions if d.slot.startswith("user_prices_")]
+    assert prices == [f"user_prices_{_GROSS}"]
+    assert plan.requirement(dataset.id).decision_ids.count(prices[0]) == 1
 
 
 def test_a_plan_on_the_part_in_another_unit_is_refused_with_no_block_for_the_re_read(

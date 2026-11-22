@@ -76,17 +76,24 @@ ORCHESTRATOR_SPEC_WARNINGS_KEY = "orchestrator:spec_warnings"
 # The spec_ids whose unit the user settled this turn: each part a unit
 # question covered and the count picked beside it, whether Search served,
 # re-read or refused the chosen unit, and each spec_id it re-read them as.
-# Their prices are closed (`unit_settled`, `settle_unit`).
+# Their prices are closed (`unit_settled`, `settle_unit`). Written by the
+# `ask` node and by the `planner` node's re-read of a part whose prices row
+# the user switched on the plan card (`harness.graph.planning.
+# _read_switched_prices`).
 ORCHESTRATOR_UNIT_SETTLED_KEY = "orchestrator:unit_settled"
-# The spec_ids the `ask` node re-read each part in, by the part a unit question
-# covered (`unit_reads`, `record_unit_read`), so the prices the user chose
-# reach the re-read series (`planner.call.prices_chosen`).
+# The spec_ids each part a unit question covered was re-read in, by the
+# part (`unit_reads`, `record_unit_read`), so the prices the user chose
+# reach the re-read series (`planner.call.prices_chosen`). Written by the
+# `ask` node and by the `planner` node's plan-card prices switch.
 ORCHESTRATOR_UNIT_READ_KEY = "orchestrator:unit_read"
-# Each part a unit question covered -> the series the agent fetches for it
-# and the unit that series is served in after the answer, as `ServedUnit`
-# JSON (`units_served`, `record_unit_served`): the chosen unit when Search
-# serves or re-reads it, the served unit when Search refuses the re-read.
-# Plan admission holds the part to that unit (`planner.call.prices_chosen`).
+# Each part a unit question covered -> the series the agent fetches for it,
+# the unit that series is served in after the answer, and the other count
+# read in the part's place, as `ServedUnit` JSON (`units_served`,
+# `record_unit_served`): the chosen unit when Search serves or re-reads it,
+# the served unit when Search refuses the re-read. Plan admission holds the
+# part to that unit (`planner.call.prices_chosen`). Written by the `ask`
+# node and by the `planner` node's plan-card prices switch, which re-reads
+# the part in the switched prices.
 ORCHESTRATOR_UNIT_SERVED_KEY = "orchestrator:unit_served"
 # The search readings of the conversation's earlier turns, with the warnings
 # of the spec_ids they name and the spec_ids whose block an earlier turn
@@ -321,12 +328,16 @@ def record_unit_read(state: SessionState, part: str, spec_id: str) -> None:
 
 class ServedUnit(BaseModel):
     """What a part a unit question covered is fetched as after the answer:
-    `spec_id`, the series the agent was told to fetch, and `unit`, the unit
+    `spec_id`, the series the agent was told to fetch, `unit`, the unit
     that series is served in, `None` when its unit cannot be read as one a
-    plan states (`planner.plan.Unit`)."""
+    plan states (`stated_unit`), and `count`, the other count of the part
+    the user picked in the same pause and Search read in the part's place,
+    `None` when the part's own count was read, as in records written before
+    the count was recorded."""
 
     spec_id: str
     unit: Unit | None
+    count: str | None = None
 
 
 def units_served(state: SessionState) -> dict[str, ServedUnit]:
@@ -338,19 +349,31 @@ def units_served(state: SessionState) -> dict[str, ServedUnit]:
     }
 
 
+def stated_unit(unit: UnitChoice) -> Unit | None:
+    """`unit` as a plan states it (`planner.plan.Unit`), `None` when no plan can
+    state it, such as a currency code that is not three capital letters."""
+    try:
+        return Unit.model_validate(unit.model_dump(mode="json"))
+    except ValidationError:
+        logger.warning("served unit %r is no unit a plan states", unit)
+        return None
+
+
 def record_unit_served(
-    state: SessionState, part: str, spec_id: str, unit: UnitChoice | None
+    state: SessionState,
+    part: str,
+    spec_id: str,
+    unit: UnitChoice | None,
+    *,
+    count: str | None = None,
 ) -> None:
     """Record that `part`, which a unit question covered, is fetched as
-    `spec_id`, served in `unit`. A unit no plan can state is recorded as none."""
-    stated: Unit | None = None
-    if unit is not None:
-        try:
-            stated = Unit.model_validate(unit.model_dump(mode="json"))
-        except ValidationError:
-            logger.warning("served unit %r is no unit a plan states", unit)
+    `spec_id`, served in `unit`, read as `count`, another count of the part,
+    when one was read in its place. A unit no plan can state is recorded as
+    none (`stated_unit`)."""
+    stated = stated_unit(unit) if unit is not None else None
     served = {name: one.model_dump(mode="json") for name, one in units_served(state).items()}
-    served[part] = ServedUnit(spec_id=spec_id, unit=stated).model_dump(mode="json")
+    served[part] = ServedUnit(spec_id=spec_id, unit=stated, count=count).model_dump(mode="json")
     state[ORCHESTRATOR_UNIT_SERVED_KEY] = served
 
 
