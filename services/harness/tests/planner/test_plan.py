@@ -7239,8 +7239,6 @@ def test_a_whole_over_donors_of_a_part_with_a_roleless_entity_asks_for_its_role(
         id="whole",
         decision_ids=["measure"],
         measure="total aid",
-        entities=part_entities,
-        across=("donor",),
         period=period,
         whole_of=WholeOf(part="part", axis="donor"),
     )
@@ -7249,3 +7247,105 @@ def test_a_whole_over_donors_of_a_part_with_a_roleless_entity_asks_for_its_role(
 
     assert reason is not None
     assert ("state each entity's role" in reason) is asks_for_roles
+
+
+def _g7_africa_share(*, whole: DatasetRequirement, pooled: bool = False) -> list[Any]:
+    """G7 aid to Africa as a share of `whole`, the plan the planner first proposed
+    in a recorded Studio turn; with `pooled`, the whole is summed by year first."""
+    part = DatasetRequirement(
+        id="g7_africa_aid",
+        decision_ids=["measure"],
+        measure="official development assistance",
+        entities=[
+            Entity(name="Group of Seven", role="donor"),
+            Entity(name="Africa", role="recipient"),
+        ],
+        period=Period(start=1960, end=2024),
+        source_spec_id=_PIN,
+    )
+    total = AggregateRequirement(
+        id="g7_total_pooled",
+        input_id=whole.id,
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    share = ShareOfRequirement(
+        id="g7_africa_share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id=part.id),
+        denominator=RequirementSide(input_id=total.id if pooled else whole.id),
+    )
+    return [part, whole, *([total] if pooled else []), share]
+
+
+_G7_WHOLE = DatasetRequirement(
+    id="g7_total_aid",
+    decision_ids=["measure"],
+    measure="official development assistance",
+    period=Period(start=1960, end=2024),
+    whole_of=WholeOf(part="g7_africa_aid", axis="recipient"),
+)
+# The same whole as an earlier release had the planner state it: the part's donor,
+# and its recipients in `across`, pooled by year. A stored session may hold it.
+_G7_WHOLE_STATED = _G7_WHOLE.model_copy(
+    update={"entities": (Entity(name="Group of Seven", role="donor"),), "across": ("recipient",)}
+)
+
+
+@pytest.mark.parametrize(
+    ("whole", "pooled"),
+    [
+        pytest.param(_G7_WHOLE, False, id="states-nothing"),
+        pytest.param(_G7_WHOLE, True, id="states-nothing-pooled"),
+        pytest.param(_G7_WHOLE_STATED, True, id="stored-with-coverage"),
+    ],
+)
+def test_a_whole_covers_its_parts_parties_with_the_side_it_opens_as_one_total(
+    decision: DecisionFactory, whole: DatasetRequirement, pooled: bool
+) -> None:
+    """G7 aid to Africa over G7 aid to every recipient: the whole states no
+    entities and no `across`, and reads as its part's donor with the recipients
+    one closed total, so the share divides by it directly. A whole a stored
+    session states coverage on reads the same way and still loads."""
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=_g7_africa_share(whole=whole, pooled=pooled),
+    )
+
+    shape = frame_shapes(plan)[whole.id]
+    assert [(role.role, role.open) for role in shape.roles] == [
+        ("donor", False),
+        ("recipient", False),
+    ]
+    assert Plan.model_validate_json(plan.model_dump_json()) == plan
+
+
+@pytest.mark.parametrize(
+    "stated",
+    [
+        pytest.param({"entities": [{"name": "Group of Seven", "role": "donor"}]}, id="entities"),
+        pytest.param({"across": ["recipient"]}, id="across"),
+    ],
+)
+def test_a_proposal_stating_coverage_on_a_whole_is_refused(stated: dict[str, Any]) -> None:
+    """A whole covers what its part covers with one side left open, so a proposal
+    stating its `entities` or `across` is refused, naming the field to drop."""
+    whole = {**_G7_WHOLE.model_dump(mode="json"), **stated}
+    part = _g7_africa_share(whole=_G7_WHOLE)[0].model_dump(mode="json")
+
+    with pytest.raises(ValidationError, match="`whole_of`") as raised:
+        _Patch.model_validate(
+            {
+                "decisions": [],
+                "evidence_requirements": [part, whole],
+                "removed_decisions": [],
+                "removed_evidence_requirements": [],
+                "declined": [],
+                "answered": [],
+                "removed_asks": [],
+                "across_years": [],
+            }
+        )
+    assert next(iter(stated)) in str(raised.value)

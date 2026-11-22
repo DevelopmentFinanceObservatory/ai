@@ -461,7 +461,7 @@ async def test_a_source_dropping_the_pinned_group_is_withheld_and_cannot_be_pinn
     assert withheld["sentence"] == "France's gross disbursements to 266 recipients"
     (dropped,) = withheld["dropped"]
     assert "Africa" in dropped and "266" in dropped
-    repair = "name 'Africa' as recipient in `entities` and drop 'recipient' from `across`"
+    repair = "name 'Africa' as recipient in `entities` with `dcid: africa` and drop 'recipient' from `across`"
     assert referral["repair"] == repair
     assert f"none keeps it, so {repair}" in referral["reason"]
     stored = load_referral(context.state)
@@ -665,7 +665,9 @@ async def test_a_pin_leaving_open_a_named_side_keeps_its_closed_sides_on_the_sea
     assert referral["kind"] == "pinned_source_not_found"
     offered = [] if kept else [answer["spec_id"]]
     assert [candidate["spec_id"] for candidate in referral["candidates"]] == offered
-    assert referral.get("repair") == ("name 'Kenya' as recipient in `entities`" if kept else None)
+    assert referral.get("repair") == (
+        "name 'Kenya' as recipient in `entities` with `dcid: country/KEN`" if kept else None
+    )
     assert [withheld["sentence"] for withheld in referral.get("withheld", [])] == (
         [answer["resolved"]["rendered_sentence"]] if kept else []
     )
@@ -815,9 +817,7 @@ _DAC_MEMBERS_PIN = {
         "entity_groups": {"origin": {"label": "DAC members", "ref": "DACMembers"}},
     },
 }
-_NAME_THE_MEMBERS = (
-    "name 'DAC members' as donor in `entities` with `members: true` and drop 'donor' from `across`"
-)
+_NAME_THE_MEMBERS = "name 'DAC members' as donor in `entities` with `dcid: DACMembers`, `members: true` and drop 'donor' from `across`"
 
 
 @pytest.mark.parametrize(
@@ -942,7 +942,9 @@ _US_AND_UK_TO_KENYA = {
         {"identity": "United Kingdom", "text": "United Kingdom", "refs": ["country/GBR"]},
     ],
 }
-_KEEP_G7 = "name 'G7' as donor in `entities` and drop 'donor' from `across`"
+_KEEP_G7 = (
+    "name 'G7' as donor in `entities` with `dcid: GroupOfSeven` and drop 'donor' from `across`"
+)
 
 
 @pytest.mark.parametrize(

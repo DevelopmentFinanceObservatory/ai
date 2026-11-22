@@ -60,6 +60,7 @@ from planner.plan import (
     ShareOfRequirement,
     Unit,
     UnsupportedOperation,
+    WholeOf,
     WindowedPin,
     current_discovery_time_left,
     load_optional_declines,
@@ -1207,13 +1208,13 @@ async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin
     assert answer["named_in_place_of_across"] == [
         {
             "requirement_id": "annual_debt_service",
-            "entity": {"name": "Africa", "role": "recipient"},
+            "entity": {"name": "Africa", "role": "recipient", "dcid": "africa"},
             "across": "recipient",
         }
     ]
     assert (stored.version, stored.status) == (1, PlanStatus.PENDING_APPROVAL)
     assert pinned.across == ()
-    assert [*pinned.entities] == [*france, Entity(name="Africa", role="recipient")]
+    assert [*pinned.entities] == [*france, Entity(name="Africa", role="recipient", dcid="africa")]
     assert stored.workflow is not None
     assert [source.spec_id for source in stored.workflow.sources] == [SPEC_AFRICA]
 
@@ -1486,13 +1487,108 @@ async def test_a_group_a_shares_numerator_names_is_not_named_on_its_whole(
 
     found = await name_pinned_groups(context.state, surface=FixtureSurface(schemas=real_schemas))
 
-    g7 = Entity(name="G7", role="donor")
+    g7 = Entity(name="G7", role="donor", dcid="GroupOfSeven")
     assert found == ((NamedGroup("oda", g7, "donor"),) if named else ())
     total = _stored(context).requirement("oda")
     assert isinstance(total, DatasetRequirement)
     assert (total.entities, total.across) == (
         ((kenya, g7), ()) if named else ((kenya,), ("donor",))
     )
+
+
+# G7 aid to Africa, and the whole `propose_plan` compiles from it over every
+# recipient: G7 aid to developing countries, a total Search binds `destination` to.
+SPEC_G7_AFRICA = "spec_2a634c06" + "0" * 24
+SPEC_G7_EVERY_RECIPIENT = "spec_66627f58" + "0" * 24
+_G7_COVERAGE = {"kind": "exact", "has_data": True, "window": {"start_year": 1960, "end_year": 2024}}
+_G7_DONOR = {"role": "origin", "label": "Group of Seven", "ref": "GroupOfSeven"}
+_G7_AFRICA_BLOCK = _spec(
+    SPEC_G7_AFRICA,
+    "Net ODA from the Group of Seven to Africa",
+    coverage=_G7_COVERAGE,
+    entities=[_G7_DONOR, {"role": "destination", "label": "Africa", "ref": "africa"}],
+)
+_DEVELOPING = {"label": "developing countries (DAC)", "ref": "DACDevelopingCountries"}
+_G7_EVERY_RECIPIENT_BLOCK = _spec(
+    SPEC_G7_EVERY_RECIPIENT,
+    "Net ODA from the Group of Seven to developing countries (DAC)",
+    coverage=_G7_COVERAGE,
+    entities=[_G7_DONOR, {"role": "destination", **_DEVELOPING}],
+    entity_groups={"destination": {**_DEVELOPING, "total": "DACDevelopingCountries"}},
+)
+
+
+@pytest.mark.parametrize("stored", [False, True], ids=["states-nothing", "stored-with-across"])
+async def test_a_whole_pinned_to_its_compile_is_never_searched(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    stored: bool,
+) -> None:
+    """G7 aid to Africa as a share of G7 aid to every recipient, the whole pinned to
+    the compile `propose_plan` made of it, which Search binds to the developing
+    countries' total. The whole is settled: translation compiles it from that pin
+    with no search and no rewrite. A whole an earlier release had the planner state
+    with the recipients in `across`, pooled by year, reads the same way."""
+    g7 = Entity(name="Group of Seven", role="donor")
+    period = Period(start=1960, end=2024)
+    whole = requirement(
+        id="g7_total_aid",
+        measure="official development assistance",
+        entities=[],
+        period=period,
+        source_spec_id=SPEC_G7_EVERY_RECIPIENT,
+        unit=None,
+        whole_of=WholeOf(part="g7_africa_aid", axis="recipient"),
+    )
+    if stored:
+        whole = whole.model_copy(update={"entities": (g7,), "across": ("recipient",)})
+    pooled = [derived_requirement(id="g7_total_pooled", input_id=whole.id)] if stored else []
+    context = context_holding(
+        draft(
+            evidence_requirements=[
+                requirement(
+                    id="g7_africa_aid",
+                    measure="official development assistance",
+                    entities=[g7, Entity(name="Africa", role="recipient")],
+                    period=period,
+                    source_spec_id=SPEC_G7_AFRICA,
+                    unit=None,
+                ),
+                whole,
+                *pooled,
+                ShareOfRequirement(
+                    id="g7_africa_share",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="g7_africa_aid"),
+                    denominator=RequirementSide(input_id="g7_total_pooled" if stored else whole.id),
+                ),
+            ],
+        )
+    )
+    save_pin_sources(
+        context.state,
+        {
+            SPEC_G7_AFRICA: PinSource(block=_G7_AFRICA_BLOCK, settled=True),
+            SPEC_G7_EVERY_RECIPIENT: PinSource(block=_G7_EVERY_RECIPIENT_BLOCK, settled=True),
+        },
+    )
+    surface = _CountingSurface(schemas=real_schemas)
+
+    answer = await build_translate(surface=surface)(FakeCall(context.state))
+
+    assert answer["outcome"] == Outcome.OK.value, answer
+    assert "search" not in surface.calls
+    assert "named_in_place_of_across" not in answer
+    plan = _stored(context)
+    assert plan.requirement(whole.id) == whole
+    assert plan.workflow is not None
+    assert {source.spec_id for source in plan.workflow.sources} == {
+        SPEC_G7_AFRICA,
+        SPEC_G7_EVERY_RECIPIENT,
+    }
 
 
 # DAC1 grant equivalents with the donor side bound to the members of "DAC members",
@@ -1578,7 +1674,7 @@ async def test_a_rank_over_a_side_a_pin_holds_to_a_group_ranks_its_members(
 
     found = await name_pinned_groups(context.state, surface=FixtureSurface(schemas=real_schemas))
 
-    members = Entity(name="DAC members", role="donor", members=True)
+    members = Entity(name="DAC members", role="donor", members=True, dcid="DACMembers")
     assert found == ((NamedGroup("req_oda", members, "donor"),) if named else ())
     ranked = _stored(context).requirement("req_oda")
     assert isinstance(ranked, DatasetRequirement)
@@ -1605,7 +1701,7 @@ async def test_a_group_a_pin_holds_is_named_on_a_dataset_and_its_whole_history_c
     copy, and the copy keeps its own pin, the dataset over its whole history.
     """
     france = Entity(name="France", role="donor")
-    africa = Entity(name="Africa", role="recipient")
+    africa = Entity(name="Africa", role="recipient", dcid="africa")
     written = draft(
         decisions=[pinning_decision(SPEC_AFRICA)],
         evidence_requirements=[

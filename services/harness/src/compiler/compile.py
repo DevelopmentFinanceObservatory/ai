@@ -50,16 +50,20 @@ from planner.operations import (
     SumOfOperation,
     Translation,
 )
+from planner.parties import flow_side
 from planner.plan import (
     DatasetRequirement,
     Entity,
+    EvidenceRequirement,
     Plan,
     Unit,
     entities_named,
     keeps_one_level,
+    opened_role,
     split_of,
     stated_names,
     unknown_names,
+    whole_read,
 )
 from planner.proof import mismatches
 from planner.records import (
@@ -307,6 +311,48 @@ Upstream = tuple[SelectedSource, DatasetRequirement]
 _SINGLE_INPUT = (AggregateOperation, GrowthOperation, RankOperation, FilterOperation)
 
 
+def _wholes_on_their_sources(
+    plan: Plan, discovered: Mapping[str, SelectedSource]
+) -> dict[str, EvidenceRequirement]:
+    """`plan`'s requirements by id, each whole read on the source `discovered` holds for it.
+
+    A whole (`DatasetRequirement.whole_of`) covers what its part covers
+    less the side it opens (`planner.plan.whole_read`). On that side it
+    reads what its source, the compile of the part with the side left open,
+    holds there, under the part's role phrase for it
+    (`planner.plan.opened_role`): the side's word in `across` where the
+    source leaves it open, else the entities it binds there by their refs,
+    the total Search counts the side as. A whole with no source yet reads
+    as its part's coverage alone.
+    """
+    by_id = {r.id: r for r in plan.evidence_requirements}
+    read: dict[str, EvidenceRequirement] = dict(by_id)
+    for requirement_id, whole in by_id.items():
+        if not isinstance(whole, DatasetRequirement) or whole.whole_of is None:
+            continue
+        part = by_id.get(whole.whole_of.part)
+        if not isinstance(part, DatasetRequirement) or part.whole_of is not None:
+            continue
+        covered = whole_read(whole, part)
+        role = opened_role(whole, part)
+        source = discovered.get(requirement_id)
+        if role is None or source is None:
+            read[requirement_id] = covered
+            continue
+        side = flow_side(role)
+        if any(flow_side(axis.column) == side for axis in source.open_entity_axes or ()):
+            update: dict[str, object] = {"across": (*covered.across, role)}
+        else:
+            held = [
+                Entity(name=entity.label, role=role, dcid=entity.ref)
+                for entity in source.entities
+                if flow_side(entity.role) == side
+            ]
+            update = {"entities": (*covered.entities, *held)}
+        read[requirement_id] = covered.model_copy(update=update)
+    return read
+
+
 class _Ratio(Enum):
     """The ratio a frame holds (`_Build._ratio_held`), a share in `PERCENT_UNIT` or one with no unit."""
 
@@ -358,7 +404,7 @@ class _Build:
         self.schemas = schemas
         self.discovered = discovered
         self.capabilities = capabilities
-        self.requirements = {r.id: r for r in plan.evidence_requirements}
+        self.requirements = _wholes_on_their_sources(plan, discovered)
         self.whole_history = split_of(plan).whole_history
         self.issues: list[CompileIssue] = []
         self.warnings: list[EvidenceIssue] = []

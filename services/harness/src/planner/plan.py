@@ -467,7 +467,11 @@ class Entity(StrictModel):
         min_length=1,
         max_length=200,
         exclude_if=lambda dcid: dcid is None,
-        description="Graph node from an entity_name_ambiguous referral.",
+        description=(
+            "The graph node this entity is, as a referral or repair names it, such as an "
+            "entity_name_ambiguous candidate's ref or a dcid a repair or kept scope gives; "
+            "Search reads the node, so copy it exactly."
+        ),
     )
 
 
@@ -1072,8 +1076,9 @@ class DatasetRequirement(TaggedModel):
         description=(
             "Set on the total a share_of or quotient_of divides its part by, the part over "
             "every sector, donor or recipient: all US aid for US health aid, all aid to Kenya "
-            "for US aid to Kenya. Counted from the part's own dataset, with no search. Read "
-            "only as that denominator."
+            "for US aid to Kenya. Counted from the part's own dataset, with no search, for the "
+            "part's parties with that side one total, so it states no `entities` or `across`. "
+            "Read only as that denominator."
         ),
     )
 
@@ -1144,10 +1149,11 @@ class DatasetRequirement(TaggedModel):
         `across=('donor',)`, an entity with no role or a place role sits in
         `across=('country',)`, and 'donor' and 'provider' state one party. A
         word outside the party vocabulary is left for
-        `compiler.evidence.open_axes_for` to refuse.
+        `compiler.evidence.open_axes_for` to refuse. A whole (`whole_of`)
+        covers what its part covers (`whole_read`), so it may name nobody.
         """
         if not self.across:
-            if not self.entities:
+            if not self.entities and self.whole_of is None:
                 raise ValueError(
                     "a dataset requirement names at least one entity, or states in `across` "
                     "the parties whose every member it covers"
@@ -2501,10 +2507,9 @@ def whole_of_fault(
 
     The whole is compiled from the part's pin with only the part's scope
     widened, so the part is another dataset requirement, itself no whole.
-    A whole over every sector counts the part's parties. A whole over every
-    donor or recipient holds the part only where the part names a party on
-    that side: it states the part's other entities, and `across` the part's
-    words with one word for that side added (`_entity_whole_fault`). It
+    A whole over every donor or recipient opens the side the part names a
+    party on (`_opened_side_fault`). The whole covers the part's parties
+    with that side one total (`whole_read`), whatever it states itself. It
     follows its part wherever the part is counted, so it is read only as
     the denominator of a share or quotient of its part (`_whole_read_fault`).
     """
@@ -2522,62 +2527,117 @@ def whole_of_fault(
             f"{whole.id!r} states whole_of part {part_id!r}, which is a whole itself; name the "
             "part both are counted from"
         )
-    if whole.whole_of.axis != "sector":
-        if fault := _entity_whole_fault(whole, part, whole.whole_of.axis):
-            return fault
-    elif {*whole.entities, *whole.across} != {*part.entities, *part.across}:
-        return (
-            f"{whole.id!r} is the whole of {part_id!r}, counted from its dataset for the same "
-            "parties, so it states the same entities and `across`"
-        )
+    if fault := _opened_side_fault(whole, part, whole.whole_of.axis):
+        return fault
     return _whole_read_fault(whole, part_id, requirements_by_id)
 
 
-def _entity_whole_fault(
+def _opened_side_fault(
     whole: DatasetRequirement, part: DatasetRequirement, axis: str
 ) -> str | None:
-    """Why `whole`, the whole of `part` over every `axis` (a donor or a recipient),
-    does not hold `part`, `None` when it does.
-
-    The part names a party on the side of the flow `axis` is on. The whole names
-    the part's other entities and states the part's `across` words with one word
-    for that side added, so it is the total over every `axis` for the part's
-    other parties. Where Search answers the whole with that side bound to one
-    group, as DAC1 binds DAC countries' total, the translator names the group on
-    the side in place of the word (`translator.discovery.name_pinned_groups`), so
-    a whole naming one entity on that side, other than the part's, and stating
-    only the part's `across` words holds the part too. Which group Search binds
-    is known only once the whole is compiled, so admission refuses a whole
-    naming any other entity there (`submission.service._misnamed_total`).
-    """
+    """Why `part` names no party on the side of the flow `whole` opens over every
+    `axis`, `None` when it does or `axis` is the sector."""
     side = role_party(axis)
-    named = [e for e in part.entities if e.role is not None and role_party(e.role) == side]
-    if not named and (roleless := [e.name for e in part.entities if e.role is None]):
+    if side is None:
+        return None
+    if _sitting_on(part.entities, side):
+        return None
+    if roleless := [e.name for e in part.entities if e.role is None]:
         return (
             f"{whole.id!r} is the whole of {part.id!r} over every {axis}, and the side of "
             f"{part.id!r}'s entities ({', '.join(sorted(roleless))}) is not stated; state each "
             "entity's role, donor or recipient"
         )
-    if not named:
-        return (
-            f"{whole.id!r} is the whole of {part.id!r} over every {axis}, and {part.id!r} names "
-            f"no {axis} to leave open; state the whole over another axis, or a total of its own "
-            "without `whole_of`"
-        )
-    others = {*part.entities} - {*named}
-    spans = any(across_party(word) == side for word in whole.across)
-    kept = {word for word in whole.across if across_party(word) != side}
-    on_side = {e for e in whole.entities if e.role is not None and role_party(e.role) == side}
-    # The side spanned by `across`, or closed to one group other than the part's party.
-    opened = not on_side if spans else len(on_side) == 1 and not on_side & {*named}
-    if {*whole.entities} - on_side != others or not opened or kept != {*part.across}:
-        return (
-            f"{whole.id!r} is the whole of {part.id!r} over every {axis}, so it states "
-            f"{part.id!r}'s entities without its {axis}s "
-            f"({', '.join(sorted(e.name for e in named))}), and `across` "
-            f"{part.id!r}'s words with {axis!r} added"
-        )
-    return None
+    return (
+        f"{whole.id!r} is the whole of {part.id!r} over every {axis}, and {part.id!r} names "
+        f"no {axis} to leave open; state the whole over another axis, or a total of its own "
+        "without `whole_of`"
+    )
+
+
+def _sits_on(entity: Entity, side: Party) -> bool:
+    """Whether `entity`'s role names the party `side`."""
+    return entity.role is not None and role_party(entity.role) == side
+
+
+def _sitting_on(entities: Iterable[Entity], side: Party) -> list[Entity]:
+    """The entities of `entities` whose role names the party `side`."""
+    return [e for e in entities if _sits_on(e, side)]
+
+
+def stated_coverage_fault(whole: DatasetRequirement) -> str | None:
+    """Why `whole` states who it covers though its `whole_of` derives it, `None` when it
+    states nothing or is no whole.
+
+    A whole covers what its part covers with one side left open (`whole_read`),
+    so `entities` or `across` on it could only disagree with that. A proposal
+    stating either is refused (`submission.service._Patch`). A plan stored
+    with them still loads, and reads them as derived.
+    """
+    if whole.whole_of is None:
+        return None
+    stated = [field for field in ("entities", "across") if getattr(whole, field)]
+    if not stated:
+        return None
+    return (
+        f"{whole.id!r} states `whole_of`, so it covers what its part "
+        f"{whole.whole_of.part!r} covers with the {whole.whole_of.axis} left open as one "
+        f"total; drop its {' and '.join(f'`{field}`' for field in stated)}"
+    )
+
+
+def whole_read(whole: DatasetRequirement, part: DatasetRequirement) -> DatasetRequirement:
+    """`whole` covering what its part `part` covers, less the side it opens.
+
+    The whole states no `entities` or `across` of its own. It keeps the part's
+    entities and `across` words on every role but the side of the flow its
+    `WholeOf.axis` opens, which it reads as one total (`opened_role`). A
+    sector whole opens no side and covers the part's parties exactly.
+    """
+    side = role_party(whole.whole_of.axis) if whole.whole_of is not None else None
+    return whole.model_copy(
+        update={
+            "entities": tuple(e for e in part.entities if side is None or not _sits_on(e, side)),
+            "across": tuple(w for w in part.across if side is None or across_party(w) != side),
+        }
+    )
+
+
+def opened_role(whole: DatasetRequirement, part: DatasetRequirement) -> str | None:
+    """The role phrase of the party `part` names on the side `whole` opens, the
+    role the whole reads that side's one total under; `None` for a sector whole."""
+    if whole.whole_of is None or (side := role_party(whole.whole_of.axis)) is None:
+        return None
+    named = _sitting_on(part.entities, side)
+    return named[0].role if named else None
+
+
+def covered(requirement: DatasetRequirement, plan: Plan) -> DatasetRequirement:
+    """Who `requirement` covers, in its own fields: a whole (`whole_of`) its part's
+    parties (`whole_read`) and the word for the side it opens in `across`, as a
+    reader names the side's total off the source; any other requirement as stated."""
+    if requirement.whole_of is None:
+        return requirement
+    part = next((r for r in plan.evidence_requirements if r.id == requirement.whole_of.part), None)
+    if not isinstance(part, DatasetRequirement):
+        return requirement
+    read = whole_read(requirement, part)
+    role = opened_role(requirement, part)
+    return read if role is None else read.model_copy(update={"across": (*read.across, role)})
+
+
+def wholes_as_read(
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> dict[str, EvidenceRequirement]:
+    """`requirements_by_id` with each whole whose part it holds read as `whole_read` reads it."""
+    read: dict[str, EvidenceRequirement] = dict(requirements_by_id)
+    for requirement_id, requirement in requirements_by_id.items():
+        if not isinstance(requirement, DatasetRequirement) or requirement.whole_of is None:
+            continue
+        part = requirements_by_id.get(requirement.whole_of.part)
+        if isinstance(part, DatasetRequirement) and part.whole_of is None:
+            read[requirement_id] = whole_read(requirement, part)
+    return read
 
 
 def _dataset_reach(
@@ -3318,7 +3378,8 @@ def _build_shapes(
     names exactly one, by construction of every transform. `whole_history`
     names each dataset requirement read from the first year its dataset
     holds on record, with that year, where its shape starts
-    (`_dataset_shape`). Every other one starts at its stated period.
+    (`_dataset_shape`). Every other one starts at its stated period. A
+    whole covers what its part covers (`wholes_as_read`).
     `origins` maps each copy `whole_history_split` added to the requirement
     it copies, which a refusal names in its place: a copy reads other
     years than its origin, and the model wrote only the origin. A copy
@@ -3335,6 +3396,7 @@ def _build_shapes(
             the first growth whose window year newer data takes out of its
             input (`planner.shapes.growth_endpoint_leaves`).
     """
+    requirements_by_id = wholes_as_read(requirements_by_id)
     reads, rolling = _rolling_reads(requirements_by_id)
     over = anchored_over(
         reads,
@@ -3404,9 +3466,14 @@ def requirement_step_order(requirements_by_id: Mapping[str, EvidenceRequirement]
     return order
 
 
-def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -> FrameShape:
+def _dataset_shape(
+    requirement: DatasetRequirement, *, first_year: int | None, opened: str | None = None
+) -> FrameShape:
     """The shape a fresh retrieval carries: one role dimension per role phrase the entities
     state, then one open dimension per `across` word, then the breakdown's.
+
+    A whole's side it opens is one more role dimension, closed, under the
+    role phrase `opened` (`opened_role`): the side's one total.
 
     Its years run on past `period` with `period_end_open`, and start at
     `first_year` for a read of its dataset's whole history, the first year
@@ -3421,7 +3488,8 @@ def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -
     breakdown, which sums the family within each code.
     """
     role_names = sorted(
-        {entity.role for entity in requirement.entities}, key=lambda role: (role is None, role)
+        {entity.role for entity in requirement.entities} | ({opened} if opened else set()),
+        key=lambda role: (role is None, role),
     )
     roles = tuple(
         RoleDimension(role=name, requirement_id=requirement.id, place=place_role(name))
@@ -4056,7 +4124,13 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
     `first_year` starts a dataset requirement's shape (`_dataset_shape`).
     """
     if isinstance(requirement, DatasetRequirement):
-        return _dataset_shape(requirement, first_year=first_year)
+        part = (
+            requirements_by_id.get(requirement.whole_of.part)
+            if requirement.whole_of is not None
+            else None
+        )
+        opened = opened_role(requirement, part) if isinstance(part, DatasetRequirement) else None
+        return _dataset_shape(requirement, first_year=first_year, opened=opened)
     if isinstance(requirement, AggregateRequirement):
         return _aggregate_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, GrowthRequirement):

@@ -63,7 +63,7 @@ from planner.plan import (
     windowed_pins,
 )
 from planner.records import EvidenceIssueCode
-from planner.tool_results import Outcome
+from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ResolvedGroup, ToolId
 from submission.service import statement
 from translator.discovery import build_discover_source
@@ -827,6 +827,7 @@ def _closed_share(kind: str) -> _ClosedShare:
                 "id": "whole",
                 "measure": "US total ODA",
                 "source_spec_id": None,
+                "entities": (),
                 "whole_of": WholeOf(part="health", axis="sector"),
             }
         )
@@ -1085,7 +1086,8 @@ async def test_a_copy_of_a_pin_from_a_warned_search_part_is_not_honoured(
     total's compile directly, and the total compiled from the one `propose_plan`
     searched for itself. Where the search part a pin was made from dropped the
     roles it was asked (`role_text_not_recognised`), admission leaves the pin
-    unwindowed, and discovery does not honour it and searches. A part that only
+    unwindowed, and discovery does not honour it and searches, but for the whole,
+    which is never searched and is referred back. A part that only
     dropped the question's years (`time_text_not_parsed`) blocks no pin retrieved
     over the requirement's period: a copy over it, or health's own identity when
     that is already over 2024 (`covered`), is honoured with no search, as a
@@ -1138,6 +1140,10 @@ async def test_a_copy_of_a_pin_from_a_warned_search_part_is_not_honoured(
     if not role or record == "clean" or admitted_clean:
         assert surface.tools == ["resolve_definition"]
         assert found["status"] == "definite", found
+    elif kind == "whole":
+        # A whole is never searched: its compile is its only source.
+        assert "search" not in surface.tools
+        assert found["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, found
     else:
         assert "search" in surface.tools
         assert found.get("status") != "definite", found

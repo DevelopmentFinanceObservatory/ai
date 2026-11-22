@@ -101,6 +101,7 @@ from planner.plan import (
     authored,
     authored_text,
     copy_origins,
+    covered,
     dataset_of,
     frame_shapes,
     inputs_of,
@@ -627,7 +628,7 @@ def _who(
     region = _governing(requirement, plan).get("region")
     source = _source(requirement.id, plan, sources)
     sides: dict[str | None, list[str]] = {"giving": [], "receiving": [], None: []}
-    for entity in requirement.entities:
+    for entity in covered(requirement, plan).entities:
         side = flow_side(entity.role) if entity.role else None
         name = region.chosen if entity.members and region is not None else entities_phrase([entity])
         sides[side].append(name)
@@ -2522,6 +2523,7 @@ def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | 
     keeps. A set on a side no `across` word covers is left unsaid, as the
     requirement leaves it. Before compile the requirement's own words.
     """
+    requirement = covered(requirement, plan)
     sides = {across_party(word) for word in requirement.across}
     source = _selected_source(requirement.id, plan)
     groups = [(side, label) for side, label in _side_groups(source) if side in sides]
@@ -2699,7 +2701,8 @@ def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
             return stated
         read = ", ".join(clauses)
         return f"{stated} {read[0].upper()}{read[1:]}."
-    parties = entities_phrase(requirement.entities, across=requirement.across)
+    stated = covered(requirement, plan)
+    parties = entities_phrase(stated.entities, across=stated.across)
     period = f"{requirement.period.start}-{requirement.period.end}" + (
         _FOLLOWING if requirement.period_end_open else ""
     )
@@ -2745,6 +2748,7 @@ def _population_count(requirement: DatasetRequirement, word: str, plan: Plan) ->
     set of open axes.
     """
     source = _selected_source(requirement.id, plan)
+    requirement = covered(requirement, plan)
     if source is None or word not in requirement.across:
         return None
     axes = open_axes_for(requirement.across, source.open_entity_axes)

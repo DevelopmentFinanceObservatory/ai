@@ -1425,9 +1425,10 @@ def _kept_scope(
 
     A search sent without them may answer a source that drops them, as
     Japan's aid to every recipient for "Japan's ODA" pinned to every donor's
-    aid to Kenya. A group goes as its label, asking for its members unless
-    `held` binds its published total (`ResolvedGroup.reads_total`); an
-    entity goes as its label and its graph node.
+    aid to Kenya. A group goes as its label and its graph node, where it has
+    one, asking for its members unless `held` binds its published total
+    (`ResolvedGroup.reads_total`); an entity goes as its label and its graph
+    node.
     """
     columns = _kept_columns(plan, requirement, held)
     kept: list[dict[str, object]] = []
@@ -1437,6 +1438,8 @@ def _kept_scope(
             continue
         grouped.add(group.role)
         sent: dict[str, object] = {"text": group.label, "role": role}
+        if group.ref is not None:
+            sent["dcid"] = group.ref
         if not group.reads_total:
             sent["members"] = True
         kept.append(sent)
@@ -2878,6 +2881,9 @@ async def _source_from_resolve_pin(
     read for that check alone, so a pin of a source the translator found
     itself is set aside too. It never honours the pin: its identity carries
     the window of the search that found it.
+
+    A whole (`DatasetRequirement.whole_of`) is never searched for
+    (`_settled_whole`).
     """
     read = await _pin_source(
         state,
@@ -2886,6 +2892,8 @@ async def _source_from_resolve_pin(
         first_year=split_of(plan).whole_history.get(requirement.id),
         surface=surface,
     )
+    if requirement.whole_of is not None:
+        return await _settled_whole(state, plan=plan, requirement=requirement, read=read)
     if read is None or isinstance(read, dict):
         return read
     source, honoured = read
@@ -2914,6 +2922,56 @@ async def _source_from_resolve_pin(
     log = await _record_honoured_pin(state, plan=plan, requirement=requirement, source=source)
     return ok(
         requirement_id=requirement_id,
+        status=DiscoveryStatus.DEFINITE.value,
+        searched_as=requirement.measure,
+        sources=[compact_source(source, selectable=True)],
+        detail=None,
+        warnings=[],
+        budget_remaining=DISCOVERY_CALL_BUDGET - log.calls(plan_revision(plan)),
+    )
+
+
+async def _settled_whole(
+    state: SessionState,
+    *,
+    plan: Plan,
+    requirement: DatasetRequirement,
+    read: tuple[SelectedSource, bool] | dict[str, object] | None,
+) -> dict[str, object]:
+    """The source of the whole `requirement` from its pin, with no search (`_pin_source`'s `read`).
+
+    `propose_plan` pins a whole to the compile of its part with one side
+    left open (`planner.source_reads.compile_whole`), so that pin is its
+    source, whatever it holds on that side: a whole covers what its part
+    covers (`planner.plan.whole_read`), and a search for it could only find
+    another population. A source read only off the discovery log is that
+    compile too. A problem a reader met is returned as it is, and a pin no
+    reader holds, as one compiled from a part whose search answered a
+    narrower question (`narrowed_pin`), refers the whole back as unmeetable.
+    """
+    if isinstance(read, dict):
+        return read
+    if read is None:
+        assert requirement.whole_of is not None
+        message = (
+            f"{requirement.id!r} is the whole of {requirement.whole_of.part!r}, counted from "
+            f"its part's dataset with no search, and its pin {requirement.source_spec_id!r} "
+            f"cannot be read over {requirement.period.start} to {requirement.period.end}: "
+            "the part's search answered a narrower question, or nothing on record describes "
+            f"the pin over those years. Settle {requirement.whole_of.part!r} on a dataset "
+            "that answers it, and propose the plan again so the whole is compiled from it"
+        )
+        return _referred_answer(
+            requirement,
+            kind=ReferralKind.REQUIREMENT_UNMEETABLE,
+            code=ProblemCode.SHARE_WHOLE_UNDERIVABLE,
+            message=message,
+            detail={"requirement_id": requirement.id},
+        )
+    source, _ = read
+    log = await _record_honoured_pin(state, plan=plan, requirement=requirement, source=source)
+    return ok(
+        requirement_id=requirement.id,
         status=DiscoveryStatus.DEFINITE.value,
         searched_as=requirement.measure,
         sources=[compact_source(source, selectable=True)],
@@ -3041,6 +3099,9 @@ async def name_pinned_groups(
     on its total would divide G7 by itself, so the pin is set aside and the
     total stays the whole.
 
+    A whole (`DatasetRequirement.whole_of`) is left as it is: it covers what
+    its part covers, and its pin is the compile of it (`_settled_whole`).
+
     The requirements read are those the model wrote (`authored`), so a
     dataset read beside a copy of its whole history
     (`Plan.rolling_copies`) is judged with the readers of both, and the
@@ -3073,7 +3134,11 @@ async def name_pinned_groups(
     named: list[NamedGroup] = []
     honoured: list[tuple[DatasetRequirement, SelectedSource]] = []
     for requirement in written.evidence_requirements:
-        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
+        if (
+            not isinstance(requirement, DatasetRequirement)
+            or requirement.source_spec_id is None
+            or requirement.whole_of is not None
+        ):
             continue
         found = await _groups_named(
             state,
@@ -3270,16 +3335,19 @@ def _group_named(source: SelectedSource, word: str, role: str, *, members: bool)
     label = closing_group(source, word)
     if label is None:
         return None
-    if not members:
-        return Entity(name=label, role=role)
     side = flow_side(word)
+    ref = next(
+        (g.ref for g in source.groups if g.label == label and flow_side(g.role) == side), None
+    )
+    if not members:
+        return Entity(name=label, role=role, dcid=ref)
     if any(
         group.reads_total
         for group in source.groups
         if group.label == label and flow_side(group.role) == side
     ):
         return None
-    return Entity(name=label, role=role, members=True)
+    return Entity(name=label, role=role, members=True, dcid=ref)
 
 
 def _with_groups_named(

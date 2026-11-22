@@ -233,15 +233,24 @@ async def _search_with_meta(meta: dict[str, object]) -> tuple[CallToolResult, li
     return result, sent
 
 
-@pytest.mark.parametrize("enabled", [True, False])
-async def test_the_context_in_meta_reaches_search_only_when_the_setting_is_on(
+@pytest.mark.parametrize(
+    ("setting", "enabled"),
+    [(None, True), ("true", True), ("false", False)],
+    ids=["unset", "on", "off"],
+)
+async def test_the_context_in_meta_reaches_search_unless_the_setting_is_off(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     exported_spans: InMemorySpanExporter,
+    setting: str | None,
     enabled: bool,
 ) -> None:
-    """A context the setting drops is logged at debug and marked on the call's span."""
-    monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", str(enabled).lower())
+    """Unset, the setting posts the context; off, it drops it, logged at debug
+    and marked on the call's span."""
+    if setting is None:
+        monkeypatch.delenv("SEARCH_SENDS_CONVERSATION_CONTEXT", raising=False)
+    else:
+        monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", setting)
     context = {"user_message": "now Ghana", "carried_entries": [CARRIED_SECTOR]}
 
     with caplog.at_level(logging.DEBUG, logger="data_mcp.search_tool"):
@@ -283,7 +292,7 @@ _MALFORMED_ENTRIES = {
 async def test_a_context_of_the_wrong_shape_is_refused_before_search_is_called(
     monkeypatch: pytest.MonkeyPatch, context: dict[str, object]
 ) -> None:
-    monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", "true")
+    monkeypatch.delenv("SEARCH_SENDS_CONVERSATION_CONTEXT", raising=False)
 
     result, sent = await _search_with_meta({SEARCH_CONTEXT_META_KEY: context})
 
