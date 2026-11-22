@@ -16,6 +16,7 @@ from submission.service import statement
 
 from harness.plan_display import (
     DECISION_CHOICE_PREFIX,
+    chosen_count_decision,
     decision_option_id,
     switchable_decision,
 )
@@ -61,7 +62,12 @@ def decision_pick(
 
 
 def picks_the_chosen_option(plan: Plan, *, choice_id: str, option_id: str) -> bool:
-    """Whether `choice_id` names a planner decision of `plan` and `option_id` the option it has chosen."""
+    """Whether `choice_id` names a planner decision or a count row of `plan`
+    (`harness.plan_display.chosen_count_decision`) and `option_id` the option
+    it has chosen."""
+    counted = chosen_count_decision(plan, choice_id)
+    if counted is not None:
+        return decision_option_id(counted.chosen) == option_id
     if not is_decision_choice(choice_id):
         return False
     slot = choice_id.removeprefix(DECISION_CHOICE_PREFIX)

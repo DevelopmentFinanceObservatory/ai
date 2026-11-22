@@ -34,7 +34,10 @@ from harness.plan_display import (
     card_summary,
     card_title,
     choice_id,
+    chosen_count_decision,
     chosen_scope_decision,
+    count_choice_id,
+    count_options,
     decision_choice_id,
     decision_option_id,
     listed_together,
@@ -5159,3 +5162,42 @@ def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it()
         )
         is None
     )
+
+
+def test_a_count_row_offers_only_the_counts_every_source_of_it_offers() -> None:
+    """Germany's share of ODA to Ethiopia as admission wrote it, both pins
+    counted as gross disbursements beside net. Germany's pin is given the
+    counts the recorded block for health ODA to Kenya offers, gross beside
+    net disbursements and commitments, so the two pins still share one row,
+    which lists Germany's decision. That row offers gross and net only, the
+    counts both sources have, under one id that names both decisions."""
+    root = Path(__file__).parents[3]
+    recorded = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures/planner_runs/test_recorded_requests"
+            / "test_each_request_equals_its_stored_expectation"
+            / "share-germany-of-oda-ethiopia_reference.json"
+        ).read_text()
+    )
+    (search,) = json.loads(
+        (root / "evals/planner_entry/recordings/share-health-oda-kenya.json").read_text()
+    )["searches"][:1]
+    elected = source_from_spec_block(search["envelope"]["parts"][0]["spec"]).elected_measure
+    assert elected is not None
+    offered = (elected.label, *(other.label for other in elected.other_counts()))
+    assert set(offered) == {"gross disbursements", "net disbursements", "commitments"}
+    plan = Plan.model_validate(recorded["plan"])
+    germany, all_oda = (d for d in plan.decisions if d.slot.startswith("source_"))
+    assert all_oda.options == ("gross disbursements", "net disbursements")
+    widened = germany.model_copy(update={"options": offered})
+    plan = plan.model_copy(
+        update={"decisions": [widened if d.slot == germany.slot else d for d in plan.decisions]}
+    )
+
+    assert [d.slot for d in listed_together(plan, all_oda.slot)] == [germany.slot, all_oda.slot]
+    assert count_options(plan, widened) == ("gross disbursements", "net disbursements")
+    assert count_options(plan, all_oda) == ("gross disbursements", "net disbursements")
+    row = count_choice_id(plan, widened)
+    assert row == count_choice_id(plan, all_oda) == "germany:count"
+    assert chosen_count_decision(plan, row) is not None

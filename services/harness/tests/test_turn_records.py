@@ -31,6 +31,7 @@ from harness.turn_records import (
     PlanRecord,
     ScopeChip,
     SearchReading,
+    SiblingReading,
     WindowReading,
     basis_line,
     chip_kept,
@@ -39,6 +40,7 @@ from harness.turn_records import (
     part_name,
     render_readings,
     scope_chips,
+    stored_count,
 )
 from planner.plan import (
     CUT_MARKER,
@@ -1103,6 +1105,73 @@ def test_the_turn_after_a_chip_reverses_it_only_by_moving_its_choice_back(
     }
 
     assert chip_kept(applied, [SearchReading.from_part(part).model_dump(mode="json")]) is kept
+    assert chip_kept(applied, []) is True
+
+
+_NET = {"spec_id": "spec_net", "label": "net disbursements"}
+
+
+def _counted_part() -> dict[str, Any]:
+    """`_scoped_part` counted as gross disbursements, offering net disbursements as another count."""
+    return {**_scoped_part(), "counted_as": "gross disbursements", "alternatives": [_NET]}
+
+
+def _net_reading(offering: dict[str, Any]) -> dict[str, Any]:
+    """The reading a fetch of `_NET` gains, read as the other count `offering` offers."""
+    reading = SearchReading.from_part(
+        {"variable": "health aid", "status": "chosen", "spec_id": _NET["spec_id"]}
+    ).model_copy(
+        update={
+            "sibling_of": SiblingReading(
+                spec_id=offering["spec_id"], axis="what", label=_NET["label"]
+            ),
+            "counted_as": _NET["label"],
+        }
+    )
+    return reading.with_fetch({"summary": "30 observations"}).model_dump(mode="json")
+
+
+def test_a_part_offering_another_count_offers_its_count_chip_first() -> None:
+    """The count chip runs before every scope chip, and the cut to four keeps
+    it. Once the part reads the other count, its offering reading offers no
+    count chip and the choice is on the other count."""
+    gross = _fetched(_counted_part())
+    choice_id = f"{gross['spec_id']}:count"
+
+    chips = scope_chips([gross], specs={})
+    switched = [gross, _net_reading(gross)]
+
+    assert chips[0] == ScopeChip(
+        label="net disbursements",
+        choice_id=choice_id,
+        option_id="spec_net",
+        spec_id=gross["spec_id"],
+    )
+    assert len(chips) == 4
+    assert [chip.choice_id for chip in scope_chips(switched, specs={})].count(choice_id) == 0
+    assert stored_count(switched, choice_id) == (
+        SearchReading.model_validate(gross),
+        "spec_net",
+    )
+    assert stored_count(switched, f"{gross['spec_id']}:sector") is None
+
+
+@pytest.mark.parametrize(("net", "kept"), [(True, True), (False, False)], ids=["kept", "back"])
+def test_the_turn_after_a_count_chip_reverses_it_only_by_reading_the_count_it_left(
+    net: bool, kept: bool
+) -> None:
+    """A count chip moved health aid from gross to net disbursements. The next
+    turn reverses it when its newest reading of the choice reads gross again,
+    and keeps it when it reads net or names no reading of the choice."""
+    gross = _fetched(_counted_part())
+    applied = {
+        "choice_id": f"{gross['spec_id']}:count",
+        "option_id": "spec_net",
+        "from_option_id": gross["spec_id"],
+    }
+    readings = [gross, _net_reading(gross)] if net else [gross]
+
+    assert chip_kept(applied, readings) is kept
     assert chip_kept(applied, []) is True
 
 

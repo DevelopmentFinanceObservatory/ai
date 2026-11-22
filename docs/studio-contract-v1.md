@@ -691,6 +691,35 @@ A page that sends a closed turn's `new_question` as the next turn sends it autom
 
 `constraint_id: "turn_moved"` tells this refusal apart from a busy conversation, which answers 409 `transient_unavailable` with `retry_after_seconds`. A busy refusal comes first while another request's stream holds the conversation; once that stream ends, the retry answers `turn_moved`. On `turn_moved` the page reads the state, shows the turns it lacks, and does not send the question again. The check begins no turn, meters nothing and writes nothing. A request without `after_turn` is admitted as before.
 
+## Count chips and count rows on the plan card (delta 29, v1.14)
+
+- Answers offer count chips, `apply_choice` chips with `choice_id`
+  `"<spec_id>:count"` (`docs/frontend-interface.md` 4.1.2).
+- The row stating how a pinned source's flow is counted ("How the flow is
+  counted.", with options such as "gross disbursements" and "net
+  disbursements") carries `choice_id` `"<requirement id>:count"`,
+  `active_option_id` and `options`, as any switchable row does. Sources
+  counted the same way, such as a share's numerator and denominator, share
+  one row, which offers only the counts every one of them offers. The
+  requirement is the first pinning a source of the row, so the id survives
+  every switch of the count. Each option's `option_id` is derived from its
+  label, as a planner decision's is (`"option_"` and the first 12 hex
+  digits of the label's SHA-256), and its `status` is `available`, since
+  Search offered each count beside every source of the row.
+- A client switches it as it switches a scope row: `interrupt.response`
+  with `decision: "switch"` and `{choice_id, option_id}`. The harness
+  re-pins every requirement on every source of the row to that source's
+  other count, a dataset Search already named, in one revision, and offers
+  the revised plan with no `moved` entries; the row then holds the chosen
+  count as the user's choice. A
+  switch to the count the row already holds is refused as any such switch
+  is, and the plan is re-offered with `switch_failed`.
+- `plan.approved.choices[]` carries the row under the same `choice_id`.
+  A client tells it from a scope row by the `:count` ending, where it
+  wants to word it apart.
+
+`schema_version` stays 1.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -803,3 +832,11 @@ Fixture values that are samples:
 1. `POST /api/studio/resume` (`turn.resume`) carries on a running turn whose client left, on a new stream; `GET /api/studio/state` reads the conversation as stored (turn status and lease, closed turns after `since` with `closed_total`, the open pause and its frames, the manifest) with no lease; every stream names its turn in the `x-dfo-turn-index` header.
 1. `done` gains an optional `new_question`: an `amend` whose text asks a different question ends the turn, its plan set aside, and the client sends the text as the next `turn.request`. An `amend` that asks for a new question without stating it ends the turn the same way with no `new_question`, and the reply asks the user for their question.
 1. `turn.request` gains an optional `after_turn`, the turn it follows; a request whose `after_turn` is not the conversation's latest turn is refused 409 `edit_conflict` with `constraint_id: "turn_moved"` and begins no turn.
+1. `suggestions` gains count chips: `apply_choice` chips whose `choice_id`
+   is `"<spec_id>:count"` and whose `option_id` is the spec_id of another
+   way of counting the part's flow that Search offered, such as net
+   disbursements beside gross. They take the shape and request of a scope
+   chip and run first (`docs/frontend-interface.md` 4.1.2). The plan card's
+   row stating how a pinned source is counted gains `choice_id`
+   `"<requirement id>:count"`, so a switch can name it (see "Count chips and
+   count rows on the plan card").

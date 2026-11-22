@@ -51,13 +51,14 @@ from harness.graph.state import (
     PICK_REPLAN_KEY,
 )
 from harness.graph.switch import SCOPE_CHOICE_NOT_APPLIED, SWITCH_CANCELLED, SwitchFailedError
-from harness.plan_display import choice_id, decision_option_id
+from harness.plan_display import choice_id, count_choice_id, decision_option_id
 from harness.planner_adapter import PlannerAdapter, store_searched_pin_readings
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.sentences import StopCode
 from harness.settings import Settings
+from harness.studio_state import ConversationState
 from harness.turn.events import NodeDone, TurnFailed
 from harness.turn.loop import Outcome, stop_turn
 from harness.turn.store import Cursor, TurnStatus
@@ -76,6 +77,7 @@ from planner.plan import (
     ResolvedBy,
     SessionState,
     authored,
+    current_recorded_identity,
     decision_pick,
     load_plan,
     plan_revision,
@@ -126,6 +128,7 @@ from .scripted_genai import ScriptedGenai, call_part, reply
 from .scripted_planner import SIGNED
 from .scripted_tools import plan_call, scripted_orchestrator
 from .session_events import one_answer
+from .test_planner_entry_eval import entry, validate
 from .test_planner_node import _ask_call, _proposals, _steps
 from .turn_driver import SegmentRun, TurnDriver, numbered_call_ids, scripted_models
 
@@ -2036,3 +2039,160 @@ async def test_a_switch_after_an_entry_revises_the_plan(
             }
         ),
     )
+
+
+# --- a switch of the row stating how a pin is counted ---------------------------------
+
+
+class _Admitted(Exception):  # noqa: N818 -- a stop signal, not a fault
+    """Raised by `_admitted_plan`'s translate once the revision's proposal is admitted."""
+
+
+async def _counted_entry(
+    task_id: str = "aggregate-total-oda-kenya",
+) -> tuple[PlannerPlan, dict[str, Any], dict[str, Any]]:
+    """The plan the planner entry eval lands for task `task_id`
+    (`evals/planner_entry`), its reference plan proposed over the task's
+    recording, with the turn's state and the recording. For total ODA to
+    Kenya, the default, admission wrote the row stating how its one pin is
+    counted, gross disbursements, beside net disbursements."""
+    task = next(task for task in entry.load_tasks() if task.id == task_id)
+    (payload,) = [p for p in validate.task_payloads(task) if p.label == "reference"]
+    recording = entry.load_recording(task.id)
+    scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, dict(payload.body)))])
+    with numbered_call_ids():
+        run = await entry.run_entry(task, recording, prefix_cache=None, client=scripted.client)
+    assert run.error is None, run.error
+    assert run.probe.plan is not None
+    return run.probe.plan, run.state, recording
+
+
+async def test_a_count_row_switch_repins_the_plan_to_the_other_count_with_no_search() -> None:
+    """The card's count row switched from gross to net disbursements re-pins
+    the requirement to the net count Search named beside the pin, posts nothing
+    to Search, and admission, run for real, writes the row on the new pin as
+    the user's choice, under the same row id. The same option again, the one
+    the row holds, is refused unchanged."""
+    plan, state, recording = await _counted_entry()
+    (counted,) = [d for d in plan.decisions if d.slot.startswith("source_")]
+    row = count_choice_id(plan, counted)
+    assert counted.fixes is not None and counted.fixes.source_spec_id is not None
+    pin = counted.fixes.source_spec_id
+    block = state[ORCHESTRATOR_SPECS_KEY][pin]
+    (net,) = [
+        alternative["definition"]["spec_id"]
+        for alternative in block["resolved"]["alternative_measures"]
+        if alternative["axis"] == "what"
+    ]
+    admitted: list[PlannerPlan] = []
+
+    async def translate(call: PlannerCall) -> dict[str, object]:
+        draft = load_plan(call.state)
+        assert draft is not None
+        admitted.append(draft)
+        raise _Admitted
+
+    surface = entry.RecordedSurface(recording.get("tools") or {})
+    adapter = PlannerAdapter(settings=Settings(), surface=surface, translate=translate)
+    conversation = ConversationState(conversation_id="c1")
+    conversation.turn_specs = dict(state[ORCHESTRATOR_SPECS_KEY])
+    token = current_recorded_identity.set(conversation.recorded_identity)
+    try:
+        ctx = node_ctx(state=copy.deepcopy(state))
+        with pytest.raises(SwitchFailedError) as same:
+            await switch_module._switched_plan(
+                ctx,
+                plan,
+                choice_id=row or "",
+                option_id=decision_option_id("gross disbursements"),
+                planner=cast(Any, adapter),
+                surface=surface,
+            )
+        with pytest.raises(_Admitted):
+            await switch_module._switched_plan(
+                ctx,
+                plan,
+                choice_id=row or "",
+                option_id=decision_option_id("net disbursements"),
+                planner=cast(Any, adapter),
+                surface=surface,
+            )
+    finally:
+        current_recorded_identity.reset(token)
+
+    assert row == "oda:count"
+    assert same.value.code == SCOPE_CHOICE_NOT_APPLIED
+    assert not any(name == "resolve_definition" for name in surface.misses)
+    (revised,) = admitted
+    (dataset,) = [r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)]
+    assert dataset.source_spec_id == net
+    (moved,) = [d for d in revised.decisions if d.slot.startswith("source_")]
+    assert (moved.chosen, moved.resolved_by) == ("net disbursements", ResolvedBy.USER)
+    assert moved.fixes is not None and moved.fixes.source_spec_id == net
+    assert count_choice_id(revised, moved) == row
+
+
+async def test_a_count_row_standing_for_two_pins_switches_both() -> None:
+    """Germany's share of ODA to Ethiopia pins two sources, each counted as
+    gross disbursements beside net, and the card lists their counts as one
+    row under one id. Switching that row to net re-pins both requirements to
+    the net count Search named beside each pin, so the share's numerator and
+    denominator stay counted alike, and admission writes net on both as the
+    user's choice, still one row under the same id."""
+    plan, state, recording = await _counted_entry("share-germany-of-oda-ethiopia")
+    counted = [d for d in plan.decisions if d.slot.startswith("source_")]
+    assert len(counted) == 2
+    (row,) = {count_choice_id(plan, decision) for decision in counted}
+    nets: dict[str, str] = {}
+    for decision in counted:
+        assert decision.fixes is not None and decision.fixes.source_spec_id is not None
+        pin = decision.fixes.source_spec_id
+        block = state[ORCHESTRATOR_SPECS_KEY][pin]
+        (nets[pin],) = [
+            alternative["definition"]["spec_id"]
+            for alternative in block["resolved"]["alternative_measures"]
+            if alternative["axis"] == "what"
+        ]
+    admitted: list[PlannerPlan] = []
+
+    async def translate(call: PlannerCall) -> dict[str, object]:
+        draft = load_plan(call.state)
+        assert draft is not None
+        admitted.append(draft)
+        raise _Admitted
+
+    surface = entry.RecordedSurface(recording.get("tools") or {})
+    adapter = PlannerAdapter(settings=Settings(), surface=surface, translate=translate)
+    conversation = ConversationState(conversation_id="c1")
+    conversation.turn_specs = dict(state[ORCHESTRATOR_SPECS_KEY])
+    token = current_recorded_identity.set(conversation.recorded_identity)
+    try:
+        with pytest.raises(_Admitted):
+            await switch_module._switched_plan(
+                node_ctx(state=copy.deepcopy(state)),
+                plan,
+                choice_id=row or "",
+                option_id=decision_option_id("net disbursements"),
+                planner=cast(Any, adapter),
+                surface=surface,
+            )
+    finally:
+        current_recorded_identity.reset(token)
+
+    assert row is not None
+    (revised,) = admitted
+    stated = {
+        r.id: r.source_spec_id
+        for r in plan.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    }
+    assert {
+        r.id: r.source_spec_id
+        for r in revised.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    } == {requirement: nets[pin] for requirement, pin in stated.items()}
+    moved = [d for d in revised.decisions if d.slot.startswith("source_")]
+    assert [(d.chosen, d.resolved_by) for d in moved] == [
+        ("net disbursements", ResolvedBy.USER)
+    ] * 2
+    assert {count_choice_id(revised, decision) for decision in moved} == {row}
