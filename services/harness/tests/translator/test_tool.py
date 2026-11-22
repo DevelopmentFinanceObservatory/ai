@@ -78,6 +78,7 @@ from planner.records import (
     GroupBy,
     RankAmong,
     RankDirection,
+    Reduction,
     RelativePeriod,
     RollingWindow,
     SourceNameCandidate,
@@ -1584,6 +1585,95 @@ async def test_a_rank_over_a_side_a_pin_holds_to_a_group_ranks_its_members(
     assert isinstance(ranked, DatasetRequirement)
     assert (ranked.entities, ranked.across, ranked.source_spec_id) == (
         ((members,), (), SPEC_DAC_MEMBERS) if named else ((), ("donor",), SPEC_DAC_MEMBERS)
+    )
+
+
+# ODA from two donors to the African recipients, the recipient side bound to the
+# members of "Africa".
+SPEC_DONORS_TO_AFRICA = "spec_fb3cc27e" + "2" * 24
+_DONORS_TO_AFRICA_BLOCK = _spec(
+    SPEC_DONORS_TO_AFRICA,
+    "Gross disbursements from DAC members to the 59 countries and territories in Africa",
+    coverage={"kind": "exact", "has_data": True, "window": {"start_year": 2015, "end_year": 2024}},
+    entities=[
+        {"role": "origin", "label": "United States", "ref": "country/USA"},
+        {"role": "origin", "label": "Germany", "ref": "country/DEU"},
+        {"role": "destination", "label": "Ghana", "ref": "country/GHA"},
+        {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
+    ],
+    entity_groups={"destination": {"label": "Africa", "ref": "africa"}},
+)
+
+
+@pytest.mark.parametrize(
+    ("per", "reduction", "named"),
+    [("recipient", None, True), (None, Reduction.SUM, False)],
+    ids=["per-recipient", "summed-over-recipients"],
+)
+async def test_a_rank_per_a_side_a_pin_holds_to_a_group_ranks_within_its_members(
+    real_schemas: list[ToolSchema],
+    decision: Callable[..., Any],
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    context_holding: ContextHolding,
+    per: str | None,
+    reduction: Reduction | None,
+    named: bool,
+) -> None:
+    """For "top 6 donors per African recipient", the recipient side a pin holds to Africa's
+    members is named for its members, so the rank orders donors within each African
+    recipient. A rank over donors summed across recipients leaves the recipient side as
+    it is."""
+    context = context_holding(
+        draft(
+            decisions=[
+                pinning_decision(SPEC_DONORS_TO_AFRICA),
+                decision(
+                    slot="donor_population_scope",
+                    options=["every donor", "the donors named"],
+                    chosen="every donor",
+                    fixes=DecisionFixes(among=RankAmong.POPULATION),
+                ),
+            ],
+            evidence_requirements=[
+                requirement(
+                    id="req_oda",
+                    measure="official development assistance",
+                    entities=[],
+                    across=("donor", "recipient"),
+                    source_spec_id=SPEC_DONORS_TO_AFRICA,
+                    unit=None,
+                ),
+                RankRequirement(
+                    id="req_rank",
+                    decision_ids=["donor_population_scope"],
+                    input_id="req_oda",
+                    direction=RankDirection.HIGHEST_FIRST,
+                    among=RankAmong.POPULATION,
+                    axis="donor",
+                    per=per,
+                    reduction=reduction,
+                    limit=6,
+                    window_start=2024,
+                    window_end=2024,
+                ),
+            ],
+        )
+    )
+    save_pin_sources(
+        context.state,
+        {SPEC_DONORS_TO_AFRICA: PinSource(block=_DONORS_TO_AFRICA_BLOCK, settled=True)},
+    )
+
+    found = await name_pinned_groups(context.state, surface=FixtureSurface(schemas=real_schemas))
+
+    members = Entity(name="Africa", role="recipient", members=True)
+    assert found == ((NamedGroup("req_oda", members, "recipient"),) if named else ())
+    ranked = _stored(context).requirement("req_oda")
+    assert isinstance(ranked, DatasetRequirement)
+    assert (ranked.entities, ranked.across) == (
+        ((members,), ("donor",)) if named else ((), ("donor", "recipient"))
     )
 
 

@@ -126,7 +126,7 @@ from planner.records import (
     TaggedModel,
     ValueThreshold,
 )
-from planner.shapes import FrameShape, TimeLabel, pooling_remedy
+from planner.shapes import FrameShape, ShapeVerb, TimeLabel, pooling_remedy, rejects
 from planner.workflow import (
     ArtifactKind,
     Binding,
@@ -2460,18 +2460,18 @@ def test_a_rank_per_another_role_ranks_within_it_with_no_reduction(
         evidence_requirements=[dataset, _rank(dataset.id, axis="donor", per="recipient", limit=6)],
     )
 
-    roles = frame_shapes(plan)["ranked"].roles
-    assert sorted(role.role or "" for role in roles) == ["donor", "recipient"]
-    with pytest.raises(ValidationError, match="names the role the rank orders"):
-        _plan(
-            _population_decision(decision),
-            evidence_requirements=[dataset, _rank(dataset.id, axis="donor", per="donor")],
-        )
-    with pytest.raises(ValidationError, match=r"per 'sector' does not name a role"):
-        _plan(
-            _population_decision(decision),
-            evidence_requirements=[dataset, _rank(dataset.id, axis="donor", per="sector")],
-        )
+    shapes = frame_shapes(plan)
+    assert sorted(role.role or "" for role in shapes["ranked"].roles) == ["donor", "recipient"]
+    # A `per` naming the ranked role, or no role the input carries, is refused.
+    read = shapes[dataset.id]
+    assert rejects(ShapeVerb.RANK, read, axis="donor", per="recipient") is None
+    for per in ("donor", "sector"):
+        assert rejects(ShapeVerb.RANK, read, axis="donor", per=per) is not None
+        with pytest.raises(ValidationError):
+            _plan(
+                _population_decision(decision),
+                evidence_requirements=[dataset, _rank(dataset.id, axis="donor", per=per)],
+            )
 
 
 def test_a_requirement_reading_a_join_is_rejected(

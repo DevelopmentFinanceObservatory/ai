@@ -5333,7 +5333,8 @@ def unstated_result_scopes(plan: Plan) -> list[ResultScopeGap]:
     it is one growth per member, which a question asking for the total does
     not want. A result kept per member of such a party passes when the plan
     states that scope: a step on its way to the result operates over the
-    role by name (`_operand_roles`: a rank ordering it, a share or quotient
+    role by name (`_operand_roles`: a rank ordering it or ranking within
+    it by `per`, a share or quotient
     keyed on it, or a place-level filter on it, since `_filter_shape`
     refuses an `EntityIn` naming a member of an open role, by
     `unknown_names`), or, like `among='population'`
@@ -5893,7 +5894,7 @@ def _operand_roles(
     """The role dimensions `requirement` operates over by name, each as its role and dataset requirement.
 
     A rank orders the dimension its `axis` selects, the lone one when it
-    states none. A share_of or quotient_of states `axis` to give one figure
+    states none, and names the dimension its `per` ranks within. A share_of or quotient_of states `axis` to give one figure
     per member of the numerator's dimension it names. A filter narrows the
     dimensions its `EntityIn` predicates name, and a predicate naming no
     role counts only over an input with one dimension, since its names may
@@ -5905,7 +5906,10 @@ def _operand_roles(
     """
     selected: list[RoleDimension] = []
     if isinstance(requirement, RankRequirement):
-        selected.append(_selected_role(shapes_by_id[requirement.input_id].roles, requirement.axis))
+        roles = shapes_by_id[requirement.input_id].roles
+        selected.append(_selected_role(roles, requirement.axis))
+        if requirement.per is not None:
+            selected.append(_selected_role(roles, requirement.per))
     elif isinstance(requirement, ShareOfRequirement | QuotientRequirement):
         if requirement.axis is not None:
             selected.extend(

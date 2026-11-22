@@ -1593,8 +1593,10 @@ def test_a_rank_per_another_role_says_it_ranks_within_each_of_its_entities(
     sentence = next(row for row in requirement_rows(plan) if row["id"] == "ranked")["sentence"]
 
     assert _label(rank, plan) == "Rank the top 6 donors per recipient by ODA"
-    assert sentence.startswith(
+    assert sentence == (
         "Ranks by ODA: ranks every donor the source holds within each recipient;"
+        " the window is collapsed into one ranking per recipient;"
+        " keeps the top 6 donors per recipient, more when 6th place is shared."
     )
 
 

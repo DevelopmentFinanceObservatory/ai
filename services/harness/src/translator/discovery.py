@@ -3229,7 +3229,9 @@ def _ranked_sides(plan: Plan, requirement_id: str) -> frozenset[FlowSide]:
     side is open or names a group's members, so naming the group a pin holds
     the side to ranks the members the pin held. A rank stating no `axis`
     ranks over its input's one role (`planner.plan.frame_shapes`), which
-    that role's side stands for. Empty when nothing reads `requirement_id`,
+    that role's side stands for. A rank's `per` side counts too: the rank
+    orders the axis within each of its members, so a group the pin holds
+    that side to is read as those members. Empty when nothing reads `requirement_id`,
     or when a reader is not a rank, or ranks over a role naming no side of a
     flow.
     """
@@ -3243,6 +3245,8 @@ def _ranked_sides(plan: Plan, requirement_id: str) -> frozenset[FlowSide]:
         if axis is None or (side := flow_side(axis)) is None:
             return frozenset()
         sides.add(side)
+        if reader.per is not None and (per_side := flow_side(reader.per)) is not None:
+            sides.add(per_side)
     return frozenset(sides)
 
 

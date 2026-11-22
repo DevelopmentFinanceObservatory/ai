@@ -2807,12 +2807,16 @@ def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
         if one_year and not requirement.per_period
         else per_period_phrase(requirement.per_period, limited=requirement.limit is not None)
     )
+    # A rank with `per` gives one ranking, and keeps `limit` entities, per member of that role.
+    per_text = "" if requirement.per is None else f" per {singular(requirement.per)}"
     if requirement.per is not None:
         among_text += f" within each {singular(requirement.per)}"
+        if not one_year and not requirement.per_period:
+            per_period_text += per_text
     sentence = f"Ranks by {_ranked_value(requirement, plan)}: {among_text}; {per_period_text}"
     if requirement.limit is None:
         return f"{sentence}."
-    kept = _kept_phrase(requirement, requirement.limit, plan)
+    kept = _kept_phrase(requirement, requirement.limit, plan) + per_text
     if requirement.per_period:
         kept += " in each period"
     return f"{sentence}; keeps {kept}, {shared_place_phrase(requirement.limit)}."

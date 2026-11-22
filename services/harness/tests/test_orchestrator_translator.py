@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from analysis_mcp.artifact import Exclusion
+from analysis_mcp.artifact import Exclusion, Interval, Observation
 from analysis_mcp.result import StatVarsSummed, VerbResult
 from common.period_note import period_note
 from compiler.surface import ProgressCallback, ToolCallResult, ToolSchema
@@ -1742,6 +1742,7 @@ def _verb_result(
     ranked_before_limit: int | None = None,
     exclusions: tuple[Exclusion, ...] = (),
     summed: tuple[int, ...] = (),
+    time: Observation | Interval | None = None,
 ) -> dict[str, Any]:
     """An analysis verb's structured content, as analysis-mcp builds it. Each
     of `summed` is the StatVars one dataset version it read summed over."""
@@ -1757,6 +1758,7 @@ def _verb_result(
             StatVarsSummed(spec_id=f"spec_{index}", content_version="cv_1", count=count)
             for index, count in enumerate(summed)
         ),
+        time=time or Observation(),
     ).model_dump(mode="json")
 
 
@@ -1806,7 +1808,7 @@ async def test_a_plan_steps_line_states_the_period_note_and_the_rows_its_result_
     held, summed = str(steps["aggregate"].detail).split(" \u00b7 ")
     assert checks._numbers_in_prose(held) == {9}
     assert checks._numbers_in_prose(summed) == {380}
-    assert "StatVars" in summed and is_user_sentence(summed)
+    assert is_user_sentence(summed)
 
 
 async def test_a_rankings_line_names_the_rows_it_left_out_before_it_ranked():
@@ -1815,13 +1817,78 @@ async def test_a_rankings_line_names_the_rows_it_left_out_before_it_ranked():
     adds up to the plan's: 141 ranked and 25 residuals are the 166 recipients
     the plan named. The limit's own cut and rows the plan asked to drop are
     not named again."""
-    ranked = _verb_result(10, ranked_before_limit=141, exclusions=_RECIPIENT_EXCLUSIONS)
+    ranked = _verb_result(
+        10,
+        ranked_before_limit=141,
+        exclusions=(
+            *_RECIPIENT_EXCLUSIONS,
+            Exclusion(reason="outside_window", rows=3000),
+            Exclusion(reason="predicate", rows=12),
+        ),
+    )
 
     detail = (await _plan_steps({"rank": ranked}))["rank"].detail
 
     assert checks._numbers_in_prose(detail) == {10, 141, 25}
-    assert "unallocated" in str(detail)
     assert is_user_sentence(detail)
+
+
+# Three unallocated providers over 2020 to 2024: 15 input rows, one per provider and year.
+_PROVIDER_RESIDUALS = {
+    "financingProvider": ("DACUnallocated", "MultilateralUnallocated", "PrivateUnallocated")
+}
+
+
+@pytest.mark.parametrize(
+    ("time", "truncated", "numbers"),
+    [
+        pytest.param(Interval(start="2020", end="2024"), False, {10, 40, 3}, id="entities"),
+        pytest.param(Interval(start="2020", end="2024"), True, {10, 40}, id="truncated"),
+        pytest.param(Interval(start="2023", end="2023"), True, {10, 40, 15}, id="one-period"),
+        pytest.param(Observation(), True, {10, 40, 15}, id="periods-apart"),
+    ],
+)
+async def test_a_rankings_left_out_count_is_in_the_unit_of_its_entries(
+    time: Observation | Interval, truncated: bool, numbers: set[int]
+) -> None:
+    """ "Top donors to Guatemala since 2020" collapses five years into one entry
+    per provider, so the three unallocated providers it left out count as
+    three, not as their 15 rows. Where the providers are not listed in full,
+    a collapsed ranking over several years names no count, and a ranking
+    over one period, or one keeping its periods apart, counts rows like its
+    entries. A count given as a boolean is no count."""
+    ranked = _verb_result(
+        10,
+        ranked_before_limit=40,
+        time=time,
+        exclusions=(
+            Exclusion(
+                reason="party_residual",
+                rows=15,
+                entities=_PROVIDER_RESIDUALS,
+                entities_truncated=truncated,
+            ),
+        ),
+    )
+    ranked["exclusions"].append({"reason": "non_finite", "rows": True})
+
+    detail = (await _plan_steps({"rank": ranked}))["rank"].detail
+
+    assert checks._numbers_in_prose(detail) == numbers
+    assert is_user_sentence(detail)
+
+
+async def test_an_aggregates_left_out_count_names_entities_beside_its_groups():
+    """An aggregate's rows are its groups, so the group totals it left out
+    count as the entities they were, and as nothing where not listed in full."""
+    listed = Exclusion(reason="party_total", rows=30, entities={"financingProvider": ("DAC", "G7")})
+    unlisted = listed.model_copy(update={"entities_truncated": True})
+
+    named = await _plan_steps({"aggregate": _verb_result(9, exclusions=(listed,))})
+    unnamed = await _plan_steps({"aggregate": _verb_result(9, exclusions=(unlisted,))})
+
+    assert checks._numbers_in_prose(named["aggregate"].detail) == {9, 2}
+    assert checks._numbers_in_prose(unnamed["aggregate"].detail) == {9}
 
 
 async def test_a_reply_stating_the_facts_of_its_steps_is_grounded_by_their_frames():

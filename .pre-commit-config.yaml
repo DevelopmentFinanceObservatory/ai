@@ -46,7 +46,8 @@ repos:
         exclude: |
           (?x)^(
             \.idea/.*|
-            \.vscode/.*
+            \.vscode/.*|
+            services/harness/tests/fixtures/orchestrator_requests/.*
           )$
       - id: check-yaml
         args: [--allow-multiple-documents]

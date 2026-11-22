@@ -731,7 +731,7 @@ def _surface_call_outcome(tool: str, result: ToolCallResult) -> dict[str, Any]:
             counted["rows"] = body["rows"]
         if (ranked := declared_ranked_before_limit(body)) is not None:
             counted["ranked_before_limit"] = ranked
-        if left_out := _left_out(body):
+        if left_out := _left_out(tool, body):
             counted["left_out"] = left_out
         if summed := _stat_vars_summed(body):
             counted["stat_vars_summed"] = summed
@@ -749,17 +749,15 @@ def _surface_call_outcome(tool: str, result: ToolCallResult) -> dict[str, Any]:
 
 # What a verb's left-out rows were, by `analysis_mcp.artifact.Exclusion`
 # reason, as a step's line names them. `beyond_limit` rows are the ranking's
-# own cut, which its kept count already states; `entity_not_selected` and
-# `period_unmatched` rows are ones the plan asked to drop, as the analysis
-# digest also leaves them unnamed.
+# own cut, which its kept count already states. `entity_not_selected`,
+# `period_unmatched`, `outside_window` and `predicate` rows are ones the plan
+# asked to drop, as the analysis digest also leaves them unnamed.
 _LEFT_OUT_TEXT: dict[str, str] = {
     "party_total": "of group totals",
     "party_residual": "of unallocated amounts",
     "non_finite": "with no finite value",
-    "outside_window": "outside the years asked for",
     "endpoint_missing": "with no value in the first or last year",
     "zero_or_sign_crossing_base": "with a zero or sign-crossing base",
-    "predicate": "that the filter removed",
     "unmatched_key": "with no match on the other side",
     "unit_unbound": "with no unit",
     "unit_not_selected": "in another unit",
@@ -767,18 +765,65 @@ _LEFT_OUT_TEXT: dict[str, str] = {
 }
 
 
-def _left_out(body: Mapping[str, Any]) -> list[tuple[str, int]]:
-    """The rows a verb's result left out, summed by reason in the order the
+def _left_out(tool: str, body: Mapping[str, Any]) -> list[tuple[str, int, str]]:
+    """What a verb's result left out, summed by reason in the order the
     reasons first appear, for the reasons `_LEFT_OUT_TEXT` names. Each
-    reason pairs with the words a step's line says it in."""
+    reason pairs with the words a step's line says it in, its count, and
+    that count's unit, "row" or "entity".
+
+    The count is in the unit of the result's own rows, or names entities
+    where no row count is. A result that keeps its periods apart (`time` an
+    `Observation`) holds one row per input row it kept, so a reason counts
+    the rows it dropped (`Exclusion.rows`). A result that collapsed its
+    periods (`time` an `Interval`) holds one row per entity, so a reason
+    counts the entities it dropped, where every exclusion for it lists them
+    in full on one role (`Exclusion.entities` and `entities_truncated`),
+    else its rows when the input held one period, since one period's rows
+    are its entities. An aggregate's rows are its groups, which no dropped
+    member is, so its reasons count entities alone. A reason fitting none
+    of these is left out of the line: over five years, 15 rows of three
+    unallocated providers reconcile with nothing a ranking of providers
+    counts.
+    """
+    time = body.get("time")
+    interval = isinstance(time, Mapping) and time.get("kind") == "interval"
+    by_entity = tool == "aggregate" or interval
+    by_row = tool != "aggregate" and (
+        not interval or (isinstance(time, Mapping) and time.get("start") == time.get("end"))
+    )
     rows: dict[str, int] = {}
+    entities: dict[str, set[str] | None] = {}
     for exclusion in body.get("exclusions") or ():
         if not isinstance(exclusion, Mapping):
             continue
         reason, count = exclusion.get("reason"), exclusion.get("rows")
-        if reason in _LEFT_OUT_TEXT and isinstance(count, int) and count > 0:
-            rows[reason] = rows.get(reason, 0) + count
-    return [(_LEFT_OUT_TEXT[reason], count) for reason, count in rows.items()]
+        if (
+            reason not in _LEFT_OUT_TEXT
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or count <= 0
+        ):
+            continue
+        rows[reason] = rows.get(reason, 0) + count
+        named = exclusion.get("entities")
+        listed = (
+            isinstance(named, Mapping)
+            and len(named) == 1
+            and not exclusion.get("entities_truncated")
+        )
+        held = entities.get(reason, set())
+        entities[reason] = (
+            None
+            if not listed or held is None
+            else held | {str(value) for values in named.values() for value in values}
+        )
+    left_out: list[tuple[str, int, str]] = []
+    for reason, count in rows.items():
+        if by_entity and (named_entities := entities[reason]):
+            left_out.append((_LEFT_OUT_TEXT[reason], len(named_entities), "entity"))
+        elif by_row:
+            left_out.append((_LEFT_OUT_TEXT[reason], count, "row"))
+    return left_out
 
 
 def _stat_vars_summed(body: Mapping[str, Any]) -> list[int]:
@@ -1140,16 +1185,25 @@ def _listed(items: Sequence[str]) -> str:
 
 
 def _rows(count: int) -> str:
-    return f"{count:,} row" if count == 1 else f"{count:,} rows"
+    return _counted(count, "row")
+
+
+def _counted(count: int, unit: str) -> str:
+    """`count` of `unit`, "row" or "entity", in words: "1 row" or "3 entities"."""
+    if count == 1:
+        return f"{count:,} {unit}"
+    return f"{count:,} {'entities' if unit == 'entity' else f'{unit}s'}"
 
 
 def _rows_held(record: _ExecutorRecord) -> str | None:
     """How many rows the result of a recorded call other than a retrieval
     holds, when it counts them. A ranking's rows are the ones it keeps, of
-    the entries it ranked when a limit cut them. The rows the call left out
-    before it counted, such as a ranking's unallocated amounts, follow by
-    reason (`_left_out`), so the count adds up to the rows the step read. A
-    retrieval's summary states its own observations."""
+    the entries it ranked when a limit cut them. What the call left out
+    before it counted, such as a ranking's unallocated amounts, follows by
+    reason in the unit of the result's rows (`_left_out`), so a ranking's
+    entries and what it left out add up to the entities the plan named:
+    141 recipients ranked and 25 regional residuals are DAC2a's 166 for one
+    year. A retrieval's summary states its own observations."""
     rows = record.result.get("rows")
     if record.tool == "get_data" or not isinstance(rows, int):
         return None
@@ -1158,7 +1212,10 @@ def _rows_held(record: _ExecutorRecord) -> str | None:
     held = (
         f"The ranking keeps {counted}" if record.tool == "rank" else f"The result holds {counted}"
     )
-    left_out = [f"{_rows(count)} {text}" for text, count in record.result.get("left_out") or ()]
+    left_out = [
+        f"{_counted(count, unit)} {text}"
+        for text, count, unit in record.result.get("left_out") or ()
+    ]
     if left_out:
         held += f", leaving out {_listed(left_out)}"
     return f"{held}."
@@ -1171,7 +1228,7 @@ def _summed_held(record: _ExecutorRecord) -> str | None:
     if not counts:
         return None
     if len(counts) == 1:
-        return f"It adds up {counts[0]:,} StatVars."
+        return f"It adds up {counts[0]:,} StatVar{'' if counts[0] == 1 else 's'}."
     return f"Its readings add up {_listed([f'{count:,}' for count in counts])} StatVars."
 
 
