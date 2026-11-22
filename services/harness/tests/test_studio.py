@@ -3025,8 +3025,9 @@ async def test_a_step_its_budget_cuts_off_closes_its_activity_line_as_failed(
 ) -> None:
     """A step whose budget runs out mid-call, or during a retry's delay,
     streamed `running` frames and never returned a result. Its line still
-    ends on a `failed` frame before the turn moves on, so Studio shows no
-    step waiting after the run is over."""
+    ends on a `failed` frame before the turn moves on to its reply, so Studio
+    shows no step waiting after the run is over. A data service that did not
+    answer closes the turn with no second plan to approve."""
     monkeypatch.setattr("executor.run.step_budget_s", lambda *_args, **_kwargs: 0.2)
     app = _app(*_plan(), tool_surface=surface)
     async with _client(app) as client:
@@ -3042,7 +3043,10 @@ async def test_a_step_its_budget_cuts_off_closes_its_activity_line_as_failed(
     assert get_data[-1]["status"] == "failed"
     assert is_user_sentence(get_data[-1]["detail"])
     assert get_data[-1]["duration_ms"] is not None
-    assert second.index(get_data[-1]) < _events(second).index("plan.proposed")
+    events = _events(second)
+    assert "plan.proposed" not in events
+    assert events[-1] == "done"
+    assert second.index(get_data[-1]) < events.index("message.delta")
 
 
 async def test_planner_lines_and_plan_step_lines_never_share_a_step_id_across_an_approval() -> None:
