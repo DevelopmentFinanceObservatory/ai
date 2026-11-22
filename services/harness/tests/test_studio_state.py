@@ -487,10 +487,9 @@ def test_a_realistic_canvas_block_states_its_shared_coordinates_once():
             "component_id": component_id,
             **entry,
             "fact_summary": entry["fact_summary"] and factored(entry["fact_summary"]),
-            "position": position,
             "turn": 1,
         }
-        for position, (component_id, entry) in enumerate(entries.items(), start=1)
+        for component_id, entry in entries.items()
     ]
 
 
@@ -815,7 +814,6 @@ def test_this_turns_cards_past_the_full_places_are_named_compactly():
             "component_id": f"cmp_{index:02d}",
             "type": "line_chart",
             "title": "Aid",
-            "position": index + 1,
             "turn": 1,
         }
         for index in range(cap, cap + 3)
@@ -918,10 +916,12 @@ def test_a_card_left_on_the_canvas_is_named_ahead_of_removed_cards():
 
 
 @pytest.mark.parametrize("order", ["reversed", "pinned-last", "interleaved"])
-def test_the_canvas_views_name_the_same_cards_however_the_canvas_is_ordered(order: str):
-    """The user reorders the canvas. The views rank by the turn that drew each
-    card, so the order of the composition's blocks changes which cards are
-    named, and how, not at all. Each card's `position` follows the canvas."""
+def test_the_canvas_views_are_the_same_however_the_manifest_orders_the_cards(order: str):
+    """Studio places cards on a free board and keeps drag positions and its
+    own text cards on the client, so the manifest's block order is not the
+    order the user sees. The views rank by the turn that drew each card and
+    state no place on the canvas: the same cards in any manifest order give
+    the same views."""
     reorder: dict[str, Callable[[list[str]], list[str]]] = {
         "reversed": lambda ids: ids[::-1],
         "pinned-last": lambda ids: sorted(ids, key=lambda cid: cid.startswith("cmp_1_")),
@@ -931,40 +931,8 @@ def test_the_canvas_views_name_the_same_cards_however_the_canvas_is_ordered(orde
     plain = _turns_of_cards(*groups)
     moved = _turns_of_cards(*groups, order=reorder[order])
 
-    assert _without_positions(moved.canvas_listing_state()) == _without_positions(
-        plain.canvas_listing_state()
-    )
+    assert moved.canvas_listing_state() == plain.canvas_listing_state()
     assert moved.canvas_summary_state() == plain.canvas_summary_state()
-
-
-def _without_positions(listing: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: [{k: v for k, v in entry.items() if k != "position"} for entry in value]
-        if key in ("blocks", "titles", "off_canvas")
-        else value
-        for key, value in listing.items()
-    }
-
-
-def test_each_card_on_the_canvas_states_where_the_user_sees_it():
-    """A card dragged to the top of the canvas keeps its rank and states its
-    new position, so "the top chart" names it."""
-    state = _turns_of_cards((2, False, True), (3, False, True))
-    assert state.composition is not None
-    blocks = state.composition.blocks
-    state.composition = _next_manifest(
-        state.composition, [blocks[-1], *blocks[:-1]], actor=CompositionActor.USER
-    )
-
-    listing = state.canvas_listing_state()
-
-    assert [(block["component_id"], block["position"]) for block in listing["blocks"]] == [
-        ("cmp_2_00", 4),
-        ("cmp_2_01", 5),
-        ("cmp_2_02", 1),
-        ("cmp_1_00", 2),
-        ("cmp_1_01", 3),
-    ]
 
 
 def test_pinned_cards_past_the_compact_cap_are_counted():

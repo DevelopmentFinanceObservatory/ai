@@ -2975,9 +2975,8 @@ def build_orchestrator_tools(
         `part`: "plan" for the plan records of a turn, "readings" for the
         search readings of a turn, "canvas" for the conversation's cards, or,
         with `component_id`, that one card's stored entry. The canvas listing
-        ranks cards by the turn that drew them, not by where they sit. Each
-        card it lists names its `turn`, and a card on the canvas its
-        `position` there, 1 being the first card the user sees:
+        ranks cards by the turn that drew them and holds no card's place on
+        the canvas. Each card it lists names its `turn`:
         - `blocks`: cards in full with their facts, while places remain:
           this turn's cards on the canvas, then the pinned ones, then the
           other cards on the canvas, newest turn first.
