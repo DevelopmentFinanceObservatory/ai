@@ -1437,36 +1437,51 @@ def _scope_issues(
 
     The identity is what `spec_id` hashes, so what it binds is what a
     retrieval against that spec can return. Only what it actually states is
-    compared: a member it omits says nothing.
+    compared: a member it omits, or a role its `entities` leaves out
+    (`_identity_entities`), says nothing.
     """
     if not evidence.identity:
         return []
     issues: list[EvidenceIssue] = []
-    bound = _identity_refs(evidence.identity.get("entities"))
+    bound = _identity_entities(evidence.identity.get("entities"))
     if bound is not None:
-        named = named_refs(requirement.entities, evidence)
-        issues.extend(_scope_entity_issues(requirement, named, bound))
+        named = {
+            one.ref
+            for entity in requirement.entities
+            for one in named_members(entity, evidence)
+            if one.role in bound
+        }
+        refs = {ref for refs_on_role in bound.values() for ref in refs_on_role}
+        issues.extend(_scope_entity_issues(requirement, named, refs))
     requested = evidence.identity.get("requested_window")
     if isinstance(requested, dict):
         issues.extend(_scope_window_issues(requirement, requested))
     return issues
 
 
-def _identity_refs(entities: JsonValue) -> set[str] | None:
-    """The refs an identity's `entities` binds, across every role; `None` when it states none.
+def _identity_entities(entities: JsonValue) -> dict[str, set[str]] | None:
+    """The refs an identity's `entities` binds, by the role column each sits on; `None`
+    when it states none.
 
-    The identity's keys are graph properties, not the source's role columns,
-    so only the refs are compared and never the roles. An empty map, or one
-    with no list under any key, states none exactly as an absent member
-    does: data-mcp writes `entities: {}` to clear the filter, which is an
-    unfiltered definition wider than the requirement, not one binding nothing.
+    The identity is keyed by role column (`observationAbout`, `origin`,
+    `destination`), as the source's entities are. A role it leaves out is a
+    side the definition does not bind: Search answers it with what the side
+    reads as, such as the total it counts an open recipient side as, and
+    states that among the source's entities. A required entity sitting on
+    such a role is checked against those entities (`_entity_findings`), so
+    the scope check says nothing about it. An empty map, or one with no list
+    under any key, states none exactly as an absent member does: data-mcp
+    writes `entities: {}` to clear the filter, which is an unfiltered
+    definition wider than the requirement, not one binding nothing.
     """
     if not isinstance(entities, dict):
         return None
-    lists = [values for values in entities.values() if isinstance(values, list)]
-    if not lists:
-        return None
-    return {value for values in lists for value in values if isinstance(value, str)}
+    bound = {
+        role: {value for value in values if isinstance(value, str)}
+        for role, values in entities.items()
+        if isinstance(values, list)
+    }
+    return bound or None
 
 
 def _scope_entity_issues(

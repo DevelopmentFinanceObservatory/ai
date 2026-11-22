@@ -454,7 +454,7 @@ def _scope_codes(requirement: DatasetRequirement, source: SelectedSource) -> lis
 def test_an_identity_binding_exactly_the_required_entities_says_nothing(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
-    identity = _identity(entities={"recipient": ["country/KEN"]})
+    identity = _identity(entities={"destination": ["country/KEN"]})
 
     assert _scope_codes(requirement(), source(identity=identity)) == []
 
@@ -462,7 +462,7 @@ def test_an_identity_binding_exactly_the_required_entities_says_nothing(
 def test_an_identity_that_does_not_bind_a_required_entity_is_an_error(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
-    identity = _identity(entities={"recipient": ["country/GHA"]})
+    identity = _identity(entities={"destination": ["country/GHA"]})
     issues = check_evidence(requirement(), evidence_from_source(source(identity=identity)))
 
     (issue,) = errors(issues)
@@ -475,7 +475,7 @@ def test_an_identity_bound_wider_than_the_requirement_is_a_warning(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
     # A region name legitimately expands into its members.
-    identity = _identity(entities={"recipient": ["country/KEN", "country/GHA"]})
+    identity = _identity(entities={"destination": ["country/KEN", "country/GHA"]})
     issues = check_evidence(requirement(), evidence_from_source(source(identity=identity)))
 
     assert errors(issues) == []
@@ -484,13 +484,36 @@ def test_an_identity_bound_wider_than_the_requirement_is_a_warning(
     assert issue.found == ["country/GHA", "country/KEN"]
 
 
-def test_identity_refs_are_compared_across_roles_and_never_the_roles_themselves(
+def test_an_entity_on_a_role_the_identity_leaves_out_says_nothing_about_the_scope(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
-    # The identity's keys are graph properties, not the source's role columns.
-    identity = _identity(entities={"debtor_of": ["country/KEN"]})
+    # A G7 whole over every recipient: the definition binds the donor only,
+    # and Search answers the open recipient side with the developing-countries
+    # total, which the whole names by its ref. The control binds the
+    # recipient side to another party, which the check still refuses.
+    entities = (
+        ResolvedEntity(role="origin", ref="GroupOfSeven", label="Group of Seven"),
+        ResolvedEntity(
+            role="destination", ref="DACDevelopingCountries", label="developing countries (DAC)"
+        ),
+    )
+    whole = requirement(
+        entities=[
+            Entity(name="Group of Seven", role="donor"),
+            Entity(
+                name="developing countries (DAC)", role="recipient", dcid="DACDevelopingCountries"
+            ),
+        ]
+    )
+    donor_only = _identity(entities={"origin": ["GroupOfSeven"]})
+    other_recipient = _identity(
+        entities={"origin": ["GroupOfSeven"], "destination": ["country/KEN"]}
+    )
 
-    assert _scope_codes(requirement(), source(identity=identity)) == []
+    assert _scope_codes(whole, source(entities=entities, identity=donor_only)) == []
+    assert ("scope_entities_unbound", "error") in _scope_codes(
+        whole, source(entities=entities, identity=other_recipient)
+    )
 
 
 def test_an_identity_omitting_its_entities_says_nothing_about_them(
@@ -3512,7 +3535,7 @@ def test_an_identity_binding_a_named_sets_members_is_not_wider_than_the_requirem
     # France and Africa's members are every ref the identity binds, so none
     # is unnamed.
     identity = _identity(
-        entities={"donor": ["country/FRA"], "recipient": ["country/GHA", "country/KEN"]}
+        entities={"origin": ["country/FRA"], "destination": ["country/GHA", "country/KEN"]}
     )
     wanted = requirement(
         entities=[Entity(name="France", role="donor"), Entity(name="Africa", role="recipient")]
