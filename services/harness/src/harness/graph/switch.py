@@ -227,13 +227,23 @@ class SwitchFailedError(Exception):
     """A switch or chip that cannot be applied: `code` is the refusal's code,
     `reason`, the message, the one sentence saying why that the card shows
     under the choice, and `retryable` whether the same switch can succeed if
-    asked again."""
+    asked again. `answer` is a chip's fetch that raised inside DFO, as the
+    `fetch` tool answers a raise (`harness.orchestrator_tools.raised_answer`),
+    handed to the agent as its own fetch would be."""
 
-    def __init__(self, reason: str, *, code: str, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        code: str,
+        retryable: bool = False,
+        answer: Mapping[str, Any] | None = None,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.code = code
         self.retryable = retryable
+        self.answer = answer
 
 
 @dataclass(frozen=True)
@@ -1370,8 +1380,9 @@ async def _fetched(
     Raises:
         SwitchFailedError: At the first fetch refused (a result stating a
             `code`), under that code, retryable when the refusal's retry
-            mode or its code says the same fetch can pass later. Later
-            fetches are not made.
+            mode or its code says the same fetch can pass later. A fetch
+            that raised (`HarnessCode.RAISED`) carries its answer
+            (`SwitchFailedError.answer`). Later fetches are not made.
     """
     fetched: list[dict[str, Any]] = []
     for shaped in (reading.fetch.args if reading.fetch is not None else ()) or ({},):
@@ -1391,6 +1402,7 @@ async def _fetched(
                 f"{' just now' if retryable else ''}.",
                 code=str(code),
                 retryable=retryable,
+                answer=result if code == HarnessCode.RAISED else None,
             )
         fetched.append(result)
     return fetched
@@ -1404,7 +1416,8 @@ def _not_applied(
     error: SwitchFailedError,
 ) -> dict[str, str]:
     """Fail the `APPLY_CHOICE_STEP_TOOL` step of a chip that cannot be applied
-    with `error`, and return the hand-back telling the agent so."""
+    with `error`, and return the hand-back telling the agent so, followed by
+    the answer of a fetch that raised (`SwitchFailedError.answer`)."""
     note = str(error)
     logger.info(
         "scope choice not applied: choice_id=%s option_id=%s code=%s",
@@ -1425,13 +1438,12 @@ def _not_applied(
             },
         },
     )
-    return {
-        "status": f"Counting {label}",
-        "text": (
-            f"The user asked to count {label}, and it was not applied: {note} Tell the "
-            "user so in a sentence. The earlier answer stands."
-        ),
-    }
+    lead = (
+        f"The user asked to count {label}, and it was not applied: {note} Tell the "
+        "user so in a sentence. The earlier answer stands."
+    )
+    raised = [json.dumps(error.answer)] if error.answer is not None else []
+    return {"status": f"Counting {label}", "text": "\n".join([lead, *raised])}
 
 
 def _apply_step(
