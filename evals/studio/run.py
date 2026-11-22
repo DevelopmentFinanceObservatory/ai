@@ -85,6 +85,11 @@ class JudgeError(Exception):
     """The judge model stayed unavailable through its retries; the case is unscored."""
 
 
+# The question forms the Studio website declares it renders
+# (`harness.wire.TurnRequest.client_features`).
+_CLIENT_FEATURES = ["unit_question", "multi_select"]
+
+
 def _request(kind: str, conversation_id: str, **members: Any) -> dict[str, Any]:
     body = {"kind": kind, "schema_version": 1, "conversation_id": conversation_id}
     body.update({key: value for key, value in members.items() if value is not None})
@@ -142,6 +147,7 @@ async def _run_message_turn(
             component_ref=component_ref,
             auto_add=turn.get("auto_add"),
             seed_spec=turn.get("seed_spec"),
+            client_features=_CLIENT_FEATURES,
         ),
     )
     violations += checks.check_segment(segment, label="turn stream")
@@ -195,6 +201,7 @@ async def _run_message_turn(
                 conversation_id,
                 interrupt_id=pause["interrupt_id"],
                 decision=decision,
+                client_features=_CLIENT_FEATURES,
                 **reply,
             ),
         )
@@ -210,16 +217,32 @@ def _elicitation_reply(
     stops it when it cannot answer. `scripted` is the turn's
     `elicitation_answers`, one entry per question by position: `{"option": n}`
     picks the question's nth option (from 1), `{"text": ...}` answers in the
-    user's words, `{"skipped": true}` leaves the question to the agent. A
-    question past the list gets its first option."""
+    user's words, `{"skipped": true}` leaves the question to the agent, and
+    `{"options": [n, ...]}` ticks the nth options (from 1) of a multi-select
+    question, `{"unit": {...}}` answers a unit question with the unit its chips start
+    on, changed by the keys given (`_unit_answer`). A question past the list
+    gets its first option, or, for a unit question, its starting unit."""
     reply: dict[str, dict[str, Any]] = {}
     for position, question in enumerate(pause["questions"]):
-        entry = scripted[position] if position < len(scripted) else {"option": 1}
+        offer = question.get("unit")
+        default: dict[str, Any] = {"unit": {}} if offer else {"option": 1}
+        entry = scripted[position] if position < len(scripted) else default
         options = question.get("options") or []
         if "text" in entry:
             reply[question["id"]] = {"kind": "text", "text": entry["text"]}
         elif entry.get("skipped"):
             reply[question["id"]] = {"kind": "skipped"}
+        elif offer and "unit" in entry:
+            reply[question["id"]] = _unit_answer(offer, entry["unit"])
+        elif (
+            question.get("input") == "multi_select"
+            and entry.get("options")
+            and all(0 < n <= len(options) for n in entry["options"])
+        ):
+            reply[question["id"]] = {
+                "kind": "options",
+                "option_ids": [options[n - 1]["id"] for n in entry["options"]],
+            }
         elif 0 < entry.get("option", 0) <= len(options):
             reply[question["id"]] = {
                 "kind": "option",
@@ -231,6 +254,19 @@ def _elicitation_reply(
                 f"and the turn answers it with {entry!r}"
             )
     return reply, None
+
+
+def _unit_answer(offer: dict[str, Any], change: dict[str, Any]) -> dict[str, Any]:
+    """A unit answer: `offer`'s start with `change` applied. A constant unit
+    with no base year takes the latest its currency offers; a current one
+    drops it."""
+    unit = {**offer["start"], **change}
+    if unit["prices"] == "current":
+        unit.pop("base_year", None)
+    elif unit.get("base_year") is None:
+        currency = next(c for c in offer["currencies"] if c["code"] == unit["currency"])
+        unit["base_year"] = currency["base_year_max"]
+    return {"kind": "unit", **unit}
 
 
 async def _run_mutate_turn(
@@ -463,7 +499,9 @@ TURN_EXPECT_KEYS: dict[str, frozenset[str] | None] = {
     "blocks": None,
     "activity_steps": None,
     "step_tools": None,
-    "elicitation": frozenset({"min_questions", "min_options", "allow_free_text", "skippable"}),
+    "elicitation": frozenset(
+        {"min_questions", "min_options", "allow_free_text", "skippable", "input"}
+    ),
     "plan": frozenset({"min_steps", "min_version", "max_version", "operations_contain"}),
     "no_plan": None,
     "card_title_contains": None,
@@ -650,6 +688,11 @@ def _check_turn_expectations(
                     f"expected >= {rules['min_questions']}"
                 )
             for position, question in enumerate(questions, start=1):
+                if "input" in rules and question.get("input") != rules["input"]:
+                    violations.append(
+                        f"{label}: elicitation question {position} input="
+                        f"{question.get('input')}, expected {rules['input']}"
+                    )
                 offered = len(question.get("options") or [])
                 if rules.get("min_options") and offered < rules["min_options"]:
                     violations.append(
@@ -811,8 +854,14 @@ def _elicitation_digest(frame: dict[str, Any], reply: dict[str, Any] | None) -> 
             shown = None
         elif answer["kind"] == "option":
             shown = labels.get(answer["option_id"], answer["option_id"])
+        elif answer["kind"] == "options":
+            shown = "; ".join(labels.get(i, i) for i in answer["option_ids"])
         elif answer["kind"] == "text":
             shown = answer["text"]
+        elif answer["kind"] == "unit":
+            shown = " ".join(
+                str(answer[key]) for key in ("prices", "base_year", "currency") if key in answer
+            )
         else:
             shown = "left to the agent"
         asked.append(

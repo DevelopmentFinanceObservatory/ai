@@ -78,6 +78,7 @@ from planner.workflow import ToolId
 from pydantic import ValidationError
 
 from harness import plan_display
+from harness.card_unit import UnitCard, card_unit_change, stored_block, unit_card
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.fatal_codes import stated_refusal, wire_error
 from harness.graph.events import AgentStatus, GraphEvent, PlannerStarted, StepProgress
@@ -119,9 +120,11 @@ from harness.studio_store import StudioStore, keep_turn_records
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
+from harness.unit_offer import unit_words, whole_units
 from harness.wire import (
     ActivityStep,
     ApplyChoiceSuggestion,
+    ClientFeature,
     ComponentCreated,
     CompositionUpdated,
     Done,
@@ -152,6 +155,7 @@ from harness.wire import (
     StepStatus,
     Suggestions,
     ToolError,
+    UnitOffer,
     component_created,
     log_unreadable_card,
 )
@@ -309,17 +313,27 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
 
 
 def closed_on_reply(
-    conversation: ConversationState, text: str, *, suggestions: bool
+    conversation: ConversationState,
+    text: str,
+    *,
+    suggestions: bool,
+    say: bool = True,
+    user_display: str | None = None,
 ) -> list[MessageComplete | Suggestions | Done]:
     """Record the turn closed on `text`, its reply, and return the frames
     that close its stream, numbered: `message.complete`, an empty
     `suggestions` when `suggestions`, and `done`. For a turn that runs no
-    agent, such as an Edit Card or a declined plan."""
+    agent, such as an Edit Card or a declined plan. A reply that is not `say`
+    is recorded and sent as no `message.complete`: the stream shows no text,
+    and a state read gives the reply as empty. `user_display` is the line a
+    state read shows as the user's message (`ConversationState.close_turn`)."""
     conversation.turn_final_text = text
-    conversation.close_turn(final_text=text)
-    frames: list[MessageComplete | Suggestions | Done] = [
-        MessageComplete(event="message.complete", seq=conversation.next_seq(), text=text)
-    ]
+    conversation.close_turn(final_text=text, reply_shown=say, user_display=user_display)
+    frames: list[MessageComplete | Suggestions | Done] = []
+    if say:
+        frames.append(
+            MessageComplete(event="message.complete", seq=conversation.next_seq(), text=text)
+        )
     if suggestions:
         frames.append(Suggestions(event="suggestions", seq=conversation.next_seq(), items=[]))
     frames.append(
@@ -1437,6 +1451,80 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     return PlannerPlan.model_validate(fields)
 
 
+def _asked_question(
+    question: Mapping[str, Any], *, skippable: bool, features: frozenset[ClientFeature]
+) -> ElicitationQuestion:
+    """One question of the `ask` node's pause as the frame asks it: a unit
+    question, whose entry carries `unit` (`harness.graph.state.ask_questions`),
+    with its offer and no options or free text; any other with its candidates
+    as options, and room for the user's own words; a `multi_select` one lets
+    the user tick several.
+
+    A client that declared no `unit_question` feature gets the unit question
+    as a `single_select` over the offer's whole units (`whole_units`), keeping
+    the offer and no free text; one that declared no `multi_select` gets a
+    `multi_select` question as a `single_select` (`ConversationState.client_features`).
+    """
+    if unit := question.get("unit"):
+        offer = UnitOffer.model_validate(unit["offer"])
+        if ClientFeature.UNIT_QUESTION in features:
+            return ElicitationQuestion(
+                id=str(question["id"]),
+                question=str(question["question"]),
+                input=ElicitationInput.UNIT,
+                allow_free_text=False,
+                skippable=skippable,
+                unit=offer,
+            )
+        return ElicitationQuestion(
+            id=str(question["id"]),
+            question=str(question["question"]),
+            input=ElicitationInput.SINGLE_SELECT,
+            options=[
+                ElicitationOption(id=option_id, label=unit_words(choice, offer))
+                for option_id, choice in whole_units(offer).items()
+            ],
+            allow_free_text=False,
+            skippable=skippable,
+        )
+    multi = bool(question.get("multi_select")) and ClientFeature.MULTI_SELECT in features
+    return ElicitationQuestion(
+        id=str(question["id"]),
+        question=str(question["question"]),
+        input=ElicitationInput.MULTI_SELECT if multi else ElicitationInput.SINGLE_SELECT,
+        options=[
+            ElicitationOption(id=str(candidate["spec_id"]), label=str(candidate["label"]))
+            for candidate in question["candidates"]
+        ],
+        allow_free_text=True,
+        skippable=skippable,
+    )
+
+
+def _kept_question(asked: ElicitationQuestion, entry: Mapping[str, Any] | None) -> _PendingQuestion:
+    """`asked` as `/interrupt` checks its answer, `entry` the `ask` node's
+    question it was built from (`None` for the planner's ask). A unit question
+    keeps its offer, and one sent in another form than its own keeps that form
+    as `native_input`, which turns its `option` answer back into a unit or a
+    one-item `options` answer (`harness.studio._resume_answer`)."""
+    offer = entry.get("unit") if entry is not None else None
+    if offer:
+        native: ElicitationInput | None = ElicitationInput.UNIT
+    elif entry is not None and entry.get("multi_select"):
+        native = ElicitationInput.MULTI_SELECT
+    else:
+        native = None
+    return _PendingQuestion(
+        id=asked.id,
+        question=asked.question,
+        options={option.id: option.label for option in asked.options or ()},
+        skippable=asked.skippable,
+        input=asked.input,
+        unit=UnitOffer.model_validate(offer["offer"]) if offer else None,
+        native_input=None if asked.input is native else native,
+    )
+
+
 def _planner_question(args: dict[str, Any]) -> ElicitationQuestion:
     """The planner's ask as the frame's one question, `q1`. Its call's
     arguments, which its tool accepted (`planner.tools.ask_refusal`) and
@@ -2092,6 +2180,14 @@ class _Translator:
                 )
             )
             if isinstance(component, dict) and created is not None:
+                # Only a card that lands a block can change unit: the route
+                # refuses a card off the canvas (`harness.card_unit.unit_move`).
+                lands = record.land and self._conversation.auto_add
+                card = (
+                    self._unit_card(component, record.card_lineage, created=created)
+                    if lands
+                    else None
+                )
                 frames.extend(
                     await self._component_frames(
                         component,
@@ -2100,9 +2196,31 @@ class _Translator:
                         created=created,
                         write_token=record.write_token,
                         card_lineage=record.card_lineage,
+                        unit_card=card,
                     )
                 )
         return frames
+
+    def _unit_card(
+        self,
+        component: dict[str, Any],
+        lineage: CardLineage | None,
+        *,
+        created: ComponentCreated,
+    ) -> UnitCard | None:
+        """The `UnitCard` of `component` when its unit can change, with its
+        `unit_change` set on `created`: a card drawing one retrieval's own
+        frame of a spec whose Search block, this turn's or one an earlier
+        turn kept, converts it (`harness.card_unit`)."""
+        card = unit_card(component, lineage)
+        if card is None:
+            return None
+        c = self._conversation
+        change = card_unit_change(card, stored_block(c.turn_specs, c.turns, card.spec_id))
+        if change is None:
+            return None
+        created.unit_change = change
+        return card
 
     async def _component_frames(
         self,
@@ -2113,6 +2231,7 @@ class _Translator:
         intent: dict[str, Any] | None = None,
         write_token: str | None = None,
         card_lineage: CardLineage | None = None,
+        unit_card: UnitCard | None = None,
     ) -> list[Any]:
         """Frames for `component`, which passed the `component.created` wire
         contract (`created` is the frame `_record_frames` built from it).
@@ -2128,16 +2247,20 @@ class _Translator:
         resolves to `"held"` inside `harness.studio_state.land_component`
         itself, also only `component.created`, and writes the card's entry
         with no block. The card's `write_token` is kept with it, in its
-        write, and its `card_lineage` commits in that write. A card that does
-        not land keeps its token in the conversation for the closing write,
-        and stores no lineage."""
+        write, and its `card_lineage` commits in that write, as does its
+        `unit_card` with its entry. A card that does not land keeps its token
+        in the conversation for the closing write, and stores no lineage."""
         created.seq = self._conversation.next_seq()
         if not land:
             if write_token:
                 self._conversation.write_tokens[created.component_id] = write_token
             return [created]
         landed = await self._land(
-            component, intent=intent, write_token=write_token, card_lineage=card_lineage
+            component,
+            intent=intent,
+            write_token=write_token,
+            card_lineage=card_lineage,
+            unit_card=unit_card,
         )
         if landed != "created":
             return [created]
@@ -2151,6 +2274,7 @@ class _Translator:
         intent: dict[str, Any] | None,
         write_token: str | None,
         card_lineage: CardLineage | None = None,
+        unit_card: UnitCard | None = None,
     ) -> Literal["created", "held"]:
         """`harness.studio_state.land_component` on the current
         conversation, inside the store's card write
@@ -2168,7 +2292,12 @@ class _Translator:
                     **work.write_tokens,
                     str(component["component_id"]): write_token,
                 }
-            return state_land_component(work, component, intent=intent)
+            return state_land_component(
+                work,
+                component,
+                intent=intent,
+                unit_card=unit_card.as_json() if unit_card is not None else None,
+            )
 
         return await self._recorder.store.change_canvas(
             *key, land, lineage=card_lineage, landed=lambda landed: landed == "created"
@@ -2460,19 +2589,7 @@ class _Translator:
         if asked:
             several = len(asked) > 1
             questions = [
-                ElicitationQuestion(
-                    id=str(question["id"]),
-                    question=str(question["question"]),
-                    input=ElicitationInput.SINGLE_SELECT,
-                    options=[
-                        ElicitationOption(
-                            id=str(candidate["spec_id"]), label=str(candidate["label"])
-                        )
-                        for candidate in question["candidates"]
-                    ],
-                    allow_free_text=True,
-                    skippable=several,
-                )
+                _asked_question(question, skippable=several, features=conversation.client_features)
                 for question in asked
             ]
             skippable = not several
@@ -2490,13 +2607,8 @@ class _Translator:
             adk_id=wire_id,
             kind="elicitation",
             questions=tuple(
-                _PendingQuestion(
-                    id=question.id,
-                    question=question.question,
-                    options={option.id: option.label for option in question.options or ()},
-                    skippable=question.skippable,
-                )
-                for question in questions
+                _kept_question(question, entry)
+                for question, entry in zip(questions, asked or [None], strict=True)
             ),
             skippable=skippable,
             frames=(frame,),

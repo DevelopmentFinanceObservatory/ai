@@ -61,6 +61,8 @@ from ..planner_tools import call_planner_tool
 from ..session_events import response_event, user_answer
 from .test_agent import (
     _CONSTANT_GROSS,
+    _EUR,
+    _EUR_READ,
     _FRANCE_KENYA,
     _GROSS,
     _US_MULTILATERAL,
@@ -70,10 +72,12 @@ from .test_agent import (
     _FakeToolContext,
     _offering_constant,
     _prices_ask_events,
+    _read_in,
     _share,
     _show_block,
     _show_blocks,
     _tools_by_name,
+    _unit_answered,
 )
 
 DAC_TOTAL = "spec_" + "d" * 32
@@ -2259,3 +2263,79 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
     )
 
     assert result["outcome"] == Outcome.OK.value, result
+
+
+def test_a_prices_switch_after_a_whole_unit_keeps_its_currency() -> None:
+    """The user chose current euros for the gross part, and the plan on the
+    series Search re-read in them records that choice in words. A switch of
+    the card's prices row to constant prices keeps the euros: a replan in
+    constant US dollars is refused and told the unit in euros."""
+    measure = Decision(
+        slot="measure",
+        description="What to measure.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+
+    def aid(requirement_id: str, **update: Any) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=("measure",),
+            measure="French aid to Kenya",
+            entities=(Entity(name="France", role="donor"), Entity(name="Kenya", role="recipient")),
+            period=Period(start=2015, end=2022),
+            source_spec_id=_EUR_READ,
+            unit=Unit(currency="EUR", prices="current"),
+        ).model_copy(update=update)
+
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _offering_constant(), _constant_block(), _read_in(_EUR_READ, _EUR))
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([measure]),
+        evidence_requirements=[aid("first")],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    slot = f"user_prices_{_EUR_READ}"
+    decided = next(d for d in plan.decisions if d.slot == slot)
+    assert (decided.chosen, decided.options) == (
+        "current prices in EUR",
+        ("current prices in EUR", "constant prices"),
+    )
+    assert decided.rationale == "The user chose current prices in EUR."
+    option = decision_option_id("constant prices")
+    pick = decision_pick(
+        plan, choice_id=f"decision/{slot}", option_id=option, to_origin={}, alignments={}
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+    ctx.records = [
+        *ctx.records,
+        response_event("propose_plan", card),
+        _switch_event(f"decision/{slot}", option),
+    ]
+
+    result = propose(
+        amends_version=card["version"],
+        evidence_requirements=[
+            aid(
+                "second",
+                source_spec_id=_CONSTANT_GROSS,
+                unit=Unit(currency="USD", prices="constant", base_year=2023),
+            )
+        ],
+        removed_evidence_requirements=["first"],
+        tool_context=ctx,
+    )
+
+    assert result["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, result
+    in_euros = Unit(currency="EUR", prices="constant", base_year=2023)
+    assert result["detail"]["unit"] == in_euros.model_dump(mode="json")

@@ -155,17 +155,20 @@ from harness.graph.state import (
     DescribedFrame,
     PendingAsk,
     PendingPlan,
+    UnitAsk,
     conversation_readings,
     count_call,
     frame_store_ref,
     open_parts,
     pending_action,
+    prices_forms,
     prices_question,
     register_frames,
     store_search,
     stored_mapping,
     stored_sequence,
     turn_budgets,
+    unit_asks,
 )
 from harness.reply_figures import (
     DrawnSeries,
@@ -1536,16 +1539,22 @@ def _questions_refusal(
     named: set[str],
     parts: Collection[str] = (),
     measures: Mapping[str, str | None] | None = None,
+    units: Sequence[UnitAsk | None] = (),
 ) -> dict[str, Any] | None:
     """The refusal of an `ask_user` call that asks no question or more than
-    `MAX_ASK_QUESTIONS`, asks a question with no option, prices a part that
-    is none of `parts`, the spec_ids of the readings whose prices are open
-    (`harness.graph.state.open_parts`), prices one part, or two parts
-    measuring the same thing over other windows (equal `measures`,
-    `submission.prices_choice.measure_key`), in two questions, offers a spec_id no search result
-    this turn named (`_named_spec_ids`), or offers one spec_id on two options
-    of the call; None when it asks well. `questions` hold the options a
-    prices question is given (`harness.graph.state.prices_question`)."""
+    `MAX_ASK_QUESTIONS`, asks a question with no option, asks the unit of a
+    part that is none of `parts`, the spec_ids of the readings whose prices
+    are open (`harness.graph.state.open_parts`), asks one part's unit, or
+    the units of two parts measuring the same thing over other windows
+    (equal `measures`, `submission.prices_choice.measure_key`), in two
+    questions, asks a unit no currency serves in both prices for the parts
+    it covers (`units`, `harness.graph.state.unit_asks`), offers a spec_id
+    no search result this turn named (`_named_spec_ids`), or offers one
+    spec_id on two options of the call, or lets the user tick several
+    (`AskQuestion.multi_select`) of options that carry a spec_id or of a unit
+    question; None when it asks well. `questions`
+    hold the options a unit question is given
+    (`harness.graph.state.prices_question`)."""
     options = [option for question in questions for option in question.options]
     spec_ids = [option.spec_id for option in options if option.spec_id is not None]
     problems = []
@@ -1554,12 +1563,19 @@ def _questions_refusal(
             f"it asks {len(questions)} questions, and ask_user takes 1 to {MAX_ASK_QUESTIONS}"
         )
     problems += [
-        f"question {question.question!r} prices {question.prices_of}, which lists no "
+        f"question {question.question!r} asks the unit of {question.unit_of}, which lists no "
         "`open_prices` this turn"
         for question in questions
-        if question.prices_of is not None and question.prices_of not in parts
+        if question.unit_of is not None and question.unit_of not in parts
     ]
-    priced = [question.prices_of for question in questions if question.prices_of is not None]
+    problems += [
+        f"question {question.question!r} lets the user tick several, so it offers labels only: "
+        "no spec_id on an option and no `unit_of`"
+        for question in questions
+        if question.multi_select
+        and (question.unit_of is not None or any(o.spec_id for o in question.options))
+    ]
+    priced = [question.unit_of for question in questions if question.unit_of is not None]
     problems += [
         f"{part} is priced by more than one question"
         for part in sorted(set(priced))
@@ -1570,7 +1586,7 @@ def _questions_refusal(
         if (key := (measures or {}).get(part)) is not None:
             by_measure.setdefault(key, set()).add(part)
     problems += [
-        f"{' and '.join(sorted(same))} measure one thing over other years, so one prices "
+        f"{' and '.join(sorted(same))} measure one thing over other years, so one unit "
         "question covers them"
         for same in by_measure.values()
         if len(same) > 1
@@ -1578,7 +1594,15 @@ def _questions_refusal(
     problems += [
         f"question {question.question!r} offers no option"
         for question in questions
-        if not question.options and question.prices_of is None
+        if not question.options and question.unit_of is None
+    ]
+    problems += [
+        f"question {question.question!r} asks the unit of {question.unit_of}, and no currency "
+        "serves both current and constant prices for every part it covers"
+        for index, question in enumerate(questions)
+        if question.unit_of in parts
+        and not question.options
+        and (units[index] if index < len(units) else None) is None
     ]
     problems += [
         f"option {option.label!r} carries {option.spec_id}, which no search result named this turn"
@@ -2154,8 +2178,8 @@ def build_orchestrator_tools(
         with other counts under `alternatives` and the same count in other
         prices under `other_prices`, each with its spec_id and label. A
         definite part whose prices the user left open over several years
-        lists `open_prices`, the options of a prices question, the prices
-        search read first. A definite part lists the `source_codes` of the
+        lists `open_prices`, the prices the unit question can ask about, the
+        prices search read first. A definite part lists the `source_codes` of the
         indicators it found, each with the publisher that issues it when
         search names one. And
         `skills`: background a result calls for, each by id and
@@ -2907,19 +2931,23 @@ def build_orchestrator_tools(
         Ask only what changes the answer. Each question offers at least one
         option. An option for one of a part's candidates carries the spec_id
         the search result gives it, and the answer names that spec_id when
-        the user picks it. Each spec_id goes on one option. A prices question
-        names its part in `prices_of`, and its options are filled in. End
-        your turn after calling ask_user. Every answer comes back as this
+        the user picks it. Each spec_id goes on one option. A unit question
+        names its part in `unit_of`, and its answers are filled in for you.
+        Set `multi_select` when several answers can hold together; its options
+        are labels only, with no spec_id.
+        End your turn after calling ask_user. Every answer comes back as this
         call's result.
         """
         parts = open_parts(call.state)
-        questions = [prices_question(question, parts) for question in questions]
+        forms = prices_forms(call.state)
+        questions = [prices_question(question, parts, forms) for question in questions]
         blocks = stored_mapping(call.state, ORCHESTRATOR_SPECS_KEY)
         refused = _questions_refusal(
             questions,
             _named_spec_ids(call),
             parts,
             {part: measure_key(blocks[part]) for part in parts if part in blocks},
+            unit_asks(questions, call.state),
         )
         if refused:
             return refused

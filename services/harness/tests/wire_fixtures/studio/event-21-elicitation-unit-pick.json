@@ -1,0 +1,24 @@
+{
+  "event": "elicitation.request",
+  "seq": 5,
+  "interrupt_id": "elc_9b2d4f61a8c34e07",
+  "questions": [
+    {
+      "id": "q1",
+      "question": "Which unit should Kenya's debt service be shown in?",
+      "input": "single_select",
+      "options": [
+        {
+          "id": "USD-constant-2023",
+          "label": "Constant 2023 US dollars"
+        },
+        {
+          "id": "USD-current",
+          "label": "Current US dollars"
+        }
+      ],
+      "skippable": true
+    }
+  ],
+  "skippable": true
+}

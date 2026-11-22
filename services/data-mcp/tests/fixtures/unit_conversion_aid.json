@@ -1,0 +1,143 @@
+{
+  "spec_id": "spec_263883d07f171c3723f665335d888229",
+  "identity": {
+    "identity_version": "spec1",
+    "shape": {
+      "kind": "statvar_schema",
+      "population_type": "FinancialFlow",
+      "measured_property": "amount",
+      "stat_type": "measuredValue",
+      "measurement_qualifier": "Nominal"
+    },
+    "slots": [
+      {
+        "property": "crsCooperationModality",
+        "binding": {
+          "state": "unbound"
+        }
+      },
+      {
+        "property": "crsPurpose",
+        "binding": {
+          "state": "unbound"
+        }
+      },
+      {
+        "property": "crsTypeOfFinance",
+        "binding": {
+          "state": "unbound"
+        }
+      },
+      {
+        "property": "crsTypeOfFlow",
+        "binding": {
+          "state": "value",
+          "ref": "CRSTypeOfFlow10"
+        }
+      },
+      {
+        "property": "financialFlowType",
+        "binding": {
+          "state": "value",
+          "ref": "Disbursement"
+        }
+      },
+      {
+        "property": "nettingBasis",
+        "binding": {
+          "state": "value",
+          "ref": "Gross"
+        }
+      }
+    ],
+    "entities": {
+      "destination": [
+        "country/GTM"
+      ],
+      "origin": [
+        "country/DEU"
+      ]
+    },
+    "requested_window": {
+      "kind": "all"
+    }
+  },
+  "unit": {
+    "currency": "EUR",
+    "prices": "constant",
+    "base_year": 2024
+  },
+  "minted": "spec_f642ff57e45a2da29e244edf5a53b8e7",
+  "minted_identity": {
+    "identity_version": "spec1",
+    "shape": {
+      "kind": "statvar_schema",
+      "population_type": "FinancialFlow",
+      "measured_property": "amount",
+      "stat_type": "measuredValue",
+      "measurement_qualifier": "Nominal"
+    },
+    "slots": [
+      {
+        "property": "crsCooperationModality",
+        "binding": {
+          "state": "unbound"
+        }
+      },
+      {
+        "property": "crsPurpose",
+        "binding": {
+          "state": "unbound"
+        }
+      },
+      {
+        "property": "crsTypeOfFinance",
+        "binding": {
+          "state": "unbound"
+        }
+      },
+      {
+        "property": "crsTypeOfFlow",
+        "binding": {
+          "state": "value",
+          "ref": "CRSTypeOfFlow10"
+        }
+      },
+      {
+        "property": "financialFlowType",
+        "binding": {
+          "state": "value",
+          "ref": "Disbursement"
+        }
+      },
+      {
+        "property": "nettingBasis",
+        "binding": {
+          "state": "value",
+          "ref": "Gross"
+        }
+      }
+    ],
+    "entities": {
+      "destination": [
+        "country/GTM"
+      ],
+      "origin": [
+        "country/DEU"
+      ]
+    },
+    "requested_window": {
+      "kind": "all"
+    },
+    "facets": {
+      "unit": {
+        "state": "value",
+        "request": {
+          "currency": "EUR",
+          "prices": "constant",
+          "base_year": 2024
+        }
+      }
+    }
+  }
+}

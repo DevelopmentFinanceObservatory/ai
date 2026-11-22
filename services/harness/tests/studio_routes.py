@@ -214,13 +214,19 @@ def studio_client(app: FastAPI) -> httpx2.AsyncClient:
     )
 
 
+# The question forms the deployed website declares it renders.
+CLIENT_FEATURES = ["unit_question", "multi_select"]
+
+
 def turn_body(message: str, *, conversation_id: str = CONVERSATION) -> dict[str, Any]:
-    """A `turn.request` body for `/api/studio/turn`."""
+    """A `turn.request` body for `/api/studio/turn`, from a client that
+    renders every question form (`CLIENT_FEATURES`)."""
     return {
         "kind": "turn.request",
         "schema_version": 1,
         "conversation_id": conversation_id,
         "message": message,
+        "client_features": CLIENT_FEATURES,
     }
 
 

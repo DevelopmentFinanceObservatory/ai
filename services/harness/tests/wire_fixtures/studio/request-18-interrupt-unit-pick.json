@@ -1,0 +1,13 @@
+{
+  "kind": "interrupt.response",
+  "schema_version": 1,
+  "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E",
+  "interrupt_id": "elc_9b2d4f61a8c34e07",
+  "decision": "answer",
+  "answers": {
+    "q1": {
+      "kind": "option",
+      "option_id": "USD-current"
+    }
+  }
+}

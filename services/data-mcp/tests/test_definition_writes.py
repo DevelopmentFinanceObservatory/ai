@@ -25,6 +25,7 @@ from data_mcp.definition_writes import (
     caller_definition,
     put_definitions,
     stored_definition,
+    unit_identity,
     windowed_identity,
 )
 
@@ -224,3 +225,39 @@ def test_an_identity_over_a_range_with_no_end_year_is_the_one_dfo_apis_serves(
 
     assert spec_id == minted
     assert identity["requested_window"] == window
+
+
+def test_a_unit_identity_is_the_one_dfo_apis_serves_for_a_unit_resubmit() -> None:
+    """Recorded from the dev API: `unitAid` resubmitted with `facets.unit` EUR, constant, 2024."""
+    recorded = json.loads((_FIXTURES / "unit_conversion_aid.json").read_text())
+
+    spec_id, identity = unit_identity(recorded["identity"], recorded["unit"])
+
+    assert spec_id == recorded["minted"]
+    assert identity == recorded["minted_identity"]
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        {"currency": "eur", "prices": "current"},
+        {"currency": "EUR", "prices": "constant"},
+        {"currency": "EUR", "prices": "constant", "base_year": "2024"},
+        {"currency": "EUR", "prices": "current", "base_year": 2024},
+        {"currency": "EUR", "prices": "real"},
+    ],
+)
+def test_a_unit_outside_the_normal_form_is_refused(unit: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        unit_identity({"identity_version": "spec1"}, unit)
+
+
+def test_a_current_price_unit_replaces_a_bound_unit_whole() -> None:
+    identity = {"facets": {"unit": {"state": "value", "ref": "x"}, "other": 1}}
+
+    _, edited = unit_identity(identity, {"currency": "USD", "prices": "current"})
+
+    assert edited["facets"] == {
+        "unit": {"state": "value", "request": {"currency": "USD", "prices": "current"}},
+        "other": 1,
+    }

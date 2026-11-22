@@ -163,7 +163,9 @@ async def test_an_ask_pauses_and_another_instance_hands_the_answer_back_to_the_w
                         {"label": "Republic of the Congo", "spec_id": None},
                         {"label": "DR Congo", "spec_id": None},
                     ],
-                    "prices_of": None,
+                    "unit_of": None,
+                    "prices": None,
+                    "multi_select": False,
                 }
             ],
         },

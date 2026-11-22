@@ -25,7 +25,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
@@ -41,6 +41,7 @@ from planner.plan import PlanStatus, cut_user_text
 from pydantic import BaseModel, ValidationError
 
 from harness.approval import ApprovalRecord
+from harness.card_unit import CARD_UNIT_KEY
 from harness.conversation import current_conversation_key
 from harness.reply_figures import drawn_series
 from harness.turn_records import (
@@ -54,12 +55,16 @@ from harness.turn_records import (
 )
 from harness.wire import (
     AddOp,
+    ClientFeature,
     ComponentType,
     CompositionActor,
     CompositionBlock,
     CompositionCounts,
     CompositionManifest,
+    ElicitationInput,
     ErrorCode,
+    LayoutHint,
+    LayoutHintType,
     PinOp,
     PlanApproved,
     PlanProposed,
@@ -70,6 +75,7 @@ from harness.wire import (
     SetLayoutHintsOp,
     StudioFrame,
     ToolError,
+    UnitOffer,
 )
 
 if TYPE_CHECKING:
@@ -330,6 +336,18 @@ class _PendingQuestion:
     # restored from before questions were kept (`legacy`).
     options: dict[str, str | None] = field(default_factory=dict)
     skippable: bool = False
+    # How the question is answered, which names the answer kinds it takes.
+    input: ElicitationInput = ElicitationInput.SINGLE_SELECT
+    # A unit question's offer, which a unit answer must lie inside. A unit
+    # question sent as a `single_select` keeps it too: its options are the
+    # offer's whole units (`harness.unit_offer.whole_units`).
+    unit: UnitOffer | None = None
+    # The form the question takes for a client that renders every form, when
+    # the frame sent another because the client declared it does not render
+    # this one (`ConversationState.client_features`): `unit` or
+    # `multi_select` for a question sent as a `single_select`. `None` when
+    # `input` is the question's own form.
+    native_input: ElicitationInput | None = None
 
 
 @dataclass(frozen=True)
@@ -564,6 +582,11 @@ class ConversationState:
     renew_now: asyncio.Event | None = None
     # The current turn's auto-add preference (delta 11); reset per turn.
     auto_add: bool = True
+    # The question forms the latest turn or interrupt request declared the
+    # client renders (`harness.wire.TurnRequest.client_features`). Stored, so
+    # a resume on another instance asks in the same forms. A conversation
+    # stored before features were kept holds none.
+    client_features: frozenset[ClientFeature] = field(default_factory=frozenset)
     # Digest entries for every component this conversation streamed,
     # keyed by component_id: {type, title, revision, fact_summary}.
     # Feeds the models' canvas context and the composition "add" op.
@@ -974,6 +997,8 @@ class ConversationState:
         basis_line: str | None = None,
         new_question: str | None = None,
         asked_for_question: bool = False,
+        reply_shown: bool = True,
+        user_display: str | None = None,
     ) -> None:
         """Append the turn's record, once, since the resume protocol can end a
         turn from more than one code path. A turn recorded with an `error`
@@ -999,7 +1024,14 @@ class ConversationState:
         `NEW_QUESTION`, and the conversation digest tells a later turn's
         model the plan was set aside (`_history_turn`). `asked_for_question`
         marks a turn whose plan card was set aside for a new question no
-        message of the user's states: its `ended_by` is `ASKED_FOR_QUESTION`."""
+        message of the user's states: its `ended_by` is `ASKED_FOR_QUESTION`.
+
+        A turn whose stream sent no `message.complete` (`reply_shown` false)
+        keeps `final_text` for later turns' models and is marked
+        `reply_shown: false`, so a state read gives its reply as empty.
+        `user_display` is the line a state read shows as the user's message
+        where the record's `user` line is written for a model, such as a
+        unit change naming its spec_id (`harness.studio_edit.unit_events`)."""
         if self.turn_recorded:
             return
         record: dict[str, Any]
@@ -1034,6 +1066,10 @@ class ConversationState:
             record["new_question"] = new_question
         elif asked_for_question:
             record["ended_by"] = ASKED_FOR_QUESTION
+        if not reply_shown:
+            record["reply_shown"] = False
+        if user_display:
+            record["user_display"] = user_display
         record["trace_id"] = self.trace_id
         record["usage"] = dataclasses.asdict(self.turn_usage)
         self.turns.append(record)
@@ -1084,20 +1120,26 @@ class ConversationState:
         # Keep the blocks of the sources the turn's plans used, of the source
         # each windowed copy among them copies, and of the pin each input
         # alignment moved states (`PlanSource.aligned_from`): a later turn can
-        # pin or fetch that source through `earlier_block`. A block can run to
-        # about 120 KB and the record is kept for the whole conversation, so no
-        # other is kept.
+        # pin or fetch that source through `earlier_block`, and of the spec each
+        # card the turn drew or redrew reads when its unit can change
+        # (`harness.card_unit`), which a later turn's unit change reads. A block
+        # can run to about 120 KB and the record is kept for the whole
+        # conversation, so no other is kept.
         identities = _turn_identities(self.turn_specs, plans)
         copied = _copied_sources(
             [source for plan in plans for source in plan.sources],
             {**self._earlier_identities(), **identities},
         )
-        used = {
-            spec_id
-            for plan in plans
-            for source in plan.sources
-            for spec_id in (source.spec_id, *source.aligned_from)
-        } | copied
+        used = (
+            {
+                spec_id
+                for plan in plans
+                for source in plan.sources
+                for spec_id in (source.spec_id, *source.aligned_from)
+            }
+            | copied
+            | self._unit_card_specs()
+        )
         specs = {spec_id: block for spec_id, block in self.turn_specs.items() if spec_id in used}
         if specs:
             record["specs"] = specs
@@ -1107,6 +1149,17 @@ class ConversationState:
                 for spec_id, recorded in identities.items()
             }
         return record
+
+    def _unit_card_specs(self) -> set[str]:
+        """The spec_id of each card the open turn drew or redrew whose unit
+        can change (`CARD_UNIT_KEY`)."""
+        specs: set[str] = set()
+        for card in self.turn_components:
+            entry = self.components.get(card.get("component_id") or "") or {}
+            stored = entry.get(CARD_UNIT_KEY)
+            if isinstance(stored, dict) and isinstance(stored.get("spec_id"), str):
+                specs.add(stored["spec_id"])
+        return specs
 
     def take_identity(
         self,
@@ -1555,8 +1608,7 @@ def _digest_block(component_id: str, entry: dict[str, Any]) -> dict[str, Any]:
     title, fact summary and what it shows bounded. An `entities` list
     shorter than the names the card draws carries an `entities_truncated`
     label. The stored entry stays whole for `recall_part`
-    and the composition "add" op. Its `_SERIES_IDS` and `_DRAWN_CARD` are
-    left out."""
+    and the composition "add" op. The keys `_model_entry` drops are left out."""
     block: dict[str, Any] = {
         "component_id": _cut_text(component_id, _BLOCK_ID_BYTES),
         **_model_entry(entry),
@@ -1797,9 +1849,13 @@ def drawn_series_ids(component: dict[str, Any]) -> dict[str, list[str]]:
 
 
 def _model_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    """A stored entry as a model may read it, without its `_SERIES_IDS` and
-    `_DRAWN_CARD`."""
-    return {key: value for key, value in entry.items() if key not in {_SERIES_IDS, _DRAWN_CARD}}
+    """A stored entry as a model may read it, without its `_SERIES_IDS`,
+    `_DRAWN_CARD` and `CARD_UNIT_KEY`."""
+    return {
+        key: value
+        for key, value in entry.items()
+        if key not in {_SERIES_IDS, _DRAWN_CARD, CARD_UNIT_KEY}
+    }
 
 
 def _turn_component_entry(
@@ -1923,6 +1979,7 @@ def land_component(
     component: dict[str, Any],
     *,
     intent: dict[str, Any] | None = None,
+    unit_card: dict[str, Any] | None = None,
 ) -> Literal["created", "held"]:
     """Land `component` on `conversation`'s canvas. `harness.studio_translate`
     calls this at drain time for a write `make_charts` stamped through
@@ -1934,7 +1991,8 @@ def land_component(
     (`conversation.components`), so a card is findable by `recall` and the
     canvas views whether or not it lands a block, and for a card
     `make_charts` wrote from `intent`, that intent with the revision it
-    was drawn as (`canvas_cards`). `auto_add=False` means
+    was drawn as (`canvas_cards`), and for a card whose unit can change, its
+    `unit_card` (`harness.card_unit.UnitCard.as_json`). `auto_add=False` means
     there is no block to append: the component still streams to the
     client, but nothing here composes for it, and the return is `"held"`.
     Otherwise a new block is appended and the return is `"created"`.
@@ -1951,6 +2009,8 @@ def land_component(
     entry = _digest_entry(component)
     if intent is not None:
         entry[_DRAWN_CARD] = {"intent": intent, "revision": int(component["revision"])}
+    if unit_card is not None:
+        entry[CARD_UNIT_KEY] = unit_card
     conversation.components[component["component_id"]] = entry
     conversation.turn_components.append(
         _turn_component_entry(
@@ -2030,16 +2090,24 @@ def _replace_block(
     *,
     old_component_id: str,
     component: dict[str, Any],
+    retitle: Callable[[str], str] | None = None,
 ) -> bool:
-    """Swap the named card's block for `component`, in place, keeping the
-    block's `pinned` flag.
+    """Swap the named card's block for `component`, in place. The new block
+    keeps the old one's `pinned` flag and card meta (`CardMeta`, the user's
+    note and labels), and a layout hint naming the old card names the new one
+    in its place, so nothing on the canvas stays on the old id.
+
+    `retitle` marks a unit change: it rewrites the words of the kept meta's
+    subtitle, description and axis labels that name the old unit
+    (`harness.card_unit.retitled`), and a `comparison` hint, which aligns its
+    members' units, drops the card, a hint left with fewer than two members
+    going with it. A `row` hint keeps the card.
 
     True iff the canvas shows `component` in the slot: a block was
     replaced, or the canvas already held `component`'s block. A card that
     was never composed (auto_add=false, or removed since) has no block to
-    swap. The caller's component still streams as component.created and is
-    not added to the canvas here. The Edit Card route's recreate
-    (`harness.studio_edit`) names the existing component_id whose slot the
+    swap. The Edit Card route's recreate and a card's unit change
+    (`harness.studio_edit`) name the existing component_id whose slot the
     new component takes over, inside the store's canvas write.
     """
     previous = conversation.composition
@@ -2047,16 +2115,46 @@ def _replace_block(
     if previous is None or index is None:
         # A canvas that already shows the new block reads the swap done.
         return _block_index(previous, component["component_id"]) is not None
+    new_id = component["component_id"]
     blocks = [block.model_copy(deep=True) for block in previous.blocks]
+    meta = blocks[index].meta
+    if meta is not None and retitle is not None:
+        meta = meta.model_copy(
+            update={
+                name: retitle(text)
+                for name in ("subtitle", "description", "x_label", "y_label")
+                if isinstance(text := getattr(meta, name), str)
+            }
+        )
     blocks[index] = CompositionBlock(
-        component_id=component["component_id"],
+        component_id=new_id,
         revision=int(component["revision"]),
         type=component["type"],
         title=_block_title(component),
         pinned=blocks[index].pinned,
+        meta=meta,
     )
-    conversation.composition = _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
+    hints = previous.layout_hints
+    if hints is not None:
+        hints = [
+            hint.model_copy(update={"members": members})
+            for hint in hints
+            if len(members := _swapped_members(hint, old_component_id, new_id, retitle)) >= 2
+        ]
+    conversation.composition = _next_manifest(
+        previous, blocks, actor=CompositionActor.MODEL, layout_hints=hints
+    )
     return True
+
+
+def _swapped_members(
+    hint: LayoutHint, old_id: str, new_id: str, retitle: Callable[[str], str] | None
+) -> list[str]:
+    """`hint`'s members with `old_id` named `new_id`, or left out of a
+    `comparison` hint when `retitle` marks a unit change."""
+    if retitle is not None and hint.type is LayoutHintType.COMPARISON:
+        return [member for member in hint.members if member != old_id]
+    return [new_id if member == old_id else member for member in hint.members]
 
 
 def _recount(blocks: list[CompositionBlock]) -> CompositionCounts:

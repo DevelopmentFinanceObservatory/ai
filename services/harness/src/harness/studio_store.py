@@ -150,7 +150,15 @@ from harness.turn.store import (
     cursor_at,
     finish_on,
 )
-from harness.wire import STUDIO_FRAME_ADAPTER, CompositionManifest, ErrorCode, PlanProposed
+from harness.wire import (
+    STUDIO_FRAME_ADAPTER,
+    CompositionManifest,
+    ElicitationInput,
+    ErrorCode,
+    PlanProposed,
+    UnitOffer,
+    declared_features,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +177,7 @@ _KEY_PENDING = "pending"
 _KEY_PLAN_VERSION_IDS = "plan_version_ids"
 _KEY_LATEST_PLAN_VERSION = "latest_plan_version"
 _KEY_AUTO_ADD = "auto_add"
+_KEY_CLIENT_FEATURES = "client_features"
 _KEY_TIMED_OUT_CALLS = "timed_out_calls"
 _KEY_TURN_USER_MESSAGE = "turn_user_message"
 _KEY_TURN_USER_WORDS = "turn_user_words"
@@ -189,6 +198,7 @@ _SCALAR_KEYS = frozenset(
         _KEY_PLAN_VERSION_IDS,
         _KEY_LATEST_PLAN_VERSION,
         _KEY_AUTO_ADD,
+        _KEY_CLIENT_FEATURES,
         _KEY_TIMED_OUT_CALLS,
         _KEY_TURN_USER_MESSAGE,
         _KEY_TURN_USER_WORDS,
@@ -352,6 +362,11 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                     "question": q.question,
                     "options": dict(q.options),
                     "skippable": q.skippable,
+                    "input": q.input.value,
+                    **({"unit": q.unit.model_dump(mode="json")} if q.unit is not None else {}),
+                    **(
+                        {"native_input": q.native_input.value} if q.native_input is not None else {}
+                    ),
                 }
                 for q in p.questions
             ],
@@ -432,6 +447,12 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
                 question=q["question"],
                 options=dict(q["options"]),
                 skippable=q["skippable"],
+                # A question kept before inputs were stored is single-select.
+                input=ElicitationInput(q.get("input", ElicitationInput.SINGLE_SELECT)),
+                unit=UnitOffer.model_validate(q["unit"]) if q.get("unit") else None,
+                native_input=(
+                    ElicitationInput(q["native_input"]) if q.get("native_input") else None
+                ),
             )
             for q in entry["questions"]
         )
@@ -473,6 +494,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_LATEST_PLAN_VERSION: state.latest_plan_version,
         _KEY_SEGMENT: _serialize_segment(state.segment) if state.segment is not None else None,
         _KEY_AUTO_ADD: state.auto_add,
+        _KEY_CLIENT_FEATURES: sorted(state.client_features),
         _KEY_TIMED_OUT_CALLS: sorted(state.timed_out_calls),
         _KEY_TURN_USER_MESSAGE: state.turn_user_message,
         _KEY_TURN_USER_WORDS: state.turn_user_words,
@@ -533,6 +555,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.segment = _deserialize_segment(value)
         elif key == _KEY_AUTO_ADD:
             state.auto_add = value
+        elif key == _KEY_CLIENT_FEATURES:
+            state.client_features = declared_features(list(value or ()))
         elif key == _KEY_TIMED_OUT_CALLS:
             state.timed_out_calls = set(value)
         elif key == _KEY_TURN_USER_MESSAGE:
