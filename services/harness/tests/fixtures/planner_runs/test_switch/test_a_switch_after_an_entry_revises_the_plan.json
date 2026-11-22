@@ -2268,6 +2268,7 @@
     "planner:refused_spec_ids": [],
     "planner:refused_spec_details": {},
     "planner:skills_read": [],
+    "planner:answered_in_words": false,
     "planner:skills_before_entry": 0,
     "planner:pin_sources": {
       "spec_50fb71f953b7ee352c878d87a27d256a": {

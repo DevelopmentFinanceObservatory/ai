@@ -73,7 +73,13 @@ from harness.gemini_agent import RecordingState
 from harness.gemini_wire import model_retry_options
 from harness.graph.interfaces import PlannerModel
 from harness.graph.planning import plan_start, planner_node
-from harness.graph.state import ORCHESTRATOR_PENDING_KEY, ORCHESTRATOR_SPECS_KEY, pending_action
+from harness.graph.state import (
+    ASK_FOR_QUESTION_KEY,
+    NEW_QUESTION_KEY,
+    ORCHESTRATOR_PENDING_KEY,
+    ORCHESTRATOR_SPECS_KEY,
+    pending_action,
+)
 from harness.orchestrator_tools import (
     AskedOutput,
     Resolver,
@@ -111,6 +117,7 @@ from translator.tool import Translate, build_translate
 
 EVAL_DIR = Path(__file__).resolve().parent
 TASKS_DIR = EVAL_DIR / "tasks"
+AMENDMENTS_DIR = EVAL_DIR / "amendments"
 RECORDINGS_DIR = EVAL_DIR / "recordings"
 RECORDING_SCHEMA = 2
 
@@ -187,6 +194,48 @@ class Alternative(_Strict):
     period_reduction: PeriodReduction | None = None
 
 
+class Amendment(_Strict):
+    """What makes a task an amendment of a plan card: the user's `text` typed on the
+    card of `prior_plan`, the plan the planner drafted for task `base` (a `Plan` dump,
+    as a run's record keeps it), and `answer`, the user's own words in reply to a
+    question the planner asks about it, when the task scripts one. A task asking a
+    new question states in `new_question_in` the value, or the list of values, a
+    `starts_new_plan` call may name: `amendment` or `answer`, whose text the turn
+    hands back (`handed_back`), or `none`, which hands back nothing and asks the user
+    for their question. A task that amends the plan states none."""
+
+    base: str
+    prior_plan: dict[str, Any]
+    text: str
+    answer: str | None = None
+    new_question_in: str | list[str] | None = None
+
+    @property
+    def accepted(self) -> frozenset[str]:
+        """The values of `new_question_in` a run may name, empty on a task that
+        amends the plan."""
+        stated = self.new_question_in
+        return frozenset([stated] if isinstance(stated, str) else stated or ())
+
+    def handed_back(self, source: str) -> str | None:
+        """The words a turn hands back when the planner names `source`: the text of
+        the message it names, `None` for `none`."""
+        return {"amendment": self.text, "answer": self.answer}.get(source)
+
+    @model_validator(mode="after")
+    def _each_named_message_exists(self) -> Self:
+        Plan.model_validate(self.prior_plan)
+        if isinstance(self.new_question_in, list) and (
+            not self.new_question_in or len(self.accepted) < len(self.new_question_in)
+        ):
+            raise ValueError("a `new_question_in` list names each value once, and one at least")
+        if unknown := self.accepted - {"amendment", "answer", "none"}:
+            raise ValueError(f"`new_question_in` names {sorted(unknown)}, not a message")
+        if "answer" in self.accepted and self.answer is None:
+            raise ValueError("`new_question_in` names `answer` and the task scripts none")
+        return self
+
+
 class Task(_Strict):
     """One question, as the orchestrator hands it to the planner.
 
@@ -202,7 +251,8 @@ class Task(_Strict):
     several years taken together (`across_years`). A task whose search holds a party
     open names it in one. `period_reduction` is what the reference plan does with the
     years of its data, `none` or `across_years`, and what a run's accepted plan is
-    held to.
+    held to. A task with an `amendment` opens the planner on the user's amendment of
+    a plan card instead of a first draft (`load_amendment_tasks`).
     """
 
     id: str
@@ -221,6 +271,13 @@ class Task(_Strict):
     period_reduction: PeriodReduction
     reference_payload: dict[str, Any]
     alternative_payloads: list[Alternative] = []
+    amendment: Amendment | None = None
+
+    @property
+    def recording_id(self) -> str:
+        """The task whose recording a run replays: the base task of an amendment
+        task, which shares its searches and skills, else this one."""
+        return self.amendment.base if self.amendment is not None else self.id
 
     @property
     def across_years_numbers(self) -> tuple[int, ...]:
@@ -257,6 +314,30 @@ def load_tasks(directory: Path = TASKS_DIR) -> list[Task]:
     ]
     order = {kind: index for index, kind in enumerate(KINDS)}
     return sorted(tasks, key=lambda task: (order.get(task.kind, len(KINDS)), task.id))
+
+
+def load_amendment_tasks(
+    directory: Path = AMENDMENTS_DIR, tasks: Sequence[Task] | None = None
+) -> list[Task]:
+    """Every amendment task in `directory`, by id. A file holds `id` and the
+    `amendment`; the rest of the task is its base task's (`Amendment.base`), whose
+    searches, brief and asks the turn ran before the user amended the card."""
+    by_id = {task.id: task for task in (tasks if tasks is not None else load_tasks())}
+    loaded = []
+    for path in sorted(directory.glob("*.json")):
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        amendment = Amendment.model_validate(raw["amendment"])
+        base = by_id[amendment.base]
+        loaded.append(
+            base.model_copy(update={"id": raw["id"], "kind": "amendment", "amendment": amendment})
+        )
+    return loaded
+
+
+def load_every_task() -> list[Task]:
+    """Every first-turn task (`load_tasks`), then every amendment task."""
+    first_turns = load_tasks()
+    return [*first_turns, *load_amendment_tasks(tasks=first_turns)]
 
 
 # --- Recordings ----------------------------------------------------------------------
@@ -1044,6 +1125,14 @@ async def run_entry(
     route reads, the user's answer under `result`. With `translation`,
     production's translation runs on the recorded plan over those calls, and
     `probe.translation` holds its answer.
+
+    A task with an `amendment` opens the planner as the `approve` node's `amend` edge
+    does, on the task's prior plan and the user's text, after `plan_start` took the
+    hand-off; its scripted `answer`, when it has one and `answers` is empty, replies to
+    the planner's first question. The entry also ends when the planner reads the text
+    as a new question, the `new_question` edge, which leaves the words it hands back
+    under `NEW_QUESTION_KEY`, or sets `ASK_FOR_QUESTION_KEY` when the planner names
+    no message.
     """
     probe = Probe()
     if translation is not None:
@@ -1087,6 +1176,9 @@ async def run_entry(
     conversation = ConversationState(conversation_id=ctx.key.conversation_id)
     conversation.turn_specs = dict(ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {})
     pending = list(answers)
+    amendment = task.amendment
+    if amendment is not None and amendment.answer is not None and not pending:
+        pending = [{"result": {"answers": {"q1": {"kind": "text", "text": amendment.answer}}}}]
     error: str | None = None
     timed_out = False
     started = time.perf_counter()
@@ -1117,6 +1209,17 @@ async def run_entry(
         # The planner node runs on its input as the loop stored it with the cursor.
         ctx.state = _stored(ctx.state)
         node_input = _stored(opened.output)
+        if amendment is not None:
+            # The card the user amended holds the prior plan, which the `approve`
+            # node hands the planner with the answer on its `amend` edge.
+            prior = Plan.model_validate(amendment.prior_plan)
+            ctx.state["plan"] = prior.model_dump_json()
+            node_input = _stored(
+                {
+                    "plan": prior.model_dump(mode="json"),
+                    "answer": {"approved": None, "amendment": amendment.text},
+                }
+            )
         result = await segment(drafting.run(ctx, node_input))
         rounds = 0
         while isinstance(result, Pause) and probe.plan is None and pending:
@@ -1189,6 +1292,11 @@ def inputs_digest(task: Task, recording: Mapping[str, Any]) -> str:
         "searches": [search.model_dump(mode="json") for search in task.searches],
         "brief": task.brief,
         "asks": asks,
+        **(
+            {"amendment": task.amendment.model_dump(mode="json")}
+            if task.amendment is not None
+            else {}
+        ),
         "recorded_searches": recording["searches"],
         "recorded_answers": recording["tools"],
     }
@@ -1333,17 +1441,26 @@ def record_period_reduction(record: Mapping[str, Any], task: Task) -> PeriodRedu
 
 def stop_reason(run: EntryRun) -> str:
     """How the entry ended: `error`, `accepted`, `timeout` (the eval's own limit), the
-    adapter's refusal code, or `asked_user` (an ask the tool took, which the entry paused
-    on, awaiting the user's answer). An error wins over a recorded plan: a step
-    that raised, or a state the turn store refused at the node's boundary, fails the
-    served turn, so the plan never reaches the user. A refusal wins over an ask, since
-    the entry it ends pauses on nothing."""
+    adapter's refusal code, `new_question` (the planner read an amendment as a new
+    question, which the turn hands back), or `asked_user` (an ask the tool took, which
+    the entry paused on, awaiting the user's answer). An error wins over a recorded
+    plan: a step that raised, or a state the turn store refused at the node's
+    boundary, fails the served turn, so the plan never reaches the user. A refusal
+    wins over an ask, since the entry it ends pauses on nothing."""
     if run.error is not None:
         return "error"
     if run.probe.plan is not None:
         return "accepted"
     if run.timed_out:
         return "timeout"
+    return _unplanned_ending(run)
+
+
+def _unplanned_ending(run: EntryRun) -> str:
+    """How an entry that recorded no plan, raised nothing and did not time out ended
+    (`stop_reason`)."""
+    if run.state.get(NEW_QUESTION_KEY) or run.state.get(ASK_FOR_QUESTION_KEY):
+        return "new_question"
     if run.probe.refused_code is not None:
         return run.probe.refused_code
     if load_pending_ask(run.state) is not None:
@@ -1401,10 +1518,25 @@ def entry_record(
         "budget_closed": run.budget_closed,
         "surface_misses": run.surface_misses,
         "wall_s": round(run.wall_s, 3),
+        "new_question_in": named_new_question(calls),
+        "new_question": run.state.get(NEW_QUESTION_KEY),
+        "asked_for_question": run.state.get(ASK_FOR_QUESTION_KEY) is True,
     }
 
 
+def named_new_question(calls: Sequence[Mapping[str, Any]]) -> str | None:
+    """The message the run's last `starts_new_plan` call named in `new_question_in`,
+    `None` when none named one."""
+    named = [
+        call["args"].get("new_question_in")
+        for call in calls
+        if call["name"] == "propose_plan" and call["args"].get("starts_new_plan")
+    ]
+    return next((value for value in reversed(named) if value), None)
+
+
 __all__ = [
+    "AMENDMENTS_DIR",
     "KINDS",
     "PERIOD_REFUSAL",
     "EntryRun",
@@ -1423,6 +1555,8 @@ __all__ = [
     "first_year_gaps",
     "inputs_digest",
     "live_client",
+    "load_amendment_tasks",
+    "load_every_task",
     "load_recording",
     "load_tasks",
     "orchestrator_state",

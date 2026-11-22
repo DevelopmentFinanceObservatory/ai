@@ -4,13 +4,13 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 149401,
-      "system_instruction_chars": 20148,
-      "declaration_total_chars": 40287,
+      "total_chars": 73480,
+      "system_instruction_chars": 20220,
+      "declaration_total_chars": 40741,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 37293
+          "chars": 37747
         },
         {
           "name": "ask_user_question",
@@ -26,12 +26,12 @@
         }
       ],
       "contents": {
-        "total_chars": 87572,
+        "total_chars": 12864,
         "buckets": [
           {
             "bucket": "text(planner-brief)",
             "count": 1,
-            "chars": 87567
+            "chars": 12859
           },
           {
             "bucket": "text",
@@ -45,13 +45,13 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 182284,
-      "system_instruction_chars": 20148,
-      "declaration_total_chars": 40287,
+      "total_chars": 106363,
+      "system_instruction_chars": 20220,
+      "declaration_total_chars": 40741,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 37293
+          "chars": 37747
         },
         {
           "name": "ask_user_question",
@@ -67,17 +67,17 @@
         }
       ],
       "contents": {
-        "total_chars": 120293,
+        "total_chars": 45585,
         "buckets": [
-          {
-            "bucket": "text(planner-brief)",
-            "count": 1,
-            "chars": 87567
-          },
           {
             "bucket": "functionResponse:get_skill",
             "count": 1,
             "chars": 32671
+          },
+          {
+            "bucket": "text(planner-brief)",
+            "count": 1,
+            "chars": 12859
           },
           {
             "bucket": "functionCall:get_skill",
@@ -96,13 +96,13 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 182920,
-      "system_instruction_chars": 20148,
-      "declaration_total_chars": 40287,
+      "total_chars": 106999,
+      "system_instruction_chars": 20220,
+      "declaration_total_chars": 40741,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 37293
+          "chars": 37747
         },
         {
           "name": "ask_user_question",
@@ -118,17 +118,17 @@
         }
       ],
       "contents": {
-        "total_chars": 120767,
+        "total_chars": 46059,
         "buckets": [
-          {
-            "bucket": "text(planner-brief)",
-            "count": 1,
-            "chars": 87567
-          },
           {
             "bucket": "functionResponse:get_skill",
             "count": 1,
             "chars": 32671
+          },
+          {
+            "bucket": "text(planner-brief)",
+            "count": 1,
+            "chars": 12859
           },
           {
             "bucket": "functionResponse:propose_plan",
@@ -157,13 +157,13 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 0,
-      "total_chars": 67530,
-      "system_instruction_chars": 20148,
-      "declaration_total_chars": 40287,
+      "total_chars": 68047,
+      "system_instruction_chars": 20220,
+      "declaration_total_chars": 40741,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 37293
+          "chars": 37747
         },
         {
           "name": "ask_user_question",
@@ -198,13 +198,13 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 1,
-      "total_chars": 100413,
-      "system_instruction_chars": 20148,
-      "declaration_total_chars": 40287,
+      "total_chars": 100930,
+      "system_instruction_chars": 20220,
+      "declaration_total_chars": 40741,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 37293
+          "chars": 37747
         },
         {
           "name": "ask_user_question",
@@ -249,13 +249,13 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 2,
-      "total_chars": 101590,
-      "system_instruction_chars": 20148,
-      "declaration_total_chars": 40287,
+      "total_chars": 102107,
+      "system_instruction_chars": 20220,
+      "declaration_total_chars": 40741,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 37293
+          "chars": 37747
         },
         {
           "name": "ask_user_question",
@@ -308,6 +308,6 @@
     }
   ],
   "declaration_digests": {
-    "served": "5459ca281bff6523280ce27bf8e8782677d67ab4e0cd66babd7422ae188370e0"
+    "served": "e38ae995911620d970076c41d72cee44f48cbb41b77a08989d9a4659ea47d5d1"
   }
 }

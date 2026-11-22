@@ -1,11 +1,11 @@
 {
  "ask_user": {
-  "description": "Ask the user one to three questions before going on, with the likely\nanswers to each. The user sees them together in one pause and answers\neach by picking an option, writing their own answer, or leaving it to\nyou.\n\nAsk only what changes the answer. Each question offers at least one\noption. An option for a count or prices that a search result names\ncarries the spec_id the result gives it, and the answer names that\nspec_id when the user picks it. A prices question names its part in\n`prices_of`, and its options are filled in. Each spec_id goes on one option. End\nyour turn after calling ask_user. Every answer comes back as this\ncall's result.",
+  "description": "Ask the user one to three questions before going on, with the likely\nanswers to each. The user sees them together in one pause and answers\neach by picking an option, writing their own answer, or leaving it to\nyou.\n\nAsk only what changes the answer. Each question offers at least one\noption. An option for one of a part's candidates carries the spec_id\nthe search result gives it, and the answer names that spec_id when\nthe user picks it. Each spec_id goes on one option. A prices question\nnames its part in `prices_of`, and its options are filled in. End\nyour turn after calling ask_user. Every answer comes back as this\ncall's result.",
   "name": "ask_user",
   "parameters_json_schema": {
    "$defs": {
     "AskOption": {
-     "description": "One answer `ask_user` offers: its wording and, for a count or prices, its spec_id.",
+     "description": "One answer `ask_user` offers: its wording and, for a part's candidate, its spec_id.",
      "properties": {
       "label": {
        "description": "the answer as the user reads it",
@@ -22,7 +22,7 @@
         }
        ],
        "default": null,
-       "description": "for a count or prices the result names, the spec_id it gives that reading; leave it out for any other answer",
+       "description": "for one of a part's candidates, the spec_id the search result gives it; leave it out for any other answer",
        "title": "Spec Id"
       }
      },
@@ -468,7 +468,7 @@
   }
  },
  "recall": {
-  "description": "Read back, in full, what an earlier turn of this conversation did:\nevery source and decision of a plan, what a search read, or the\nuser's canvas.\n\n`part`: \"plan\" for the plan records of a turn, \"readings\" for the\nsearch readings of a turn, \"canvas\" for every card of the conversation,\nlisted as on_canvas or hidden, each with its id, title, type, facts\nand pinned state, or, with `component_id`, that one card's stored\nentry. For a plan or readings, `turn` is the turn's number as the\nconversation digest counts them; leave it out for the newest turn\nthat has the part. A target that does not exist is refused with the\nvalues that do.",
+  "description": "Read back, in full, what an earlier turn of this conversation did:\nevery source and decision of a plan, what a search read, or the\nuser's canvas.\n\n`part`: \"plan\" for the plan records of a turn, \"readings\" for the\nsearch readings of a turn, \"canvas\" for the conversation's cards, or,\nwith `component_id`, that one card's stored entry. The canvas listing\nranks cards by the turn that drew them and holds no card's place on\nthe canvas. Each card it lists names its `turn`:\n- `blocks`: cards in full with their facts, while places remain:\n  this turn's cards on the canvas, then the pinned ones, then the\n  other cards on the canvas, newest turn first.\n- `titles`: the next cards of those three groups, by id, title and\n  type.\n- `off_canvas`: cards off the canvas by id, title and type, a whole\n  turn at a time, this turn's first, then newest turn first.\n- `counted`: for each turn with cards no list holds, how many are on\n  the canvas (`on_canvas`) and how many off it (`off_canvas`).\n- `counted_rest`: the same two counts for older turns' cards and\n  cards of no recorded turn.\nFor a plan or readings, `turn` is the turn's number as the\nconversation digest counts them; leave it out for the newest turn\nthat has the part. A target that does not exist is refused with the\nvalues that do.",
   "name": "recall",
   "parameters_json_schema": {
    "$defs": {
@@ -518,7 +518,7 @@
   }
  },
  "remove_cards": {
-  "description": "Take cards off the user's canvas.\n\n`component_ids` names the cards to take off, by the component ids the\ncanvas lists; set `all_cards` to take off every card instead. Returns\nthe ids taken off; a named card already off the canvas needs nothing,\nand an id this conversation never held is named back.",
+  "description": "Take cards off the user's canvas, when the conversation has moved to\nanother subject or the user asks for cards to go.\n\n`component_ids` names the cards to take off, by the component ids the\ncanvas lists; set `all_cards` to take off every card the user has\nnot pinned. A pinned card stays on the canvas, since only the user\nunpins it. Returns the ids taken off and, as `kept_pinned`, the\npinned cards left in place, with each one's title under `titles`; a\nnamed card already off the canvas\nneeds nothing and is named back as `already_off`, and an id this\nconversation never held is named back as `not_in_conversation`. When\nnothing came off, `note` says what each named id met.",
   "name": "remove_cards",
   "parameters_json_schema": {
    "properties": {

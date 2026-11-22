@@ -3,9 +3,11 @@ frame itself never leaks into the rendered text."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
+from analysis_mcp import digest as digest_module
 from analysis_mcp.artifact import Exclusion, Interval
 from analysis_mcp.digest import (
     _absent_clause,
@@ -738,6 +740,71 @@ def test_a_partitioned_rank_digest_names_the_partitions_past_the_cap() -> None:
     assert f"destination=country/R{LIST_CAP - 1} (1 of 3 shown)" in digest
     assert f"#1 origin=donor/D{LIST_CAP}0" not in digest
     assert f"2 partitions not shown: destination=country/R{LIST_CAP} (3)" in digest
+
+
+def _zero_denominator_digest(keys: int) -> str:
+    dropped = tuple((("recipient", f"dcid:R{i}"),) for i in range(keys))
+    entry = PeriodQuotient(
+        time_period="2021",
+        numerator_value=10.0,
+        denominator_value=4.0,
+        quotient=2.5,
+        key=(("recipient", "dcid:KEN"),),
+    )
+    return render_quotient_of_digest(
+        result=quotient_of_result((entry,), keys_with_zero_denominator=dropped),
+        op_spec_hash="ops_" + "a" * 32,
+        content_version="ocv_" + "b" * 32,
+        execution_identity=_EI,
+    )
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        pytest.param(
+            lambda: _partitioned_digest(2 * LIST_CAP + 3, 1), id="partitions past the cap"
+        ),
+        pytest.param(lambda: _zero_denominator_digest(8), id="keys left out past the cap"),
+    ],
+)
+def test_a_digest_names_only_the_cells_it_shows(render: Callable[[], str]) -> None:
+    """The cells a digest names, whose labels are read, are those it prints: a key
+    a list cap leaves out is named by no cell, so it costs no node read."""
+    named: list[tuple[str, str]] = []
+
+    def record(column: str, value: str) -> None:
+        named.append((column, value))
+
+    token = digest_module._cell_label.set(record)
+    try:
+        digest = render()
+    finally:
+        digest_module._cell_label.reset(token)
+
+    assert named
+    assert [cell for cell in named if f"{cell[0]}={cell[1]}" not in digest] == []
+
+
+@pytest.mark.parametrize(
+    ("label", "shown"),
+    [
+        pytest.param("a" * 190, "a" * 190, id="fits"),
+        pytest.param("a" * 201, "a" * 190 + "...(truncated)", id="201 characters"),
+    ],
+)
+def test_a_long_label_is_cut_and_its_dcid_is_shown_whole(label: str, shown: str) -> None:
+    """A label and its dcid share the 200-character cap, the dcid first: ` (dcid:R0)` takes
+    10, so a label past 190 is cut and the dcid a selection binds survives."""
+    token = digest_module._cell_label.set(
+        lambda column, value: label if (column, value) == ("recipient", "dcid:R0") else None
+    )
+    try:
+        digest = _zero_denominator_digest(1)
+    finally:
+        digest_module._cell_label.reset(token)
+
+    assert f"recipient={shown} (dcid:R0)" in digest
 
 
 def _per_period_rank_result() -> RankFacts:

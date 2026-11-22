@@ -586,7 +586,7 @@ async def _swap(
     conn: AsyncConnection,
     cursor: Cursor,
     *,
-    segment_id: str,
+    segment_id: str | None,
     statuses: tuple[TurnStatus, ...],
     sets: str,
     params: dict[str, Any],
@@ -1334,11 +1334,64 @@ async def finish_on(
         SegmentLost: `segment_id` does not hold the conversation's lease.
         CursorStale: the cursor moved, or the turn is closed.
     """
+    _check_close(status, error)
+    await _fence(conn, cursor.conversation, segment_id)
+    return await _close_on(
+        conn,
+        cursor,
+        segment_id=segment_id,
+        status=status,
+        now=now,
+        error=error,
+        state=state,
+        records=records,
+    )
+
+
+async def close_unleased_on(
+    conn: AsyncConnection,
+    cursor: Cursor,
+    *,
+    status: TurnStatus,
+    now: datetime,
+    error: dict[str, Any] | None = None,
+) -> Cursor:
+    """Close the open turn `cursor` with `status` on `conn` as `finish_on`
+    does, with no lease fence and no writer recorded. The caller holds the
+    conversation's row lock and found no live lease on it:
+    `harness.studio_store.StudioStore.load` closes this way a turn whose
+    record committed while its cursor stayed open.
+
+    Raises:
+        ValueError: as `finish_on`.
+        CursorStale: the cursor moved, or the turn is closed.
+    """
+    _check_close(status, error)
+    return await _close_on(conn, cursor, segment_id=None, status=status, now=now, error=error)
+
+
+def _check_close(status: TurnStatus, error: dict[str, Any] | None) -> None:
+    """Refuse a close `status` that does not close a turn, or an `error`
+    given where the status takes none or missing where it takes one."""
     if status not in CLOSED:
         raise ValueError(f"{status!r} does not close a turn")
     if (status in _ERRORED) != (error is not None):
         raise ValueError(f"a turn closed {status.value} takes an error only when it failed")
-    await _fence(conn, cursor.conversation, segment_id)
+
+
+async def _close_on(
+    conn: AsyncConnection,
+    cursor: Cursor,
+    *,
+    segment_id: str | None,
+    status: TurnStatus,
+    now: datetime,
+    error: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    records: Sequence[AgentRecord] = (),
+) -> Cursor:
+    """`finish_on`'s close after its fence, recording `segment_id` as the
+    writer (`None` for `close_unleased_on`)."""
     closed = await _swap(
         conn,
         cursor,

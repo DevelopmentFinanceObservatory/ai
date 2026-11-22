@@ -125,6 +125,17 @@ ORCHESTRATOR_RETRY_NOTE_KEY = "orchestrator:retry_note"
 # question this turn (`harness.graph.orchestrate`) clears it, since the user
 # may then ask for other outputs.
 ORCHESTRATOR_GIVEN_BACK_ASKS_KEY = "orchestrator:given_back_asks"
+# The user's words typed on the plan card that the planner read as a new
+# question (`starts_new_plan`), written by the `planner` node as it ends the
+# turn on its `new_question` edge. The stream's `done` frame hands them to
+# the client to send as the next turn (`harness.studio_translate`).
+NEW_QUESTION_KEY = "orchestrator:new_question"
+# Set by the `planner` node as it ends the turn on its `new_question` edge
+# when the planner read the plan card's amendment as a new question that no
+# message of the user's states (`new_question_in` `none`). The turn closes
+# asking the user to send their question, and hands nothing back
+# (`harness.studio_translate`).
+ASK_FOR_QUESTION_KEY = "orchestrator:ask_for_question"
 # The state a planner entry replanning for a pick on the plan card puts back
 # when the replan does not land (`harness.graph.planning`), written when the
 # replan pauses on a planner-side ask and cleared when the entry ends, so it
@@ -154,13 +165,13 @@ class TurnInput(BaseModel):
 
 
 class AskOption(BaseModel):
-    """One answer `ask_user` offers: its wording and, for a count or prices, its spec_id."""
+    """One answer `ask_user` offers: its wording and, for a part's candidate, its spec_id."""
 
     label: str = Field(description="the answer as the user reads it")
     spec_id: str | None = Field(
         default=None,
         description=(
-            "for a count or prices the result names, the spec_id it gives that reading; "
+            "for one of a part's candidates, the spec_id the search result gives it; "
             "leave it out for any other answer"
         ),
     )

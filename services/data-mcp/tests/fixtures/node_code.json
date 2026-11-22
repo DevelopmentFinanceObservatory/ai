@@ -1,0 +1,30 @@
+{
+  "ref": "CRSPurposeCode15220",
+  "label": "civilian peace-building, conflict prevention and resolution (CRS Purpose)",
+  "types": [
+    "CRSPurposeCodeEnum"
+  ],
+  "description": "Support for civilian activities related to peacebuilding, conflict prevention, and resolution.",
+  "links": {},
+  "gaps": [],
+  "built_from": {
+    "code_index": "67ac7cd46934db547fd7f333667503a7cec1dd0423a6085eb532c7ef57deb4c9"
+  },
+  "kind": "code",
+  "code": {
+    "code_system": {
+      "ref": "CRSPurposeCodeEnum",
+      "label": "CRS Purpose"
+    },
+    "property": "crsPurpose",
+    "code": "15220",
+    "parent": {
+      "ref": "CRSPurposeCode152",
+      "label": "conflict, peace and security"
+    },
+    "synonyms": [
+      "Civilian Peace-building, Conflict Prevention and Resolution",
+      "UNDPA"
+    ]
+  }
+}

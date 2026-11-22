@@ -42,7 +42,7 @@ from entry import (
     RECORD_SCHEMA,
     PeriodReduction,
     Task,
-    load_tasks,
+    load_every_task,
     record_period_reduction,
 )
 
@@ -138,6 +138,12 @@ class Run:
     period_reduction: PeriodReduction | None
     # Whether the task marks an ask `across_years`.
     asks_across_years: bool
+    # On an amendment task that asks a new question: whether the run named the
+    # message the task accepts (`new_question_in`) and handed back its words, or,
+    # for `none`, handed back nothing and asked the user for their question;
+    # `None` on any other task.
+    named_right: bool | None = None
+    handed_back_right: bool | None = None
 
     @property
     def accepted(self) -> bool:
@@ -192,18 +198,39 @@ def reduce_run(record: Mapping[str, Any], task: Task) -> Run:
     calls = record["calls"]
     finished = [call for call in calls if call["prompt_tokens"] is not None]
     reduction = record_period_reduction(record, task)
-    return Run(
-        arm=record["arm"],
-        task=record["task"],
-        refusal_task=task.first_proposal_refusal is not None,
-        years_expected=reduction == task.period_reduction,
-        stop=record["stop_reason"],
-        first_ok=first.get("outcome") == "ok",
-        expected_ending=(
+    amendment = task.amendment
+    asks_new = amendment is not None and bool(amendment.accepted)
+    named = str(record.get("new_question_in"))
+    named_right = named in amendment.accepted if amendment is not None and asks_new else None
+    handed_back_right = (
+        bool(named_right)
+        and record.get("new_question") == amendment.handed_back(named)
+        and bool(record.get("asked_for_question")) == (named == "none")
+        if amendment is not None and asks_new
+        else None
+    )
+    if amendment is not None:
+        ending = (
+            record["stop_reason"] == "new_question" and bool(handed_back_right)
+            if asks_new
+            else record["stop_reason"] == "accepted"
+        )
+    else:
+        ending = (
             task.first_proposal_refusal is not None
             and first.get("code") == task.first_proposal_refusal
             and record["stop_reason"] == "asked_user"
-        ),
+        )
+    return Run(
+        arm=record["arm"],
+        task=record["task"],
+        refusal_task=task.first_proposal_refusal is not None or amendment is not None,
+        years_expected=reduction == task.period_reduction,
+        stop=record["stop_reason"],
+        first_ok=first.get("outcome") == "ok",
+        expected_ending=ending,
+        named_right=named_right,
+        handed_back_right=handed_back_right,
         kind_pass=task.selects_kinds(kinds),
         first_code=None
         if not record["proposals"] or first.get("outcome") == "ok"
@@ -560,7 +587,7 @@ def task_table(by_arm: Mapping[str, Sequence[Run]], tasks: Sequence[Task]) -> st
             runs = [r for r in by_arm[arm] if r.task == task.id]
             if not runs:
                 cells.append("-")
-            elif task.first_proposal_refusal:
+            elif task.first_proposal_refusal or task.amendment is not None:
                 cells.append(f"ending {sum(r.expected_ending for r in runs)}/{len(runs)}")
             else:
                 taken = [r for r in runs if r.accepted]
@@ -571,6 +598,26 @@ def task_table(by_arm: Mapping[str, Sequence[Run]], tasks: Sequence[Task]) -> st
                 )
         if any(cell != "-" for cell in cells):
             rows.append([task.id, task.kind, *cells])
+    return table(header, rows)
+
+
+def new_question_table(by_arm: Mapping[str, Sequence[Run]]) -> str:
+    """Per arm, over the runs of amendment tasks that ask a new question: those that
+    ended on it, those whose `starts_new_plan` call named the message the task
+    expects, and those that handed back that message's words."""
+    header = ["Arm", "Runs", "Ended on a new question", "Named the right message", "Handed back"]
+    rows = []
+    for arm, runs in by_arm.items():
+        asked = [r for r in runs if r.named_right is not None]
+        rows.append(
+            [
+                arm,
+                str(len(asked)),
+                _share(sum(r.stop == "new_question" for r in asked), len(asked)),
+                _share(sum(bool(r.named_right) for r in asked), len(asked)),
+                _share(sum(bool(r.handed_back_right) for r in asked), len(asked)),
+            ]
+        )
     return table(header, rows)
 
 
@@ -652,6 +699,8 @@ def build_report(
         "## Per arm",
         arm_table(numbers, attempts, left_out),
     ]
+    if any(r.named_right is not None for runs in by_arm.values() for r in runs):
+        sections.extend(["## New questions on the plan card", new_question_table(by_arm)])
     if changed:
         sections.append(
             f"Left out, since their runs showed the planner different inputs: "
@@ -825,7 +874,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.out.mkdir(parents=True, exist_ok=True)
     path = write_summary(
-        args.out, read_records(args.records), load_tasks(), arm=args.arm, baseline=args.baseline
+        args.out,
+        read_records(args.records),
+        load_every_task(),
+        arm=args.arm,
+        baseline=args.baseline,
     )
     print(path)
     return 0

@@ -1,7 +1,7 @@
 {
   "kind": "turn.request",
   "schema_version": 1,
-  "session_id": "sess_01j9zc0003",
+  "conversation_id": "sess_01j9zc0003",
   "message": "top 10 countries for health spending per person",
   "seed_spec": [
     {

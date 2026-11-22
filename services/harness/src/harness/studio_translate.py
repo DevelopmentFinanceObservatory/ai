@@ -103,6 +103,8 @@ from harness.scope_choices import REASON_COPY
 from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
 from harness.sentences import DROPPED_REASON, MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
+    ASK_FOR_QUESTION_REPLY,
+    SET_ASIDE_REPLY,
     ConversationState,
     _PendingChoice,
     _PendingInterrupt,
@@ -1566,6 +1568,7 @@ class _Translator:
         recorder: _RecordingExecutor,
         surface_recorder: _RecordingSurface | None = None,
         approving: PlanProposed | None = None,
+        restored: Sequence[PlanApproved] = (),
     ) -> None:
         self._conversation = conversation
         self._recorder = recorder
@@ -1574,6 +1577,10 @@ class _Translator:
         # its interrupt; `plan.approved` states it once the `approve` node
         # takes the approval, and only then.
         self._approving = approving
+        # The `plan.approved` frames of approvals the turn took on an earlier
+        # segment, which this segment sends again, under fresh `seq`s, before
+        # its first frame of its own (`_take_restored`).
+        self._restored = list(restored)
         # The wire `step_id` each step (`_ExecutorRecord.step_id`) was given
         # at its first frame, so its later frames update the same line.
         self._wire_step_ids: dict[str, str] = {}
@@ -1635,7 +1642,15 @@ class _Translator:
         """The frames of `event`, emitted with `marks` (`_EventRecords`):
         those of the calls recorded before it, then its own."""
         records = [] if marks is None else self._take_records(marks)
-        return await self._translate(event, records)
+        return [*self._take_restored(), *await self._translate(event, records)]
+
+    def _take_restored(self) -> list[PlanApproved]:
+        """The restored `plan.approved` frames not yet sent, numbered now,
+        and none after the first call."""
+        restored, self._restored = self._restored, []
+        return [
+            frame.model_copy(update={"seq": self._conversation.next_seq()}) for frame in restored
+        ]
 
     async def _translate(self, event: SegmentEvent, records: list[_ExecutorRecord]) -> list[Any]:
         """The frames of `event`: those of `records`, the calls recorded
@@ -1734,13 +1749,13 @@ class _Translator:
         frames: list[Any] = []
         if node == "approve" and label == "approved":
             if self._approving is not None:
-                frames.append(
-                    plan_approved(
-                        self._approving,
-                        seq=self._conversation.next_seq(),
-                        baseline=self._conversation.turn_choice_baseline,
-                    )
+                approved = plan_approved(
+                    self._approving,
+                    seq=self._conversation.next_seq(),
+                    baseline=self._conversation.turn_choice_baseline,
                 )
+                self._conversation.record_approved(approved)
+                frames.append(approved)
                 self._approving = None
             frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._open_status(_STARTING_PLAN))
@@ -2203,8 +2218,9 @@ class _Translator:
             note = payload.get("refusal_note")
             if isinstance(note, str) and note:
                 # `harness.graph.planning`'s `planner` node sets this in three cases. Its
-                # `"pending_refusal"` route (BUDGET_EXHAUSTED or
-                # QUESTION_FIXED), a refused amendment that still has a
+                # `"pending_refusal"` route (BUDGET_EXHAUSTED, or
+                # QUESTION_FIXED on an entry with no amendment to hand back
+                # as a new question), a refused amendment that still has a
                 # `PENDING_APPROVAL` plan on record re-offered unmodified,
                 # carries the refusal's sentence: the plan card below says
                 # what is still approvable, and this says why the user is
@@ -2948,7 +2964,9 @@ class _Translator:
             },
         )
 
-    async def finish(self) -> list[Any]:
+    async def finish(
+        self, *, new_question: str | None = None, asked_for_question: bool = False
+    ) -> list[Any]:
         """Frames that close a segment that ran to the end of its events. A
         segment that did not pause closes the turn on the agent's answer,
         followed by one sentence for each loose match the turn used
@@ -2958,8 +2976,22 @@ class _Translator:
         `message.complete` text and the stored turn keeps them. The turn
         record keeps the notes and the line apart from the answer
         (`ConversationState.close_turn`), so a later turn's model reads the
-        answer alone, with no text of the code's own to restate."""
-        frames: list[Any] = [*await self._drain_recorder(), *self._close_status()]
+        answer alone, with no text of the code's own to restate.
+
+        `new_question` is the user's words a turn ended on when the planner
+        read them, typed on the plan card, as a different question
+        (`harness.graph.state.NEW_QUESTION_KEY`). The turn's record says it
+        ended so (`studio_state.NEW_QUESTION`), and `done` carries the words
+        for the client to send as the next turn. `asked_for_question` marks a
+        turn the planner ended on a new question no message of the user's
+        states (`harness.graph.state.ASK_FOR_QUESTION_KEY`): the reply is
+        `studio_state.ASK_FOR_QUESTION_REPLY`, the record says it ended so
+        (`studio_state.ASKED_FOR_QUESTION`), and `done` carries no words."""
+        frames: list[Any] = [
+            *self._take_restored(),
+            *await self._drain_recorder(),
+            *self._close_status(),
+        ]
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
             self._step(
@@ -2971,10 +3003,24 @@ class _Translator:
         self._held.clear()
         if self.paused:
             return frames
+        set_aside = bool(new_question) or asked_for_question
+        if new_question:
+            # The planner ended the turn before the agent answered: the reply
+            # says the plan was set aside, for a client that does not read
+            # `done.new_question`.
+            self._final_text = SET_ASIDE_REPLY
+        elif asked_for_question:
+            # The planner ended the turn on a new question no message states:
+            # the reply asks the user to send it.
+            self._final_text = ASK_FOR_QUESTION_REPLY
         answer, notes, basis = self._final_text, None, None
+        # A set-aside turn's reply is the code's own, with no figures to note.
+        answered = bool(self._final_text) and not set_aside
         if self._final_text:
             notes = (
-                " ".join(
+                None
+                if not answered
+                else " ".join(
                     loose_match_notes(
                         self._conversation.turn_readings,
                         specs=self._conversation.turn_specs,
@@ -2983,10 +3029,14 @@ class _Translator:
                 )
                 or None
             )
-            basis = basis_line(
-                self._conversation.turn_readings,
-                specs=self._conversation.turn_specs,
-                plans=self._conversation.turn_plans,
+            basis = (
+                basis_line(
+                    self._conversation.turn_readings,
+                    specs=self._conversation.turn_specs,
+                    plans=self._conversation.turn_plans,
+                )
+                if answered
+                else None
             )
             closing = "".join(f"\n\n{block}" for block in (notes, basis) if block)
             if closing:
@@ -3014,11 +3064,17 @@ class _Translator:
                     self._conversation.turn_readings, specs=self._conversation.turn_specs
                 )
             ]
-            if self._final_text
+            if answered
             else []
         )
         self._record_chips(chips)
-        self._conversation.close_turn(final_text=answer, match_notes=notes, basis_line=basis)
+        self._conversation.close_turn(
+            final_text=answer,
+            match_notes=notes,
+            basis_line=basis,
+            new_question=new_question,
+            asked_for_question=asked_for_question,
+        )
         frames.append(
             Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=chips)
         )
@@ -3028,6 +3084,7 @@ class _Translator:
                 seq=self._conversation.next_seq(),
                 trace_id=self._conversation.trace_id,
                 composition=self._conversation.composition,
+                new_question=new_question or None,
             )
         )
         return frames

@@ -2572,11 +2572,13 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
 
     cut = FrameRef(spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT)
     assert answer.presented == cut
+    cut_file = _kenya_donors_parquet_bytes(cut=True)
     assert answer.store == frame_ref_for(
         spec_id=KENYA_DONORS_SPEC,
         content_version=KENYA_DONORS_CUT,
         columns=KIND_COLUMNS,
         without_party_totals=True,
+        artifact_digest=f"sha256:{hashlib.sha256(cut_file).hexdigest()}",
     )
     # The frame the answer is described and drawn by is the cut version's.
     assert platform.described == [cut.model_dump()]
@@ -2858,13 +2860,18 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
         (None, None),
         (None, "default"),
     ]
-    # The frame holding the kinds is named apart from the plain one, under its file's stamp.
+    # The frame holding the kinds is named apart from the plain one, under its file's stamp
+    # and digest.
+    typed_file = _whole_totals_parquet_bytes(
+        _WHOLE_TOTAL_IDENTITIES[BOTH_TOTALS_SPEC][1], kinds=True
+    )
     assert typed_content["frame_ref"] != plain_content["frame_ref"]
     assert typed_content["frame_ref"] == frame_ref_for(
         spec_id=BOTH_TOTALS_SPEC,
         content_version=typed_content["content_version"],
         columns=flow_columns,
         enrichment_stamp=_WHOLE_TOTALS_STAMP,
+        artifact_digest=f"sha256:{hashlib.sha256(typed_file).hexdigest()}",
     ).model_dump(mode="json")
     assert summed_table.column("value").to_pylist() == pytest.approx([4_578_400_000.0])
 

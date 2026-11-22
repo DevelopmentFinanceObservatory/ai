@@ -2929,6 +2929,7 @@ async def test_a_moved_frame_is_named_apart_with_the_lost_frames_rendering(
             scope={"provider": "country/GBR"},
             stat_var_count=2,
             enrichment_stamp="stamp_of_the_old_file",
+            artifact_digest="sha256:" + "0" * 64,
         )
     )
 
