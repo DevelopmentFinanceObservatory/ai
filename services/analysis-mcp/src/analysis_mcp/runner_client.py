@@ -64,6 +64,9 @@ the latest year of the call's whole tree and answers each with its literal
 so the input's own rolling years follow that one latest year too, and the
 summary names each input that took another year alone (`run_tree`).
 
+`read_graph_nodes` reads one batch of graph nodes from `POST /api/graph/nodes`,
+which names a digest's breakdown cells (`common.breakdown_labels`).
+
 `read_derived_manifest` and `read_derived_file` read a frame the runner stored,
 by its `ops_` pair, from `GET /api/datasets/derived/{spec_id}/{content_version}`
 and its `/file`, for a caller that needs its recipe or its rows. Each raises
@@ -94,6 +97,7 @@ from typing import Annotated, Any
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider, apis_auth_provider
+from common.breakdown_labels import NODES_PATH, NODES_READ_TIMEOUT_S
 from common.caller import vouched_caller_headers
 from common.derived_replay import (
     ANALYSIS_PATH,
@@ -222,8 +226,13 @@ class RunnerClient:
         self._caller_principal = caller_principal
         self._auth = auth
 
-    async def post(self, path: str, body: Mapping[str, Any]) -> httpx2.Response | ToolRefusal:
-        """POST `body` to `path`, or the retryable refusal for a call that got no answer."""
+    async def post(
+        self, path: str, body: Mapping[str, Any], *, timeout_s: float | None = None
+    ) -> httpx2.Response | ToolRefusal:
+        """POST `body` to `path`, or the retryable refusal for a call that got no answer.
+        A `timeout_s` bounds this call in place of the compute call's timeout."""
+        if timeout_s is not None:
+            return await self._send("POST", path, json=body, timeout=timeout_s)
         return await self._send("POST", path, json=body)
 
     async def get(
@@ -790,6 +799,25 @@ def _derived_unread(answer: httpx2.Response | ToolRefusal) -> DerivedUnread:
         else answer.status_code >= 500,
         detail=str(problem.get("detail") or f"dfo-apis answered {answer.status_code}"),
     )
+
+
+async def read_graph_nodes(dcids: list[str]) -> Sequence[Mapping[str, Any]]:
+    """The entries `POST /api/graph/nodes` answers for one batch of `dcids`
+    (`common.breakdown_labels.ReadNodes`) within `NODES_READ_TIMEOUT_S`, or none when
+    the read failed, which is logged. A digest then names the cells by their values."""
+    answer = await runner_holder.get().post(
+        NODES_PATH, {"dcids": dcids}, timeout_s=NODES_READ_TIMEOUT_S
+    )
+    if isinstance(answer, ToolRefusal) or not answer.is_success:
+        status = "no answer" if isinstance(answer, ToolRefusal) else answer.status_code
+        logger.warning("dfo-apis graph nodes read of %d dcids failed: %s", len(dcids), status)
+        return []
+    body = _json(answer)
+    nodes = None if body is None else body.get("nodes")
+    if not isinstance(nodes, list):
+        logger.warning("dfo-apis graph nodes answer holds no nodes list")
+        return []
+    return [node for node in nodes if isinstance(node, Mapping)]
 
 
 def _derived_path(path: str, ref: FrameRef) -> str:

@@ -12,6 +12,8 @@ from the stored recipe's root records, `rendering.record_bare_read` records the 
 bare `spec_id` resolved to, `data_mcp.mint_recovery` rebuilds a lost record, and
 `presentation_mcp.client._record_moved_pair` copies a lost frame's rendering to the
 pair `frame_ref_for` derives from the version dfo-apis' frame refresh moved it to.
+That pair names no file digest, and `get_data` names every rendering by its file's
+digest, so no mint stores a frame under it: it keys the moved record alone.
 
 A record holds:
 
@@ -51,6 +53,11 @@ A record holds:
   (`data_mcp.manifest.ArtifactEntry.enrichment_stamp`) when `options.columns` asks for
   a `{role}_party_kind` column, else `None`. It is also `None` on a record written
   before apis sent one and on a frame read from an artifact without one.
+  `frame_ref_for` takes it back to reproduce `frame`.
+- `artifact_digest`: the digest of the file the frame was read from
+  (`data_mcp.manifest.ArtifactEntry.artifact_digest`) when `frame` names a rendering, else
+  `None`. It is also `None` on a record written before `frame_ref_for` named frames by it,
+  and on one a bare read, a Spec read or a frame refresh wrote, which saw no file.
   `frame_ref_for` takes it back to reproduce `frame`.
 
 `encode_mint_record` is the RFC 8785 form of the record, so two writers
@@ -120,6 +127,7 @@ class MintRecord(BaseModel):
     scope: dict[str, Any] = Field(default_factory=dict)
     stat_var_count: int | None = Field(default=None, ge=0)
     enrichment_stamp: str | None = Field(default=None, exclude_if=lambda stamp: stamp is None)
+    artifact_digest: str | None = Field(default=None, exclude_if=lambda digest: digest is None)
 
     @field_validator("options")
     @classmethod

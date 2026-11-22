@@ -11,8 +11,10 @@ the bytes are the version's `CANONICAL_FRAME_RENDERING` artifact, which the
 snapshot route lists, and the frame is registered only when
 `mint_content_version(frame_sha256=frame_sha256(frame))` is that
 `content_version`. Every other mint registers the artifact of its own rendering
-under a pair `frame_ref_for` derives from its columns, groupby and cut, unchecked
-against the token, since a selection, a sum or a cut is a different frame. A mint
+under a pair `frame_ref_for` derives from its columns, groupby, cut and the digest of
+the artifact it is read from, unchecked against the token, since a selection, a sum or a
+cut is a different frame. apis keeps the `content_version` when it renders a rendering's
+cells another way and links a new artifact, so the digest makes that a new frame. A mint
 with `options.without_party_totals` names apis' version of the frame without group
 totals, so the pair it registers under holds the rows apis serves for it.
 
@@ -194,26 +196,37 @@ FLOW_PARTY_ROLE_COLUMNS: frozenset[str] = frozenset(FLOW_ROLE_AXES) | frozenset(
 _LEGACY_KIND_COLUMN = "kind"
 
 
+# apis marks the rendering of a file it rendered after a failed graph metadata read with
+# `metadata: "incomplete"` (apis' `render.incomplete_rendering`). No request sends it.
+METADATA_KEY = "metadata"
+METADATA_INCOMPLETE = "incomplete"
+
+
 def resolved_options(options: Mapping[str, Any], *, manifest: Manifest) -> Mapping[str, Any]:
     """`options` as the rendering apis minted for them. An `enrichment: "default"` request
     is the `rendering` of the one data artifact the mint's manifest lists for it, which
     names the columns apis resolved the enrichment to. That artifact's rendering, its
     columns aside, is the request's, and its columns hold every requested one. A mint
-    response lists only the rendering it served and the series statistics. Any
-    other `options`, and a manifest listing no such artifact or more than one, are returned
-    as sent, so the frame read refuses for want of its rendering.
+    response lists only the rendering it served and the series statistics. An
+    incomplete artifact (`is_incomplete_rendering`) resolves to its `complete_rendering`,
+    the rendering a later request for a complete file sends. Any other `options`, and a
+    manifest listing no such rendering or more than one, are returned as sent, so the
+    frame read refuses for want of its rendering.
     """
     if options.get(ENRICHMENT) != DEFAULT_ENRICHMENT:
         return options
     base = {key: value for key, value in options.items() if key not in (ENRICHMENT, "columns")}
     requested = set(options.get("columns") or ())
-    served = [
-        artifact.rendering
-        for artifact in manifest.artifacts
-        if {key: value for key, value in artifact.rendering.items() if key != "columns"} == base
-        and isinstance(columns := artifact.rendering.get("columns", []), list)
-        and requested <= set(columns)
-    ]
+    served: list[dict[str, Any]] = []
+    for artifact in manifest.artifacts:
+        rendering = complete_rendering(artifact.rendering)
+        if (
+            {key: value for key, value in rendering.items() if key != "columns"} == base
+            and isinstance(columns := rendering.get("columns", []), list)
+            and requested <= set(columns)
+            and rendering not in served
+        ):
+            served.append(rendering)
     if len(served) != 1:
         return options
     return dict(served[0])
@@ -330,7 +343,11 @@ async def materialise_and_register(
     are the version's canonical frame, found on the snapshot route
     (`_locate_canonical_frame`) and checked against the pair's `content_version`
     before the write (`_parse_and_register`). Otherwise the bytes are the artifact
-    of the manifest whose `rendering` equals `options` (`_select_requested_artifact`).
+    of the manifest whose `rendering`, or whose incomplete twin's complete rendering,
+    equals `options` (`select_requested_artifact`),
+    and its `artifact_digest` names the reference too, so a frame held from a file apis
+    has since replaced is not the one this mint reads. A manifest that lists no such
+    artifact refuses before the store is read.
 
     `scope` is the mint request's `scope`, `None` for a mint that sent none. Every
     outcome that read or parsed the frame also writes its mint record
@@ -421,6 +438,7 @@ async def materialise_and_register(
                 scope=dict(scope or {}),
                 stat_var_count=outcome.stat_var_count,
                 enrichment_stamp=stamp,
+                artifact_digest=_named_digest(manifest, options=options, ref=ref),
             ),
             deadline=deadline,
         )
@@ -474,7 +492,18 @@ async def _register(
     kinds_asked: bool,
 ) -> MaterialisationOutcome:
     """`materialise_and_register` for the frame held under `ref`, named under `stamp`
-    (`_named_stamp`)."""
+    (`_named_stamp`) and the requested artifact's digest (`_requested_digest`)."""
+    # `frame_ref_for` keeps the mint's own pair exactly for the version's canonical
+    # frame, and names every other rendering by its options and its artifact's digest. A
+    # manifest without the requested rendering names no frame a held one could be, so it
+    # refuses before the store is read, whatever deadline is left.
+    canonical = ref == FrameRef(
+        spec_id=manifest.definition.spec_id, content_version=manifest.content_version
+    )
+    requested = None if canonical else select_requested_artifact(manifest, options=options)
+    if not canonical and requested is None:
+        return _no_artifact_refusal(listed_by="the mint's manifest", rendering=options)
+
     store = get_store()
     checked = await _check_store(
         store, ref, max_frame_rows=settings.max_frame_rows, deadline=deadline
@@ -482,16 +511,6 @@ async def _register(
     if isinstance(checked, MaterialisationOutcome):
         return _held_kinds_checked(checked, spec_id=ref.spec_id, kinds_asked=kinds_asked)
     fetch_failure_reason = checked
-
-    # `frame_ref_for` keeps the mint's own pair exactly for the version's canonical
-    # frame, and names every other rendering by its options. A manifest without the
-    # requested rendering refuses whatever deadline is left.
-    canonical = ref == FrameRef(
-        spec_id=manifest.definition.spec_id, content_version=manifest.content_version
-    )
-    requested = None if canonical else _select_requested_artifact(manifest, options=options)
-    if not canonical and requested is None:
-        return _no_artifact_refusal(listed_by="the mint's manifest", rendering=options)
 
     budget_s = settings.artifact_fetch_budget_s
     if deadline is not None:
@@ -847,9 +866,10 @@ async def _parse_and_register(
     is a rendering, validated cell by cell (`frame_from_parquet_bytes`) and
     registered under its derived pair unchecked.
 
-    The frame's trace keeps the mint's `options` and `stamp`, the stamp `ref` is named
-    under, so `data_mcp.mint_recovery` can rebuild a derived pair from the held frame
-    when its mint record is missing.
+    The frame's trace keeps the mint's `options`, `stamp`, the stamp `ref` is named
+    under, and the digest `ref` is named by (`_named_digest`), so
+    `data_mcp.mint_recovery` can rebuild a derived pair from the held frame when its
+    mint record is missing.
     """
     # `pyarrow.ArrowException` (a 2xx response whose body isn't a valid/complete Parquet
     # file) and `KeyError` (a Parquet file missing its `time_period` or `value` column,
@@ -888,6 +908,7 @@ async def _parse_and_register(
         content_version=ref.content_version,
         options=dict(options),
         enrichment_stamp=stamp,
+        artifact_digest=_named_digest(manifest, options=options, ref=ref),
     )
     try:
         async with asyncio.timeout(_seconds_left(write_deadline)):
@@ -967,8 +988,9 @@ def named_groupbys(groupby: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
 def _ref_or_refusal(
     manifest: Manifest, *, options: Mapping[str, Any], stamp: str | None
 ) -> FrameRef | MaterialisationOutcome:
-    """The reference this frame registers under (`frame_ref_for`, named under `stamp`),
-    or the refused outcome for a manifest whose `spec_id`/`content_version` combination
+    """The reference this frame registers under (`frame_ref_for`, named under `stamp` and
+    the digest of the requested artifact, `select_requested_artifact`), or the refused
+    outcome for a manifest whose `spec_id`/`content_version` combination
     doesn't match `FrameRef`'s own pair shape.
     """
     try:
@@ -979,6 +1001,7 @@ def _ref_or_refusal(
             groupby=options.get("groupby"),
             without_party_totals=options.get(WITHOUT_PARTY_TOTALS) is True,
             enrichment_stamp=stamp,
+            artifact_digest=_requested_digest(manifest, options=options),
         )
     except ValidationError as exc:
         return MaterialisationOutcome(
@@ -993,26 +1016,72 @@ def _ref_or_refusal(
 
 def _named_stamp(manifest: Manifest, *, options: Mapping[str, Any]) -> str | None:
     """The stamp a frame minted with `options` is named under (`frame_ref_for`): the
-    `enrichment_stamp` of the artifact it is read from (`_select_requested_artifact`),
+    `enrichment_stamp` of the artifact it is read from (`select_requested_artifact`),
     for a frame that asks for kinds (`recorded_stamp`). An artifact without one, such
     as a pinned file rendered under an earlier code index, names the frame unsalted.
     The canonical frame asks for no kinds."""
-    artifact = _select_requested_artifact(manifest, options=options)
+    artifact = select_requested_artifact(manifest, options=options)
     stamp = None if artifact is None else artifact.enrichment_stamp
     return recorded_stamp(options.get("columns") or (), stamp)
 
 
-def _select_requested_artifact(
+def _requested_digest(manifest: Manifest, *, options: Mapping[str, Any]) -> str | None:
+    """The `artifact_digest` of the artifact a frame minted with `options` is read from
+    (`select_requested_artifact`), or `None` when the manifest lists none."""
+    artifact = select_requested_artifact(manifest, options=options)
+    return None if artifact is None else artifact.artifact_digest
+
+
+def _named_digest(manifest: Manifest, *, options: Mapping[str, Any], ref: FrameRef) -> str | None:
+    """The digest `ref` is named by (`frame_ref_for`), which its mint record keeps: the
+    requested artifact's for a rendering, and `None` for the version's canonical frame,
+    which `ref` names by the manifest's own pair."""
+    if ref == FrameRef(
+        spec_id=manifest.definition.spec_id, content_version=manifest.content_version
+    ):
+        return None
+    return _requested_digest(manifest, options=options)
+
+
+def select_requested_artifact(
     manifest: Manifest, *, options: Mapping[str, Any]
 ) -> ArtifactEntry | None:
-    """The artifact whose `rendering` equals the mint request's `options`, or `None`.
+    """The artifact whose `rendering` equals the mint request's `options`, else its
+    incomplete twin (`is_incomplete_rendering`) whose `complete_rendering` does, or `None`.
 
     apis stores each artifact's `rendering` as the request's options with unset
     fields left out, and a manifest lists every rendering stored under its pair: other
     callers' groupby sums and column selections sit beside the requested one, in no
     set order. A manifest whose own artifact has expired lists none that matches.
+
+    apis links a file whose graph metadata read failed under its incomplete rendering,
+    and lists it alone when no complete file of that rendering is linked. That file is
+    read under its own digest (`frame_ref_for`), so its frame stays apart from a
+    complete one, and `get_data` warns that its labels or types are incomplete.
     """
-    return next((a for a in manifest.artifacts if a.rendering == options), None)
+    exact = next((a for a in manifest.artifacts if a.rendering == options), None)
+    if exact is not None:
+        return exact
+    return next(
+        (
+            a
+            for a in manifest.artifacts
+            if is_incomplete_rendering(a.rendering) and complete_rendering(a.rendering) == options
+        ),
+        None,
+    )
+
+
+def is_incomplete_rendering(rendering: Mapping[str, Any]) -> bool:
+    """Whether apis linked the file of `rendering` after a failed graph metadata read
+    (apis' `render.incomplete_rendering`): `rendering` carries `metadata: "incomplete"`."""
+    return rendering.get(METADATA_KEY) == METADATA_INCOMPLETE
+
+
+def complete_rendering(rendering: Mapping[str, Any]) -> dict[str, Any]:
+    """`rendering` without its `metadata` member: the rendering a request for its file
+    sends (apis' `render.complete_rendering`)."""
+    return {key: value for key, value in rendering.items() if key != METADATA_KEY}
 
 
 @dataclass
