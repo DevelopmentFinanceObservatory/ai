@@ -2034,9 +2034,8 @@ class WholeSum(StrictModel):
     it open with one row per party, as the CRS does over every donor. Where
     it is left open, `propose_plan` adds an aggregate summing it by period
     (`whole_sum`), which every reader of the whole reads in its place
-    (`with_whole_sums`). `propose_plan` writes it, never the model
-    (`Plan.whole_sums`), and the model is shown the plan without it
-    (`authored`).
+    (`with_whole_sums`). Only `propose_plan` writes it (`Plan.whole_sums`),
+    and the model is shown the plan without it (`authored`).
 
     The aggregate keeps apart every party the whole leaves open beside that
     side, the `across` words of its part on its other sides (`whole_read`),
@@ -2588,7 +2587,7 @@ def whole_of_fault(
     widened, so the part is another dataset requirement, itself no whole.
     A whole over every donor or recipient opens the side the part names a
     party on (`_opened_side_fault`). The whole covers the part's parties
-    with that side one total (`whole_read`), whatever it states itself. It
+    with that side one total (`whole_read`). It
     follows its part wherever the part is counted, so it is read only as
     the denominator of a share or quotient of its part (`_whole_read_fault`).
     """
@@ -2706,7 +2705,7 @@ def opened_role(whole: DatasetRequirement, part: DatasetRequirement) -> str | No
 
 
 def covered(requirement: DatasetRequirement, plan: Plan) -> DatasetRequirement:
-    """Who `requirement` covers, in its own fields; any requirement but a whole as stated.
+    """Who `requirement` covers, in its own fields. Any requirement but a whole is as stated.
 
     A whole (`whole_of`) covers what it reads on the source its plan's
     workflow retrieves it from (`whole_on_source`), as the compiler reads it
@@ -2739,11 +2738,11 @@ def whole_on_source(
     compile retrieves it from, `None` before compile.
 
     It covers its part's parties less the side it opens (`whole_read`), and on
-    that side what the source serves there: the side's word in `across`, one
-    row per party there, where the source leaves the side open
-    (`compiler.sources.open_side_column`), which the aggregate `propose_plan`
-    added sums (`WholeSum`); else the parties the source binds there, as
-    entities by their refs, the total Search counts the side as. With no
+    that side what the source serves there. Where the source leaves the side
+    open (`compiler.sources.open_side_column`), that is the side's word in
+    `across`, one row per party there, which the aggregate `propose_plan`
+    added sums (`WholeSum`). Otherwise it is the parties the source binds
+    there, as entities by their refs, the total Search counts the side as. With no
     source the side reads open where `summed`, as admission read Search's
     answer for the whole, and as `whole_read` reads it otherwise. A sector
     whole opens no side.
@@ -2787,7 +2786,7 @@ def wholes_as_read(
     requirements_by_id: Mapping[str, EvidenceRequirement], *, summed: Collection[str] = ()
 ) -> dict[str, EvidenceRequirement]:
     """`requirements_by_id` with each whole whose part it holds read before compile
-    (`whole_on_source`): the side it opens open, one row per party there, where
+    (`whole_on_source`), the side it opens open, one row per party there, where
     `summed` names it, one an aggregate sums the open side of (`WholeSum`)."""
     read: dict[str, EvidenceRequirement] = dict(requirements_by_id)
     for requirement_id, requirement in requirements_by_id.items():
@@ -3791,7 +3790,7 @@ def _dataset_shape(
     A role phrase one entity states alone, not as a set's members, is
     `single`. The plan cannot tell whether Search binds the name to one party,
     so `submission.service._rank_roles_expand` and the compiler check it. The
-    opened side is not `single`: no entity of the whole states it, so
+    opened side is not `single`, since no entity of the whole states it and
     `_rank_roles_expand` has no name to check, and a rank over another of the
     whole's roles states a reduction.
 

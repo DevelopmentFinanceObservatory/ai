@@ -245,8 +245,8 @@ async def test_the_context_in_meta_reaches_search_unless_the_setting_is_off(
     setting: str | None,
     enabled: bool,
 ) -> None:
-    """Unset, the setting posts the context; off, it drops it, logged at debug
-    and marked on the call's span."""
+    """Unset, the setting posts the context. Off, it drops the context, logs that at
+    debug and marks it on the call's span."""
     if setting is None:
         monkeypatch.delenv("SEARCH_SENDS_CONVERSATION_CONTEXT", raising=False)
     else:

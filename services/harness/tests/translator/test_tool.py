@@ -1503,7 +1503,8 @@ async def test_a_group_a_shares_numerator_names_is_not_named_on_its_whole(
 
 
 # G7 aid to Africa, and the whole `propose_plan` compiles from it over every
-# recipient: G7 aid to developing countries, a total Search binds `destination` to.
+# recipient. That is G7 aid to developing countries, a total Search binds
+# `destination` to.
 SPEC_G7_AFRICA = "spec_2a634c06" + "0" * 24
 SPEC_G7_EVERY_RECIPIENT = "spec_66627f58" + "0" * 24
 _G7_COVERAGE = {"kind": "exact", "has_data": True, "window": {"start_year": 1960, "end_year": 2024}}
@@ -1535,7 +1536,7 @@ async def test_a_whole_pinned_to_its_compile_is_never_searched(
 ) -> None:
     """G7 aid to Africa as a share of G7 aid to every recipient, the whole pinned to
     the compile `propose_plan` made of it, which Search binds to the developing
-    countries' total. The whole is settled: translation compiles it from that pin
+    countries' total. The whole is settled, and translation compiles it from that pin
     with no search and no rewrite. A stored plan may hold a whole stating its part's
     donor and the recipients in `across`, pooled by year, which loads without them
     and reads the same way."""

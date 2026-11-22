@@ -1473,8 +1473,8 @@ def _scope_issues(
 def _named_axes(
     requirement: DatasetRequirement, evidence: RetrievalEvidence
 ) -> dict[str, set[str]]:
-    """The refs `requirement` names on each identity axis: the axis of each member of
-    the source an entity names (`named_members`, `compiler.sources.identity_side`)."""
+    """The refs `requirement` names on each identity axis, read off the axis of each
+    member of the source an entity names (`named_members`, `compiler.sources.identity_side`)."""
     named: dict[str, set[str]] = {}
     for entity in requirement.entities:
         for one in named_members(entity, evidence):
@@ -1518,7 +1518,7 @@ def _unnamed_axes_issue(
     requirement: DatasetRequirement, bound: Mapping[str, set[str]]
 ) -> EvidenceIssue:
     """The finding on the refs `bound` an identity binds on each axis where the
-    requirement names no one: the definition is bound wider than it."""
+    requirement names no one. The definition is bound wider than the requirement."""
     refs = sorted({ref for refs in bound.values() for ref in refs})
     return EvidenceIssue(
         code=EvidenceIssueCode.SCOPE_ENTITIES_WIDER,

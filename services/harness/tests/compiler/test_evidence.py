@@ -471,7 +471,7 @@ def test_an_identity_binding_exactly_the_required_entities_says_nothing(
 def test_an_identity_that_does_not_bind_a_required_entity_is_an_error(
     requirement: RequirementFactory, source: SourceFactory, key: str
 ) -> None:
-    # Search keys an identity by axis and the mint by the caller's graph role; each
+    # Search keys an identity by axis and the mint by the caller's graph role. Each
     # key here names the axis Kenya sits on, the receiving side or the place.
     kenya = ResolvedEntity(
         role="observationAbout" if key == "observationAbout" else "destination",
@@ -508,7 +508,7 @@ def test_an_identity_binding_the_donor_alone_compares_only_the_donor(
 ) -> None:
     """US aid to Kenya, on a source whose identity binds the donor and leaves the
     recipient axis unbound. The donor is compared with what the identity binds
-    there; Kenya, on the unbound recipient axis, is not."""
+    there. Kenya, on the unbound recipient axis, is left out."""
     us = ResolvedEntity(role="origin", ref="country/USA", label="United States")
     identity = _identity(entities={"origin": donors})
     aid = requirement(
@@ -685,8 +685,8 @@ def test_an_identity_key_outside_the_axis_table_is_an_axis_of_its_own(
     codes: list[tuple[str, str]],
 ) -> None:
     """A role dfo-apis declares, such as `reporter`, keys an identity on an axis of
-    its own: its refs are compared only with a party resolved under that role, and
-    never with Kenya the recipient. Where the requirement names no reporter, a
+    its own: its refs are compared only with a party resolved under that role.
+    Where the requirement names no reporter, a
     reporter bound is wider than it. A key with no ref binds nothing."""
     wanted = (
         requirement(entities=[Entity(name="United States", role="reporter")])
@@ -701,8 +701,8 @@ def test_an_identity_key_outside_the_axis_table_is_an_axis_of_its_own(
 
 
 def _identity_entity_maps(value: object) -> Iterator[dict[str, object]]:
-    """Every identity's `entities` map in `value`, a parsed JSON document: a map
-    beside the identity's `slots` or `shape`."""
+    """Every identity's `entities` map in `value`, a parsed JSON document. The map
+    sits beside the identity's `slots` or `shape`."""
     if isinstance(value, dict):
         entities = value.get("entities")
         if isinstance(entities, dict) and ("slots" in value or "shape" in value):
@@ -757,10 +757,10 @@ def test_an_identity_bound_wider_than_the_requirement_is_a_warning(
 def test_an_entity_on_a_role_the_identity_leaves_out_says_nothing_about_the_scope(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
-    # A G7 whole over every recipient: the definition binds the donor only,
+    # A G7 whole over every recipient. The definition binds the donor only,
     # and Search answers the open recipient side with the developing-countries
     # total, which the whole names by its ref. The control binds the
-    # recipient side to another party, which the check still refuses.
+    # recipient side to another party, which the check refuses.
     entities = (
         ResolvedEntity(role="origin", ref="GroupOfSeven", label="Group of Seven"),
         ResolvedEntity(

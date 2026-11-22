@@ -468,8 +468,8 @@ async def _live_answer(
     key: str,
     failures: list[str],
 ) -> dict[str, Any]:
-    """`live`'s answer to one call filed under `key`. A call that raised, whose raise
-    propagates, and an answer `_keepable` keeps out are listed in `failures`."""
+    """`live`'s answer to one call filed under `key`. A call that raised (the raise
+    propagates) and an answer `_keepable` rejects are listed in `failures`."""
     try:
         answer = await live(tool, arguments)
     except BaseException as exc:

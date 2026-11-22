@@ -4003,9 +4003,9 @@ def test_the_sum_over_a_whole_s_open_side_is_a_card_row_of_its_own(
     """The United States' share of ODA to Kenya over every donor, the share reading
     the whole. Where the whole's source leaves the donors open, the sum
     `propose_plan` adds over them is a step with a row of its own, worded as a
-    total by year, which a stop names as itself, and the share still divides by
-    the whole of every donor; where the source binds the donors' total there is
-    no such row."""
+    total by year, which a stop names as itself, and the share divides by the
+    whole of every donor. Where the source binds the donors' total there is no
+    such row."""
     plan = us_share_of_kenya_oda(
         decision, whole=whole, numerator=US_DONOR, whole_of=True, group_by=None
     )
@@ -4041,7 +4041,7 @@ def test_the_sum_over_a_whole_s_open_side_is_a_card_row_of_its_own(
     [
         (DAC_DONORS, [("official donors (DAC)", "DACOfficialDonors")], ()),
         (ALL_DONORS, [], ("donor",)),
-        # The donors bound with no entity stated for them: the whole names no donor
+        # The donors bound with no entity stated for them. The whole names no donor
         # and leaves no side open, so compile reads no open axis it cannot resolve.
         ({"entities": DAC_DONORS["entities"][:1]}, [], ()),
     ],
@@ -4055,7 +4055,7 @@ def test_a_whole_covers_the_side_it_opens_as_its_compiled_source_serves_it(
 ) -> None:
     """The United States' share of ODA to Kenya over every donor, compiled. Where
     the whole's source binds the donors' total, the whole covers that total by its
-    ref; where it leaves the donors open, which the plan sums, it covers every
+    ref. Where it leaves the donors open, which the plan sums, it covers every
     donor."""
     plan = us_share_of_kenya_oda(
         decision, whole=whole, numerator=US_DONOR, whole_of=True, group_by=None

@@ -667,7 +667,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     wholes = {rid: pin for rid, pin in targets.items() if pin.whole_axis is not None}
     moved = {rid: pin for rid, pin in targets.items() if pin.whole_axis is None}
     # A whole Search leaves open on the side it opens is summed by a step of its own,
-    # derived again on every admission: the plan it amends is read without one
+    # derived again on every admission, since the plan it amends is read without one
     # (`statement`).
     sums = _whole_sums(wholes, aligned_after)
     settled, evidence_requirements = _without_replaced_whole_decisions(
@@ -6666,7 +6666,7 @@ def _whole_sums(
             continue
         block = pin.block
         if block is None:
-            # `_declared_wholes` compiles such a pin again, so none reaches here; the
+            # `_declared_wholes` compiles such a pin again, so none reaches here. The
             # compiler refers back a whole whose open side has no sum.
             logger.warning(
                 "whole %r's compile %s holds no spec block, so no sum is added for it",

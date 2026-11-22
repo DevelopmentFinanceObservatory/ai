@@ -1891,9 +1891,9 @@ class _Build:
         identity is logged. Where a denominator source
         binds parties on a side and states no named set there, a party it does not
         bind is unshown, since a bound region holds countries no set lists. So is a
-        total the numerator binds with no named set stating it there, a party
-        whose ref shows no class of party (`compiler.sources.party_class`): no set
-        lists what it holds. A party
+        party whose ref shows no class of party (`compiler.sources.party_class`),
+        where no named set states it on the numerator's side, since nothing lists
+        what it holds. A party
         nothing shows is inside or outside is not refused. A `quotient_of` divides
         any two measures and is not checked.
         """

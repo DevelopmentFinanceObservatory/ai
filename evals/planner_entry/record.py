@@ -211,15 +211,15 @@ async def _first_year_results(
 
 
 class ProposalRecordError(RuntimeError):
-    """A live proposal that would leave its recording short: the task is not saved."""
+    """A live proposal that would leave its recording short. The task is not saved."""
 
 
 async def _proposal_calls(
     client: Any, task: Task, recording: Mapping[str, Any], *, wall_s: float
 ) -> dict[str, dict[str, Any]]:
     """The answers to each call `propose_plan` makes while it admits each of `task`'s
-    payloads that the recording's `tools` do not hold, made now, by the key
-    `entry.RecordedSurface` looks each up under: such as the `resolve_definition` call
+    payloads that the recording's `tools` do not hold, made live, by the key
+    `entry.RecordedSurface` looks each up under, such as the `resolve_definition` call
     `compile_whole` sends for a `whole_of`. Each entry may take `wall_s`.
 
     Raises:

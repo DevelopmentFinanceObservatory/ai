@@ -7459,7 +7459,7 @@ def test_a_whole_over_donors_of_a_part_with_a_roleless_entity_asks_for_its_role(
 
 def _g7_africa_share(*, whole: DatasetRequirement, pooled: bool = False) -> list[Any]:
     """G7 aid to Africa as a share of `whole`, the plan the planner first proposed
-    in a recorded Studio turn; with `pooled`, the whole is summed by year first."""
+    in a recorded Studio turn. With `pooled`, the whole is summed by year first."""
     part = DatasetRequirement(
         id="g7_africa_aid",
         decision_ids=["measure"],
@@ -7493,7 +7493,7 @@ _G7_WHOLE = DatasetRequirement(
     period=Period(start=1960, end=2024),
     whole_of=WholeOf(part="g7_africa_aid", axis="recipient"),
 )
-# The same whole as a stored plan may hold it: stating the part's donor, and its
+# The same whole as a stored plan may hold it, stating the part's donor and its
 # recipients in `across`, pooled by year.
 _G7_WHOLE_STATED = _G7_WHOLE.model_copy(
     update={"entities": (Entity(name="Group of Seven", role="donor"),), "across": ("recipient",)}
@@ -7511,7 +7511,7 @@ _G7_WHOLE_STATED = _G7_WHOLE.model_copy(
 def test_a_whole_covers_its_parts_parties_with_the_side_it_opens_as_one_total(
     decision: DecisionFactory, whole: DatasetRequirement, pooled: bool
 ) -> None:
-    """G7 aid to Africa over G7 aid to every recipient: the whole states no
+    """G7 aid to Africa over G7 aid to every recipient. The whole states no
     entities and no `across`, and reads as its part's donor with the recipients
     one closed total, so the share divides by it directly. A whole a stored
     session states coverage on loads without it and reads the same way."""
@@ -7542,7 +7542,7 @@ def test_a_summed_whole_reads_its_side_open_and_its_sum_closes_it(
     decision: DecisionFactory,
 ) -> None:
     """G7 aid to Africa over G7 aid to every recipient, on a source leaving the
-    recipients open: the whole reads them open, one row each, and the sum
+    recipients open. The whole reads them open, one row each, and the sum
     `propose_plan` added keeps the donor and sums them away, so the share divides
     by one total. The plan the model wrote is the plan without the sum."""
     sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
@@ -7571,8 +7571,8 @@ def test_a_plan_at_the_requirement_limit_holds_the_sum_over_its_whole(
     decision: DecisionFactory,
 ) -> None:
     """A plan stating `MAX_PLAN_REQUIREMENTS` requirements, one of them a whole
-    `propose_plan` sums: the sum is no requirement the model wrote, so the plan
-    still fits."""
+    `propose_plan` sums. The sum is no requirement the model wrote, so the plan
+    fits."""
     sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
     written = _g7_africa_share(whole=_G7_WHOLE)
     fillers = [
@@ -7634,8 +7634,8 @@ def test_a_plan_whose_whole_sums_are_not_its_wholes_aggregates_is_refused(
 
 def test_a_copy_of_a_whole_s_sum_is_named_as_the_whole() -> None:
     """A rolling copy of the sum `propose_plan` added over a whole is named in
-    outward text as the whole the model wrote, which the planner can patch, and
-    not as the sum it is never shown."""
+    outward text as the whole the model wrote, which the planner can patch. The
+    planner is never shown the sum."""
     split = HistorySplit(
         requirements=(),
         copies=(RollingCopy(copy_id="total_sum_history", origin_id="total_sum"),),
@@ -7652,7 +7652,7 @@ def test_a_copy_of_a_whole_s_sum_is_named_as_the_whole() -> None:
 
 def test_requirements_dropping_a_whole_drop_its_sum(decision: DecisionFactory) -> None:
     """G7 aid to Africa over its whole, summed, restated with the whole a total of
-    its own: the plan keeps no sum over a whole it no longer states."""
+    its own. The plan keeps a sum only over a whole it states."""
     sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
     written = _g7_africa_share(whole=_G7_WHOLE, pooled=True)
     plan = _plan(
@@ -7678,7 +7678,7 @@ def test_a_part_naming_the_set_it_read_across_keeps_its_whole_s_sum(
     recipient, the recipients summed keeping each donor apart. The part restated
     naming the G7 in place of its `across` donors, as the translator restates a
     part whose pin holds that side to one set (`translator.discovery.name_pinned_groups`),
-    keeps the sum, which now keeps the G7 apart where it kept each donor."""
+    keeps the sum, which then keeps the G7 apart in place of each donor."""
     sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
     g7 = Entity(name="Group of Seven", role="donor")
     africa = Entity(name="Africa", role="recipient")

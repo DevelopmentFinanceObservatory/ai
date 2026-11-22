@@ -61,7 +61,7 @@ PARTY_ROLES: frozenset[str] = frozenset(FLOW_ROLE_COLUMNS.values())
 IdentityAxis = Literal["origin", "destination", "place"]
 
 # The axis each key of a spec identity's `entities` names. Search keys an identity by the axis
-# labels and `observationAbout`; the mint keeps a caller's role spelling, each a graph role
+# labels and `observationAbout`. The mint keeps a caller's role spelling, a graph role that
 # dfo-apis's `dfo_platform.roles.ROLE_AXES` places on a flow axis. dfo-apis declares role names
 # open, so a key outside this table is an axis of its own (`compiler.sources.identity_side`).
 _IDENTITY_KEY_AXES: dict[str, IdentityAxis] = {

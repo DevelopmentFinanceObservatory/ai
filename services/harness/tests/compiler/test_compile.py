@@ -9022,7 +9022,7 @@ def test_a_share_checks_only_the_entity_its_numerator_narrows_to(
 ) -> None:
     """G7 aid to Kenya and the United States, narrowed to one of them, over G7 aid
     to Africa. Kenya is inside Africa, so the share holds its part even though the
-    numerator's source also binds the United States; narrowed to the United
+    numerator's source also binds the United States. Narrowed to the United
     States, the part is outside the whole."""
     united_states = ResolvedEntity(role="destination", ref="country/USA", label="United States")
     g7 = Entity(name="G7", role="donor")
@@ -9097,8 +9097,8 @@ _DAC_DEVELOPING_GROUP = ResolvedGroup(
         # The share would read one row per recipient there, which the sum
         # `propose_plan` derives again repairs, so that is the one issue.
         pytest.param([], [], False, False, [Code.WHOLE_SUM_UNMATCHED], id="open-source-unsummed"),
-        # So it is where a step reading the whole is found at fault before the
-        # whole's source is read.
+        # A step reading a whole that lacks its sum reports that issue alone, so a
+        # stray reader adds none.
         pytest.param(
             [],
             [],
@@ -9245,7 +9245,7 @@ def test_a_planners_pool_over_a_whole_reads_the_sum_where_its_source_leaves_the_
     """G7 aid to Kenya over its whole over every recipient, the planner pooling the
     whole by year with `mean`. Over a source leaving the recipients open the pool
     reads the sum `propose_plan` added, so it averages one total a year, as it does
-    reading a source binding the total; the plan compiles either way."""
+    reading a source binding the total. The plan compiles either way."""
     aid = requirement(
         id="aid",
         measure="official development assistance",
@@ -9468,7 +9468,7 @@ def test_a_recorded_share_of_a_donor_s_aid_to_a_region_holds_its_part(
     build: Callable[..., CompileResult],
 ) -> None:
     # UK ODA to Africa as a share of all UK ODA, as a live planner proposed it, on
-    # the constant-price sources Search answered it with: the part binds the UK
+    # the constant-price sources Search answered it with. The part binds the UK
     # and Africa's total, the whole the UK alone. The plan reads the part's
     # family separately, which the share refuses for its shape alone.
     arguments = _UK_ODA["calls"][1]["arguments"]

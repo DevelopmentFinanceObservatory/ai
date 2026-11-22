@@ -1106,7 +1106,7 @@ async def test_a_wholes_retrieval_is_held_to_the_parties_its_part_covers(
 ) -> None:
     """The United States' ODA to Kenya as a share of its whole over every donor, whose
     source binds Kenya and leaves the donors open, so the plan sums them
-    (`Plan.whole_sums`): the whole states no entity, and its retrieval answering
+    (`Plan.whole_sums`). The whole states no entity, and its retrieval answering
     with Uganda's aid is refused, since the whole covers what its part covers,
     Kenya included."""
     usa = ResolvedEntity(role="origin", ref="country/USA", label="United States")

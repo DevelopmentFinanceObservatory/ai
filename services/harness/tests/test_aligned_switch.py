@@ -1141,7 +1141,7 @@ async def test_a_copy_of_a_pin_from_a_warned_search_part_is_not_honoured(
         assert surface.tools == ["resolve_definition"]
         assert found["status"] == "definite", found
     elif kind == "whole":
-        # A whole is never searched: its compile is its only source.
+        # A whole is never searched, since its compile is its only source.
         assert "search" not in surface.tools
         assert found["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, found
     else:

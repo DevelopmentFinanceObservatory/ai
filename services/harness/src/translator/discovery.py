@@ -2995,7 +2995,7 @@ def _whole_referral(
 ) -> dict[str, object] | None:
     """The whole `requirement` referred back (`_unsettled_whole`) where it states no
     pin, or where its pin was compiled from another dataset than the one its part is
-    pinned to now; `None` otherwise. Neither needs a reader, so a compile of the
+    pinned to; `None` otherwise. Neither needs a reader, so a compile of the
     part's own dataset is asked for before any reader's answer about this one."""
     assert requirement.whole_of is not None
     part = requirement.whole_of.part
@@ -3045,8 +3045,8 @@ def _unreadable_block(
 
 
 def _unsettled_whole(requirement: DatasetRequirement, reason: str) -> dict[str, object]:
-    """The whole `requirement` referred back as unmeetable for `reason`, with the fix:
-    settle its part and propose the plan again, so the whole is compiled from it."""
+    """The whole `requirement` referred back as unmeetable for `reason`, with the fix
+    to settle its part and propose the plan again, so the whole is compiled from it."""
     assert requirement.whole_of is not None
     part = requirement.whole_of.part
     return _referred_answer(

@@ -9353,7 +9353,7 @@ async def test_a_whole_search_leaves_open_is_summed_by_one_step_admission_adds(
     """US health aid to Africa as a share of every donor's. Where Search leaves the
     donors open on the whole, as the CRS does, `propose_plan` adds one aggregate
     summing them by year, keeping Africa, and every reader of the whole reads it, a
-    pool the planner wrote included; the planner is shown the plan without it.
+    pool the planner wrote included. The planner is shown the plan without it.
     Where Search binds the donors' total the plan is as written."""
     block = _us_health_to_africa()
     surface = _OpenedWholeCompiles(block, **answer)
@@ -9388,7 +9388,7 @@ async def test_a_part_moved_between_datasets_takes_or_drops_the_sum_with_its_who
 ) -> None:
     """US health aid to Africa over every donor, the part moved by amendment from a
     dataset whose whole Search leaves the donors open, as the CRS does, to one
-    whose whole binds their total, as DAC2a does, and back: the sum goes with the
+    whose whole binds their total, as DAC2a does, and back. The sum goes with the
     first move and comes back with the second."""
     crs = _us_health_to_africa()
     dac2a = json.loads(json.dumps(crs).replace(_AFRICA_PART, f"spec_{'d' * 32}"))
@@ -9541,7 +9541,7 @@ async def test_a_whole_compiled_again_within_a_call_is_refused(
 async def test_a_whole_with_a_second_open_side_is_summed_keeping_that_side_apart(
     decision: DecisionFactory,
 ) -> None:
-    """Every recipient's US health aid as a share of every donor's aid to it: the
+    """Every recipient's US health aid as a share of every donor's aid to it. The
     part keeps the recipients open in `across`, and Search leaves the donors open
     on the whole, so the sum admission adds totals the donors and keeps each
     recipient apart, grouped by entity."""
@@ -9600,7 +9600,7 @@ async def test_a_whole_with_a_second_open_side_is_summed_keeping_that_side_apart
 async def test_an_amended_plan_keeps_one_sum_over_its_whole(
     decision: DecisionFactory, restated: bool
 ) -> None:
-    """A plan whose whole Search leaves open, amended: the amendment is read without
+    """A plan whose whole Search leaves open, amended. The amendment is read without
     the sum and admission adds it again, so the plan holds one sum under the id it
     had, whether the patch restates the whole and its share or leaves them."""
     block = _us_health_to_africa()
@@ -10177,7 +10177,7 @@ async def test_a_dac_donor_whole_reads_searchs_answer_for_it(
 
 
 # The total dfo-apis serves DAC2a over every recipient as, which no name resolves to,
-# holding every country that receives aid; regional aid is the side's residual.
+# holding every country that receives aid. Regional aid is the side's residual.
 _DEVELOPING_COUNTRIES = {
     "label": "developing countries (DAC)",
     "ref": "DACDevelopingCountries",
