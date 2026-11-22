@@ -5894,8 +5894,8 @@ def _operand_roles(
     """The role dimensions `requirement` operates over by name, each as its role and dataset requirement.
 
     A rank orders the dimension its `axis` selects, the lone one when it
-    states none, and names the dimension its `per` ranks within. A share_of or quotient_of states `axis` to give one figure
-    per member of the numerator's dimension it names. A filter narrows the
+    states none, and names the dimension its `per` ranks within. A share_of
+    or quotient_of states `axis` to give one figure per member of the numerator's dimension it names. A filter narrows the
     dimensions its `EntityIn` predicates name, and a predicate naming no
     role counts only over an input with one dimension, since its names may
     sit in any of several. An `EntityIn` names only what the requirements

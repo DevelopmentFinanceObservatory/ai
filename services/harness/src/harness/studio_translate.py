@@ -705,8 +705,9 @@ def _surface_call_outcome(tool: str, result: ToolCallResult) -> dict[str, Any]:
     did, and states the `rows` its result holds when its structured content
     counts them, as an analysis verb's does, with the `ranked_before_limit`
     of a limited ranking, the rows it left out by reason (`_left_out`) and
-    the StatVars each summed reading added up (`_stat_vars_summed`). The digest text is written for the model and names
-    dcids and dimension keys, so it never becomes the summary.
+    the StatVars each summed reading added up (`_stat_vars_summed`). The
+    digest text is written for the model and names dcids and dimension keys,
+    so it never becomes the summary.
 
     A refusal carries `code`, `retry_mode`, `fix` and `message`, read off
     `structured_content`, the machine-readable half of the result. The digest
@@ -781,7 +782,7 @@ def _left_out(tool: str, body: Mapping[str, Any]) -> list[tuple[str, int, str]]:
     else its rows when the input held one period, since one period's rows
     are its entities. An aggregate's rows are its groups, which no dropped
     member is, so its reasons count entities alone. A reason fitting none
-    of these is left out of the line: over five years, 15 rows of three
+    of these is left out of the line. Over five years, 15 rows of three
     unallocated providers reconcile with nothing a ranking of providers
     counts.
     """
@@ -1201,7 +1202,7 @@ def _rows_held(record: _ExecutorRecord) -> str | None:
     the entries it ranked when a limit cut them. What the call left out
     before it counted, such as a ranking's unallocated amounts, follows by
     reason in the unit of the result's rows (`_left_out`), so a ranking's
-    entries and what it left out add up to the entities the plan named:
+    entries and what it left out add up to the entities the plan named.
     141 recipients ranked and 25 regional residuals are DAC2a's 166 for one
     year. A retrieval's summary states its own observations."""
     rows = record.result.get("rows")
