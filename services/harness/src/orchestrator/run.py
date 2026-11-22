@@ -158,10 +158,13 @@ class Opening:
 @dataclass(frozen=True)
 class HandBack:
     """The result of the run's deferred `answers` call: the planner's result
-    (`plan`) or the user's answer (`ask_user`)."""
+    (`plan`) or the user's answer (`ask_user`). `written` names the turn
+    state keys the node that made the result wrote, which the run's first
+    `ToolsAnswered`, the one answering that call, carries."""
 
     answers: Literal["plan", "ask_user"]
     result: dict[str, Any]
+    written: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -186,7 +189,8 @@ class ToolsAnswered:
     order, and a copy of the turn state's value of every key those calls
     wrote, so a later call's change does not reach an event still queued. A
     call that handed off has no answer here. A run resumed after it opens on
-    one whose answer is the hand-back."""
+    one whose answer is the hand-back, and whose state also holds the keys
+    the hand-back's node wrote (`HandBack.written`)."""
 
     answers: tuple[types.FunctionResponse, ...]
     state: dict[str, Any]
@@ -270,6 +274,9 @@ async def run_orchestrator(
             conversation = replace(conversation, conversation_id=conversation_id)
             conversation_id = None
         results = DeferredToolResults(calls={_waiting(history, hand_back): hand_back.result})
+        # The hand-back's writes join those of the call it answers, so the
+        # `ToolsAnswered` of that call carries them (`_written_state`).
+        deps.view = RecordingState(state, written=hand_back.written)
     else:
         raise ValueError("give an opening for a turn's first run, or a history and a hand-back")
 

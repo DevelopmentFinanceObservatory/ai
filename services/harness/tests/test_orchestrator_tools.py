@@ -312,7 +312,7 @@ def test_the_search_and_ask_user_declarations_carry_prices_beside_counts():
     assert "`other_prices`, each with its spec_id and label" in declarations["search"]
     ask_user = declarations["ask_user"]
     assert "An option for one of a part's candidates carries the spec_id" in ask_user
-    assert "names its part in `prices_of`" in ask_user
+    assert "names its part in `unit_of`" in ask_user
     assert "count" not in ask_user
 
 
@@ -4631,9 +4631,14 @@ async def test_search_names_the_count_it_chose_and_the_others_by_spec_id(constan
         ).read_text()
     )
     if constant:
-        envelope["parts"][0]["spec"]["resolved"]["alternative_measures"].append(
+        resolved = envelope["parts"][0]["spec"]["resolved"]
+        resolved["alternative_measures"].append(
             {"label": "constant prices", "axis": "unit", "definition": {"spec_id": SPEC_CONSTANT}}
         )
+        resolved["price_bases"] = [
+            {"prices": "current", "via": "served"},
+            {"prices": "constant", "via": "alternative"},
+        ]
     tools, ctx = _tools(resolver=_resolver(resolver_digest(envelope)))
 
     found = await tools["search"](ctx, [{"variable": "aid"}])
@@ -4646,15 +4651,16 @@ async def test_search_names_the_count_it_chose_and_the_others_by_spec_id(constan
     assert part.get("other_prices") == (
         [{"spec_id": SPEC_CONSTANT, "label": "constant prices"}] if constant else None
     )
-    # The answer spans 1978 to 2024 in current US dollars, and the question
-    # named no prices, so the prices are open with the offered sibling or,
-    # when search offers none, constant prices.
-    assert part["open_prices"] == [
-        {"label": "current prices"},
-        {"spec_id": SPEC_CONSTANT, "label": "constant prices"}
-        if constant
-        else {"label": "constant prices"},
-    ]
+    # The answer spans 1978 to 2024 in current US dollars and the question named
+    # no prices. The recording predates `price_bases`, so the gate stays closed
+    # on it; with the constant sibling and a listed route the prices are open.
+    if constant:
+        assert part["open_prices"] == [
+            {"label": "current prices"},
+            {"spec_id": SPEC_CONSTANT, "label": "constant prices"},
+        ]
+    else:
+        assert "open_prices" not in part
 
 
 SPEC_NET = "spec_" + "c" * 32
@@ -4741,8 +4747,22 @@ _PRICES_QUESTION = {
             "question 'In which prices?' offers no option",
         ),
         (
-            [{"question": "In which prices?", "prices_of": SPEC_NET}],
-            f"prices {SPEC_NET}, which lists no `open_prices` this turn",
+            [{"question": "In which prices?", "unit_of": SPEC_NET}],
+            f"asks the unit of {SPEC_NET}, which lists no `open_prices` this turn",
+        ),
+        (
+            [
+                {
+                    "question": "Which counts?",
+                    "multi_select": True,
+                    "options": [{"label": "Net", "spec_id": SPEC_NET}, {"label": "Gross"}],
+                }
+            ],
+            "offers labels only: no spec_id on an option and no `unit_of`",
+        ),
+        (
+            [{"question": "Which?", "multi_select": True, "unit_of": SPEC_NET, "options": []}],
+            "offers labels only: no spec_id on an option and no `unit_of`",
         ),
     ],
     ids=[
@@ -4755,7 +4775,9 @@ _PRICES_QUESTION = {
         "no_question",
         "four_questions",
         "no_option",
-        "prices_of_no_open_part",
+        "unit_of_no_open_part",
+        "multi_select_with_a_spec_id",
+        "multi_select_with_unit_of",
     ],
 )
 async def test_ask_user_offers_a_count_only_under_a_spec_id_this_turns_search_named(

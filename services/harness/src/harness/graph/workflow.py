@@ -27,7 +27,7 @@ from harness.graph.approve import approve_node
 from harness.graph.events import GraphEvent
 from harness.graph.execute import execute_node
 from harness.graph.interfaces import Executor, PlannerModel
-from harness.graph.orchestrate import ask, orchestrate_node
+from harness.graph.orchestrate import ask_node, orchestrate_node
 from harness.graph.plan_done import plan_done_node
 from harness.graph.resume import run_resumer
 from harness.graph.seed import chip_fetch, seed_node
@@ -129,7 +129,7 @@ def studio_graph(
             ),
         ),
         "orchestrate": orchestrate_node(orchestrator=orchestrator, model=model),
-        "ask": ask,
+        "ask": ask_node(definition_surface=definition_surface),
         "plan_start": planning.plan_start,
         "planner": planning.planner_node(planner=planner),
         "approve": approve_node(early_mints=early_mints),

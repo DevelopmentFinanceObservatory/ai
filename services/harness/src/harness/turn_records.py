@@ -1026,13 +1026,61 @@ CURRENT_PRICES = "current prices"
 CONSTANT_PRICES = "constant prices"
 
 
-def open_prices(
+type PricesForm = Literal["unit", "options", "closed"]
+
+
+def _lists_both_bases(resolved: Mapping[str, Any]) -> bool:
+    """True when `resolved.price_bases` lists a current and a constant route.
+
+    An absent list (search does not know the served bases) and an empty one
+    (not money) both read as False, so prices are offered only on a listed route.
+    """
+    routes = resolved.get("price_bases")
+    if not isinstance(routes, Sequence) or isinstance(routes, str):
+        return False
+    bases = {route.get("prices") for route in routes if isinstance(route, Mapping)}
+    return {"current", "constant"} <= bases
+
+
+def _converts_both_bases(resolved: Mapping[str, Any]) -> bool:
+    """True when some currency of `resolved.unit_conversion` serves current years and
+    constant years with a base-year range."""
+    conversion = resolved.get("unit_conversion")
+    currencies = conversion.get("currencies") if isinstance(conversion, Mapping) else None
+    return any(
+        isinstance(currency, Mapping)
+        and currency.get("current_years") is not None
+        and currency.get("constant_years") is not None
+        and currency.get("base_year_min") is not None
+        and currency.get("base_year_max") is not None
+        for currency in currencies or ()
+    )
+
+
+def _prices_open(block: Mapping[str, Any], window: Mapping[str, Any] | None) -> bool:
+    """True when the part's window spans several years of money the request left in
+    current prices."""
+    if not isinstance(window, Mapping) or window.get("start") == window.get("end"):
+        return False
+    unit = ((block.get("resolved") or {}).get("facets") or {}).get("unit") or {}
+    if (unit.get("request_basis") or {}).get("prices") == "bound":
+        return False
+    identity = (block.get("definition") or {}).get("identity") or {}
+    request = ((identity.get("facets") or {}).get("unit") or {}).get("request")
+    if isinstance(request, Mapping) and request.get("prices") is not None:
+        return request["prices"] == "current"
+    ref = unit.get("ref")
+    reading = read_unit_dcid(ref if isinstance(ref, str) else None)
+    return reading.currency not in (None, "PPP") and reading.prices != "constant"
+
+
+def prices_form(
     block: Mapping[str, Any],
     *,
     window: Mapping[str, Any] | None,
     other_prices: Sequence[Mapping[str, Any]],
-) -> list[dict[str, str]]:
-    """The options of the prices choice a `definite` part leaves open, empty when its prices are settled.
+) -> PricesForm:
+    """How a `definite` part's prices question is asked: "unit", "options" or "closed".
 
     Prices are open when the part's `window` (`harness.tool_contracts._window`)
     spans more than one year, its spec block's unit is money in current
@@ -1044,25 +1092,40 @@ def open_prices(
     request bound the prices when `resolved.facets.unit.request_basis.prices`
     is `bound`.
 
-    The first option is the prices search read, with no spec_id. Each of
-    the part's `other_prices` offers (`harness.tool_contracts.measure_choice`)
-    follows with its spec_id, or constant prices with none when search
-    offers no other prices.
+    An open part is still closed unless the harness holds a concrete way to
+    serve both bases. `resolved.price_bases` must list a current and a constant
+    route; an absent list is closed. Then:
+
+    - "unit": `resolved.unit_conversion` has a currency serving both bases.
+    - "options": otherwise, an `other_prices` offer (`harness.tool_contracts.measure_choice`)
+      carries the spec_id of the constant reading.
+    - "closed": otherwise.
     """
-    if not isinstance(window, Mapping) or window.get("start") == window.get("end"):
-        return []
-    unit = ((block.get("resolved") or {}).get("facets") or {}).get("unit") or {}
-    if (unit.get("request_basis") or {}).get("prices") == "bound":
-        return []
-    identity = (block.get("definition") or {}).get("identity") or {}
-    request = ((identity.get("facets") or {}).get("unit") or {}).get("request")
-    if isinstance(request, Mapping) and request.get("prices") is not None:
-        current = request["prices"] == "current"
-    else:
-        ref = unit.get("ref")
-        reading = read_unit_dcid(ref if isinstance(ref, str) else None)
-        current = reading.currency not in (None, "PPP") and reading.prices != "constant"
-    if not current:
+    if not _prices_open(block, window):
+        return "closed"
+    resolved = block.get("resolved") or {}
+    if not _lists_both_bases(resolved):
+        return "closed"
+    if _converts_both_bases(resolved):
+        return "unit"
+    if any(offer.get("spec_id") for offer in other_prices):
+        return "options"
+    return "closed"
+
+
+def open_prices(
+    block: Mapping[str, Any],
+    *,
+    window: Mapping[str, Any] | None,
+    other_prices: Sequence[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    """The options of the prices choice a `definite` part leaves open, empty when its prices are closed (`prices_form`).
+
+    The first option is the prices search read, with no spec_id. Each of
+    the part's `other_prices` follows with its spec_id, or constant prices
+    with none when search offers no other prices.
+    """
+    if prices_form(block, window=window, other_prices=other_prices) == "closed":
         return []
     others = [dict(offer) for offer in other_prices] or [{"label": CONSTANT_PRICES}]
     return [{"label": CURRENT_PRICES}, *others]

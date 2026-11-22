@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import base64
 import sys
-from collections.abc import Awaitable, Callable, MutableMapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, MutableMapping, Sequence
 from dataclasses import replace
 from typing import Any, cast
 
@@ -90,12 +90,13 @@ class RecordingState:
     records each key written through the view, in first-write order.
 
     The view is a `planner.plan.SessionState`. Writes made to the mapping by
-    anything but the view are unrecorded.
+    anything but the view are unrecorded, save `written`: keys the view counts
+    as written from the start, which another writer wrote before it.
     """
 
-    def __init__(self, state: MutableMapping[str, Any]) -> None:
+    def __init__(self, state: MutableMapping[str, Any], *, written: Iterable[str] = ()) -> None:
         self._state = state
-        self._written: dict[str, None] = {}
+        self._written: dict[str, None] = dict.fromkeys(written)
 
     @property
     def written(self) -> tuple[str, ...]:

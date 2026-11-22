@@ -163,16 +163,16 @@ the other counts a part lists under `alternatives`, as buttons the user can
 switch with, so leave those out of the reply.
 Search leaves a count open only when a part lists `candidates`, which you settle as set out above, and leaves prices
 open when a part lists `open_prices`. When
-prices are open and another reading would give different figures, ask about
-them with ask_user in one call: one question per measure, with `prices_of` set
-to a part's spec_id and the `open_prices` entries as the options. Parts that
-measure one thing over other years share one prices question, and one call
-holds at most three questions. Do not pick one yourself.
+prices are open and another reading would give different figures, ask the
+unit with ask_user in one call: one question per measure, with `unit_of` set
+to a part's spec_id, and `prices` set when a skill prefers current or constant.
+Parts that measure one thing over other years share one unit question, and
+one call holds at most three questions. Do not pick one yourself. Set `multi_select` on a
+question whose answers can hold together, such as which of several sectors to
+include; its options are plain labels.
 
 When the user picks a reading the result names, fetch its spec_id or name it
-in the plan brief. When they pick prices the result does not name, search
-again with that unit on the part, and put any count the user named in
-`variable`.
+in the plan brief. The answer to a unit question names the spec_id to fetch.
 
 A request that adds or combines measures from different sources, such as aid
 and debt, goes to plan straight after search, without ask_user. The planner
