@@ -200,7 +200,23 @@
   ],
   "frames": [],
   "state": {
-    "planner:skill_page:fast::0": "The fast page.",
+    "planner:pending_ask": null,
+    "planner:asked_referral": null,
+    "planner:rounds": 0,
+    "planner:amendment_entry": false,
+    "planner:decision_pick": null,
+    "planner:unsupported": [],
+    "planner:optional_declines": [
+      "no_operation_covers"
+    ],
+    "planner:terminal_declines": [
+      "no_operation_covers"
+    ],
+    "planner:reduction_refused_asks": [],
+    "translator:compile_failures": [],
+    "planner:plan": null,
+    "planner:refused_spec_ids": [],
+    "planner:refused_spec_details": {},
     "planner:skills_read": [
       {
         "skill_id": "fast",
@@ -213,25 +229,10 @@
         "offset": 0
       }
     ],
-    "planner:skill_page:slow::0": "The slow page.",
-    "planner:plan": null,
-    "planner:rounds": 0,
-    "planner:pin_sources": {},
-    "planner:unsupported": [],
-    "planner:optional_declines": [
-      "no_operation_covers"
-    ],
-    "planner:terminal_declines": [
-      "no_operation_covers"
-    ],
-    "planner:reduction_refused_asks": [],
-    "translator:compile_failures": [],
-    "planner:amendment_entry": false,
-    "planner:decision_pick": null,
-    "planner:refused_spec_ids": [],
-    "planner:refused_spec_details": {},
+    "planner:answered_in_words": false,
     "planner:skills_before_entry": 0,
-    "planner:pending_ask": null,
-    "planner:asked_referral": null
+    "planner:pin_sources": {},
+    "planner:skill_page:fast::0": "The fast page.",
+    "planner:skill_page:slow::0": "The slow page."
   }
 }

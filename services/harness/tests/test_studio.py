@@ -158,6 +158,7 @@ from planner.plan import (
     plan_revision,
 )
 from planner.plan import Plan as PlannerPlan
+from planner.tool_results import ProblemCode
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 from sqlalchemy import text
@@ -1126,12 +1127,14 @@ async def test_a_plan_pause_whose_acknowledgement_was_lost_is_shown_and_approvab
     assert _events(second)[-1] == "done"
 
 
-async def test_a_plan_pause_whose_turn_cannot_be_read_back_ends_transient_and_stays_paused(
+async def test_a_plan_pause_whose_turn_cannot_be_read_back_ends_transient_and_closes_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The plan's pause commits, its write raises, and the read of the turn
     after it fails. The stream ends on a retryable `transient_unavailable`
-    error and the turn stays paused on the pause as stored, unclosed."""
+    error, whose record the closing write commits with the turn's cursor
+    closed `failed` in the same transaction, so the turn the client was told
+    failed is not left paused."""
     failing = _plan_pause_acknowledgement_lost(monkeypatch, read_back_fails=True)
     app = _app(
         *_plan("q with forks", *_charts_the_plan()),
@@ -1145,9 +1148,8 @@ async def test_a_plan_pause_whose_turn_cannot_be_read_back_ends_transient_and_st
     error = _frame(first, "error")["error"]
     assert (error["error"], error["retry"]) == ("transient_unavailable", "retry_after_delay")
     failing.clear()
-    stored = await TurnStore(_engine()).open_cursor(PRINCIPAL, CONVERSATION)
-    assert stored is not None
-    assert stored.status is TurnStatus.PAUSED and stored.pause is not None
+    assert await TurnStore(_engine()).open_cursor(PRINCIPAL, CONVERSATION) is None
+    assert await _turn_statuses() == ["failed"]
 
 
 @pytest.fixture
@@ -2311,7 +2313,7 @@ _ENDINGS_BY_FINISH = {
         (_FAILED, "cancelled", "cancelled", None),
     ],
     Finish.UNCLOSED: [
-        (_SAVED, _CAP, "running", _CAP),
+        (_SAVED, _CAP, "failed", _CAP),
         (_STOPPED, "cancelled", "cancelled", "cancelled"),
         (_LOST, _TRANSIENT, "running", None),
         (_FAILED, _CAP, "running", None),
@@ -3447,56 +3449,55 @@ _QUESTION_FIXED_TEXT = (
     "was not recorded as a change to it. Ask the other question as its "
     "own message."
 )
-_QUESTION_FIXED_STILL_APPROVABLE_TEXT = (
-    f"{_QUESTION_FIXED_TEXT} Version 1 is still there to approve; anything "
-    "past that needs a new question."
-)
 
 
 class _RestartRefusingPlanner(_RefusingAmendPlanner):
     """`_RefusingAmendPlanner`, refusing every later call the way a real
     `PlannerAdapter`, which holds the turn's question fixed
-    (`submission.service._resolve_intent`), refuses an amendment
-    that tries to restart for a different question: `QUESTION_FIXED`, not
-    `BUDGET_EXHAUSTED`. Records every call's own `question`, so a test can
-    prove `ctx.state["question"]` reached the second call unchanged from
-    the first."""
+    (`submission.service._resolve_intent`), refuses an amendment its model
+    reads as a different question (`starts_new_plan`, with or without
+    `amends_version`): `QUESTION_FIXED`. Records every call's own `question`
+    and `amendment`."""
 
     def __init__(self, schemas: list[ToolSchema]) -> None:
         super().__init__(schemas)
         self.questions_seen: list[str] = []
+        self.amendments_seen: list[str | None] = []
 
     async def __call__(self, *, question: str, **kwargs: Any) -> dict[str, Any]:
         self.questions_seen.append(question)
+        self.amendments_seen.append(kwargs.get("amendment"))
         if self.calls > 0:
             self.calls += 1
-            return {"refused": {"text": _QUESTION_FIXED_TEXT}}
+            return {
+                "refused": {
+                    "text": _QUESTION_FIXED_TEXT,
+                    "final": False,
+                    "code": ProblemCode.QUESTION_FIXED.value,
+                }
+            }
         return await super().__call__(question=question, **kwargs)
 
 
-async def test_an_amend_that_restarts_is_refused_with_no_version_regression_or_duplicate_id(
+async def test_a_new_question_typed_on_the_plan_card_ends_the_turn_and_hands_it_back(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """A restart the planner refuses (`QUESTION_FIXED`)
-    reaches the wire exactly like a `BUDGET_EXHAUSTED` refusal (see
-    `test_a_refused_amendment_still_offers_the_pending_version_for_approval`,
-    just above): the same pending plan is re-offered, under the same
-    `plan_version_id` and `revision` -- proving `_interrupt_frames`
-    (`harness.studio_translate`) neither regresses `latest_plan_version` nor
-    mints a second wire id for a version it already gave one to -- and no
-    `plan.versioned` frame fires, since nothing was recorded to supersede
-    the first card with. The planner drafts for the agent's brief; the
-    refused restart records nothing, so the second call sees the same brief
-    the first one did.
-    """
+    """The user types a different question on an open plan card, which the
+    client sends as `amend`, and the planner reads it as a new question
+    (`QUESTION_FIXED`). The turn ends `done`, its plan set aside unapproved,
+    with the typed words on `done` for the client to send as the next turn,
+    and no card is offered again. The next turn's history says the plan was
+    set aside."""
     executor = ScriptedExecutor()
     planner = _RestartRefusingPlanner(schemas=real_schemas)
     app = _app(
         *_plan("kenya debt"),
+        _text("Kenya's ODA in 2023 was 3 billion dollars."),
         executor=executor,
         planner=planner,
         tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
     )
+    typed = "what was Kenya's ODA in 2023?"
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("kenya debt"))
         plan_v1 = _frame(first, "plan.proposed")
@@ -3504,27 +3505,271 @@ async def test_an_amend_that_restarts_is_refused_with_no_version_regression_or_d
         second = await _stream(
             client,
             "/api/studio/interrupt",
-            _interrupt_body(plan_v1["interrupt_id"], "amend", "what was Kenya's ODA in 2023?"),
+            _interrupt_body(plan_v1["interrupt_id"], "amend", typed),
         )
 
+        assert "plan.proposed" not in _events(second)
         assert "plan.versioned" not in _events(second)
-        message = _frame(second, "message.complete")
-        assert message["text"] == _QUESTION_FIXED_STILL_APPROVABLE_TEXT
-        plan_again = _frame(second, "plan.proposed")
-        assert plan_again["version"] == plan_v1["version"]
-        assert plan_again["revision"] == plan_v1["revision"]
-        assert plan_again["plan_version_id"] == plan_v1["plan_version_id"]
-        assert plan_again["interrupt_id"] != plan_v1["interrupt_id"]
-
-        third = await _stream(
-            client,
-            "/api/studio/interrupt",
-            _interrupt_body(plan_again["interrupt_id"], "approve"),
+        assert _frame(second, "message.complete")["text"] == studio_state_module.SET_ASIDE_REPLY
+        done = second[-1]
+        assert done["event"] == "done"
+        assert done["new_question"] == typed
+        read = await client.get(
+            "/api/studio/state",
+            params={"conversation_id": CONVERSATION, "since": 0},
+            headers=AUTH,
         )
+        (closed,) = read.json()["closed_since"]
+        assert closed["new_question"] == typed
+        assert read.json()["turn"]["status"] == "done"
+
+        stale = await client.post(
+            "/api/studio/interrupt",
+            json=_interrupt_body(plan_v1["interrupt_id"], "approve"),
+            headers=AUTH,
+        )
+        assert stale.status_code == 404
+
+        third = await _stream(client, "/api/studio/turn", _turn_body(typed))
 
     assert _events(third)[-1] == "done"
-    assert "write_component" not in [c["tool"] for c in executor.calls]
-    assert planner.questions_seen == ["kenya debt", "kenya debt"]
+    assert "new_question" not in third[-1]
+    assert planner.amendments_seen == [None, typed]
+    history = _digest(_model(app).requests[-1], "Earlier turns in this conversation")
+    assert history is not None
+    (record,) = history["turns"]
+    assert record["ended"] == studio_state_module._SET_ASIDE
+    assert record["assistant"] == studio_state_module.SET_ASIDE_REPLY
+    assert "error" not in record
+    reloaded = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert reloaded is not None
+    assert reloaded.turns[0]["ended_by"] == "new_question"
+    assert reloaded.turns[0]["new_question"] == typed
+    assert "ended_by" not in reloaded.turns[1]
+
+
+class _AskingThenRestartRefusingPlanner(_RestartRefusingPlanner):
+    """`_RestartRefusingPlanner`, whose amendment entry first asks the user a
+    question, then refuses the answer as a different question the way a
+    real `PlannerAdapter` does, carrying the user's message its
+    `starts_new_plan` call named in `new_question_in` (`named`, none when
+    `None`)."""
+
+    def __init__(self, schemas: list[ToolSchema], *, named: str | None) -> None:
+        super().__init__(schemas)
+        self.named = named
+
+    async def __call__(self, *, question: str, **kwargs: Any) -> dict[str, Any]:
+        if self.calls > 0 and kwargs.get("answer") is None:
+            return {"asked": {"call_id": "amend_ask", "args": {"message": "Which years?"}}}
+        answer = await super().__call__(question=question, **kwargs)
+        if self.named is not None and "refused" in answer:
+            answer["refused"]["new_question_in"] = self.named
+        return answer
+
+
+class _NamingRestartRefusingPlanner(_RestartRefusingPlanner):
+    """`_RestartRefusingPlanner`, whose refusal carries the user's message
+    its `starts_new_plan` call named in `new_question_in` (`named`)."""
+
+    def __init__(self, schemas: list[ToolSchema], *, named: str) -> None:
+        super().__init__(schemas)
+        self.named = named
+
+    async def __call__(self, *, question: str, **kwargs: Any) -> dict[str, Any]:
+        answer = await super().__call__(question=question, **kwargs)
+        if "refused" in answer:
+            answer["refused"]["new_question_in"] = self.named
+        return answer
+
+
+_GHANA = "Actually, what is Ghana's GDP?"
+_ASK_ELSE = "I'd like to ask something else instead."
+_KENYA_ODA = "what was Kenya's ODA in 2023?"
+
+
+@pytest.mark.parametrize(
+    ("amended", "typed", "named", "handed_back"),
+    [
+        pytest.param("show it for Kenya instead", _GHANA, "answer", _GHANA, id="answer-asks-it"),
+        pytest.param(_KENYA_ODA, "separately", "amendment", _KENYA_ODA, id="amendment-asks-it"),
+        pytest.param(_KENYA_ODA, "separately", None, _KENYA_ODA, id="none-named"),
+        pytest.param(_ASK_ELSE, "never mind", "none", None, id="no-message-asks-it"),
+    ],
+)
+async def test_a_new_question_reached_through_a_planner_question_is_the_message_the_planner_names(
+    real_schemas: list[ToolSchema],
+    amended: str,
+    typed: str,
+    named: str | None,
+    handed_back: str | None,
+) -> None:
+    """The user amends the plan card, the planner asks which years, and the
+    planner reads the answer as a different question (`QUESTION_FIXED`).
+    `done` hands back the stored text of the user's message the planner's
+    `starts_new_plan` call names, the answer or the amendment, and the
+    amendment when it names none, so the question handed back is the user's
+    words. An answer that is no question, such as "separately", is handed
+    back only when the planner names it. A call naming `none` hands back
+    nothing, and the reply asks the user for their question."""
+    app = _app(
+        *_plan("kenya debt"),
+        planner=_AskingThenRestartRefusingPlanner(schemas=real_schemas, named=named),
+        tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("kenya debt"))
+        plan = _frame(first, "plan.proposed")
+        asked = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(plan["interrupt_id"], "amend", amended),
+        )
+        question = _frame(asked, "elicitation.request")
+        answered = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(
+                question["interrupt_id"],
+                "answer",
+                answers={"q1": {"kind": "text", "text": typed}},
+            ),
+        )
+
+    assert question["questions"][0]["question"] == "Which years?"
+    assert answered[-1]["event"] == "done"
+    assert answered[-1].get("new_question") == handed_back
+    assert _frame(answered, "message.complete")["text"] == (
+        studio_state_module.SET_ASIDE_REPLY
+        if handed_back
+        else studio_state_module.ASK_FOR_QUESTION_REPLY
+    )
+
+
+async def test_a_new_question_no_message_states_ends_the_turn_asking_for_it(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The user types on the plan card that they want to ask something
+    else, and the planner's `starts_new_plan` call names `none`. The turn
+    ends `done` with nothing handed back and a reply asking for the
+    question; the state read, the stored record and the next turn's history
+    say so."""
+    planner = _NamingRestartRefusingPlanner(schemas=real_schemas, named="none")
+    app = _app(
+        *_plan("kenya debt"),
+        _text("Ghana's GDP in 2022 was 77 billion dollars."),
+        planner=planner,
+        tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("kenya debt"))
+        plan = _frame(first, "plan.proposed")
+        second = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(plan["interrupt_id"], "amend", _ASK_ELSE),
+        )
+        read = (
+            await client.get(
+                "/api/studio/state",
+                params={"conversation_id": CONVERSATION, "since": 0},
+                headers=AUTH,
+            )
+        ).json()
+        await _stream(client, "/api/studio/turn", _turn_body("what was Ghana's GDP in 2022?"))
+
+    assert "plan.proposed" not in _events(second)
+    assert second[-1]["event"] == "done"
+    assert "new_question" not in second[-1]
+    assert read["turn"]["status"] == "done"
+    (closed,) = read["closed_since"]
+    assert closed["reply"] == studio_state_module.ASK_FOR_QUESTION_REPLY
+    assert "new_question" not in closed
+    history = _digest(_model(app).requests[-1], "Earlier turns in this conversation")
+    assert history is not None
+    (record,) = history["turns"]
+    assert record["ended"] == studio_state_module._ASKED_FOR
+    reloaded = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert reloaded is not None
+    assert reloaded.turns[0]["ended_by"] == studio_state_module.ASKED_FOR_QUESTION
+    assert "new_question" not in reloaded.turns[0]
+
+
+async def test_an_edit_card_turn_whose_closing_write_failed_reads_abandoned_with_its_record() -> (
+    None
+):
+    """An Edit Card turn has no cursor. Its closing write saves nothing, and
+    once the lease lapses the state read states the turn `abandoned`, as
+    the next turn records it, with its record in `closed_since`."""
+    clock = await StoreClock.start(_engine())
+    store = StudioStore(_engine(), **clock.store_kwargs)
+    app = _app(*_card(), store=store, **_edit_app(Finish.DONE))
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        _close_as(store, SegmentClose.FAILED)
+        await _stream(client, "/api/studio/turn", _edit_body("rename it"))
+        await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)
+        read = (
+            await client.get(
+                "/api/studio/state",
+                params={"conversation_id": CONVERSATION, "since": 1},
+                headers=AUTH,
+            )
+        ).json()
+
+    assert read["turn"]["index"] == 2
+    assert read["turn"]["status"] == "abandoned"
+    assert read["closed_total"] == 2
+    (closed,) = read["closed_since"]
+    assert closed["turn_index"] == 2
+    assert closed["error"] == "abandoned"
+
+
+async def test_a_set_aside_turn_whose_closing_write_failed_keeps_its_question(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The turn ends on a new question typed on the plan card, and its
+    closing write saves nothing. Once the lease lapses, the state read and the
+    next load find the cursor closed with no record, and record the turn as
+    the stream told the client, `state_not_saved` with no reply, keeping the
+    typed question for the page to send as the next turn. The read states
+    the turn `failed`, as its record does, over the cursor's `done`."""
+    clock = await StoreClock.start(_engine())
+    store = StudioStore(_engine(), **clock.store_kwargs)
+    app = _app(
+        *_plan("kenya debt"),
+        planner=_RestartRefusingPlanner(schemas=real_schemas),
+        tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
+        store=store,
+    )
+    typed = "what was Kenya's ODA in 2023?"
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("kenya debt"))
+        plan_v1 = _frame(first, "plan.proposed")
+        _close_as(store, SegmentClose.FAILED)
+        await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(plan_v1["interrupt_id"], "amend", typed),
+        )
+        await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)
+        read = (
+            await client.get(
+                "/api/studio/state",
+                params={"conversation_id": CONVERSATION, "since": 0},
+                headers=AUTH,
+            )
+        ).json()
+
+    assert read["turn"]["status"] == "failed"
+    (closed,) = read["closed_since"]
+    assert closed["new_question"] == typed
+    assert closed["reply"] == ""
+    assert closed["error"] == HarnessCode.STATE_NOT_SAVED.value
+    reloaded = await StudioStore(_engine(), **clock.store_kwargs).load(PRINCIPAL, CONVERSATION)
+    assert reloaded is not None
+    assert reloaded.turns[0]["new_question"] == typed
+    assert reloaded.turns[0]["error"] == HarnessCode.STATE_NOT_SAVED.value
 
 
 async def test_an_approval_is_recorded_with_its_approver_and_its_revision() -> None:
@@ -4485,7 +4730,8 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
     write, completes. B's same answer is refused while A's segment
     lease is still live, and resumes the turn once it expires (an injected
     clock), without a second `ApprovalRecord` and past every `seq` A's dead
-    attempt may already have sent."""
+    attempt may already have sent. B's retry sends the approval A's attempt
+    took first, since A's client may never have read it."""
     clock = await StoreClock.start(_engine())
     store_a = StudioStore(
         _engine(),
@@ -4529,8 +4775,11 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
     # The turn's first segment numbered from 0 and A's dead resume from the
     # block after it, so B's resume starts past both blocks.
     assert resumed[0]["seq"] >= 2 * SEQ_BLOCK
-    # A's dead attempt sent the approved plan once the approve node took it.
-    assert "plan.approved" not in _events(resumed)
+    # A's dead attempt took the approval, and its client may never have read
+    # the `plan.approved` it sent, so B's retry sends it first, once.
+    assert _events(resumed).count("plan.approved") == 1
+    assert _events(resumed)[0] == "plan.approved"
+    assert resumed[0]["revision"] == plan["revision"]
 
     reloaded = await StudioStore(
         _engine(),
@@ -7907,6 +8156,7 @@ class _StopReaders:
         self.heartbeat = _StopsTaken(store)
         self.counts = {"release": 0, "claim": 0, "cancel": 0}
         close_segment = store.close_segment
+
         act_on_stop = studio_module._act_on_stop
         stop_open = studio_module._stop_open_turn
 
@@ -8143,8 +8393,9 @@ async def _stop_after_the_claim_before_the_abandon(row: _Row):
 async def _stop_whose_claimant_cannot_close_the_turn(row: _Row):
     """A Stop left live on a paused turn whose lease lapsed. The next
     `/turn` acts on it first, but its close is refused (another writer moved
-    the cursor), so that `/turn` answers a retryable 409 and starts nothing;
-    its retry acts on the Stop and runs the new turn."""
+    the cursor), which rolls back the turn's record with it, so that
+    `/turn` answers a retryable 409 and starts nothing; its retry acts on
+    the Stop and runs the new turn."""
     app = await row.build(*_plan(), _text("Hello."), clock=True)
     store = app.state.studio.store
     sent: list[httpx2.Response] = []
@@ -8165,14 +8416,14 @@ async def _stop_whose_claimant_cannot_close_the_turn(row: _Row):
         async def moved(*_args: Any, **_kwargs: Any) -> Any:
             raise CursorStale("another writer moved the cursor")
 
-        real_stop_turn = studio_module.stop_turn
-        row.monkeypatch.setattr(studio_module, "stop_turn", moved)
+        real_stop_turn = studio_module.stop_turn_on
+        row.monkeypatch.setattr(studio_module, "stop_turn_on", moved)
         busy = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
         assert busy.status_code == 409
         assert busy.json()["retry"] == "retry_after_delay"
         assert await _turn_statuses() == ["paused"]
         assert await _stop_live()
-        row.monkeypatch.setattr(studio_module, "stop_turn", real_stop_turn)
+        row.monkeypatch.setattr(studio_module, "stop_turn_on", real_stop_turn)
         return await _stream(client, "/api/studio/turn", _turn_body("hi")), sent[0]
 
 
@@ -8778,13 +9029,14 @@ async def test_a_closing_write_that_fails_under_a_stop_leaves_the_stop_for_the_n
 async def test_a_cancel_whose_close_fails_answers_503_and_leaves_the_stop_live(
     fails: str,
 ) -> None:
-    """`/cancel` finds no live lease on a paused turn and one of the two
-    writes that close it fails: it answers a retryable 503 and leaves a Stop
+    """`/cancel` finds no live lease on a paused turn, and the save of the
+    turn's record or the close of its cursor, which share one transaction,
+    fails: it answers a retryable 503, stores neither, and leaves a Stop
     live, so the next `/turn` closes the turn `cancelled` before it streams.
     The instance's live state changes only with a save that commits."""
     app = _app(*_plan(), _text("Hello."))
-    store, turns = app.state.studio.store, app.state.studio.turns
-    real_save, real_finish = store.save, turns.finish
+    store = app.state.studio.store
+    real_save, real_close = store.save, studio_module.stop_turn_on
     claimed = [False]
 
     async def save(*args: Any, **kwargs: Any) -> Any:
@@ -8795,17 +9047,19 @@ async def test_a_cancel_whose_close_fails_answers_503_and_leaves_the_stop_live(
             raise ConnectionError("the database is unreachable")
         return await real_save(*args, **kwargs)
 
-    async def finish(cursor: Any, **kwargs: Any) -> Any:
-        if fails == "turn" and claimed[0] and kwargs.get("status") is TurnStatus.CANCELLED:
+    async def close(*args: Any, **kwargs: Any) -> Any:
+        if fails == "turn" and claimed[0]:
             claimed[0] = False
             raise ConnectionError("the database is unreachable")
-        return await real_finish(cursor, **kwargs)
+        return await real_close(*args, **kwargs)
 
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
-        store.save, turns.finish = save, finish
-        refused = await _post_stop(client)
-        store.save, turns.finish = real_save, real_finish
+        store.save, studio_module.stop_turn_on = save, close
+        try:
+            refused = await _post_stop(client)
+        finally:
+            store.save, studio_module.stop_turn_on = real_save, real_close
         held = bool(store.current(PRINCIPAL, CONVERSATION).pending)
         live = await _stop_live()
         statuses = await _turn_statuses()
@@ -8813,7 +9067,7 @@ async def test_a_cancel_whose_close_fails_answers_503_and_leaves_the_stop_live(
 
     assert refused.status_code == 503
     assert refused.json()["retry"] == "retry_after_delay"
-    assert held is (fails == "record")
+    assert held
     assert live
     assert statuses == ["paused"]
     assert _events(after)[-1] == "done"
@@ -9616,15 +9870,15 @@ async def test_a_failed_turn_is_recorded_with_its_error() -> None:
     assert record["error"] == "capability_unavailable"
 
 
-@pytest.mark.parametrize(("then", "closed_as"), [("cancel", "cancelled"), ("turn", "abandoned")])
-async def test_a_failed_turn_whose_close_was_not_written_is_closed_by_what_comes_next(
-    then: str, closed_as: str
+@pytest.mark.parametrize("then", ["cancel", "turn"])
+async def test_a_failed_turn_whose_close_was_not_written_is_closed_by_its_closing_write(
+    then: str,
 ) -> None:
     """A node fails and its close cannot be written: the client gets the
     node's error frame, and the conversation's record of the turn holds
-    that error. The turn stays running until a later Stop closes it
-    `cancelled` or a later turn `abandoned`, which leave the record as it
-    is."""
+    that error. The stream's closing write commits that record and closes
+    the cursor `failed` in the same transaction, so a later Stop or turn
+    finds no open turn and leaves record and cursor as they are."""
 
     class BrokenSurface(ScriptedSurface):
         async def call_tool(self, **kwargs: Any) -> ToolCallResult:
@@ -9650,8 +9904,8 @@ async def test_a_failed_turn_whose_close_was_not_written_is_closed_by_what_comes
         assert frames[-1]["event"] == "error"
         assert frames[-1]["error"]["error"] == "capability_unavailable"
         (shown,) = store.current(PRINCIPAL, CONVERSATION).turns
-        left = await turns.open_cursor(PRINCIPAL, CONVERSATION)
-        assert left is not None and left.status is TurnStatus.RUNNING
+        assert await turns.open_cursor(PRINCIPAL, CONVERSATION) is None
+        assert await _turn_statuses() == ["failed"]
 
         if then == "cancel":
             cancel = await client.post(
@@ -9670,13 +9924,7 @@ async def test_a_failed_turn_whose_close_was_not_written_is_closed_by_what_comes
     assert record["user"] == "q that dies"
     assert record["error"] == "capability_unavailable"
     assert record["assistant"] == frames[-1]["error"]["detail"]
-    async with _engine().connect() as conn:
-        status = (
-            await conn.execute(
-                text("SELECT status FROM turn_cursors WHERE id = :id"), {"id": left.id}
-            )
-        ).scalar_one()
-    assert status == closed_as
+    assert (await _turn_statuses())[0] == "failed"
 
 
 def test_the_conversation_digest_is_bounded() -> None:

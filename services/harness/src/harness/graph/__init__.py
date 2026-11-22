@@ -10,6 +10,9 @@ unfinished, carried on, and any datasets the user brought from Search) ->
 edge is the one action the agent asked for: `ask` puts its question to the
 user, and `plan` hands its brief through `plan_start` to `planner` ->
 `approve` -> `execute`, whose result `plan_done` hands back to the agent.
+A plan-card amendment the planner reads as a different question ends the
+turn at `planner`, handing the words back for the client to send as the
+next turn.
 
 Everything external is injected (`executor`, `tool_surface`,
 `definition_surface`, `run_ledger`, `publisher`). The injected dependencies

@@ -2266,7 +2266,10 @@ def test_resolve_intent_refuses_a_restart_before_the_round_cap() -> None:
 def test_the_instruction_tells_the_planner_to_stop_on_a_different_question() -> None:
     instruction = planner_instruction()
 
-    assert "`starts_new_plan=true` and stop there" in instruction
+    assert (
+        "`starts_new_plan=true` and, in `new_question_in`, the user's message "
+        "that states it or `none`, and stop there"
+    ) in instruction
 
 
 def _arguments(tools: dict[str, ToolSpec], name: str = "propose_plan") -> dict[str, Any]:
@@ -3084,26 +3087,47 @@ def test_a_call_with_no_plan_recorded_needs_no_statement_of_intent(
     assert result["previous_version"] is None
 
 
-def test_an_amendment_stating_both_reads_as_the_amendment(
-    decision: DecisionFactory, requirements: RequirementPair
+@pytest.mark.parametrize(
+    ("user_amends", "question", "recorded"),
+    [
+        pytest.param(True, "a different question", 1, id="user-amendment-entry-new-question"),
+        pytest.param(False, "q", 2, id="replan-entry-patch"),
+    ],
+)
+def test_a_call_stating_both_is_a_new_question_only_on_the_users_amendment(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    user_amends: bool,
+    question: str,
+    recorded: int,
 ) -> None:
-    # Both stated is an amendment. Patching the plan the version names is the
-    # narrower reading, so it wins.
+    # On an entry the user's amendment opened, `starts_new_plan` beside
+    # `amends_version` reports the different question asked in the user's
+    # message `new_question_in` names, and records nothing. On any other entry, such as a replan after a run,
+    # no words of the user's are there to hand on, and the pair patches the
+    # plan the version names, its `question` the recorded one.
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = user_amends
 
     result = call_planner_tool(
         tools["propose_plan"],
-        question="q",
+        question=question,
         decisions=drafts([decision(rationale="Reconsidered.")]),
         amends_version=1,
         starts_new_plan=True,
+        new_question_in="amendment",
         tool_context=ctx,
     )
 
-    assert result["outcome"] == Outcome.OK.value, result
-    assert result["version"] == 2
+    stored = load_plan(ctx.state)
+    assert stored is not None
+    assert stored.version == recorded
+    if user_amends:
+        assert result["code"] == ProblemCode.QUESTION_FIXED.value, result
+    else:
+        assert result["outcome"] == Outcome.OK.value, result
 
 
 # --- Patching an existing plan -----------------------------------------------------

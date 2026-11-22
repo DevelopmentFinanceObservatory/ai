@@ -37,8 +37,8 @@ from entry import (
     PLANNER_RUNNER,
     Task,
     entry_record,
+    load_every_task,
     load_recording,
-    load_tasks,
     quiet_logs,
     run_entry,
 )
@@ -115,7 +115,7 @@ async def run_all(args: argparse.Namespace, tasks: list[Task], arms: list[str]) 
     """Run every arm, task and repetition not yet recorded, for up to `--passes` passes,
     each retrying the runs that errored. Returns how many still end in an error."""
     records_path: Path = args.out / "records.jsonl"
-    recordings = {task.id: load_recording(task.id) for task in tasks}
+    recordings = {task.id: load_recording(task.recording_id) for task in tasks}
     by_id = {task.id: task for task in tasks}
     model = AgentSettings().planner_model_name
     at = revision()
@@ -232,7 +232,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     quiet_logs()
-    every_task = load_tasks()
+    every_task = load_every_task()
     tasks = every_task
     if args.only:
         wanted = set(args.only.split(","))

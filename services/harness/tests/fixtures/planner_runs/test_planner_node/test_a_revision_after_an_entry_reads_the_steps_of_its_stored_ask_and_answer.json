@@ -2550,6 +2550,7 @@
     "planner:terminal_declines": [],
     "planner:reduction_refused_asks": [],
     "translator:compile_failures": [],
+    "planner:answered_in_words": false,
     "planner:skills_before_entry": 0,
     "planner:pin_sources": {
       "spec_cccccccccccccccccccccccccccccccc": {
