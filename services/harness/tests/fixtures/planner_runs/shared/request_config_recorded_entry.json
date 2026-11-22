@@ -1078,6 +1078,12 @@
                     "type": "string",
                     "description": "Which role dimension of the input this rank keeps; required once the input carries more than one."
                   },
+                  "per": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "type": "string",
+                    "description": "Another role of the input to rank `axis` within: each of its entities gets its own ranking and `limit`. Top 5 donors per recipient: axis 'donor', per 'recipient'."
+                  },
                   "reduction": {
                     "description": "How to collapse an entity's rows to one value first. Required when the input carries more than one role, to collapse the other role's rows, and required when the window leaves an entity more than one row.",
                     "enum": [

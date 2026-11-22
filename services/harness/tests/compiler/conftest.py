@@ -141,6 +141,7 @@ RANK_PARAMETERS: dict[str, Any] = {
         "ascending": {"type": "boolean", "default": False},
         "per_period": {"type": "boolean", "default": False},
         "limit": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}], "default": None},
+        "partition_by": {"type": "array", "items": {"type": "string"}, "default": []},
     },
     "required": ["frame_ref", "rank_by"],
     "additionalProperties": False,

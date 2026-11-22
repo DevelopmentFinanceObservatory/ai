@@ -1564,6 +1564,42 @@ def test_a_rank_names_the_value_its_input_holds(
     assert _label(plan.requirement("ranked"), plan) == f"Rank the top 5 debtors by {value}"
 
 
+def test_a_rank_per_another_role_says_it_ranks_within_each_of_its_entities(
+    decision: DecisionFactory,
+) -> None:
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="ODA",
+        across=("donor", "recipient"),
+        period=Period(start=2023, end=2023),
+    )
+    rank = RankRequirement(
+        id="ranked",
+        decision_ids=["measure"],
+        input_id="aid",
+        direction=RankDirection.HIGHEST_FIRST,
+        among=RankAmong.POPULATION,
+        axis="donor",
+        per="recipient",
+        limit=6,
+    )
+    plan = Plan(
+        question="q",
+        decisions=[decision(fixes=DecisionFixes(among=RankAmong.POPULATION))],
+        evidence_requirements=[aid, rank],
+    )
+
+    sentence = next(row for row in requirement_rows(plan) if row["id"] == "ranked")["sentence"]
+
+    assert _label(rank, plan) == "Rank the top 6 donors per recipient by ODA"
+    assert sentence == (
+        "Ranks by ODA: ranks every donor the source holds within each recipient;"
+        " the window is collapsed into one ranking per recipient;"
+        " keeps the top 6 donors per recipient, more when 6th place is shared."
+    )
+
+
 _SIX = ["Kenya", "Ethiopia", "Chad", "Mali", "Niger", "Sudan"]
 
 

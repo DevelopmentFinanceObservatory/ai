@@ -155,6 +155,21 @@ def _requirements(variant: str) -> list[EvidenceRequirement]:
                 per_period=True,
             ),
         ],
+        "ranked-per-recipient": [
+            _aid().model_copy(update={"entities": (), "across": ("donor", "recipient")}),
+            RankRequirement(
+                id="ranked",
+                decision_ids=("population",),
+                input_id="aid",
+                direction=RankDirection.HIGHEST_FIRST,
+                among=RankAmong.POPULATION,
+                axis="donor",
+                per="recipient",
+                limit=6,
+                reduction=Reduction.SUM,
+                per_period=True,
+            ),
+        ],
         "share-per-donor": [
             _aid(),
             _TOTAL,
@@ -175,6 +190,7 @@ def _decisions(variant: str, decision: Callable[..., Decision]) -> list[Decision
     extra = {
         "per-donor-stated": [PER_DONOR],
         "ranked-over-donors": [POPULATION],
+        "ranked-per-recipient": [POPULATION],
         "share-per-donor": [POOLED],
     }
     return [decision(), *extra.get(variant, [])]
@@ -199,6 +215,7 @@ SERIES = AnswerMode.SERIES
         pytest.param("summed", COMPUTED, [ASK], False, id="summed-over-donors"),
         pytest.param("per-donor-stated", COMPUTED, [ASK], False, id="per-donor-stated"),
         pytest.param("ranked-over-donors", COMPUTED, [ASK], False, id="ranked-over-donors"),
+        pytest.param("ranked-per-recipient", COMPUTED, [ASK], False, id="ranked-per-recipient"),
         pytest.param("share-per-donor", COMPUTED, [ASK], False, id="share-per-donor"),
         pytest.param(
             "recipient-filtered-roleless", COMPUTED, [ASK], True, id="roleless-filter-two-roles"

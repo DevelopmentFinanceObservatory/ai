@@ -193,6 +193,9 @@ ranking or comparison across many places, a count of places meeting a
 condition, a sum across donors, sectors or places, or a sum over years the
 user named. Call plan for it. A question about the largest, the most or the
 top is a ranking, so it goes to plan.
+A ranking within each member of another group ("the top 6 donors per
+recipient", "the largest sector in each country") ranks inside every one of
+them, so it names no member and needs no question about which one.
 
 Do not compute a figure yourself, in the answer or on the way to it. That
 rules out sums, differences, averages, shares or counts of values a tool

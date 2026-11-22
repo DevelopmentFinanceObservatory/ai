@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from analysis_mcp.result import VerbResult
+from analysis_mcp.artifact import Exclusion, Interval, Observation
+from analysis_mcp.result import StatVarsSummed, VerbResult
 from common.period_note import period_note
 from compiler.surface import ProgressCallback, ToolCallResult, ToolSchema
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
@@ -1735,8 +1736,16 @@ async def _plan_steps(results: Mapping[str, Mapping[str, Any]]) -> dict[str, Act
     return {f.tool: f for f in await translator._drain_recorder() if f.event == "activity.step"}
 
 
-def _verb_result(rows: int, *, ranked_before_limit: int | None = None) -> dict[str, Any]:
-    """An analysis verb's structured content, as analysis-mcp builds it."""
+def _verb_result(
+    rows: int,
+    *,
+    ranked_before_limit: int | None = None,
+    exclusions: tuple[Exclusion, ...] = (),
+    summed: tuple[int, ...] = (),
+    time: Observation | Interval | None = None,
+) -> dict[str, Any]:
+    """An analysis verb's structured content, as analysis-mcp builds it. Each
+    of `summed` is the StatVars one dataset version it read summed over."""
     return VerbResult(
         spec_id="ops_1",
         content_version="v1",
@@ -1744,7 +1753,28 @@ def _verb_result(rows: int, *, ranked_before_limit: int | None = None) -> dict[s
         rows=rows,
         stat_var_count=1,
         ranked_before_limit=ranked_before_limit,
+        exclusions=exclusions,
+        stat_vars_summed=tuple(
+            StatVarsSummed(spec_id=f"spec_{index}", content_version="cv_1", count=count)
+            for index, count in enumerate(summed)
+        ),
+        time=time or Observation(),
     ).model_dump(mode="json")
+
+
+# What the "Top 10 recipients of ODA in 2023" ranking on DAC2a left out: 25
+# regional residuals before it ranked 141 of the 166 recipients the plan
+# named, and the 131 recipients its limit cut.
+_RECIPIENT_EXCLUSIONS = (
+    Exclusion(
+        reason="party_residual",
+        rows=25,
+        entities={"financingRecipient": ("DACAfricaUnallocated",)},
+        entities_truncated=True,
+    ),
+    Exclusion(reason="beyond_limit", rows=131),
+    Exclusion(reason="entity_not_selected", rows=4),
+)
 
 
 async def test_a_plan_steps_line_states_the_period_note_and_the_rows_its_result_holds():
@@ -1762,6 +1792,7 @@ async def test_a_plan_steps_line_states_the_period_note_and_the_rows_its_result_
             "get_data": _YEAR_COUNTS_MANIFEST,
             "rank": _verb_result(10, ranked_before_limit=70),
             "growth": _verb_result(1),
+            "aggregate": _verb_result(9, summed=(380,)),
         }
     )
     plain = (await _plan_steps({"get_data": unnoted}))["get_data"].detail
@@ -1773,6 +1804,91 @@ async def test_a_plan_steps_line_states_the_period_note_and_the_rows_its_result_
     assert checks._numbers_in_prose(unlimited) == {10}
     assert checks._numbers_in_prose(steps["growth"].detail) == {1}
     assert all(is_user_sentence(steps[tool].detail) for tool in ("rank", "growth"))
+    # A summed reading's StatVars follow the rows, as a fact of their own.
+    held, summed = str(steps["aggregate"].detail).split(" \u00b7 ")
+    assert checks._numbers_in_prose(held) == {9}
+    assert checks._numbers_in_prose(summed) == {380}
+    assert is_user_sentence(summed)
+
+
+async def test_a_rankings_line_names_the_rows_it_left_out_before_it_ranked():
+    """A ranking that left out rows before it ranked, such as DAC2a's regional
+    residuals, names how many and why after the rows it keeps, so its count
+    adds up to the plan's: 141 ranked and 25 residuals are the 166 recipients
+    the plan named. The limit's own cut and rows the plan asked to drop are
+    not named again."""
+    ranked = _verb_result(
+        10,
+        ranked_before_limit=141,
+        exclusions=(
+            *_RECIPIENT_EXCLUSIONS,
+            Exclusion(reason="outside_window", rows=3000),
+            Exclusion(reason="predicate", rows=12),
+        ),
+    )
+
+    detail = (await _plan_steps({"rank": ranked}))["rank"].detail
+
+    assert checks._numbers_in_prose(detail) == {10, 141, 25}
+    assert is_user_sentence(detail)
+
+
+# Three unallocated providers over 2020 to 2024: 15 input rows, one per provider and year.
+_PROVIDER_RESIDUALS = {
+    "financingProvider": ("DACUnallocated", "MultilateralUnallocated", "PrivateUnallocated")
+}
+
+
+@pytest.mark.parametrize(
+    ("time", "truncated", "numbers"),
+    [
+        pytest.param(Interval(start="2020", end="2024"), False, {10, 40, 3}, id="entities"),
+        pytest.param(Interval(start="2020", end="2024"), True, {10, 40}, id="truncated"),
+        pytest.param(Interval(start="2023", end="2023"), True, {10, 40, 15}, id="one-period"),
+        pytest.param(Observation(), True, {10, 40, 15}, id="periods-apart"),
+    ],
+)
+async def test_a_rankings_left_out_count_is_in_the_unit_of_its_entries(
+    time: Observation | Interval, truncated: bool, numbers: set[int]
+) -> None:
+    """ "Top donors to Guatemala since 2020" collapses five years into one entry
+    per provider, so the three unallocated providers it left out count as
+    three, not as their 15 rows. Where the providers are not listed in full,
+    a collapsed ranking over several years names no count, and a ranking
+    over one period, or one keeping its periods apart, counts rows like its
+    entries. A count given as a boolean is no count."""
+    ranked = _verb_result(
+        10,
+        ranked_before_limit=40,
+        time=time,
+        exclusions=(
+            Exclusion(
+                reason="party_residual",
+                rows=15,
+                entities=_PROVIDER_RESIDUALS,
+                entities_truncated=truncated,
+            ),
+        ),
+    )
+    ranked["exclusions"].append({"reason": "non_finite", "rows": True})
+
+    detail = (await _plan_steps({"rank": ranked}))["rank"].detail
+
+    assert checks._numbers_in_prose(detail) == numbers
+    assert is_user_sentence(detail)
+
+
+async def test_an_aggregates_left_out_count_names_entities_beside_its_groups():
+    """An aggregate's rows are its groups, so the group totals it left out
+    count as the entities they were, and as nothing where not listed in full."""
+    listed = Exclusion(reason="party_total", rows=30, entities={"financingProvider": ("DAC", "G7")})
+    unlisted = listed.model_copy(update={"entities_truncated": True})
+
+    named = await _plan_steps({"aggregate": _verb_result(9, exclusions=(listed,))})
+    unnamed = await _plan_steps({"aggregate": _verb_result(9, exclusions=(unlisted,))})
+
+    assert checks._numbers_in_prose(named["aggregate"].detail) == {9, 2}
+    assert checks._numbers_in_prose(unnamed["aggregate"].detail) == {9}
 
 
 async def test_a_reply_stating_the_facts_of_its_steps_is_grounded_by_their_frames():
@@ -1803,7 +1919,13 @@ async def test_a_reply_stating_the_facts_of_its_steps_is_grounded_by_their_frame
         await _charts_step(_cut_chart("Aid", drawn=24, holding=70, other_kinds=15, unvalued=31)),
         *(
             await _plan_steps(
-                {"get_data": manifest, "rank": _verb_result(25, ranked_before_limit=64)}
+                {
+                    "get_data": manifest,
+                    "rank": _verb_result(
+                        25, ranked_before_limit=64, exclusions=_RECIPIENT_EXCLUSIONS
+                    ),
+                    "aggregate": _verb_result(9, summed=(380,)),
+                }
             )
         ).values(),
     ]
@@ -1812,7 +1934,8 @@ async def test_a_reply_stating_the_facts_of_its_steps_is_grounded_by_their_frame
         "text": (
             "The data is for 2024, which covers 85 donors, while 2025 covers 9 donors so far. "
             "The chart shows the 24 largest of 70 donors, excluding 15 group totals and 31 "
-            "with no value. The ranking keeps 25 of 64 ranked donors."
+            "with no value. The ranking keeps 25 of 64 ranked donors, leaving out 25 "
+            "unallocated amounts. The total adds up 380 StatVars."
         ),
     }
     turn = [frame.model_dump(mode="json") for frame in steps]
@@ -1821,7 +1944,9 @@ async def test_a_reply_stating_the_facts_of_its_steps_is_grounded_by_their_frame
     # The same turn with its step details withheld grounds none of them.
     bare = [{**frame, "detail": None} for frame in turn]
     (violation,) = checks.check_grounding([[*bare, reply]])
-    assert all(number in violation for number in ("2025", "85", "70", "15", "31", "25", "64"))
+    assert all(
+        number in violation for number in ("2025", "85", "70", "15", "31", "25", "64", "380")
+    )
 
 
 def _record(tool: str, *, step_id: str | None = None, **result: object) -> _ExecutorRecord:

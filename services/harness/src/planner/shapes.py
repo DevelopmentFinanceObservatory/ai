@@ -1287,11 +1287,14 @@ def ranked(
     limit: int | None,
     rolling: RollingWindow | None = None,
     step_id: Identifier | None,
+    per: str | None = None,
 ) -> FrameShape:
     """The shape `rank` produces, in its collapsing or per-period mode.
 
     `axis` selects which of `shape`'s role dimensions the output keeps;
-    `None` with a single input role picks that lone role. Collapse mode
+    `None` with a single input role picks that lone role. `per` names a
+    second role the output keeps, whose entities each hold their own
+    ranking of the axis's. Collapse mode
     (`per_period=False`) carries the entity's own measured `value`, labelled
     a `SPAN`. Per-period mode keeps one row per entity per period of its
     input, with the input's own period labels, and carries the axis role's
@@ -1316,7 +1319,9 @@ def ranked(
     collapsing rank over a span with no window (`FrameShape.span_of`).
     """
     axis_role = _select_role(shape.roles, axis)
-    roles = _without_level_filterability((axis_role,) if axis_role is not None else ())
+    per_role = None if per is None else role_named(shape.roles, per)
+    kept = tuple(role for role in (per_role, axis_role) if role is not None)
+    roles = _without_level_filterability(kept)
     period, drift = windowed(shape, window, rolling)
     limited = limit is not None or shape.limited
     if per_period:
@@ -2049,6 +2054,25 @@ def _rejects_rank_axis(shape: FrameShape, axis: str | None) -> str | None:
     return _names_no_role("axis", axis, "this input", shape.roles)
 
 
+def _rejects_rank_per(shape: FrameShape, axis: str | None, per: str | None) -> str | None:
+    """Return why `per` cannot name the role a rank over `shape` ranks `axis` within, or `None`.
+
+    `per` has to name one role of `shape` other than the one `axis` selects,
+    which `_rejects_rank_axis` has already resolved.
+    """
+    if per is None:
+        return None
+    reason = _names_no_role("per", per, "this input", shape.roles)
+    if reason is not None:
+        return reason
+    if role_named(shape.roles, per) is _select_role(shape.roles, axis):
+        return (
+            f"per {per!r} names the role the rank orders, so each ranking would hold one "
+            "entity; name another role in `per`, or leave it unset"
+        )
+    return None
+
+
 def _rejects_rank_rows(shape: FrameShape) -> str | None:
     """Return why the rows `shape` holds give a rank nothing true to order, or `None` when they do."""
     if shape.value is ValueKind.ORDINAL:
@@ -2210,6 +2234,7 @@ def _rejects_rank(
     per_period: bool = False,
     reduction: Reduction | None = None,
     rolling: RollingWindow | None = None,
+    per: str | None = None,
 ) -> str | None:
     reason = (
         _several_measures("rank", shape)
@@ -2217,6 +2242,7 @@ def _rejects_rank(
         or _mixed_levels("a rank", shape)
         or _rejects_rank_rows(shape)
         or _rejects_rank_axis(shape, axis)
+        or _rejects_rank_per(shape, axis, per)
         or _rejects_rank_picked(shape)
         or _rejects_rank_window(shape, window, rolling)
     )
@@ -2887,7 +2913,7 @@ def rejects(verb: ShapeVerb, shape: FrameShape, **options: object) -> str | None
         shape: The candidate input shape.
         options: The verb's own options -- see each rule function for which
             it reads (`by_entity`/`by_period`/`by_breakdown`/`reduction` for aggregate,
-            `change`/`window` for growth, `axis`/`among`/`window`/`rolling`/`per_period`/`reduction` for rank,
+            `change`/`window` for growth, `axis`/`among`/`window`/`rolling`/`per_period`/`reduction`/`per` for rank,
             `axis`/`scope`/`other`/`entity` for share_of, where `entity` is
             the one entity the side passed as `shape` narrows to,
             `axis`/`denominator_axis`/`other` for quotient_of, and

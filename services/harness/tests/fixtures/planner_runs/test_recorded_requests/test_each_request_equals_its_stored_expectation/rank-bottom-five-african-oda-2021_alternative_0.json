@@ -153,6 +153,7 @@
         "direction": "lowest_first",
         "among": "population",
         "axis": "recipient",
+        "per": null,
         "reduction": "sum",
         "window_start": null,
         "window_end": null,

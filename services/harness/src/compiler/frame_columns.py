@@ -208,7 +208,10 @@ _DIVIDING_SITES = (
 _COLUMN_SITES: Mapping[ToolId, tuple[_ColumnSite, ...]] = {
     _analysis("aggregate"): (_ColumnSite("group_by", _Form.NAMES, FRAME_PARAMETER),),
     _analysis("growth"): (_ColumnSite("entity_by", _Form.NAMES, FRAME_PARAMETER),),
-    _analysis("rank"): (_ColumnSite("rank_by", _Form.NAMES, FRAME_PARAMETER),),
+    _analysis("rank"): (
+        _ColumnSite("rank_by", _Form.NAMES, FRAME_PARAMETER),
+        _ColumnSite("partition_by", _Form.NAMES, FRAME_PARAMETER),
+    ),
     _analysis("filter"): (_ColumnSite("predicates", _Form.PREDICATES, FRAME_PARAMETER),),
     _analysis("join"): (
         _ColumnSite("join_keys", _Form.NAMES, FRAME_PARAMETER),

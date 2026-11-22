@@ -1438,6 +1438,15 @@ class RankRequirement(TaggedModel):
         max_length=MAX_ENTITY_ROLE_CHARS,
         description="Which role dimension of the input this rank keeps; required once the input carries more than one.",
     )
+    per: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_ENTITY_ROLE_CHARS,
+        description=(
+            "Another role of the input to rank `axis` within: each of its entities gets its "
+            "own ranking and `limit`. Top 5 donors per recipient: axis 'donor', per 'recipient'."
+        ),
+    )
     reduction: Reduction | None = Field(
         default=None,
         description=(
@@ -3576,6 +3585,7 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
         per_period=requirement.per_period,
         reduction=requirement.reduction,
         rolling=requirement.rolling,
+        per=requirement.per,
     )
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
@@ -3597,6 +3607,7 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
         limit=requirement.limit,
         rolling=requirement.rolling,
         step_id=requirement.id,
+        per=requirement.per,
     )
 
 
@@ -3619,11 +3630,12 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
     """
     if requirement.reduction is not None:
         return None
-    if len(input_shape.roles) > 1:
+    if len(input_shape.roles) > _roles_ranked(requirement):
         return (
             f"{requirement.id!r} ranks by axis {requirement.axis!r} over an input carrying more "
             "than one role, which needs a reduction to collapse the other role's rows to one "
-            "value per axis entity"
+            "value per axis entity, or `per` naming that role to rank the axis within each of "
+            "its entities"
         )
     if requirement.per_period or input_shape.one_row_per_entity:
         return None
@@ -3644,6 +3656,15 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
         "one offset for a year that follows the newest data, or, only for an ask marked "
         "(across years), state a reduction to combine the years"
     )
+
+
+def _roles_ranked(requirement: RankRequirement) -> int:
+    """How many roles of its input `requirement` keeps: its axis, and the role `per` names.
+
+    A rank within `per` orders each of that role's entities' axis entities
+    apart, so neither role's rows need collapsing. Any other role does.
+    """
+    return 1 if requirement.per is None else 2
 
 
 def stated_under(entity: Entity, role: str | None) -> bool:
@@ -5312,7 +5333,8 @@ def unstated_result_scopes(plan: Plan) -> list[ResultScopeGap]:
     it is one growth per member, which a question asking for the total does
     not want. A result kept per member of such a party passes when the plan
     states that scope: a step on its way to the result operates over the
-    role by name (`_operand_roles`: a rank ordering it, a share or quotient
+    role by name (`_operand_roles`: a rank ordering it or ranking within
+    it by `per`, a share or quotient
     keyed on it, or a place-level filter on it, since `_filter_shape`
     refuses an `EntityIn` naming a member of an open role, by
     `unknown_names`), or, like `among='population'`
@@ -5872,8 +5894,8 @@ def _operand_roles(
     """The role dimensions `requirement` operates over by name, each as its role and dataset requirement.
 
     A rank orders the dimension its `axis` selects, the lone one when it
-    states none. A share_of or quotient_of states `axis` to give one figure
-    per member of the numerator's dimension it names. A filter narrows the
+    states none, and names the dimension its `per` ranks within. A share_of
+    or quotient_of states `axis` to give one figure per member of the numerator's dimension it names. A filter narrows the
     dimensions its `EntityIn` predicates name, and a predicate naming no
     role counts only over an input with one dimension, since its names may
     sit in any of several. An `EntityIn` names only what the requirements
@@ -5884,7 +5906,10 @@ def _operand_roles(
     """
     selected: list[RoleDimension] = []
     if isinstance(requirement, RankRequirement):
-        selected.append(_selected_role(shapes_by_id[requirement.input_id].roles, requirement.axis))
+        roles = shapes_by_id[requirement.input_id].roles
+        selected.append(_selected_role(roles, requirement.axis))
+        if requirement.per is not None:
+            selected.append(_selected_role(roles, requirement.per))
     elif isinstance(requirement, ShareOfRequirement | QuotientRequirement):
         if requirement.axis is not None:
             selected.extend(
