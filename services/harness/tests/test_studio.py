@@ -9479,6 +9479,35 @@ async def test_a_count_chip_whose_fetch_is_refused_is_recorded_as_not_applied() 
     assert [step["status"] for step in steps][-1] == "failed"
 
 
+async def test_an_answer_whose_other_count_was_refused_offers_that_count_chip() -> None:
+    """The agent fetches the gross count, then the net count Search offered
+    beside it, and data-mcp refuses the net fetch. The part still reads
+    gross, so the answer offers the net count's chip on the gross spec_id."""
+    gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
+    search = SearchStub(answer={FRANCE_KENYA_NET: _net_family_envelope(), gross: FRANCE_KENYA})
+    app = _app(
+        search_call("aid"),
+        fetch_call(gross, scope={"window": _TWO_YEARS}),
+        fetch_call(FRANCE_KENYA_NET, scope={"window": _TWO_YEARS}),
+        _text("France gave Kenya this much, gross."),
+        resolver=CannedSearch(FRANCE_KENYA),
+        executor=_RefusingOne(FRANCE_KENYA_NET),
+        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("aid from France to Kenya"))
+        turns = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+
+    readings = [SearchReading.model_validate(r) for r in turns[0]["readings"]]
+    assert [(r.spec_id, r.fetch is not None and r.fetch.refusal_code) for r in readings][-1] == (
+        FRANCE_KENYA_NET,
+        "upstream_error",
+    )
+    assert [(c["choice_id"], c["option_id"]) for c in _frame(first, "suggestions")["items"]] == [
+        (f"{gross}:count", FRANCE_KENYA_NET)
+    ]
+
+
 @pytest.mark.parametrize(
     ("pick", "constraint"),
     [

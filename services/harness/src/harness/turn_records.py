@@ -1565,7 +1565,9 @@ class CountChoice(NamedTuple):
     `alternatives` are the other counts it offers. `current` is the spec_id
     of the count the part reads now: `reading`'s own, or that of a newer
     reading of one of its other counts (`SearchReading.other_count_of`),
-    which a fetch of that count, a chip's among them, leaves."""
+    which a fetch of that count, a chip's among them, leaves. A reading
+    whose fetch was refused (`FetchReading.refusal_code`) read no data, so
+    the part does not read its count."""
 
     reading: SearchReading
     current: str
@@ -1590,7 +1592,13 @@ def stored_count(readings: Sequence[Mapping[str, Any]], choice_id: str) -> Count
             reading = SearchReading.model_validate(raw)
         except ValidationError:
             continue
-        if current is None and reading.other_count_of == spec_id and reading.spec_id is not None:
+        refused = reading.fetch is not None and reading.fetch.refusal_code is not None
+        if (
+            current is None
+            and not refused
+            and reading.other_count_of == spec_id
+            and reading.spec_id is not None
+        ):
             current = reading.spec_id
         if reading.spec_id == spec_id:
             if not reading.alternatives:
