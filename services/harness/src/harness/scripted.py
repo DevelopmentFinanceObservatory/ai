@@ -16,7 +16,7 @@ translation.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -409,9 +409,10 @@ class ScriptedPlannerModel:
         prior_plan: dict[str, Any],
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],
+        picked: Collection[str] = (),
     ) -> dict[str, Any]:
         """Refuse: the canned plan pins no source, so no switch reaches it."""
-        del ctx, prior_plan, evidence_requirements, inherits
+        del ctx, prior_plan, evidence_requirements, inherits, picked
         return {"refused": {"text": "The scripted planner revises no plan.", "code": None}}
 
 

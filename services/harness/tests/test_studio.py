@@ -92,7 +92,7 @@ from harness.graph.state import (
 from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.plan_display import decision_option_id
-from harness.planner_adapter import PlannerAdapter
+from harness.planner_adapter import PlannerAdapter, _reading_pin_sources
 from harness.provenance import CARD_FRAME_KEY, ProvenanceStore
 from harness.scripted import SCRIPTED_SPEC, ScriptedPlannerModel, ScriptedSurface
 from harness.sentences import FAILURE_CLASS, StopCode, refusal_sentence
@@ -165,6 +165,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.requests import ClientDisconnect
+from submission.service import measure_choices
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .failure_text import classed_sentence, is_user_sentence
@@ -183,6 +184,7 @@ from .scripted_tools import (
 )
 from .store_clock import StoreClock
 from .studio_routes import AUTH, ScriptLlm, orchestrator_app, stream, studio_client, turn_body
+from .test_orchestrator_tools import FRANCE_KENYA, FRANCE_KENYA_NET, _net_family_envelope
 from .test_turn_records import _top_donors
 from .turn_driver import CONVERSATION
 
@@ -9570,6 +9572,226 @@ async def test_a_chip_is_shown_applied_and_kept_and_each_step_is_recorded(
     ]
 
 
+def _count_chip_app(
+    *script: types.Part, executor: ScriptedExecutor | None = None
+) -> tuple[FastAPI, ScriptedExecutor, SearchStub]:
+    """An app whose first turn searches aid from France to Kenya, which Search
+    counts as gross disbursements and offers as net disbursements too, fetches
+    it over two years and answers, then runs `script`, its calls answered by
+    `executor`. Search answers the net count's definition. Returns the app,
+    the executor and the Search stub."""
+    executor = executor or ScriptedExecutor()
+    gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
+    search = SearchStub(answer={FRANCE_KENYA_NET: _net_family_envelope(), gross: FRANCE_KENYA})
+    app = _app(
+        search_call("aid"),
+        fetch_call(gross, scope={"window": _TWO_YEARS}),
+        _text("France gave Kenya this much."),
+        *script,
+        resolver=CannedSearch(FRANCE_KENYA),
+        executor=executor,
+        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
+    )
+    return app, executor, search
+
+
+async def test_a_count_chip_fetches_the_other_count_as_the_answer_fetched_it() -> None:
+    """The answer counted gross disbursements and Search offered net ones, so
+    its first chip switches the count. Clicking it fetches the net count's
+    spec_id over the answer's years, resolving its definition on record with
+    no scope entries, and records the chip applied. The turn's reading is the
+    net count, read as the gross count's other count. The same chip again is
+    stale, since the part reads the net count. The net answer offers the
+    gross count back, and clicking that reads the first spec_id again, with
+    the definition the first search recorded, as the count Search elected.
+    It offers net again, and a plan pinning it from the ledger states how it
+    is counted, gross chosen beside net."""
+    app, executor, search = _count_chip_app(_text("Net, it was less."), _text("Gross again."))
+    gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("aid from France to Kenya"))
+        chip = _frame(first, "suggestions")["items"][0]
+        applied = await _stream(client, "/api/studio/turn", _chip_body(chip))
+        again = await client.post("/api/studio/turn", json=_chip_body(chip), headers=AUTH)
+        (back,) = _frame(applied, "suggestions")["items"]
+        returned = await _stream(client, "/api/studio/turn", _chip_body(back))
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        turns = conversation.turns
+        ledger = conversation.prior_ledger_state()
+
+    assert chip == {
+        "kind": "apply_choice",
+        "label": "net disbursements",
+        "choice_id": f"{gross}:count",
+        "option_id": FRANCE_KENYA_NET,
+        "turn": 1,
+        "spec_id": gross,
+    }
+    entries = [entry for posted in search.posted for entry in posted["input"]["entries"]]
+    assert [spec_id_for(canonicalize(entry["identity"])) for entry in entries] == [
+        FRANCE_KENYA_NET,
+        gross,
+    ]
+    assert not any("scope_entries" in entry for entry in entries)
+    fetched = [call["args"] for call in executor.calls if call["tool"] == "get_data"]
+    assert [(args["spec_id"], args["scope"]) for args in fetched] == [
+        (gross, {"window": _TWO_YEARS}),
+        (FRANCE_KENYA_NET, {"window": _TWO_YEARS}),
+        (gross, {"window": _TWO_YEARS}),
+    ]
+    assert _frame(applied, "message.complete")["text"].startswith("Net, it was less.")
+    (reading,) = (SearchReading.model_validate(r) for r in turns[1]["readings"])
+    assert (reading.spec_id, reading.other_count_of, reading.counted_as) == (
+        FRANCE_KENYA_NET,
+        gross,
+        "net disbursements",
+    )
+    assert turns[1]["applied_choice"] == {
+        "choice_id": f"{gross}:count",
+        "option_id": FRANCE_KENYA_NET,
+        "from_option_id": gross,
+        "spec_id": FRANCE_KENYA_NET,
+    }
+    assert again.status_code == 422
+    assert again.json()["constraint_id"] == "scope_choice_stale"
+    assert back == {
+        "kind": "apply_choice",
+        "label": "gross disbursements",
+        "choice_id": f"{FRANCE_KENYA_NET}:count",
+        "option_id": gross,
+        "turn": 2,
+        "spec_id": FRANCE_KENYA_NET,
+    }
+    assert _frame(returned, "message.complete")["text"].startswith("Gross again.")
+    (reading,) = (SearchReading.model_validate(r) for r in turns[2]["readings"])
+    assert (reading.spec_id, reading.other_count_of, reading.counted_as) == (
+        gross,
+        None,
+        "gross disbursements",
+    )
+    assert turns[2]["applied_choice"]["spec_id"] == gross
+    assert [(c["choice_id"], c["option_id"]) for c in _frame(returned, "suggestions")["items"]] == [
+        (f"{gross}:count", FRANCE_KENYA_NET)
+    ]
+    # A plan pinning gross from the ledger, with the block Search answers for it.
+    pins = _reading_pin_sources(
+        ledger["readings"],
+        [gross],
+        blocks={gross: FRANCE_KENYA["parts"][0]["spec"]},
+        earlier=(),
+        warnings={},
+    )
+    assert (pins[gross].settled, pins[gross].other_count_of) == (True, None)
+    choice = measure_choices(pins)[gross]
+    assert (choice.options, choice.chosen) == (
+        ("gross disbursements", "net disbursements"),
+        "gross disbursements",
+    )
+
+
+class _RefusingOne(ScriptedExecutor):
+    """A `ScriptedExecutor` whose `get_data` refuses `spec_id` as data-mcp
+    refuses a fetch it cannot serve just now."""
+
+    def __init__(self, spec_id: str) -> None:
+        super().__init__()
+        self.spec_id = spec_id
+
+    async def __call__(
+        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
+    ) -> dict[str, Any]:
+        if tool == "get_data" and args.get("spec_id") == self.spec_id:
+            self.calls.append({"tool": tool, "args": args})
+            return {
+                "outcome": "refusal",
+                "refusal": {
+                    "code": "upstream_error",
+                    "retry_mode": "retry_after_delay",
+                    "message": "The data service did not answer.",
+                },
+            }
+        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+
+
+async def test_a_count_chip_whose_fetch_is_refused_is_recorded_as_not_applied() -> None:
+    """Clicking the net count's chip fetches it and data-mcp refuses the
+    fetch: the chip is recorded as not applied and its step fails."""
+    app, executor, _ = _count_chip_app(
+        _text("That could not be counted."), executor=_RefusingOne(FRANCE_KENYA_NET)
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("aid from France to Kenya"))
+        chip = _frame(first, "suggestions")["items"][0]
+        refused = await _stream(client, "/api/studio/turn", _chip_body(chip))
+        turns = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+
+    assert chip["option_id"] == FRANCE_KENYA_NET
+    fetched = [call["args"]["spec_id"] for call in executor.calls if call["tool"] == "get_data"]
+    assert fetched[:2] == [FRANCE_KENYA["parts"][0]["spec"]["spec_id"], FRANCE_KENYA_NET]
+    assert "spec_id" not in turns[1]["applied_choice"]
+    steps = [
+        frame
+        for frame in refused
+        if frame["event"] == "activity.step" and frame.get("tool") == "apply_choice"
+    ]
+    assert [step["status"] for step in steps][-1] == "failed"
+
+
+async def test_an_answer_whose_other_count_was_refused_offers_that_count_chip() -> None:
+    """The agent fetches the gross count, then the net count Search offered
+    beside it, and data-mcp refuses the net fetch. The part still reads
+    gross, so the answer offers the net count's chip on the gross spec_id."""
+    gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
+    search = SearchStub(answer={FRANCE_KENYA_NET: _net_family_envelope(), gross: FRANCE_KENYA})
+    app = _app(
+        search_call("aid"),
+        fetch_call(gross, scope={"window": _TWO_YEARS}),
+        fetch_call(FRANCE_KENYA_NET, scope={"window": _TWO_YEARS}),
+        _text("France gave Kenya this much, gross."),
+        resolver=CannedSearch(FRANCE_KENYA),
+        executor=_RefusingOne(FRANCE_KENYA_NET),
+        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("aid from France to Kenya"))
+        turns = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+
+    readings = [SearchReading.model_validate(r) for r in turns[0]["readings"]]
+    assert [(r.spec_id, r.fetch is not None and r.fetch.refusal_code) for r in readings][-1] == (
+        FRANCE_KENYA_NET,
+        "upstream_error",
+    )
+    assert [(c["choice_id"], c["option_id"]) for c in _frame(first, "suggestions")["items"]] == [
+        (f"{gross}:count", FRANCE_KENYA_NET)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("pick", "constraint"),
+    [
+        ({"option_id": "spec_" + "e" * 32}, "switch_option_unavailable"),
+        ({"spec_id": FRANCE_KENYA_NET}, "scope_choice_stale"),
+        ({"option_id": FRANCE_KENYA["parts"][0]["spec"]["spec_id"]}, "scope_choice_stale"),
+    ],
+    ids=["count-not-offered", "another-reading", "own-count"],
+)
+async def test_a_count_chip_that_cannot_apply_is_refused_with_its_constraint(
+    pick: dict[str, str], constraint: str
+) -> None:
+    """A count the part does not offer is unavailable. A chip naming a reading
+    the choice is not on, or the count the part already reads, is stale. Each
+    is a 422 before any stream, and Search is asked nothing."""
+    app, _, search = _count_chip_app()
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("aid from France to Kenya"))
+        chip = {**_frame(first, "suggestions")["items"][0], **pick}
+        refused = await client.post("/api/studio/turn", json=_chip_body(chip), headers=AUTH)
+
+    assert (refused.status_code, refused.json()["constraint_id"]) == (422, constraint)
+    assert refused.json()["pointer"] == "/apply_choice"
+    assert search.posted == []
+
+
 async def test_a_chip_search_refuses_is_recorded_as_not_applied(
     otlp_spans: InMemorySpanExporter,
 ) -> None:
@@ -9589,6 +9811,37 @@ async def test_a_chip_search_refuses_is_recorded_as_not_applied(
     assert "spec_id" not in turns[1]["applied_choice"]
     assert "scope_choice.not_applied" in events
     assert "scope_choice.applied" not in events
+
+
+async def test_a_chip_whose_fetch_is_refused_is_recorded_as_not_applied(
+    otlp_spans: InMemorySpanExporter,
+) -> None:
+    """Search compiles the chip's reading and data-mcp refuses its fetch: the
+    chip is recorded as not applied and its step fails."""
+    executor = _RefusingOne(_switched_answer(_hashed_scope())[0])
+    app, _, search = _chip_app(_text("That could not be counted."), executor=executor)
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("health aid to Africa"))
+        (chip,) = [
+            c for c in _frame(first, "suggestions")["items"] if c["option_id"] == "sector:120+130"
+        ]
+        refused = await _stream(client, "/api/studio/turn", _chip_body(chip))
+        turns = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+
+    events = [event.name for span in otlp_spans.get_finished_spans() for event in span.events]
+    assert len(search.posted) == 1
+    assert [call["args"]["spec_id"] for call in executor.calls if call["tool"] == "get_data"][
+        -1
+    ] == executor.spec_id
+    assert "spec_id" not in turns[1]["applied_choice"]
+    assert "scope_choice.not_applied" in events
+    assert "scope_choice.applied" not in events
+    steps = [
+        frame
+        for frame in refused
+        if frame["event"] == "activity.step" and frame.get("tool") == "apply_choice"
+    ]
+    assert [step["status"] for step in steps][-1] == "failed"
 
 
 async def test_a_chip_applies_only_on_the_answer_it_was_offered_with() -> None:

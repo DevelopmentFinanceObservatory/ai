@@ -234,26 +234,38 @@ for the dataset again.
 After an answer whose figures came from a fetch, `suggestions.items` can
 hold up to four chips of kind `apply_choice`:
 `{kind: "apply_choice", label, choice_id, option_id, turn, spec_id}`. Each moves one
-scope choice of the data the answer used (the sector's codes, a region's
-members, the provider scope or the measure basis) to another option
-Search can serve, such as "health, CRS 120 alone" or "including imputed
-multilateral". `label` is the option's label, quoted after the part's
-words when the answer used several parts. Chips run sector first, then
-region, provider and measure basis. An option Search cannot serve has no
-chip, and an answer from a plan has none: its card carries the switch.
-`turn` is the number of the conversation turn whose answer offers the
-chip, counted from 1, and `spec_id` names the stored data the chip
+choice of the data the answer used to another option. A scope chip moves
+one scope choice (the sector's codes, a region's members, the provider
+scope or the measure basis) to an option Search can serve, such as
+"health, CRS 120 alone" or "including imputed multilateral". Its
+`choice_id` is `"<spec_id>:<axis>"` and its `option_id` the option's id. A
+count chip switches a part to another way of counting its flow that
+Search offered beside the count it chose, such as "net disbursements" on
+an answer counted in gross disbursements. Its `choice_id` is
+`"<spec_id>:count"`, with the answer's `spec_id`, and its `option_id` is
+the spec_id of the other count. Both kinds have the same shape and are
+sent the same way, so a client renders and sends a count chip as it does
+a scope chip, and tells them apart, where it wants to word them apart, by
+the `:count` ending of `choice_id`. `label` is the option's label, quoted
+after the part's words when the answer used several parts. A client
+builds the chip's action text from it. Chips run count first, then
+sector, region, provider and measure basis. An option Search cannot serve
+has no chip, and an answer from a plan has none: its card carries the
+switch. `turn` is the number of the conversation turn whose answer offers
+the chip, counted from 1, and `spec_id` names the stored data the chip
 re-counts. Together they bind the chip to its answer.
 
 A click sends a `turn.request` with
 `apply_choice: {choice_id, option_id, turn, spec_id}` copied from the
 chip and no `message`, `seed_spec` or `component_ref`;
-one beside any of them gets a 422. The turn re-counts the stored data
-with that option through the Search API, retrieves it, and answers from
-it with the usual basis line, without searching or planning. The
-Activity feed shows a "Count your choice" step and the retrieval. When
-Search cannot serve the option, the step fails with the note a plan
-card's switch shows, the agent says so, and the earlier answer stands.
+one beside any of them gets a 422. A scope chip's turn re-counts the
+stored data with that option through the Search API. A count chip's turn
+reads the other count Search already named, with nothing re-counted.
+Either turn retrieves the data and answers from it with the usual basis
+line, without searching or planning. The Activity feed shows a "Count
+your choice" step and the retrieval. When Search cannot serve the option,
+the step fails with the note a plan card's switch shows, the agent says
+so, and the earlier answer stands.
 
 A chip that no longer applies gets a 422 `constraint_violation` before
 any stream starts, with `pointer: "/apply_choice"` and a `detail` to
@@ -261,11 +273,14 @@ show:
 
 - `scope_choice_stale`: a later turn has answered, so the chip's answer is
   no longer the latest; a switch on a later plan card has re-counted the
-  choice's data, so its newest data is no longer `spec_id`; no stored
-  answer holds the choice; or the choice is already on that option. A
-  client shows chips under the latest answer only.
+  choice's data, so its newest data is no longer `spec_id`; a later
+  retrieval read one of the part's other counts, so the part
+  reads a count other than that of `spec_id`; no stored answer holds the choice; or the
+  choice is already on that option. A client shows chips under the latest
+  answer only.
 - `switch_option_unavailable`: the choice does not offer the option, or
-  Search cannot serve it.
+  Search cannot serve it. For a count chip, the part offers no other count
+  with that spec_id.
 
 #### 4.1.3 `after_turn`
 
@@ -467,7 +482,7 @@ Notes on specific fields:
   `label`; show `description` when the user expands the step. `args`
   holds the tool arguments backing the step, for a client that wants to
   show more than the label.
-- `plan.proposed.decisions[]`: `{id, question, chosen, reason, resolved_by, alternatives?, choice_id?, active_option_id?, options?}`, the choices the agent made for the user. A decision stating how Search counted a source carries the scope choice's `choice_id`, `"<requirement id>:<axis>"`, which stays the same on every plan of the conversation, switches included, its `active_option_id` and every option as `{option_id, label, status, reason?, years?}`, where `status` is `available`, `partial` or `unavailable`, `reason` says why a partial or unavailable option is limited, and `years` are the years a partial option covers. A decision without `choice_id` is a planner decision.
+- `plan.proposed.decisions[]`: `{id, question, chosen, reason, resolved_by, alternatives?, choice_id?, active_option_id?, options?}`, the choices the agent made for the user. A decision stating how Search counted a source carries the scope choice's `choice_id`, `"<requirement id>:<axis>"`, which stays the same on every plan of the conversation, switches included, its `active_option_id` and every option as `{option_id, label, status, reason?, years?}`, where `status` is `available`, `partial` or `unavailable`, `reason` says why a partial or unavailable option is limited, and `years` are the years a partial option covers. The decision stating how pinned sources' flows are counted ("How the flow is counted.") carries `choice_id` `"<requirement id>:count"`, its `active_option_id` and each count every source of the row offers as an `available` option whose `option_id` is derived from its label. Sources counted the same way share the row, and a switch of it moves every requirement on each of them to that count. A decision without `choice_id` is a planner decision.
 - `plan.proposed.revision` is a string identifying the plan's approval
   key, distinct from the integer `version`. It sits beside `version`: a
   client that shows a version badge keeps using `version`.
