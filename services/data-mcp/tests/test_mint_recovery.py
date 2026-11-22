@@ -79,9 +79,10 @@ async def _holding(
     *stat_vars: str,
     options: dict[str, object] | None = None,
     stamp: str | None = None,
+    digest: str | None = None,
 ) -> InMemoryMaterialisationStore:
     """A store holding, under `ref`, a frame with one row for each of `stat_vars`,
-    whose trace keeps `options` and `stamp`."""
+    whose trace keeps `options`, `stamp` and `digest`."""
     store = InMemoryMaterialisationStore()
     if stat_vars:
         frame = Frame.build(
@@ -97,6 +98,7 @@ async def _holding(
             content_version=ref.content_version,
             options=options,
             enrichment_stamp=stamp,
+            artifact_digest=digest,
         )
         await store.put(ref, frame=frame, trace=trace, writer="test")
     return store
@@ -358,6 +360,42 @@ async def test_a_sum_that_kept_its_version_is_recovered_from_its_traces_options(
         options=kept_sum,
         scope={},
         stat_var_count=1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("columns", "groupby"),
+    [(("observationAbout_type",), None), ((), _GROUPBY)],
+    ids=["column-selection", "sum-that-kept-its-version"],
+)
+async def test_a_rendering_named_by_its_files_digest_is_recovered_with_its_traces_digest(
+    columns: tuple[str, ...], groupby: dict[str, Any] | None
+) -> None:
+    """apis lists no file digest on a version, so only the digest the held frame's trace
+    keeps reproduces the pair, and the record keeps it for a replay to name the frame by."""
+    options: dict[str, object] = dict(_DEFAULT_OPTIONS)
+    if columns:
+        options["columns"] = list(columns)
+    if groupby is not None:
+        options["groupby"] = groupby
+    digest = "sha256:" + "d" * 64
+    ref = frame_ref_for(
+        spec_id=_SPEC_ID,
+        content_version=_OLDER,
+        columns=columns,
+        groupby=groupby,
+        artifact_digest=digest,
+    )
+    store = await _holding(ref, "dcid:A", options=options, digest=digest)
+
+    record = await recover_mint_record(ref, dataset_versions=_Versions(), store=store)
+
+    assert record == MintRecord(
+        frame=ref,
+        dataset=FrameRef(spec_id=_SPEC_ID, content_version=_OLDER),
+        options=options,
+        stat_var_count=1,
+        artifact_digest=digest,
     )
 
 

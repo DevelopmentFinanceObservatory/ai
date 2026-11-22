@@ -31,9 +31,11 @@ Each renderer's `_truncation_note` call names which rule it used.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from typing import Any
 
-from common.echoed_text import truncate_value
+from common.breakdown_labels import NO_LABELS, Cell, CellLabels
+from common.echoed_text import MAX_LABEL_CHARS, escape_control_chars, truncate_value
 from common.time_grain import span_label
 from common.unit_refs import PERCENT_UNIT
 from dfo_frame_grammar.grammar import UnitCell
@@ -109,13 +111,38 @@ def _unit_text(unit: UnitCell | None) -> str:
     return truncate_value(unit_name(unit))
 
 
+# The label `_cell` names a cell by, from `render_summary_digest`'s labels while it renders.
+_cell_label: ContextVar[Callable[[str, str], str | None]] = ContextVar(
+    "cell_label", default=NO_LABELS.label
+)
+
+_TRUNCATED = "...(truncated)"
+
+
+def _cell(column: str, value: str) -> str:
+    """The text of the cell `value` of `column`: a breakdown cell's label with its
+    value after it where one was read (`_cell_label`), else the value, capped
+    (`truncate_value`). A label and its value share the `MAX_LABEL_CHARS` cap, the value
+    first, so a long label is cut and the value a selection binds is shown whole."""
+    label = _cell_label.get()(column, value)
+    shown = truncate_value(value)
+    if label is None:
+        return shown
+    suffix = f" ({shown})"
+    text = escape_control_chars(label)
+    room = max(MAX_LABEL_CHARS - len(suffix), 0)
+    if len(text) > room:
+        text = text[:room] + _TRUNCATED
+    return text + suffix
+
+
 def _key_text(key: Sequence[tuple[str, str]]) -> str:
-    """The `column=value, ...` text for an entity/group key tuple. Each
-    value is capped (`truncate_value`); each column name is not, since a
-    column name is schema, not a per-row data value."""
+    """The `column=value, ...` text for an entity/group key tuple, each cell
+    named by `_cell`. Each column name is left uncapped, since a column name
+    is schema, not a per-row data value."""
     if not key:
         return "(all rows)"
-    return ", ".join(f"{column}={truncate_value(value)}" for column, value in key)
+    return ", ".join(f"{column}={_cell(column, value)}" for column, value in key)
 
 
 # How a flow party role's pooled parties are named in a sum's private-party line, one and
@@ -286,12 +313,12 @@ def _exclusion_entities_text(group: Sequence[Exclusion]) -> str | None:
     for exclusion in group:
         for role, values in exclusion.entities.items():
             by_role.setdefault(role, []).extend(values)
-    pairs = [
-        f"{role}={truncate_value(value)}" for role in sorted(by_role) for value in by_role[role]
-    ]
-    if not pairs:
+    cells = [(role, value) for role in sorted(by_role) for value in by_role[role]]
+    if not cells:
         return None
-    return ", ".join(pairs[:_EXCLUSION_ENTITY_NAME_CAP])
+    return ", ".join(
+        f"{role}={_cell(role, value)}" for role, value in cells[:_EXCLUSION_ENTITY_NAME_CAP]
+    )
 
 
 def _exclusions_block(exclusions: Sequence[Exclusion]) -> str | None:
@@ -706,8 +733,8 @@ def _difference_label(result: CompareFacts) -> str:
     if len(differing) == 1:
         (column,) = differing
         return (
-            f"{left}, {truncate_value(result.right_entities[column])} minus "
-            f"{truncate_value(result.left_entities[column])}"
+            f"{left}, {_cell(column, result.right_entities[column])} minus "
+            f"{_cell(column, result.left_entities[column])}"
         )
     return f"difference in {left}"
 
@@ -1158,14 +1185,16 @@ def _dropped_line_covers(exclusion: Exclusion) -> bool:
     )
 
 
-def _named(items: Sequence[str]) -> str:
-    """Up to `_LEFT_OUT_NAME_CAP` of `items`, then how many there are in all."""
-    text = ", ".join(items[:_LEFT_OUT_NAME_CAP])
-    return f"{text} ({len(items)} total)" if len(items) > _LEFT_OUT_NAME_CAP else text
+def _named[T](items: Sequence[T], text: Callable[[T], str] = str) -> str:
+    """Up to `_LEFT_OUT_NAME_CAP` of `items`, each as its `text`, then how many
+    there are in all. Only the items named are rendered, so a digest's cells
+    (`digest_cells`) are those it shows."""
+    named = ", ".join(text(item) for item in items[:_LEFT_OUT_NAME_CAP])
+    return f"{named} ({len(items)} total)" if len(items) > _LEFT_OUT_NAME_CAP else named
 
 
 def _keys_named(keys: Sequence[KeyPairs]) -> str:
-    return _named([_key_text(key) for key in keys])
+    return _named(keys, _key_text)
 
 
 def _quotient_line(entry: PeriodQuotient) -> str:
@@ -1195,17 +1224,23 @@ def _periods_left_out_lines(result: QuotientOfFacts | ShareOfFacts) -> list[str]
         if unmatched:
             one_sided.append(f"only the {side} reports {_named(unmatched)}")
         pairs = [
-            f"{_key_text(key)} {_period_range_text(shown)} ({len(shown)})"
+            (key, shown)
             for key, periods in by_key
             if (shown := [period for period in periods if period in other_reports])
         ]
         if pairs:
-            one_sided_pairs.append(f"only the {side} reports {_named(pairs)}")
+            one_sided_pairs.append(f"only the {side} reports {_named(pairs, _pair_text)}")
     if one_sided:
         lines.append(f"periods left out: {'; '.join(one_sided)}")
     if one_sided_pairs:
         lines.append(f"pairs left out: {'; '.join(one_sided_pairs)}")
     return lines
+
+
+def _pair_text(pair: tuple[KeyPairs, Sequence[str]]) -> str:
+    """A key and the periods one side alone reports under it."""
+    key, periods = pair
+    return f"{_key_text(key)} {_period_range_text(periods)} ({len(periods)})"
 
 
 def _coverage_line(result: QuotientOfFacts | ShareOfFacts, *, keyed: bool) -> str:
@@ -1499,13 +1534,41 @@ def _rolling_section(rolling: Rolling) -> str:
     return text
 
 
-def render_summary_digest(summary: VerbSummary, *, heading: str | None = None) -> str:
+def digest_cells(summary: VerbSummary, *, heading: str | None = None) -> tuple[str, list[Cell]]:
+    """`render_summary_digest` of `summary` with no labels, and the `(column, value)`
+    cells it names, in the order it names them: the cells whose labels the digest can
+    show (`common.breakdown_labels.label_cells`), and no cell the list caps leave out.
+    A caller that reads no label for any of them shows this digest as it is."""
+    named: list[Cell] = []
+
+    def record(column: str, value: str) -> None:
+        named.append((column, value))
+
+    token = _cell_label.set(record)
+    try:
+        return _render_summary_digest(summary, heading=heading), named
+    finally:
+        _cell_label.reset(token)
+
+
+def render_summary_digest(
+    summary: VerbSummary, *, heading: str | None = None, labels: CellLabels = NO_LABELS
+) -> str:
     """The digest of a verb call the runner `summary` states, rendered by its
     verb's `render_*_digest` from the summary's facts, canonical parameters,
     identity, derived marker, exclusions and time, with the latest year its
     relative periods were filled from (`_rolling_section`) before the identity.
     `heading`, when given, opens a `sum_of` or `quotient_of` digest in the verb's
-    place."""
+    place. Every key's breakdown cell reads as its label in `labels`, else as its
+    value."""
+    token = _cell_label.set(labels.label)
+    try:
+        return _render_summary_digest(summary, heading=heading)
+    finally:
+        _cell_label.reset(token)
+
+
+def _render_summary_digest(summary: VerbSummary, *, heading: str | None) -> str:
     parameters = summary.parameters
     result = summary.result
     render: Callable[..., str]

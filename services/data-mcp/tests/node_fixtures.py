@@ -3,7 +3,8 @@
 Each fixture is one node envelope of apis' Graph wire: `node_stat_var`, `node_group`,
 `node_continent` and `node_country` are the response examples of apis'
 `src/graph_api/README.md`, served by the app its `tests/graph_api` fixtures build;
-`node_source` and `node_other` follow the same schema. Every fixture validates through the
+`node_source` and `node_other` follow the same schema, and `node_code` is a CRS purpose
+code as dev's `POST /api/graph/nodes` answers it, its description and synonyms shortened. Every fixture validates through the
 generated `data_mcp.graph_wire` models, so a schema change that a fixture no longer meets
 fails the tests that load it.
 """
@@ -26,6 +27,7 @@ NODE_FIXTURES = (
     "node_country",
     "node_source",
     "node_other",
+    "node_code",
 )
 
 
