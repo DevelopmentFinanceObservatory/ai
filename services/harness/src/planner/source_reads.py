@@ -475,7 +475,8 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     or with a donor or recipient whole that Search shows does not hold a party
     the part names on that role (`part_outside_whole`), or bound to one total
     that states neither its members nor a whole class of party, so nothing
-    shows it does (`whole_members_unstated`) (`_parties_outside`).
+    shows it does (`whole_members_unstated`) (`_parties_outside`), or with no
+    spec block to hold (`whole_refused`).
     """
     part_pin, axis = realignment.spec_id, cast(str, realignment.whole_axis)
 
@@ -547,6 +548,10 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
         if answered.get(choice.axis) == choice.active
     }
     digest = resolver_digest({"parts": [_as_whole(part, inherited, entries, answered)]})
+    if not isinstance(digest.get("spec_block"), Mapping):
+        # A whole held with no block is compiled again on every proposal
+        # (`AlignedPin.complete`), so one is never held.
+        return underivable(f"Search's answer for the whole of {part_pin} states no spec block")
     mark_planner_axes(digest, planner_axes(block) & inherited.keys())
 
     def hold(into: SessionState) -> None:
@@ -914,7 +919,9 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
     A pin already compiled on a set of options, or a whole already compiled,
     is asked for once, so a refusal naming one is answered as it stands, and
     inputs sharing a pin and a set of options compile it once
-    (`_alignment_key`).
+    (`_alignment_key`). A whole on record with no spec block is compiled
+    again, once a call: a refusal naming a whole this call compiled answers
+    `SHARE_WHOLE_UNDERIVABLE`.
 
     The reads one refusal asks for run at once. Their writes are made in the
     order the refusal names them, up to the first read refused. That refusal
@@ -925,6 +932,7 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
     next proposal searches only for what was refused.
     """
     scopes_read: set[str] = set()
+    compiled: set[tuple[str, tuple[str, ...], str | None]] = set()
     while True:
         result = propose()
         pin = _first_year_wanted(result)
@@ -980,6 +988,23 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
         keys = [_alignment_key(item.spec_id, item.option_ids, item.whole_axis) for item in wanted]
         if not wanted or any(key in done for key in keys):
             return result
+        again = next(
+            (item for key, item in zip(keys, wanted, strict=True) if key in compiled), None
+        )
+        if again is not None:
+            # Held and refused again for want of what it holds: Search's answer
+            # will not change within the call.
+            if again.whole_axis is None:
+                return result
+            return share_whole_underivable(
+                whole_id=again.requirement_id,
+                part_spec_id=again.spec_id,
+                reason=(
+                    f"Search's answer for the whole of {again.spec_id} does not say how it "
+                    f"serves every {again.whole_axis}"
+                ),
+                cause="whole_refused",
+            )
         compiles: dict[tuple[str, tuple[str, ...], str | None], Realignment] = {}
         for key, item in zip(keys, wanted, strict=True):
             compiles.setdefault(key, item)
@@ -987,6 +1012,7 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
             (compile_on_basis(surface, item, state=state) for item in compiles.values()),
             state=state,
         )
+        compiled.update(compiles)
         if refused is not None:
             return refused
 

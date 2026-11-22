@@ -1601,12 +1601,13 @@ _SPEC_ELSEWHERE = "spec_" + "9" * 32
 
 
 @pytest.mark.parametrize(
-    ("pinned", "settled"),
+    ("pinned", "answered"),
     [
-        ("compiled-from-its-part", True),
-        ("compiled-from-another-dataset", False),
-        ("no-pin", False),
-        ("read-off-the-log", False),
+        ("compiled-from-its-part", "definite"),
+        ("compiled-from-another-dataset", "share_whole_underivable"),
+        ("no-pin", "share_whole_underivable"),
+        ("read-off-the-log", "share_whole_underivable"),
+        ("compiled-block-unreadable", "search_refused"),
     ],
 )
 async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
@@ -1614,14 +1615,16 @@ async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
     requirement: RequirementFactory,
     context_holding: ContextHolding,
     pinned: str,
-    settled: bool,
+    answered: str,
 ) -> None:
     """G7 aid to Africa's whole over every recipient, pinned to a compile of G7 aid.
     The whole is settled with no search on a compile of the dataset its part is
     pinned to. A compile of another dataset, no pin at all, and a pin known only
     from the discovery log, whose identity carries another search's years, each
     refer the whole back, so the plan is proposed again and the whole compiled
-    from its part."""
+    from its part. A compile whose block names a class of party this release does
+    not know is refused as the unreadable answer it is, since its part's search
+    answers the same way."""
     g7 = Entity(name="Group of Seven", role="donor")
     period = Period(start=1960, end=2024)
     whole = requirement(
@@ -1678,13 +1681,16 @@ async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
             requirement_id=whole.id,
         )
     else:
+        block = json.loads(json.dumps(_G7_EVERY_RECIPIENT_BLOCK))
+        if pinned == "compiled-block-unreadable":
+            block["resolved"]["entity_groups"]["destination"]["whole_of"] = ["sovereign_fund"]
         save_aligned_pin(
             context.state,
             AlignedPin(
                 origin=origin,
                 option_ids=(),
                 spec_id=SPEC_G7_EVERY_RECIPIENT,
-                digest={"spec_block": _G7_EVERY_RECIPIENT_BLOCK},
+                digest={"spec_block": block},
                 whole_axis="recipient",
             ),
             warnings=(),
@@ -1696,14 +1702,16 @@ async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
     )
 
     assert surface.calls == {}
-    if settled:
+    if answered == "definite":
         assert (found["status"], found["sources"][0]["spec_id"]) == (
             "definite",
             SPEC_G7_EVERY_RECIPIENT,
         )
+    elif answered == "search_refused":
+        assert found["code"] == answered
     else:
         assert (found["code"], found["action"]["arguments"]["kind"]) == (
-            "share_whole_underivable",
+            answered,
             "requirement_unmeetable",
         )
 

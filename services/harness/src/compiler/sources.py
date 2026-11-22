@@ -25,7 +25,7 @@ from enum import StrEnum
 from typing import Any, NamedTuple, cast
 
 import rfc8785
-from common.place_type import FLOW_ROLE_COLUMNS, PartyClass
+from common.place_type import FLOW_ROLE_COLUMNS, IDENTITY_KEY_AXES, IdentityAxis, PartyClass
 from planner.parties import flow_side
 from planner.records import (
     AmbiguousEntityReading,
@@ -1215,12 +1215,11 @@ class WholeSide(NamedTuple):
     readable: bool = True
 
 
-def identity_side(key: str) -> str:
-    """The side a role column or a key of an identity's `entities` names: a flow
-    party's side (`planner.parties.flow_side`), so `origin`, `donor` and `creditor`
-    are one side, and any other key as written. An identity's keys keep the spelling
-    of whoever built it, a role column or the party's word."""
-    return flow_side(key) or key
+def identity_side(key: str) -> IdentityAxis | None:
+    """The axis a role column or a key of an identity's `entities` names
+    (`common.place_type.IDENTITY_KEY_AXES`), so `origin`, `financingProvider` and
+    `creditor` are one axis; `None` for a key outside that closed set."""
+    return IDENTITY_KEY_AXES.get(key)
 
 
 def open_side_column(axes: Iterable[OpenEntityAxis] | None, role: str) -> str | None:
@@ -1245,14 +1244,15 @@ def open_side_column(axes: Iterable[OpenEntityAxis] | None, role: str) -> str | 
 
 def source_whole_side(source: SelectedSource, column: str) -> WholeSide | None:
     """What `source` binds on the role column `column`: the parties its definition's
-    identity binds on that side (`identity_side`) and the named set it states there.
-    `None` where it records no identity, so nothing says what it binds."""
+    identity binds on that axis (`identity_side`) and the named set it states there.
+    `None` where it records no identity, so nothing says what it binds. A key on no
+    axis is the scope check's error (`compiler.evidence._scope_issues`)."""
     if source.identity is None:
         return None
     entities = source.identity.get("entities")
     side = identity_side(column)
     bound: list[str] = []
-    if isinstance(entities, Mapping):
+    if isinstance(entities, Mapping) and side is not None:
         for key, refs in entities.items():
             if identity_side(str(key)) != side or not isinstance(refs, list):
                 continue

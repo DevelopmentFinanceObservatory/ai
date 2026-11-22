@@ -6635,7 +6635,8 @@ def _whole_sums(
     (`planner.plan.WholeSum`), in plan order.
 
     Search's answer for the whole (`AlignedPin.block`, which every pin
-    `_declared_wholes` returns holds) either binds that side to one total, as
+    `_declared_wholes` returns holds; one without is logged and given no sum)
+    either binds that side to one total, as
     DAC2a binds developing countries, and the whole is read as it is, or
     leaves it open with one row per party there, as the CRS does over every
     donor. The block's open axes say which (`compiler.sources.open_side_column`
@@ -6664,7 +6665,15 @@ def _whole_sums(
         if role is None:
             continue
         block = pin.block
-        assert block is not None, "a whole's compile holds its spec block (`_declared_wholes`)"
+        if block is None:
+            # `_declared_wholes` compiles such a pin again, so none reaches here; the
+            # compiler refers back a whole whose open side has no sum.
+            logger.warning(
+                "whole %r's compile %s holds no spec block, so no sum is added for it",
+                requirement.id,
+                pin.spec_id,
+            )
+            continue
         resolved = block.get("resolved")
         axes = open_entity_axes_of(resolved if isinstance(resolved, Mapping) else {})
         if open_side_column(axes, role) is None:
@@ -7354,7 +7363,8 @@ def share_whole_underivable(
       this release cannot read.
     - `whole_refused`: Search refuses the whole, its code in `reason`
       (`requested_option_unavailable` where it cannot hold an option the part
-      holds), or answers with no one dataset.
+      holds), answers with no one dataset or with no spec block, or a compile
+      held within the call is asked for again (`planner.source_reads.with_source_reads`).
     - `part_outside_whole`, `whole_members_unstated`: Search's whole does not
       hold, or does not show it holds, a party the part names
       (`planner.source_reads._uncontained`).

@@ -117,6 +117,7 @@ from planner.plan import (
     RefusedSpec,
     RequirementSide,
     ResolvedBy,
+    SessionState,
     ShareOfRequirement,
     SumOfRequirement,
     Unit,
@@ -9476,6 +9477,65 @@ async def test_a_whole_compiled_with_no_spec_block_on_record_is_compiled_again(
     assert plan is not None
     whole, (added,) = _summed_whole(plan)
     assert plan.whole_sums == (WholeSum(whole_id=whole.id, sum_id=added.id),)
+
+
+async def test_a_whole_search_answers_with_no_spec_block_is_refused_unheld(
+    decision: DecisionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """US health aid to Africa as a share of every donor's, Search's answer for the
+    whole read as stating no spec block. The compile holds no pin, which admission
+    would compile again on every proposal, and the whole is refused after one call."""
+    digest = planner_source_reads.resolver_digest
+
+    def blockless(envelope: dict[str, Any]) -> dict[str, Any]:
+        return {**digest(envelope), "spec_block": None}
+
+    monkeypatch.setattr(planner_source_reads, "resolver_digest", blockless)
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+
+    result = await _share_over_every(surface, ctx, block, "donor", decision, pooled=False)
+
+    assert result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert len(surface.calls) == 1
+    assert [pin for pin in aligned_pins(ctx.state) if pin.whole_axis is not None] == []
+
+
+async def test_a_whole_compiled_again_within_a_call_is_refused(
+    decision: DecisionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """US health aid to Africa as a share of every donor's, where each compile of the
+    whole holds a pin with no spec block. Admission asks for the whole again after
+    the first compile, and the call answers the refusal in place of a second."""
+    block = _us_health_to_africa()
+    compiles: list[Realignment] = []
+
+    async def holding_blockless(
+        surface: ToolSurface, realignment: Realignment, *, state: SessionState
+    ) -> planner_source_reads.SourceRead:
+        del surface, state
+        compiles.append(realignment)
+        if len(compiles) > 1:
+            return lambda _: {"code": "compiled_twice"}
+        pin = AlignedPin(
+            origin=realignment.spec_id,
+            option_ids=(),
+            spec_id=_OPENED_WHOLE["donor"],
+            digest={},
+            whole_axis=realignment.whole_axis,
+        )
+        return lambda into: save_aligned_pin(into, pin, warnings=())
+
+    monkeypatch.setattr(planner_source_reads, "compile_whole", holding_blockless)
+    ctx = _FakeToolContext()
+
+    result = await _share_over_every(
+        _OpenedWholeCompiles(block), ctx, block, "donor", decision, pooled=False
+    )
+
+    assert result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert len(compiles) == 1
 
 
 async def test_a_whole_with_a_second_open_side_is_summed_keeping_that_side_apart(

@@ -77,6 +77,7 @@ from typing import Literal, NamedTuple, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
+from common.place_type import IdentityAxis
 from common.price_basis import price_basis_reading
 from data_mcp.dcid import bare_dcid, is_dcid
 from data_mcp.manifest import Manifest
@@ -1441,108 +1442,98 @@ def _scope_issues(
 
     The identity is what `spec_id` hashes, so what it binds is what a
     retrieval against that spec can return. Only what it actually states is
-    compared: a member it omits, or a role its `entities` leaves out
+    compared: a member it omits, or an axis its `entities` leaves unbound
     (`_identity_entities`), says nothing. An entity the requirement names is
-    compared with what the identity binds when its side is bound, or when no
-    column of the retrieval carries its side, so nothing shows where the
-    identity puts it. A named entity on a carried side the identity leaves
-    unbound, such as a recipient beside a donor the identity binds, is
-    checked against the source's entities alone (`_entity_findings`). A key
-    no column carries is logged. The refs under it, such as a country or a
-    group under `counterpart`, could sit on any side, so every named entity is
-    compared with them too, the one on a carried side the identity leaves
-    unbound with them alone. A code the identity's own slots bind there
-    (`_slot_refs`), such as a sector's, binds no party and is left out.
+    compared with the refs the identity binds on the entity's own axis, the
+    axis its resolved role names (`compiler.sources.identity_side`), and with
+    no other axis's. A named entity on an axis the identity leaves unbound,
+    such as a recipient beside a donor the identity binds, is checked against
+    the source's entities alone (`_entity_findings`). An identity keying its
+    `entities` by a key on no axis is one error for the source, whatever it
+    binds there, since nothing says which side those refs sit on.
     """
     if not evidence.identity:
         return []
     issues: list[EvidenceIssue] = []
-    bound = _identity_entities(evidence.identity.get("entities"))
-    if bound is not None:
-        carried = {identity_side(entity.role) for entity in evidence.entities}
-        carried.update(identity_side(axis.column) for axis in evidence.open_entity_axes or ())
-        stray = sorted(set(bound) - carried)
-        if stray:
-            logger.warning(
-                "the identity of %s binds %r on sides no column of it carries",
-                evidence.spec_id,
-                stray,
+    entities = evidence.identity.get("entities")
+    if unknown := _unknown_entity_keys(entities):
+        issues.append(
+            EvidenceIssue(
+                code=EvidenceIssueCode.IDENTITY_UNVERIFIED,
+                severity=Severity.ERROR,
+                requirement_id=requirement.id,
+                detail=(
+                    f"source {evidence.spec_id}'s identity binds entities under {unknown!r}, "
+                    "which name no side of a flow or place, so what it binds cannot be "
+                    "compared with the requirement"
+                ),
+                found=unknown,
             )
-        codes = _slot_refs(evidence.identity)
-        stray_refs = {ref for side in stray for ref in bound[side]} - codes
-        refs = {ref for side, on_side in bound.items() if side in carried for ref in on_side}
-        compared: dict[str, set[str]] = {}
+        )
+    elif (bound := _identity_entities(entities)) is not None:
+        named: dict[IdentityAxis, set[str]] = {}
         for entity in requirement.entities:
             for one in named_members(entity, evidence):
-                side = identity_side(one.role)
-                if side in bound or side not in carried:
-                    compared.setdefault(one.ref, set()).update(refs, stray_refs)
-                elif stray_refs:
-                    compared.setdefault(one.ref, set()).update(stray_refs)
-        issues.extend(_scope_entity_issues(requirement, compared))
+                axis = identity_side(one.role)
+                if axis is not None and axis in bound:
+                    named.setdefault(axis, set()).add(one.ref)
+        for axis in sorted(named):
+            issues.extend(_scope_entity_issues(requirement, named[axis], bound[axis]))
     requested = evidence.identity.get("requested_window")
     if isinstance(requested, dict):
         issues.extend(_scope_window_issues(requirement, requested))
     return issues
 
 
-def _identity_entities(entities: JsonValue) -> dict[str, set[str]] | None:
-    """The refs an identity's `entities` binds, by the side each sits on
+def _unknown_entity_keys(entities: JsonValue) -> list[str]:
+    """The keys of an identity's `entities` on no axis (`compiler.sources.identity_side`),
+    sorted; empty where every key names one or it states no map."""
+    if not isinstance(entities, dict):
+        return []
+    return sorted(key for key in entities if identity_side(key) is None)
+
+
+def _identity_entities(entities: JsonValue) -> dict[IdentityAxis, set[str]] | None:
+    """The refs an identity's `entities` binds, by the axis each key names
     (`compiler.sources.identity_side`); `None` when it states none.
 
-    The identity is keyed by role column (`observationAbout`, `origin`,
-    `destination`) or by the party's word (`donor`, `creditor`), whichever its
-    builder spelled, so each key is read as the side it names. A role it leaves out is a
-    side the definition does not bind: Search answers it with what the side
-    reads as, such as the total it counts an open recipient side as, and
-    states that among the source's entities. A required entity sitting on
-    such a role is checked against those entities (`_entity_findings`), so
-    the scope check says nothing about it. An empty map, or one with no list
-    under any key, states none exactly as an absent member does: data-mcp
-    writes `entities: {}` to clear the filter, which is an unfiltered
-    definition wider than the requirement, not one binding nothing.
+    Search keys an identity by axis (`observationAbout`, `origin`,
+    `destination`) and the mint by the caller's graph role (`creditor`,
+    `financingRecipient`), so each key is read as the axis it names. An
+    axis it leaves out is one the definition does not bind: Search answers
+    it with what the side reads as, such as the total it counts an open
+    recipient side as, and states that among the source's entities. A
+    required entity sitting on such an axis is checked against those
+    entities (`_entity_findings`), so the scope check says nothing about it.
+    An empty map, or one with no list under any key, states none exactly as
+    an absent member does: data-mcp writes `entities: {}` to clear the
+    filter, which is an unfiltered definition wider than the requirement, not
+    one binding nothing. A key on no axis is left out (`_unknown_entity_keys`).
     """
     if not isinstance(entities, dict):
         return None
-    bound: dict[str, set[str]] = {}
-    for role, values in entities.items():
-        if isinstance(values, list):
-            bound.setdefault(identity_side(role), set()).update(
+    bound: dict[IdentityAxis, set[str]] = {}
+    for key, values in entities.items():
+        axis = identity_side(key)
+        if axis is not None and isinstance(values, list):
+            bound.setdefault(axis, set()).update(
                 value for value in values if isinstance(value, str)
             )
     return bound or None
 
 
-def _slot_refs(identity: Mapping[str, JsonValue]) -> set[str]:
-    """The codes `identity`'s slots bind, a `value` binding's `ref` and a `set`
-    binding's `refs`: a sector or a flow type, never a party."""
-    codes: set[str] = set()
-    slots = identity.get("slots")
-    for slot in slots if isinstance(slots, list) else ():
-        binding = slot.get("binding") if isinstance(slot, dict) else None
-        if not isinstance(binding, dict):
-            continue
-        if isinstance(ref := binding.get("ref"), str):
-            codes.add(ref)
-        if isinstance(refs := binding.get("refs"), list):
-            codes.update(ref for ref in refs if isinstance(ref, str))
-    return codes
-
-
 def _scope_entity_issues(
-    requirement: DatasetRequirement, compared: Mapping[str, set[str]]
+    requirement: DatasetRequirement, wanted: set[str], bound: set[str]
 ) -> list[EvidenceIssue]:
-    """The findings on each ref the requirement names that `compared` holds, against
-    the refs of the identity it is compared with there."""
+    """The findings on the refs `wanted` the requirement names on one axis, against
+    the refs `bound` the identity binds there."""
     # A required entity is known by name; the refs it binds to are the ones
     # it names (`named_members`), a set's members included. One naming none
     # is already reported as missing or ambiguous, and has no ref to compare.
-    if not compared:
+    if not wanted:
         return []
-    wanted = set(compared)
-    bound = set().union(*compared.values())
     issues: list[EvidenceIssue] = []
-    if unbound := {ref for ref, against in compared.items() if ref not in against}:
+    if unbound := wanted - bound:
         issues.append(
             EvidenceIssue(
                 code=EvidenceIssueCode.SCOPE_ENTITIES_UNBOUND,

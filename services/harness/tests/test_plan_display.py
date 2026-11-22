@@ -4041,8 +4041,10 @@ def test_the_sum_over_a_whole_s_open_side_is_a_card_row_of_its_own(
     [
         (DAC_DONORS, [("official donors (DAC)", "DACOfficialDonors")], ()),
         (ALL_DONORS, [], ("donor",)),
+        # The donors bound, with no entity stated for them: the whole covers the side.
+        ({"entities": DAC_DONORS["entities"][:1]}, [], ("donor",)),
     ],
-    ids=["donors-bound", "donors-open"],
+    ids=["donors-bound", "donors-open", "donors-bound-unstated"],
 )
 def test_a_whole_covers_the_side_it_opens_as_its_compiled_source_serves_it(
     decision: DecisionFactory,

@@ -2949,7 +2949,11 @@ async def _settled_whole(
     no pin, where no reader holds its pin over its period, a pin read only
     off the discovery log included, whose identity carries the window of the
     search that found it, and where its pin was compiled from another dataset
-    than the one its part is pinned to now.
+    than the one its part is pinned to now. A pin whose spec block is on
+    record and does not read as a source, as one naming a class of party this
+    release does not know, is refused as the search answering it would be
+    (`SEARCH_REFUSED`): the part's block carries the same field, so settling
+    the part again cannot help.
     """
     if isinstance(read, dict):
         return read
@@ -2962,6 +2966,8 @@ async def _settled_whole(
             "with no search, and states no pin to that count",
         )
     if read is None or not read[1]:
+        if (unread := _unreadable_block(state, plan=plan, requirement=requirement)) is not None:
+            return unread
         return _unsettled_whole(
             requirement,
             f"{requirement.id!r} is the whole of {part!r}, counted from its part's dataset "
@@ -2991,6 +2997,31 @@ async def _settled_whole(
         warnings=[],
         budget_remaining=DISCOVERY_CALL_BUDGET - log.calls(plan_revision(plan)),
     )
+
+
+def _unreadable_block(
+    state: SessionState, *, plan: Plan, requirement: DatasetRequirement
+) -> dict[str, object] | None:
+    """The refusal of a search whose envelope could not be read, for the pin of
+    `requirement` whose spec block on record (`_resolve_pin_block`) does not read as a
+    source; `None` where none is on record or it reads."""
+    block = _resolve_pin_block(_PinRecords(state), plan=plan, requirement=requirement)
+    if block is None:
+        return None
+    try:
+        source_from_spec_block(block)
+    except ValueError as exc:
+        return problem(
+            ProblemCode.SEARCH_REFUSED,
+            "data-mcp answered with an envelope that could not be read.",
+            outcome=Outcome.REFUSED,
+            detail={
+                "parse_error": str(exc),
+                "budget_remaining": DISCOVERY_CALL_BUDGET
+                - load_log(state).calls(plan_revision(plan)),
+            },
+        )
+    return None
 
 
 def _unsettled_whole(requirement: DatasetRequirement, reason: str) -> dict[str, object]:

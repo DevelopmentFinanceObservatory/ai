@@ -2729,10 +2729,11 @@ def whole_on_source(
     row per party there, where the source leaves the side open
     (`compiler.sources.open_side_column`), which the aggregate `propose_plan`
     added sums (`WholeSum`); else the parties the source binds there, as
-    entities by their refs, the total Search counts the side as. With no
-    source the side reads open where `summed`, as admission read Search's
-    answer for the whole, and as `whole_read` reads it otherwise. A sector
-    whole opens no side.
+    entities by their refs, the total Search counts the side as, and the side's
+    word in `across` where the source states no entity there. With no source
+    the side reads open where `summed`, as admission read Search's answer for
+    the whole, and as `whole_read` reads it otherwise. A sector whole opens no
+    side.
     """
     read = whole_read(whole, part)
     role = opened_role(whole, part)
@@ -2750,6 +2751,8 @@ def whole_on_source(
         for entity in (source.entities if source is not None else ())
         if flow_side(entity.role) == side
     ]
+    if source is not None and not held:
+        return read.model_copy(update={"across": (*read.across, role)})
     return read.model_copy(update={"entities": (*read.entities, *held)})
 
 
