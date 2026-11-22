@@ -34,6 +34,7 @@ import pytest
 from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.genai import Client, errors, types
+from harness.graph import planning
 from harness.turn.store import AgentRecord
 from harness.turn_events import PLANNER_ASK
 from langfuse.api import DatasetItem, NotFoundError
@@ -73,6 +74,46 @@ async def test_every_task_validates_and_the_set_covers_every_kind() -> None:
     faults = await validate.check_all(entry.load_tasks())
 
     assert faults == {}
+
+
+@pytest.mark.parametrize("moved", [False, True], ids=["as-served", "hand-back-moved"])
+async def test_each_amendment_task_hands_back_the_message_it_names(
+    moved: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scripted planner names each value an amendment task accepts in
+    `new_question_in`, and the turn hands back that message's words, or nothing and
+    asks the user for their question for `none`. A planner node that leaves the hand-back
+    under other keys is reported on every task."""
+    entry.quiet_logs()
+    tasks = entry.load_amendment_tasks()
+    assert any(len(task.amendment.accepted) > 1 for task in tasks)
+    if moved:
+        monkeypatch.setattr(planning, "NEW_QUESTION_KEY", "moved:new_question")
+        monkeypatch.setattr(planning, "ASK_FOR_QUESTION_KEY", "moved:ask_for_question")
+
+    faults = {}
+    for task in tasks:
+        if found := await validate.check_amendment(task):
+            faults[task.id] = found
+
+    assert sorted(faults) == (sorted(task.id for task in tasks) if moved else []), faults
+
+
+@pytest.mark.parametrize(
+    "stated",
+    [
+        pytest.param([], id="an-empty-list"),
+        pytest.param(["amendment", "amendment"], id="a-value-twice"),
+        pytest.param("the brief", id="no-message"),
+        pytest.param(["answer", "none"], id="an-answer-the-task-scripts-not"),
+    ],
+)
+def test_an_amendment_names_only_messages_the_task_holds(stated: Any) -> None:
+    task = next(task for task in entry.load_amendment_tasks() if task.amendment.answer is None)
+    stored = task.amendment.model_dump()
+
+    with pytest.raises(ValidationError):
+        entry.Amendment.model_validate({**stored, "new_question_in": stated})
 
 
 def _search_reworded(task: Any) -> dict[str, Any]:

@@ -61,6 +61,7 @@ from harness.wire import (
     CompositionManifest,
     ErrorCode,
     PinOp,
+    PlanApproved,
     PlanProposed,
     RemoveOp,
     ReorderOp,
@@ -471,6 +472,25 @@ class Segment:
 # for each turn close and each pause one of its writes commits.
 TURN_LOG_EVENT = "studio.turn"
 
+# A turn record's `ended_by` for a turn the user ended by typing a different
+# question on its plan card (`ConversationState.close_turn`).
+NEW_QUESTION = "new_question"
+# The reply such a turn closes on, which a client that does not read
+# `done.new_question` still shows.
+SET_ASIDE_REPLY = "The plan was set aside, since your message asks a new question."
+# What the conversation digest says of such a turn (`_history_turn`).
+_SET_ASIDE = "The user set this plan aside unapproved and asked a new question."
+# A turn record's `ended_by` for a turn whose plan card the user set aside for
+# a new question no message of theirs states, which closes asking them for it
+# (`harness.graph.state.ASK_FOR_QUESTION_KEY`).
+ASKED_FOR_QUESTION = "asked_for_question"
+# The reply such a turn closes on.
+ASK_FOR_QUESTION_REPLY = "The plan was set aside. What would you like to ask?"
+# What the conversation digest says of such a turn (`_history_turn`).
+_ASKED_FOR = (
+    "The user set this plan aside unapproved to ask a new question, and was asked to send it."
+)
+
 
 @dataclass
 class TurnUsage:
@@ -614,6 +634,12 @@ class ConversationState:
     # first switch of the turn on (`/interrupt`). `plan.approved` names it
     # as `changed_from` for a choice that holds another label now.
     turn_choice_baseline: dict[str, str] = field(default_factory=dict)
+    # Each `plan.approved` frame the turn sent or a resume restored, one per
+    # plan revision, as JSON, in the order they were first recorded
+    # (`record_approved`). `close_turn` keeps them with the turn's record as
+    # `approved`, and the state read hands them to a page that never read
+    # the frame.
+    turn_approved: list[dict[str, Any]] = field(default_factory=list)
     turn_recorded: bool = False
     # Who asked the current turn and the specs it used; set by `begin_turn`.
     turn_usage: TurnUsage = field(default_factory=TurnUsage)
@@ -946,6 +972,8 @@ class ConversationState:
         error: str | None = None,
         match_notes: str | None = None,
         basis_line: str | None = None,
+        new_question: str | None = None,
+        asked_for_question: bool = False,
     ) -> None:
         """Append the turn's record, once, since the resume protocol can end a
         turn from more than one code path. A turn recorded with an `error`
@@ -963,7 +991,15 @@ class ConversationState:
         appends to the reply after the model's `final_text`, in that order.
         The record keeps each under its own key, beside the answer, so the
         conversation digest (`_history_turn`) shows a later turn's model the
-        answer alone, and that model has no text of the code's own to copy."""
+        answer alone, and that model has no text of the code's own to copy.
+
+        `new_question` is the user's words for a turn that ended with its
+        plan card set aside, since the user typed a different question on
+        it. The record keeps them as `new_question`, with `ended_by` set to
+        `NEW_QUESTION`, and the conversation digest tells a later turn's
+        model the plan was set aside (`_history_turn`). `asked_for_question`
+        marks a turn whose plan card was set aside for a new question no
+        message of the user's states: its `ended_by` is `ASKED_FOR_QUESTION`."""
         if self.turn_recorded:
             return
         record: dict[str, Any]
@@ -993,6 +1029,11 @@ class ConversationState:
             }
             if error:
                 record["error"] = error
+        if new_question:
+            record["ended_by"] = NEW_QUESTION
+            record["new_question"] = new_question
+        elif asked_for_question:
+            record["ended_by"] = ASKED_FOR_QUESTION
         record["trace_id"] = self.trace_id
         record["usage"] = dataclasses.asdict(self.turn_usage)
         self.turns.append(record)
@@ -1021,6 +1062,8 @@ class ConversationState:
             record["basis_line"] = basis_line
         if self.turn_components:
             record["cards"] = list(self.turn_components)
+        if self.turn_approved:
+            record["approved"] = list(self.turn_approved)
         if error:
             record["error"] = error
         if self.turn_plans:
@@ -1200,6 +1243,13 @@ class ConversationState:
             if p.resuming_segment != segment_id
         }
 
+    def record_approved(self, frame: PlanApproved) -> None:
+        """Keep `frame` among the turn's approved plans (`turn_approved`),
+        unless the turn already holds one of its plan revision."""
+        if any(kept.get("revision") == frame.revision for kept in self.turn_approved):
+            return
+        self.turn_approved.append(frame.model_dump(mode="json", exclude_none=True))
+
     def start_plan_lineage(self) -> None:
         """Forget the plan version ids given out and the choice labels the
         turn's switches kept. The next plan card is the first of a new line, as
@@ -1245,6 +1295,7 @@ class ConversationState:
         self.turn_readings = []
         self.turn_specs = {}
         self.turn_applied_choice = None
+        self.turn_approved = []
         self.turn_recorded = False
         self.turn_usage = usage if usage is not None else TurnUsage()
         self.turn_usage.trace_id = self.trace_id
@@ -1574,6 +1625,10 @@ def _history_turn(
         record["cards_omitted"] = len(cards) - len(kept)
     if turn.get("error"):
         record["error"] = _cut_text(turn["error"], _HISTORY_ERROR_BYTE_CAP >> shrink)
+    if turn.get("ended_by") == NEW_QUESTION:
+        record["ended"] = _SET_ASIDE
+    elif turn.get("ended_by") == ASKED_FOR_QUESTION:
+        record["ended"] = _ASKED_FOR
     return record
 
 

@@ -7,6 +7,7 @@ import random
 from typing import cast, get_args
 
 import pytest
+from analysis_mcp.runner_client import RUNNER_CODES
 from analysis_mcp.tool_errors import ToolErrorCode as AnalysisCode
 from data_mcp.errors import UpstreamError
 from data_mcp.tool_errors import CeilingKind, ToolRefusal, from_upstream_error, to_tool_result
@@ -33,6 +34,8 @@ from executor.classify import (
     retry_delay,
 )
 
+from .conftest import runner_refused
+
 _PLACED = (
     METHOD_CHOICE_CODES,
     REDISCOVERY_CODES,
@@ -42,10 +45,47 @@ _PLACED = (
 )
 
 
+@pytest.mark.parametrize(
+    ("status", "code", "title", "retryable", "decision"),
+    [
+        (
+            503,
+            "upstream_version_changed",
+            "Upstream Version Changed",
+            True,
+            Disposition.REDISCOVER,
+        ),
+        # dfo-apis marks it retryable when a second member walk can settle members the
+        # first left unsettled; the stated mode outranks the code's stop bucket.
+        (422, "member_not_resolvable", "Member Not Resolvable", True, Disposition.RETRY_LATER),
+        (422, "member_not_resolvable", "Member Not Resolvable", False, Disposition.STOP),
+        (504, "timeout", "Gateway Timeout", True, Disposition.RETRY_LATER),
+    ],
+    ids=[
+        "upstream-version-changed",
+        "member-not-resolvable-unsettled",
+        "member-not-resolvable",
+        "timeout",
+    ],
+)
+async def test_a_runner_refusal_reaches_the_executors_decision_for_its_code(
+    status: int, code: str, title: str, retryable: bool, decision: Disposition
+) -> None:
+    """A runner refusal's `retryable` decides its mode only where its code carries
+    no fixed one, and the refusal analysis-mcp returns reaches that decision."""
+    refused = await runner_refused(status=status, code=code, title=title, retryable=retryable)
+    payload = refused.structured_content
+    assert payload is not None
+
+    assert classify_refusal(parse_tool_failure(payload)) is decision
+
+
 def test_every_code_either_server_can_answer_with_is_placed_exactly_once() -> None:
     # A new server code must be placed here deliberately, not fall into the
     # stop bucket by omission: this fails until someone picks a side.
-    served = {code.value for code in DataCode} | {code.value for code in AnalysisCode}
+    served = (
+        {code.value for code in DataCode} | {code.value for code in AnalysisCode} | RUNNER_CODES
+    )
     placed = frozenset().union(*_PLACED)
 
     assert served == placed, {

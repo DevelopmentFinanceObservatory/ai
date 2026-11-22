@@ -566,7 +566,7 @@ _READ_AS: dict[str, Any] = {"format": "parquet", "bundle": False, "layout": "fra
         (_READ_AS, {"without_party_totals": False, "columns": []}, False, True),
         (
             {**_READ_AS, "columns": ["b", "a", "a"]},
-            {"without_party_totals": False, "columns": ["a", "b"]},
+            {"without_party_totals": False, "columns": ["b", "a"]},
             False,
             True,
         ),

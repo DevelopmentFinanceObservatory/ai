@@ -306,6 +306,13 @@ class FrameShape:
     `get_data` for. Both read the roles (`RoleDimension.mixed_levels` and
     `level_filterable`).
 
+    `retrieval` is whether the frame is a `get_data` retrieval no step has
+    read yet. dfo-apis' analysis runner reads such a frame summed over its
+    StatVars when a verb other than `filter` reads it and names no
+    `stat_var` (dfo-apis conformance C121a), so a single-measure verb takes
+    it whole when apis may sum it (`summed_on_read`). A frame a step
+    computed is a stored recipe the runner reads as it was stored, unsummed.
+
     `composed_unit` is whether the frame's values are in a unit two measures
     compose, dollars per person: a `quotient_of`'s result, and whatever a
     later step computes in that same unit, such as an average of it or its
@@ -341,9 +348,20 @@ class FrameShape:
     limited: bool
     roots: tuple[Identifier, ...]
     unsummable_axes: tuple[str, ...] | None = None
+    retrieval: bool = False
     composed_unit: bool = False
     drift: PeriodDrift = FIXED
     span_of: Identifier | None = None
+
+    @property
+    def summed_on_read(self) -> bool:
+        """Whether the analysis runner reads this frame summed into one measure: a
+        retrieval no step has read, holding several StatVars of a family apis may sum
+        over every axis it varies along (`unsummable_axes` empty). A family with an
+        unsummable axis, or one varying along no axis a source states (`None`), has
+        no sum apis can take: it refuses `rollup_not_summable` and the runner reads
+        the family unsummed."""
+        return self.retrieval and self.measures != 1 and self.unsummable_axes == ()
 
     @property
     def mixed_levels(self) -> bool:
@@ -1117,6 +1135,7 @@ def retrieved(
     return FrameShape(
         roles=tuple(replace(role, requirement_id=requirement_id, narrowed=False) for role in roles),
         measures=measures,
+        retrieval=True,
         value=ValueKind.MEASURED,
         time=TimeLabel.OBSERVATION,
         period=period,
@@ -1127,6 +1146,12 @@ def retrieved(
         unsummable_axes=unsummable_axes,
         drift=PeriodDrift(end=EndDrift.DATA if end_open else EndDrift.FIXED),
     )
+
+
+def _read_measures(shape: FrameShape) -> MeasureCount:
+    """The measures a verb other than `filter` reads of `shape`: one when the runner
+    sums it on read (`FrameShape.summed_on_read`), else its own count."""
+    return 1 if shape.summed_on_read else shape.measures
 
 
 def aggregated(
@@ -1145,7 +1170,8 @@ def aggregated(
     entity keeps the parties the requirement names and sums an open
     dimension away, as it sums the periods a group without period. The frame
     becomes one row per entity exactly when the group does not keep
-    period apart. `measures`, `value`, `period` and its `drift` carry through
+    period apart. `measures` is the input's as the runner reads it
+    (`_read_measures`), and `value`, `period` and its `drift` carry through
     unchanged, since aggregate reduces rows and leaves what they measure
     alone. `cut_per_period` survives
     only a group by both entity and period, which keeps the gaps; a group by
@@ -1184,7 +1210,7 @@ def aggregated(
     roles = _without_level_filterability(roles)
     return FrameShape(
         roles=roles,
-        measures=shape.measures,
+        measures=_read_measures(shape),
         value=shape.value,
         time=time,
         period=period,
@@ -1237,7 +1263,7 @@ def grown(
     roles = _without_level_filterability(shape.roles)
     return FrameShape(
         roles=roles,
-        measures=shape.measures,
+        measures=_read_measures(shape),
         value=value,
         time=TimeLabel.SPAN,
         period=window,
@@ -1312,7 +1338,7 @@ def ranked(
         )
     return FrameShape(
         roles=roles,
-        measures=shape.measures,
+        measures=_read_measures(shape),
         value=shape.value,
         time=TimeLabel.SPAN,
         period=period,
@@ -1808,8 +1834,12 @@ def _several_measures(verb: str, shape: FrameShape) -> str | None:
     """Why `verb`, which reads one measure, refuses `shape`, or `None` when it does not.
 
     Only a retrieval reading a family of StatVars separately carries more
-    than one measure into a verb (a `join`'s two feed nothing), and only a
-    count its source states is refused: an uncounted shape (`None`) may rest
+    than one measure into a verb (a `join`'s two feed nothing). A retrieval
+    no step has read yet reaches the verb summed into one by the analysis
+    runner when apis may sum it (`FrameShape.summed_on_read`), so this refuses
+    a frame a step such as a filter computed, whose stored recipe the runner
+    reads unsummed, and a family apis may not sum. Only a count the source
+    states is refused: an uncounted shape (`None`) may rest
     on a source binding one StatVar, and the compiler counts it once the
     source is known. The reason states the count, or "several" for a family
     whose source lists none of its StatVars or one of a capped list (`SEVERAL`). It advises reading the family summed where
@@ -1817,7 +1847,7 @@ def _several_measures(verb: str, shape: FrameShape) -> str | None:
     (`FrameShape.unsummable_axes`), names the axes it may not sum over
     otherwise, and puts the advice as a condition where neither is known.
     """
-    if shape.measures is None or shape.measures == 1:
+    if shape.measures is None or shape.measures == 1 or shape.summed_on_read:
         return None
     reason = (
         f"{verb} reads a single measure; got {shape.measures}, one per StatVar of a family "

@@ -162,7 +162,7 @@ def _normalise_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     """Sort/dedup the array-shaped parameter fields known today.
 
     `AggregateOpSpec.group_by`, `FilterOpSpec.predicates`,
-    `GrowthOpSpec.entity_by`, `RankOpSpec.rank_by`, `JoinOpSpec.join_keys`,
+    `GrowthOpSpec.entity_by`, `RankOpSpec.rank_by` and `partition_by`, `JoinOpSpec.join_keys`,
     and `ShareOfOpSpec`'s and `QuotientOfOpSpec`'s `numerator_by` are the only
     array members any verb's parameters carry -- each named explicitly here rather than walked
     generically, the same named-fields-only discipline
@@ -188,6 +188,10 @@ def _normalise_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
         )
     if "rank_by" in normalised:
         normalised["rank_by"] = _sorted_unique_strings(normalised["rank_by"], description="rank_by")
+    if "partition_by" in normalised:
+        normalised["partition_by"] = _sorted_unique_strings(
+            normalised["partition_by"], description="partition_by"
+        )
     if "join_keys" in normalised:
         normalised["join_keys"] = _sorted_unique_strings(
             normalised["join_keys"], description="join_keys"
