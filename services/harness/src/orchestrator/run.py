@@ -15,6 +15,13 @@ they happen:
 - `Answered`: the run ended on the reply. Nothing is stored, and the next
   turn opens from the digests.
 
+A turn whose first response makes one `remove_cards` call and holds no
+answer text ends after that call: the harness writes the reply from the
+call's answer (`harness.orchestrator_tools.removal_reply`), streams it as a
+`TextDelta` and ends on it, with no second model call. The run leaves
+Pydantic AI's `Agent.iter` loop after the call's tools node, before the next
+model request node, and yields the reply once the agent's run has closed.
+
 The run happens in the caller's task, so cancelling the caller cancels the
 model stream and any tool in flight. A call a bound of the turn's budget
 closes ends the run on the bound's sentence (`orchestrator.model`), as an
@@ -45,6 +52,7 @@ from harness.gemini_agent import (
 )
 from harness.gemini_wire import StreamResumedError, resumed_over_output
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
+from harness.orchestrator_tools import removal_reply
 from pydantic import BaseModel, SerializerFunctionWrapHandler, field_serializer, field_validator
 from pydantic_ai import (
     Agent,
@@ -57,7 +65,14 @@ from pydantic_ai import (
     TextPart,
     TextPartDelta,
 )
-from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.models import Model
 
 from orchestrator.agent import INSTRUCTION, Orchestrator, OrchestratorDeps
@@ -272,6 +287,13 @@ async def run_orchestrator(
             # The spec blocks before the current response, which its calls
             # may replace (`_written_state`).
             held = dict(deps.state.get(ORCHESTRATOR_SPECS_KEY) or {})
+            # Whether the response at hand is the turn's first and makes
+            # one `remove_cards` call alone (`_lone_removal`).
+            lone_removal = False
+            first = opening is not None and opening.seeded is None
+            # The reply the harness writes for a lone removal, which ends the
+            # run once the agent's run has closed.
+            removal: str | None = None
             async for node in run:
                 if Agent.is_model_request_node(node):
                     deps.view = RecordingState(deps.state)
@@ -286,6 +308,7 @@ async def run_orchestrator(
                             "the model's response held neither answer text nor a function call"
                         )
                     yield ModelResponded(parts=response_parts(without_unsigned_thoughts(response)))
+                    lone_removal, first = first and _lone_removal(response), False
                 elif Agent.is_call_tools_node(node):
                     async with node.stream(run.ctx) as stream:
                         answered = [
@@ -298,6 +321,8 @@ async def run_orchestrator(
                             answers=tuple(answered),
                             state=_written_state(deps, held),
                         )
+                    if lone_removal and (removal := _removal_reply(answered)) is not None:
+                        break
             result = run.result
     except Exception as exc:
         if not resumed_over_output(exc):
@@ -309,6 +334,10 @@ async def run_orchestrator(
             exc,
         )
         raise StreamResumedError(str(exc)) from exc
+    if removal is not None:
+        yield TextDelta(removal)
+        yield Answered(text=removal)
+        return
     assert result is not None
     output = result.output
     if isinstance(output, DeferredToolRequests):
@@ -357,6 +386,22 @@ def _waiting(history: StoredHistory, hand_back: HandBack) -> str:
     if len(calls) != 1:
         raise NoCallWaitsError(f"no one {hand_back.answers} call waits on this hand-back")
     return calls[0].tool_call_id
+
+
+def _lone_removal(response: ModelResponse) -> bool:
+    """Whether `response` makes one call, to `remove_cards`, and holds no
+    answer text."""
+    calls = [part for part in response.parts if isinstance(part, ToolCallPart)]
+    texts = [part for part in response.parts if isinstance(part, TextPart) and part.content]
+    return not texts and len(calls) == 1 and calls[0].tool_name == "remove_cards"
+
+
+def _removal_reply(answered: Sequence[types.FunctionResponse]) -> str | None:
+    """The reply `removal_reply` writes from the lone `remove_cards` call's
+    answer, or None when the model answers instead."""
+    if len(answered) != 1 or answered[0].name != "remove_cards":
+        return None
+    return removal_reply(answered[0].response or {})
 
 
 def _text(event: object) -> str | None:

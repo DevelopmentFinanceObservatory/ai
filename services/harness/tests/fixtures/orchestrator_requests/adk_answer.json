@@ -905,7 +905,7 @@
        }
       },
       {
-       "description": "Take cards off the user's canvas, when the conversation has moved to\nanother subject or the user asks for cards to go.\n\n`component_ids` names the cards to take off, by the component ids the\ncanvas lists; set `all_cards` to take off every card the user has\nnot pinned. A pinned card stays on the canvas, since only the user\nunpins it. Returns the ids taken off and, as `kept_pinned`, the\npinned cards left in place; a named card already off the canvas\nneeds nothing and is named back as `already_off`, and an id this\nconversation never held is named back as `not_in_conversation`. When\nnothing came off, `note` says what each named id met.",
+       "description": "Take cards off the user's canvas, when the conversation has moved to\nanother subject or the user asks for cards to go.\n\n`component_ids` names the cards to take off, by the component ids the\ncanvas lists; set `all_cards` to take off every card the user has\nnot pinned. A pinned card stays on the canvas, since only the user\nunpins it. Returns the ids taken off and, as `kept_pinned`, the\npinned cards left in place, with each one's title under `titles`; a\nnamed card already off the canvas\nneeds nothing and is named back as `already_off`, and an id this\nconversation never held is named back as `not_in_conversation`. When\nnothing came off, `note` says what each named id met.",
        "name": "remove_cards",
        "parameters_json_schema": {
         "properties": {
@@ -1864,7 +1864,7 @@
        }
       },
       {
-       "description": "Take cards off the user's canvas, when the conversation has moved to\nanother subject or the user asks for cards to go.\n\n`component_ids` names the cards to take off, by the component ids the\ncanvas lists; set `all_cards` to take off every card the user has\nnot pinned. A pinned card stays on the canvas, since only the user\nunpins it. Returns the ids taken off and, as `kept_pinned`, the\npinned cards left in place; a named card already off the canvas\nneeds nothing and is named back as `already_off`, and an id this\nconversation never held is named back as `not_in_conversation`. When\nnothing came off, `note` says what each named id met.",
+       "description": "Take cards off the user's canvas, when the conversation has moved to\nanother subject or the user asks for cards to go.\n\n`component_ids` names the cards to take off, by the component ids the\ncanvas lists; set `all_cards` to take off every card the user has\nnot pinned. A pinned card stays on the canvas, since only the user\nunpins it. Returns the ids taken off and, as `kept_pinned`, the\npinned cards left in place, with each one's title under `titles`; a\nnamed card already off the canvas\nneeds nothing and is named back as `already_off`, and an id this\nconversation never held is named back as `not_in_conversation`. When\nnothing came off, `note` says what each named id met.",
        "name": "remove_cards",
        "parameters_json_schema": {
         "properties": {

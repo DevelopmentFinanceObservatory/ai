@@ -1373,7 +1373,7 @@ def make_remove_cards(store: StudioStore) -> Any:
         key = current_conversation_key.get()
         conversation = store.current(*key) if key is not None else None
         if key is None or conversation is None:
-            return CardRemoval([], list(component_ids), [])
+            return CardRemoval([], list(component_ids), [], {})
 
         def change(work: ConversationState) -> CardRemoval:
             return remove_cards(work, component_ids, all_cards=all_cards)
@@ -1927,12 +1927,13 @@ def land_component(
 
 class CardRemoval(NamedTuple):
     """What `remove_cards` did: the ids it took off, in canvas order; the
-    named ids the conversation never held; and the pinned ids it left on
-    the canvas, in canvas order."""
+    named ids the conversation never held; the pinned ids it left on the
+    canvas, in canvas order; and the title of each card taken off or kept."""
 
     removed: list[str]
     missing: list[str]
     kept_pinned: list[str]
+    titles: dict[str, str]
 
 
 def remove_cards(
@@ -1951,6 +1952,7 @@ def remove_cards(
     targeted = [b for b in blocks_now if all_cards or b.component_id in named]
     removed = [b.component_id for b in targeted if not b.pinned]
     kept_pinned = [b.component_id for b in targeted if b.pinned]
+    titles = {b.component_id: _cut_text(b.title, _TITLE_BYTE_CAP) for b in targeted}
     present = _block_ids(previous)
     missing = [
         cid
@@ -1965,7 +1967,7 @@ def remove_cards(
         ]
         conversation.composition = _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
         conversation._removal_unreported = True
-    return CardRemoval(removed, missing, kept_pinned)
+    return CardRemoval(removed, missing, kept_pinned, titles)
 
 
 def _replace_block(
