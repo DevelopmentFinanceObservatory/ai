@@ -33,6 +33,7 @@ from pydantic_ai.models import Model
 
 from harness.graph.events import AgentStatus, GraphEvent
 from harness.graph.state import (
+    ORCHESTRATOR_GIVEN_BACK_ASKS_KEY,
     ORCHESTRATOR_HISTORY_KEY,
     ORCHESTRATOR_PENDING_KEY,
     ORCHESTRATOR_SPECS_KEY,
@@ -216,6 +217,9 @@ async def _answered(
     else:
         replies = answer_replies(questions, answers, priced_options(questions, ctx.state))
         closing = _SETTLED
+        # The user answered, and may ask for other outputs than a plan call
+        # given back was held to.
+        ctx.state[ORCHESTRATOR_GIVEN_BACK_ASKS_KEY] = None
     if len(questions) == 1:
         lines = [f"You asked the user: {questions[0].question}", *filter(None, replies)]
     else:

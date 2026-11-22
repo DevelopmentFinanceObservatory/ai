@@ -33,8 +33,11 @@ from executor.outcomes import (
     RediscoveryNeeded,
     RefusalKind,
     Refused,
+    Remedy,
     failed_step,
     permanent_transport_stop,
+    remedy,
+    stop_step,
 )
 from executor.outcomes import RunOutcome as ExecutionOutcome
 from executor.run import (
@@ -56,16 +59,18 @@ from harness.graph.answer import (
     store_run_plan,
 )
 from harness.graph.events import GraphEvent, StepProgress
-from harness.graph.plan_done import StepSummary, authored_report
+from harness.graph.plan_done import StepSummary, authored_report, shown_stop
 from harness.graph.state import (
     APPROVED_RUN_KEY,
     ORCHESTRATOR_ALIGNED_SERVED_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
+    ORCHESTRATOR_REPLANNED_STOP_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     readable_plan,
     stored_sequence,
 )
 from harness.scope_choices import served_facts
+from harness.sentences import worded_fix
 from harness.turn.node import Next, Node, NodeCtx
 from harness.turn_records import SearchReading
 
@@ -165,6 +170,15 @@ def _is_dead_end(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> b
     refused it in a way `classify_refusal` calls `Disposition.STOP`, when its errors
     are a moved family (`_family_moved`), or when the tool surface failed it for a fault no
     later attempt gets past (`permanent_transport_stop`). A wave with any other stop replans.
+
+    It answers another question than the wave's remedy
+    (`executor.outcomes.remedy`). A dead end is a wave the planner cannot
+    get past by drafting the same brief again with the refusal in hand. The
+    remedy says whether a plan from another brief can. A tool's stop another
+    source avoids (`facet_not_available`) is a dead end whose remedy is
+    `REPLAN`, so `plan_done` gives the orchestrator its plan call back.
+    `execute` replans only a wave that is no dead end and whose remedy is
+    `REPLAN`.
     """
     return all(_stop_is_dead_end(stop) for stop in (outcome, *outcome.also_stopped))
 
@@ -318,8 +332,9 @@ def _mark_masked_step_failed(
     corrected. `mark_step_failed` is looked up via `getattr` (`tool_surface`
     is a bare `ToolSurface` in tests with no recorder around it, and a step
     whose own call already failed is a no-op there), the same duck-typed
-    opt-in `_RecordingExecutor.aclose` uses. Each stop's own `_failed_step`
-    supplies the `code`/`message` the step's record keeps for the trace,
+    opt-in `_RecordingExecutor.aclose` uses. Each stop's own
+    `executor.outcomes.stop_step` supplies the `code`/`message` the step's
+    record keeps for the trace, whatever stop decides the wave,
     naming the actual check that fired (e.g. `source_pin_mismatch`).
     """
     mark = getattr(tool_surface, "mark_step_failed", None)
@@ -328,7 +343,7 @@ def _mark_masked_step_failed(
     for stopped in (outcome, *outcome.also_stopped):
         if stopped.step_id is None:
             continue
-        failed = _failed_step(stopped)
+        failed = stop_step(stopped)
         # The step's record is the run's record of the stop, so a stop the
         # orchestrator is told of by its kind alone keeps its own detail there.
         by_kind = isinstance(stopped, Refused) and stopped.payload is None and not stopped.issues
@@ -410,7 +425,16 @@ def _failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> d
             outcome.refusal.value,
             outcome.detail,
         )
-    return failed_step(outcome)
+    return _worded_step(outcome)
+
+
+def _worded_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
+    """`outcome`'s `failed_step` as `execute` keeps it: its refusal's `fix`
+    holds only what the user's sentence for it reads (`worded_fix`)."""
+    failed = failed_step(outcome)
+    if isinstance(fix := failed.get("fix"), Mapping):
+        failed["fix"] = worded_fix(failed["code"], fix)
+    return failed
 
 
 def _without_figures(plan_version: int, *, run: dict[str, Any]) -> dict[str, Any]:
@@ -493,15 +517,19 @@ def execute_node(
         The "ok" route carries those frames as final; the "replan" refusal
         names the asks they compute (`computed_asks`), since the new plan
         runs from the start.
-        The exception is a wave whose every stop is a dead end no replan
+        The exceptions are a wave whose every stop is a dead end no replan
         reaches (`_is_dead_end`): a plain `Refused` whose own `payload` is a
         `ToolFailure` `executor.classify.classify_refusal` calls
         `Disposition.STOP`, or an evidence stop failing on
         `stat_var_family_moved` and nothing that move does not explain
         (`_family_moved`), whose family a replan in this turn would approve
-        again as it was. The turn closes right there on the failed step with
-        the refusal's own remedy and no replan spent, so the budget does not go
-        on reproducing the identical failing call.
+        again as it was; and a wave whose remedy (`executor.outcomes.remedy`
+        of its `failed_step`, decided by its most severe stop) is anything but
+        `REPLAN`: a service that did not answer, a fact the user decides on,
+        or a fault of the system, which a second approval would not get past.
+        The turn closes right there on the failed step with the refusal's own
+        remedy and no replan spent, so the budget does not go on reproducing
+        the identical failing call.
         `Refused(NOT_APPROVED)` and `Refused(STALE_REVISION)` mean the workflow's own `approve` node let
         through a plan it should not have -- a replan here would loop on the
         same defect, so those raise instead. Any other outcome also corrects
@@ -654,8 +682,11 @@ def execute_node(
         # A dead end: a tool's STOP refusal or a family that moved since
         # approval, for every stop in the wave. No replan in this turn can fix
         # it, so none is spent, and the planner's re-proposal (which would
-        # reproduce the same failure) never runs.
-        dead_end = _is_dead_end(outcome)
+        # reproduce the same failure) never runs. A wave a new plan does not
+        # get past (its deciding stop's remedy, `failed_step`) waits, is the
+        # user's or is the system's, so it never reaches the planner either,
+        # whose draft would ask the user to approve again.
+        replannable = not _is_dead_end(outcome) and remedy(failed_step(outcome)) is Remedy.REPLAN
         answers = answer_frames(outcome)
         link_evidence_to_terminal_frames(tool_surface, outcome, workflow=workflow)
         if finished.asks:
@@ -663,8 +694,9 @@ def execute_node(
                 ctx.state.get(ORCHESTRATOR_KEPT_ASKS_KEY), tool_surface, outcome, plan=finished
             )
         replans = int(ctx.state.get("replans", 0))
-        if not dead_end and replans < MAX_REPLANS:
+        if replannable and replans < MAX_REPLANS:
             ctx.state["replans"] = replans + 1
+            ctx.state[ORCHESTRATOR_REPLANNED_STOP_KEY] = shown_stop(_worded_step(outcome), finished)
             refusal = _planner_refusal(outcome, plan=finished, origins=windowed_origins(ctx.state))
             if finished.asks:
                 refusal["computed_asks"] = _computed_asks(finished, answers)
