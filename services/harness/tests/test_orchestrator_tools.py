@@ -20,6 +20,7 @@ import httpx2
 import pyarrow as pa
 import pytest
 from analysis_mcp import verbs as analysis_verbs
+from analysis_mcp.runner_client import RunnerClient, runner_holder
 from common.materialisation import (
     FrameRef,
     FrameTooLarge,
@@ -76,6 +77,7 @@ from harness.rolling_cards import CardWithheld, RollingCards
 from harness.scope_choices import served_facts
 from harness.studio_edit import _record_revision
 from harness.studio_state import (
+    CardRemoval,
     ConversationState,
     _apply_operations,
     _next_manifest,
@@ -302,7 +304,9 @@ def test_the_search_and_ask_user_declarations_carry_prices_beside_counts():
 
     assert "`other_prices`, each with its spec_id and label" in declarations["search"]
     ask_user = declarations["ask_user"]
-    assert "An option for a count or prices that a search result names" in ask_user
+    assert "An option for one of a part's candidates carries the spec_id" in ask_user
+    assert "names its part in `prices_of`" in ask_user
+    assert "count" not in ask_user
 
 
 def test_every_chart_field_is_described_and_select_json_shows_a_list_of_values():
@@ -1927,6 +1931,86 @@ async def test_a_redraw_of_a_series_on_the_canvas_as_the_turn_began_states_no_fi
     assert _figures(redrawn["charts"][0]) == []
     assert _figures(named["charts"][0]) == [("NGA", 54.5, "2024")]
     assert _figures(next_turn["charts"][0]) == ([("NGA", 54.5, "2024")] if removed_first else [])
+
+
+_PEACE = "civilian peace-building, conflict prevention and resolution"
+
+
+@pytest.mark.parametrize("named", [_PEACE, "CRSPurposeCode15220"])
+async def test_a_table_of_breakdown_codes_names_its_series_by_their_labels(
+    monkeypatch: pytest.MonkeyPatch, named: str
+) -> None:
+    """A table whose `stat_var_crsPurpose` cells hold a code dcid and a label
+    names the code's series by its label with the dcid after it, read from the
+    graph for the dcid alone, and the label cell's by the label. A name the
+    model gives as the label or as the dcid finds the code's series with no
+    read of the frame's rows."""
+    envelope = resolved_revision("table")
+    template = envelope["component"]["rows"][0]
+    envelope["component"]["rows"] = [
+        {
+            **template,
+            "series_id": f"s_{number}",
+            "dimensions": {"stat_var_crsPurpose": cell},
+            "period": "2024",
+            "value": value,
+        }
+        for number, (cell, value) in enumerate(
+            [("CRSPurposeCode15220", 7.0), ("basic education", 3.0)]
+        )
+    ]
+    executor = FakeExecutor()
+    executor.written = drawn_cards.write_reply(envelope)
+    asked: list[list[str]] = []
+
+    def graph(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/api/graph/nodes"
+        dcids = json.loads(request.content)["dcids"]
+        asked.append(dcids)
+        code = {
+            "ref": "CRSPurposeCode15220",
+            "kind": "code",
+            "label": f"{_PEACE} (CRS Purpose)",
+            "code": {"property": "crsPurpose", "code_system": {"label": "CRS Purpose"}},
+        }
+        return httpx2.Response(200, json={"nodes": [code]})
+
+    runner_holder.set(
+        RunnerClient(
+            base_url="http://runner.test",
+            timeout_s=5.0,
+            read_timeout_s=5.0,
+            caller_principal=None,
+            auth=_no_token,
+            transport=httpx2.MockTransport(graph),
+        )
+    )
+    frame_reads: list[object] = []
+
+    async def frame_work(ref: object, work: object) -> None:
+        frame_reads.append(ref)
+
+    monkeypatch.setattr(orchestrator_tools, "_frame_work", frame_work)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    chart = _one_chart(frame_id_for(REF))[0] | {"state_values_for": [named]}
+
+    (card,) = (await tools["make_charts"]([chart], ctx))["charts"]
+
+    peace = f"{_PEACE} (CRSPurposeCode15220)"
+    assert card["holds"]["series"] == [peace, "basic education"]
+    assert "not_matched" not in card
+    assert "not_in_card" not in card
+    assert _figures(card) == [
+        (peace, 7.0, "2024", "largest"),
+        ("basic education", 3.0, "2024", "smallest"),
+    ]
+    assert asked == [["CRSPurposeCode15220"]]
+    assert frame_reads == []
+
+
+async def _no_token() -> dict[str, str]:
+    return {}
 
 
 def _bars(codes: list[str]) -> dict[str, Any]:
@@ -5482,7 +5566,7 @@ def _recall_callable(state: ConversationState):
 
 
 def _remove_callable(state: ConversationState):
-    async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
+    async def remove(*, component_ids: list[str], all_cards: bool) -> CardRemoval:
         return remove_cards(state, component_ids, all_cards=all_cards)
 
     return remove
@@ -5490,10 +5574,15 @@ def _remove_callable(state: ConversationState):
 
 def _two_card_canvas() -> ConversationState:
     state = ConversationState(conversation_id="c1")
-    for cid in ("cmp_01", "cmp_02"):
+    for cid, title in (("cmp_01", "Aid to Kenya"), ("cmp_02", "Aid to Ghana")):
         land_component(
             state,
-            {"component_id": cid, "revision": 1, "type": "line_chart", "title": "Aid"},
+            {
+                "component_id": cid,
+                "revision": 1,
+                "type": "line_chart",
+                "payload": {"component": {"title": {"text": title}}},
+            },
         )
     return state
 
@@ -5502,9 +5591,13 @@ async def test_remove_cards_takes_named_cards_off_and_says_which_it_never_held()
     state = _two_card_canvas()
     tools, ctx = _tools(remove_cards=_remove_callable(state))
 
-    answer = await tools["remove_cards"](ctx, ["cmp_01", "cmp_99"])
+    answer = await tools["remove_cards"](ctx, ["cmp_01", "cmp_99", "cmp_99"])
 
-    assert answer == {"removed": ["cmp_01"], "not_in_conversation": ["cmp_99"]}
+    assert answer == {
+        "removed": ["cmp_01"],
+        "not_in_conversation": ["cmp_99"],
+        "titles": {"cmp_01": "Aid to Kenya"},
+    }
     assert state.composition is not None
     assert [b.component_id for b in state.composition.blocks] == ["cmp_02"]
 
@@ -5516,10 +5609,48 @@ async def test_remove_cards_clears_the_canvas_and_refuses_a_call_that_names_noth
     nothing = await tools["remove_cards"](ctx)
     cleared = await tools["remove_cards"](ctx, all_cards=True)
     again = await tools["remove_cards"](ctx, all_cards=True)
+    # A fresh turn, since the three calls above spend remove_cards' budget.
+    tools, ctx = _tools(remove_cards=_remove_callable(state))
+    named = await tools["remove_cards"](ctx, ["cmp_99"], all_cards=True)
 
     assert _stated(nothing) == ("tool_arguments_invalid", "correct_and_retry")
-    assert cleared == {"removed": ["cmp_01", "cmp_02"]}
+    assert cleared == {
+        "removed": ["cmp_01", "cmp_02"],
+        "titles": {"cmp_01": "Aid to Kenya", "cmp_02": "Aid to Ghana"},
+    }
     assert again == {"removed": [], "note": "The canvas was already empty."}
+    assert {key: value for key, value in named.items() if key != "note"} == {
+        "removed": [],
+        "not_in_conversation": ["cmp_99"],
+    }
+
+
+async def test_remove_cards_leaves_a_pinned_card_and_names_it():
+    state = _two_card_canvas()
+    assert state.composition is not None
+    state.composition.blocks[0].pinned = True
+    tools, ctx = _tools(remove_cards=_remove_callable(state))
+
+    pinned_only = await tools["remove_cards"](ctx, ["cmp_01"])
+    cleared = await tools["remove_cards"](ctx, all_cards=True)
+    mixed = await tools["remove_cards"](ctx, ["cmp_01", "cmp_02", "cmp_99"])
+
+    assert pinned_only["removed"] == []
+    assert pinned_only["kept_pinned"] == ["cmp_01"]
+    assert "Unpin from Canvas" in pinned_only["note"]
+    assert cleared == {
+        "removed": ["cmp_02"],
+        "kept_pinned": ["cmp_01"],
+        "titles": {"cmp_02": "Aid to Ghana", "cmp_01": "Aid to Kenya"},
+    }
+    assert [b.component_id for b in state.composition.blocks] == ["cmp_01"]
+    assert {key: value for key, value in mixed.items() if key != "note"} == {
+        "removed": [],
+        "kept_pinned": ["cmp_01"],
+        "already_off": ["cmp_02"],
+        "not_in_conversation": ["cmp_99"],
+        "titles": {"cmp_01": "Aid to Kenya"},
+    }
 
 
 async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
@@ -5529,10 +5660,14 @@ async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
     tools, ctx = _tools(remove_cards=_remove_callable(state))
     await tools["remove_cards"](ctx, ["cmp_01"])
 
-    again = await tools["remove_cards"](ctx, ["cmp_01"])
-    unknown = await tools["remove_cards"](ctx, ["cmp_99"])
+    again = await tools["remove_cards"](ctx, ["cmp_01", "cmp_01"])
+    unknown = await tools["remove_cards"](ctx, ["cmp_99", "cmp_99"])
 
-    assert again == {"removed": [], "note": "Those cards were already off the canvas."}
+    assert again == {
+        "removed": [],
+        "already_off": ["cmp_01"],
+        "note": "Those cards were already off the canvas.",
+    }
     assert _stated(unknown) == ("card_not_found", "correct_and_retry")
     assert "cmp_99" not in unknown["error"]
 
@@ -5576,7 +5711,7 @@ async def test_a_canvas_listing_does_not_spend_the_detail_reads():
     listing = await tools["recall"]("canvas", ctx)
     reads = [await tools["recall"]("canvas", ctx, component_id="cmp_01") for _ in range(3)]
 
-    assert [card["component_id"] for card in listing["on_canvas"]] == ["cmp_01"]
+    assert [card["component_id"] for card in listing["blocks"]] == ["cmp_01"]
     assert all("error" not in read for read in reads)
     for _ in range(BUDGETS["recall_canvas"] - 1):
         await tools["recall"]("canvas", ctx)

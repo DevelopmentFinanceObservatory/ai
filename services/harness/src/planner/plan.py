@@ -167,6 +167,12 @@ UNSUPPORTED_STATE_KEY = "planner:unsupported"
 # Unset, the entry carries no amendment.
 AMENDMENT_ENTRY_STATE_KEY = "planner:amendment_entry"
 
+# The session-state slot saying whether the run the planner's current call
+# makes reads the user's own-words answer to a question the planner asked
+# (`harness.planner_adapter.PlannerAdapter` writes it on every call). Unset,
+# the run reads none.
+ANSWERED_IN_WORDS_STATE_KEY = "planner:answered_in_words"
+
 # The session-state slot holding the option the user picked for a planner
 # decision on the plan card, as a `DecisionPick` dump, when the planner's
 # current entry replans to hold that pick. `harness.planner_adapter.PlannerAdapter`
@@ -7078,6 +7084,29 @@ def amendment_entry(state: SessionState) -> bool:
 def save_amendment_entry(state: SessionState, amended: bool) -> None:
     """Record whether the planner's current entry opened with the user's amendment of the plan."""
     state[AMENDMENT_ENTRY_STATE_KEY] = amended
+
+
+def answered_in_words(state: SessionState) -> bool:
+    """Whether the planner's current run reads the user's own-words answer to its question (`ANSWERED_IN_WORDS_STATE_KEY`)."""
+    return bool(state.get(ANSWERED_IN_WORDS_STATE_KEY))
+
+
+def save_answered_in_words(state: SessionState, answered: bool) -> None:
+    """Record whether the planner's current run reads the user's own-words answer to its question."""
+    state[ANSWERED_IN_WORDS_STATE_KEY] = answered
+
+
+class NewQuestionSource(TitlelessEnum):
+    """Which of the user's messages a `starts_new_plan` call on the user's
+    amendment says asks the new question: `amendment`, the change they
+    asked for on the plan card, or `answer`, their own-words answer to the
+    question the planner asked about it, which the harness hands on, as
+    stored, as the next turn; or `none`, which ends the turn asking the user
+    to send their question (`harness.graph.planning`)."""
+
+    AMENDMENT = "amendment"
+    ANSWER = "answer"
+    NONE = "none"
 
 
 class DecisionPick(StrictModel):

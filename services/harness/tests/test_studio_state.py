@@ -8,7 +8,7 @@ faked to prove the wiring; its own backend handling is covered by
 `packages/common/tests/test_telemetry.py`.
 
 The canvas and conversation digests the models read carry a stated maximum
-size (`CANVAS_DIGEST_MAX_BYTES`, `CONVERSATION_DIGEST_MAX_BYTES`); the tests
+size (`CANVAS_LISTING_MAX_BYTES`, `CONVERSATION_DIGEST_MAX_BYTES`); the tests
 below feed each one oversized input and assert the maximum holds.
 
 The canvas digest entry is pinned here too: what a card shows (its entities
@@ -45,14 +45,20 @@ from compiler.sources import source_from_spec_block
 from fastapi.responses import JSONResponse
 from harness import studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
+from harness.chart_binding import MAX_CHARTS_PER_CALL
 from harness.conversation import current_conversation_key
 from harness.db import engine as engine_module
 from harness.db.commit import transaction_committed
-from harness.graph.state import ORCHESTRATOR_PLAN_RECORDS_KEY, ORCHESTRATOR_SEARCHES_KEY
+from harness.graph.state import (
+    BUDGETS,
+    ORCHESTRATOR_PLAN_RECORDS_KEY,
+    ORCHESTRATOR_SEARCHES_KEY,
+)
 from harness.provenance import CardLineage, ProvenanceInput
 from harness.studio_edit import _record_revision, _refresh_block
 from harness.studio_state import (
-    CANVAS_DIGEST_MAX_BYTES,
+    CANVAS_LISTING_MAX_BYTES,
+    CANVAS_SUMMARY_MAX_BYTES,
     CONVERSATION_DIGEST_MAX_BYTES,
     ConversationState,
     DatabaseUnavailable,
@@ -258,7 +264,7 @@ def test_digest_entry_stays_bounded_however_many_series_the_frame_holds() -> Non
 
     assert len(entry["entities"]) == studio_state._DIGEST_SHOW_CAP
     state = _canvas({"cmp_two": entry})
-    digest = state.canvas_digest_state()
+    digest = state.canvas_listing_state()
     assert digest is not None
     (block,) = digest["blocks"]
     assert len(block["entities"]) == studio_state._DIGEST_SHOW_CAP
@@ -355,8 +361,6 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     assert len(state.components[card_id]["fact_summary"]["series"]) == 12
     model_facing = json.dumps(
         [
-            state.canvas_digest_state(),
-            state.canvas_digest_state(focus=card_id),
             state.canvas_summary_state(focus=card_id),
             state.canvas_listing_state(),
             state.recall_part(part="canvas"),
@@ -423,10 +427,18 @@ def _shows(name: str, time: str, *, count: int = studio_state._DIGEST_SHOW_CAP) 
     return {"entities": [name] * count, "time": time}
 
 
-def _canvas(entries: dict[str, dict[str, Any]]) -> ConversationState:
-    """A conversation whose composition holds every entry, in order."""
+def _canvas(entries: dict[str, dict[str, Any]], *, turn: int | None = None) -> ConversationState:
+    """A conversation whose composition holds every entry, in order, each drawn
+    by the open turn, or with `turn` by that closed turn (1-based) after
+    `turn - 1` turns that drew nothing."""
     state = ConversationState(conversation_id=CONVERSATION)
     state.components.update(entries)
+    cards = [{"component_id": component_id, "action": "created"} for component_id in entries]
+    if turn is None:
+        state.turn_components = cards
+    else:
+        state.turns = [{"user": "u", "assistant": "a"} for _ in range(turn - 1)]
+        state.turns.append({"user": "u", "assistant": "a", "cards": cards})
     blocks = [
         CompositionBlock(
             component_id=component_id,
@@ -455,7 +467,7 @@ def test_a_realistic_canvas_block_states_its_shared_coordinates_once():
     }
     state = _canvas(entries)
 
-    digest = state.canvas_digest_state()
+    digest = state.canvas_listing_state()
 
     assert digest is not None
 
@@ -475,6 +487,7 @@ def test_a_realistic_canvas_block_states_its_shared_coordinates_once():
             "component_id": component_id,
             **entry,
             "fact_summary": entry["fact_summary"] and factored(entry["fact_summary"]),
+            "turn": 1,
         }
         for component_id, entry in entries.items()
     ]
@@ -498,7 +511,7 @@ def test_a_coordinate_one_series_differs_in_stays_on_every_series():
     summary["series"][2]["coordinates"]["measurementMethod"] = "Modelled"
     state = _canvas({"cmp_01": _entry("Aid to Guatemala", summary)})
 
-    digest = state.canvas_digest_state()
+    digest = state.canvas_listing_state()
 
     assert digest is not None
     shown = digest["blocks"][0]["fact_summary"]
@@ -517,7 +530,7 @@ def test_a_coordinate_one_series_differs_in_stays_on_every_series():
 def test_an_oversized_title_is_cut_and_says_so():
     state = _canvas({"cmp_01": _entry("t" * BIG, _fact_summary())})
 
-    digest = state.canvas_digest_state()
+    digest = state.canvas_listing_state()
 
     assert digest is not None
     title = digest["blocks"][0]["title"]
@@ -529,7 +542,7 @@ def test_an_oversized_title_is_cut_and_says_so():
 def test_a_title_of_escaped_characters_is_cut_by_its_serialised_size():
     state = _canvas({"cmp_01": _entry(ASTRAL * 1_000, _fact_summary())})
 
-    digest = state.canvas_digest_state()
+    digest = state.canvas_listing_state()
 
     assert digest is not None
     title = digest["blocks"][0]["title"]
@@ -547,7 +560,7 @@ def test_an_oversized_fact_summary_keeps_its_leading_series_and_labels_the_subse
     oversized = {**_fact_summary(), "series": series}
     state = _canvas({"cmp_01": _entry("Aid", oversized)})
 
-    digest = state.canvas_digest_state()
+    digest = state.canvas_listing_state()
 
     assert digest is not None
     summary = digest["blocks"][0]["fact_summary"]
@@ -586,7 +599,7 @@ def test_a_unit_object_is_shed_only_when_it_is_over_its_cap_and_the_summary_is_o
     summary = {**_fact_summary(series), "unit": unit}
     state = _canvas({"cmp_01": _entry("Aid", summary)})
 
-    digest = state.canvas_digest_state()
+    digest = state.canvas_listing_state()
 
     assert digest is not None
     shown = digest["blocks"][0]["fact_summary"]
@@ -606,7 +619,7 @@ def test_a_summary_the_platform_cut_states_the_platforms_total(oversized: bool):
     }
     state = _canvas({"cmp_01": _entry("Aid", summary)})
 
-    digest = state.canvas_digest_state()
+    digest = state.canvas_listing_state()
 
     assert digest is not None
     block = digest["blocks"][0]["fact_summary"]
@@ -626,7 +639,7 @@ def test_an_oversized_fact_summary_becomes_a_stub_that_says_it_was_cut():
     for oversized in (no_series_fit, "s" * BIG):
         state = _canvas({"cmp_01": _entry("Aid", oversized)})
 
-        digest = state.canvas_digest_state()
+        digest = state.canvas_listing_state()
 
         assert digest is not None
         summary = digest["blocks"][0]["fact_summary"]
@@ -642,7 +655,7 @@ def test_a_fact_summary_at_its_cap_is_kept_and_one_byte_over_is_cut():
         {"cmp_01": _entry("at", at_cap), "cmp_02": _entry("over", at_cap + "s")},
     )
 
-    digest = state.canvas_digest_state()
+    digest = state.canvas_listing_state()
 
     assert digest is not None
     kept, cut = digest["blocks"]
@@ -650,29 +663,89 @@ def test_a_fact_summary_at_its_cap_is_kept_and_one_byte_over_is_cut():
     assert set(cut["fact_summary"]) == {"cut"}
 
 
-def test_the_canvas_digest_stays_under_its_maximum_with_every_field_at_its_cap():
+def _largest_canvas() -> ConversationState:
+    """A conversation with the canvas listing at its caps: every field of
+    every card just inside its cap, and past their caps this turn's cards, the
+    pinned cards of an earlier turn, the cards still on the canvas of another,
+    and turns of cards off the canvas."""
     title = "t" * (studio_state._TITLE_BYTE_CAP - 2)
     summary = "s" * (studio_state._FACT_SUMMARY_BYTE_CAP - 2)
     shows = _shows(
         "n" * (studio_state._DIGEST_NAME_BYTE_CAP - 2),
         "y" * (studio_state._DIGEST_TIME_BYTE_CAP - 2),
     )
-    entries = {
-        f"cmp_{index:058d}": _entry(title, summary, revision=9_999_999_999, shows=shows)
-        for index in range(studio_state._DIGEST_BLOCK_CAP)
-    }
-    state = _canvas(entries)
+    group = studio_state._DIGEST_BLOCK_CAP + studio_state._LISTING_COMPACT_CAP + 2
+    # Oldest first: the pinned cards' turn, turns of one card off the canvas,
+    # a turn whose cards fill the off-canvas places, a turn whose cards stay
+    # on the canvas, and the open turn.
+    sizes = [
+        group,
+        *[1] * (studio_state._EARLIER_TURN_CAP + 2),
+        studio_state._LISTING_COMPACT_CAP,
+        group,
+        group,
+    ]
+    off = range(1, len(sizes) - 2)
+    state = ConversationState(conversation_id=CONVERSATION)
+    blocks: list[CompositionBlock] = []
+    for turn, size in enumerate(sizes):
+        cards = []
+        for index in range(size):
+            component_id = f"cmp_{turn:04d}_{index:053d}"
+            state.components[component_id] = _entry(
+                title, summary, revision=9_999_999_999, shows=shows
+            )
+            cards.append({"component_id": component_id, "action": "created"})
+            if turn not in off:
+                blocks.append(
+                    CompositionBlock(
+                        component_id=component_id,
+                        revision=1,
+                        type=ComponentType.LINE_CHART,
+                        title="block",
+                        pinned=turn == 0,
+                    )
+                )
+        if turn == len(sizes) - 1:
+            state.turn_components = cards
+        else:
+            state.turns.append({"user": "u", "assistant": "a", "cards": cards})
+    state.composition = _next_manifest(None, blocks, actor=CompositionActor.MODEL)
+    return state
 
-    digest = state.canvas_digest_state(focus=next(reversed(entries)))
 
-    assert digest is not None
-    assert len(digest["blocks"]) == studio_state._DIGEST_BLOCK_CAP
-    size = _serialised(digest)
-    assert size <= CANVAS_DIGEST_MAX_BYTES
-    assert size > CANVAS_DIGEST_MAX_BYTES * 0.9  # the maximum is within reach
+def test_the_canvas_listing_stays_under_its_maximum_with_every_field_at_its_cap():
+    listing = _largest_canvas().canvas_listing_state()
+
+    assert len(listing["blocks"]) == studio_state._DIGEST_BLOCK_CAP
+    assert len(listing["titles"]) == 3 * studio_state._LISTING_COMPACT_CAP
+    assert len(listing["off_canvas"]) == studio_state._LISTING_COMPACT_CAP
+    assert len(listing["counted"]) == studio_state._EARLIER_TURN_CAP
+    assert "counted_rest" in listing
+    size = _serialised({"part": "canvas", **listing})
+    assert size <= CANVAS_LISTING_MAX_BYTES
+    assert size > CANVAS_LISTING_MAX_BYTES * 0.9  # the maximum is within reach
 
 
-def test_the_canvas_digest_stays_under_its_maximum_however_large_the_inputs():
+def test_the_canvas_summary_stays_under_its_maximum_with_every_field_at_its_cap():
+    state = _largest_canvas()
+
+    summary = state.canvas_summary_state(focus=next(iter(state.components)))
+
+    assert summary is not None
+    size = _serialised(summary)
+    assert size <= CANVAS_SUMMARY_MAX_BYTES
+    assert size > CANVAS_SUMMARY_MAX_BYTES * 0.9
+
+
+def test_one_turns_cards_fit_the_places_a_view_names_them_in():
+    """Every card a turn can draw is named, in full or compactly."""
+    most = BUDGETS["make_charts"] * MAX_CHARTS_PER_CALL
+
+    assert most <= studio_state._DIGEST_BLOCK_CAP + studio_state._LISTING_COMPACT_CAP
+
+
+def test_the_canvas_listing_stays_under_its_maximum_however_large_the_inputs():
     entries = {
         f"cmp_{index:016d}": _entry(
             ASTRAL * BIG,
@@ -683,159 +756,269 @@ def test_the_canvas_digest_stays_under_its_maximum_however_large_the_inputs():
     }
     state = _canvas(entries)
 
-    digest = state.canvas_digest_state()
+    listing = state.canvas_listing_state()
+    summary = state.canvas_summary_state(focus=next(iter(entries)))
 
-    assert digest is not None
-    assert len(digest["blocks"]) == studio_state._DIGEST_BLOCK_CAP
-    assert _serialised(digest) <= CANVAS_DIGEST_MAX_BYTES
-
-
-def test_a_canvas_emptied_by_removals_is_stated_empty_in_the_digest():
-    """A canvas whose cards were all removed reads as empty, not as no canvas,
-    so the model is not left with the earlier turns' cards as its only view."""
-    state = _canvas({"cmp_01": _entry("Aid", None)})
-    state.composition = _next_manifest(state.composition, [], actor=CompositionActor.USER)
-
-    digest = state.canvas_digest_state()
-    assert digest is not None
-    assert digest["blocks"] == []
-    assert [card["component_id"] for card in digest["hidden"]] == ["cmp_01"]
-    assert ConversationState(conversation_id=CONVERSATION).canvas_digest_state() is None
+    assert len(listing["blocks"]) == studio_state._DIGEST_BLOCK_CAP
+    assert _serialised(listing) <= CANVAS_LISTING_MAX_BYTES
+    assert _serialised(summary) <= CANVAS_SUMMARY_MAX_BYTES
 
 
-def test_the_digest_marks_a_pinned_block():
+def test_a_card_taken_off_the_canvas_this_turn_is_named_off_it_and_says_so():
+    """A card this turn drew and then lost from the canvas is still named,
+    after the cards on the canvas and flagged, so the model does not read it
+    as on the canvas."""
+    state = _canvas({"cmp_01": _entry("Aid", _fact_summary()), "cmp_02": _entry("Debt", None)})
+    assert state.composition is not None
+    state.composition = _next_manifest(
+        state.composition, state.composition.blocks[:1], actor=CompositionActor.USER
+    )
+
+    listing = state.canvas_listing_state()
+
+    assert [block["component_id"] for block in listing["blocks"]] == ["cmp_01"]
+    assert "on_canvas" not in listing["blocks"][0]
+    assert listing["off_canvas"] == [
+        {
+            "component_id": "cmp_02",
+            "type": "line_chart",
+            "title": "Debt",
+            "on_canvas": False,
+            "turn": 1,
+        }
+    ]
+
+
+def test_the_listing_marks_a_pinned_block():
     state = _canvas({"cmp_01": _entry("Aid", None), "cmp_02": _entry("Debt", None)})
     assert state.composition is not None
     state.composition.blocks[1].pinned = True
 
-    digest = state.canvas_digest_state()
+    listing = state.canvas_listing_state()
 
-    assert digest is not None
-    assert "pinned" not in digest["blocks"][0]
-    assert digest["blocks"][1]["pinned"] is True
+    assert "pinned" not in listing["blocks"][0]
+    assert listing["blocks"][1]["pinned"] is True
 
 
-def test_the_digest_counts_the_blocks_its_cap_leaves_out():
+def test_this_turns_cards_past_the_full_places_are_named_compactly():
     cap = studio_state._DIGEST_BLOCK_CAP
     state = _canvas({f"cmp_{index:02d}": _entry("Aid", None) for index in range(cap + 3)})
 
-    digest = state.canvas_digest_state()
+    listing = state.canvas_listing_state()
 
-    assert digest is not None
-    assert len(digest["blocks"]) == cap
-    assert digest["blocks_not_shown"] == 3
-    one = _canvas({"cmp_01": _entry("Aid", None)}).canvas_digest_state()
-    assert one is not None
-    assert "blocks_not_shown" not in one
+    assert [block["component_id"] for block in listing["blocks"]] == [
+        f"cmp_{index:02d}" for index in range(cap)
+    ]
+    assert listing["titles"] == [
+        {
+            "component_id": f"cmp_{index:02d}",
+            "type": "line_chart",
+            "title": "Aid",
+            "turn": 1,
+        }
+        for index in range(cap, cap + 3)
+    ]
+    assert "titles" not in _canvas({"cmp_01": _entry("Aid", None)}).canvas_listing_state()
 
 
-def test_the_digest_with_every_block_pinned_and_some_cut_stays_under_its_maximum():
-    title = "t" * (studio_state._TITLE_BYTE_CAP - 2)
-    summary = "s" * (studio_state._FACT_SUMMARY_BYTE_CAP - 2)
-    shows = _shows(
-        "n" * (studio_state._DIGEST_NAME_BYTE_CAP - 2),
-        "y" * (studio_state._DIGEST_TIME_BYTE_CAP - 2),
+def _turns_of_cards(
+    *groups: tuple[int, bool, bool],
+    order: Callable[[list[str]], list[str]] = list,
+) -> ConversationState:
+    """One turn per group, oldest first, the last the open turn: each group is
+    `(cards, pinned, on_canvas)`. Card ids are `cmp_<turn>_<n>`, and the
+    composition holds the on-canvas cards in `order`."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    held: list[str] = []
+    pinned: set[str] = set()
+    for turn, (count, pin, on) in enumerate(groups, start=1):
+        ids = [f"cmp_{turn}_{n:02d}" for n in range(count)]
+        for cid in ids:
+            state.components[cid] = _entry(cid, None)
+        if on:
+            held += ids
+        if pin:
+            pinned.update(ids)
+        cards = [{"component_id": cid} for cid in ids]
+        if turn == len(groups):
+            state.turn_components = cards
+        else:
+            state.turns.append({"user": "u", "assistant": "a", "cards": cards})
+    state.composition = _next_manifest(
+        None,
+        [
+            CompositionBlock(
+                component_id=cid,
+                revision=1,
+                type=ComponentType.LINE_CHART,
+                title="block",
+                pinned=cid in pinned,
+            )
+            for cid in order(held)
+        ],
+        actor=CompositionActor.MODEL,
     )
-    entries = {
-        f"cmp_{index:058d}": _entry(title, summary, revision=9_999_999_999, shows=shows)
-        for index in range(studio_state._DIGEST_BLOCK_CAP + 2)
-    }
-    state = _canvas(entries)
-    assert state.composition is not None
-    for block in state.composition.blocks:
-        block.pinned = True
-
-    digest = state.canvas_digest_state(focus=next(reversed(entries)))
-
-    assert digest is not None
-    assert digest["blocks_not_shown"] == 2
-    assert _serialised(digest) <= CANVAS_DIGEST_MAX_BYTES
+    return state
 
 
-def test_the_digest_lists_this_conversations_cards_that_are_not_on_the_canvas():
-    """A card a new turn hid, or one removed, is named under `hidden`: id,
-    type and title only, so the model can talk about it but not read it as
-    on the canvas."""
-    state = _canvas({"cmp_01": _entry("Aid", _fact_summary())})
-    state.components["cmp_old"] = _entry("Debt", _fact_summary())
-
-    digest = state.canvas_digest_state()
-
-    assert digest is not None
-    assert [b["component_id"] for b in digest["blocks"]] == ["cmp_01"]
-    assert digest["hidden"] == [{"component_id": "cmp_old", "type": "line_chart", "title": "Debt"}]
+def _named_ids(view: dict[str, Any]) -> list[str]:
+    return [entry["component_id"] for key in ("blocks", "titles") for entry in view.get(key, [])]
 
 
-def test_a_canvas_with_only_hidden_cards_is_empty_and_names_them():
-    state = _canvas({"cmp_01": _entry("Aid", None)})
-    remove_cards(state, [], all_cards=True)
+def test_every_card_drawn_this_turn_and_every_pinned_card_is_named():
+    """With forty cards drawn this turn and twenty pinned ones, the listing
+    names each, in full or compactly, then the earlier cards still on the canvas."""
+    state = _turns_of_cards((20, True, True), (2, False, True), (40, False, True))
+    drawn = [f"cmp_3_{n:02d}" for n in range(40)]
+    pinned = [f"cmp_1_{n:02d}" for n in range(20)]
 
-    digest = state.canvas_digest_state()
+    listing = state.canvas_listing_state()
 
-    assert digest == {
-        "blocks": [],
-        "hidden": [{"component_id": "cmp_01", "type": "line_chart", "title": "Aid"}],
-    }
-
-
-def test_the_hidden_list_keeps_the_newest_and_counts_the_rest():
-    cap = studio_state._DIGEST_HIDDEN_CAP
-    state = _canvas({"cmp_on": _entry("On", None)})
-    for index in range(cap + 4):
-        state.components[f"cmp_{index:02d}"] = _entry(f"Card {index}", None)
-
-    digest = state.canvas_digest_state()
-
-    assert digest is not None
-    assert len(digest["hidden"]) == cap
-    assert digest["hidden"][-1]["component_id"] == f"cmp_{cap + 3:02d}"
-    assert digest["hidden_not_shown"] == 4
+    assert _named_ids(listing) == [*drawn, *pinned, "cmp_2_00", "cmp_2_01"]
+    assert [block["component_id"] for block in listing["blocks"]] == drawn[
+        : studio_state._DIGEST_BLOCK_CAP
+    ]
+    assert all(entry["pinned"] for entry in listing["titles"] if entry["turn"] == 1)
+    assert "counted" not in listing
 
 
-def test_a_focus_card_off_the_canvas_is_a_block_that_says_it_is_hidden():
-    """#348 keeps the focus card in `blocks` whatever its state; a hidden one
-    stays hidden, so the model does not read it as on the user's canvas."""
-    state = _canvas({"cmp_01": _entry("Aid", None)})
-    state.components["cmp_off"] = _entry("Off the canvas", None)
+def test_a_follow_up_turn_lists_the_earlier_cards_on_the_canvas_in_full():
+    """A new turn has drawn nothing yet, so the cards still on the canvas
+    from earlier turns take the full places, newest turn first."""
+    state = _turns_of_cards((1, False, True), (3, False, True), (0, False, True))
 
-    digest = state.canvas_digest_state(focus="cmp_off")
+    listing = state.canvas_listing_state()
 
-    assert digest is not None
-    assert digest["blocks"][-1]["component_id"] == "cmp_off"
-    assert digest["blocks"][-1]["on_canvas"] is False
-    assert "on_canvas" not in digest["blocks"][0]
-    assert [card["component_id"] for card in digest["hidden"]] == ["cmp_off"]
+    assert [block["component_id"] for block in listing["blocks"]] == [
+        "cmp_2_00",
+        "cmp_2_01",
+        "cmp_2_02",
+        "cmp_1_00",
+    ]
+    assert all("fact_summary" in block for block in listing["blocks"])
 
 
-def test_the_digest_with_hidden_cards_at_their_caps_stays_under_its_maximum():
-    title = "t" * (studio_state._TITLE_BYTE_CAP - 2)
-    summary = "s" * (studio_state._FACT_SUMMARY_BYTE_CAP - 2)
-    shows = _shows(
-        "n" * (studio_state._DIGEST_NAME_BYTE_CAP - 2),
-        "y" * (studio_state._DIGEST_TIME_BYTE_CAP - 2),
+def test_a_card_left_on_the_canvas_is_named_ahead_of_removed_cards():
+    """Turn 2's card stays on the canvas while turn 3's forty cards were taken
+    off. The next turn names the card in full, so `remove_cards` can take it
+    by id, and the removed ones after it."""
+    state = _turns_of_cards(
+        (1, False, True), (1, False, True), (40, False, False), (0, False, True)
     )
-    entries = {
-        f"cmp_{index:058d}": _entry(title, summary, revision=9_999_999_999, shows=shows)
-        for index in range(studio_state._DIGEST_BLOCK_CAP + 2)
+
+    listing = state.canvas_listing_state()
+
+    assert [block["component_id"] for block in listing["blocks"]] == ["cmp_2_00", "cmp_1_00"]
+    assert [entry["component_id"] for entry in listing["off_canvas"]] == [
+        f"cmp_3_{n:02d}" for n in range(40)
+    ]
+    assert "counted" not in listing
+
+
+@pytest.mark.parametrize("order", ["reversed", "pinned-last", "interleaved"])
+def test_the_canvas_views_are_the_same_however_the_manifest_orders_the_cards(order: str):
+    """Studio places cards on a free board and keeps drag positions and its
+    own text cards on the client, so the manifest's block order is not the
+    order the user sees. The views rank by the turn that drew each card and
+    state no place on the canvas: the same cards in any manifest order give
+    the same views."""
+    reorder: dict[str, Callable[[list[str]], list[str]]] = {
+        "reversed": lambda ids: ids[::-1],
+        "pinned-last": lambda ids: sorted(ids, key=lambda cid: cid.startswith("cmp_1_")),
+        "interleaved": lambda ids: ids[::2] + ids[1::2],
     }
-    state = _canvas(entries)
+    groups = ((30, True, True), (20, False, True), (5, False, False), (20, False, True))
+    plain = _turns_of_cards(*groups)
+    moved = _turns_of_cards(*groups, order=reorder[order])
+
+    assert moved.canvas_listing_state() == plain.canvas_listing_state()
+    assert moved.canvas_summary_state() == plain.canvas_summary_state()
+
+
+def test_pinned_cards_past_the_compact_cap_are_counted():
+    full, compact = studio_state._DIGEST_BLOCK_CAP, studio_state._LISTING_COMPACT_CAP
+    state = _turns_of_cards((full + compact + 5, True, True), (0, False, True))
+
+    listing = state.canvas_listing_state()
+
+    assert len(listing["blocks"]) == full
+    assert all(block["pinned"] for block in listing["blocks"])
+    assert len(listing["titles"]) == compact
+    assert listing["counted"] == [{"turn": 1, "on_canvas": 5}]
+
+
+def test_earlier_cards_past_the_caps_are_counted_by_turn():
+    """Cards still on the canvas past the compact cap, and the turns of cards
+    off it past the one that fills the off-canvas places, are counted by the
+    turn that drew them, the newest turns apart and the rest in one count."""
+    full, compact = studio_state._DIGEST_BLOCK_CAP, studio_state._LISTING_COMPACT_CAP
+    cap = studio_state._EARLIER_TURN_CAP
+    state = _turns_of_cards(
+        *[(1, False, False)] * (cap + 2),
+        (compact, False, False),
+        (full + compact + 3, False, True),
+        (0, False, True),
+    )
+    state.components["cmp_unrecorded"] = _entry("Aid", None)
+
+    listing = state.canvas_listing_state()
+
+    assert len(_named_ids(listing)) == full + compact
+    assert {entry["turn"] for entry in listing["off_canvas"]} == {cap + 3}
+    assert len(listing["off_canvas"]) == compact
+    assert listing["counted"][0] == {"turn": cap + 4, "on_canvas": 3}
+    assert [count["turn"] for count in listing["counted"]] == [
+        cap + 4,
+        *range(cap + 2, 3, -1),
+    ]
+    assert listing["counted_rest"] == {"off_canvas": 4}
+
+
+def test_cards_this_turn_took_off_rank_behind_the_pinned_ones():
+    state = _turns_of_cards((3, True, True), (20, False, False))
+
+    listing = state.canvas_listing_state()
+
+    assert [block["component_id"] for block in listing["blocks"]] == [
+        f"cmp_1_{n:02d}" for n in range(3)
+    ]
+    assert [entry["component_id"] for entry in listing["off_canvas"]] == [
+        f"cmp_2_{n:02d}" for n in range(20)
+    ]
+
+
+def test_turns_of_cards_off_the_canvas_are_named_whole_or_counted():
+    """The off-canvas cards are named a whole turn at a time, newest first,
+    until a turn does not fit. That turn and the older turns are counted."""
+    compact = studio_state._LISTING_COMPACT_CAP
+    state = _turns_of_cards(
+        (5, False, False), (compact - 3, False, False), (2, False, False), (0, False, True)
+    )
+
+    listing = state.canvas_listing_state()
+
+    assert [entry["turn"] for entry in listing["off_canvas"]] == [3, 3, *[2] * (compact - 3)]
+    assert listing["counted"] == [{"turn": 1, "off_canvas": 5}]
+
+
+def test_recall_without_a_component_lists_the_canvas():
+    state = _canvas({"cmp_01": _entry("Aid", _fact_summary()), "cmp_02": _entry("Debt", None)})
     assert state.composition is not None
-    for block in state.composition.blocks:
-        block.pinned = True
-    for index in range(studio_state._DIGEST_HIDDEN_CAP + 2):
-        hidden = _entry("h" * BIG, None)
-        hidden["type"] = "x" * BIG
-        state.components["cmp_h" + "i" * BIG + str(index)] = hidden
+    state.components["cmp_old"] = _entry("Old", _fact_summary())
+    state.turns = [{"user": "u", "assistant": "a", "cards": [{"component_id": "cmp_old"}]}]
+    state.composition.blocks[0].pinned = True
 
-    digest = state.canvas_digest_state(focus=next(reversed(entries)))
+    listing = state.recall_part(part="canvas")
 
-    assert digest is not None
-    assert digest["hidden_not_shown"] == 2
-    assert _serialised(digest) <= CANVAS_DIGEST_MAX_BYTES
+    assert listing["part"] == "canvas"
+    assert [card["component_id"] for card in listing["blocks"]] == ["cmp_01", "cmp_02"]
+    assert listing["blocks"][0]["pinned"] is True
+    assert listing["blocks"][0]["turn"] == 2
+    assert [card["component_id"] for card in listing["off_canvas"]] == ["cmp_old"]
 
 
 def test_the_orchestrators_canvas_summary_counts_the_cards_and_names_none():
-    """The always-on summary is two counts; the listing is a recall away."""
+    """The always-on summary holds counts only. The listing is a recall away."""
     state = _canvas({"cmp_01": _entry("Aid", _fact_summary()), "cmp_02": _entry("Debt", None)})
     state.components["cmp_old"] = _entry("Old", None)
 
@@ -855,64 +1038,6 @@ def test_the_canvas_summary_keeps_a_focus_card_in_full():
     assert summary["blocks"][0]["fact_summary"] is not None
 
 
-def test_recall_without_a_component_lists_the_canvas_and_the_hidden_cards():
-    state = _canvas({"cmp_01": _entry("Aid", _fact_summary()), "cmp_02": _entry("Debt", None)})
-    assert state.composition is not None
-    state.composition.blocks[0].pinned = True
-    state.components["cmp_old"] = _entry("Old", _fact_summary())
-
-    listing = state.recall_part(part="canvas")
-
-    assert listing["part"] == "canvas"
-    assert [card["component_id"] for card in listing["on_canvas"]] == ["cmp_01", "cmp_02"]
-    assert listing["on_canvas"][0]["pinned"] is True
-    assert [card["component_id"] for card in listing["hidden"]] == ["cmp_old"]
-    assert listing["hidden"][0]["fact_summary"] is not None
-
-
-def test_the_listing_names_cards_past_its_cap_compactly_so_each_can_be_found():
-    """Past the newest 16 a card is still named (id, type, title), so the
-    model can recall or remove it by id; past that compact cap they are
-    counted."""
-    full, compact = studio_state._DIGEST_BLOCK_CAP, studio_state._LISTING_COMPACT_CAP
-    state = _canvas({f"cmp_{n:03d}": _entry(f"Card {n}", None) for n in range(full + compact + 2)})
-
-    listing = state.canvas_listing_state()
-
-    assert len(listing["on_canvas"]) == full
-    assert len(listing["on_canvas_older"]) == compact
-    assert set(listing["on_canvas_older"][0]) == {"component_id", "type", "title"}
-    assert listing["on_canvas_older"][-1]["component_id"] == f"cmp_{compact + 1:03d}"
-    assert listing["on_canvas_not_shown"] == 2
-
-
-def test_the_listing_at_every_cap_stays_under_its_maximum():
-    title = "t" * (studio_state._TITLE_BYTE_CAP - 2)
-    summary = "s" * (studio_state._FACT_SUMMARY_BYTE_CAP - 2)
-    shows = _shows(
-        "n" * (studio_state._DIGEST_NAME_BYTE_CAP - 2),
-        "y" * (studio_state._DIGEST_TIME_BYTE_CAP - 2),
-    )
-    many = studio_state._DIGEST_BLOCK_CAP + studio_state._LISTING_COMPACT_CAP + 3
-    entries = {
-        f"cmp_{index:058d}": _entry(title, summary, revision=9_999_999_999, shows=shows)
-        for index in range(many)
-    }
-    state = _canvas(entries)
-    assert state.composition is not None
-    for block in state.composition.blocks:
-        block.pinned = True
-    for index in range(many):
-        state.components[f"cmp_h{index:057d}"] = _entry(
-            title, summary, revision=9_999_999_999, shows=shows
-        )
-
-    listing = state.canvas_listing_state()
-
-    assert listing["hidden_not_shown"] == 3
-    assert _serialised({"part": "canvas", **listing}) <= studio_state.CANVAS_LISTING_MAX_BYTES
-
-
 def test_recall_says_whether_a_component_is_still_on_the_canvas():
     state = _canvas({"cmp_01": _entry("Aid", None)})
     state.components["cmp_off"] = _entry("Removed", None)
@@ -925,9 +1050,9 @@ def test_removing_cards_takes_the_named_blocks_off_and_reports_the_rest():
     state = _canvas({f"cmp_0{n}": _entry("Aid", None) for n in (1, 2, 3)})
     before = state.composition
 
-    removed, missing = remove_cards(state, ["cmp_02", "cmp_99"], all_cards=False)
+    removal = remove_cards(state, ["cmp_02", "cmp_99"], all_cards=False)
 
-    assert (removed, missing) == (["cmp_02"], ["cmp_99"])
+    assert removal[:3] == (["cmp_02"], ["cmp_99"], [])
     assert state.composition is not None and before is not None
     assert [b.component_id for b in state.composition.blocks] == ["cmp_01", "cmp_03"]
     assert state.composition.revision == before.revision + 1
@@ -937,69 +1062,77 @@ def test_removing_cards_takes_the_named_blocks_off_and_reports_the_rest():
     assert state.take_unreported_removal() is False
 
 
+@pytest.mark.parametrize(
+    ("named", "all_cards"),
+    [(["cmp_01", "cmp_02"], False), ([], True)],
+    ids=["named", "all-cards"],
+)
+def test_removing_cards_leaves_pinned_ones_and_names_them(named: list[str], all_cards: bool):
+    """Only the user unpins a card, so a pinned block stays whether the call
+    names it or takes every card, and the call says which stayed."""
+    state = _canvas({f"cmp_0{n}": _entry("Aid", None) for n in (1, 2, 3)})
+    assert state.composition is not None
+    state.composition.blocks[0].pinned = True
+
+    removal = remove_cards(state, named, all_cards=all_cards)
+
+    assert removal.kept_pinned == ["cmp_01"]
+    assert "cmp_01" not in removal.removed
+    assert state.composition.blocks[0].component_id == "cmp_01"
+    assert state.composition.blocks[0].pinned is True
+
+
+def test_a_call_naming_only_pinned_cards_changes_nothing():
+    state = _canvas({"cmp_01": _entry("Aid", None)})
+    assert state.composition is not None
+    state.composition.blocks[0].pinned = True
+    before = state.composition.revision
+
+    assert remove_cards(state, ["cmp_01"], all_cards=False)[:3] == ([], [], ["cmp_01"])
+    assert state.composition.revision == before
+    assert state.take_unreported_removal() is False
+
+
 def test_a_card_already_off_the_canvas_is_not_reported_missing():
     state = _canvas({"cmp_01": _entry("Aid", None)})
     state.components["cmp_hidden"] = _entry("Hidden", None)
 
-    assert remove_cards(state, ["cmp_hidden"], all_cards=False) == ([], [])
+    assert remove_cards(state, ["cmp_hidden"], all_cards=False)[:3] == ([], [], [])
     assert state.take_unreported_removal() is False
 
 
 def test_removing_every_card_leaves_an_empty_canvas_the_digest_states():
     state = _canvas({f"cmp_0{n}": _entry("Aid", None) for n in (1, 2)})
 
-    removed, missing = remove_cards(state, [], all_cards=True)
+    removal = remove_cards(state, [], all_cards=True)
 
-    assert (removed, missing) == (["cmp_01", "cmp_02"], [])
-    digest = state.canvas_digest_state()
-    assert digest is not None and digest["blocks"] == []
-    assert remove_cards(state, [], all_cards=True) == ([], [])
+    assert removal[:3] == (["cmp_01", "cmp_02"], [], [])
+    listing = state.canvas_listing_state()
+    assert all(block["on_canvas"] is False for block in listing["blocks"])
+    assert remove_cards(state, [], all_cards=True) == ([], [], [], {})
 
 
-def test_a_focus_that_names_no_stored_component_stays_out_of_the_digest():
+def test_a_focus_that_names_no_stored_component_stays_out_of_the_summary():
     """`focus` is the client's `component_ref.component_id`, an unbounded string."""
     state = _canvas({"cmp_01": _entry("Aid", _fact_summary())})
 
-    digest = state.canvas_digest_state(focus="F" * 1_000_000)
+    summary = state.canvas_summary_state(focus="F" * 1_000_000)
 
-    assert digest is not None
-    assert "focus_component_id" not in digest
-    assert [block["component_id"] for block in digest["blocks"]] == ["cmp_01"]
-    assert _serialised(digest) <= CANVAS_DIGEST_MAX_BYTES
+    assert summary == {"cards_on_canvas": 1, "cards_hidden": 0}
 
 
-def test_a_focus_that_names_a_stored_component_is_named_in_the_digest():
-    state = _canvas({"cmp_01": _entry("Aid", _fact_summary()), "cmp_02": _entry("Debt", None)})
-
-    digest = state.canvas_digest_state(focus="cmp_01")
-
-    assert digest is not None
-    assert digest["focus_component_id"] == "cmp_01"
-
-
-def test_a_focus_on_a_component_off_the_canvas_adds_its_block_and_names_it():
+def test_a_focus_card_off_the_canvas_comes_whole_and_says_it_is_hidden():
+    """#348 keeps the focus card whatever its state. A hidden one stays
+    hidden, so the model does not read it as on the user's canvas."""
     state = _canvas({"cmp_01": _entry("Aid", None)})
     state.components["cmp_off"] = _entry("Off the canvas", None)
 
-    digest = state.canvas_digest_state(focus="cmp_off")
+    summary = state.canvas_summary_state(focus="cmp_off")
 
-    assert digest is not None
-    assert digest["focus_component_id"] == "cmp_off"
-    assert digest["blocks"][-1]["component_id"] == "cmp_off"
-
-
-def test_a_focus_card_older_than_the_block_cap_stays_in_the_digest():
-    """The card the user asks about is the one block the digest must keep."""
-    entries = {f"cmp_{index:02d}": _entry(f"Card {index}", None) for index in range(17)}
-    state = _canvas(entries)
-
-    digest = state.canvas_digest_state(focus="cmp_00")
-
-    assert digest is not None
-    ids = [block["component_id"] for block in digest["blocks"]]
-    assert len(ids) == studio_state._DIGEST_BLOCK_CAP
-    assert "cmp_00" in ids
-    assert digest["focus_component_id"] == "cmp_00"
+    assert summary is not None
+    assert summary["focus_component_id"] == "cmp_off"
+    assert [block["component_id"] for block in summary["blocks"]] == ["cmp_off"]
+    assert summary["blocks"][0]["on_canvas"] is False
 
 
 def test_a_component_id_a_type_and_a_title_of_any_size_are_cut_to_their_caps():
@@ -1027,11 +1160,12 @@ def test_a_component_id_a_type_and_a_title_of_any_size_are_cut_to_their_caps():
         ],
         actor=CompositionActor.MODEL,
     )
+    state.turn_components = [{"component_id": huge_id}, {"component_id": "cmp_02"}]
 
-    digest = state.canvas_digest_state()
+    digest = state.canvas_listing_state()
 
     assert digest is not None
-    assert _serialised(digest) <= CANVAS_DIGEST_MAX_BYTES
+    assert _serialised(digest) <= CANVAS_LISTING_MAX_BYTES
     first, second = digest["blocks"]
     assert _serialised(first["component_id"]) <= studio_state._BLOCK_ID_BYTES
     assert first["component_id"].endswith(studio_state._CUT_MARKER)
@@ -3059,7 +3193,11 @@ async def test_a_card_write_commits_only_the_fields_its_change_made(new_store) -
     remove = studio_state.make_remove_cards(store)
     token = current_conversation_key.set(("principal", CONVERSATION))
     try:
-        assert await remove(component_ids=["cmp_two"], all_cards=False) == (["cmp_two"], [])
+        assert (await remove(component_ids=["cmp_two"], all_cards=False))[:3] == (
+            ["cmp_two"],
+            [],
+            [],
+        )
     finally:
         current_conversation_key.reset(token)
 
@@ -3468,7 +3606,7 @@ async def test_a_removal_whose_commit_lost_its_acknowledgement_reports_the_cards
         current_conversation_key.reset(token)
 
     assert faults == [1]
-    assert result == (["cmp_two"], [])
+    assert result[:3] == (["cmp_two"], [], [])
     assert state.take_unreported_removal() is True
     assert state.composition is not None and state.composition.blocks == []
     reloaded = await new_store().load("principal", CONVERSATION)
@@ -3552,7 +3690,7 @@ async def test_a_retried_removal_of_every_card_keeps_a_card_the_user_added_meanw
     result = await _remove_all(store_a)
 
     assert faults == [1]
-    assert result == (["cmp_two"], [])
+    assert result[:3] == (["cmp_two"], [], [])
     assert state.take_unreported_removal() is True
     reloaded = await new_store().load("principal", CONVERSATION)
     assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
@@ -3601,7 +3739,7 @@ async def test_overlapping_canvas_changes_each_land_once_when_the_first_lost_its
 
     assert faults == [1]
     assert landing[0].done()
-    assert result == (["cmp_two"], [])
+    assert result[:3] == (["cmp_two"], [], [])
     reloaded = await new_store().load("principal", CONVERSATION)
     assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
     assert state.composition == reloaded.composition

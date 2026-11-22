@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx2
 import pytest
-from analysis_mcp import verbs
+from analysis_mcp import digest, verbs
 from analysis_mcp.digest import render_summary_digest
 from analysis_mcp.runner_client import (
     DEFAULT_RETRY_AFTER_S,
@@ -23,6 +23,7 @@ from analysis_mcp.runner_client import (
 )
 from analysis_mcp.summary import LIST_CAP, VerbSummary
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
+from common.breakdown_labels import NODES_READ_TIMEOUT_S
 from common.materialisation import (
     DEFAULT_MINT_OPTIONS,
     AnchorRecord,
@@ -631,6 +632,159 @@ async def test_the_statvars_a_summed_read_added_up_reach_the_result_and_the_dige
     head, _, identity = result.content[0].text.rpartition("\n\n")
     assert head.endswith(f"summed: {_SPEC}, {_DATASET_CV} added up over 1,598 StatVars.")
     assert identity.startswith("frame reference:")
+
+
+# A CRS purpose code as dfo-apis' `POST /api/graph/nodes` answers it.
+_PURPOSE_NODE = {
+    "ref": "CRSPurposeCode15220",
+    "kind": "code",
+    "label": "civilian peace-building, conflict prevention and resolution (CRS Purpose)",
+    "code": {
+        "code": "15220",
+        "property": "crsPurpose",
+        "code_system": {"ref": "CRSPurposeCodeEnum", "label": "CRS Purpose"},
+    },
+}
+
+
+_PEACE = "civilian peace-building, conflict prevention and resolution"
+_BREAKDOWN = "stat_var_crsPurpose"
+_CELLS = ["CRSPurposeCode15220", "agriculture"]
+
+
+def _aggregate_by_purpose() -> dict[str, Any]:
+    """A recorded aggregate answer grouped by the two `_CELLS`."""
+    body = _recorded_ready("aggregate")
+    summary = body["summary"]
+    groups = summary["result"]["group_summaries"]
+    keyed = [
+        {**group, "group_key": [[_BREAKDOWN, cell]]}
+        for group, cell in zip(groups, _CELLS, strict=True)
+    ]
+    parameters = {**summary["parameters"], "group_by": [_BREAKDOWN]}
+    result = {**summary["result"], "group_summaries": keyed}
+    return {**body, "summary": {**summary, "parameters": parameters, "result": result}}
+
+
+def _rank_excluding_purposes() -> dict[str, Any]:
+    """A recorded rank answer whose exclusion names the two `_CELLS`."""
+    body = _recorded_ready("rank")
+    summary = body["summary"]
+    (exclusion, *_) = summary["exclusions"]
+    excluded = {**exclusion, "entities": {_BREAKDOWN: _CELLS}}
+    return {**body, "summary": {**summary, "exclusions": [excluded]}}
+
+
+def _compare_of_purposes() -> dict[str, Any]:
+    """A recorded compare answer of one StatVar across the two `_CELLS`, `agriculture`
+    on the left."""
+    replies = json.loads(REPLIES_PATH.read_text())
+    body = next(
+        reply["body"]
+        for key, reply in replies.items()
+        if reply["status"] == 200
+        and key.startswith("/api/datasets/analysis {")
+        and reply["body"]["summary"]["verb"] == "compare"
+        and reply["body"]["summary"]["result"]["left_entities"].keys() == {"donor"}
+        and reply["body"]["summary"]["result"]["right_entities"].keys() == {"donor"}
+    )
+    summary = body["summary"]
+    result = {
+        **summary["result"],
+        "left_entities": {_BREAKDOWN: _CELLS[1]},
+        "right_entities": {_BREAKDOWN: _CELLS[0]},
+    }
+    return {**body, "summary": {**summary, "exclusions": [], "result": result}}
+
+
+@pytest.mark.parametrize(
+    ("answer", "call", "shown"),
+    [
+        pytest.param(
+            _aggregate_by_purpose,
+            lambda: verbs.aggregate(frame_ref=_FRAME, aggregation="sum"),
+            [
+                f"{_BREAKDOWN}={_PEACE} (CRSPurposeCode15220)",
+                f"{_BREAKDOWN}=agriculture",
+            ],
+            id="group key",
+        ),
+        pytest.param(
+            _rank_excluding_purposes,
+            lambda: verbs.rank(frame_ref=_FRAME, rank_by=["donor"]),
+            [f"{_BREAKDOWN}={_PEACE} (CRSPurposeCode15220), {_BREAKDOWN}=agriculture"],
+            id="exclusion",
+        ),
+        pytest.param(
+            _compare_of_purposes,
+            lambda: verbs.compare(frame_ref=_FRAME, right_frame_ref=_DERIVED),
+            [f", {_PEACE} (CRSPurposeCode15220) minus agriculture"],
+            id="compare difference",
+        ),
+    ],
+)
+async def test_a_digest_names_a_breakdown_code_cell_by_its_label_and_value(
+    store: InMemoryMaterialisationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: Callable[[], dict[str, Any]],
+    call: Callable[[], Awaitable[Any]],
+    shown: list[str],
+) -> None:
+    """A dcid cell of a breakdown column reads as its label with the dcid after it,
+    which a filter or a select still binds, and a label cell as it is. The digest is
+    rendered once with no labels and once with them, and the nodes read is bounded by
+    its own short timeout."""
+    stated = answer()
+    renders = _count_renders(monkeypatch)
+
+    def reply(request: dict[str, Any]) -> httpx2.Response:
+        if "dcids" in request:
+            held = [
+                _PURPOSE_NODE
+                if dcid == _PURPOSE_NODE["ref"]
+                else {"ref": dcid, "status": "not_held"}
+                for dcid in request["dcids"]
+            ]
+            return httpx2.Response(200, json={"nodes": held})
+        return httpx2.Response(200, json=stated)
+
+    runner = _install(reply)
+
+    result = await call()
+
+    assert result.is_error is False, result.content
+    text = result.content[0].text
+    for line in shown:
+        assert line in text
+    reads = [request for request in runner.requests if request.url.path == "/api/graph/nodes"]
+    assert [json.loads(request.content) for request in reads] == [{"dcids": _CELLS}]
+    assert reads[0].extensions["timeout"]["read"] == NODES_READ_TIMEOUT_S
+    assert renders == [None, None]
+
+
+async def test_a_digest_with_no_cell_labelled_is_rendered_once(
+    store: InMemoryMaterialisationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    renders = _count_renders(monkeypatch)
+    _install(httpx2.Response(200, json=_recorded_ready("aggregate")))
+
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    assert result.is_error is False, result.content
+    assert renders == [None]
+
+
+def _count_renders(monkeypatch: pytest.MonkeyPatch) -> list[None]:
+    """A list that grows by one each time a digest is rendered."""
+    renders: list[None] = []
+    render = digest._render_summary_digest
+
+    def counted(summary: VerbSummary, *, heading: str | None) -> str:
+        renders.append(None)
+        return render(summary, heading=heading)
+
+    monkeypatch.setattr(digest, "_render_summary_digest", counted)
+    return renders
 
 
 async def test_an_answer_whose_summed_reads_do_not_fit_refuses_as_outside_the_contract(

@@ -456,9 +456,13 @@ reworded question cannot be read as a new plan.
 turn's `question` before the planner ever runs, and a restart would silently
 swap the question out from under the plan the workflow holds. So
 `starts_new_plan` with a plan already recorded is refused with
-`question_fixed`, records nothing, and is how the model tells the harness the
-user's reply asks a different question: the turn ends there for the harness to
-tell the user to send it as its own message. An amendment whose own `question`
+`question_fixed`, whether or not the call also names `amends_version`, records
+nothing, and is how the model tells the harness the user's reply asks a
+different question: the turn ends there, and the harness hands the stored text
+of the user's message the call names in `new_question_in`, the amendment or the
+user's own-words answer to the planner's question about it, to the client to
+send as the next turn (`harness.graph.planning`). On the user's amendment, a
+call naming no such message is refused `invalid_plan`. An amendment whose own `question`
 states something other than the one recorded is refused as `invalid_plan`
 instead, correctable within the same round (`submission.service._resolve_intent`).
 

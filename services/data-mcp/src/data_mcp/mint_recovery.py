@@ -33,6 +33,10 @@ Recoverable:
   pair `frame_ref_for` derives from them and a listed version is the match. The
   record holds those options and that stamp. A trace that keeps no stamp is tried under
   the stamp each version lists and under none.
+- `artifact_digest` of a frame named by the digest of the file it was read from. apis
+  lists no file digest on a version, so no candidate above reproduces the pair. The
+  frame's held trace keeps the digest (`MaterialisationTrace.artifact_digest`) beside its
+  options and stamp, and the pair is matched from the trace as in the entry above.
 - `options.groupby` of a summed frame with a `content_version` of its own. apis
   records the version it was summed from as `base_content_version`, and its
   versions route returns the `groupby` the mint sent whenever a file stored under
@@ -74,6 +78,8 @@ Not recoverable:
   `no_version_matches`.
 - A frame named under another stamp whose frame the store no longer holds, or holds
   with a trace that keeps no stamp. It fails with `no_version_matches`.
+- A frame named by its file's digest whose frame the store no longer holds. It fails
+  with `no_version_matches`.
 - A frame whose dataset version apis no longer lists, or one minted with a
   column selection outside `RECOVERABLE_COLUMNS`. Both fail with
   `no_version_matches`.
@@ -277,9 +283,9 @@ def _listed_or_none(version: DatasetVersion) -> tuple[str | None, ...]:
 async def _recover_from_trace(
     ref: FrameRef, *, versions: Sequence[DatasetVersion], store: MaterialisationStore
 ) -> MintRecord:
-    """The mint record of `ref` rebuilt from the options and stamp its held frame's
-    trace keeps, matched against `versions` by `frame_ref_for`. A trace that keeps no
-    stamp is tried under each version's `_listed_or_none`."""
+    """The mint record of `ref` rebuilt from the options, stamp and artifact digest its
+    held frame's trace keeps, matched against `versions` by `frame_ref_for`. A trace that
+    keeps no stamp is tried under each version's `_listed_or_none`."""
     held = await _held(store, ref)
     trace = None if held is None else held[1]
     if held is None or not isinstance(trace, MaterialisationTrace) or trace.options is None:
@@ -303,6 +309,7 @@ async def _recover_from_trace(
                 groupby=groupby,
                 without_party_totals=cut,
                 enrichment_stamp=stamp,
+                artifact_digest=trace.artifact_digest,
                 keep_by_order=True,
             )
             if candidate == ref:
@@ -312,6 +319,7 @@ async def _recover_from_trace(
                     options=dict(options),
                     stat_var_count=observed_shape(held[0])[1],
                     enrichment_stamp=recorded_stamp(options.get("columns") or (), stamp),
+                    artifact_digest=trace.artifact_digest,
                 )
     raise MintRecordUnrecoverableError(ref, reason="no_version_matches")
 

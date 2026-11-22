@@ -59,6 +59,8 @@ import httpx2
 import pyarrow as pa
 from analysis_mcp.frame_ref_resolution import read_derived_marker
 from analysis_mcp.identity import OP_SPEC_HASH_PREFIX
+from analysis_mcp.runner_client import read_graph_nodes
+from common.breakdown_labels import CellLabels, label_cells
 from common.materialisation import FrameRef
 from common.materialisation import get_store as get_frame_store
 from common.place_type import (
@@ -167,12 +169,14 @@ from harness.reply_figures import (
     DrawnSeries,
     card_result,
     drawn_series,
+    labelled,
+    series_cells,
     unplaced_names,
     with_coordinates,
 )
 from harness.rolling_cards import named_year
 from harness.scope_choices import PartScope, carried_entries
-from harness.studio_state import RecallPart, RecallRefusedError
+from harness.studio_state import CardRemoval, RecallPart, RecallRefusedError
 from harness.tool_contracts import (
     HarnessCode,
     ResolverError,
@@ -1885,6 +1889,77 @@ def _search_context(state: SessionState) -> SearchContext:
     )
 
 
+def _nothing_removed_note(
+    component_ids: Sequence[str],
+    *,
+    kept_pinned: Collection[str],
+    already_off: Collection[str],
+    missing: Collection[str],
+    all_cards: bool,
+) -> str:
+    """What a `remove_cards` call that took nothing off met, a sentence per
+    outcome: cards the user pinned, named cards already off the canvas, ids
+    this conversation never held, and, for `all_cards`, a canvas with no
+    card left to take off."""
+    sentences: list[str] = []
+    if kept_pinned:
+        sentences.append(
+            "The user pinned the cards in kept_pinned, so they stay on the canvas. The user "
+            "can unpin one from the card's menu (Unpin from Canvas) and then ask again."
+        )
+    if already_off:
+        sentences.append(
+            "Those cards were already off the canvas."
+            if len(already_off) == len(set(component_ids))
+            else "The cards in already_off were already off the canvas."
+        )
+    if missing:
+        sentences.append("No card of this conversation has the ids in not_in_conversation.")
+    if all_cards and not kept_pinned:
+        sentences.append("The canvas was already empty.")
+    return " ".join(sentences)
+
+
+_REMOVAL_KEYS = frozenset({"removed", "kept_pinned", "titles", "note"})
+
+
+def removal_reply(answer: Mapping[str, Any]) -> str | None:
+    """The reply to a turn whose only call was `remove_cards`, written from
+    the call's `answer`: each card taken off and each pinned card kept, by
+    title, and how the user unpins a kept one. None for an answer that holds
+    anything else (a refusal, `already_off`, `not_in_conversation`) or names
+    no card, which the model answers instead."""
+    if not answer.keys() <= _REMOVAL_KEYS:
+        return None
+    removed = answer.get("removed") or []
+    kept = answer.get("kept_pinned") or []
+    titles = answer.get("titles") or {}
+    if not (removed or kept) or any(cid not in titles for cid in [*removed, *kept]):
+        return None
+    sentences: list[str] = []
+    if removed:
+        sentences.append(f"I took {_quoted_list([titles[cid] for cid in removed])} off the canvas.")
+    if len(kept) == 1:
+        sentences.append(
+            f'"{titles[kept[0]]}" is pinned, so it stays. To remove it, choose Unpin from '
+            "Canvas in its menu, then ask again."
+        )
+    elif kept:
+        sentences.append(
+            f"{_quoted_list([titles[cid] for cid in kept])} are pinned, so they stay. To remove "
+            "one, choose Unpin from Canvas in its menu, then ask again."
+        )
+    return " ".join(sentences)
+
+
+def _quoted_list(titles: Sequence[str]) -> str:
+    """`titles` quoted and joined: "A", "A" and "B", or "A", "B", and "C"."""
+    quoted = [f'"{title}"' for title in titles]
+    if len(quoted) < 3:
+        return " and ".join(quoted)
+    return f"{', '.join(quoted[:-1])}, and {quoted[-1]}"
+
+
 def build_orchestrator_tools(
     *,
     resolver: Resolver,
@@ -1895,7 +1970,7 @@ def build_orchestrator_tools(
     recall_part: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     canvas_series: Callable[[], list[str]] | None = None,
     canvas_cards: Callable[[], list[dict[str, Any]]] | None = None,
-    remove_cards: Callable[..., Awaitable[tuple[list[str], list[str]]]] | None = None,
+    remove_cards: Callable[..., Awaitable[CardRemoval]] | None = None,
 ) -> list[Any]:
     """The orchestrator's tools, bound to this server's resolver, executor and tool surface.
 
@@ -2323,22 +2398,32 @@ def build_orchestrator_tools(
         The rows of the frame the card draws (`_drawn_store_ref`) are read
         only for a name in `chart.state_values_for` that matches no series
         while some state no coordinates: the platform's summary lists the
-        coordinates of twelve."""
+        coordinates of twelve. The breakdown cells the series are labelled and
+        named by read as their labels with their values after them
+        (`common.breakdown_labels`), read from their graph nodes before that
+        match, and again only for the cells the frame's coordinates add."""
         payload = component.get("payload") or {}
         series = drawn_series(payload.get("component") or {}, component.get("fact_summary") or {})
-        if unplaced_names(series, chart.state_values_for):
+        labels = await label_cells(series_cells(series), read_nodes=read_graph_nodes)
+        if unplaced_names(labelled(series, labels), chart.state_values_for, labels=labels):
             placed = await _frame_work(
                 _drawn_store_ref(payload, frame),
                 functools.partial(_coordinate_rows, series=series),
             )
-            series = placed or series
+            if placed:
+                read = set(series_cells(series))
+                added = [cell for cell in series_cells(placed) if cell not in read]
+                more = await label_cells(added, read_nodes=read_graph_nodes)
+                labels = CellLabels({**labels.labels, **more.labels})
+                series = placed
         return card_result(
-            series,
+            labelled(series, labels),
             state_values_for=chart.state_values_for,
             state_span=chart.state_span,
             state_period=chart.state_period,
             on_canvas=on_canvas,
             cut=cut,
+            labels=labels,
         )
 
     async def _stored_card(component_id: str) -> dict[str, Any] | None:
@@ -2775,10 +2860,10 @@ def build_orchestrator_tools(
         you.
 
         Ask only what changes the answer. Each question offers at least one
-        option. An option for a count or prices that a search result names
-        carries the spec_id the result gives it, and the answer names that
-        spec_id when the user picks it. A prices question names its part in
-        `prices_of`, and its options are filled in. Each spec_id goes on one option. End
+        option. An option for one of a part's candidates carries the spec_id
+        the search result gives it, and the answer names that spec_id when
+        the user picks it. Each spec_id goes on one option. A prices question
+        names its part in `prices_of`, and its options are filled in. End
         your turn after calling ask_user. Every answer comes back as this
         call's result.
         """
@@ -2942,10 +3027,22 @@ def build_orchestrator_tools(
         user's canvas.
 
         `part`: "plan" for the plan records of a turn, "readings" for the
-        search readings of a turn, "canvas" for every card of the conversation,
-        listed as on_canvas or hidden, each with its id, title, type, facts
-        and pinned state, or, with `component_id`, that one card's stored
-        entry. For a plan or readings, `turn` is the turn's number as the
+        search readings of a turn, "canvas" for the conversation's cards, or,
+        with `component_id`, that one card's stored entry. The canvas listing
+        ranks cards by the turn that drew them and holds no card's place on
+        the canvas. Each card it lists names its `turn`:
+        - `blocks`: cards in full with their facts, while places remain:
+          this turn's cards on the canvas, then the pinned ones, then the
+          other cards on the canvas, newest turn first.
+        - `titles`: the next cards of those three groups, by id, title and
+          type.
+        - `off_canvas`: cards off the canvas by id, title and type, a whole
+          turn at a time, this turn's first, then newest turn first.
+        - `counted`: for each turn with cards no list holds, how many are on
+          the canvas (`on_canvas`) and how many off it (`off_canvas`).
+        - `counted_rest`: the same two counts for older turns' cards and
+          cards of no recorded turn.
+        For a plan or readings, `turn` is the turn's number as the
         conversation digest counts them; leave it out for the newest turn
         that has the part. A target that does not exist is refused with the
         values that do.
@@ -2988,12 +3085,18 @@ def build_orchestrator_tools(
         component_ids: list[str] | None = None,
         all_cards: bool = False,
     ) -> dict[str, Any]:
-        """Take cards off the user's canvas.
+        """Take cards off the user's canvas, when the conversation has moved to
+        another subject or the user asks for cards to go.
 
         `component_ids` names the cards to take off, by the component ids the
-        canvas lists; set `all_cards` to take off every card instead. Returns
-        the ids taken off; a named card already off the canvas needs nothing,
-        and an id this conversation never held is named back.
+        canvas lists; set `all_cards` to take off every card the user has
+        not pinned. A pinned card stays on the canvas, since only the user
+        unpins it. Returns the ids taken off and, as `kept_pinned`, the
+        pinned cards left in place, with each one's title under `titles`; a
+        named card already off the canvas
+        needs nothing and is named back as `already_off`, and an id this
+        conversation never held is named back as `not_in_conversation`. When
+        nothing came off, `note` says what each named id met.
         """
         spent = _spend(call, "remove_cards")
         if spent:
@@ -3009,23 +3112,39 @@ def build_orchestrator_tools(
             )
         _canvas_series(call)
         async with _canvas_lock(call):
-            removed, missing = await remove_cards(
+            removed, missing, kept_pinned, titles = await remove_cards(
                 component_ids=component_ids or [], all_cards=all_cards
             )
             _forget_drawn(call, removed)
-        if not removed and missing and len(missing) == len(component_ids or []):
+        named = component_ids or []
+        if not all_cards and missing and len(missing) == len(dict.fromkeys(named)):
             return _failed(
                 HarnessCode.CARD_NOT_FOUND,
                 "No card of this conversation has those ids. Nothing changed.",
             )
-        if not removed:
-            note = (
-                "The canvas was already empty."
-                if all_cards
-                else "Those cards were already off the canvas."
+        # Each named id once, in the order named.
+        settled = {*removed, *kept_pinned, *missing}
+        already_off = [cid for cid in dict.fromkeys(named) if cid not in settled]
+        answer: dict[str, Any] = {"removed": removed} | {
+            key: ids
+            for key, ids in (
+                ("kept_pinned", kept_pinned),
+                ("already_off", already_off),
+                ("not_in_conversation", missing),
             )
-            return {"removed": [], "note": note}
-        return {"removed": removed} | ({"not_in_conversation": missing} if missing else {})
+            if ids
+        }
+        if removed or kept_pinned:
+            answer["titles"] = {cid: titles[cid] for cid in [*removed, *kept_pinned]}
+        if not removed:
+            answer["note"] = _nothing_removed_note(
+                named,
+                kept_pinned=kept_pinned,
+                already_off=already_off,
+                missing=missing,
+                all_cards=all_cards,
+            )
+        return answer
 
     remove_cards_tool.__name__ = "remove_cards"
 
@@ -3047,4 +3166,11 @@ def build_orchestrator_tools(
     ]
 
 
-__all__ = ["TOOL_NAMES", "Chart", "Resolver", "build_orchestrator_tools", "raised_answer"]
+__all__ = [
+    "TOOL_NAMES",
+    "Chart",
+    "Resolver",
+    "build_orchestrator_tools",
+    "raised_answer",
+    "removal_reply",
+]

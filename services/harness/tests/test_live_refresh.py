@@ -428,6 +428,21 @@ async def test_a_card_that_cannot_be_replayed_is_refused_before_any_root_is_aske
 # --- the roots ------------------------------------------------------------------
 
 
+async def test_a_card_whose_roots_carry_a_member_this_build_does_not_know_is_checked(
+    apis: RecordedApis,
+) -> None:
+    """A recipe published by a build whose mint record carries a later member is read
+    as `read_mint_record` reads a stored record."""
+    recipe = recipe_of(STORED)
+    recipe["roots"] = [{**root, "a_later_member": "x"} for root in recipe["roots"]]
+    apis.recipes[STORED] = recipe
+    apis.heads = {SPEC: FIRST}
+    async with client_of(service_over(apis, Replayer(apis))) as client:
+        response = await refresh(client)
+
+    assert (response.status_code, response.json()) == (200, {"status": "current"})
+
+
 async def test_a_card_whose_roots_are_all_current_stands_and_nothing_else_is_asked(
     apis: RecordedApis, flow_definition: SuspendingDefinitionStore
 ) -> None:

@@ -30,6 +30,7 @@ from typing import Annotated, Any, Literal
 
 import httpx2
 import pyarrow as pa
+from common.breakdown_labels import NODES_READ_TIMEOUT_S, CellLabels, label_cells
 from common.caller import current_writer
 from common.materialisation import FrameRef, MintRecord
 from common.place_type import PARTY_ROLES, type_column
@@ -63,9 +64,11 @@ from data_mcp.frame_materialisation import (
     ENRICHMENT,
     KIND_COLUMNS,
     WITHOUT_PARTY_TOTALS,
+    is_incomplete_rendering,
     materialise_and_register,
     replayed_mint_options,
     resolved_options,
+    select_requested_artifact,
 )
 from data_mcp.get_data_digest import (
     BreakdownLevel,
@@ -83,6 +86,7 @@ from data_mcp.manifest import (
     DefinitionModel,
     Manifest,
     SeriesStatisticsModel,
+    WarningModel,
     render_validation_errors,
     strip_manifest,
 )
@@ -202,6 +206,11 @@ _DEFINITION_STORE_SERVICE_NAME = "the definition store"
 # reserve unspent.
 _STATISTICS_FLOOR_S = 8.0
 _STATISTICS_RESERVE_S = 3.0
+# The breakdown cells' label read runs after the statistics read, inside its reserve. It
+# must end with `_LABELS_RENDER_FLOOR_S` left for rendering and waits at most
+# `NODES_READ_TIMEOUT_S`, so a statistics read that spent its whole share still leaves
+# the labels about 2s.
+_LABELS_RENDER_FLOOR_S = 1.0
 
 # The clock a call's deadline reads. Tests replace it to move time without sleeping.
 _deadline_clock: Clock = time.monotonic
@@ -787,6 +796,37 @@ async def _fetch_warning_labels(manifest: Manifest, *, deadline: CallDeadline) -
     return labels
 
 
+async def _fetch_breakdown_labels(
+    series_stats: Sequence[SeriesStatisticsModel] | None, *, deadline: CallDeadline
+) -> CellLabels:
+    """The labels of the breakdown cells `series_stats` name (`stat_var_<axis>` entities),
+    read through `node_lookup.describe_nodes` (`common.breakdown_labels.label_cells`).
+
+    The read waits at most `NODES_READ_TIMEOUT_S` and must end with
+    `_LABELS_RENDER_FLOOR_S` of `deadline` still left. A failed or late read is logged
+    and labels nothing, so the digest names those cells by their values.
+    """
+    cells = [
+        (entity.role, entity.ref) for series in series_stats or () for entity in series.entities
+    ]
+
+    async def read_nodes(dcids: list[str]) -> list[dict[str, Any]]:
+        wait_s = min(NODES_READ_TIMEOUT_S, deadline.reserving(_LABELS_RENDER_FLOOR_S).remaining())
+        try:
+            async with asyncio.timeout(wait_s):
+                outcomes = await node_lookup.describe_nodes(dcids)
+        except (UpstreamError, ValueError, TimeoutError) as exc:
+            logger.warning("get_data: could not label the breakdown cells: %s", exc)
+            return []
+        return [
+            node.model_dump(mode="json")
+            for node in outcomes.values()
+            if not isinstance(node, NotHeldEntry)
+        ]
+
+    return await label_cells(cells, read_nodes=read_nodes)
+
+
 def _mint_json_or_refusal(response: httpx2.Response) -> dict[str, Any] | ToolResult:
     """The mint response's parsed JSON body, or the refusal for one that does not parse."""
     try:
@@ -993,6 +1033,7 @@ async def _finish_mint_response(
         series_stats=series_stats,
         description=description,
     )
+    cell_labels = await _fetch_breakdown_labels(series_stats, deadline=deadline)
 
     # The digest and the returned manifest carry the same labelled warning messages.
     manifest = manifest.model_copy(
@@ -1012,6 +1053,7 @@ async def _finish_mint_response(
             breakdown=breakdown,
             description=description,
             summed=summed,
+            cell_labels=cell_labels,
         )
     except ValueError as exc:
         return to_tool_result(ToolRefusal.upstream_response_unusable(detail=str(exc)))
@@ -1044,22 +1086,47 @@ async def _finish_mint_response(
 
 
 def _narrowed_to_rendering(manifest: Manifest, *, options: Mapping[str, Any]) -> Manifest:
-    """`manifest` listing only the artifact whose `rendering` equals `options`, and the
-    statistics artifact.
+    """`manifest` listing only the artifact of the requested rendering
+    (`frame_materialisation.select_requested_artifact`), and the statistics artifact.
 
     apis answers a mint with one data rendering, the one it resolved for the request,
     beside the statistics, so the narrowed list holds the same artifacts unless the
-    rendering apis resolved differs from `options`. The resource links and the harness's freshness date
-    (`harness.provenance.data_artifact`) read the narrowed list, and so does the frame
-    fetch of a mint with columns or a groupby. A manifest without the requested
-    rendering keeps only its statistics, and `materialise_and_register` refuses such a
-    mint unless the store already holds the frame. A default mint's frame is the
+    rendering apis resolved differs from `options`. The resource links and the harness's
+    freshness date (`harness.provenance.data_artifact`) read the narrowed list, and so
+    does the frame fetch of a mint with columns or a groupby. A manifest without the
+    requested rendering keeps only its statistics, and `materialise_and_register`
+    refuses such a mint before it reads the store. A default mint's frame is the
     version's canonical frame, which the snapshot route lists and no mint response
     does.
+
+    A file apis linked after a failed graph metadata read is listed under its
+    incomplete rendering, and the narrowed manifest carries an
+    `INCOMPLETE_METADATA_WARNING` for it.
     """
     statistics = find_statistics_artifact(manifest)
-    artifacts = [a for a in manifest.artifacts if a.rendering == options or a is statistics]
-    return manifest.model_copy(update={"artifacts": artifacts})
+    requested = select_requested_artifact(manifest, options=options)
+    artifacts = [a for a in manifest.artifacts if a is requested or a is statistics]
+    warnings = list(manifest.warnings)
+    if requested is not None and is_incomplete_rendering(requested.rendering):
+        # First, so the digest's warning cap keeps it before apis' other warnings.
+        warnings.insert(0, _incomplete_metadata_warning())
+    return manifest.model_copy(update={"artifacts": artifacts, "warnings": warnings})
+
+
+# The code of the warning `get_data` adds when the file it read is one apis rendered after
+# a failed graph metadata read (`frame_materialisation.is_incomplete_rendering`).
+INCOMPLETE_METADATA_WARNING = "metadata_incomplete"
+
+
+def _incomplete_metadata_warning() -> WarningModel:
+    """The `INCOMPLETE_METADATA_WARNING` for a frame read from an incomplete file."""
+    return WarningModel(
+        code=INCOMPLETE_METADATA_WARNING,
+        severity="warn",
+        message="dfo-apis could not read the graph when it rendered this file, so some "
+        "labels or place types in the frame may be missing. A later get_data call reads "
+        "a complete file once dfo-apis renders one.",
+    )
 
 
 async def _post_mint(

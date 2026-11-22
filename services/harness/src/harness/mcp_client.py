@@ -1496,6 +1496,7 @@ class McpExecutor:
                 lineage=lineage,
                 manifest=manifest,
                 platform_facts=platform_facts,
+                partial_period=_envelope_partial_period(envelope),
             ),
         }
         return _Assembled(
@@ -1836,12 +1837,29 @@ def _platform_source(platform_facts: dict[str, Any]) -> str | None:
     return None
 
 
+def _envelope_partial_period(envelope: Mapping[str, Any]) -> bool:
+    """Whether the resolved revision `envelope` states that a row its card draws
+    lies in a period its source marked partial.
+
+    dfo-apis states it on a card without a description as
+    `provenance.freshness.partial_period`, and on a card with one as a
+    non-empty `description.freshness.partial_periods`. A payload stating
+    neither reads false.
+    """
+    freshness = (envelope.get("provenance") or {}).get("freshness") or {}
+    if freshness.get("partial_period") is True:
+        return True
+    described = ((envelope.get("description") or {}).get("freshness") or {}).get("partial_periods")
+    return bool(described)
+
+
 def _wire_provenance(
     *,
     frame_ref: dict[str, Any],
     lineage: Lineage,
     manifest: dict[str, Any],
     platform_facts: dict[str, Any],
+    partial_period: bool = False,
 ) -> dict[str, Any]:
     """Wire provenance built from the manifests actually linked to `frame_ref`.
 
@@ -1861,6 +1879,10 @@ def _wire_provenance(
     A retrieval, the card's own frame among them, is listed under
     `ProvenanceInput.served_ref`, the pair the datasets door serves, while the
     lineage stays keyed by its frame key.
+
+    `freshness.partial_period` is `partial_period`, which the card's own
+    resolved revision states (`_envelope_partial_period`). The manifests carry
+    only a per-frame record, which says nothing of the rows the card draws.
     """
     now = datetime.now(UTC)
     served = {(member.spec_id, member.content_version): member.served_ref for member in lineage}
@@ -1896,7 +1918,7 @@ def _wire_provenance(
         "freshness": {
             "data_through": str(coverage_window.get("end_year") or ""),
             "last_refreshed": last_refreshed,
-            "partial_period": False,
+            "partial_period": partial_period,
         },
         "warnings": [
             {

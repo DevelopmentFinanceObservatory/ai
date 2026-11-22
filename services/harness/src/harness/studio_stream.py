@@ -104,6 +104,7 @@ from harness.studio_store import SegmentClose
 from harness.studio_translate import SEGMENT_LOST_DETAIL, STREAM_RETRY_AFTER_S
 from harness.turn.loop import Outcome, pending_owed_work
 from harness.wire import (
+    TURN_INDEX_HEADER,
     ActivityStep,
     Done,
     ElicitationRequest,
@@ -889,9 +890,11 @@ def open_stream[E, R](
     settle: Callable[[], Awaitable[bool]] | None = None,
 ) -> StudioStream:
     """Start the owner of the claimed segment `segment_id` (`own_segment`)
-    and return the response that relays it. The caller holds the segment's
-    lease and `hold` on the conversation's local lock, and hands both to the
-    owner, so it must not let go of either once this returns."""
+    and return the response that relays it, which names the index of the
+    turn it carries, `conversation`'s, in its `TURN_INDEX_HEADER`. The
+    caller holds the segment's lease and `hold` on the conversation's local
+    lock, and hands both to the owner, so it must not let go of either once
+    this returns."""
     channel: Channel = asyncio.Queue()
     gone = asyncio.Event()
     owner = owners.start(
@@ -908,4 +911,9 @@ def open_stream[E, R](
             settle=settle,
         )
     )
-    return StudioStream(channel=channel, owner=owner, gone=gone)
+    return StudioStream(
+        channel=channel,
+        owner=owner,
+        gone=gone,
+        headers={TURN_INDEX_HEADER: str(conversation.turn_index)},
+    )

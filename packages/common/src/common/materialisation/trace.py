@@ -53,6 +53,11 @@ class MaterialisationTrace:
     (`data_mcp.frame_materialisation.recorded_stamp`): set on a frame minted with
     party kinds whose artifact carried one, and `None` on any other frame and on one
     registered with a trace that lacks the member.
+
+    `artifact_digest` is the digest of the file the pair is named by
+    (`common.materialisation.frame_ref_for`): set on a frame read from a rendering's
+    file, and `None` on the canonical frame and on one registered with a trace that
+    lacks the member.
     """
 
     upstream_trace: dict[str, Any]
@@ -60,6 +65,7 @@ class MaterialisationTrace:
     content_version: str
     options: dict[str, Any] | None = None
     enrichment_stamp: str | None = None
+    artifact_digest: str | None = None
 
     @property
     def frame_content_version(self) -> str:
