@@ -39,6 +39,7 @@ beat.
 
 A turn no segment runs is closed without running its node: `stop_turn` closes it `cancelled` on a
 Stop that found no live segment (the turn paused, or left running by a segment whose lease lapsed),
+and `stop_turn_on` does so in the transaction that records the turn closed,
 `reject` closes a paused turn `done` on the user's reject of its open pause, and `abandon_on` closes
 an open turn `abandoned` in the transaction that opens the conversation's next turn.
 """
@@ -1140,6 +1141,25 @@ async def stop_turn(store: TurnStore, cursor: Cursor, *, segment_id: str) -> Cur
         CursorStale: another writer moved the cursor, or closed the turn.
     """
     return await store.finish(cursor, segment_id=segment_id, status=TurnStatus.CANCELLED)
+
+
+async def stop_turn_on(
+    conn: AsyncConnection, cursor: Cursor, *, segment_id: str, now: datetime
+) -> Cursor:
+    """Close the open turn at `cursor` `cancelled` as `stop_turn` does, on
+    `conn`, in the caller's transaction (`finish_on`), stamping the runs the
+    close ends with `now`. The Stop of a turn no segment runs
+    (`harness.studio`) runs it in the transaction of the save that records
+    the turn closed `cancelled`, so the record commits only with the cursor
+    closed.
+
+    Raises:
+        SegmentLost: `segment_id` does not hold the conversation's lease.
+        CursorStale: another writer moved the cursor, or closed the turn.
+    """
+    return await finish_on(
+        conn, cursor, segment_id=segment_id, status=TurnStatus.CANCELLED, now=now
+    )
 
 
 async def reject(store: TurnStore, cursor: Cursor, *, segment_id: str, answer: Answer) -> Cursor:

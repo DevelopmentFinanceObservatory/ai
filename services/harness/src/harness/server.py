@@ -77,6 +77,7 @@ from harness.studio_store import StudioStore
 from harness.turn.loop import Graph
 from harness.turn.store import FrameLineage, TurnStore
 from harness.turn_budget import current_turn_budget
+from harness.wire import TURN_INDEX_HEADER
 from harness.wiring import build_planner, handing_back_planner_failures
 
 logger = logging.getLogger(__name__)
@@ -547,6 +548,8 @@ def create_app(
             allow_origins=resolved_settings.studio_cors_origins,
             allow_methods=["*"],
             allow_headers=["*"],
+            # A browser reading a stream directly needs the turn's index.
+            expose_headers=[TURN_INDEX_HEADER],
         )
     if resolved_settings.studio_api_token is None:
         # PLACEHOLDER ACCESS CONTROL. Without the shared secret every

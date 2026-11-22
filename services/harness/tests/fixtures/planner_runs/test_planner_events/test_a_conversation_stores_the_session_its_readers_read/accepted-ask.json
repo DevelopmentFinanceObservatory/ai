@@ -197,9 +197,10 @@
         "rationale": null
       }
     },
-    "planner:plan": null,
+    "planner:asked_referral": null,
     "planner:rounds": 0,
-    "planner:pin_sources": {},
+    "planner:amendment_entry": false,
+    "planner:decision_pick": null,
     "planner:unsupported": [],
     "planner:optional_declines": [
       "no_operation_covers"
@@ -209,12 +210,12 @@
     ],
     "planner:reduction_refused_asks": [],
     "translator:compile_failures": [],
-    "planner:amendment_entry": false,
-    "planner:decision_pick": null,
+    "planner:plan": null,
     "planner:refused_spec_ids": [],
     "planner:refused_spec_details": {},
     "planner:skills_read": [],
+    "planner:answered_in_words": false,
     "planner:skills_before_entry": 0,
-    "planner:asked_referral": null
+    "planner:pin_sources": {}
   }
 }

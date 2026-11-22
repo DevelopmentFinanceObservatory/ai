@@ -5,9 +5,7 @@ the frontend team builds against. Three things are pinned here: every event
 fixture round-trips bit-for-bit through `STUDIO_FRAME_ADAPTER` (parse, then
 `model_dump(mode="json", exclude_unset=True)` reproduces the fixture
 exactly); every request fixture parses through `STUDIO_REQUEST_ADAPTER`
-with the fixtures' `session_id` accepted as the deprecated alias for
-`conversation_id` (contract delta 5) and round-trips up to that one rename;
-and the boundary refuses what the contract says it refuses: unknown
+and round-trips exactly; and the boundary refuses what the contract says it refuses: unknown
 members, unknown discriminators, out-of-vocabulary enum values.
 """
 
@@ -55,6 +53,7 @@ from harness.wire import (
     PlanRequirement,
     PlanStep,
     PlanVersioned,
+    ResumeRequest,
     Seed,
     SkippedAnswer,
     SpecBlock,
@@ -104,6 +103,7 @@ REQUEST_FIXTURES = {
     "request-11-turn-seeded.json": TurnRequest,
     "request-12-interrupt-answers.json": InterruptResponse,
     "request-13-turn-apply-choice.json": TurnRequest,
+    "request-14-resume.json": ResumeRequest,
 }
 
 
@@ -128,21 +128,13 @@ def test_event_fixture_round_trips_exactly(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", sorted(REQUEST_FIXTURES))
-def test_request_fixture_parses_with_session_id_as_alias(name: str) -> None:
-    """The turn/interrupt fixtures carry `session_id`; v1 parses it as
-    the deprecated alias of `conversation_id` (delta 5) and serialisation
-    writes `conversation_id`, so their round-trip is exact up to that one
-    rename. The composition.mutate fixture is delta-adjusted on disk (delta 5
-    adds a conversation identifier), so it round-trips exactly as stored."""
+def test_request_fixture_round_trips_exactly(name: str) -> None:
     raw = _load(name)
 
     request = STUDIO_REQUEST_ADAPTER.validate_python(raw)
 
     assert type(request) is REQUEST_FIXTURES[name]
-    expected = dict(raw)
-    if "session_id" in expected:
-        expected["conversation_id"] = expected.pop("session_id")
-    assert request.model_dump(mode="json", exclude_unset=True) == expected
+    assert request.model_dump(mode="json", exclude_unset=True) == raw
 
 
 def test_fixtures_that_omit_optional_flags_parse_to_the_contract_defaults() -> None:
@@ -169,16 +161,6 @@ def test_fixtures_that_omit_optional_flags_parse_to_the_contract_defaults() -> N
     assert open_ended.skippable is True
 
 
-def test_turn_request_accepts_conversation_id_directly() -> None:
-    raw = _load("request-01-turn.json")
-    raw["conversation_id"] = raw.pop("session_id")
-
-    request = STUDIO_REQUEST_ADAPTER.validate_python(raw)
-
-    assert isinstance(request, TurnRequest)
-    assert request.conversation_id == "sess_01j9zc0000"
-
-
 def test_turn_request_surface_defaults_to_studio() -> None:
     """Delta 6: doc 1 requires `surface`, doc 2's fixtures omit it --
     resolved in favour of the lenient parse."""
@@ -188,11 +170,12 @@ def test_turn_request_surface_defaults_to_studio() -> None:
     assert request.surface is Surface.STUDIO
 
 
-def test_a_request_carrying_both_id_spellings_is_refused() -> None:
-    """`session_id` is an alias of `conversation_id`: once `conversation_id`
-    claims the alias, a leftover `session_id` is an unknown member."""
-    raw = _load("request-01-turn.json")
-    raw["conversation_id"] = raw["session_id"]
+@pytest.mark.parametrize("name", sorted(REQUEST_FIXTURES))
+def test_a_request_naming_its_conversation_session_id_is_refused(name: str) -> None:
+    """`session_id`, the conversation id's earlier name, is an unknown
+    member of every request that names a conversation."""
+    raw = _load(name)
+    raw["session_id"] = raw.pop("conversation_id")
 
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python(raw)
@@ -273,7 +256,7 @@ def test_an_unknown_event_discriminator_is_refused() -> None:
 def test_an_unknown_request_kind_is_refused() -> None:
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python(
-            {"kind": "turn.start", "schema_version": 1, "session_id": "s", "message": "m"}
+            {"kind": "turn.start", "schema_version": 1, "conversation_id": "s", "message": "m"}
         )
 
 
