@@ -2267,8 +2267,8 @@ def test_the_instruction_tells_the_planner_to_stop_on_a_different_question() -> 
     instruction = planner_instruction()
 
     assert (
-        "`starts_new_plan=true` and the user's new question in their own words "
-        "in `question`, and stop there"
+        "`starts_new_plan=true` and, in `new_question_in`, the user's message "
+        "that asks it, and stop there"
     ) in instruction
 
 
@@ -3102,8 +3102,8 @@ def test_a_call_stating_both_is_a_new_question_only_on_the_users_amendment(
     recorded: int,
 ) -> None:
     # On an entry the user's amendment opened, `starts_new_plan` beside
-    # `amends_version` reports the different question its `question` states
-    # and records nothing. On any other entry, such as a replan after a run,
+    # `amends_version` reports the different question asked in the user's
+    # message `new_question_in` names, and records nothing. On any other entry, such as a replan after a run,
     # no words of the user's are there to hand on, and the pair patches the
     # plan the version names, its `question` the recorded one.
     tools = _tools_by_name()
@@ -3117,6 +3117,7 @@ def test_a_call_stating_both_is_a_new_question_only_on_the_users_amendment(
         decisions=drafts([decision(rationale="Reconsidered.")]),
         amends_version=1,
         starts_new_plan=True,
+        new_question_in="amendment",
         tool_context=ctx,
     )
 

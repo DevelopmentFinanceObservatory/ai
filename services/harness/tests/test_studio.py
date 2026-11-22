@@ -3551,19 +3551,20 @@ async def test_a_new_question_typed_on_the_plan_card_ends_the_turn_and_hands_it_
 class _AskingThenRestartRefusingPlanner(_RestartRefusingPlanner):
     """`_RestartRefusingPlanner`, whose amendment entry first asks the user a
     question, then refuses the answer as a different question the way a
-    real `PlannerAdapter` does, carrying the `question` its `starts_new_plan`
-    call stated (`stated`, none when `None`)."""
+    real `PlannerAdapter` does, carrying the user's message its
+    `starts_new_plan` call named in `new_question_in` (`named`, none when
+    `None`)."""
 
-    def __init__(self, schemas: list[ToolSchema], *, stated: str | None) -> None:
+    def __init__(self, schemas: list[ToolSchema], *, named: str | None) -> None:
         super().__init__(schemas)
-        self.stated = stated
+        self.named = named
 
     async def __call__(self, *, question: str, **kwargs: Any) -> dict[str, Any]:
         if self.calls > 0 and kwargs.get("answer") is None:
             return {"asked": {"call_id": "amend_ask", "args": {"message": "Which years?"}}}
         answer = await super().__call__(question=question, **kwargs)
-        if self.stated is not None and "refused" in answer:
-            answer["refused"]["question"] = self.stated
+        if self.named is not None and "refused" in answer:
+            answer["refused"]["new_question_in"] = self.named
         return answer
 
 
@@ -3572,29 +3573,30 @@ _KENYA_ODA = "what was Kenya's ODA in 2023?"
 
 
 @pytest.mark.parametrize(
-    ("amended", "typed", "stated", "handed_back"),
+    ("amended", "typed", "named", "handed_back"),
     [
-        pytest.param("show it for Kenya instead", _GHANA, _GHANA, _GHANA, id="answer-asks-it"),
-        pytest.param(_KENYA_ODA, "separately", _KENYA_ODA, _KENYA_ODA, id="amendment-asks-it"),
-        pytest.param(_KENYA_ODA, "separately", None, _KENYA_ODA, id="none-stated"),
+        pytest.param("show it for Kenya instead", _GHANA, "answer", _GHANA, id="answer-asks-it"),
+        pytest.param(_KENYA_ODA, "separately", "amendment", _KENYA_ODA, id="amendment-asks-it"),
+        pytest.param(_KENYA_ODA, "separately", None, _KENYA_ODA, id="none-named"),
     ],
 )
-async def test_a_new_question_reached_through_a_planner_question_is_the_one_the_planner_states(
+async def test_a_new_question_reached_through_a_planner_question_is_the_message_the_planner_names(
     real_schemas: list[ToolSchema],
     amended: str,
     typed: str,
-    stated: str | None,
+    named: str | None,
     handed_back: str,
 ) -> None:
     """The user amends the plan card, the planner asks which years, and the
     planner reads the answer as a different question (`QUESTION_FIXED`).
-    `done` hands back the question the planner's `starts_new_plan` call
-    stated in the user's words, from the answer or the amendment, and the
-    amendment when it stated none. An answer that is no question, such as
-    "separately", is never handed back."""
+    `done` hands back the stored text of the user's message the planner's
+    `starts_new_plan` call names, the answer or the amendment, and the
+    amendment when it names none, so the question handed back is the user's
+    words. An answer that is no question, such as "separately", is handed
+    back only when the planner names it."""
     app = _app(
         *_plan("kenya debt"),
-        planner=_AskingThenRestartRefusingPlanner(schemas=real_schemas, stated=stated),
+        planner=_AskingThenRestartRefusingPlanner(schemas=real_schemas, named=named),
         tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
     )
     async with _client(app) as client:

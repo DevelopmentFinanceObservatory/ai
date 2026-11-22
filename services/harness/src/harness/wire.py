@@ -1744,12 +1744,17 @@ class TurnState(_WireModel):
     it, as `ClosedTurn.user_message` words it. `lease_live` says a segment
     holds the turn now, on some instance; `retry_after_seconds` is then the
     most the lease has left, and is absent otherwise. A `running` turn with
-    no live lease is carried on by `POST /api/studio/resume`."""
+    no live lease is carried on by `POST /api/studio/resume`. `approved`
+    holds the `plan.approved` frame of each plan the open turn approved,
+    one per plan revision, each with the `seq` it was first sent with. It
+    is absent when the open turn approved none, and on a closed turn, whose
+    `ClosedTurn.approved` holds them."""
 
     index: int = Field(ge=1)
     status: TurnStatusName
     trace_id: str
     user_message: str
+    approved: list[PlanApproved] | None = None
     lease_live: bool
     retry_after_seconds: int | None = Field(default=None, ge=0)
 
@@ -1773,8 +1778,10 @@ class ClosedTurn(_WireModel):
     amendment or an answer adds a `(then: ...)` line), the reply the turn
     closed on (empty when it closed with none), the ids of the cards it
     made or changed with each one's stored card (`cards`, in the same order,
-    leaving out an id the conversation holds no card for), and the code it
-    closed on when it did not end cleanly. `new_question` is set on a turn the user ended by typing a
+    leaving out an id the conversation holds no card for), the
+    `plan.approved` frame of each plan the turn approved, one per plan
+    revision (`approved`, absent when it approved none), and the code it closed on when it did not end
+    cleanly. `new_question` is set on a turn the user ended by typing a
     different question on its plan card (`Done.new_question`): the client
     sends it as the next turn when it holds no later one."""
 
@@ -1783,6 +1790,7 @@ class ClosedTurn(_WireModel):
     reply: str
     component_ids: list[str]
     cards: list[StoredCard] = Field(default_factory=list)
+    approved: list[PlanApproved] | None = None
     error: str | None = None
     new_question: str | None = None
 
@@ -1791,8 +1799,9 @@ class PendingPause(_WireModel):
     """The open pause of a paused turn: the `interrupt_id` an
     `interrupt.response` answers, its kind, and the frames the pause was sent
     as, in order, its `plan.proposed` or `elicitation.request` last. Each
-    frame keeps the `seq` it went out with. `frames` is empty for a pause
-    stored before its frames were kept."""
+    frame keeps the `seq` it went out with. A pause stored before its
+    frames were kept reads as a `running` turn with no pause, which
+    `POST /api/studio/resume` sends again."""
 
     interrupt_id: str
     kind: Literal["plan", "elicitation"]

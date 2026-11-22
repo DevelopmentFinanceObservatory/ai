@@ -49,7 +49,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import (
     suppress,
 )
@@ -148,6 +148,7 @@ from harness.studio_translate import (
     closed_on_reply,
     held_labels,
     keep_turn_records,
+    plan_approved,
     recorded_fatal,
 )
 from harness.turn import transcript as entries
@@ -191,6 +192,7 @@ from harness.wire import (
     InterruptResponse,
     OptionAnswer,
     PendingPause,
+    PlanApproved,
     PlanProposed,
     PlanRevisionStaleError,
     ResumeRequest,
@@ -816,7 +818,10 @@ class _SegmentWork:
     and runs its first segment; `/interrupt` gives `answer`, the answer to
     the turn's open pause (`None` when a retry carries on a running turn),
     and `approving`, the plan card a first answer approves, which
-    `plan.approved` states once the graph takes the approval. With
+    `plan.approved` states once the graph takes the approval, and
+    `restored`, the `plan.approved` frames of approvals the turn took on an
+    earlier segment, which it records on the turn (`record_approved`) and
+    sends before its first frame. With
     `replay`, the segment runs no node: it emits the pause the paused
     cursor holds and ends `paused` (`_replay_pause`).
 
@@ -848,6 +853,7 @@ class _SegmentWork:
         segment_id: str,
         answer: Answer | None = None,
         approving: PlanProposed | None = None,
+        restored: Sequence[PlanApproved] = (),
         replay: bool = False,
     ) -> None:
         self._runner = runner
@@ -857,11 +863,13 @@ class _SegmentWork:
         self._segment_id = segment_id
         self._answer = answer
         self._replay = replay
+        self._restored = tuple(restored)
         self._translator = _Translator(
             conversation=conversation,
             recorder=runner.recorder,
             surface_recorder=runner.surface_recorder,
             approving=approving,
+            restored=restored,
         )
         # The drive's half of the translation: it marks each event with the
         # calls recorded before it, and reads nothing else.
@@ -876,6 +884,8 @@ class _SegmentWork:
         instance began."""
         self._conversation.renew_now = self._renew_now
         keep_turn_records(self._conversation, self._cursor.state)
+        for approved in self._restored:
+            self._conversation.record_approved(approved)
 
     async def drive(self, emit: Emit[_MarkedEvent]) -> Segment:
         """Run the segment, emitting each event marked with the calls
@@ -1221,6 +1231,43 @@ def _resume_refusal(standing: TurnStanding, turn_index: int) -> JSONResponse | N
             return None
 
 
+def _taken_approval(
+    conversation: ConversationState, cursor: Cursor, card: PlanProposed | None
+) -> PlanApproved | None:
+    """The `plan.approved` frame of `card`, the plan card an answer
+    approved, when the turn at `cursor` already took that approval: an
+    earlier segment's `approve` node approved the plan of the card's
+    revision, so no `approve` node of a segment carrying the turn on states
+    it. The frame the turn recorded for that revision
+    (`ConversationState.turn_approved`) when it holds one, else one built
+    from the card. `None` when the approval is not yet taken."""
+    if card is None:
+        return None
+    raw = cursor.state.get("plan")
+    plan = stored_plan(raw if isinstance(raw, str) else None, state_key="plan")
+    if plan is None or plan.approved_at is None or plan_revision(plan) != card.revision:
+        return None
+    recorded = next(
+        (kept for kept in conversation.turn_approved if kept.get("revision") == card.revision),
+        None,
+    )
+    if recorded is not None:
+        return PlanApproved.model_validate(recorded)
+    return plan_approved(card, seq=0, baseline=conversation.turn_choice_baseline)
+
+
+def _turn_approvals(
+    conversation: ConversationState, taken: PlanApproved | None
+) -> list[PlanApproved]:
+    """Every `plan.approved` the turn recorded, then `taken` when the turn
+    holds none of its revision: what a `/resume` stream sends first, for a
+    page that never read them."""
+    approvals = [PlanApproved.model_validate(kept) for kept in conversation.turn_approved]
+    if taken is not None and all(kept.revision != taken.revision for kept in approvals):
+        approvals.append(taken)
+    return approvals
+
+
 def _cursor_standing(
     cursor: Cursor | None, state: ConversationState, *, lease_live: bool
 ) -> TurnStanding:
@@ -1341,9 +1388,23 @@ def _closed_turn(
         reply=reply,
         component_ids=component_ids,
         cards=cards,
+        approved=_approved_plans(record.get("approved")),
         error=record.get("error"),
         new_question=record.get("new_question"),
     )
+
+
+def _approved_plans(stored: Any) -> list[PlanApproved] | None:
+    """The `plan.approved` frames a turn recorded (`ConversationState.
+    turn_approved`), for the state read, `None` when it recorded none. One
+    that does not validate is left out."""
+    approved: list[PlanApproved] = []
+    for frame in stored if isinstance(stored, list) else ():
+        try:
+            approved.append(PlanApproved.model_validate(frame))
+        except ValidationError:
+            logger.warning("studio state: a stored approved plan does not validate", exc_info=True)
+    return approved or None
 
 
 def _answer_again(
@@ -1408,6 +1469,11 @@ def _conversation_read(stored: StoredConversation, *, since: int | None) -> Conv
             status=status,
             trace_id=state.trace_id,
             user_message=state.turn_user_message,
+            approved=(
+                _approved_plans(state.turn_approved)
+                if status in (TurnStatusName.RUNNING, TurnStatusName.PAUSED)
+                else None
+            ),
             lease_live=stored.lease_seconds is not None,
             retry_after_seconds=(
                 math.ceil(stored.lease_seconds) if stored.lease_seconds is not None else None
@@ -3282,6 +3348,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 and answered.answer.get("decision") == InterruptDecision.APPROVE.value
                 else None
             )
+            # An approval the turn took before its client left goes out
+            # first, with every other the turn recorded, since the page may
+            # have read none of them.
+            taken = _taken_approval(conversation, claimed, approving)
             # The segment's owner takes the lease and the lock hold from here on.
             return open_stream(
                 _SegmentWork(
@@ -3290,7 +3360,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     conversation=conversation,
                     cursor=claimed,
                     segment_id=segment_id,
-                    approving=approving,
+                    approving=None if taken is not None else approving,
+                    restored=_turn_approvals(conversation, taken),
                 ),
                 owners=studio.owners,
                 store=studio.store,

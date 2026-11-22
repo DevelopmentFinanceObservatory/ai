@@ -14,6 +14,7 @@ from planner.plan import (
     ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
     MAX_QUESTION_CHARS,
+    NewQuestionSource,
     PlanStatus,
     SessionState,
     UnreadablePickError,
@@ -40,6 +41,7 @@ from harness.graph.state import (
     UNREADABLE_PLAN_UNPLANNED_NOTE,
     conversation_readings,
     readable_plan,
+    resume_answers,
 )
 from harness.graph.switch import SwitchFailedError
 from harness.sentences import StopCode
@@ -85,8 +87,9 @@ async def _draft(
     drafted plan. `"new_question"` ends the turn when the planner read the
     user's amendment as a different question (`starts_new_plan`, refused as
     `QUESTION_FIXED` because the turn's question is fixed,
-    `submission.service._resolve_intent`): the amendment's words go under
-    `NEW_QUESTION_KEY` for the client to send as the next turn, and the plan
+    `submission.service._resolve_intent`): the stored words of the user's
+    message the call names go under `NEW_QUESTION_KEY` for the client to
+    send as the next turn (`_refused_entry`), and the plan
     card is set aside unanswered. `"pending_refusal"` also goes to
     `approve`, for a planner that refuses to draft a plan at all
     (`PlannerAdapter`'s own `MAX_PLAN_ROUNDS` cap, or `QUESTION_FIXED` with
@@ -254,6 +257,7 @@ async def _draft(
             refused,
             existing=existing,
             amendment=amendment,
+            answer=answer,
             unreadable=unreadable,
         )
     planner_plan = PlannerPlan.model_validate(drafted["plan"])
@@ -289,20 +293,25 @@ def _refused_entry(
     *,
     existing: PlannerPlan | None,
     amendment: Any,
+    answer: Mapping[str, Any] | None,
     unreadable: bool,
 ) -> Next:
     """Where an entry the planner refused goes (`_draft`): `new_question`
     for an amendment read as a different question, `pending_refusal` to
     offer the plan still awaiting approval again, else `refused`. The new
-    question is the one the planner's `starts_new_plan` call stated, in the
-    user's words from the amendment or from an answer to a question the
-    planner asked about it, and the amendment when the call stated none."""
+    question is the stored text of the user's message the planner's
+    `starts_new_plan` call names (`new_question_in`): `answer`, the text
+    the user typed in `answer` to a question the planner asked about the
+    amendment, or else the amendment itself."""
     if refused.get("code") == ProblemCode.QUESTION_FIXED and amendment:
         # The user asked a different question on the plan card. The turn
-        # ends here, and the client sends it as the next turn.
-        stated = refused.get("question")
+        # ends here, and the client sends the user's own message as the
+        # next turn.
+        typed = _typed_answer(answer)
         ctx.state[NEW_QUESTION_KEY] = (
-            stated if isinstance(stated, str) and stated else str(amendment)
+            typed
+            if refused.get("new_question_in") == NewQuestionSource.ANSWER and typed
+            else str(amendment)
         )
         return Next("new_question")
     text = str(refused.get("text", ""))
@@ -332,6 +341,18 @@ def _refused_entry(
         "refused",
         {"text": text, "final": bool(refused.get("final")), "code": refused.get("code")},
     )
+
+
+def _typed_answer(answer: Mapping[str, Any] | None) -> str | None:
+    """The text the user typed in `answer`, the resume value of the question
+    the planner asked (`resume_answers`), whose one question is `q1`, or
+    `None` when the answer typed none: no answer, a skip, or a pick of an
+    option."""
+    reply = (resume_answers(answer) or {}).get("q1")
+    if not isinstance(reply, Mapping) or reply.get("kind") != "text":
+        return None
+    text = reply.get("text")
+    return text if isinstance(text, str) and text.strip() else None
 
 
 def _pick(payload: dict[str, Any]) -> DecisionPick | None:

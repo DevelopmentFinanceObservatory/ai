@@ -27,6 +27,7 @@ from planner.plan import (
     DecisionDraft,
     Decline,
     EvidenceRequirement,
+    NewQuestionSource,
 )
 from planner.skills import DFO_FAQ_SKILL_ID, read_skill_page
 from planner.tool_spec import REQUIRED, Parameter, ToolSpec
@@ -44,15 +45,13 @@ from planner.tools import (
 PROPOSE_PLAN = PROPOSE_PLAN_PROPOSER.call
 
 # What each `propose_plan` argument means, as the model reads it on the
-# argument itself. `question` and `starts_new_plan` describe how
+# argument itself. `question`, `starts_new_plan` and `new_question_in` describe how
 # `submission.service._resolve_intent` holds the turn's question fixed.
 _PROPOSE_PLAN_ARGUMENTS = {
     "question": (
         "The question this plan answers. Required on a first draft. This "
         "turn's question is fixed, so a patch either omits it or restates it "
-        "unchanged: it has to match the one already recorded. With "
-        "`starts_new_plan`, the user's new question in their own words, quoted "
-        "from their amendment or answer."
+        "unchanged: it has to match the one already recorded."
     ),
     "answer_mode": (
         "What kind of answer the requirements add up to. `series` answers a "
@@ -135,12 +134,15 @@ _PROPOSE_PLAN_ARGUMENTS = {
     ),
     "starts_new_plan": (
         "True says the user's reply asks a different question from the one "
-        "fixed for this turn, which this call states in `question`, in the "
-        "user's words. Refused, recording nothing. On the user's "
+        "fixed for this turn. Refused, recording nothing. On the user's "
         "amendment of the plan card it holds even beside `amends_version`, and "
-        "the harness ends the turn and sends the reply on as its own question. "
-        "Anywhere else a call that also names `amends_version` is read as that "
-        "patch."
+        "the harness ends the turn. Anywhere else a call that also names "
+        "`amends_version` is read as that patch."
+    ),
+    "new_question_in": (
+        "With `starts_new_plan` on the user's amendment, the user's message "
+        "that asks the new question: the `amendment`, or their own-words "
+        "`answer` to your question. The harness sends it as the next turn."
     ),
 }
 
@@ -222,6 +224,7 @@ _PROPOSE_PARAMETERS = (
     Parameter("across_years", list[str], []),
     Parameter("amends_version", int | None, None),
     Parameter("starts_new_plan", bool, False),
+    Parameter("new_question_in", NewQuestionSource | None, None),
 )
 
 

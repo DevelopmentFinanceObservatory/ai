@@ -1005,7 +1005,7 @@ async def test_a_terminal_refusal_beside_an_accepted_ask_ends_the_entry_on_the_r
         [
             _calls(
                 (PLANNER_ASK, {"message": "Which years?"}),
-                ("propose_plan", {"starts_new_plan": True, "question": "a different question"}),
+                ("propose_plan", {"starts_new_plan": True, "new_question_in": "amendment"}),
             )
         ]
     )
@@ -4383,7 +4383,7 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
             _calls(
                 (
                     "propose_plan",
-                    {"starts_new_plan": True, "question": "a different question", **named},
+                    {"starts_new_plan": True, "new_question_in": "amendment", **named},
                 )
             )
         ]
@@ -4402,7 +4402,7 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
     assert result is not None and "refused" in result
     assert result["refused"]["code"] == ProblemCode.QUESTION_FIXED
     assert "own message" in result["refused"]["text"]
-    assert result["refused"]["question"] == "a different question"
+    assert result["refused"]["new_question_in"] == "amendment"
     plan = load_plan(await harness.state())
     assert plan is not None
     assert plan.version == 3
@@ -4412,12 +4412,13 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
 @pytest.mark.parametrize(
     ("stated", "named"),
     [
-        pytest.param({}, {"amends_version": 3}, id="no-question"),
-        pytest.param({"question": "  "}, {}, id="blank-question"),
-        pytest.param({"question": "kenya debt"}, {}, id="the-recorded-question"),
+        pytest.param({}, {"amends_version": 3}, id="no-message"),
+        pytest.param({"question": "what is Ghana's GDP?"}, {}, id="a-question-and-no-message"),
+        pytest.param({"new_question_in": "answer"}, {}, id="an-answer-the-entry-has-not"),
+        pytest.param({"new_question_in": "the brief"}, {}, id="no-message-of-the-users"),
     ],
 )
-async def test_a_restart_on_the_amend_edge_states_the_users_new_question(
+async def test_a_restart_on_the_amend_edge_names_the_users_message(
     decision: Any,
     requirement: Any,
     derived_requirement: Any,
@@ -4425,10 +4426,11 @@ async def test_a_restart_on_the_amend_edge_states_the_users_new_question(
     named: dict[str, Any],
 ) -> None:
     """On an entry the user's amendment opened, a `starts_new_plan` call
-    whose `question` is missing, blank or the recorded one is refused
-    `INVALID_PLAN`, correctable, naming `question` as what the retry needs,
-    since the harness would hand back no question or the old one. The retry
-    stating the new question is refused `QUESTION_FIXED` carrying it."""
+    that names no message of the user's in `new_question_in`, or names an
+    answer the run does not read, is refused `INVALID_PLAN`, correctable,
+    naming `new_question_in` as what the retry needs, since the harness
+    would have no message to hand back. The retry naming the amendment is
+    refused `QUESTION_FIXED` carrying it."""
     seeded = _translated_plan(decision, requirement, derived_requirement, version=3)
     scripted = ScriptedGenai(
         [
@@ -4436,7 +4438,7 @@ async def test_a_restart_on_the_amend_edge_states_the_users_new_question(
             _calls(
                 (
                     "propose_plan",
-                    {"starts_new_plan": True, "question": "what is Ghana's GDP?", **named},
+                    {"starts_new_plan": True, "new_question_in": "amendment", **named},
                 )
             ),
         ]
@@ -4454,10 +4456,68 @@ async def test_a_restart_on_the_amend_edge_states_the_users_new_question(
     (first,) = _answers(scripted.requests[1], "propose_plan")
     assert first["outcome"] == "invalid_input"
     assert first["code"] == ProblemCode.INVALID_PLAN
-    assert first["action"]["needs"] == ["question"]
+    assert first["action"]["needs"] == ["new_question_in"]
     assert result is not None
     assert result["refused"]["code"] == ProblemCode.QUESTION_FIXED
-    assert result["refused"]["question"] == "what is Ghana's GDP?"
+    assert result["refused"]["new_question_in"] == "amendment"
+
+
+@pytest.mark.parametrize(
+    ("reply", "outcome"),
+    [
+        pytest.param({"text": "what is Ghana's GDP?"}, "refused", id="typed"),
+        pytest.param({"spec_id": "dac1"}, "invalid_input", id="picked"),
+    ],
+)
+async def test_a_restart_names_the_answer_only_when_the_user_typed_one(
+    decision: Any,
+    requirement: Any,
+    derived_requirement: Any,
+    reply: dict[str, Any],
+    outcome: str,
+) -> None:
+    """The planner asks about the user's amendment and the run the answer
+    resumes names the answer as the message asking a new question. An
+    own-words answer is refused `QUESTION_FIXED` carrying `answer`; a pick
+    of an option holds no words of the user's, so the call is refused
+    `INVALID_PLAN`."""
+    seeded = _translated_plan(decision, requirement, derived_requirement, version=3)
+    scripted = ScriptedGenai(
+        [
+            _calls((PLANNER_ASK, {"message": "Which years?"})),
+            _calls(("propose_plan", {"starts_new_plan": True, "new_question_in": "answer"})),
+            _says("stop"),
+        ]
+    )
+    adapter = _scripted_planner(scripted)
+    harness = PlannerHarness()
+    amendment = "show it for Kenya instead"
+    asked = await harness.run(
+        adapter,
+        question="kenya debt",
+        readings=[],
+        prior_plan=seeded.model_dump(mode="json"),
+        amendment=amendment,
+    )
+    assert asked is None
+
+    result = await harness.run(
+        adapter,
+        question="kenya debt",
+        readings=[],
+        prior_plan=seeded.model_dump(mode="json"),
+        amendment=amendment,
+        answer=one_answer(reply),
+    )
+
+    if outcome == "refused":
+        assert result is not None
+        assert result["refused"]["code"] == ProblemCode.QUESTION_FIXED
+        assert result["refused"]["new_question_in"] == "answer"
+    else:
+        (answered,) = _answers(scripted.requests[2], "propose_plan")
+        assert answered["outcome"] == "invalid_input"
+        assert answered["code"] == ProblemCode.INVALID_PLAN
 
 
 async def test_a_second_turn_on_one_session_clears_the_first_drafts_plan_and_briefed_flag(

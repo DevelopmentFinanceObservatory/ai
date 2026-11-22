@@ -61,6 +61,7 @@ from harness.wire import (
     CompositionManifest,
     ErrorCode,
     PinOp,
+    PlanApproved,
     PlanProposed,
     RemoveOp,
     ReorderOp,
@@ -604,6 +605,12 @@ class ConversationState:
     # first switch of the turn on (`/interrupt`). `plan.approved` names it
     # as `changed_from` for a choice that holds another label now.
     turn_choice_baseline: dict[str, str] = field(default_factory=dict)
+    # Each `plan.approved` frame the turn sent or a resume restored, one per
+    # plan revision, as JSON, in the order they were first recorded
+    # (`record_approved`). `close_turn` keeps them with the turn's record as
+    # `approved`, and the state read hands them to a page that never read
+    # the frame.
+    turn_approved: list[dict[str, Any]] = field(default_factory=list)
     turn_recorded: bool = False
     # Who asked the current turn and the specs it used; set by `begin_turn`.
     turn_usage: TurnUsage = field(default_factory=TurnUsage)
@@ -974,6 +981,8 @@ class ConversationState:
             record["basis_line"] = basis_line
         if self.turn_components:
             record["cards"] = list(self.turn_components)
+        if self.turn_approved:
+            record["approved"] = list(self.turn_approved)
         if error:
             record["error"] = error
         if self.turn_plans:
@@ -1153,6 +1162,13 @@ class ConversationState:
             if p.resuming_segment != segment_id
         }
 
+    def record_approved(self, frame: PlanApproved) -> None:
+        """Keep `frame` among the turn's approved plans (`turn_approved`),
+        unless the turn already holds one of its plan revision."""
+        if any(kept.get("revision") == frame.revision for kept in self.turn_approved):
+            return
+        self.turn_approved.append(frame.model_dump(mode="json", exclude_none=True))
+
     def start_plan_lineage(self) -> None:
         """Forget the plan version ids given out and the choice labels the
         turn's switches kept. The next plan card is the first of a new line, as
@@ -1198,6 +1214,7 @@ class ConversationState:
         self.turn_readings = []
         self.turn_specs = {}
         self.turn_applied_choice = None
+        self.turn_approved = []
         self.turn_recorded = False
         self.turn_usage = usage if usage is not None else TurnUsage()
         self.turn_usage.trace_id = self.trace_id

@@ -41,7 +41,7 @@ from harness.studio_store import (
     turn_standing,
 )
 from harness.turn.store import TurnStatus, TurnStore
-from harness.wire import TURN_INDEX_HEADER
+from harness.wire import TURN_INDEX_HEADER, MessageComplete
 from planner.workflow import ToolId
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -284,6 +284,54 @@ async def test_a_resume_drops_the_answer_its_departed_client_left_resuming(
     assert stored.pending == {}
 
 
+@pytest.mark.parametrize("recorded", [True, False], ids=["recorded", "unrecorded"])
+async def test_an_approval_the_turn_took_before_its_client_left_reaches_the_page(
+    pg_engine: AsyncEngine, recorded: bool
+) -> None:
+    """The client approves the plan and leaves once its first step runs,
+    after the `approve` node took the approval, so the page may never have
+    read `plan.approved`. The state read's open turn carries it, `/resume`
+    sends it once, and the read's closed turn carries it, each as the
+    approved card stated it. A turn whose departed segment stored no
+    `plan.approved` (`unrecorded`, as when its instance died before its
+    closing write) has it rebuilt from the answered card, since the cursor
+    shows the approval taken."""
+    surface = _StepHangsOnce()
+    app, _ = orchestrator_app(
+        plan_call("q with forks"),
+        _text("Planned and run."),
+        tool_surface=surface,
+        engine=pg_engine,
+    )
+    async with studio_client(app) as client:
+        plan = (await stream(client, "/api/studio/turn", turn_body("q with forks")))[-1]
+    assert plan["event"] == "plan.proposed"
+    await _leave_once(app, "/api/studio/interrupt", _approve(plan["interrupt_id"]), surface.entered)
+    if not recorded:
+        async with pg_engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE conversations SET turn_state = turn_state - 'turn_approved'")
+            )
+        app.state.studio.store.evict(PRINCIPAL, CONVERSATION)
+
+    async with studio_client(app) as client:
+        before = (await _state(client)).json()
+        resumed = await stream(client, "/api/studio/resume", _resume_body(1))
+        read = (await _state(client, since=0)).json()
+
+    assert [frame["revision"] for frame in before["turn"].get("approved", [])] == (
+        [plan["revision"]] if recorded else []
+    )
+    approved = [frame for frame in resumed if frame["event"] == "plan.approved"]
+    assert [frame["revision"] for frame in approved] == [plan["revision"]]
+    assert _events(resumed).index("plan.approved") == 0
+    assert _events(resumed)[-1] == "done"
+    (closed,) = read["closed_since"]
+    assert [
+        {key: value for key, value in frame.items() if key != "seq"} for frame in closed["approved"]
+    ] == [{key: value for key, value in approved[0].items() if key != "seq"}]
+
+
 async def test_the_state_read_shows_a_live_lease_and_resume_waits_for_it(
     pg_engine: AsyncEngine,
 ) -> None:
@@ -494,12 +542,17 @@ async def test_a_resume_carries_on_an_answer_its_client_left_before_the_turn_too
     assert _events(resumed)[-1] == "done"
 
 
-def _entry(interrupt_id: str, *, answered: bool = False) -> _PendingInterrupt:
+def _entry(interrupt_id: str, *, answered: bool = False, framed: bool = True) -> _PendingInterrupt:
+    """A plan pause's entry, holding the frame it was sent as unless it is
+    one stored before entries kept their frames (`framed` false)."""
     return _PendingInterrupt(
         adk_id=interrupt_id,
         kind="plan",
         resuming_segment="seg_left" if answered else None,
         answer={"decision": "approve", "payload": None} if answered else None,
+        frames=(MessageComplete(event="message.complete", seq=0, text="The plan."),)
+        if framed
+        else (),
     )
 
 
@@ -528,6 +581,16 @@ _READ_TABLE = [
         "running",
         "resume",
         id="paused-answer-left",
+    ),
+    pytest.param(
+        TurnStatus.PAUSED,
+        "int_1",
+        (_entry("int_1", framed=False),),
+        False,
+        None,
+        "running",
+        "resume",
+        id="paused-entry-without-frames",
     ),
     pytest.param(
         TurnStatus.PAUSED,
@@ -646,6 +709,40 @@ async def test_a_resume_sends_a_pause_whose_entry_was_never_stored(pg_engine: As
     assert after["pause"]["interrupt_id"] == resumed[-1]["interrupt_id"]
 
 
+async def test_a_pause_stored_without_its_frames_is_sent_again_on_resume(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A pause whose entry was stored before entries kept their frames gives
+    the page no card to draw. The read reports the turn running with no
+    pause, and `/resume` translates the pause again from the cursor and
+    stores its frames, after which the read shows it to answer."""
+    app, _ = orchestrator_app(plan_call("q with forks"), engine=pg_engine)
+    async with studio_client(app) as client:
+        plan = (await stream(client, "/api/studio/turn", turn_body("q with forks")))[-1]
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE conversations SET turn_state = jsonb_set(turn_state, '{pending}', "
+                "(SELECT jsonb_object_agg(key, value - 'frames') "
+                "FROM jsonb_each(turn_state -> 'pending')))"
+            )
+        )
+    app.state.studio.store.evict(PRINCIPAL, CONVERSATION)
+
+    async with studio_client(app) as client:
+        before = (await _state(client)).json()
+        resumed = await stream(client, "/api/studio/resume", _resume_body(1))
+        after = (await _state(client)).json()
+
+    assert before["turn"]["status"] == "running"
+    assert before["turn"]["lease_live"] is False
+    assert "pause" not in before
+    assert _events(resumed)[-1] == "plan.proposed"
+    assert resumed[-1]["interrupt_id"] == plan["interrupt_id"]
+    assert after["turn"]["status"] == "paused"
+    assert after["pause"]["frames"][-1] == resumed[-1]
+
+
 async def test_a_closed_turn_carries_the_cards_it_made(pg_engine: AsyncEngine) -> None:
     """A page that never got a turn's frames draws its cards from the state
     read: each card the turn made comes with its stored type, title, revision
@@ -697,6 +794,7 @@ _ENTRIES: dict[str, tuple[_PendingInterrupt, ...]] = {
     "no-entry": (),
     "awaiting": (_entry("int_1"),),
     "answer-left": (_entry("int_1", answered=True),),
+    "unframed": (_entry("int_1", framed=False),),
     "other-pause": (_entry("int_0", answered=True),),
 }
 
@@ -711,6 +809,7 @@ _UNRECORDED_UNHELD: dict[tuple[TurnStatus | None, str], TurnStanding] = {
     (TurnStatus.PAUSED, "no-entry"): TurnStanding(Standing.REPLAY),
     (TurnStatus.PAUSED, "awaiting"): TurnStanding(Standing.AWAITING_ANSWER),
     (TurnStatus.PAUSED, "answer-left"): TurnStanding(Standing.CARRY),
+    (TurnStatus.PAUSED, "unframed"): TurnStanding(Standing.REPLAY),
     (TurnStatus.PAUSED, "other-pause"): TurnStanding(Standing.REPLAY),
     **{(TurnStatus.DONE, entry): _CLOSED_DONE for entry in _ENTRIES},
     **{
@@ -759,7 +858,7 @@ _STANDING_CELLS = _standing_cells()
 
 
 def test_the_standing_table_covers_every_cell() -> None:
-    assert len(_STANDING_CELLS) == 7 * 2 * 2 * 4
+    assert len(_STANDING_CELLS) == 7 * 2 * 2 * 5
 
 
 @pytest.mark.parametrize(("cursor", "recorded", "lease", "entry", "expected"), _STANDING_CELLS)

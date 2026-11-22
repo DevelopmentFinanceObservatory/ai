@@ -1567,6 +1567,7 @@ class _Translator:
         recorder: _RecordingExecutor,
         surface_recorder: _RecordingSurface | None = None,
         approving: PlanProposed | None = None,
+        restored: Sequence[PlanApproved] = (),
     ) -> None:
         self._conversation = conversation
         self._recorder = recorder
@@ -1575,6 +1576,10 @@ class _Translator:
         # its interrupt; `plan.approved` states it once the `approve` node
         # takes the approval, and only then.
         self._approving = approving
+        # The `plan.approved` frames of approvals the turn took on an earlier
+        # segment, which this segment sends again, under fresh `seq`s, before
+        # its first frame of its own (`_take_restored`).
+        self._restored = list(restored)
         # The wire `step_id` each step (`_ExecutorRecord.step_id`) was given
         # at its first frame, so its later frames update the same line.
         self._wire_step_ids: dict[str, str] = {}
@@ -1636,7 +1641,15 @@ class _Translator:
         """The frames of `event`, emitted with `marks` (`_EventRecords`):
         those of the calls recorded before it, then its own."""
         records = [] if marks is None else self._take_records(marks)
-        return await self._translate(event, records)
+        return [*self._take_restored(), *await self._translate(event, records)]
+
+    def _take_restored(self) -> list[PlanApproved]:
+        """The restored `plan.approved` frames not yet sent, numbered now,
+        and none after the first call."""
+        restored, self._restored = self._restored, []
+        return [
+            frame.model_copy(update={"seq": self._conversation.next_seq()}) for frame in restored
+        ]
 
     async def _translate(self, event: SegmentEvent, records: list[_ExecutorRecord]) -> list[Any]:
         """The frames of `event`: those of `records`, the calls recorded
@@ -1735,13 +1748,13 @@ class _Translator:
         frames: list[Any] = []
         if node == "approve" and label == "approved":
             if self._approving is not None:
-                frames.append(
-                    plan_approved(
-                        self._approving,
-                        seq=self._conversation.next_seq(),
-                        baseline=self._conversation.turn_choice_baseline,
-                    )
+                approved = plan_approved(
+                    self._approving,
+                    seq=self._conversation.next_seq(),
+                    baseline=self._conversation.turn_choice_baseline,
                 )
+                self._conversation.record_approved(approved)
+                frames.append(approved)
                 self._approving = None
             frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._open_status(_STARTING_PLAN))
@@ -2964,7 +2977,11 @@ class _Translator:
         (`harness.graph.state.NEW_QUESTION_KEY`). The turn's record says it
         ended so (`studio_state.NEW_QUESTION`), and `done` carries the words
         for the client to send as the next turn."""
-        frames: list[Any] = [*await self._drain_recorder(), *self._close_status()]
+        frames: list[Any] = [
+            *self._take_restored(),
+            *await self._drain_recorder(),
+            *self._close_status(),
+        ]
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
             self._step(

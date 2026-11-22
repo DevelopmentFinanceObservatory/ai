@@ -178,6 +178,7 @@ _KEY_TURN_PLANS = "turn_plans"
 _KEY_TURN_READINGS = "turn_readings"
 _KEY_TURN_APPLIED_CHOICE = "turn_applied_choice"
 _KEY_TURN_CHOICE_BASELINE = "turn_choice_baseline"
+_KEY_TURN_APPROVED = "turn_approved"
 _KEY_TURN_USAGE = "turn_usage"
 _SCALAR_KEYS = frozenset(
     {
@@ -197,6 +198,7 @@ _SCALAR_KEYS = frozenset(
         _KEY_TURN_READINGS,
         _KEY_TURN_APPLIED_CHOICE,
         _KEY_TURN_CHOICE_BASELINE,
+        _KEY_TURN_APPROVED,
         _KEY_TURN_USAGE,
     }
 )
@@ -480,6 +482,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_TURN_READINGS: state.turn_readings,
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
         _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
+        _KEY_TURN_APPROVED: state.turn_approved,
         _KEY_TURN_USAGE: dataclasses.asdict(state.turn_usage),
     }
     for index, turn in enumerate(state.turns):
@@ -549,6 +552,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_applied_choice = dict(value) if value else None
         elif key == _KEY_TURN_CHOICE_BASELINE:
             state.turn_choice_baseline = dict(value or {})
+        elif key == _KEY_TURN_APPROVED:
+            state.turn_approved = list(value or ())
         elif key == _KEY_TURN_USAGE:
             pass  # after the loop, once `trace_id` holds its value from this delta
         elif key.startswith(_TURN_ITEM_PREFIX):
@@ -843,13 +848,15 @@ class Standing(StrEnum):
     - `HELD`: a live lease holds the turn, on some instance.
     - `RESUMABLE`: the turn is running and no segment holds it.
     - `AWAITING_ANSWER`: the turn is paused on a question whose stored entry
-      awaits the user's answer on `/interrupt`.
+      holds the frames the pause was sent as and awaits the user's answer on
+      `/interrupt`.
     - `CARRY`: the turn is paused on a question whose entry holds an answer
       a client left before the turn took it; `/resume` carries it on as a
       retry of that answer.
     - `REPLAY`: the turn is paused on a question no entry holds, since the
-      write that stores the entry never landed; `/resume` sends the pause
-      again from the cursor.
+      write that stores the entry never landed, or whose entry holds no
+      frames to show, since it was stored before entries kept them;
+      `/resume` sends the pause again from the cursor.
     """
 
     CLOSED = "closed"
@@ -930,6 +937,11 @@ def _paused_standing(pending: Mapping[str, _PendingInterrupt], pause_id: str | N
     _, entry = found
     if entry.resuming_segment is not None and entry.answer is not None:
         return Standing.CARRY
+    if not entry.frames:
+        # An entry stored before entries kept their frames gives the page
+        # no card to draw, so the pause is sent again from the cursor, whose
+        # translation stores the frames.
+        return Standing.REPLAY
     return Standing.AWAITING_ANSWER
 
 

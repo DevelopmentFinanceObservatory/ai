@@ -143,6 +143,7 @@ from planner.plan import (
     FirstYear,
     FixDisagreement,
     FullHistory,
+    NewQuestionSource,
     OneYearRead,
     PinSource,
     PinVerdict,
@@ -166,6 +167,7 @@ from planner.plan import (
     aligned_pins,
     alignments,
     amendment_entry,
+    answered_in_words,
     authored,
     bound_fixes,
     check_acyclic,
@@ -375,6 +377,7 @@ class Proposal:
     across_years: Sequence[Any] = ()
     amends_version: int | None = None
     starts_new_plan: bool = False
+    new_question_in: NewQuestionSource | str | None = None
 
 
 # The most failing fields one `propose_plan` refusal names. A plan can fail on
@@ -528,6 +531,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         amendment_entry=in_amendment_entry,
         rounds_so_far=load_plan_rounds(view.state),
         question=question,
+        new_question_in=_new_question_source(proposal.new_question_in),
+        answered_in_words=answered_in_words(view.state),
     )
     if isinstance(resolved, dict):
         return resolved
@@ -1897,6 +1902,8 @@ def _resolve_intent(
     rounds_so_far: int,
     question: str | None = None,
     amendment_entry: bool = False,
+    new_question_in: NewQuestionSource | None = None,
+    answered_in_words: bool = False,
 ) -> tuple[Plan | None, int] | dict[str, object]:
     """Which plan a `propose_plan` call means, from what the call states.
 
@@ -1947,7 +1954,11 @@ def _resolve_intent(
         return None, 1
     restart = starts_new_plan and (amends_version is None or amendment_entry)
     blocked = _restart_blocked(
-        existing, restart=restart, question=question, amendment_entry=amendment_entry
+        existing,
+        restart=restart,
+        new_question_in=new_question_in if amendment_entry else None,
+        amendment_entry=amendment_entry,
+        answered_in_words=answered_in_words,
     ) or _round_cap_blocked(existing, rounds_so_far=rounds_so_far)
     if blocked is not None:
         return blocked
@@ -1960,40 +1971,66 @@ def _resolve_intent(
 
 
 def _restart_blocked(
-    existing: Plan, *, restart: bool, question: str | None, amendment_entry: bool
+    existing: Plan,
+    *,
+    restart: bool,
+    new_question_in: NewQuestionSource | None,
+    amendment_entry: bool,
+    answered_in_words: bool,
 ) -> dict[str, object] | None:
     """Return the refusal for a restart, or `None`: `QUESTION_FIXED`, whose
-    detail carries the call's `question`, the user's new question in their
-    own words, which the harness hands back as the next turn
-    (`harness.graph.planning`). On an entry the user's amendment opened,
-    a restart whose `question` is missing or restates the recorded one is
-    refused `INVALID_PLAN` first, correctable within the round, since the
-    harness would hand back no question or the old one.
+    detail carries the call's `new_question_in` on an entry the user's
+    amendment opened: which of the user's messages asks the new question,
+    whose stored text the harness hands back as the next turn
+    (`harness.graph.planning`). There, a restart that names no message, or
+    names `answer` while the run reads no own-words answer
+    (`answered_in_words`), is refused `INVALID_PLAN` first, correctable
+    within the round, since the harness would have no message to hand back.
 
     Split out of `_resolve_intent` to keep its own branch count within this
     project's `PLR0911` budget.
     """
     if not restart:
         return None
-    if amendment_entry and (not (question or "").strip() or question == existing.question):
+    if amendment_entry and (
+        new_question_in is None
+        or (new_question_in is NewQuestionSource.ANSWER and not answered_in_words)
+    ):
+        stated = (
+            "names none"
+            if new_question_in is None
+            else "names `answer`, and the user answered no question of yours in their own words"
+        )
         return problem(
             ProblemCode.INVALID_PLAN,
-            "`starts_new_plan` states the user's new question in `question`, and "
-            "this call states "
-            + ("none" if not (question or "").strip() else "the question already recorded")
-            + ". State the user's new question in their own words, quoted from their "
-            "amendment or answer, and call again.",
+            "`starts_new_plan` names in `new_question_in` the user's message that asks the "
+            f"new question, and this call {stated}. Name `amendment` or `answer` and call "
+            "again.",
             outcome=Outcome.INVALID_INPUT,
             action=Action(
-                call=PROPOSE_PLAN.call, arguments={"starts_new_plan": True}, needs=("question",)
+                call=PROPOSE_PLAN.call,
+                arguments={"starts_new_plan": True},
+                needs=("new_question_in",),
             ),
         )
     return problem(
         ProblemCode.QUESTION_FIXED,
         _QUESTION_FIXED_RESTART,
         outcome=Outcome.REFUSED,
-        detail={"version": existing.version, **({"question": question} if question else {})},
+        detail={
+            "version": existing.version,
+            **({"new_question_in": new_question_in.value} if new_question_in else {}),
+        },
     )
+
+
+def _new_question_source(value: object) -> NewQuestionSource | None:
+    """`value`, a call's `new_question_in` as it arrived, as the message it
+    names, or `None` for no value or one that names no message."""
+    try:
+        return NewQuestionSource(value) if value is not None else None
+    except ValueError:
+        return None
 
 
 def _round_cap_blocked(existing: Plan, *, rounds_so_far: int) -> dict[str, object] | None:
