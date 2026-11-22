@@ -19,6 +19,7 @@ from typing import Any, cast
 import pytest
 from analysis_mcp.digest import render_rank_digest
 from analysis_mcp.summary import EntityRank, RankFacts
+from analysis_mcp.tool_errors import ToolRefusal as AnalysisRefusal
 from compiler.surface import ToolCallResult
 from data_mcp.tool_errors import ToolErrorCode as DataCode
 from data_mcp.tool_errors import ToolRefusal as DataRefusal
@@ -42,8 +43,10 @@ from harness.graph.plan_done import (
     _partial_result,
     _retry_note,
     _stop_causes,
+    _stopped_asks,
 )
 from harness.graph.state import (
+    ORCHESTRATOR_BRIEF_KEY,
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
@@ -59,13 +62,21 @@ from harness.turn.events import NodeDone, Paused
 from harness.turn.loop import Outcome, run_segment
 from harness.turn.store import TurnStatus
 from harness.turn_records import PlanAsk, PlanRecord
-from planner.plan import AskAnswer, Decline, Plan, PlanStatus, UnsupportedOperation, load_asks
+from planner.plan import (
+    AskAnswer,
+    AskBreakdown,
+    Decline,
+    Plan,
+    PlanStatus,
+    UnsupportedOperation,
+    load_asks,
+)
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .graph_turns import agent_read, opening_graph, visited
 from .plan_turns import approve_answer, approve_turn, plan_nodes
 from .scripted_genai import reply, text_part
-from .scripted_tools import plan_call, scripted_orchestrator
+from .scripted_tools import ask_user_call, plan_call, scripted_orchestrator
 from .stored_verbs import EXECUTION_IDENTITY
 from .turn_driver import CONVERSATION, PRINCIPAL, ScriptedModels, TurnDriver, scripted_models
 
@@ -667,6 +678,141 @@ async def test_an_unavoidable_failure_ends_the_turn_on_its_sentence_with_no_seco
         assert sentence not in after_plan
     else:
         assert sentence in after_plan
+
+
+# analysis-mcp's refusal of a donor pool whose party kind column mixes typed
+# and untyped cells, as a deployed rank step met it: its message names the
+# frame's column and the filter that keeps the parties.
+_MIXED_KINDS = AnalysisRefusal.place_levels_mixed(
+    column="financingProvider_party_kind", types=["party", "untyped"]
+)
+
+
+class _MixedKindsSurface(ScriptedSurface):
+    """`ScriptedSurface` whose `get_data` refuses as `_MIXED_KINDS` does."""
+
+    async def call_tool(self, *, tool: Any, arguments: Any, on_progress: Any = None) -> Any:
+        if tool.name != "get_data":
+            return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        refusal = {
+            "code": _MIXED_KINDS.code.value,
+            "retry_mode": _MIXED_KINDS.retry_mode.value,
+            "fix": _MIXED_KINDS.fix,
+            "message": _MIXED_KINDS.message,
+        }
+        return ToolCallResult(is_error=True, structured_content=refusal, text=_MIXED_KINDS.message)
+
+
+@pytest.mark.parametrize(
+    ("surface", "cause"),
+    [
+        pytest.param(_MixedKindsSurface(), failure_cause("internal_error"), id="system-fault"),
+        pytest.param(
+            RefusingGetDataSurface("member_not_resolvable"),
+            failure_cause("member_not_resolvable"),
+            id="given-back",
+        ),
+    ],
+)
+async def test_a_stopped_plan_hands_the_agent_the_users_words_for_the_stop(
+    surface: ScriptedSurface, cause: str, pg_engine: AsyncEngine
+) -> None:
+    """The agent reads a stop as the user reads its cause, so a tool's own
+    message, written for a caller that can retry the call, never reaches the
+    plan path to be copied into a brief or an ask."""
+    models = _planned("It could not be computed.")
+    driver = _driver(pg_engine, models, tool_surface=surface)
+
+    await approve_turn(driver, _QUESTION)
+
+    body = _hand_back_body(models)
+    assert body["failed_step"]["message"] == cause
+    after_plan = agent_read(models.orchestrator.requests[-1])
+    assert "financingProvider_party_kind" not in after_plan
+    assert "this deployment cannot serve the request" not in after_plan
+
+
+_ASK = "Kenya's top donor in each year"
+_TOOL_WORDS = f"{_ASK}, keeping financingProvider_party_kind party alone"
+
+
+async def test_a_plan_call_given_back_keeps_the_stopped_plans_asks(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The plan call given back after a stop may change its brief only: the
+    new plan holds the stopped plan's asks, whatever asks the call sends, so
+    the card titles the user's outputs in the words they were asked in."""
+    models = scripted_models(
+        orchestrator=[
+            reply(plan_call(_BRIEF, _ASK)),
+            reply(plan_call(f"{_BRIEF}, from another source", _TOOL_WORDS, "a second output")),
+            reply(text_part("It could not be computed.")),
+        ]
+    )
+    driver = _driver(
+        pg_engine, models, tool_surface=RefusingGetDataSurface("member_not_resolvable")
+    )
+
+    second = await approve_turn(driver, _QUESTION)
+
+    assert second.pause.kind == "approve"
+    state = second.cursor.state
+    assert state[ORCHESTRATOR_BRIEF_KEY] == f"{_BRIEF}, from another source"
+    assert load_asks(state) == (_ASK,)
+
+
+async def test_a_plan_call_after_the_user_answers_again_takes_its_own_asks(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The user's answer to a question asked after the plan call was given
+    back can change what they ask for, so the next plan call's asks stand."""
+    models = scripted_models(
+        orchestrator=[
+            reply(plan_call(_BRIEF, _ASK)),
+            reply(ask_user_call("Which years?", "2018 to 2022", "2015 to 2022")),
+            reply(plan_call(f"{_BRIEF}, 2015 to 2022", f"{_ASK} from 2015 to 2022")),
+            reply(text_part("It could not be computed.")),
+        ]
+    )
+    driver = _driver(
+        pg_engine, models, tool_surface=RefusingGetDataSurface("member_not_resolvable")
+    )
+
+    asked = await approve_turn(driver, _QUESTION)
+    assert asked.pause.kind == "ask"
+    second = await driver.answer(
+        {"answers": {"q1": {"kind": "option", "spec_id": "o2"}}}, to=asked.pause
+    )
+
+    assert second.pause.kind == "approve"
+    assert load_asks(second.cursor.state) == (f"{_ASK} from 2015 to 2022",)
+
+
+def test_the_asks_kept_for_a_plan_given_back_leave_out_those_the_user_removed() -> None:
+    """An ask the user's amendment removed stays removed on the plan given
+    back, and each kept ask keeps its parties and years under its new number."""
+    plan = cast(
+        "Plan",
+        SimpleNamespace(
+            asks=("aid by donor", "a total", "aid by recipient"),
+            dropped_asks=(1,),
+            ask_breakdowns=(
+                AskBreakdown(ask=0, by=("donor",)),
+                AskBreakdown(ask=1, over=("donor",)),
+                AskBreakdown(ask=2, by=("recipient",)),
+            ),
+            asks_across_years=(1, 2),
+        ),
+    )
+
+    kept = _stopped_asks({}, plan)
+
+    assert kept["asks"] == ["aid by donor", "aid by recipient"]
+    assert [(entry["ask"], entry["by"]) for entry in kept["ask_breakdowns"]] == [
+        (0, ["donor"]),
+        (1, ["recipient"]),
+    ]
+    assert kept["asks_across_years"] == [1]
 
 
 def test_a_retry_note_survives_a_card_it_cannot_draw_and_words_a_stop_at_no_step(

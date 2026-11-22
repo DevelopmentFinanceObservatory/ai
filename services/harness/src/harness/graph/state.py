@@ -118,6 +118,13 @@ ORCHESTRATOR_AMENDMENTS_KEY = "orchestrator:amendments"
 # back, and the `planner` node takes it onto the next first draft as its
 # `refusal_note`, which Studio shows before the card.
 ORCHESTRATOR_RETRY_NOTE_KEY = "orchestrator:retry_note"
+# The asks of the plan that stopped when `plan_done` gave the plan call back,
+# as the `PendingPlan` fields `asks`, `ask_breakdowns` and `asks_across_years`.
+# The call given back may change the brief only, so the `plan` tool holds the
+# new plan to these, whatever asks it is sent. The user's answer to a later
+# question this turn (`harness.graph.orchestrate`) clears it, since the user
+# may then ask for other outputs.
+ORCHESTRATOR_GIVEN_BACK_ASKS_KEY = "orchestrator:given_back_asks"
 # The state a planner entry replanning for a pick on the plan card puts back
 # when the replan does not land (`harness.graph.planning`), written when the
 # replan pauses on a planner-side ask and cleared when the entry ends, so it

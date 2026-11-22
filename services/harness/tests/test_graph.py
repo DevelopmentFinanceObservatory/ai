@@ -85,7 +85,7 @@ from harness.plan_display import decision_option_id
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
-from harness.sentences import FAILURE_SENTENCES, FailureClass
+from harness.sentences import FAILURE_SENTENCES, FailureClass, failure_cause
 from harness.studio_translate import failure_detail
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import SearchReading, basis_line
@@ -2037,10 +2037,11 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
     _, body = handed_back(model)
     # The refusal's retry mode and `fix` word the user's sentence, and its
     # cause, disposition and wave's remedy decide what follows. The agent
-    # reads the rest.
+    # reads the rest, with what happened in the user's words in place of the
+    # tool's message.
     hidden = ("retry_mode", "fix", "disposition", "cause", "wave_remedy")
     shown = {k: v for k, v in executed["failed_step"].items() if k not in hidden}
-    assert body["failed_step"] == shown
+    assert body["failed_step"] == {**shown, "message": failure_cause("entity_ambiguous", {})}
 
 
 async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_replan(
@@ -2098,7 +2099,7 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
     assert body["failed_step"] == {
         "step_id": "totals",
         "code": "over_ceiling",
-        "message": "over the coverage ceiling: too many series.",
+        "message": failure_cause("over_ceiling", {}),
     }
 
 
@@ -2210,7 +2211,7 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
     """A `get_data` asked to sum its family declares three StatVars, so the
     sum did not happen. The same plan draws the same frame, so `execute`
     closes the turn on this first refusal: no replan, no second approval of
-    an identical plan. The agent reads the executor's own message and
+    an identical plan. The agent reads what happened and the executor's
     remedy, both written for the user, in place of the count of `stat_vars`
     the refusal's `detail` states."""
     plan = _planner_plan(schemas=real_schemas, stat_vars="sum")
@@ -2251,7 +2252,7 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
     assert body["failed_step"] == {
         "step_id": "get_data",
         "code": "family_not_summed",
-        "message": message,
+        "message": failure_cause("family_not_summed", {}),
         "remedy": remedy,
     }
     assert "distinct stat_vars" not in text

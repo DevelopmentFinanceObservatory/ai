@@ -141,6 +141,7 @@ from harness.graph.interfaces import Executor
 from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
+    ORCHESTRATOR_GIVEN_BACK_ASKS_KEY,
     ORCHESTRATOR_PENDING_KEY,
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -2821,6 +2822,15 @@ def build_orchestrator_tools(
         End your turn after calling it; the plan's result comes back as this
         call's result.
         """
+        pinned = call.state.get(ORCHESTRATOR_GIVEN_BACK_ASKS_KEY)
+        if pinned and pinned.get("asks"):
+            # The call `plan_done` gave back after a stop may change the brief
+            # only, so the plan keeps the stopped plan's asks in the words the
+            # user asked them in, and the asks sent here are not read.
+            spent = _spend(call, "plan")
+            if spent:
+                return spent
+            return _pend(call, PendingPlan.model_validate({**pinned, "brief": brief}))
         texts = [ask.text for ask in asks]
         refused = _asks_refusal(texts) or _breakdowns_missing(call, asks)
         if refused:

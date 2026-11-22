@@ -27,7 +27,9 @@ from planner.plan import (
     aligned_stated_pins,
     authored_text,
     copy_origins,
+    load_ask_breakdowns,
     load_asks,
+    load_asks_across_years,
     windowed_pins,
 )
 
@@ -43,6 +45,7 @@ from harness.graph.state import (
     ORCHESTRATOR_ALIGNED_SERVED_KEY,
     ORCHESTRATOR_AMENDMENTS_KEY,
     ORCHESTRATOR_CALLS_KEY,
+    ORCHESTRATOR_GIVEN_BACK_ASKS_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
@@ -329,9 +332,10 @@ def _after_stop(
     the plan call was given back. Both a run that stopped and a planner that
     refused to replan past a stop end here.
 
-    `REPLAN` gives the plan call back once a turn (`_give_plan_back`), and the
+    `REPLAN` gives the plan call back once a turn (`_give_plan_back`), the
     next card's note names the step and what happened there
-    (`ORCHESTRATOR_RETRY_NOTE_KEY`). Every other remedy, and a `REPLAN` once
+    (`ORCHESTRATOR_RETRY_NOTE_KEY`), and the call given back keeps the
+    stopped plan's asks (`ORCHESTRATOR_GIVEN_BACK_ASKS_KEY`, `_stopped_asks`). Every other remedy, and a `REPLAN` once
     the turn's new plan is spent, ends on the user's sentence for the failure
     (`_user_sentence`), or its cause and the failure's own remedy where it has
     one (`_user_remedy`). A fault of the system says the user's question is
@@ -340,6 +344,7 @@ def _after_stop(
     past = remedy(failed)
     if past is Remedy.REPLAN and _give_plan_back(ctx):
         ctx.state[ORCHESTRATOR_RETRY_NOTE_KEY] = _retry_note(plan, failed)
+        ctx.state[ORCHESTRATOR_GIVEN_BACK_ASKS_KEY] = _stopped_asks(ctx.state, plan)
         return " A brief that avoids the failure may be planned once more.", True
     advice = _user_remedy(failed)
     sentence = _user_cause(failed) if advice else _user_sentence(failed)
@@ -361,6 +366,35 @@ def _after_stop(
     if advice:
         tail += f" Tell the user what they can do about it: {advice}"
     return tail, False
+
+
+def _stopped_asks(state: SessionState, plan: Plan | None) -> dict[str, Any]:
+    """The asks a plan call given back after `plan` stopped is held to, as
+    `PendingPlan` states them: `plan`'s asks without those the user's
+    amendment removed, numbered afresh, with the parties and the years each
+    kept ask was put to. With no plan to read, or one that records no asks,
+    the asks the plan call stated (`load_asks`)."""
+    if plan is None or not plan.asks:
+        return {
+            "asks": list(load_asks(state)),
+            "ask_breakdowns": [
+                breakdown.model_dump(mode="json") for breakdown in load_ask_breakdowns(state)
+            ],
+            "asks_across_years": list(load_asks_across_years(state)),
+        }
+    kept = [number for number in range(len(plan.asks)) if number not in plan.dropped_asks]
+    renumbered = {number: index for index, number in enumerate(kept)}
+    return {
+        "asks": [plan.asks[number] for number in kept],
+        "ask_breakdowns": [
+            breakdown.model_copy(update={"ask": renumbered[breakdown.ask]}).model_dump(mode="json")
+            for breakdown in plan.ask_breakdowns
+            if breakdown.ask in renumbered
+        ],
+        "asks_across_years": [
+            renumbered[number] for number in plan.asks_across_years if number in renumbered
+        ],
+    }
 
 
 def shown_stop(failed: Mapping[str, Any], plan: Plan) -> dict[str, Any]:
@@ -1083,9 +1117,13 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
         elif failed:
             result["failed_step"] = {
                 key: str(failed[key])[:_HAND_BACK_CAP]
-                for key in ("step_id", "tool", "code", "message")
+                for key in ("step_id", "tool", "code")
                 if failed.get(key)
             }
+            # What happened, in the user's words. A tool's own message is
+            # written for a caller that can retry the call, which the agent
+            # cannot, so its vocabulary would only be copied into a brief.
+            result["failed_step"]["message"] = _user_cause(failed)
             after, given_back = _after_stop(ctx, failed, plan)
             # The failure's own remedy, only where the user is told to act on it.
             if not given_back and (advice := _user_remedy(failed)) is not None:
