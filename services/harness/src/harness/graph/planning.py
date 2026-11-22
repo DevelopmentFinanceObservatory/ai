@@ -37,6 +37,8 @@ from harness.graph.state import (
     ORCHESTRATOR_AMENDMENTS_KEY,
     ORCHESTRATOR_BRIEF_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
+    ORCHESTRATOR_REPLANNED_STOP_KEY,
+    ORCHESTRATOR_RETRY_NOTE_KEY,
     PICK_REPLAN_KEY,
     UNREADABLE_PLAN_NOTE,
     UNREADABLE_PLAN_UNPLANNED_NOTE,
@@ -118,6 +120,11 @@ async def _draft(
     shows before the plan card, and `"restarted": True`, since its version
     counts from 1 again. The `"refused"` edge's text opens with
     `UNREADABLE_PLAN_UNPLANNED_NOTE`.
+
+    The first draft after `plan_done` gave the plan call back carries the
+    note it left (`ORCHESTRATOR_RETRY_NOTE_KEY`) as `refusal_note`, naming the
+    step the approved plan stopped at, after `UNREADABLE_PLAN_NOTE` where both
+    apply.
 
     A first draft's plan also carries `"new_plan": True`, which starts a new
     plan card lineage in the turn. A re-offer of the plan on record does not
@@ -271,13 +278,19 @@ async def _draft(
         ]
     if pick is not None:
         _end_pick_entry(ctx)
+    notes = [UNREADABLE_PLAN_NOTE] if unreadable else []
+    if is_first_draft and (retry := ctx.state.get(ORCHESTRATOR_RETRY_NOTE_KEY)):
+        # `plan_done` gave the plan call back after an approved plan stopped.
+        # The card says which step stopped and why it needs approving again.
+        notes.append(str(retry))
+        ctx.state[ORCHESTRATOR_RETRY_NOTE_KEY] = None
     return Next(
         "ok",
         {
             **planner_plan.model_dump(mode="json"),
             "summary": drafted["summary"],
             "revision": plan_revision(planner_plan),
-            **({"refusal_note": UNREADABLE_PLAN_NOTE} if unreadable else {}),
+            **({"refusal_note": " ".join(notes)} if notes else {}),
             # The draft's version counts from 1 again, on a line of its
             # own: no earlier card of the turn is a version of this plan.
             **({"restarted": True} if unreadable else {}),
@@ -454,6 +467,7 @@ async def _plan_start(ctx: NodeCtx[GraphEvent], node_input: dict[str, Any]) -> N
     ctx.state[ASK_BREAKDOWNS_STATE_KEY] = node_input.get("ask_breakdowns") or None
     ctx.state[ASKS_ACROSS_YEARS_STATE_KEY] = node_input.get("asks_across_years") or None
     ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
+    ctx.state[ORCHESTRATOR_REPLANNED_STOP_KEY] = None
     ctx.state[ORCHESTRATOR_AMENDMENTS_KEY] = None
     return Next("next", {})
 

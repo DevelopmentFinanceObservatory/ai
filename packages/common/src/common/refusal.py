@@ -32,6 +32,22 @@ from common.telemetry import current_trace_id
 # The tool result `_meta` key under which a refusal carries its code.
 REFUSAL_META_KEY = "org.one.dfo/refusal"
 
+# The `fix.kind` of a refusal whose code alone does not say whose failure it
+# is. Every server that answers the code sets it, from this one place.
+#
+# On `upstream_error`, the upstream service failed of itself (a 5xx, an answer
+# with no problem document, a call that got no answer, or a response the server
+# could not use). An `upstream_error` without it is a refusal of the request
+# under a code the server does not map.
+SERVICE_FAILURE = "service_failure"
+# On `upstream_error`, data-mcp refused a definition dfo-apis would not
+# register, and another definition gets past it.
+SPEC_NOT_REGISTERED = "spec_not_registered"
+# On `frame_integrity_failed`, the frame data-mcp minted under one content
+# version reads back wrong, and a narrower scope mints another. Any other
+# stored frame that fails its check is the store's fault.
+MINTED_FRAME = "minted_frame"
+
 # The codes a request sent once more, unchanged, can get past.
 # `upstream_version_changed` comes from a read of a source's newest version (the
 # analysis runner's Spec and `latest` roots and recipe replays, data-mcp's mint) whose
