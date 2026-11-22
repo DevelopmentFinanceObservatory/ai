@@ -26,7 +26,6 @@ from types import SimpleNamespace
 from typing import Any, NamedTuple, cast, override
 
 import httpx2
-import pyarrow as pa
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from compiler.surface import (
@@ -42,7 +41,6 @@ from data_mcp.client import UpstreamClient
 from data_mcp.definition_store import InMemoryDefinitionStore
 from data_mcp.definition_store.identity import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
-from data_mcp.manifest import Manifest
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from data_mcp.settings import Settings as DataMcpSettings
@@ -1606,10 +1604,7 @@ async def _switch_off_a_stated_source(
             "window": {"start_year": 1995, "end_year": 2024},
         },
         "facets": {"provenance": _INCLUSIVE_PROVENANCE},
-        "entities": [
-            {"role": "country", "ref": "country/KEN", "label": "Kenya"},
-            {"role": "origin", "ref": "country/USA", "label": "United States"},
-        ],
+        "entities": [{"role": "country", "ref": "country/KEN", "label": "Kenya"}],
     }
     scoped = _scoped_plan(pin, scope, schemas=real_schemas)
     plan = PlannerPlan.model_validate(
@@ -1620,13 +1615,7 @@ async def _switch_off_a_stated_source(
             "translation": None,
             "workflow": None,
             "evidence_requirements": [
-                # The dataset binds the US as its donor, so the requirement names it.
-                r.model_copy(
-                    update={
-                        "source": _STATED_SOURCE,
-                        "entities": (*r.entities, Entity(name="United States", role="donor")),
-                    }
-                )
+                r.model_copy(update={"source": _STATED_SOURCE})
                 for r in scoped.evidence_requirements
                 if isinstance(r, DatasetRequirement)
             ],
@@ -1727,22 +1716,10 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
     _, outcome = await execute_approved_plan(
         approved,
         surface=_fixture_surface(real_schemas, get_data_result=fetched),
-        fetch_series_stats=_us_series_stats,
+        fetch_series_stats=scripted_fetch_series_stats,
     )
 
     assert isinstance(outcome, Accepted), outcome
-
-
-async def _us_series_stats(manifest: Manifest) -> pa.Table | None:
-    """The scripted run's series (`scripted_fetch_series_stats`), each from the US as
-    the donor the switched dataset binds."""
-    table = await scripted_fetch_series_stats(manifest)
-    assert table is not None
-    rows = [
-        {**row, "entities": [*row["entities"], {"role": "origin", "ref": "country/USA"}]}
-        for row in table.to_pylist()
-    ]
-    return pa.Table.from_pylist(rows, schema=table.schema)
 
 
 async def test_a_later_period_amendment_reads_the_switched_dataset_over_every_year_it_holds(
