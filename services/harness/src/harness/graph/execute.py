@@ -33,8 +33,10 @@ from executor.outcomes import (
     RediscoveryNeeded,
     RefusalKind,
     Refused,
+    Remedy,
     failed_step,
     permanent_transport_stop,
+    remedy,
     stop_step,
 )
 from executor.outcomes import RunOutcome as ExecutionOutcome
@@ -174,10 +176,9 @@ def _is_dead_end(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> b
     get past by drafting the same brief again with the refusal in hand. The
     remedy says whether a plan from another brief can. A tool's stop another
     source avoids (`facet_not_available`) is a dead end whose remedy is
-    `REPLAN`, so `plan_done` gives the orchestrator its plan call back. A step
-    result the run could not use is no dead end, since the planner may draft
-    another workflow for it, but its remedy is `SYSTEM`, so no plan call is
-    given back once the planner fails to.
+    `REPLAN`, so `plan_done` gives the orchestrator its plan call back.
+    `execute` replans only a wave that is no dead end and whose remedy is
+    `REPLAN`.
     """
     return all(_stop_is_dead_end(stop) for stop in (outcome, *outcome.also_stopped))
 
@@ -516,15 +517,19 @@ def execute_node(
         The "ok" route carries those frames as final; the "replan" refusal
         names the asks they compute (`computed_asks`), since the new plan
         runs from the start.
-        The exception is a wave whose every stop is a dead end no replan
+        The exceptions are a wave whose every stop is a dead end no replan
         reaches (`_is_dead_end`): a plain `Refused` whose own `payload` is a
         `ToolFailure` `executor.classify.classify_refusal` calls
         `Disposition.STOP`, or an evidence stop failing on
         `stat_var_family_moved` and nothing that move does not explain
         (`_family_moved`), whose family a replan in this turn would approve
-        again as it was. The turn closes right there on the failed step with
-        the refusal's own remedy and no replan spent, so the budget does not go
-        on reproducing the identical failing call.
+        again as it was; and a wave whose remedy (`executor.outcomes.remedy`
+        of its `failed_step`, decided by its most severe stop) is anything but
+        `REPLAN`: a service that did not answer, a fact the user decides on,
+        or a fault of the system, which a second approval would not get past.
+        The turn closes right there on the failed step with the refusal's own
+        remedy and no replan spent, so the budget does not go on reproducing
+        the identical failing call.
         `Refused(NOT_APPROVED)` and `Refused(STALE_REVISION)` mean the workflow's own `approve` node let
         through a plan it should not have -- a replan here would loop on the
         same defect, so those raise instead. Any other outcome also corrects
@@ -677,8 +682,11 @@ def execute_node(
         # A dead end: a tool's STOP refusal or a family that moved since
         # approval, for every stop in the wave. No replan in this turn can fix
         # it, so none is spent, and the planner's re-proposal (which would
-        # reproduce the same failure) never runs.
-        dead_end = _is_dead_end(outcome)
+        # reproduce the same failure) never runs. A wave a new plan does not
+        # get past (its deciding stop's remedy, `failed_step`) waits, is the
+        # user's or is the system's, so it never reaches the planner either,
+        # whose draft would ask the user to approve again.
+        replannable = not _is_dead_end(outcome) and remedy(failed_step(outcome)) is Remedy.REPLAN
         answers = answer_frames(outcome)
         link_evidence_to_terminal_frames(tool_surface, outcome, workflow=workflow)
         if finished.asks:
@@ -686,7 +694,7 @@ def execute_node(
                 ctx.state.get(ORCHESTRATOR_KEPT_ASKS_KEY), tool_surface, outcome, plan=finished
             )
         replans = int(ctx.state.get("replans", 0))
-        if not dead_end and replans < MAX_REPLANS:
+        if replannable and replans < MAX_REPLANS:
             ctx.state["replans"] = replans + 1
             ctx.state[ORCHESTRATOR_REPLANNED_STOP_KEY] = shown_stop(_worded_step(outcome), finished)
             refusal = _planner_refusal(outcome, plan=finished, origins=windowed_origins(ctx.state))

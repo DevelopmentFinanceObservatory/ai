@@ -852,7 +852,9 @@ async def test_the_caller_is_named_beside_the_principal(
             httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
             "timeout",
             "retry_after_delay",
-            {},
+            # A refusal passed through that the runner answered with a 5xx is
+            # its own failure.
+            {"kind": SERVICE_FAILURE},
         ),
         (
             _problem(
@@ -870,6 +872,12 @@ async def test_the_caller_is_named_beside_the_principal(
             "a_code_no_registry_holds",
             "correct_and_retry",
             {"x": 1},
+        ),
+        (
+            _problem(500, "a_code_no_registry_holds", fix={"x": 1}),
+            "a_code_no_registry_holds",
+            "do_not_retry",
+            {"x": 1, "kind": SERVICE_FAILURE},
         ),
         (
             _problem(422, "unit_heterogeneous", fix={"x": 1}, retry_mode="retry_whenever"),
@@ -922,6 +930,7 @@ async def test_the_caller_is_named_beside_the_principal(
         "retryable-registry-code",
         "code-this-service-defines-no-factory-for",
         "code-no-registry-holds",
+        "code-no-registry-holds-5xx",
         "unheld-retry-mode",
         "malformed-retry-mode",
         "this-services-own-code",

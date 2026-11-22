@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any, get_args
 
+import httpx2
 import pytest
+from analysis_mcp.runner_client import refusal_for
 from analysis_mcp.tool_errors import ToolErrorCode as AnalysisCode
 from analysis_mcp.tool_errors import ToolRefusal as AnalysisRefusal
 from common.materialisation import FrameRef
@@ -227,7 +229,7 @@ def _served(
 ) -> ToolFailure:
     """`refusal` as the executor parses it off the wire, with the server's own retry mode."""
     return ToolFailure(
-        code=refusal.code.value,
+        code=str(refusal.code),
         message=refusal.message,
         retry_mode=refusal.retry_mode.value,
         fix=refusal.fix,
@@ -507,6 +509,43 @@ def test_a_stopped_runs_remedy_follows_its_cause_its_disposition_and_its_code(
     stop: MethodChoiceNeeded | RediscoveryNeeded | Refused, past: Remedy
 ) -> None:
     assert remedy(failed_step(stop)) is past
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "retry_mode", "past"),
+    [
+        # A code no table places, and a code placed as another plan's, that the
+        # runner answered with a 5xx: the runner failed of itself.
+        (500, "analysis_engine_crashed", None, Remedy.SYSTEM),
+        (500, "stat_var_unresolved", None, Remedy.SYSTEM),
+        # The same codes answered with a 4xx are refusals of the request.
+        (422, "analysis_engine_crashed", None, Remedy.USER),
+        (422, "stat_var_unresolved", None, Remedy.REPLAN),
+        # A code with its own recovery keeps it whatever the status.
+        (503, "upstream_version_changed", None, Remedy.REPLAN),
+        (503, "analysis_engine_crashed", "retry_after_delay", Remedy.WAIT),
+    ],
+    ids=[
+        "unplaced-5xx",
+        "placed-5xx",
+        "unplaced-4xx",
+        "placed-4xx",
+        "rediscovery-5xx",
+        "wait-5xx",
+    ],
+)
+async def test_a_runner_refusal_passed_through_reads_a_5xx_as_the_runners_fault(
+    status: int, code: str, retry_mode: str | None, past: Remedy
+) -> None:
+    """analysis-mcp passes a runner refusal it does not map through under the
+    runner's code, and the stop it ends reads the status the runner answered
+    it with: a 5xx is the system's, unless its code or its stated retry mode
+    names a recovery of its own."""
+    problem = {"code": code, "detail": "d", "retryable": False, "retry_mode": retry_mode}
+    refusal = await refusal_for(httpx2.Response(status, json=problem), refs_by_root={})
+    assert str(refusal.code) == code
+
+    assert stop_remedy(failed_step(_tool_stop(_served(refusal)))) is past
 
 
 def test_a_failed_step_with_no_wave_remedy_is_the_systems() -> None:

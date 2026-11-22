@@ -394,8 +394,7 @@ HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
     ExecutorCode.INTERNAL_ERROR,
 }
 
-# The codes whose `fix.kind` says whose failure they are (`common.refusal`).
-UPSTREAM_ERROR = "upstream_error"
+# The code whose `fix.kind` says whose failure it is (`common.refusal`).
 FRAME_INTEGRITY_FAILED = "frame_integrity_failed"
 
 
@@ -495,15 +494,23 @@ def is_anchor_fault(failure: ToolFailure) -> bool:
 
 
 def is_upstream_fault(failure: ToolFailure) -> bool:
-    """Whether `failure` says an upstream service failed of itself. That is an
-    `upstream_error` its server marks `SERVICE_FAILURE` (a 5xx, an answer with
-    no problem document, a call that got no answer, or a response it could
-    not use). A definition the platform refused and a refusal of the request
-    under a code the server does not map carry no such mark, and another spec
-    or request may avoid them. One that names a wait is transient before it
-    is anyone's fault (`executor.outcomes.stop_cause`).
+    """Whether `failure` says an upstream service failed of itself: a refusal
+    under any code its server marks `SERVICE_FAILURE` that names no recovery
+    of its own (`classify_refusal` calls it `Disposition.STOP`). data-mcp and
+    analysis-mcp mark an `upstream_error` for a 5xx, an answer with no problem
+    document, a call that got no answer, or a response they could not use,
+    and analysis-mcp marks a runner refusal it passes through under the
+    runner's code when the runner answered it with a 5xx. A definition the
+    platform refused and a refusal of the request under a code the server
+    does not map carry no such mark, and another spec or request may avoid
+    them. A marked refusal whose code or retry mode names a recovery keeps it:
+    one that names a wait is transient before it is anyone's fault
+    (`executor.outcomes.stop_cause`), and `upstream_version_changed` is
+    discovered again.
     """
-    return failure.code == UPSTREAM_ERROR and failure.fix.get("kind") == SERVICE_FAILURE
+    return (
+        failure.fix.get("kind") == SERVICE_FAILURE and classify_refusal(failure) is Disposition.STOP
+    )
 
 
 def is_store_fault(failure: ToolFailure) -> bool:

@@ -33,6 +33,8 @@ answer, or the `ToolRefusal` its reply maps to:
   defines for its own failures (`_LOCAL_CODES`) is `upstream_error` naming it.
   `RUNNER_CODES` is every code the code registry (`dfo_spec_kit.registry`) maps
   to the analysis route. A code outside it passes through too, and is logged.
+  A code passed through that the runner answered with a 5xx is the runner's own
+  failure, and its `fix.kind` says so (`common.refusal.SERVICE_FAILURE`).
 - An answer outside that contract, an unreachable dfo-apis, a timeout and a
   failed credential are `upstream_error`, the last three retryable.
 
@@ -109,6 +111,7 @@ from common.derived_replay import replay_derived as _replay
 from common.derived_replay import retry_after_s as _retry_after_s
 from common.holder import Holder
 from common.materialisation import FrameRef, LeftOutSeries
+from common.refusal import SERVICE_FAILURE
 from dfo_frame_grammar import shift_period
 from dfo_spec_kit.registry import REGISTRY
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -445,7 +448,9 @@ def _passed_through(
     `retry_mode`, or one stating a mode `RetryMode` does not hold, which is logged,
     takes the mode `_FIXED_MODES` gives its code, else `retry_after_delay` when it is
     `retryable`, else the mode this service gives a code it defines. Only a
-    `retry_after_delay` refusal carries `retry_after_s`."""
+    `retry_after_delay` refusal carries `retry_after_s`. A refusal the runner
+    answered with a 5xx is its own failure, and its `fix.kind` is
+    `SERVICE_FAILURE`, which a harness reads on any code."""
     if code not in RUNNER_CODES:
         logger.warning("dfo-apis refused with %s, a code the code registry does not hold", code)
     retryable = problem.get("retryable") is True
@@ -456,7 +461,7 @@ def _passed_through(
     return ToolRefusal(
         code=ToolErrorCode(code) if code in _TOOL_CODES else code,
         message=detail,
-        fix=fix,
+        fix={**fix, "kind": SERVICE_FAILURE} if response.status_code >= 500 else fix,
         retry_after_s=_retry_after_s(response) if delayed else None,
         runner_retry_mode=mode,
     )

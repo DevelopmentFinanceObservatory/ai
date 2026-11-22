@@ -2336,16 +2336,16 @@ def _stop(revision: str, step_id: str, spec: _StopSpec) -> Refused:
 
 
 @pytest.mark.parametrize(
-    ("primary", "also", "dead_end"),
+    ("primary", "also", "closed_on"),
     [
-        ((_MOVED,), (), True),
-        ((_REBOUND,), (), False),
-        ((_MOVED, _UNCONFIRMED), (), True),
-        ((_MOVED, _REBOUND), (), True),
-        ((_MOVED, _SHORT), (), False),
-        ((_MOVED,), ((_SHORT,),), False),
-        (None, ((_SHORT,),), False),
-        (None, ((_MOVED,), None), True),
+        ((_MOVED,), (), "stat_var_family_moved"),
+        ((_REBOUND,), (), "stat_var_membership_drift"),
+        ((_MOVED, _UNCONFIRMED), (), "stat_var_family_moved"),
+        ((_MOVED, _REBOUND), (), "stat_var_family_moved"),
+        ((_MOVED, _SHORT), (), "stat_var_family_moved"),
+        ((_MOVED,), ((_SHORT,),), "stat_var_family_moved"),
+        (None, ((_SHORT,),), None),
+        (None, ((_MOVED,), None), "stat_var_family_moved"),
     ],
     ids=[
         "family-moved",
@@ -2364,18 +2364,19 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
     monkeypatch: pytest.MonkeyPatch,
     primary: _StopSpec,
     also: tuple[_StopSpec, ...],
-    dead_end: bool,
+    closed_on: str | None,
 ) -> None:
-    """A wave whose every stop is a dead end closes the turn on the stop that
-    decides its remedy, the first of the most severe, with no replan. An
-    evidence stop is one when the StatVar family's digest moved since Search
-    approved it and that move explains every error, a family
-    grown past the one series approved included: a replan in the same turn
-    approves the digest the turn already holds, so the turn closes on the
-    source-gone sentence, which asks the user to ask again. A tool's `STOP`
-    refusal is another. A binding that fails the same way for every search, a
-    stop that also fails on another issue, or a wave with any other stop
-    (`also`) replans like any other."""
+    """A wave whose every stop is a dead end, or whose remedy is the user's,
+    closes the turn on the stop that decides its remedy, the first of the
+    most severe, with no replan. An evidence stop is a dead end when the
+    StatVar family's digest moved since Search approved it and that move
+    explains every error, a family grown past the one series approved
+    included: a replan in the same turn approves the digest the turn already
+    holds, so the turn closes on the source-gone sentence, which asks the user
+    to ask again. A tool's `STOP` refusal is another. A moved family is the
+    user's however the rest of its wave fails, and so is a binding that fails
+    the same way for every search. A wave of stops a new plan gets past
+    (`closed_on` None) replans."""
     plan = _planner_plan(schemas=real_schemas)
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
 
@@ -2391,40 +2392,60 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
 
     events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
-    assert len(planner.calls) == (1 if dead_end else 2)
-    if not dead_end:
+    assert len(planner.calls) == (2 if closed_on is None else 1)
+    if closed_on is None:
         assert _pending_interrupt(events) == APPROVE_PAUSE
         return
     assert _pending_interrupt(events) is None
     failed = _output_of(events, "execute")["failed_step"]
     # Another spec avoids `spec_not_exportable`, and the user has to accept a
     # moved family, so the family decides the wave wherever it stands.
-    assert failed["code"] == "stat_var_family_moved"
-    gone = FAILURE_SENTENCES[FailureClass.SOURCE_GONE]
-    assert failure_detail(failed) == f"{gone.cause}, {gone.advice}."
+    assert failed["code"] == closed_on
+    assert failed["wave_remedy"] == "user"
+    if closed_on == "stat_var_family_moved":
+        gone = FAILURE_SENTENCES[FailureClass.SOURCE_GONE]
+        assert failure_detail(failed) == f"{gone.cause}, {gone.advice}."
 
 
-@pytest.mark.parametrize("retryable", [True, False], ids=["retryable", "permanent"])
-async def test_a_transport_stop_closes_the_turn_only_when_no_retry_can_help(
+@pytest.mark.parametrize(
+    ("retryable", "beside", "wave_remedy"),
+    [
+        (True, False, "wait"),
+        (False, False, "system"),
+        (True, True, "wait"),
+    ],
+    ids=["retryable", "permanent", "retryable-beside-a-replannable-stop"],
+)
+async def test_a_transport_stop_closes_the_turn_without_a_replan(
     pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
     monkeypatch: pytest.MonkeyPatch,
     retryable: bool,
+    beside: bool,
+    wave_remedy: str,
 ) -> None:
-    """A step the tool surface failed for a fault no later attempt gets past
-    closes the turn without a replan, which would spend an approval on the
-    same failure. A retryable transport stop replans."""
+    """A step the tool surface failed closes the turn without a replan, which
+    would ask the user to approve again a plan no new draft gets past: the
+    executor spent its retries on a retryable one, so the user tries again
+    later, and no later attempt gets past a permanent one. A replannable stop
+    in the same wave does not route it to the planner, since the transport
+    stop decides the wave."""
     plan = _planner_plan(schemas=real_schemas)
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
 
     async def _stub_wave(drafted_plan: Any, **_kwargs: Any) -> Any:
+        revision = plan_revision(drafted_plan)
         stop = Refused(
-            revision=plan_revision(drafted_plan),
+            revision=revision,
             refusal=RefusalKind.TRANSPORT_FAILED,
             detail="could not call 'get_data'",
             step_id="get_data",
             retryable=retryable,
         )
+        if beside:
+            stop = stop.model_copy(
+                update={"also_stopped": (_stop(revision, "sibling", (_SHORT,)),)}
+            )
         return drafted_plan, stop
 
     monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_wave)
@@ -2433,8 +2454,11 @@ async def test_a_transport_stop_closes_the_turn_only_when_no_retry_can_help(
 
     events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
-    assert len(planner.calls) == (2 if retryable else 1)
-    assert (_pending_interrupt(events) == APPROVE_PAUSE) is retryable
+    assert len(planner.calls) == 1
+    assert _pending_interrupt(events) is None
+    failed = _output_of(events, "execute")["failed_step"]
+    assert failed["step_id"] == "get_data"
+    assert failed["wave_remedy"] == wave_remedy
 
 
 async def test_a_not_approved_outcome_raises_instead_of_replanning(
