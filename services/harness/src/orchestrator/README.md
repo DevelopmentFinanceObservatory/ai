@@ -17,17 +17,17 @@ each declared from its signature and docstring (`declarations.py`) and run over
 an `OrchestratorCall` (`call.py`) holding the turn's state and id. The harness
 gives it these (`harness.orchestrator_tools`):
 
-| Tool          | Behaviour                                                                                                                        |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `search`      | Sends every part of the question to Search in one call, or `text` for Search to read itself; returns each part's reading         |
-| `fetch`       | Retrieves one dataset, summing a family of indicators, and returns frame ids with their views                                    |
-| `make_charts` | Draws charts from those frames on the canvas and returns what each holds and its reply figures, or why it failed                 |
-| `ask_user`    | Records one to three questions for the user; the workflow pauses once for all of them and hands every answer back                |
-| `plan`        | Records a brief and the outputs asked for; the plan path runs and hands back its frames and each ask's status                    |
-| `get_skill`   | Loads a skill a search result named, or with `path` one file it links, through data-mcp                                          |
-| `explain_dfo` | What DFO is and what can be asked, from the `dfo-faq` skill read through data-mcp (`harness.dfo_faq`)                            |
-| `recall`      | An earlier turn's plan records or readings, or a canvas component's entry, in full; a typed refusal names the legal turns or ids |
-| `remove_cards` | Takes the cards the user names off the canvas, or all of them for a request to clear it |
+| Tool           | Behaviour                                                                                                                                                                                                      |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `search`       | Sends every part of the question to Search in one call, or `text` for Search to read itself; returns each part's reading                                                                                       |
+| `fetch`        | Retrieves one dataset, summing a family of indicators, and returns frame ids with their views                                                                                                                  |
+| `make_charts`  | Draws charts from those frames on the canvas and returns what each holds and its reply figures, or why it failed                                                                                               |
+| `ask_user`     | Records one to three questions for the user; the workflow pauses once for all of them and hands every answer back                                                                                              |
+| `plan`         | Records a brief and the outputs asked for; the plan path runs and hands back its frames and each ask's status                                                                                                  |
+| `get_skill`    | Loads a skill a search result named, or with `path` one file it links, through data-mcp                                                                                                                        |
+| `explain_dfo`  | What DFO is and what can be asked, from the `dfo-faq` skill read through data-mcp (`harness.dfo_faq`)                                                                                                          |
+| `recall`       | An earlier turn's plan records or readings, or a canvas component's entry, in full; a typed refusal names the legal turns or ids                                                                               |
+| `remove_cards` | Takes cards off the canvas: those the user names, every unpinned card with `all_cards`, or the earlier subject's cards when the conversation changes subject; pinned cards stay and come back as `kept_pinned` |
 
 The model sees digests only: part readings, frame views, one-line summaries
 and a drawn card's reply figures, with no rows. Each turn's first request

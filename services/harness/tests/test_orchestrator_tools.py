@@ -77,6 +77,7 @@ from harness.rolling_cards import CardWithheld, RollingCards
 from harness.scope_choices import served_facts
 from harness.studio_edit import _record_revision
 from harness.studio_state import (
+    CardRemoval,
     ConversationState,
     _apply_operations,
     _next_manifest,
@@ -303,7 +304,9 @@ def test_the_search_and_ask_user_declarations_carry_prices_beside_counts():
 
     assert "`other_prices`, each with its spec_id and label" in declarations["search"]
     ask_user = declarations["ask_user"]
-    assert "An option for a count or prices that a search result names" in ask_user
+    assert "An option for one of a part's candidates carries the spec_id" in ask_user
+    assert "names its part in `prices_of`" in ask_user
+    assert "count" not in ask_user
 
 
 def test_every_chart_field_is_described_and_select_json_shows_a_list_of_values():
@@ -5563,7 +5566,7 @@ def _recall_callable(state: ConversationState):
 
 
 def _remove_callable(state: ConversationState):
-    async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
+    async def remove(*, component_ids: list[str], all_cards: bool) -> CardRemoval:
         return remove_cards(state, component_ids, all_cards=all_cards)
 
     return remove
@@ -5571,10 +5574,15 @@ def _remove_callable(state: ConversationState):
 
 def _two_card_canvas() -> ConversationState:
     state = ConversationState(conversation_id="c1")
-    for cid in ("cmp_01", "cmp_02"):
+    for cid, title in (("cmp_01", "Aid to Kenya"), ("cmp_02", "Aid to Ghana")):
         land_component(
             state,
-            {"component_id": cid, "revision": 1, "type": "line_chart", "title": "Aid"},
+            {
+                "component_id": cid,
+                "revision": 1,
+                "type": "line_chart",
+                "payload": {"component": {"title": {"text": title}}},
+            },
         )
     return state
 
@@ -5583,9 +5591,13 @@ async def test_remove_cards_takes_named_cards_off_and_says_which_it_never_held()
     state = _two_card_canvas()
     tools, ctx = _tools(remove_cards=_remove_callable(state))
 
-    answer = await tools["remove_cards"](ctx, ["cmp_01", "cmp_99"])
+    answer = await tools["remove_cards"](ctx, ["cmp_01", "cmp_99", "cmp_99"])
 
-    assert answer == {"removed": ["cmp_01"], "not_in_conversation": ["cmp_99"]}
+    assert answer == {
+        "removed": ["cmp_01"],
+        "not_in_conversation": ["cmp_99"],
+        "titles": {"cmp_01": "Aid to Kenya"},
+    }
     assert state.composition is not None
     assert [b.component_id for b in state.composition.blocks] == ["cmp_02"]
 
@@ -5597,10 +5609,48 @@ async def test_remove_cards_clears_the_canvas_and_refuses_a_call_that_names_noth
     nothing = await tools["remove_cards"](ctx)
     cleared = await tools["remove_cards"](ctx, all_cards=True)
     again = await tools["remove_cards"](ctx, all_cards=True)
+    # A fresh turn, since the three calls above spend remove_cards' budget.
+    tools, ctx = _tools(remove_cards=_remove_callable(state))
+    named = await tools["remove_cards"](ctx, ["cmp_99"], all_cards=True)
 
     assert _stated(nothing) == ("tool_arguments_invalid", "correct_and_retry")
-    assert cleared == {"removed": ["cmp_01", "cmp_02"]}
+    assert cleared == {
+        "removed": ["cmp_01", "cmp_02"],
+        "titles": {"cmp_01": "Aid to Kenya", "cmp_02": "Aid to Ghana"},
+    }
     assert again == {"removed": [], "note": "The canvas was already empty."}
+    assert {key: value for key, value in named.items() if key != "note"} == {
+        "removed": [],
+        "not_in_conversation": ["cmp_99"],
+    }
+
+
+async def test_remove_cards_leaves_a_pinned_card_and_names_it():
+    state = _two_card_canvas()
+    assert state.composition is not None
+    state.composition.blocks[0].pinned = True
+    tools, ctx = _tools(remove_cards=_remove_callable(state))
+
+    pinned_only = await tools["remove_cards"](ctx, ["cmp_01"])
+    cleared = await tools["remove_cards"](ctx, all_cards=True)
+    mixed = await tools["remove_cards"](ctx, ["cmp_01", "cmp_02", "cmp_99"])
+
+    assert pinned_only["removed"] == []
+    assert pinned_only["kept_pinned"] == ["cmp_01"]
+    assert "Unpin from Canvas" in pinned_only["note"]
+    assert cleared == {
+        "removed": ["cmp_02"],
+        "kept_pinned": ["cmp_01"],
+        "titles": {"cmp_02": "Aid to Ghana", "cmp_01": "Aid to Kenya"},
+    }
+    assert [b.component_id for b in state.composition.blocks] == ["cmp_01"]
+    assert {key: value for key, value in mixed.items() if key != "note"} == {
+        "removed": [],
+        "kept_pinned": ["cmp_01"],
+        "already_off": ["cmp_02"],
+        "not_in_conversation": ["cmp_99"],
+        "titles": {"cmp_01": "Aid to Kenya"},
+    }
 
 
 async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
@@ -5610,10 +5660,14 @@ async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
     tools, ctx = _tools(remove_cards=_remove_callable(state))
     await tools["remove_cards"](ctx, ["cmp_01"])
 
-    again = await tools["remove_cards"](ctx, ["cmp_01"])
-    unknown = await tools["remove_cards"](ctx, ["cmp_99"])
+    again = await tools["remove_cards"](ctx, ["cmp_01", "cmp_01"])
+    unknown = await tools["remove_cards"](ctx, ["cmp_99", "cmp_99"])
 
-    assert again == {"removed": [], "note": "Those cards were already off the canvas."}
+    assert again == {
+        "removed": [],
+        "already_off": ["cmp_01"],
+        "note": "Those cards were already off the canvas.",
+    }
     assert _stated(unknown) == ("card_not_found", "correct_and_retry")
     assert "cmp_99" not in unknown["error"]
 
@@ -5657,7 +5711,7 @@ async def test_a_canvas_listing_does_not_spend_the_detail_reads():
     listing = await tools["recall"]("canvas", ctx)
     reads = [await tools["recall"]("canvas", ctx, component_id="cmp_01") for _ in range(3)]
 
-    assert [card["component_id"] for card in listing["on_canvas"]] == ["cmp_01"]
+    assert [card["component_id"] for card in listing["blocks"]] == ["cmp_01"]
     assert all("error" not in read for read in reads)
     for _ in range(BUDGETS["recall_canvas"] - 1):
         await tools["recall"]("canvas", ctx)

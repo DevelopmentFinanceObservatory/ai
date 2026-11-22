@@ -4,7 +4,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 149918,
+      "total_chars": 73480,
       "system_instruction_chars": 20220,
       "declaration_total_chars": 40741,
       "declarations": [
@@ -26,12 +26,12 @@
         }
       ],
       "contents": {
-        "total_chars": 87572,
+        "total_chars": 12864,
         "buckets": [
           {
             "bucket": "text(planner-brief)",
             "count": 1,
-            "chars": 87567
+            "chars": 12859
           },
           {
             "bucket": "text",
@@ -45,7 +45,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 182801,
+      "total_chars": 106363,
       "system_instruction_chars": 20220,
       "declaration_total_chars": 40741,
       "declarations": [
@@ -67,17 +67,17 @@
         }
       ],
       "contents": {
-        "total_chars": 120293,
+        "total_chars": 45585,
         "buckets": [
-          {
-            "bucket": "text(planner-brief)",
-            "count": 1,
-            "chars": 87567
-          },
           {
             "bucket": "functionResponse:get_skill",
             "count": 1,
             "chars": 32671
+          },
+          {
+            "bucket": "text(planner-brief)",
+            "count": 1,
+            "chars": 12859
           },
           {
             "bucket": "functionCall:get_skill",
@@ -96,7 +96,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 183437,
+      "total_chars": 106999,
       "system_instruction_chars": 20220,
       "declaration_total_chars": 40741,
       "declarations": [
@@ -118,17 +118,17 @@
         }
       ],
       "contents": {
-        "total_chars": 120767,
+        "total_chars": 46059,
         "buckets": [
-          {
-            "bucket": "text(planner-brief)",
-            "count": 1,
-            "chars": 87567
-          },
           {
             "bucket": "functionResponse:get_skill",
             "count": 1,
             "chars": 32671
+          },
+          {
+            "bucket": "text(planner-brief)",
+            "count": 1,
+            "chars": 12859
           },
           {
             "bucket": "functionResponse:propose_plan",
