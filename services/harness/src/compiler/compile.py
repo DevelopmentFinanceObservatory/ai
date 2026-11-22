@@ -25,7 +25,9 @@ graph the plan already validated. Nothing here reads a claim.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
+import itertools
+import logging
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, StrEnum
 from typing import Any, Literal, NamedTuple
@@ -33,7 +35,12 @@ from typing import Any, Literal, NamedTuple
 from common.place_type import FLOW_ROLE_COLUMNS, type_column
 from common.rolling import PopulationEmptyError, PopulationLevelColumnMissingError
 from common.unit_refs import PERCENT_UNIT
-from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN, VALUE_COLUMN, normalize_role_keys
+from dfo_frame_grammar.grammar import (
+    STAT_VAR_COLUMN,
+    TIME_PERIOD_COLUMN,
+    VALUE_COLUMN,
+    normalize_role_keys,
+)
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -42,6 +49,7 @@ from planner.operations import (
     GrowthOperation,
     JoinOperation,
     Operation,
+    OperationKind,
     QuotientOfOperation,
     RankOperation,
     RetrieveOperation,
@@ -67,6 +75,7 @@ from planner.plan import (
 )
 from planner.proof import mismatches
 from planner.records import (
+    MAX_IDENTIFIER_CHARS,
     DenominatorScope,
     EntityIn,
     EvidenceIssueCode,
@@ -77,6 +86,7 @@ from planner.records import (
     PlaceLevel,
     RankAmong,
     RankDirection,
+    Reduction,
     StatVarReading,
     StrictModel,
     ValueThreshold,
@@ -156,11 +166,14 @@ from compiler.sources import (
     entity_scopes_disjoint,
     family_overlap,
     parties_outside,
+    party_class,
     pinned_stat_var,
     source_whole_side,
     stat_var_reading,
 )
 from compiler.surface import ToolSchema, schema_hash_error
+
+logger = logging.getLogger(__name__)
 
 
 class CompileIssueCode(StrEnum):
@@ -322,46 +335,84 @@ Upstream = tuple[SelectedSource, DatasetRequirement]
 _SINGLE_INPUT = (AggregateOperation, GrowthOperation, RankOperation, FilterOperation)
 
 
-def _wholes_on_their_sources(
-    plan: Plan, discovered: Mapping[str, SelectedSource]
-) -> dict[str, EvidenceRequirement]:
-    """`plan`'s requirements by id, each whole read on the source `discovered` holds for it.
+@dataclass(frozen=True, slots=True)
+class WholeOnSource:
+    """A whole (`DatasetRequirement.whole_of`) read on the source discovery selected for it.
 
-    A whole (`DatasetRequirement.whole_of`) covers what its part covers
-    less the side it opens (`planner.plan.whole_read`). On that side it
-    reads what its source, the compile of the part with the side left open,
-    holds there, under the part's role phrase for it
-    (`planner.plan.opened_role`): the side's word in `across` where the
-    source leaves it open, else the entities it binds there by their refs,
-    the total Search counts the side as. A whole with no source yet reads
-    as its part's coverage alone.
+    `read` is the whole as every reader takes it: what its part covers less the
+    side it opens (`planner.plan.whole_read`), with that side one total, as the
+    plan reads it (`planner.plan.opened_role`). `retrieved` is the whole as its
+    retrieval fetches it, which the evidence checks hold the source to. Where the
+    source binds the opened side, the two are one requirement naming the
+    entities it binds there by their refs, the total Search counts the side as.
+    Where the source leaves the side open, `retrieved` states the side's word in
+    `across`, and `summed` is the role column the retrieval holds open there:
+    the compiler sums that column away by period in a step after the retrieval
+    (`_Build._summing_arguments`), so `read` keeps no column for the side.
     """
-    by_id = {r.id: r for r in plan.evidence_requirements}
-    read: dict[str, EvidenceRequirement] = dict(by_id)
-    for requirement_id, whole in by_id.items():
+
+    read: DatasetRequirement
+    retrieved: DatasetRequirement
+    summed: str | None = None
+
+
+def wholes_on_their_sources(
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+    discovered: Mapping[str, SelectedSource],
+) -> dict[str, WholeOnSource]:
+    """Each whole of `requirements_by_id` whose part it holds, read on the source
+    `discovered` holds for it (`WholeOnSource`), by requirement id.
+
+    The source is the compile of the part with the side left open. A whole with
+    no source yet, or one opening no side (a sector whole), reads as its part's
+    coverage alone.
+    """
+    wholes: dict[str, WholeOnSource] = {}
+    for requirement_id, whole in requirements_by_id.items():
         if not isinstance(whole, DatasetRequirement) or whole.whole_of is None:
             continue
-        part = by_id.get(whole.whole_of.part)
+        part = requirements_by_id.get(whole.whole_of.part)
         if not isinstance(part, DatasetRequirement) or part.whole_of is not None:
             continue
         covered = whole_read(whole, part)
         role = opened_role(whole, part)
         source = discovered.get(requirement_id)
         if role is None or source is None:
-            read[requirement_id] = covered
+            wholes[requirement_id] = WholeOnSource(read=covered, retrieved=covered)
             continue
         side = flow_side(role)
-        if any(flow_side(axis.column) == side for axis in source.open_entity_axes or ()):
-            update: dict[str, object] = {"across": (*covered.across, role)}
-        else:
-            held = [
-                Entity(name=entity.label, role=role, dcid=entity.ref)
-                for entity in source.entities
-                if flow_side(entity.role) == side
-            ]
-            update = {"entities": (*covered.entities, *held)}
-        read[requirement_id] = covered.model_copy(update=update)
-    return read
+        summed = next(
+            (
+                axis.column
+                for axis in source.open_entity_axes or ()
+                if flow_side(axis.column) == side
+            ),
+            None,
+        )
+        if summed is not None:
+            retrieved = covered.model_copy(update={"across": (*covered.across, role)})
+            wholes[requirement_id] = WholeOnSource(read=covered, retrieved=retrieved, summed=summed)
+            continue
+        held = [
+            Entity(name=entity.label, role=role, dcid=entity.ref)
+            for entity in source.entities
+            if flow_side(entity.role) == side
+        ]
+        read = covered.model_copy(update={"entities": (*covered.entities, *held)})
+        wholes[requirement_id] = WholeOnSource(read=read, retrieved=read)
+    return wholes
+
+
+def _summing_step_id(op_id: str, taken: Collection[str]) -> str:
+    """The id of the step summing the side a whole's retrieval `op_id` leaves open
+    (`WholeOnSource.summed`): the retrieval's id with `_summed` after it, cut to an
+    identifier's length and numbered past any id of `taken`."""
+    for count in itertools.count(1):
+        suffix = "_summed" if count == 1 else f"_summed{count}"
+        step_id = op_id[: MAX_IDENTIFIER_CHARS - len(suffix)] + suffix
+        if step_id not in taken:
+            return step_id
+    raise AssertionError("unreachable")
 
 
 class _Ratio(Enum):
@@ -415,7 +466,21 @@ class _Build:
         self.schemas = schemas
         self.discovered = discovered
         self.capabilities = capabilities
-        self.requirements = _wholes_on_their_sources(plan, discovered)
+        stated = {r.id: r for r in plan.evidence_requirements}
+        wholes = wholes_on_their_sources(stated, discovered)
+        # Every reader takes a whole as `read`; its retrieval's evidence is held to
+        # `retrieved`, and a side its source leaves open is summed (`summed`).
+        self.requirements: dict[str, EvidenceRequirement] = stated | {
+            rid: whole.read for rid, whole in wholes.items()
+        }
+        self.retrieved: dict[str, DatasetRequirement] = {
+            rid: whole.retrieved for rid, whole in wholes.items()
+        }
+        self.summed: dict[str, str] = {
+            rid: whole.summed for rid, whole in wholes.items() if whole.summed is not None
+        }
+        # The step summing a whole's open side, by the id of the retrieval it reads.
+        self.summing_steps: dict[str, str] = {}
         self.whole_history = split_of(plan).whole_history
         self.issues: list[CompileIssue] = []
         self.warnings: list[EvidenceIssue] = []
@@ -448,7 +513,7 @@ class _Build:
         ]
         terminal = set(self.translation.terminal)
         return Workflow(
-            steps=tuple(self.steps[op_id] for op_id in self.order),
+            steps=tuple(self.steps[step_id] for step_id in self._step_ids()),
             sources=tuple(self.sources[op.id] for op in retrieves),
             evidence_bindings=tuple(
                 EvidenceBinding(
@@ -458,9 +523,30 @@ class _Build:
                 )
                 for op in retrieves
             ),
-            terminal_steps=tuple(op_id for op_id in self.order if op_id in terminal),
+            terminal_steps=tuple(
+                self._producing_step(op_id) for op_id in self.order if op_id in terminal
+            ),
             warnings=warnings,
         )
+
+    def _step_ids(self) -> list[str]:
+        """Every step's id in the order the steps run: each operation's in `self.order`,
+        a whole's retrieval followed by the step summing its open side (`summing_steps`)."""
+        ids: list[str] = []
+        for op_id in self.order:
+            ids.append(op_id)
+            if (summing := self.summing_steps.get(op_id)) is not None:
+                ids.append(summing)
+        return ids
+
+    def _producing_step(self, op_id: str) -> str:
+        """The step whose frame is operation `op_id`'s result: the step summing a whole's
+        open side after its retrieval (`summing_steps`), else the operation's own."""
+        return self.summing_steps.get(op_id, op_id)
+
+    def _frame_of(self, op_id: str) -> Binding:
+        """A binding to operation `op_id`'s result frame (`_producing_step`)."""
+        return _frame_from(self._producing_step(op_id))
 
     # -- checks ------------------------------------------------------------------
 
@@ -643,7 +729,9 @@ class _Build:
             self.sources[operation.id] = source
             self._check_summable(operation, requirement, source)
             self._check_breakdown(operation, requirement, source)
-            findings = check_evidence(requirement, evidence_from_source(source))
+            findings = check_evidence(
+                self.retrieved.get(requirement.id, requirement), evidence_from_source(source)
+            )
             for finding in errors(findings):
                 self._issue(
                     CompileIssueCode.SOURCE_UNUSABLE,
@@ -728,6 +816,10 @@ class _Build:
         `roots` back to the retrieval that produced it.
         """
         self._retrieve_by_requirement = {op.requirement_id: op.id for op in self._retrieves()}
+        for operation in self._retrieves():
+            if operation.requirement_id in self.summed:
+                taken = {*self.operations, *self.summing_steps.values()}
+                self.summing_steps[operation.id] = _summing_step_id(operation.id, taken)
         self.shapes, reasons = shapes_for(
             self.operations,
             requirements=self.requirements,
@@ -1832,9 +1924,13 @@ class _Build:
         numerator is checked against the sources behind the denominator together,
         so a denominator summing several datasets holds a party one of them holds.
         A side whose sources are all the numerator's, or one whose sources are not
-        all known or state no identity, is not read. Where a denominator source
+        all known or state no identity, is not read, and a source stating no
+        identity is logged. Where a denominator source
         binds parties on a side and states no named set there, a party it does not
-        bind is unshown, since a bound region holds countries no set lists. A party
+        bind is unshown, since a bound region holds countries no set lists. So is a
+        total the numerator binds with no named set stating it there, a party
+        whose ref shows no class of party (`compiler.sources.party_class`): no set
+        lists what it holds. A party
         nothing shows is inside or outside is not refused. A `quotient_of` divides
         any two measures and is not checked.
         """
@@ -1851,21 +1947,36 @@ class _Build:
         for axis, column in WHOLE_COLUMNS.items():
             whole = [source_whole_side(source, column) for source in denominators]
             if any(side is None for side in whole):
+                logger.info(
+                    "share %r: a denominator source states no identity, so its %s side is "
+                    "not checked for the parties its numerator names",
+                    operation.id,
+                    axis,
+                )
                 return
             for numerator in numerators:
                 part = source_whole_side(numerator, column)
-                if part is None or not part.bound:
+                if part is None:
+                    logger.info(
+                        "share %r: numerator source %s states no identity, so the %s "
+                        "parties it names are not checked",
+                        operation.id,
+                        numerator.spec_id,
+                        axis,
+                    )
                     continue
-                held = parties_outside(
-                    part.bound,
-                    [side for side in whole if side is not None],
-                    part_group=part.group,
-                    bound_is_exact=False,
-                )
                 labels = {entity.ref: entity.label for entity in numerator.entities}
-                outside.extend(
-                    f"{axis} {labels.get(party, party)} ({party})" for party in held.outside
-                )
+                for party in part.bound:
+                    held = parties_outside(
+                        (party,),
+                        [side for side in whole if side is not None],
+                        part_group=part.group,
+                        part_readable=part.group is not None or party_class(party) is not None,
+                        bound_is_exact=False,
+                    )
+                    outside.extend(
+                        f"{axis} {labels.get(party, party)} ({party})" for party in held.outside
+                    )
         if not outside:
             return
         part = self._requirement_upstream(operation.numerator.input)
@@ -2105,23 +2216,35 @@ class _Build:
         return None
 
     def _check_capabilities(self) -> None:
+        """Record in `self.tools` the one tool carrying out each step, or report why none can.
+
+        A whole's summing step (`summing_steps`) is an aggregate carrying out its
+        retrieval's operation, so its issues name that operation.
+        """
         drift_by_tool: dict[ToolId, list[SchemaDrift]] = {}
         for d in schema_drift(self.capabilities, self.schemas):
             drift_by_tool.setdefault(d.tool, []).append(d)
-        for operation in self.operations.values():
-            candidates = capabilities_for(operation.kind, self.capabilities)
+        steps = [
+            (operation.kind, operation.id, operation.id) for operation in self.operations.values()
+        ]
+        steps.extend(
+            (OperationKind.AGGREGATE, step_id, op_id)
+            for op_id, step_id in self.summing_steps.items()
+        )
+        for kind, step_id, operation_id in steps:
+            candidates = capabilities_for(kind, self.capabilities)
             if not candidates:
                 self._issue(
                     CompileIssueCode.NO_CAPABILITY,
-                    f"no tool implements {operation.kind.value!r} operations",
-                    operation_id=operation.id,
+                    f"no tool implements {kind.value!r} operations",
+                    operation_id=operation_id,
                 )
                 continue
             if len(candidates) > 1:
                 self._issue(
                     CompileIssueCode.AMBIGUOUS_CAPABILITY,
-                    f"{len(candidates)} tools implement {operation.kind.value!r} operations",
-                    operation_id=operation.id,
+                    f"{len(candidates)} tools implement {kind.value!r} operations",
+                    operation_id=operation_id,
                 )
                 continue
             (capability,) = candidates
@@ -2130,7 +2253,7 @@ class _Build:
                 self._issue(
                     CompileIssueCode.UNKNOWN_TOOL,
                     f"{capability.tool.server} serves no tool named {capability.tool.name!r}",
-                    operation_id=operation.id,
+                    operation_id=operation_id,
                     tool=capability.tool,
                 )
                 continue
@@ -2139,7 +2262,7 @@ class _Build:
                 self._issue(
                     CompileIssueCode.BAD_TOOL_SCHEMA,
                     f"{capability.tool.name!r} declares an unusable argument schema: {unusable}",
-                    operation_id=operation.id,
+                    operation_id=operation_id,
                     tool=capability.tool,
                 )
                 continue
@@ -2151,7 +2274,7 @@ class _Build:
                     CompileIssueCode.BAD_TOOL_SCHEMA,
                     f"{capability.tool.name!r} declares a schema that cannot be hashed: "
                     f"{hash_error}",
-                    operation_id=operation.id,
+                    operation_id=operation_id,
                     tool=capability.tool,
                 )
                 continue
@@ -2164,7 +2287,7 @@ class _Build:
                     CompileIssueCode.CAPABILITY_SCHEMA_DRIFT,
                     f"{capability.tool.name!r} no longer matches its capability row's {d.field} "
                     f"(pinned {d.pinned}, live {d.live}); the row needs re-pinning",
-                    operation_id=operation.id,
+                    operation_id=operation_id,
                     tool=capability.tool,
                 )
                 continue
@@ -2174,11 +2297,11 @@ class _Build:
                     CompileIssueCode.CAPABILITY_UNPINNED,
                     f"{capability.tool.name!r} declares a {d.field} its capability row does not "
                     f"pin (live {d.live}); the row needs pinning",
-                    operation_id=operation.id,
+                    operation_id=operation_id,
                     tool=capability.tool,
                 )
                 continue
-            self.tools[operation.id] = (capability, schema)
+            self.tools[step_id] = (capability, schema)
 
     # -- building --------------------------------------------------------------------
 
@@ -2202,7 +2325,16 @@ class _Build:
             written[op_id] = built
             self._check_bindings(operation, capability, built[1])
             if ROLLING_PARAMETER not in built[0]:
-                self._build_step(op_id, *built)
+                self._build_step(op_id, op_id, *built)
+            summing = self.summing_steps.get(op_id)
+            if summing is None or summing not in self.tools:
+                continue
+            summed = self._summing_arguments(op_id)
+            if summed is None:
+                continue
+            written[summing] = summed
+            self._check_bindings(operation, self.tools[summing][0], summed[1])
+            self._build_step(summing, op_id, *summed)
         rolling = [op_id for op_id, (args, _) in written.items() if ROLLING_PARAMETER in args]
         if not rolling:
             return
@@ -2211,24 +2343,49 @@ class _Build:
             return
         for op_id in rolling:
             args, bindings = written[op_id]
-            self._build_step(op_id, with_population(args, populations[op_id]), bindings)
+            self._build_step(op_id, op_id, with_population(args, populations[op_id]), bindings)
 
     def _build_step(
-        self, op_id: str, args: dict[str, JsonValue], bindings: dict[str, Binding]
+        self,
+        step_id: str,
+        operation_id: str,
+        args: dict[str, JsonValue],
+        bindings: dict[str, Binding],
     ) -> None:
-        capability, schema = self.tools[op_id]
-        self._check_arguments(self.operations[op_id], capability, schema, args, bindings)
-        self.steps[op_id] = WorkflowStep(
-            id=op_id,
-            operation_id=op_id,
+        """Build step `step_id`, which carries out operation `operation_id`: the
+        operation's own step, or the step summing a whole's open side after its
+        retrieval (`summing_steps`)."""
+        capability, schema = self.tools[step_id]
+        self._check_arguments(self.operations[operation_id], capability, schema, args, bindings)
+        self.steps[step_id] = WorkflowStep(
+            id=step_id,
+            operation_id=operation_id,
             tool=capability.tool,
             args=args,
             bindings=bindings,
             implementation_version=capability.implementation_version,
             input_schema_hash=schema.input_schema_hash,
             output_schema_hash=schema.output_schema_hash,
-            expected_role_keys=self._expected_role_keys(op_id),
+            expected_role_keys=self._expected_role_keys(step_id),
         )
+
+    def _summing_arguments(self, retrieve_id: str) -> Arguments | None:
+        """The arguments of the step summing a whole's open side after its retrieval
+        `retrieve_id` (`WholeOnSource.summed`): an `aggregate` by `sum` grouped by
+        period and every column of the shape every reader of the whole was checked
+        against, so its frame is that shape, one total on the side. A family read
+        separately keeps its StatVars apart.
+        """
+        resolved = self.shapes.get(retrieve_id)
+        source = self.sources.get(retrieve_id)
+        if resolved is None or source is None:
+            return None
+        columns = [role.column for role in resolved.columns]
+        group_by = [TIME_PERIOD_COLUMN, *columns]
+        if source.stat_var_reading is StatVarReading.SEPARATE:
+            group_by.append(STAT_VAR_COLUMN)
+        args: dict[str, JsonValue] = {"aggregation": Reduction.SUM.value, "group_by": group_by}
+        return args, {"frame_ref": _frame_from(retrieve_id)}
 
     def _populations(
         self, written: Mapping[str, Arguments]
@@ -2242,7 +2399,8 @@ class _Build:
         chains keep no series of a retrieval, reported as
         `ROLLING_POPULATION_UNUSABLE`.
         """
-        if set(written) != set(self.order):
+        step_ids = self._step_ids()
+        if set(written) != set(step_ids):
             return None
         roots = {
             op_id: self._root(operation, written[op_id][0])
@@ -2250,19 +2408,19 @@ class _Build:
             if isinstance(operation := self.operations[op_id], RetrieveOperation)
         }
         frame_slots = {
-            op_id: [
+            step_id: [
                 declared.parameter
-                for declared in self.tools[op_id][0].inputs
+                for declared in self.tools[step_id][0].inputs
                 if declared.artifact is ArtifactKind.FRAME_REF
             ]
-            for op_id in self.order
-            if op_id not in roots
+            for step_id in step_ids
+            if step_id not in roots
         }
         terminal = set(self.translation.terminal)
         try:
             return step_populations(
                 written,
-                terminal=[op_id for op_id in self.order if op_id in terminal],
+                terminal=[self._producing_step(op_id) for op_id in self.order if op_id in terminal],
                 roots=roots,
                 frame_slots=frame_slots,
             )
@@ -2293,6 +2451,8 @@ class _Build:
         requirement = self.requirements.get(operation.requirement_id)
         columns = {entity.role for entity in source.entities}
         columns.update(self._columns_of(operation.id) or ())
+        if (summed := self.summed.get(operation.requirement_id)) is not None:
+            columns.add(summed)
         if self._read_by_level_filter(operation.id):
             columns.update(type_column(column) for column in self._columns_of(operation.id) or ())
         named: dict[str, tuple[str, ...]] = {}
@@ -2304,7 +2464,7 @@ class _Build:
         return Root(spec_id=source.spec_id, columns=frozenset(columns), named=named)
 
     def _expected_role_keys(self, op_id: str) -> tuple[str, ...]:
-        """The prediction frozen onto `op_id`'s step: its own resolved shape's role columns.
+        """The prediction frozen onto step `op_id`: its operation's resolved shape's role columns.
 
         Sorted the way `Frame.build` sorts them, through
         `grammar.normalize_role_keys` -- an unsorted prediction would fail
@@ -2313,10 +2473,23 @@ class _Build:
         to an operation with no resolved shape, which `_arguments` has
         already refused to build a step for unless an issue explains why.
         """
-        resolved = self.shapes.get(op_id)
+        resolved = self.shapes.get(self._operation_of(op_id))
         if resolved is None:
             return ()
-        return normalize_role_keys(role.column for role in resolved.columns)
+        columns = [role.column for role in resolved.columns]
+        retrieved = self.operations.get(op_id)
+        if isinstance(retrieved, RetrieveOperation) and op_id in self.summing_steps:
+            # The retrieval holds the side its summing step sums away.
+            columns.append(self.summed[retrieved.requirement_id])
+        return normalize_role_keys(columns)
+
+    def _operation_of(self, step_id: str) -> str:
+        """The operation step `step_id` carries out: its own id, or the retrieval a
+        summing step follows (`summing_steps`)."""
+        return next(
+            (op_id for op_id, summing in self.summing_steps.items() if summing == step_id),
+            step_id,
+        )
 
     def _arguments(self, operation: Operation) -> Arguments | None:
         """Write the tool arguments for `operation`, or `None` if a dependency was refused."""
@@ -2421,7 +2594,7 @@ class _Build:
             "aggregation": operation.reduction.value,
             "group_by": _group_columns(operation.group_by, resolved.columns),
         }
-        return args, {"frame_ref": _frame_from(operation.input)}
+        return args, {"frame_ref": self._frame_of(operation.input)}
 
     def _growth_arguments(self, operation: GrowthOperation) -> Arguments | None:
         columns = self._columns_of(operation.input)
@@ -2436,7 +2609,7 @@ class _Build:
             args["change"] = operation.change.value
         if operation.rolling is not None:
             args[ROLLING_PARAMETER] = window_overlay(operation.rolling)
-        return args, {"frame_ref": _frame_from(operation.input)}
+        return args, {"frame_ref": self._frame_of(operation.input)}
 
     def _compare_arguments(self, operation: CompareOperation) -> Arguments | None:
         return self._two_sided_arguments(operation.id, operation.left, operation.right)
@@ -2444,9 +2617,9 @@ class _Build:
     def _two_sided_arguments(self, op_id: str, left: Side, right: Side) -> Arguments | None:
         """The frames and entity bindings of a two-slice verb, `compare` or `sum_of`."""
         args: dict[str, JsonValue] = {}
-        bindings = {"frame_ref": _frame_from(left.input)}
+        bindings = {"frame_ref": self._frame_of(left.input)}
         if right.input != left.input:
-            bindings["right_frame_ref"] = _frame_from(right.input)
+            bindings["right_frame_ref"] = self._frame_of(right.input)
         for parameter, side in (("left_entity", left), ("right_entity", right)):
             if side.entity is None:
                 continue
@@ -2496,9 +2669,9 @@ class _Build:
     ) -> Arguments | None:
         """The frames, entity bindings and keys of a dividing verb, `share_of` or `quotient_of`."""
         args: dict[str, JsonValue] = {}
-        bindings = {"frame_ref": _frame_from(operation.numerator.input)}
+        bindings = {"frame_ref": self._frame_of(operation.numerator.input)}
         if operation.denominator.input != operation.numerator.input:
-            bindings["denominator_frame_ref"] = _frame_from(operation.denominator.input)
+            bindings["denominator_frame_ref"] = self._frame_of(operation.denominator.input)
         for parameter, side in (
             ("numerator_entity", operation.numerator),
             ("denominator_entity", operation.denominator),
@@ -2618,7 +2791,7 @@ class _Build:
             args["limit"] = operation.limit
         if operation.rolling is not None:
             args[ROLLING_PARAMETER] = window_overlay(operation.rolling)
-        return args, {"frame_ref": _frame_from(operation.input)}
+        return args, {"frame_ref": self._frame_of(operation.input)}
 
     def _join_arguments(self, operation: JoinOperation) -> Arguments | None:
         """Write every key explicitly, as `join_keys` in the left frame's names and `right_keys` mapping each to the right's.
@@ -2644,8 +2817,8 @@ class _Build:
             "right_keys": dict(columns),
         }
         bindings = {
-            "frame_ref": _frame_from(operation.left),
-            "right_frame_ref": _frame_from(operation.right),
+            "frame_ref": self._frame_of(operation.left),
+            "right_frame_ref": self._frame_of(operation.right),
         }
         return args, bindings
 
@@ -2701,7 +2874,7 @@ class _Build:
         if rolls(operation):
             # The population every rolling step carries is written in `_build_steps`.
             args[ROLLING_PARAMETER] = {}
-        return args, {"frame_ref": _frame_from(operation.input)}
+        return args, {"frame_ref": self._frame_of(operation.input)}
 
     def _place_level_column(self, operation: FilterOperation, predicate: PlaceLevel) -> str | None:
         """The input role whose type column a place-level predicate reads (`level_roles`)."""

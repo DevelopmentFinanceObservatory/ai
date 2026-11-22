@@ -9944,6 +9944,7 @@ class _SearchRefused:
         pytest.param("dac1", False, id="dac1-read-directly"),
         pytest.param("dac1_bilateral_uncovered", True, id="dac1-bilateral-uncovered"),
         pytest.param("dac2a", True, id="dac2a"),
+        pytest.param("dac2a", False, id="dac2a-read-directly"),
     ],
 )
 async def test_a_dac_donor_whole_searchs_answer_compiles(
@@ -9953,7 +9954,8 @@ async def test_a_dac_donor_whole_searchs_answer_compiles(
     answer to the resubmit `compile_whole` posts: the translator takes the pin with no
     fresh search and no rewrite, and the plan compiles, whether Search binds the donor
     side to one published total (DAC1's DAC countries' total), which the share may
-    read directly, or leaves it open (DAC2a), which the share reads summed by year."""
+    read directly, or leaves it open (DAC2a), which the compiler sums by year after
+    the retrieval, so the share reads it directly or summed by year either way."""
     surface = _RecordedWhole(name)
     ctx = _FakeToolContext()
     block = json.loads(json.dumps(surface.recorded["part"]))

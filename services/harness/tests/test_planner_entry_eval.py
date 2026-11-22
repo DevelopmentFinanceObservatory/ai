@@ -25,7 +25,7 @@ import datetime
 import importlib.util
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, get_args
@@ -70,31 +70,14 @@ recorder = _load("record")
 
 
 async def test_every_task_validates_and_the_set_covers_every_kind() -> None:
+    # Each recorded plan has to compile, so a task dividing by `share_of` fails
+    # where the share's denominator shows it does not hold a party its numerator
+    # names (`share_part_outside_whole`).
     entry.quiet_logs()
 
     faults = await validate.check_all(entry.load_tasks())
 
     assert faults == {}
-
-
-# Each recorded task with a plan dividing by `share_of`. Each has to compile,
-# which `compiler.compile` refuses where the share's denominator shows it does not
-# hold a party its numerator names (`share_part_outside_whole`).
-_SHARE_TASKS = [
-    pytest.param(task, id=task.id)
-    for task in entry.load_tasks()
-    if any("share_of" in validate._kinds(payload.body) for payload in validate.task_payloads(task))
-    and entry.recording_path(task.id).exists()
-]
-
-
-@pytest.mark.parametrize("task", _SHARE_TASKS)
-async def test_each_share_task_s_plans_divide_by_a_whole_that_holds_their_part(
-    task: Any,
-) -> None:
-    entry.quiet_logs()
-
-    assert await validate.check_task(task) == []
 
 
 @pytest.mark.parametrize("moved", [False, True], ids=["as-served", "hand-back-moved"])
@@ -1615,6 +1598,25 @@ async def test_the_recorded_surface_answers_the_planners_one_skill_tool(
 
     assert result.text.endswith(text)
     assert surface.misses == []
+
+
+async def test_the_recorded_surface_records_a_skill_file_page_by_the_tool_its_key_names() -> None:
+    """A skill file's page the recording lacks is called live as `get_skill_file`, with
+    the arguments its key names, and kept under that key."""
+    called: list[tuple[str, dict[str, Any]]] = []
+
+    async def live(tool: ToolId, arguments: Mapping[str, object]) -> dict[str, Any]:
+        called.append((tool.name, dict(arguments)))
+        return {"is_error": False, "text": "File b.", "structured_content": None}
+
+    surface = entry.RecordedSurface({}, live=live)
+
+    result = await surface.call_tool(tool=GET_SKILL, arguments={"skill_id": "oda", "path": "b.md"})
+
+    arguments = {"skill_id": "oda", "path": "b.md", "offset": 0}
+    assert called == [("get_skill_file", arguments)]
+    assert list(surface.added) == [entry.surface_key("get_skill_file", arguments)]
+    assert result.text == "File b."
 
 
 async def test_the_recorded_surface_passes_other_calls_through_and_misses_what_it_lacks() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -459,16 +460,48 @@ def test_an_identity_binding_exactly_the_required_entities_says_nothing(
     assert _scope_codes(requirement(), source(identity=identity)) == []
 
 
+@pytest.mark.parametrize("key", ["destination", "recipient", "debtor"])
 def test_an_identity_that_does_not_bind_a_required_entity_is_an_error(
-    requirement: RequirementFactory, source: SourceFactory
+    requirement: RequirementFactory, source: SourceFactory, key: str
 ) -> None:
-    identity = _identity(entities={"destination": ["country/GHA"]})
+    # An identity keys a side by its role column or by the party's word, as
+    # whoever built it spelled it; each names the receiving side Kenya sits on.
+    identity = _identity(entities={key: ["country/GHA"]})
     issues = check_evidence(requirement(), evidence_from_source(source(identity=identity)))
 
     (issue,) = errors(issues)
     assert issue.code is EvidenceIssueCode.SCOPE_ENTITIES_UNBOUND
     assert issue.found == ["country/GHA"]
     assert issue.required == ["country/KEN"]
+
+
+@pytest.mark.parametrize(
+    ("bound", "codes"),
+    [
+        (["country/KEN"], []),
+        (
+            ["country/GHA"],
+            [("scope_entities_unbound", "error"), ("scope_entities_wider", "warning")],
+        ),
+    ],
+    ids=["binds-kenya", "binds-ghana"],
+)
+def test_an_identity_binding_a_side_no_column_carries_is_compared_with_every_named_entity(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    caplog: pytest.LogCaptureFixture,
+    bound: list[str],
+    codes: list[tuple[str, str]],
+) -> None:
+    # Nothing says which side `counterpart` is, so Kenya, named on `destination`, is
+    # compared with what it binds, and the identity is logged.
+    identity = _identity(entities={"counterpart": bound})
+
+    with caplog.at_level(logging.WARNING, logger="compiler.evidence"):
+        found = _scope_codes(requirement(), source(identity=identity))
+
+    assert found == codes
+    assert any("counterpart" in record.getMessage() for record in caplog.records)
 
 
 def test_an_identity_bound_wider_than_the_requirement_is_a_warning(

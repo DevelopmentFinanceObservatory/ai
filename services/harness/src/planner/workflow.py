@@ -503,11 +503,12 @@ class WorkflowStep(StrictModel):
     those roles take, and the StatVars each frame holds, come from the
     retrieved frame (`compiler.frame_columns.bound_stat_var_count`).
 
-    `id` must equal `operation_id`. The compiler resolves a frame binding by
-    naming the operation that produces it (`compile._frame_from`), and that
-    binding only finds its step because the two are the same value. The day
-    one operation compiles to several steps, `_frame_from` has to name the
-    producing step and this validator comes off.
+    `operation_id` names the operation the step carries out. A step's `id` is
+    its operation's, except for the step `compiler.compile` adds after a
+    whole's retrieval to sum the side its source leaves open
+    (`compiler.compile.WholeOnSource.summed`), which carries out the
+    retrieval's operation under an id of its own. A frame binding names the
+    step producing the frame (`compiler.compile._Build._producing_step`).
     """
 
     id: Identifier
@@ -525,14 +526,6 @@ class WorkflowStep(StrictModel):
         both = sorted(set(self.args) & set(self.bindings))
         if both:
             raise ValueError(f"arguments given both literally and by binding: {both!r}")
-        return self
-
-    @model_validator(mode="after")
-    def _names_its_operation(self) -> WorkflowStep:
-        if self.id != self.operation_id:
-            raise ValueError(
-                f"step id {self.id!r} must equal its operation_id {self.operation_id!r}"
-            )
         return self
 
 

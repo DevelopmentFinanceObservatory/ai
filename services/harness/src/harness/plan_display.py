@@ -340,12 +340,18 @@ def _stepped(
     """Each workflow step of `shown`, `plan` folded (`shown_plan`), in the order the
     workflow runs them, with the requirement its operation carries out and the
     scope its result gives where that result answers (`answer_scopes`), else `None`.
-    The row core `step_rows` and `card_rows` share; requires a compiled plan."""
+    The row core `step_rows` and `card_rows` share; requires a compiled plan.
+
+    A step carrying out an operation under an id of its own, the sum of the side
+    a whole's source leaves open (`compiler.compile.WholeOnSource.summed`), is
+    left out: the whole's one row is its retrieval's."""
     assert shown.translation is not None
     assert shown.workflow is not None
     scopes = answer_scopes(plan)
     operations_by_id = {operation.id: operation for operation in shown.translation.operations}
     for step in shown.workflow.steps:
+        if step.id != step.operation_id:
+            continue
         requirement = shown.requirement(operations_by_id[step.operation_id].requirement_id)
         yield step, requirement, scopes.get(requirement.id)
 
@@ -2119,7 +2125,9 @@ def _populations(requirement: EvidenceRequirement, plan: Plan) -> dict[str, _Pop
     if datasets is None:
         return None
     populations: dict[str, _Population] = {}
-    for dataset in datasets:
+    for stated in datasets:
+        # A whole covers its part's parties (`planner.plan.covered`).
+        dataset = covered(stated, plan)
         source = _selected_source(dataset.id, plan)
         if source is None:
             continue
@@ -2248,7 +2256,7 @@ def _kept_apart(role: RoleDimension, plan: Plan) -> bool:
         return True
     dataset = plan.requirement(role.requirement_id)
     assert isinstance(dataset, DatasetRequirement)
-    named = [entity for entity in dataset.entities if entity.role == role.role]
+    named = [entity for entity in covered(dataset, plan).entities if entity.role == role.role]
     return len(named) > 1 or any(entity.members for entity in named)
 
 
@@ -2463,7 +2471,7 @@ def _axis_role(requirement: RankRequirement, plan: Plan) -> str | None:
     `across` carry when the axis is left to infer from a single-role input."""
     if requirement.axis is not None:
         return requirement.axis
-    datasets = datasets_of(requirement, plan)
+    datasets = [covered(dataset, plan) for dataset in datasets_of(requirement, plan)]
     roles = sorted(
         {entity.role for dataset in datasets for entity in dataset.entities if entity.role}
         | {word for dataset in datasets for word in dataset.across}

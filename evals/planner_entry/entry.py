@@ -703,8 +703,8 @@ class RecordedSurface:
     turns into a sentence saying the call did not complete, and is listed in `misses`.
 
     With `live` (`record.py`), a call the recording lacks is made through `live` instead,
-    such as the `resolve_definition` call `propose_plan` makes to admit a `whole_of`,
-    and kept in `added` under its key. A live call that raised, or answered a refusal
+    as the tool and arguments its key names, such as the `resolve_definition` call
+    `propose_plan` makes to admit a `whole_of`, and kept in `added` under its key. A live call that raised, or answered a refusal
     to retry later, is kept out and listed in `failures`.
     """
 
@@ -734,8 +734,10 @@ class RecordedSurface:
             arguments.setdefault("offset", 0)
         key = surface_key(name, arguments)
         if key not in self._results and self._live is not None:
+            # The call the key names: a skill file's page is `get_skill_file`'s.
+            called = ToolId(server=tool.server, name=name)
             answer = await _live_answer(
-                self._live, tool, arguments, key=key, failures=self.failures
+                self._live, called, arguments, key=key, failures=self.failures
             )
             if not _keepable(answer):
                 return ToolCallResult.model_validate(answer)

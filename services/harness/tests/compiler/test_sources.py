@@ -24,6 +24,7 @@ from compiler.sources import (
     readable_source,
     readable_wire_groups,
     source_from_spec_block,
+    source_whole_side,
     stat_var_count,
     total_reading,
     wire_groups,
@@ -1475,3 +1476,16 @@ def test_a_whole_holds_a_party_one_of_its_datasets_holds(
     dataset binding a party with no named set shows nothing unless what it binds is
     all it holds."""
     assert parties_outside(["country/KEN"], whole, part_group=None, bound_is_exact=exact) == held
+
+
+@pytest.mark.parametrize("key", ["destination", "recipient", "debtor"])
+def test_a_sources_whole_side_reads_its_identity_by_the_side_each_key_names(
+    source: Callable[..., SelectedSource], key: str
+) -> None:
+    """An identity keyed by the receiving side's role column or by the party's word
+    binds Kenya on `destination`, and nothing on `origin`."""
+    found = source(identity={"stat_var": "ODA", "entities": {key: ["country/KEN"]}})
+
+    sides = (source_whole_side(found, "destination"), source_whole_side(found, "origin"))
+
+    assert sides == (WholeSide(bound=("country/KEN",)), WholeSide(bound=()))

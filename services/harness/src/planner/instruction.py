@@ -124,7 +124,7 @@ _PLANNING = (
     "naming the part and the `axis` it opens. The part names its entities "
     "as any dataset does; the total states no `entities`, `across`, "
     "`source` or `source_spec_id`, since it covers the part's parties with "
-    "that side one total, and only that share reads it, directly. US health aid "
+    "that side one total, and only that share reads it. US health aid "
     "over all US aid opens 'sector'; the US share of all aid to Kenya opens "
     "'donor', Kenya's share of US aid 'recipient'. Leave it unset "
     "for a whole that binds a sector itself (health aid under malaria aid) "

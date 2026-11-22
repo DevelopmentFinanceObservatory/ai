@@ -64,11 +64,6 @@ def test_step_ids_are_unique() -> None:
         )
 
 
-def test_a_step_names_the_operation_it_compiles() -> None:
-    with pytest.raises(ValidationError, match="'debt' must equal its operation_id 'totals'"):
-        _step(operation_id="totals")
-
-
 def test_a_workflow_records_the_phrase_each_source_was_searched_as(
     source: Callable[..., SelectedSource],
 ) -> None:

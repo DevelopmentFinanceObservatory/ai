@@ -7456,8 +7456,8 @@ _G7_WHOLE = DatasetRequirement(
     period=Period(start=1960, end=2024),
     whole_of=WholeOf(part="g7_africa_aid", axis="recipient"),
 )
-# The same whole as an earlier release had the planner state it: the part's donor,
-# and its recipients in `across`, pooled by year. A stored session may hold it.
+# The same whole as a stored plan may hold it: stating the part's donor, and its
+# recipients in `across`, pooled by year.
 _G7_WHOLE_STATED = _G7_WHOLE.model_copy(
     update={"entities": (Entity(name="Group of Seven", role="donor"),), "across": ("recipient",)}
 )

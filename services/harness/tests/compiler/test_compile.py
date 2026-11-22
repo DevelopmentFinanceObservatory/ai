@@ -79,6 +79,7 @@ from planner.plan import (
     ShareOfRequirement,
     SumOfRequirement,
     Unit,
+    WholeOf,
     settle_decisions,
 )
 from planner.records import (
@@ -8880,6 +8881,25 @@ def _flow_source(
             id="africa-over-dac-members",
         ),
         pytest.param(
+            ("Africa", [_AFRICA], []),
+            (
+                Entity(name="developing countries (DAC)", role="recipient", members=True),
+                [
+                    ResolvedEntity(role="destination", ref="country/USA", label="United States"),
+                    ResolvedEntity(role="destination", ref="country/DEU", label="Germany"),
+                ],
+                [
+                    ResolvedGroup(
+                        role="destination",
+                        label="developing countries (DAC)",
+                        ref="groups/OECD.DAC",
+                    )
+                ],
+            ),
+            [],
+            id="africa-stating-no-set-over-dac-members",
+        ),
+        pytest.param(
             ("Africa", [_AFRICA], [_AFRICA_GROUP]),
             (
                 Entity(name="developing countries (DAC)", role="recipient"),
@@ -8927,8 +8947,10 @@ def test_a_share_divides_by_a_whole_that_holds_its_part(
     codes: list[Code],
 ) -> None:
     """G7 aid to a recipient as a share of G7 aid to a whole. G7 aid to Africa over G7
-    aid to the DAC's member countries, the plan a repair once led the planner to,
-    divides by a whole that holds no African country, so it is refused. Over the
+    aid to the DAC's member countries, the plan a `scope_repair` naming the DAC's
+    member countries leads the planner to, divides by a whole that holds no African
+    country, so it is refused. Where the part binds Africa's total with no named set
+    listing its members, nothing shows what it holds, so it is not refused. Over the
     developing countries' total, Kenya over Africa's total, and Kenya over every
     recipient each hold their part."""
     recipient, part_entities, part_groups = part
@@ -8977,6 +8999,104 @@ def test_a_share_divides_by_a_whole_that_holds_its_part(
     )
 
     assert _codes(result) == codes
+
+
+@pytest.mark.parametrize(
+    ("recipients", "groups", "summed"),
+    [
+        pytest.param([], [], True, id="source-leaves-it-open"),
+        pytest.param(
+            [
+                ResolvedEntity(
+                    role="destination",
+                    ref="DACDevelopingCountries",
+                    label="developing countries (DAC)",
+                )
+            ],
+            [
+                ResolvedGroup(
+                    role="destination",
+                    label="developing countries (DAC)",
+                    ref="DACDevelopingCountries",
+                    total="DACDevelopingCountries",
+                )
+            ],
+            False,
+            id="source-binds-its-total",
+        ),
+    ],
+)
+def test_a_share_reads_its_whole_as_one_total_whichever_way_its_source_serves_it(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    recipients: list[ResolvedEntity],
+    groups: list[ResolvedGroup],
+    summed: bool,
+) -> None:
+    """G7 aid to Kenya as a share of its whole over every recipient, the share
+    reading the whole directly. Where the whole's source binds the recipients'
+    total, the share reads its retrieval. Where it leaves the recipients open, a
+    step after the retrieval sums them by year, so the share reads one total."""
+    g7 = Entity(name="G7", role="donor")
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[g7, Entity(name="Kenya", role="recipient")],
+    )
+    whole = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[],
+        whole_of=WholeOf(part="aid", axis="recipient"),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="total"),
+    )
+
+    result = build(
+        _draft([decision()], [aid, whole, share]),
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="fetch"),
+                denominator=Side(input="fetch_total"),
+            ),
+            terminal=["share"],
+        ),
+        discovered={
+            "aid": _flow_source(source, SPEC_KENYA, recipients=[_KENYA]),
+            "total": _flow_source(source, SPEC_OTHER, recipients=recipients, groups=groups),
+        },
+    )
+
+    assert result.workflow is not None, result.issues
+    steps = {step.id: step for step in result.workflow.steps}
+    denominator = steps["share"].bindings["denominator_frame_ref"].from_step
+    assert steps["fetch_total"].expected_role_keys == ("destination", "origin")
+    if not summed:
+        assert (denominator, "fetch_total_summed" in steps) == ("fetch_total", False)
+        return
+    summing = steps[denominator]
+    assert (summing.id, summing.operation_id, summing.tool.name) == (
+        "fetch_total_summed",
+        "fetch_total",
+        "aggregate",
+    )
+    assert summing.args == {"aggregation": "sum", "group_by": ["time_period", "origin"]}
+    assert summing.bindings["frame_ref"].from_step == "fetch_total"
+    assert summing.expected_role_keys == ("origin",)
+    assert [binding.step_id for binding in result.workflow.evidence_bindings] == [
+        "fetch",
+        "fetch_total",
+    ]
 
 
 _RECORDED_CARDS = json.loads(

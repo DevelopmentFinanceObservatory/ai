@@ -29,7 +29,7 @@ from typing import Any, cast
 import pytest
 import translator.tool
 from compiler.compile import CompileIssue, CompileIssueCode, CompileResult
-from compiler.sources import DiscoveryStatus
+from compiler.sources import DiscoveryStatus, source_from_spec_block
 from compiler.surface import (
     FixtureSurface,
     ProgressCallback,
@@ -44,6 +44,8 @@ from planner.operations import Translation
 from planner.plan import (
     PLAN_STATE_KEY,
     AggregateRequirement,
+    AlignedInput,
+    AlignedPin,
     AskAnswer,
     Coverage,
     DatasetRequirement,
@@ -67,6 +69,7 @@ from planner.plan import (
     load_unsupported,
     period_window,
     plan_revision,
+    save_alignments,
     save_pin_sources,
     save_windowed_pins,
     split_of,
@@ -86,9 +89,11 @@ from planner.records import (
 from planner.shapes import pooling_remedy
 from planner.tool_results import Outcome, referred
 from planner.workflow import SelectedSource, ToolId
+from submission.service import save_aligned_pin
 from translator.discovery import (
     DiscoveryRecord,
     NamedGroup,
+    build_discover_source,
     load_log,
     name_pinned_groups,
     requirement_revision,
@@ -1530,8 +1535,8 @@ async def test_a_whole_pinned_to_its_compile_is_never_searched(
     """G7 aid to Africa as a share of G7 aid to every recipient, the whole pinned to
     the compile `propose_plan` made of it, which Search binds to the developing
     countries' total. The whole is settled: translation compiles it from that pin
-    with no search and no rewrite. A whole an earlier release had the planner state
-    with the recipients in `across`, pooled by year, reads the same way."""
+    with no search and no rewrite. A stored plan may hold a whole stating its part's
+    donor and the recipients in `across`, pooled by year, which reads the same way."""
     g7 = Entity(name="Group of Seven", role="donor")
     period = Period(start=1960, end=2024)
     whole = requirement(
@@ -1589,6 +1594,118 @@ async def test_a_whole_pinned_to_its_compile_is_never_searched(
         SPEC_G7_AFRICA,
         SPEC_G7_EVERY_RECIPIENT,
     }
+
+
+# A dataset the whole's part is not pinned to.
+_SPEC_ELSEWHERE = "spec_" + "9" * 32
+
+
+@pytest.mark.parametrize(
+    ("pinned", "settled"),
+    [
+        ("compiled-from-its-part", True),
+        ("compiled-from-another-dataset", False),
+        ("no-pin", False),
+        ("read-off-the-log", False),
+    ],
+)
+async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    context_holding: ContextHolding,
+    pinned: str,
+    settled: bool,
+) -> None:
+    """G7 aid to Africa's whole over every recipient, pinned to a compile of G7 aid.
+    The whole is settled with no search on a compile of the dataset its part is
+    pinned to. A compile of another dataset, no pin at all, and a pin known only
+    from the discovery log, whose identity carries another search's years, each
+    refer the whole back, so the plan is proposed again and the whole compiled
+    from its part."""
+    g7 = Entity(name="Group of Seven", role="donor")
+    period = Period(start=1960, end=2024)
+    whole = requirement(
+        id="g7_total_aid",
+        measure="official development assistance",
+        entities=[],
+        period=period,
+        source_spec_id=None if pinned == "no-pin" else SPEC_G7_EVERY_RECIPIENT,
+        unit=None,
+        whole_of=WholeOf(part="g7_africa_aid", axis="recipient"),
+    )
+    context = context_holding(
+        draft(
+            evidence_requirements=[
+                requirement(
+                    id="g7_africa_aid",
+                    measure="official development assistance",
+                    entities=[g7, Entity(name="Africa", role="recipient")],
+                    period=period,
+                    source_spec_id=SPEC_G7_AFRICA,
+                    unit=None,
+                ),
+                whole,
+                ShareOfRequirement(
+                    id="g7_africa_share",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="g7_africa_aid"),
+                    denominator=RequirementSide(input_id=whole.id),
+                ),
+            ],
+        )
+    )
+    save_pin_sources(
+        context.state, {SPEC_G7_AFRICA: PinSource(block=_G7_AFRICA_BLOCK, settled=True)}
+    )
+    origin = _SPEC_ELSEWHERE if pinned == "compiled-from-another-dataset" else SPEC_G7_AFRICA
+    save_alignments(
+        context.state,
+        [
+            AlignedInput(
+                requirement_id=whole.id,
+                spec_id=SPEC_G7_EVERY_RECIPIENT,
+                origin=origin,
+                whole_axis="recipient",
+                stated_pin=None,
+            )
+        ],
+    )
+    if pinned == "read-off-the-log":
+        _discovered(
+            context,
+            source_from_spec_block(_G7_EVERY_RECIPIENT_BLOCK),
+            status=DiscoveryStatus.DEFINITE,
+            requirement_id=whole.id,
+        )
+    else:
+        save_aligned_pin(
+            context.state,
+            AlignedPin(
+                origin=origin,
+                option_ids=(),
+                spec_id=SPEC_G7_EVERY_RECIPIENT,
+                digest={"spec_block": _G7_EVERY_RECIPIENT_BLOCK},
+                whole_axis="recipient",
+            ),
+            warnings=(),
+        )
+    surface = _CountingSurface(schemas=[])
+
+    found = await build_discover_source(surface=surface)(
+        requirement_id=whole.id, state=context.state
+    )
+
+    assert surface.calls == {}
+    if settled:
+        assert (found["status"], found["sources"][0]["spec_id"]) == (
+            "definite",
+            SPEC_G7_EVERY_RECIPIENT,
+        )
+    else:
+        assert (found["code"], found["action"]["arguments"]["kind"]) == (
+            "share_whole_underivable",
+            "requirement_unmeetable",
+        )
 
 
 # DAC1 grant equivalents with the donor side bound to the members of "DAC members",

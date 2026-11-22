@@ -110,7 +110,7 @@ from planner.workflow import (
 from pydantic import ConfigDict, Field, JsonValue, ValidationError, field_validator
 
 from compiler.frame_columns import columns_on_axes
-from compiler.sources import pinned_stat_var, source_constraint_matches
+from compiler.sources import identity_side, pinned_stat_var, source_constraint_matches
 
 logger = logging.getLogger(__name__)
 
@@ -1438,18 +1438,31 @@ def _scope_issues(
     The identity is what `spec_id` hashes, so what it binds is what a
     retrieval against that spec can return. Only what it actually states is
     compared: a member it omits, or a role its `entities` leaves out
-    (`_identity_entities`), says nothing.
+    (`_identity_entities`), says nothing. A side the identity binds that no
+    column of the retrieval carries is logged, and every entity the
+    requirement names is compared with what it binds there, since nothing
+    says which side it is.
     """
     if not evidence.identity:
         return []
     issues: list[EvidenceIssue] = []
     bound = _identity_entities(evidence.identity.get("entities"))
     if bound is not None:
+        carried = {identity_side(entity.role) for entity in evidence.entities}
+        carried.update(identity_side(axis.column) for axis in evidence.open_entity_axes or ())
+        stray = sorted(set(bound) - carried)
+        if stray:
+            logger.warning(
+                "the identity of %s binds %r on sides no column of it carries; every "
+                "entity the requirement names is compared with them",
+                evidence.spec_id,
+                stray,
+            )
         named = {
             one.ref
             for entity in requirement.entities
             for one in named_members(entity, evidence)
-            if one.role in bound
+            if stray or identity_side(one.role) in bound
         }
         refs = {ref for refs_on_role in bound.values() for ref in refs_on_role}
         issues.extend(_scope_entity_issues(requirement, named, refs))
@@ -1460,11 +1473,12 @@ def _scope_issues(
 
 
 def _identity_entities(entities: JsonValue) -> dict[str, set[str]] | None:
-    """The refs an identity's `entities` binds, by the role column each sits on; `None`
-    when it states none.
+    """The refs an identity's `entities` binds, by the side each sits on
+    (`compiler.sources.identity_side`); `None` when it states none.
 
     The identity is keyed by role column (`observationAbout`, `origin`,
-    `destination`), as the source's entities are. A role it leaves out is a
+    `destination`) or by the party's word (`donor`, `creditor`), whichever its
+    builder spelled, so each key is read as the side it names. A role it leaves out is a
     side the definition does not bind: Search answers it with what the side
     reads as, such as the total it counts an open recipient side as, and
     states that among the source's entities. A required entity sitting on
@@ -1476,11 +1490,12 @@ def _identity_entities(entities: JsonValue) -> dict[str, set[str]] | None:
     """
     if not isinstance(entities, dict):
         return None
-    bound = {
-        role: {value for value in values if isinstance(value, str)}
-        for role, values in entities.items()
-        if isinstance(values, list)
-    }
+    bound: dict[str, set[str]] = {}
+    for role, values in entities.items():
+        if isinstance(values, list):
+            bound.setdefault(identity_side(role), set()).update(
+                value for value in values if isinstance(value, str)
+            )
     return bound or None
 
 

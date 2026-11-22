@@ -2944,29 +2944,41 @@ async def _settled_whole(
     left open (`planner.source_reads.compile_whole`), so that pin is its
     source, whatever it holds on that side: a whole covers what its part
     covers (`planner.plan.whole_read`), and a search for it could only find
-    another population. A source read only off the discovery log is that
-    compile too. A problem a reader met is returned as it is, and a pin no
-    reader holds, as one compiled from a part whose search answered a
-    narrower question (`narrowed_pin`), refers the whole back as unmeetable.
+    another population. A problem a reader met is returned as it is. The
+    whole is referred back as unmeetable (`_unsettled_whole`) where it states
+    no pin, where no reader holds its pin over its period, a pin read only
+    off the discovery log included, whose identity carries the window of the
+    search that found it, and where its pin was compiled from another dataset
+    than the one its part is pinned to now.
     """
     if isinstance(read, dict):
         return read
-    if read is None:
-        assert requirement.whole_of is not None
-        message = (
-            f"{requirement.id!r} is the whole of {requirement.whole_of.part!r}, counted from "
-            f"its part's dataset with no search, and its pin {requirement.source_spec_id!r} "
-            f"cannot be read over {requirement.period.start} to {requirement.period.end}: "
-            "the part's search answered a narrower question, or nothing on record describes "
-            f"the pin over those years. Settle {requirement.whole_of.part!r} on a dataset "
-            "that answers it, and propose the plan again so the whole is compiled from it"
-        )
-        return _referred_answer(
+    assert requirement.whole_of is not None
+    part = requirement.whole_of.part
+    if requirement.source_spec_id is None:
+        return _unsettled_whole(
             requirement,
-            kind=ReferralKind.REQUIREMENT_UNMEETABLE,
-            code=ProblemCode.SHARE_WHOLE_UNDERIVABLE,
-            message=message,
-            detail={"requirement_id": requirement.id},
+            f"{requirement.id!r} is the whole of {part!r}, counted from its part's dataset "
+            "with no search, and states no pin to that count",
+        )
+    if read is None or not read[1]:
+        return _unsettled_whole(
+            requirement,
+            f"{requirement.id!r} is the whole of {part!r}, counted from its part's dataset "
+            f"with no search, and its pin {requirement.source_spec_id!r} cannot be read over "
+            f"{requirement.period.start} to {requirement.period.end}: the part's search "
+            "answered a narrower question, or nothing on record describes the pin over "
+            "those years",
+        )
+    records = _PinRecords(state)
+    origin = _whole_origin(records, requirement)
+    settled = _settled_part_pins(records, plan, part)
+    if origin is not None and origin not in settled:
+        return _unsettled_whole(
+            requirement,
+            f"{requirement.id!r} is the whole of {part!r}, and its pin "
+            f"{requirement.source_spec_id!r} was counted from {origin!r}, while {part!r} is "
+            f"pinned to {sorted(settled)!r}",
         )
     source, _ = read
     log = await _record_honoured_pin(state, plan=plan, requirement=requirement, source=source)
@@ -2979,6 +2991,41 @@ async def _settled_whole(
         warnings=[],
         budget_remaining=DISCOVERY_CALL_BUDGET - log.calls(plan_revision(plan)),
     )
+
+
+def _unsettled_whole(requirement: DatasetRequirement, reason: str) -> dict[str, object]:
+    """The whole `requirement` referred back as unmeetable for `reason`, with the fix:
+    settle its part and propose the plan again, so the whole is compiled from it."""
+    assert requirement.whole_of is not None
+    part = requirement.whole_of.part
+    return _referred_answer(
+        requirement,
+        kind=ReferralKind.REQUIREMENT_UNMEETABLE,
+        code=ProblemCode.SHARE_WHOLE_UNDERIVABLE,
+        message=(
+            f"{reason}. Settle {part!r} on a dataset that answers it, and propose the plan "
+            "again so the whole is compiled from it"
+        ),
+        detail={"requirement_id": requirement.id},
+    )
+
+
+def _whole_origin(records: _PinRecords, whole: DatasetRequirement) -> str | None:
+    """The pin of its part the whole `whole` was compiled from (`AlignedInput.origin`),
+    `None` where nothing records admission compiling it."""
+    entry = records.alignments.get(whole.id)
+    return entry.origin if entry is not None and entry.whole_axis is not None else None
+
+
+def _settled_part_pins(records: _PinRecords, plan: Plan, part_id: str) -> set[str]:
+    """The pins the part `part_id` of `plan` is settled on: the pin it states, and the
+    pin that one copies over its window (`planner.plan.windowed_pins`), the pin a
+    whole of it is compiled from."""
+    part = plan.requirement(part_id)
+    if not isinstance(part, DatasetRequirement) or part.source_spec_id is None:
+        return set()
+    copy = records.copies.get(part.source_spec_id)
+    return {part.source_spec_id, *((copy.windowed_from,) if copy is not None else ())}
 
 
 async def _pin_source(

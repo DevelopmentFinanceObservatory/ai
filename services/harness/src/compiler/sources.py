@@ -26,6 +26,7 @@ from typing import Any, NamedTuple, cast
 
 import rfc8785
 from common.place_type import FLOW_ROLE_COLUMNS, PartyClass
+from planner.parties import flow_side
 from planner.records import (
     AmbiguousEntityReading,
     AmbiguousSourceReading,
@@ -1214,21 +1215,30 @@ class WholeSide(NamedTuple):
     readable: bool = True
 
 
+def identity_side(key: str) -> str:
+    """The side a role column or a key of an identity's `entities` names: a flow
+    party's side (`planner.parties.flow_side`), so `origin`, `donor` and `creditor`
+    are one side, and any other key as written. An identity's keys keep the spelling
+    of whoever built it, a role column or the party's word."""
+    return flow_side(key) or key
+
+
 def source_whole_side(source: SelectedSource, column: str) -> WholeSide | None:
     """What `source` binds on the role column `column`: the parties its definition's
-    identity binds there and the named set it states there. `None` where it records no
-    identity, so nothing says what it binds."""
+    identity binds on that side (`identity_side`) and the named set it states there.
+    `None` where it records no identity, so nothing says what it binds."""
     if source.identity is None:
         return None
     entities = source.identity.get("entities")
-    bound = entities.get(column) if isinstance(entities, Mapping) else None
+    side = identity_side(column)
+    bound: list[str] = []
+    if isinstance(entities, Mapping):
+        for key, refs in entities.items():
+            if identity_side(str(key)) != side or not isinstance(refs, list):
+                continue
+            bound.extend(ref for ref in refs if isinstance(ref, str) and ref not in bound)
     group = next((group for group in source.groups if group.role == column), None)
-    return WholeSide(
-        bound=tuple(ref for ref in bound if isinstance(ref, str))
-        if isinstance(bound, list)
-        else (),
-        group=group,
-    )
+    return WholeSide(bound=tuple(bound), group=group)
 
 
 class Containment(NamedTuple):
