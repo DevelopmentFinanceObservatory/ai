@@ -44,7 +44,7 @@ from harness.conversation import current_conversation_id
 from harness.graph import answer as answer_module
 from harness.graph.answer import answer_frames, link_evidence_to_terminal_frames
 from harness.graph.execute import _failed_step, _mark_masked_step_failed
-from harness.mcp_client import McpExecutor, _wire_provenance
+from harness.mcp_client import McpExecutor, _envelope_partial_period, _wire_provenance
 from harness.provenance import ProvenanceInput, ProvenanceStore
 from harness.scripted import SCRIPTED_SPEC
 from harness.scripted import ScriptedSurface as ScriptedToolSurface
@@ -1411,3 +1411,38 @@ def test_a_sources_licence_is_what_the_citation_states_when_it_states_one(
     )
 
     assert provenance["sources"] == [{"id": "a", "name": "A", "licence": wire}]
+
+
+@pytest.mark.parametrize(
+    ("envelope", "partial"),
+    [
+        ({"provenance": {"freshness": {"partial_period": True}}}, True),
+        ({"provenance": {"freshness": {"partial_period": False}}}, False),
+        ({"provenance": {}}, False),
+        (
+            {
+                "description": {
+                    "freshness": {"partial_periods": [{"source": "s", "period": "2025"}]}
+                }
+            },
+            True,
+        ),
+        ({"description": {"freshness": {"partial_periods": []}}}, False),
+    ],
+)
+def test_the_wire_freshness_states_the_partial_period_the_card_states(
+    envelope: dict[str, Any], partial: bool
+) -> None:
+    assert _envelope_partial_period(envelope) is partial
+    manifest = {"citation": {"text": "T", "sources": [{"ref": "a", "label": "A"}]}}
+    lineage = (ProvenanceInput("spec_a", "v1", manifest),)
+
+    provenance = _wire_provenance(
+        frame_ref={"spec_id": "spec_a", "content_version": "v1"},
+        lineage=lineage,
+        manifest=manifest,
+        platform_facts={},
+        partial_period=_envelope_partial_period(envelope),
+    )
+
+    assert provenance["freshness"]["partial_period"] is partial
