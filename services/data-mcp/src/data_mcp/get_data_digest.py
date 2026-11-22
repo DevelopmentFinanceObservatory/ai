@@ -38,6 +38,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple, cast
 
+from common.breakdown_labels import NO_LABELS, CellLabels
 from common.composite import ManifestComponent, manifest_components, year_spans, years_of
 from common.materialisation import FrameRef
 from common.period_note import period_note
@@ -251,6 +252,7 @@ def render_get_data_digest(
     breakdown: BreakdownLevel | None = None,
     description: VersionDescription | None = None,
     summed: SummedFamily | None = None,
+    cell_labels: CellLabels = NO_LABELS,
 ) -> str:
     """Render `manifest` into the model-facing digest for `get_data`.
 
@@ -308,6 +310,9 @@ def render_get_data_digest(
             renders the manifest's citation line alone.
         summed: The family the frame summed (`summed_family`), `None` (the default) for
             a frame that summed none.
+        cell_labels: The labels of the breakdown cells (`stat_var_<axis>` entities) the
+            series statistics name (`common.breakdown_labels`). A cell without one is
+            named by its value.
 
     Returns:
         A short prose digest: an acknowledgement of what was retrieved, its
@@ -358,6 +363,7 @@ def render_get_data_digest(
             summed_ref=None if summed is None else summed.ref,
             family=family,
             breakdown=breakdown,
+            cell_labels=cell_labels,
         )
     )
     sections.extend(_dropped_role_line(role) for role in dropped_roles)
@@ -769,6 +775,7 @@ def _statistics_sections(
     summed_ref: str | None,
     family: str | None,
     breakdown: BreakdownLevel | None,
+    cell_labels: CellLabels,
 ) -> list[str]:
     """One rendered block per series, or a single count-only line, or nothing.
 
@@ -810,6 +817,7 @@ def _statistics_sections(
             family if series.reported.stat_var == summed_ref else None,
             estimates=series.estimates,
             breakdown=breakdown,
+            cell_labels=cell_labels,
         )
         for series in continued_series(series_stats or (), continuing=continuing_method(manifest))
     ]
@@ -821,12 +829,21 @@ def _series_statistics_block(
     *,
     estimates: SeriesStatisticsModel | None = None,
     breakdown: BreakdownLevel | None = None,
+    cell_labels: CellLabels = NO_LABELS,
 ) -> str:
     """One series' block, headed as the summed total of `family` when it is one, or
     on a `breakdown` as `family` summed within the code its `stat_var_<code_system>`
-    entity names, with a line for the `estimates` continuing it past its reported end."""
+    entity names, with a line for the `estimates` continuing it past its reported end.
+    Each entity is named by its label in `cell_labels`, else by its ref."""
     code_column = None if breakdown is None else f"stat_var_{breakdown.code_system}"
-    code = next((entity.ref for entity in series.entities if entity.role == code_column), None)
+    code = next(
+        (
+            cell_labels.text(entity.role, entity.ref)
+            for entity in series.entities
+            if entity.role == code_column
+        ),
+        None,
+    )
     if family is None:
         header = series.stat_var
     elif breakdown is not None and code is not None:
@@ -835,7 +852,7 @@ def _series_statistics_block(
         header = f"Summed total of {family}"
     header_pieces = [header]
     header_pieces.extend(
-        f"{entity.role} {entity.ref}"
+        f"{entity.role} {cell_labels.text(entity.role, entity.ref)}"
         for entity in series.entities
         if family is None or entity.role != code_column
     )

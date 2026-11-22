@@ -3,7 +3,8 @@ names and the mint options that shape the frame.
 
 `frame_ref_for` is the one rule: data-mcp registers a minted frame under it, and
 presentation-mcp names the frame a refresh moved to (`presentation_mcp.client`). apis'
-`analysis_roots.frame_ref_for` names root frames the same way.
+`analysis_roots.frame_ref_for` names root frames by the same preimage with apis' render
+format in place of the artifact digest, so the two name a rendering's frame apart.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ def frame_ref_for(
     groupby: Mapping[str, Any] | None = None,
     without_party_totals: bool = False,
     enrichment_stamp: str | None = None,
+    artifact_digest: str | None = None,
     keep_by_order: bool = False,
 ) -> FrameRef:
     """The frame reference of the frame a mint names as `{spec_id, content_version}`,
@@ -70,11 +72,20 @@ def frame_ref_for(
     would serve the frame holding the old kinds for as long as it keeps the entry.
     With no stamp, or with columns that ask for no kinds, the ref is the unsalted one.
 
+    `artifact_digest` is the digest of the bytes of the file the frame is read from
+    (`data_mcp.manifest.ArtifactEntry.artifact_digest`), named in the preimage as an
+    `"artifact_digest"` member when set. apis links each rendering of a version to one
+    file and links a new one when it renders that rendering's cells another way, such as
+    a change to how it decodes a breakdown code, keeping the `content_version`. Naming
+    the frame by its file's digest makes such a change a new frame, so the store serves
+    no frame read from the replaced file. A frame registered before data-mcp named
+    frames by the digest is named without it. The version's own pair ignores it: the
+    canonical frame is checked against its `content_version`.
+
     `options.without_party_totals` names the frame although apis mints a frame without
     party totals a version of its own: a cut that leaves nothing out serves its base's
     frame under its base's version, and a recipe replaying the frame read with the cut
-    replays the cut, so the frame is named apart from the one read without it. apis'
-    `analysis_roots.frame_ref_for` names root frames the same way.
+    replays the cut, so the frame is named apart from the one read without it.
 
     `keep_by_order` names `groupby` with `by` in the order it holds, the pair of a frame
     registered before this function sorted `by`
@@ -97,6 +108,8 @@ def frame_ref_for(
         preimage[WITHOUT_PARTY_TOTALS] = True
     if enrichment_stamp is not None and requests_kinds(columns):
         preimage["enrichment_stamp"] = enrichment_stamp
+    if artifact_digest is not None:
+        preimage["artifact_digest"] = artifact_digest
     rendering = rfc8785.dumps(preimage)
     return FrameRef(
         spec_id=spec_id, content_version=f"cv_{hashlib.sha256(rendering).hexdigest()[:32]}"

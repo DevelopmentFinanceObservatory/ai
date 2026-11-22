@@ -96,6 +96,7 @@ from common.materialisation import (
     FrameTooLarge,
     MaterialisationStore,
     MintRecord,
+    read_mint_record,
 )
 from common.recipe import (
     RECIPE_SCHEMA_VERSION,
@@ -795,7 +796,7 @@ def _parsed(recipe: Mapping[str, Any]) -> tuple[Mapping[str, Any], list[MintReco
             )
         )
     try:
-        return tree, [MintRecord.model_validate(root) for root in roots]
+        return tree, [read_mint_record(root) for root in roots]
     except ValidationError as exc:
         raise _Stopped(
             Refused(
@@ -991,10 +992,10 @@ async def runner_execution_identity(apis: LiveApisClient) -> ExecutionIdentity |
 def _names_its_groupby(record: MintRecord) -> bool:
     """Whether `record` is a groupby root whose frame is held under the pair
     `frame_ref_for` derives from its dataset, columns, groupby, cut and the enrichment
-    stamp the record keeps. The groupby is tried with its `by` in each order
-    `named_groupbys` lists, since a record written before `frame_ref_for` sorted `by`
-    names its frame with the order get_data sent. `MintRecord` has checked the
-    groupby's shape."""
+    stamp and artifact digest the record keeps. The groupby is tried with its `by` in
+    each order `named_groupbys` lists, since a record written before `frame_ref_for`
+    sorted `by` names its frame with the order get_data sent. `MintRecord` has checked
+    the groupby's shape."""
     groupby = record.options.get("groupby")
     return groupby is not None and any(
         record.frame
@@ -1005,6 +1006,7 @@ def _names_its_groupby(record: MintRecord) -> bool:
             groupby=named,
             without_party_totals=record.options.get(WITHOUT_PARTY_TOTALS) is True,
             enrichment_stamp=record.enrichment_stamp,
+            artifact_digest=record.artifact_digest,
             keep_by_order=True,
         )
         for named in named_groupbys(groupby)
