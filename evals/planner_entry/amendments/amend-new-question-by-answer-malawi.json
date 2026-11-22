@@ -205,7 +205,9 @@
     },
     "text": "I'd like to ask something else instead.",
     "answer": "Which countries received the most ODA from Germany in 2021?",
-    "new_question_in": "answer",
-    "new_question": "Which countries received the most ODA from Germany in 2021?"
+    "new_question_in": [
+      "answer",
+      "none"
+    ]
   }
 }

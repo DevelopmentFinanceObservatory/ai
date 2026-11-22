@@ -199,34 +199,40 @@ class Amendment(_Strict):
     card of `prior_plan`, the plan the planner drafted for task `base` (a `Plan` dump,
     as a run's record keeps it), and `answer`, the user's own words in reply to a
     question the planner asks about it, when the task scripts one. A task asking a
-    new question names the message that asks it (`new_question_in`, `amendment` or
-    `answer`) and the words the turn hands back (`new_question`), that message's
-    text, or names `none` and hands back nothing; one that amends the plan states
-    neither."""
+    new question states in `new_question_in` the value, or the list of values, a
+    `starts_new_plan` call may name: `amendment` or `answer`, whose text the turn
+    hands back (`handed_back`), or `none`, which hands back nothing and asks the user
+    for their question. A task that amends the plan states none."""
 
     base: str
     prior_plan: dict[str, Any]
     text: str
     answer: str | None = None
-    new_question_in: str | None = None
-    new_question: str | None = None
+    new_question_in: str | list[str] | None = None
+
+    @property
+    def accepted(self) -> frozenset[str]:
+        """The values of `new_question_in` a run may name, empty on a task that
+        amends the plan."""
+        stated = self.new_question_in
+        return frozenset([stated] if isinstance(stated, str) else stated or ())
+
+    def handed_back(self, source: str) -> str | None:
+        """The words a turn hands back when the planner names `source`: the text of
+        the message it names, `None` for `none`."""
+        return {"amendment": self.text, "answer": self.answer}.get(source)
 
     @model_validator(mode="after")
-    def _the_question_is_the_named_message(self) -> Self:
+    def _each_named_message_exists(self) -> Self:
         Plan.model_validate(self.prior_plan)
-        named = {"amendment": self.text, "answer": self.answer}
-        if self.new_question_in is None:
-            if self.new_question is not None:
-                raise ValueError("`new_question` comes with the `new_question_in` naming it")
-            return self
-        if self.new_question_in not in {*named, "none"}:
-            raise ValueError(f"`new_question_in` is one of {sorted({*named, 'none'})}")
-        if self.new_question_in == "none":
-            if self.new_question is not None:
-                raise ValueError("`none` hands back no `new_question`")
-            return self
-        if self.new_question != named[self.new_question_in]:
-            raise ValueError("`new_question` is the text of the message `new_question_in` names")
+        if isinstance(self.new_question_in, list) and (
+            not self.new_question_in or len(self.accepted) < len(self.new_question_in)
+        ):
+            raise ValueError("a `new_question_in` list names each value once, and one at least")
+        if unknown := self.accepted - {"amendment", "answer", "none"}:
+            raise ValueError(f"`new_question_in` names {sorted(unknown)}, not a message")
+        if "answer" in self.accepted and self.answer is None:
+            raise ValueError("`new_question_in` names `answer` and the task scripts none")
         return self
 
 

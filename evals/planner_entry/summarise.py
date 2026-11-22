@@ -139,7 +139,7 @@ class Run:
     # Whether the task marks an ask `across_years`.
     asks_across_years: bool
     # On an amendment task that asks a new question: whether the run named the
-    # message the task expects (`new_question_in`) and handed back its words, or,
+    # message the task accepts (`new_question_in`) and handed back its words, or,
     # for `none`, handed back nothing and asked the user for their question;
     # `None` on any other task.
     named_right: bool | None = None
@@ -199,15 +199,13 @@ def reduce_run(record: Mapping[str, Any], task: Task) -> Run:
     finished = [call for call in calls if call["prompt_tokens"] is not None]
     reduction = record_period_reduction(record, task)
     amendment = task.amendment
-    asks_new = amendment is not None and amendment.new_question_in is not None
-    named_right = (
-        record.get("new_question_in") == amendment.new_question_in
-        if amendment is not None and asks_new
-        else None
-    )
+    asks_new = amendment is not None and bool(amendment.accepted)
+    named = str(record.get("new_question_in"))
+    named_right = named in amendment.accepted if amendment is not None and asks_new else None
     handed_back_right = (
-        record.get("new_question") == amendment.new_question
-        and bool(record.get("asked_for_question")) == (amendment.new_question_in == "none")
+        bool(named_right)
+        and record.get("new_question") == amendment.handed_back(named)
+        and bool(record.get("asked_for_question")) == (named == "none")
         if amendment is not None and asks_new
         else None
     )

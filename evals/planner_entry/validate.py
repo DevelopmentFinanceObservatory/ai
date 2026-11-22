@@ -353,20 +353,28 @@ async def check_task(task: Task) -> list[str]:
 
 
 async def check_amendment(task: Task) -> list[str]:
-    """Every fault in amendment task `task`: a scripted planner that asks about the
-    amendment when the task scripts an answer, then reads the named message as a new
-    question (`starts_new_plan` with `new_question_in`), ends the entry on it, and the
-    turn hands back the task's `new_question`, or, for `none`, nothing, asking the
-    user for their question."""
+    """Every fault in amendment task `task`, for each value of `new_question_in` it
+    accepts: a scripted planner that asks about the amendment when the task scripts
+    an answer, then names that value with `starts_new_plan`, ends the entry on it,
+    and the turn hands back the named message's text, or, for `none`, nothing,
+    asking the user for their question."""
     amendment = task.amendment
     assert amendment is not None
-    if amendment.new_question_in is None:
-        return []
+    faults = []
+    for source in sorted(amendment.accepted):
+        faults += [f"{source}: {fault}" for fault in await _check_source(task, source)]
+    return faults
+
+
+async def _check_source(task: Task, source: str) -> list[str]:
+    """`check_amendment` for the one value `source`."""
+    amendment = task.amendment
+    assert amendment is not None
     restart = (
         "propose_plan",
         {
             "starts_new_plan": True,
-            "new_question_in": amendment.new_question_in,
+            "new_question_in": source,
             "amends_version": amendment.prior_plan["version"],
         },
     )
@@ -385,10 +393,10 @@ async def check_amendment(task: Task) -> list[str]:
         return [f"entry: {type(exc).__name__}: {exc}"]
     faults = [run.error] if run.error else []
     handed_back = run.state.get(NEW_QUESTION_KEY)
-    if handed_back != amendment.new_question:
-        faults.append(f"handed back {handed_back!r}, not {amendment.new_question!r}")
+    if handed_back != (expected := amendment.handed_back(source)):
+        faults.append(f"handed back {handed_back!r}, not {expected!r}")
     asked = run.state.get(ASK_FOR_QUESTION_KEY) is True
-    if asked != (amendment.new_question_in == "none"):
+    if asked != (source == "none"):
         faults.append(f"asked the user for their question: {asked}")
     return faults
 
