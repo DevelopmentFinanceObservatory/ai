@@ -1,0 +1,312 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "G7 aid to Africa as a share of its total aid since the earliest available year"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "G7 official development assistance to Africa as a share of total G7 official development assistance across all recipients, from 1960 to 2024.",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "scope_measure_basis_spec_c7b5636b0b05e865a5b884eacf9cdf13",
+        "description": "Which basis the figures are measured on.",
+        "options": [
+          "gross disbursements, current USD",
+          "net disbursements, current USD",
+          "grant equivalents (OECD headline), current USD",
+          "commitments, current USD"
+        ],
+        "chosen": "net disbursements, current USD",
+        "resolved_by": "planner_default",
+        "rationale": "Search's default for this question.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_c7b5636b0b05e865a5b884eacf9cdf13",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        },
+        "scope": {
+          "choice_id": "spec_2a634c06dc3937cc8692b41d25268397:measure_basis",
+          "axis": "measure_basis",
+          "options": [
+            {
+              "option_id": "measure_basis:gross",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "measure_basis:net",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "measure_basis:grant_equivalent",
+              "status": "unavailable",
+              "years": null,
+              "code": "basis_not_published"
+            },
+            {
+              "option_id": "measure_basis:commitments",
+              "status": "unavailable",
+              "years": null,
+              "code": "basis_not_published"
+            }
+          ],
+          "provenance": "default"
+        }
+      },
+      {
+        "slot": "scope_provider_spec_c7b5636b0b05e865a5b884eacf9cdf13",
+        "description": "Whose spending the figures count.",
+        "options": [
+          "bilateral flows to countries and regions, without core contributions to multilateral agencies",
+          "net bilateral plus imputed multilateral as published, by convention, 1975 to 2024",
+          "total ODA, including core contributions to multilateral agencies"
+        ],
+        "chosen": "bilateral flows to countries and regions, without core contributions to multilateral agencies",
+        "resolved_by": "planner_default",
+        "rationale": "Search's default for this question.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_c7b5636b0b05e865a5b884eacf9cdf13",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        },
+        "scope": {
+          "choice_id": "spec_2a634c06dc3937cc8692b41d25268397:provider",
+          "axis": "provider",
+          "options": [
+            {
+              "option_id": "provider:bilateral",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "provider:inclusive",
+              "status": "partial",
+              "years": [
+                [
+                  1975,
+                  2024
+                ]
+              ],
+              "code": "imputed_coverage"
+            },
+            {
+              "option_id": "provider:contributions",
+              "status": "unavailable",
+              "years": null,
+              "code": "provider_not_offered"
+            }
+          ],
+          "provenance": "default"
+        }
+      },
+      {
+        "slot": "share_whole_g7_total_aid",
+        "description": "Which total the share divides by.",
+        "options": [
+          "the OECD DAC2a total over every recipient",
+          "a total from another dataset"
+        ],
+        "chosen": "the OECD DAC2a total over every recipient",
+        "resolved_by": "planner_default",
+        "rationale": "The share divides by the total over every recipient from the OECD DAC2a, the same dataset as the official development assistance figures, so both sides count the same donors, measure basis and providers.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_66627f5871d4ef51038b5ec8c69948a5",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        },
+        "caveat": "derived_whole"
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "g7_africa_aid",
+        "decision_ids": [
+          "scope_measure_basis_spec_c7b5636b0b05e865a5b884eacf9cdf13",
+          "scope_provider_spec_c7b5636b0b05e865a5b884eacf9cdf13"
+        ],
+        "measure": "official development assistance",
+        "entities": [
+          {
+            "name": "Group of Seven",
+            "role": "donor"
+          },
+          {
+            "name": "Africa",
+            "role": "recipient"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 1960,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_c7b5636b0b05e865a5b884eacf9cdf13",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "dataset",
+        "id": "g7_total_aid",
+        "decision_ids": [
+          "share_whole_g7_total_aid"
+        ],
+        "measure": "official development assistance",
+        "entities": [],
+        "across": [],
+        "period": {
+          "start": 1960,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_66627f5871d4ef51038b5ec8c69948a5",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null,
+        "whole_of": {
+          "part": "g7_africa_aid",
+          "axis": "recipient"
+        }
+      },
+      {
+        "kind": "share_of",
+        "id": "g7_africa_share",
+        "decision_ids": [],
+        "numerator": {
+          "input_id": "g7_africa_aid",
+          "entity": null
+        },
+        "denominator": {
+          "input_id": "g7_total_aid",
+          "entity": null
+        },
+        "axis": null,
+        "denominator_scope": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "G7 official development assistance to Africa as a share of G7 total official development assistance"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "g7_africa_share"
+        ]
+      }
+    ],
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [],
+        "over": [
+          "recipient"
+        ]
+      }
+    ],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

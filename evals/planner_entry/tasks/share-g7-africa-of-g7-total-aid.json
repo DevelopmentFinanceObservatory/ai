@@ -45,7 +45,6 @@
   ],
   "acceptable_kinds": [
     "dataset",
-    "aggregate",
     "share_of"
   ],
   "neighbour": {

@@ -460,6 +460,34 @@ def stray_recordings(task_ids: Collection[str], directory: Path = RECORDINGS_DIR
 type LiveCall = Callable[[ToolId, Mapping[str, object]], Awaitable[dict[str, Any]]]
 
 
+async def _live_answer(
+    live: LiveCall,
+    tool: ToolId,
+    arguments: Mapping[str, object],
+    *,
+    key: str,
+    failures: list[str],
+) -> dict[str, Any]:
+    """`live`'s answer to one call filed under `key`. A call that raised, whose raise
+    propagates, and an answer `_keepable` keeps out are listed in `failures`."""
+    try:
+        answer = await live(tool, arguments)
+    except BaseException as exc:
+        failures.append(f"{key}: {type(exc).__name__}: {exc}")
+        raise
+    if not _keepable(answer):
+        failures.append(f"{key}: refused for now: {answer['structured_content']}")
+    return answer
+
+
+def _keepable(answer: Mapping[str, Any]) -> bool:
+    """Whether a recording keeps `answer`: anything but a refusal to retry later."""
+    return not (
+        answer["is_error"]
+        and (answer["structured_content"] or {}).get("retry_mode") == "retry_after_delay"
+    )
+
+
 class TranslationCalls:
     """The `ToolSurface`, resolve door and node door production's translation reads,
     answered from `held`, a recording's `translation`: tool answers under `calls`, by
@@ -512,17 +540,8 @@ class TranslationCalls:
             raise ToolSurfaceUnavailableError(
                 f"the recording holds no answer for {key}", retryable=False
             )
-        try:
-            answer = await self._live(tool, arguments)
-        except BaseException as exc:
-            self.failures.append(f"{key}: {type(exc).__name__}: {exc}")
-            raise
-        if (
-            answer["is_error"]
-            and (answer["structured_content"] or {}).get("retry_mode") == "retry_after_delay"
-        ):
-            self.failures.append(f"{key}: refused for now: {answer['structured_content']}")
-        else:
+        answer = await _live_answer(self._live, tool, arguments, key=key, failures=self.failures)
+        if _keepable(answer):
             self._calls[key] = answer
             self._used.add(key)
         return ToolCallResult.model_validate(answer)
@@ -682,11 +701,21 @@ class RecordedSurface:
     `get_skill_file`, are rewritten to name `get_skill`. A call the recording lacks is answered as an
     unreachable server is (`ToolSurfaceUnavailableError`), which the planner's tool
     turns into a sentence saying the call did not complete, and is listed in `misses`.
+
+    With `live` (`record.py`), a call the recording lacks is made through `live` instead,
+    such as the `resolve_definition` call `propose_plan` makes to admit a `whole_of`,
+    and kept in `added` under its key. A live call that raised, or answered a refusal
+    to retry later, is kept out and listed in `failures`.
     """
 
-    def __init__(self, results: Mapping[str, Mapping[str, Any]]) -> None:
+    def __init__(
+        self, results: Mapping[str, Mapping[str, Any]], *, live: LiveCall | None = None
+    ) -> None:
         self._results = dict(results)
+        self._live = live
         self.misses: list[str] = []
+        self.added: dict[str, dict[str, Any]] = {}
+        self.failures: list[str] = []
 
     async def list_tools(self) -> list[ToolSchema]:
         return []
@@ -704,6 +733,13 @@ class RecordedSurface:
             name = "get_skill_file"
             arguments.setdefault("offset", 0)
         key = surface_key(name, arguments)
+        if key not in self._results and self._live is not None:
+            answer = await _live_answer(
+                self._live, tool, arguments, key=key, failures=self.failures
+            )
+            if not _keepable(answer):
+                return ToolCallResult.model_validate(answer)
+            self._results[key] = self.added[key] = answer
         if key not in self._results:
             self.misses.append(key)
             raise ToolSurfaceUnavailableError(
@@ -1110,6 +1146,7 @@ async def run_entry(
     timeout_s: float = 300.0,
     answers: Sequence[Mapping[str, Any]] = (),
     translation: TranslationCalls | None = None,
+    surface: RecordedSurface | None = None,
 ) -> EntryRun:
     """Run `task`'s planner entry once on a fresh turn.
 
@@ -1124,7 +1161,8 @@ async def run_entry(
     passes none, so an ask ends it. Each answer is the reply the studio's interrupt
     route reads, the user's answer under `result`. With `translation`,
     production's translation runs on the recorded plan over those calls, and
-    `probe.translation` holds its answer.
+    `probe.translation` holds its answer. The planner's tool calls, `propose_plan`'s
+    own included, go to `surface`, by default one over the recording's `tools`.
 
     A task with an `amendment` opens the planner as the `approve` node's `amend` edge
     does, on the task's prior plan and the user's text, after `plan_start` took the
@@ -1142,7 +1180,8 @@ async def run_entry(
             anchor_read=_no_anchor_read,
             describe_nodes=translation.describe_nodes,
         )
-    surface = RecordedSurface(recording.get("tools") or {})
+    if surface is None:
+        surface = RecordedSurface(recording.get("tools") or {})
     resolver = RecordedResolver(recording["searches"])
     state = await orchestrator_state(task, resolver)
     if resolver.left():

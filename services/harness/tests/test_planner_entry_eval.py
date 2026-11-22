@@ -38,6 +38,7 @@ from harness.graph import planning
 from harness.turn.store import AgentRecord
 from harness.turn_events import PLANNER_ASK
 from langfuse.api import DatasetItem, NotFoundError
+from mcp.types import TextContent
 from planner import session
 from planner.plan import EvidenceRequirement
 from planner.skills import GET_SKILL
@@ -354,6 +355,46 @@ async def test_a_live_translation_records_each_call_a_replay_reads() -> None:
 
     assert list(kept["calls"]) == client.asked
     assert kept["calls"][client.asked[0]]["meta"][SEARCH_ENVELOPE_META_KEY]["parts"]
+
+
+@pytest.mark.parametrize("refused", [False, True], ids=["answered", "refused-for-now"])
+async def test_a_live_proposal_records_each_call_propose_plan_makes(refused: bool) -> None:
+    # `propose_plan` sends `resolve_definition` to admit the reference plan's `whole_of`.
+    # With that answer left out of the recording, the live client is asked for it.
+    entry.quiet_logs()
+    task = _task("share-g7-africa-of-g7-total-aid")
+    recording = entry.load_recording(task.id)
+    proposed = {
+        key: answer
+        for key, answer in recording["tools"].items()
+        if key.startswith("resolve_definition ")
+    }
+    assert len(proposed) == 1
+    (recorded,) = proposed.values()
+
+    async def answered() -> Any:
+        return SimpleNamespace(
+            is_error=recorded["is_error"],
+            structured_content=recorded["structured_content"],
+            content=[TextContent(type="text", text=recorded["text"])],
+            meta=recorded["meta"],
+        )
+
+    client = _LiveClient(_refused_for_now if refused else answered)
+    held = {
+        **recording,
+        "tools": {key: answer for key, answer in recording["tools"].items() if key not in proposed},
+    }
+
+    if refused:
+        with pytest.raises(recorder.ProposalRecordError, match="refused for now"):
+            await recorder._proposal_calls(client, task, held, wall_s=60.0)
+        assert client.asked == list(proposed)
+        return
+    added = await recorder._proposal_calls(client, task, held, wall_s=60.0)
+
+    assert added == proposed
+    assert client.asked == list(proposed)
 
 
 def test_a_task_states_its_period_reduction_in_the_closed_vocabulary() -> None:
