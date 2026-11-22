@@ -231,7 +231,7 @@ from common.place_type import (
     levels_of,
     whole_column,
 )
-from common.refusal import internal_error_message, refusal_meta, refusal_text
+from common.refusal import SERVICE_FAILURE, internal_error_message, refusal_meta, refusal_text
 from fastmcp.tools import ToolResult
 
 
@@ -871,11 +871,13 @@ class ToolRefusal:
         upstream_code: str | None,
         detail: str,
         retry_after_s: float | None,
+        service_failure: bool,
         fix: Mapping[str, Any] | None = None,
     ) -> Self:
         """A runner refusal under a code this module does not define, or a call the
         runner could not answer. `retry_after_s` is `None` when a retry is not
-        expected to succeed."""
+        expected to succeed. `service_failure` is true when the runner itself failed,
+        and `fix.kind` then says so (`common.refusal.SERVICE_FAILURE`)."""
         retry = (
             f"Retry after {retry_after_s:.1f}s."
             if retry_after_s is not None
@@ -887,7 +889,11 @@ class ToolRefusal:
                 f"The analysis service refused the call ({upstream_code or 'unclassified'}): "
                 f"{detail}. {retry}"
             ),
-            fix={"detail": detail, **(fix or {})},
+            fix={
+                "detail": detail,
+                **(fix or {}),
+                **({"kind": SERVICE_FAILURE} if service_failure else {}),
+            },
             retry_after_s=retry_after_s,
             upstream_code=upstream_code,
         )

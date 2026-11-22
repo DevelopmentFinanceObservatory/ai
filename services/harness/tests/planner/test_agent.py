@@ -9453,6 +9453,7 @@ class _NoInclusiveWithoutDonor(_OpenedWholeCompiles):
                     detail=f"Scope entry {position} cannot apply to this part: "
                     "provider_not_offered.",
                     retry_after_s=None,
+                    service_failure=False,
                 )
             )
             return ToolCallResult(is_error=True, structured_content=refused.structured_content)

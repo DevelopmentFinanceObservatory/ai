@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from analysis_mcp.digest import render_rank_digest
 from analysis_mcp.summary import EntityRank, RankFacts
+from analysis_mcp.tool_errors import ToolRefusal as AnalysisRefusal
 from compiler.surface import ToolCallResult
+from data_mcp.tool_errors import ToolErrorCode as DataCode
+from data_mcp.tool_errors import ToolRefusal as DataRefusal
+from executor import classify as classify_module
 from executor.ledger import (
     Attempt,
     InMemoryRunLedger,
@@ -36,29 +41,42 @@ from harness.graph.plan_done import (
     StepSummary,
     _ask_status,
     _partial_result,
+    _retry_note,
     _stop_causes,
+    _stopped_asks,
 )
 from harness.graph.state import (
+    ORCHESTRATOR_BRIEF_KEY,
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
+    ORCHESTRATOR_RETRY_NOTE_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
 )
+from harness.plan_display import card_rows
 from harness.run_ledger import StudioRunLedger
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
-from harness.sentences import DECLINE_REASONS
+from harness.sentences import DECLINE_REASONS, failure_cause, failure_sentence
 from harness.studio_state import ConversationState, SegmentLost
 from harness.turn.events import NodeDone, Paused
 from harness.turn.loop import Outcome, run_segment
 from harness.turn.store import TurnStatus
 from harness.turn_records import PlanAsk, PlanRecord
-from planner.plan import AskAnswer, Decline, Plan, PlanStatus, UnsupportedOperation, load_asks
+from planner.plan import (
+    AskAnswer,
+    AskBreakdown,
+    Decline,
+    Plan,
+    PlanStatus,
+    UnsupportedOperation,
+    load_asks,
+)
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .graph_turns import agent_read, opening_graph, visited
 from .plan_turns import approve_answer, approve_turn, plan_nodes
 from .scripted_genai import reply, text_part
-from .scripted_tools import plan_call, scripted_orchestrator
+from .scripted_tools import ask_user_call, plan_call, scripted_orchestrator
 from .stored_verbs import EXECUTION_IDENTITY
 from .turn_driver import CONVERSATION, PRINCIPAL, ScriptedModels, TurnDriver, scripted_models
 
@@ -107,19 +125,28 @@ async def refuses_to_describe(*, tool: str, args: dict[str, Any], on_progress: A
 
 
 class RefusingGetDataSurface(ScriptedSurface):
-    """`ScriptedSurface` whose `get_data` answers the refusal `code` names."""
+    """`ScriptedSurface` whose `get_data` answers the refusal `code` names, with
+    the retry mode data-mcp gives it, or `do_not_retry` for a code data-mcp
+    does not answer."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, fix: dict[str, Any] | None = None) -> None:
         super().__init__()
         self.code = code
+        self.fix = fix or {}
+        served = code in set(DataCode)
+        self.retry_mode = (
+            DataRefusal(code=DataCode(code), message="", fix=self.fix).retry_mode.value
+            if served
+            else "do_not_retry"
+        )
 
     async def call_tool(self, *, tool: Any, arguments: Any, on_progress: Any = None) -> Any:
         if tool.name != "get_data":
             return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
         refusal = {
             "code": self.code,
-            "retry_mode": "do_not_retry",
-            "fix": {},
+            "retry_mode": self.retry_mode,
+            "fix": self.fix,
             "message": "this deployment cannot serve the request",
         }
         return ToolCallResult(is_error=True, structured_content=refusal, text=refusal["message"])
@@ -500,13 +527,23 @@ async def test_a_breakdown_refused_at_run_time_hands_back_a_failed_step_and_ask(
     ]
 
 
-@pytest.mark.parametrize("code", ["capability_unavailable", "member_not_resolvable"])
-async def test_a_step_refused_for_a_missing_capability_closes_the_part_it_served(
-    code: str, pg_engine: AsyncEngine
+@pytest.mark.parametrize(
+    ("code", "given_back"),
+    [
+        ("capability_unavailable", False),
+        ("member_not_resolvable", True),
+        ("place_levels_mixed", False),
+        ("internal_error", False),
+    ],
+)
+async def test_a_stopped_plan_gives_the_plan_call_back_only_for_a_failure_a_brief_avoids(
+    code: str, given_back: bool, pg_engine: AsyncEngine
 ) -> None:
     """A capability the platform lacks fails any brief and any fetch of the
     step's data, so the plan call is not given back and the step's spec_id
-    is refused to `fetch`; another refusal leaves both open."""
+    is refused to `fetch`. A fault of the system fails any brief too. Only a
+    failure another source or spec avoids gives the plan call back, and any
+    other ends the turn on the user's sentence for it."""
     models = _planned("That part is unavailable.")
     driver = _driver(pg_engine, models, tool_surface=RefusingGetDataSurface(code))
 
@@ -515,9 +552,287 @@ async def test_a_step_refused_for_a_missing_capability_closes_the_part_it_served
     body = _hand_back_body(models)
     assert body["failed_step"]["code"] == code
     state = ran.cursor.state
+    assert bool(state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")) is given_back
+    assert bool(state.get(ORCHESTRATOR_RETRY_NOTE_KEY)) is given_back
     missing = code == "capability_unavailable"
-    assert bool(state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")) is not missing
     assert (SCRIPTED_SPEC in (state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {})) is missing
+    after_plan = agent_read(models.orchestrator.requests[-1])
+    assert (failure_sentence(code) in after_plan) is not given_back
+
+
+async def test_a_system_fault_ends_the_turn_worded_as_the_systems_fault(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A code the compiler should have ruled out reaches the user as the
+    system's fault, whatever its own class says, and offers no second plan."""
+    models = _planned("It could not be computed.")
+    advice = "Ask about one sector."
+    surface = RefusingGetDataSurface("composed_unit_sum_unsupported", {"remedy": advice})
+    driver = _driver(pg_engine, models, tool_surface=surface)
+
+    ran = await approve_turn(driver, _QUESTION)
+
+    assert ran.outcome is Outcome.DONE
+    assert not ran.cursor.state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")
+    after_plan = agent_read(models.orchestrator.requests[-1])
+    assert failure_sentence("internal_error") in after_plan
+    assert failure_sentence("composed_unit_sum_unsupported") not in after_plan
+    # The tool's remedy is for a question at fault, and none is.
+    assert advice not in after_plan
+
+
+@pytest.mark.parametrize(
+    ("code", "fix"),
+    [
+        ("member_not_resolvable", {}),
+        # The user is told data-mcp's remedy only once no new plan is left.
+        ("member_not_resolvable", {"remedy": "Ask about one sector."}),
+        # Another facet is a plan the model can draft.
+        ("facet_not_available", {}),
+    ],
+)
+async def test_an_avoidable_failure_offers_one_new_plan_whose_card_names_the_failed_step(
+    code: str, fix: dict[str, Any], pg_engine: AsyncEngine
+) -> None:
+    """The plan given back drafts a new card that says which step the
+    approved plan stopped at and what happened there, the cause the
+    refusal's code and `fix` word, with the new plan as the way past it. Its
+    run stopping the same way ends the turn on the user's whole sentence,
+    with no third card."""
+    models = scripted_models(
+        orchestrator=[
+            reply(plan_call(_BRIEF)),
+            reply(plan_call(f"{_BRIEF}, from another source")),
+            reply(text_part("It could not be computed.")),
+        ]
+    )
+    surface = RefusingGetDataSurface(code, fix)
+    driver = _driver(pg_engine, models, tool_surface=surface)
+    sentence = failure_sentence(code, surface.retry_mode, fix)
+
+    second = await approve_turn(driver, _QUESTION)
+
+    card = second.pause
+    assert card.kind == "approve"
+    plan = Plan.model_validate_json(second.cursor.state["plan"])
+    (failed,) = (row for row in card_rows(plan) if row["id"] == "retrieve")
+    note = card.payload["refusal_note"]
+    assert f"“{failed['label']}”" in note
+    assert failure_cause(code, fix) in note
+    assert sentence not in note
+    assert second.cursor.state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")
+    assert second.cursor.state.get(ORCHESTRATOR_RETRY_NOTE_KEY) is None
+
+    ended = await driver.answer(approve_answer(card.payload["revision"]), to=card)
+
+    assert ended.outcome is Outcome.DONE
+    # The second stop leaves no note, since the turn's one new plan is spent.
+    assert ended.cursor.state.get(ORCHESTRATOR_RETRY_NOTE_KEY) is None
+    first, last = (agent_read(request) for request in models.orchestrator.requests[1:])
+    if "remedy" in fix:
+        # The plan given back is the way past it, so the hand-back states no remedy.
+        assert fix["remedy"] not in first
+        assert failure_cause(code, fix) in last
+        assert fix["remedy"] in last
+    else:
+        assert sentence in last
+
+
+@pytest.mark.parametrize(
+    ("code", "fix"),
+    [
+        # Narrowing the topic is the user's call. The words name the ceiling
+        # the refusal's `fix` names, and data-mcp's remedy gives the advice.
+        (
+            "over_ceiling",
+            {"ceiling_kind": "member_cardinality", "remedy": "Ask about one sector."},
+        ),
+        ("place_levels_mixed", {}),
+    ],
+)
+async def test_an_unavoidable_failure_ends_the_turn_on_its_sentence_with_no_second_card(
+    code: str, fix: dict[str, Any], pg_engine: AsyncEngine
+) -> None:
+    """The agent's second plan call is refused for its budget, so the turn
+    ends without another card, and the hand-back carries the user's
+    sentence for the failure, or only its cause where a remedy gives the
+    advice."""
+    models = scripted_models(
+        orchestrator=[
+            reply(plan_call(_BRIEF)),
+            reply(plan_call(f"{_BRIEF}, narrower")),
+            reply(text_part("It could not be computed.")),
+        ]
+    )
+    surface = RefusingGetDataSurface(code, fix)
+    driver = _driver(pg_engine, models, tool_surface=surface)
+
+    ran = await approve_turn(driver, _QUESTION)
+
+    assert ran.outcome is Outcome.DONE
+    assert not ran.cursor.state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")
+    after_plan = agent_read(models.orchestrator.requests[-1])
+    sentence = failure_sentence(code, surface.retry_mode, fix)
+    if "remedy" in fix:
+        assert failure_cause(code, fix) in after_plan
+        assert sentence not in after_plan
+    else:
+        assert sentence in after_plan
+
+
+# analysis-mcp's refusal of a donor pool whose party kind column mixes typed
+# and untyped cells, as a deployed rank step met it: its message names the
+# frame's column and the filter that keeps the parties.
+_MIXED_KINDS = AnalysisRefusal.place_levels_mixed(
+    column="financingProvider_party_kind", types=["party", "untyped"]
+)
+
+
+class _MixedKindsSurface(ScriptedSurface):
+    """`ScriptedSurface` whose `get_data` refuses as `_MIXED_KINDS` does."""
+
+    async def call_tool(self, *, tool: Any, arguments: Any, on_progress: Any = None) -> Any:
+        if tool.name != "get_data":
+            return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        refusal = {
+            "code": _MIXED_KINDS.code.value,
+            "retry_mode": _MIXED_KINDS.retry_mode.value,
+            "fix": _MIXED_KINDS.fix,
+            "message": _MIXED_KINDS.message,
+        }
+        return ToolCallResult(is_error=True, structured_content=refusal, text=_MIXED_KINDS.message)
+
+
+@pytest.mark.parametrize(
+    ("surface", "cause"),
+    [
+        pytest.param(_MixedKindsSurface(), failure_cause("internal_error"), id="system-fault"),
+        pytest.param(
+            RefusingGetDataSurface("member_not_resolvable"),
+            failure_cause("member_not_resolvable"),
+            id="given-back",
+        ),
+    ],
+)
+async def test_a_stopped_plan_hands_the_agent_the_users_words_for_the_stop(
+    surface: ScriptedSurface, cause: str, pg_engine: AsyncEngine
+) -> None:
+    """The agent reads a stop as the user reads its cause, so a tool's own
+    message, written for a caller that can retry the call, never reaches the
+    plan path to be copied into a brief or an ask."""
+    models = _planned("It could not be computed.")
+    driver = _driver(pg_engine, models, tool_surface=surface)
+
+    await approve_turn(driver, _QUESTION)
+
+    body = _hand_back_body(models)
+    assert body["failed_step"]["message"] == cause
+    after_plan = agent_read(models.orchestrator.requests[-1])
+    assert "financingProvider_party_kind" not in after_plan
+    assert "this deployment cannot serve the request" not in after_plan
+
+
+_ASK = "Kenya's top donor in each year"
+_TOOL_WORDS = f"{_ASK}, keeping financingProvider_party_kind party alone"
+
+
+async def test_a_plan_call_given_back_keeps_the_stopped_plans_asks(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The plan call given back after a stop may change its brief only: the
+    new plan holds the stopped plan's asks, whatever asks the call sends, so
+    the card titles the user's outputs in the words they were asked in."""
+    models = scripted_models(
+        orchestrator=[
+            reply(plan_call(_BRIEF, _ASK)),
+            reply(plan_call(f"{_BRIEF}, from another source", _TOOL_WORDS, "a second output")),
+            reply(text_part("It could not be computed.")),
+        ]
+    )
+    driver = _driver(
+        pg_engine, models, tool_surface=RefusingGetDataSurface("member_not_resolvable")
+    )
+
+    second = await approve_turn(driver, _QUESTION)
+
+    assert second.pause.kind == "approve"
+    state = second.cursor.state
+    assert state[ORCHESTRATOR_BRIEF_KEY] == f"{_BRIEF}, from another source"
+    assert load_asks(state) == (_ASK,)
+
+
+async def test_a_plan_call_after_the_user_answers_again_takes_its_own_asks(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The user's answer to a question asked after the plan call was given
+    back can change what they ask for, so the next plan call's asks stand."""
+    models = scripted_models(
+        orchestrator=[
+            reply(plan_call(_BRIEF, _ASK)),
+            reply(ask_user_call("Which years?", "2018 to 2022", "2015 to 2022")),
+            reply(plan_call(f"{_BRIEF}, 2015 to 2022", f"{_ASK} from 2015 to 2022")),
+            reply(text_part("It could not be computed.")),
+        ]
+    )
+    driver = _driver(
+        pg_engine, models, tool_surface=RefusingGetDataSurface("member_not_resolvable")
+    )
+
+    asked = await approve_turn(driver, _QUESTION)
+    assert asked.pause.kind == "ask"
+    second = await driver.answer(
+        {"answers": {"q1": {"kind": "option", "spec_id": "o2"}}}, to=asked.pause
+    )
+
+    assert second.pause.kind == "approve"
+    assert load_asks(second.cursor.state) == (f"{_ASK} from 2015 to 2022",)
+
+
+def test_the_asks_kept_for_a_plan_given_back_leave_out_those_the_user_removed() -> None:
+    """An ask the user's amendment removed stays removed on the plan given
+    back, and each kept ask keeps its parties and years under its new number."""
+    plan = cast(
+        "Plan",
+        SimpleNamespace(
+            asks=("aid by donor", "a total", "aid by recipient"),
+            dropped_asks=(1,),
+            ask_breakdowns=(
+                AskBreakdown(ask=0, by=("donor",)),
+                AskBreakdown(ask=1, over=("donor",)),
+                AskBreakdown(ask=2, by=("recipient",)),
+            ),
+            asks_across_years=(1, 2),
+        ),
+    )
+
+    kept = _stopped_asks({}, plan)
+
+    assert kept["asks"] == ["aid by donor", "aid by recipient"]
+    assert [(entry["ask"], entry["by"]) for entry in kept["ask_breakdowns"]] == [
+        (0, ["donor"]),
+        (1, ["recipient"]),
+    ]
+    assert kept["asks_across_years"] == [1]
+
+
+def test_a_retry_note_survives_a_card_it_cannot_draw_and_words_a_stop_at_no_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A note never fails the turn. A card that cannot be drawn names "a step",
+    and a stop at no step says the plan could not run."""
+
+    def undrawable(plan: Plan) -> list[dict[str, object]]:
+        raise ValueError("no card")
+
+    monkeypatch.setattr(plan_done_module.plan_display, "card_rows", undrawable)
+    plan = cast("Plan", SimpleNamespace(translation=object(), workflow=object()))
+    failed = {"step_id": "retrieve", "code": "facet_not_available", "wave_remedy": "replan"}
+    cause = failure_cause("facet_not_available")
+
+    assert _retry_note(plan, failed).startswith(f"The approved plan stopped at a step. {cause} ")
+    assert _retry_note(plan, {**failed, "step_id": None}).startswith(
+        f"The approved plan could not run. {cause} "
+    )
 
 
 async def test_a_plan_whose_frames_cannot_be_described_hands_back_the_reason_not_a_frame(
@@ -902,3 +1217,60 @@ async def test_an_approved_plan_runs_and_its_final_frames_come_back_to_the_agent
     (plan,) = closed.turn_plans
     assert PlanRecord.model_validate(plan).digest_line() in read
     assert "Charted." in read
+
+
+class _UnusableGetDataSurface(ScriptedSurface):
+    """`ScriptedSurface` whose `get_data` answers a result that states no frame."""
+
+    async def call_tool(self, *, tool: Any, arguments: Any, on_progress: Any = None) -> Any:
+        if tool.name != "get_data":
+            return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        return ToolCallResult(is_error=False, structured_content={}, text="fetched")
+
+
+class _RefusingReplanner(ScriptedPlannerModel):
+    """`ScriptedPlannerModel` that drafts the first plan and refuses, not
+    finally, to replan past the stop of its run."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("refusal") is not None:
+            return {"refused": {"text": "No plan gets past that step.", "final": False}}
+        return await super().__call__(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("surface", "told"),
+    [
+        # A method choice is the planner's to make, so another brief may make it.
+        (RefusingGetDataSurface("entity_ambiguous", {"candidates": ["country/KEN"]}), None),
+        # A result the run cannot use is the system's fault, which no brief avoids.
+        (_UnusableGetDataSurface(), failure_sentence("internal_error")),
+        # A service that did not answer is waited out, not planned around, and
+        # told as its code tells it.
+        (
+            RefusingGetDataSurface("service_unavailable"),
+            failure_sentence("service_unavailable", "retry_after_delay"),
+        ),
+    ],
+    ids=["method-choice", "system-fault", "wait"],
+)
+async def test_a_planner_refusal_after_a_stop_gives_the_plan_back_only_when_a_new_plan_remedies_it(
+    surface: ScriptedSurface,
+    told: str | None,
+    pg_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The run retries a service that did not answer with no backoff between.
+    monkeypatch.setattr(classify_module, "BACKOFF_SECONDS", 0.0)
+    models = _planned("It could not be computed.")
+    driver = _driver(pg_engine, models, planner=_RefusingReplanner(), tool_surface=surface)
+
+    ran = await approve_turn(driver, _QUESTION)
+
+    assert ran.outcome is Outcome.DONE
+    after_plan = agent_read(models.orchestrator.requests[-1])
+    given_back = told is None
+    assert bool(ran.cursor.state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")) is given_back
+    assert bool(ran.cursor.state.get(ORCHESTRATOR_RETRY_NOTE_KEY)) is given_back
+    if told is not None:
+        assert told in after_plan

@@ -1223,10 +1223,27 @@ def _choice_members(
     (`plan_display.switchable_decision`) takes `plan_display.
     decision_choice_id`, and each option `plan_display.decision_option_id`,
     its label in the card's words (`named`) and status "available", the
-    chosen one active. Empty for any other decision.
+    chosen one active. The row of how pinned sources' flows are counted
+    (`plan_display.count_choice_id`) takes that id, and each count it offers
+    (`plan_display.count_options`) the id `plan_display.decision_option_id`
+    gives its label, with status "available", since Search offered each
+    beside every source of the row. Empty for any other decision.
     """
     if decision is None:
         return {}
+    if (row := plan_display.count_choice_id(plan, decision)) is not None:
+        return {
+            "choice_id": row,
+            "active_option_id": plan_display.decision_option_id(decision.chosen),
+            "options": [
+                PlanDecisionOption(
+                    option_id=plan_display.decision_option_id(option),
+                    label=named(option),
+                    status="available",
+                )
+                for option in plan_display.count_options(plan, decision)
+            ],
+        }
     if decision.scope is not None:
         return {
             "choice_id": plan_display.choice_id(plan, decision),
@@ -2217,17 +2234,20 @@ class _Translator:
             frames: list[Any] = []
             note = payload.get("refusal_note")
             if isinstance(note, str) and note:
-                # `harness.graph.planning`'s `planner` node sets this in two cases. Its
+                # `harness.graph.planning`'s `planner` node sets this in three cases. Its
                 # `"pending_refusal"` route (BUDGET_EXHAUSTED, or
                 # QUESTION_FIXED on an entry with no amendment to hand back
-                # as a new question), a refusal that still has a
+                # as a new question), a refused amendment that still has a
                 # `PENDING_APPROVAL` plan on record re-offered unmodified,
                 # carries the refusal's sentence: the plan card below says
                 # what is still approvable, and this says why the user is
                 # seeing it again rather than the change they just asked
                 # for. An `"ok"` draft made over a plan the node could not
-                # read says so (`UNREADABLE_PLAN_NOTE`). Any other `"ok"`
-                # draft carries no `refusal_note` and gets no message here.
+                # read says so (`UNREADABLE_PLAN_NOTE`). The first draft
+                # after an approved plan stopped and `plan_done` gave the
+                # plan call back names the step it stopped at and why
+                # (`ORCHESTRATOR_RETRY_NOTE_KEY`). Any other `"ok"` draft
+                # carries no `refusal_note` and gets no message here.
                 frames.append(
                     MessageDelta(event="message.delta", seq=conversation.next_seq(), text=note)
                 )

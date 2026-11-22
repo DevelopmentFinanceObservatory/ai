@@ -85,7 +85,7 @@ from harness.plan_display import decision_option_id
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
-from harness.sentences import FAILURE_SENTENCES, FailureClass
+from harness.sentences import FAILURE_SENTENCES, FailureClass, failure_cause
 from harness.studio_translate import failure_detail
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import SearchReading, basis_line
@@ -2024,12 +2024,24 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
         "tool": "aggregate",
         "code": "entity_ambiguous",
         "message": "more than one entity matches 'Kenya'",
+        "retry_mode": "correct_and_retry",
+        # The `fix` keeps only what the user's sentence reads.
+        "fix": {},
+        "disposition": "method_choice",
+        "cause": "data",
+        "wave_remedy": "replan",
     }
     # get_data ran and completed before the refusal; its frame is kept.
     assert executed["frame_refs"] == [REF_A]
     assert [step["digest"] for step in executed["step_summaries"]] == ["fetched"]
     _, body = handed_back(model)
-    assert body["failed_step"] == executed["failed_step"]
+    # The refusal's retry mode and `fix` word the user's sentence, and its
+    # cause, disposition and wave's remedy decide what follows. The agent
+    # reads the rest, with what happened in the user's words in place of the
+    # tool's message.
+    hidden = ("retry_mode", "fix", "disposition", "cause", "wave_remedy")
+    shown = {k: v for k, v in executed["failed_step"].items() if k not in hidden}
+    assert body["failed_step"] == {**shown, "message": failure_cause("entity_ambiguous", {})}
 
 
 async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_replan(
@@ -2076,13 +2088,18 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
         "tool": None,
         "code": "over_ceiling",
         "message": "over the coverage ceiling: too many series.",
+        "retry_mode": "correct_and_retry",
+        "fix": {},
+        "disposition": "stop",
+        "cause": "data",
+        "wave_remedy": "user",
     }
     assert executed["frame_refs"] == [REF_A]
     _, body = handed_back(model)
     assert body["failed_step"] == {
         "step_id": "totals",
         "code": "over_ceiling",
-        "message": "over the coverage ceiling: too many series.",
+        "message": failure_cause("over_ceiling", {}),
     }
 
 
@@ -2130,6 +2147,11 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
         "code": "over_ceiling",
         "message": "over the coverage ceiling: 2933 members. A narrower question "
         "resolves to a smaller definition.",
+        "retry_mode": "correct_and_retry",
+        "fix": {"ceiling_kind": "member_cardinality"},
+        "disposition": "stop",
+        "cause": "data",
+        "wave_remedy": "user",
     }
     _, body = handed_back(model)
     assert (body["failed_step"]["step_id"], body["failed_step"]["code"]) == (
@@ -2189,7 +2211,7 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
     """A `get_data` asked to sum its family declares three StatVars, so the
     sum did not happen. The same plan draws the same frame, so `execute`
     closes the turn on this first refusal: no replan, no second approval of
-    an identical plan. The agent reads the executor's own message and
+    an identical plan. The agent reads what happened and the executor's
     remedy, both written for the user, in place of the count of `stat_vars`
     the refusal's `detail` states."""
     plan = _planner_plan(schemas=real_schemas, stat_vars="sum")
@@ -2218,6 +2240,11 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
         "tool": None,
         "code": "family_not_summed",
         "message": message,
+        "retry_mode": "do_not_retry",
+        "fix": {},
+        "disposition": "stop",
+        "cause": "data",
+        "wave_remedy": "user",
         "remedy": remedy,
     }
     assert executed["frame_refs"] == []
@@ -2225,7 +2252,7 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
     assert body["failed_step"] == {
         "step_id": "get_data",
         "code": "family_not_summed",
-        "message": message,
+        "message": failure_cause("family_not_summed", {}),
         "remedy": remedy,
     }
     assert "distinct stat_vars" not in text
@@ -2310,16 +2337,16 @@ def _stop(revision: str, step_id: str, spec: _StopSpec) -> Refused:
 
 
 @pytest.mark.parametrize(
-    ("primary", "also", "dead_end"),
+    ("primary", "also", "closed_on"),
     [
-        ((_MOVED,), (), True),
-        ((_REBOUND,), (), False),
-        ((_MOVED, _UNCONFIRMED), (), True),
-        ((_MOVED, _REBOUND), (), True),
-        ((_MOVED, _SHORT), (), False),
-        ((_MOVED,), ((_SHORT,),), False),
-        (None, ((_SHORT,),), False),
-        (None, ((_MOVED,), None), True),
+        ((_MOVED,), (), "stat_var_family_moved"),
+        ((_REBOUND,), (), "stat_var_membership_drift"),
+        ((_MOVED, _UNCONFIRMED), (), "stat_var_family_moved"),
+        ((_MOVED, _REBOUND), (), "stat_var_family_moved"),
+        ((_MOVED, _SHORT), (), "stat_var_family_moved"),
+        ((_MOVED,), ((_SHORT,),), "stat_var_family_moved"),
+        (None, ((_SHORT,),), None),
+        (None, ((_MOVED,), None), "stat_var_family_moved"),
     ],
     ids=[
         "family-moved",
@@ -2338,17 +2365,19 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
     monkeypatch: pytest.MonkeyPatch,
     primary: _StopSpec,
     also: tuple[_StopSpec, ...],
-    dead_end: bool,
+    closed_on: str | None,
 ) -> None:
-    """A wave whose every stop is a dead end closes the turn on the first, with
-    no replan. An evidence stop is one when the StatVar family's digest moved
-    since Search approved it and that move explains every error, a family
-    grown past the one series approved included: a replan in the same turn
-    approves the digest the turn already holds, so the turn closes on the
-    source-gone sentence, which asks the user to ask again. A tool's `STOP`
-    refusal is another. A binding that fails the same way for every search, a
-    stop that also fails on another issue, or a wave with any other stop
-    (`also`) replans like any other."""
+    """A wave whose every stop is a dead end, or whose remedy is the user's,
+    closes the turn on the stop that decides its remedy, the first of the
+    most severe, with no replan. An evidence stop is a dead end when the
+    StatVar family's digest moved since Search approved it and that move
+    explains every error, a family grown past the one series approved
+    included: a replan in the same turn approves the digest the turn already
+    holds, so the turn closes on the source-gone sentence, which asks the user
+    to ask again. A tool's `STOP` refusal is another. A moved family is the
+    user's however the rest of its wave fails, and so is a binding that fails
+    the same way for every search. A wave of stops a new plan gets past
+    (`closed_on` None) replans."""
     plan = _planner_plan(schemas=real_schemas)
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
 
@@ -2364,41 +2393,60 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
 
     events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
-    assert len(planner.calls) == (1 if dead_end else 2)
-    if not dead_end:
+    assert len(planner.calls) == (2 if closed_on is None else 1)
+    if closed_on is None:
         assert _pending_interrupt(events) == APPROVE_PAUSE
         return
     assert _pending_interrupt(events) is None
     failed = _output_of(events, "execute")["failed_step"]
-    if primary is None:
-        assert failed["code"] == "spec_not_exportable"
-        return
-    assert failed["code"] == "stat_var_family_moved"
-    gone = FAILURE_SENTENCES[FailureClass.SOURCE_GONE]
-    assert failure_detail(failed) == f"{gone.cause}, {gone.advice}."
+    # Another spec avoids `spec_not_exportable`, and the user has to accept a
+    # moved family, so the family decides the wave wherever it stands.
+    assert failed["code"] == closed_on
+    assert failed["wave_remedy"] == "user"
+    if closed_on == "stat_var_family_moved":
+        gone = FAILURE_SENTENCES[FailureClass.SOURCE_GONE]
+        assert failure_detail(failed) == f"{gone.cause}, {gone.advice}."
 
 
-@pytest.mark.parametrize("retryable", [True, False], ids=["retryable", "permanent"])
-async def test_a_transport_stop_closes_the_turn_only_when_no_retry_can_help(
+@pytest.mark.parametrize(
+    ("retryable", "beside", "wave_remedy"),
+    [
+        (True, False, "wait"),
+        (False, False, "system"),
+        (True, True, "wait"),
+    ],
+    ids=["retryable", "permanent", "retryable-beside-a-replannable-stop"],
+)
+async def test_a_transport_stop_closes_the_turn_without_a_replan(
     pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
     monkeypatch: pytest.MonkeyPatch,
     retryable: bool,
+    beside: bool,
+    wave_remedy: str,
 ) -> None:
-    """A step the tool surface failed for a fault no later attempt gets past
-    closes the turn without a replan, which would spend an approval on the
-    same failure. A retryable transport stop replans."""
+    """A step the tool surface failed closes the turn without a replan, which
+    would ask the user to approve again a plan no new draft gets past: the
+    executor spent its retries on a retryable one, so the user tries again
+    later, and no later attempt gets past a permanent one. A replannable stop
+    in the same wave does not route it to the planner, since the transport
+    stop decides the wave."""
     plan = _planner_plan(schemas=real_schemas)
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
 
     async def _stub_wave(drafted_plan: Any, **_kwargs: Any) -> Any:
+        revision = plan_revision(drafted_plan)
         stop = Refused(
-            revision=plan_revision(drafted_plan),
+            revision=revision,
             refusal=RefusalKind.TRANSPORT_FAILED,
             detail="could not call 'get_data'",
             step_id="get_data",
             retryable=retryable,
         )
+        if beside:
+            stop = stop.model_copy(
+                update={"also_stopped": (_stop(revision, "sibling", (_SHORT,)),)}
+            )
         return drafted_plan, stop
 
     monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_wave)
@@ -2407,8 +2455,11 @@ async def test_a_transport_stop_closes_the_turn_only_when_no_retry_can_help(
 
     events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
-    assert len(planner.calls) == (2 if retryable else 1)
-    assert (_pending_interrupt(events) == APPROVE_PAUSE) is retryable
+    assert len(planner.calls) == 1
+    assert _pending_interrupt(events) is None
+    failed = _output_of(events, "execute")["failed_step"]
+    assert failed["step_id"] == "get_data"
+    assert failed["wave_remedy"] == wave_remedy
 
 
 async def test_a_not_approved_outcome_raises_instead_of_replanning(
@@ -2515,6 +2566,11 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": "aggregate",
         "code": "entity_ambiguous",
         "message": "ambiguous",
+        "retry_mode": "correct_and_retry",
+        "fix": {},
+        "disposition": "method_choice",
+        "cause": "data",
+        "wave_remedy": "replan",
     }
 
     rediscovery = RediscoveryNeeded(
@@ -2552,6 +2608,11 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": "get_data",
         "code": "rediscovery_needed",
         "message": "the source moved",
+        "retry_mode": "refresh_then_retry",
+        "fix": {},
+        "disposition": "rediscover",
+        "cause": "data",
+        "wave_remedy": "replan",
     }
 
     refused = Refused(
@@ -2594,6 +2655,11 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": None,
         "code": "over_ceiling",
         "message": "over the coverage ceiling: too many series",
+        "retry_mode": "correct_and_retry",
+        "fix": {},
+        "disposition": "stop",
+        "cause": "data",
+        "wave_remedy": "user",
     }
 
     # A `REQUIREMENT_UNMET` stop carries `check_evidence`'s own findings as
@@ -2633,6 +2699,8 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": None,
         "code": "source_pin_mismatch",
         "message": "the requirement pins 'spec_a', the source found is 'spec_b'",
+        "cause": "data",
+        "wave_remedy": "user",
     }
 
     # No ERROR-severity issue at all (every finding a caveat) falls back to
@@ -2660,6 +2728,8 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": None,
         "code": "source_unverified",
         "message": "the source states no provenance",
+        "cause": "data",
+        "wave_remedy": "replan",
     }
 
     # A stop with every donor named missing. The failed step carries what the
@@ -2690,6 +2760,8 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "code": "entity_missing",
         "message": "the source resolves no entity named 'United States'; the source "
         "resolves no entity named 'Germany'",
+        "cause": "data",
+        "wave_remedy": "user",
     }
 
 
@@ -3029,7 +3101,7 @@ def test_mark_masked_step_failed_corrects_every_sibling_a_wave_surfaced() -> Non
     """A wave whose primary and one `also_stopped` sibling both passed their
     raw call but were refused by a post-call check (`_check_evidence`) each
     carry a distinct `step_id`. `_mark_masked_step_failed` corrects both
-    Activity feed records, not just the primary's."""
+    Activity feed records, each with its own stop's code, in either order."""
 
     class _RecorderStub:
         def __init__(self) -> None:
@@ -3063,21 +3135,29 @@ def test_mark_masked_step_failed_corrects_every_sibling_a_wave_surfaced() -> Non
         also_stopped=(sibling,),
     )
 
+    pin_record = {
+        "step_id": "fetch_gdp",
+        "code": "source_pin_mismatch",
+        "detail": "the requirement pins 'spec_a', the source found is 'spec_b'",
+    }
+    empty_record = {
+        "step_id": "fetch_population",
+        "code": "empty_answer",
+        "detail": "no rows matched",
+    }
+
     recorder = _RecorderStub()
     _mark_masked_step_failed(recorder, primary, tools={})
+    assert recorder.calls == [pin_record, empty_record]
 
-    assert recorder.calls == [
-        {
-            "step_id": "fetch_gdp",
-            "code": "source_pin_mismatch",
-            "detail": "the requirement pins 'spec_a', the source found is 'spec_b'",
-        },
-        {
-            "step_id": "fetch_population",
-            "code": "empty_answer",
-            "detail": "no rows matched",
-        },
-    ]
+    # With the milder stop first, its record keeps its own code although the
+    # sibling decides the wave.
+    swapped = sibling.model_copy(
+        update={"also_stopped": (primary.model_copy(update={"also_stopped": ()}),)}
+    )
+    recorder = _RecorderStub()
+    _mark_masked_step_failed(recorder, swapped, tools={})
+    assert recorder.calls == [empty_record, pin_record]
 
 
 # --- the seed intake's wording ---------------------------------------------------

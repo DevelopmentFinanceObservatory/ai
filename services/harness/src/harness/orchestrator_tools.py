@@ -143,7 +143,9 @@ from harness.graph.interfaces import Executor
 from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
+    ORCHESTRATOR_GIVEN_BACK_ASKS_KEY,
     ORCHESTRATOR_PENDING_KEY,
+    ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
@@ -1713,15 +1715,23 @@ def _attach_fetch(
     (`harness.scope_choices.served_facts`), when it said, and `args`, the
     call's arguments that shape its frame (`FetchReading.args`).
 
-    A spec_id that no reading holds as its own, but one offered as a
-    candidate, as another count (`SearchReading.alternatives`) or as the
-    same count in other prices (`SearchReading.other_prices`), first gains
-    a reading of its own, read from its block (`chosen_part`) with the
+    A spec_id that no reading of this turn holds as its own, but one offered
+    as a candidate, as another count (`SearchReading.alternatives`) or as
+    the same count in other prices (`SearchReading.other_prices`), first
+    gains a reading of its own, read from its block (`chosen_part`) with the
     offering reading's text, skills and departures and asked parties and
-    its own warnings, else the offering reading's. A spec_id no reading
-    offers as a candidate is a sibling (`_offered_sibling`), and its reading
-    names the reading that offered it (`SearchReading.sibling_of`) and the
-    count it reads.
+    its own warnings, else the offering reading's. The offering reading is
+    the newest reading offering the spec_id in any of those ways, this
+    turn's before the earlier turns' (`ORCHESTRATOR_PRIOR_LEDGER_KEY`), so a
+    fetch of what an earlier answer offered, a count chip's included
+    (`harness.graph.switch`), reads as that offer, and this turn's offer
+    wins over an older one (`_offering`). A spec_id offered as another
+    count or in other prices is a sibling, and its reading names the
+    reading it is a sibling of (`SearchReading.sibling_of`) and the count
+    it reads. Another count names the count Search elected for the part
+    (`_elected_count`), and a fetch
+    of a count Search elected, or of one any reading holds as its own
+    count, is no sibling: its reading states its block's own count.
     """
     spec_id = result["spec_id"]
     state = call.state
@@ -1729,13 +1739,21 @@ def _attach_fetch(
         SearchReading.model_validate(stored)
         for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY)
     ]
+    earlier = [
+        SearchReading.model_validate(stored)
+        for stored in stored_mapping(state, ORCHESTRATOR_PRIOR_LEDGER_KEY).get("readings") or ()
+    ]
+    newest_first = [*reversed(searches), *reversed(earlier)]
     block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(spec_id)
-    candidate_of = next(
-        (r for r in searches if any(c.spec_id == spec_id for c in r.candidates)), None
-    )
-    sibling = None if candidate_of else _offered_sibling(searches, spec_id)
-    offered = candidate_of or (sibling[0] if sibling else None)
-    if block and offered is not None and all(r.spec_id != spec_id for r in searches):
+    found = _offering(newest_first, spec_id)
+    if block and found is not None and all(r.spec_id != spec_id for r in searches):
+        offered, link = found
+        if link is not None and link.axis == "what":
+            root = _elected_count(newest_first, offered)
+            elected = root == spec_id or any(
+                r.spec_id == spec_id and r.other_count_of is None for r in newest_first
+            )
+            link = None if elected else link.model_copy(update={"spec_id": root})
         warnings = (state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {}).get(spec_id)
         if warnings is None:
             warnings = [w.model_dump() for w in offered.warnings]
@@ -1751,8 +1769,7 @@ def _attach_fetch(
             "open_roles": offered.open_roles,
             "share_over": offered.share_over,
         }
-        if sibling is not None:
-            link = sibling[1]
+        if link is not None:
             counted_as = link.label if link.axis == "what" else offered.counted_as
             update |= {"sibling_of": link, "counted_as": counted_as}
         searches.append(chosen.model_copy(update=update))
@@ -1791,13 +1808,18 @@ def _share_sides(part: SearchPart) -> list[str]:
     )
 
 
-def _offered_sibling(
-    searches: Sequence[SearchReading], spec_id: str
-) -> tuple[SearchReading, SiblingReading] | None:
-    """The first reading of `searches` offering `spec_id` as another count or
-    in other prices, with the link a reading of `spec_id` keeps to it; `None`
-    when none does."""
-    for reading in searches:
+def _offering(
+    readings: Sequence[SearchReading], spec_id: str
+) -> tuple[SearchReading, SiblingReading | None] | None:
+    """The first of `readings` offering `spec_id`, with the link a reading of
+    `spec_id` keeps to it: `None` for a candidate, a `SiblingReading` for
+    another count (axis `what`) or the same count in other prices (axis
+    `unit`). Each reading's candidates, other counts and other prices are
+    read together, so the newest reading offering `spec_id` wins.
+    `None` when no reading offers `spec_id`."""
+    for reading in readings:
+        if any(candidate.spec_id == spec_id for candidate in reading.candidates):
+            return reading, None
         if reading.spec_id is None:
             continue
         for axis, offers in (("what", reading.alternatives), ("unit", reading.other_prices)):
@@ -1805,6 +1827,29 @@ def _offered_sibling(
             if label is not None:
                 return reading, SiblingReading(spec_id=reading.spec_id, axis=axis, label=label)
     return None
+
+
+def _elected_count(readings: Sequence[SearchReading], offering: SearchReading) -> str:
+    """The spec_id of the count Search elected for the part `offering` reads.
+
+    `offering`'s own, unless it is another count of a part
+    (`SearchReading.other_count_of`): then the count that names, followed
+    back through `readings`, newest first, to a reading that is no other
+    count. A stored reading can name another count in place of the elected
+    one, which this follows past. A link that loops or leaves `readings`
+    ends at the last spec_id it named.
+    """
+    assert offering.spec_id is not None
+    current, seen = offering, {offering.spec_id}
+    while (previous := current.other_count_of) is not None and previous not in seen:
+        seen.add(previous)
+        found = next((r for r in readings if r.spec_id == previous), None)
+        if found is None:
+            return previous
+        current = found
+    # Each reading followed holds the spec_id it was found by.
+    assert current.spec_id is not None
+    return current.spec_id
 
 
 def _asked_roles(part: SearchPart) -> list[str]:
@@ -2906,6 +2951,15 @@ def build_orchestrator_tools(
         End your turn after calling it; the plan's result comes back as this
         call's result.
         """
+        pinned = call.state.get(ORCHESTRATOR_GIVEN_BACK_ASKS_KEY)
+        if pinned and pinned.get("asks"):
+            # The call `plan_done` gave back after a stop may change the brief
+            # only, so the plan keeps the stopped plan's asks in the words the
+            # user asked them in, and the asks sent here are not read.
+            spent = _spend(call, "plan")
+            if spent:
+                return spent
+            return _pend(call, PendingPlan.model_validate({**pinned, "brief": brief}))
         texts = [ask.text for ask in asks]
         refused = _asks_refusal(texts) or _breakdowns_missing(call, asks)
         if refused:
