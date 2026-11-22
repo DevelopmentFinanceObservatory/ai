@@ -34,7 +34,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from common.breakdown_labels import NO_LABELS, Cell, CellLabels
-from common.echoed_text import truncate_value
+from common.echoed_text import MAX_LABEL_CHARS, escape_control_chars, truncate_value
 from common.time_grain import span_label
 from common.unit_refs import PERCENT_UNIT
 from dfo_frame_grammar.grammar import UnitCell
@@ -111,15 +111,29 @@ def _unit_text(unit: UnitCell | None) -> str:
     return truncate_value(unit_name(unit))
 
 
-# How `_cell` names a cell, `render_summary_digest`'s labels while it renders.
-_cell_text: ContextVar[Callable[[str, str], str]] = ContextVar("cell_text", default=NO_LABELS.text)
+# The label `_cell` names a cell by, from `render_summary_digest`'s labels while it renders.
+_cell_label: ContextVar[Callable[[str, str], str | None]] = ContextVar(
+    "cell_label", default=NO_LABELS.label
+)
+
+_TRUNCATED = "...(truncated)"
 
 
 def _cell(column: str, value: str) -> str:
     """The text of the cell `value` of `column`: a breakdown cell's label with its
-    value after it where one was read (`_cell_text`), else the value, capped
-    (`truncate_value`)."""
-    return truncate_value(_cell_text.get()(column, value))
+    value after it where one was read (`_cell_label`), else the value, capped
+    (`truncate_value`). A label and its value share the `MAX_LABEL_CHARS` cap, the value
+    first, so a long label is cut and the value a selection binds is shown whole."""
+    label = _cell_label.get()(column, value)
+    shown = truncate_value(value)
+    if label is None:
+        return shown
+    suffix = f" ({shown})"
+    text = escape_control_chars(label)
+    room = max(MAX_LABEL_CHARS - len(suffix), 0)
+    if len(text) > room:
+        text = text[:room] + _TRUNCATED
+    return text + suffix
 
 
 def _key_text(key: Sequence[tuple[str, str]]) -> str:
@@ -1620,15 +1634,14 @@ def digest_cells(summary: VerbSummary, *, heading: str | None = None) -> tuple[s
     A caller that reads no label for any of them shows this digest as it is."""
     named: list[Cell] = []
 
-    def record(column: str, value: str) -> str:
+    def record(column: str, value: str) -> None:
         named.append((column, value))
-        return value
 
-    token = _cell_text.set(record)
+    token = _cell_label.set(record)
     try:
         return _render_summary_digest(summary, heading=heading), named
     finally:
-        _cell_text.reset(token)
+        _cell_label.reset(token)
 
 
 def render_summary_digest(
@@ -1642,11 +1655,11 @@ def render_summary_digest(
     `heading`, when given, opens a `sum_of` or `quotient_of` digest in the verb's
     place. Every key's breakdown cell reads as its label in `labels`, else as its
     value."""
-    token = _cell_text.set(labels.text)
+    token = _cell_label.set(labels.label)
     try:
         return _render_summary_digest(summary, heading=heading)
     finally:
-        _cell_text.reset(token)
+        _cell_label.reset(token)
 
 
 def _render_summary_digest(summary: VerbSummary, *, heading: str | None) -> str:

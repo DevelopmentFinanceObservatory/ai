@@ -536,3 +536,34 @@ def test_a_name_finds_a_breakdown_cell_by_its_value_or_its_label(
     ]
     assert "not_in_card" not in result
     assert "not_matched" not in result
+
+
+@pytest.mark.parametrize("placed", [True, False], ids=["coordinates", "table cells"])
+def test_a_bare_label_two_codes_share_selects_both_series_each_under_its_own_name(
+    placed: bool,
+) -> None:
+    """Two codes the graph labels alike are two series: the bare label names both, and
+    each figure keeps the series it came from, a placed series by its own label and a
+    table series by its text, whose dcid tells the two apart."""
+    codes = ("CRSPurposeCode15220", "CRSPurposeCode15230")
+    labels = CellLabels({("stat_var_crsPurpose", code): _PEACE for code in codes})
+    series = [
+        DrawnSeries(
+            id=f"s_{own}",
+            label=own if placed else code,
+            unit=unit,
+            points=(("2024", 7.0),),
+            coordinates={"stat_var_crsPurpose": code} if placed else None,
+            cells=() if placed else (("stat_var_crsPurpose", code),),
+        )
+        for own, code, unit in zip(("first", "second"), codes, ("USD", "EUR"), strict=True)
+    ]
+
+    result = card_result(labelled(series, labels), state_values_for=[_PEACE], labels=labels)
+
+    names = ["first", "second"] if placed else [f"{_PEACE} ({code})" for code in codes]
+    assert [(figure["series"], figure["unit"]) for figure in result["reply_figures"]] == list(
+        zip(names, ("USD", "EUR"), strict=True)
+    )
+    assert "not_in_card" not in result
+    assert "not_matched" not in result

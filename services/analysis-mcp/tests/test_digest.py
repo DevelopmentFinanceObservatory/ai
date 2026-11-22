@@ -773,18 +773,38 @@ def test_a_digest_names_only_the_cells_it_shows(render: Callable[[], str]) -> No
     a list cap leaves out is named by no cell, so it costs no node read."""
     named: list[tuple[str, str]] = []
 
-    def record(column: str, value: str) -> str:
+    def record(column: str, value: str) -> None:
         named.append((column, value))
-        return value
 
-    token = digest_module._cell_text.set(record)
+    token = digest_module._cell_label.set(record)
     try:
         digest = render()
     finally:
-        digest_module._cell_text.reset(token)
+        digest_module._cell_label.reset(token)
 
     assert named
     assert [cell for cell in named if f"{cell[0]}={cell[1]}" not in digest] == []
+
+
+@pytest.mark.parametrize(
+    ("label", "shown"),
+    [
+        pytest.param("a" * 190, "a" * 190, id="fits"),
+        pytest.param("a" * 201, "a" * 190 + "...(truncated)", id="201 characters"),
+    ],
+)
+def test_a_long_label_is_cut_and_its_dcid_is_shown_whole(label: str, shown: str) -> None:
+    """A label and its dcid share the 200-character cap, the dcid first: ` (dcid:R0)` takes
+    10, so a label past 190 is cut and the dcid a selection binds survives."""
+    token = digest_module._cell_label.set(
+        lambda column, value: label if (column, value) == ("recipient", "dcid:R0") else None
+    )
+    try:
+        digest = _zero_denominator_digest(1)
+    finally:
+        digest_module._cell_label.reset(token)
+
+    assert f"recipient={shown} (dcid:R0)" in digest
 
 
 def _per_period_rank_result() -> RankFacts:
