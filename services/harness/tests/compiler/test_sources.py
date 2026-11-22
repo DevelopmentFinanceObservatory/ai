@@ -9,14 +9,17 @@ from typing import Any
 
 import pytest
 from compiler.sources import (
+    Containment,
     DiscoveryStatus,
     MembersAnswer,
+    WholeSide,
     block_wire_groups,
     bound_refs,
     is_family,
     measure_named_by_query,
     members_reading,
     outcome_from_envelope,
+    parties_outside,
     pinned_stat_var,
     readable_source,
     readable_wire_groups,
@@ -26,7 +29,7 @@ from compiler.sources import (
     wire_groups,
 )
 from planner.records import EntityCandidate, EntityKey, Period
-from planner.workflow import BoundEntity, OpenEntityAxis, SelectedSource
+from planner.workflow import BoundEntity, OpenEntityAxis, ResolvedGroup, SelectedSource
 
 SPEC_KENYA = "spec_" + "a" * 32
 SPEC_OTHER = "spec_" + "b" * 32
@@ -1419,3 +1422,56 @@ def test_ignored_source_constraints_are_not_saved_as_applied():
         ]
     }
     assert outcome_from_envelope(envelope).sources[0].resolved_sources == ()
+
+
+# Asia's and Africa's published totals, each listing its member countries.
+_ASIA = WholeSide(
+    bound=("DACAsia",),
+    group=ResolvedGroup(
+        role="destination", label="Asia", total="DACAsia", members=("country/IND",)
+    ),
+)
+_AFRICA = WholeSide(
+    bound=("DACAfrica",),
+    group=ResolvedGroup(
+        role="destination", label="Africa", total="DACAfrica", members=("country/KEN",)
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("whole", "exact", "held"),
+    [
+        pytest.param([_ASIA], False, Containment(outside=("country/KEN",)), id="one-total"),
+        pytest.param([_ASIA, _AFRICA], False, Containment(), id="union-holds"),
+        pytest.param(
+            [_ASIA, WholeSide(bound=())], False, Containment(), id="union-with-an-open-side"
+        ),
+        pytest.param(
+            [WholeSide(bound=("africa",))],
+            False,
+            Containment(unshown=("country/KEN",)),
+            id="ungrouped-unshown",
+        ),
+        pytest.param(
+            [WholeSide(bound=("africa",))],
+            True,
+            Containment(outside=("country/KEN",)),
+            id="ungrouped-exact",
+        ),
+        pytest.param(
+            [WholeSide(bound=("africa",)), _ASIA],
+            False,
+            Containment(unshown=("country/KEN",)),
+            id="union-unshown-beats-outside",
+        ),
+    ],
+)
+def test_a_whole_holds_a_party_one_of_its_datasets_holds(
+    whole: list[WholeSide], exact: bool, held: Containment
+) -> None:
+    """Kenya against a whole read on one or several datasets: the whole holds Kenya
+    where one of them does, and shows Kenya outside only where every one does. A
+    dataset binding a party with no named set shows nothing unless what it binds is
+    all it holds."""
+    assert parties_outside(["country/KEN"], whole, part_group=None, bound_is_exact=exact) == held

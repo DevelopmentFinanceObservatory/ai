@@ -76,6 +76,26 @@ async def test_every_task_validates_and_the_set_covers_every_kind() -> None:
     assert faults == {}
 
 
+# Each recorded task with a plan dividing by `share_of`. Each has to compile,
+# which `compiler.compile` refuses where the share's denominator shows it does not
+# hold a party its numerator names (`share_part_outside_whole`).
+_SHARE_TASKS = [
+    pytest.param(task, id=task.id)
+    for task in entry.load_tasks()
+    if any("share_of" in validate._kinds(payload.body) for payload in validate.task_payloads(task))
+    and entry.recording_path(task.id).exists()
+]
+
+
+@pytest.mark.parametrize("task", _SHARE_TASKS)
+async def test_each_share_task_s_plans_divide_by_a_whole_that_holds_their_part(
+    task: Any,
+) -> None:
+    entry.quiet_logs()
+
+    assert await validate.check_task(task) == []
+
+
 @pytest.mark.parametrize("moved", [False, True], ids=["as-served", "hand-back-moved"])
 async def test_each_amendment_task_hands_back_the_message_it_names(
     moved: bool, monkeypatch: pytest.MonkeyPatch

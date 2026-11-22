@@ -150,11 +150,14 @@ from compiler.shapes import (
     unsummable_axes,
 )
 from compiler.sources import (
+    WHOLE_COLUMNS,
     FamilyOverlap,
     bound_codes,
     entity_scopes_disjoint,
     family_overlap,
+    parties_outside,
     pinned_stat_var,
+    source_whole_side,
     stat_var_reading,
 )
 from compiler.surface import ToolSchema, schema_hash_error
@@ -208,6 +211,9 @@ class CompileIssueCode(StrEnum):
     FAMILY_UNSUMMABLE = "family_unsummable"
     SUM_UNITS_DIFFER = "sum_units_differ"
     SHARE_UNITS_DIFFER = "share_units_differ"
+    # A share whose denominator shows it does not hold a party its numerator
+    # names on a donor or recipient side (`_Build._check_share_holds_part`).
+    SHARE_PART_OUTSIDE_WHOLE = "share_part_outside_whole"
     FRAME_UNITS_DIFFER = "frame_units_differ"
     FRAME_UNIT_UNBOUND = "frame_unit_unbound"
     FRAME_UNIT_FORMS_DIFFER = "frame_unit_forms_differ"
@@ -756,6 +762,7 @@ class _Build:
                     keyed=_keyed_axes(operation),
                 )
                 self._check_key_axes(operation)
+                self._check_share_holds_part(operation)
             elif isinstance(operation, QuotientOfOperation):
                 self._check_two_sided(
                     operation.id,
@@ -1813,6 +1820,76 @@ class _Build:
             return "per cent, as a share"
         source = self._source_upstream(op_id)
         return _unit_cell(unit, _denoted_unit(source, unit) if source is not None else None)
+
+    def _check_share_holds_part(self, operation: ShareOfOperation) -> None:
+        """Report `SHARE_PART_OUTSIDE_WHOLE` for a share whose denominator shows it
+        does not hold a party its numerator names.
+
+        A share is a part over its whole, so on each donor or recipient side
+        (`compiler.sources.WHOLE_COLUMNS`) the denominator holds every party the
+        numerator binds there, by `compiler.sources.parties_outside`. Each side is
+        read as every source its shape rests on, and each source behind the
+        numerator is checked against the sources behind the denominator together,
+        so a denominator summing several datasets holds a party one of them holds.
+        A side whose sources are all the numerator's, or one whose sources are not
+        all known or state no identity, is not read. Where a denominator source
+        binds parties on a side and states no named set there, a party it does not
+        bind is unshown, since a bound region holds countries no set lists. A party
+        nothing shows is inside or outside is not refused. A `quotient_of` divides
+        any two measures and is not checked.
+        """
+        numerators = self._sources_behind(operation.numerator.input)
+        denominators = self._sources_behind(operation.denominator.input)
+        if (
+            not numerators
+            or not denominators
+            or {source.spec_id for source in numerators}
+            == {source.spec_id for source in denominators}
+        ):
+            return
+        outside: list[str] = []
+        for axis, column in WHOLE_COLUMNS.items():
+            whole = [source_whole_side(source, column) for source in denominators]
+            if any(side is None for side in whole):
+                return
+            for numerator in numerators:
+                part = source_whole_side(numerator, column)
+                if part is None or not part.bound:
+                    continue
+                held = parties_outside(
+                    part.bound,
+                    [side for side in whole if side is not None],
+                    part_group=part.group,
+                    bound_is_exact=False,
+                )
+                labels = {entity.ref: entity.label for entity in numerator.entities}
+                outside.extend(
+                    f"{axis} {labels.get(party, party)} ({party})" for party in held.outside
+                )
+        if not outside:
+            return
+        part = self._requirement_upstream(operation.numerator.input)
+        whole_of = (
+            f"; for a part of its whole, state `whole_of` with part {part.id!r} on the "
+            "denominator's dataset requirement"
+            if part is not None
+            else ""
+        )
+        self._issue(
+            CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE,
+            f"operation {operation.id!r} divides by a denominator that does not hold "
+            f"{', '.join(dict.fromkeys(outside))}, which its numerator names, so the share "
+            f"would not be a part of its whole{whole_of}",
+            operation_id=operation.id,
+        )
+
+    def _sources_behind(self, op_id: str) -> tuple[SelectedSource, ...]:
+        """Every source the shape at `op_id` rests on, none where a retrieval it rests on
+        has no source."""
+        sources = [self._source_of(root) for root in self._root_requirement_ids(op_id)]
+        if any(source is None for source in sources):
+            return ()
+        return tuple(source for source in sources if source is not None)
 
     def _report_share_units(self, op_id: str, numerator: str, denominator: str) -> None:
         self._issue(

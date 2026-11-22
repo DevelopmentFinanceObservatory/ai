@@ -205,6 +205,9 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
     ),
     CompileIssueCode.SUM_UNITS_DIFFER: "the parts of a sum are in different units",
     CompileIssueCode.SHARE_UNITS_DIFFER: "a share sets figures in different units against each other",
+    CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE: (
+        "a share divides by a total that does not include the part it is a share of"
+    ),
     CompileIssueCode.FRAME_UNITS_DIFFER: "the figures being combined are in different units",
     CompileIssueCode.FRAME_UNIT_UNBOUND: "one of the figures being combined states no unit",
     CompileIssueCode.FRAME_UNIT_FORMS_DIFFER: (

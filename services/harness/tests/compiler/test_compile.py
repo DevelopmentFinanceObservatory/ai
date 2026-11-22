@@ -6562,18 +6562,26 @@ _DRC_PLANS = json.loads(
 
 
 def _drc_sources(source: SourceFactory) -> dict[str, SelectedSource]:
-    """The sources the plans pin: the US flow bound both sides, every donor's open on `origin`."""
+    """The sources the plans pin: the US flow bound both sides, every donor's open on
+    `origin`, so the total holds the US flow its share divides."""
     return {
         "us_disbursements": source(
             spec_id=SPEC_US_TO_DRC,
             entities=(DRC, UNITED_STATES),
-            **_pinned("UsOdaToDrc"),
+            **_pinned(
+                "UsOdaToDrc",
+                {
+                    "identity": {
+                        "entities": {"origin": [UNITED_STATES.ref], "destination": [DRC.ref]}
+                    }
+                },
+            ),
         ),
         "all_donors_disbursements": source(
             spec_id=SPEC_EVERY_DONOR_TO_DRC,
             entities=(DRC,),
             open_entity_axes=(OpenEntityAxis(column="origin", member_count=77),),
-            **_pinned("OdaToDrc"),
+            **_pinned("OdaToDrc", {"identity": {"entities": {"destination": [DRC.ref]}}}),
         ),
     }
 
@@ -8809,3 +8817,255 @@ def test_a_share_pairs_only_with_another_side_in_percent(
         (issue.code, issue.operation_id, issue.requirement_id) for issue in result.issues
     ] == issues
     assert result.ok == (not issues)
+
+
+# G7 aid, read on the donor side as the G7's published total.
+_G7 = ResolvedEntity(role="origin", ref="GroupOfSeven", label="G7")
+_G7_GROUP = ResolvedGroup(role="origin", label="G7", total="GroupOfSeven")
+_KENYA = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
+# Africa read as the total the DAC publishes for it, listing its member countries.
+_AFRICA = ResolvedEntity(role="destination", ref="DACAfrica", label="Africa")
+_AFRICA_GROUP = ResolvedGroup(
+    role="destination",
+    label="Africa",
+    total="DACAfrica",
+    members=("country/ETH", "country/KEN", "country/NGA"),
+)
+
+
+def _flow_source(
+    source: SourceFactory,
+    spec_id: str,
+    *,
+    recipients: Sequence[ResolvedEntity],
+    groups: Sequence[ResolvedGroup] = (),
+) -> SelectedSource:
+    """G7 aid to `recipients`, the parties the source binds on `destination` (none
+    where it leaves the side open), with `groups` its named sets there."""
+    entities = {"origin": [_G7.ref]}
+    if recipients:
+        entities["destination"] = [entity.ref for entity in recipients]
+    return source(
+        spec_id=spec_id,
+        sentence="official development assistance from the G7",
+        entities=(_G7, *recipients),
+        groups=(_G7_GROUP, *groups),
+        identity={"entities": entities},
+        open_entity_axes=None
+        if recipients
+        else (OpenEntityAxis(column="destination", member_count=150),),
+    )
+
+
+@pytest.mark.parametrize(
+    ("part", "whole", "codes"),
+    [
+        pytest.param(
+            ("Africa", [_AFRICA], [_AFRICA_GROUP]),
+            (
+                Entity(name="developing countries (DAC)", role="recipient", members=True),
+                [
+                    ResolvedEntity(role="destination", ref="country/USA", label="United States"),
+                    ResolvedEntity(role="destination", ref="country/DEU", label="Germany"),
+                ],
+                [
+                    ResolvedGroup(
+                        role="destination",
+                        label="developing countries (DAC)",
+                        ref="groups/OECD.DAC",
+                    )
+                ],
+            ),
+            [Code.SHARE_PART_OUTSIDE_WHOLE],
+            id="africa-over-dac-members",
+        ),
+        pytest.param(
+            ("Africa", [_AFRICA], [_AFRICA_GROUP]),
+            (
+                Entity(name="developing countries (DAC)", role="recipient"),
+                [
+                    ResolvedEntity(
+                        role="destination",
+                        ref="DACDevelopingCountries",
+                        label="developing countries (DAC)",
+                    )
+                ],
+                [
+                    ResolvedGroup(
+                        role="destination",
+                        label="developing countries (DAC)",
+                        ref="DACDevelopingCountries",
+                        total="DACDevelopingCountries",
+                    )
+                ],
+            ),
+            [],
+            id="africa-over-developing-countries-total",
+        ),
+        pytest.param(
+            ("Kenya", [_KENYA], []),
+            (Entity(name="Africa", role="recipient"), [_AFRICA], [_AFRICA_GROUP]),
+            [],
+            id="kenya-over-its-region",
+        ),
+        pytest.param(
+            ("Kenya", [_KENYA], []),
+            (None, [], []),
+            [],
+            id="kenya-over-every-recipient",
+        ),
+    ],
+)
+def test_a_share_divides_by_a_whole_that_holds_its_part(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    source: SourceFactory,
+    part: tuple[str, list[ResolvedEntity], list[ResolvedGroup]],
+    whole: tuple[Entity | None, list[ResolvedEntity], list[ResolvedGroup]],
+    codes: list[Code],
+) -> None:
+    """G7 aid to a recipient as a share of G7 aid to a whole. G7 aid to Africa over G7
+    aid to the DAC's member countries, the plan a repair once led the planner to,
+    divides by a whole that holds no African country, so it is refused. Over the
+    developing countries' total, Kenya over Africa's total, and Kenya over every
+    recipient each hold their part."""
+    recipient, part_entities, part_groups = part
+    whole_entity, whole_entities, whole_groups = whole
+    g7 = Entity(name="G7", role="donor")
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[g7, Entity(name=recipient, role="recipient")],
+    )
+    total = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[g7] if whole_entity is None else [g7, whole_entity],
+        across=("recipient",) if whole_entity is None else (),
+    )
+    summed = derived_requirement(id="summed", input_id="total")
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="summed"),
+    )
+    plan = _draft([decision()], [aid, total, summed, share])
+
+    result = build(
+        plan,
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            _aggregate(id="summed", requirement_id="summed", input="fetch_total"),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="fetch"),
+                denominator=Side(input="summed"),
+            ),
+            terminal=["share"],
+        ),
+        discovered={
+            "aid": _flow_source(source, SPEC_KENYA, recipients=part_entities, groups=part_groups),
+            "total": _flow_source(
+                source, SPEC_OTHER, recipients=whole_entities, groups=whole_groups
+            ),
+        },
+    )
+
+    assert _codes(result) == codes
+
+
+_RECORDED_CARDS = json.loads(
+    (Path(__file__).parent.parent / "fixtures" / "plan_card_recorded.json").read_text()
+)
+
+
+@pytest.mark.parametrize("name", ["long", "long_switched_to_net"])
+def test_a_recorded_share_of_a_donor_s_total_holds_its_part(
+    build: Callable[..., CompileResult], name: str
+) -> None:
+    # US health aid as a share of all US aid, as a live harness proposed it and
+    # after the user switched its basis to net, compiled again on the sources
+    # Search answered it with. Both sides bind the US as donor and leave the
+    # recipient open.
+    recorded = copy.deepcopy(_RECORDED_CARDS[name])
+    workflow, translation = recorded.pop("workflow"), recorded.pop("translation")
+    for field in ("summary", "revision", "moved", "approved_revision", "approved_at"):
+        recorded.pop(field, None)
+    plan = Plan.model_validate({**recorded, "status": PlanStatus.DRAFT})
+    sources = {
+        source["spec_id"]: SelectedSource.model_validate(source) for source in workflow["sources"]
+    }
+
+    result = build(
+        plan,
+        Translation.model_validate(translation),
+        discovered={
+            binding["requirement_id"]: sources[binding["spec_id"]]
+            for binding in workflow["evidence_bindings"]
+        },
+    )
+
+    assert result.ok, result.issues
+
+
+_UK_ODA = json.loads(
+    (Path(__file__).parent.parent / "fixtures" / "prices_decision_uk_oda.json").read_text()
+)
+
+
+def _spec_blocks(value: Any) -> dict[str, dict[str, Any]]:
+    """Every spec block `value`, a recorded Search answer, holds, by spec_id."""
+    found: dict[str, dict[str, Any]] = {}
+    if isinstance(value, dict):
+        if isinstance(value.get("spec_id"), str) and isinstance(value.get("resolved"), dict):
+            found[value["spec_id"]] = value
+        for held in value.values():
+            found |= _spec_blocks(held)
+    elif isinstance(value, list):
+        for held in value:
+            found |= _spec_blocks(held)
+    return found
+
+
+def test_a_recorded_share_of_a_donor_s_aid_to_a_region_holds_its_part(
+    build: Callable[..., CompileResult],
+) -> None:
+    # UK ODA to Africa as a share of all UK ODA, as a live planner proposed it, on
+    # the constant-price sources Search answered it with: the part binds the UK
+    # and Africa's total, the whole the UK alone. The plan reads the part's
+    # family separately, which the share refuses for its shape alone.
+    arguments = _UK_ODA["calls"][1]["arguments"]
+    requirements = TypeAdapter(list[EvidenceRequirement]).validate_python(
+        arguments["evidence_requirements"]
+    )
+    drafts = TypeAdapter(list[DecisionDraft]).validate_python(
+        [{**draft, "fixes": None} for draft in arguments["decisions"]]
+    )
+    plan = Plan(
+        question=arguments["question"],
+        answer_mode=arguments["answer_mode"],
+        decisions=settle_decisions(drafts, requirements),
+        evidence_requirements=requirements,
+        asks=_UK_ODA["asks"],
+        answered=arguments["answered"],
+        status=PlanStatus.DRAFT,
+    )
+    blocks = _spec_blocks(_UK_ODA["searches"]["constant"])
+    pins = {
+        requirement.id: requirement.source_spec_id
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id
+    }
+    sources = {
+        requirement_id: source_from_spec_block(blocks[spec_id])
+        for requirement_id, spec_id in pins.items()
+    }
+
+    result = build(plan, build_translation(plan, pins), discovered=sources)
+
+    assert Code.SHARE_PART_OUTSIDE_WHOLE not in _codes(result)

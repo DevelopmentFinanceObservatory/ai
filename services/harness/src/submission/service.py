@@ -58,6 +58,7 @@ import rfc8785
 from compiler.evidence import named_members, named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
+    WHOLE_COLUMNS,
     block_concept_label,
     block_group,
     countries_apart,
@@ -7202,11 +7203,6 @@ def axis_slot(scope: PartScope, axis: str) -> str | None:
     slots = {o.binding.slot for o in choice.options if isinstance(o.binding, SlotBinding)}
     held = {slot.get("property") for slot in scope.base.identity.get("slots") or ()}
     return next(iter(slots)) if len(slots) == 1 and slots <= held else None
-
-
-# The role column a declared whole over every donor or recipient leaves open, by
-# `planner.plan.WholeOf.axis`.
-WHOLE_COLUMNS: Mapping[str, str] = {"donor": "origin", "recipient": "destination"}
 
 
 def bound_parties(scope: PartScope, column: str) -> tuple[str, ...]:

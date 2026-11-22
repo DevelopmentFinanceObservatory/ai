@@ -333,6 +333,7 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             | CompileIssueCode.FAMILY_UNSUMMABLE
             | CompileIssueCode.SUM_UNITS_DIFFER
             | CompileIssueCode.SHARE_UNITS_DIFFER
+            | CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE
             | CompileIssueCode.FRAME_UNITS_DIFFER
             | CompileIssueCode.FRAME_UNIT_FORMS_DIFFER
             | CompileIssueCode.FRAME_PRICE_BASES_DIFFER
@@ -454,6 +455,12 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "for one measure per unit of another, replace the share with a `quotient_of`, which "
         "divides the two and states the result in a composed unit; for a part of its whole, "
         "state the same unit on both sides' requirements"
+    ),
+    CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE: (
+        "where the share is a part of its whole, make the denominator a dataset requirement "
+        "stating `whole_of` with the numerator's requirement as its `part` and the side it "
+        "leaves open as its `axis`, which is counted from the part's own dataset; otherwise "
+        "give the denominator entities that hold every party the numerator names"
     ),
     CompileIssueCode.FRAME_UNITS_DIFFER: (
         "state the same unit on both sides' requirements, so each source is retrieved in it"
