@@ -47,10 +47,6 @@ class ToolId(StrictModel):
     name: str = Field(min_length=1)
 
 
-# The tool of an internal step (`WorkflowStep.internal`).
-_AGGREGATE = ToolId(server="analysis-mcp", name="aggregate")
-
-
 class Binding(StrictModel):
     """Take an earlier step's output as this argument's value at run time."""
 
@@ -507,15 +503,11 @@ class WorkflowStep(StrictModel):
     those roles take, and the StatVars each frame holds, come from the
     retrieved frame (`compiler.frame_columns.bound_stat_var_count`).
 
-    `operation_id` names the operation the step carries out. Every operation
-    has exactly one step under its own id. A step whose `id` differs from its
-    `operation_id` is internal (`internal`): the `aggregate` `compiler.compile`
-    adds after a whole's retrieval to sum the side its source leaves open
-    (`compiler.compile.WholeOnSource.summed`), whose `frame_ref` binds the step
-    named its `operation_id` (`Workflow._internal_steps_follow_their_operation`).
-    It reports as its operation everywhere a user or the orchestrator sees it
-    (`Workflow.reported_step`). A frame binding names the step producing the
-    frame (`compiler.compile._Build._producing_step`).
+    `id` must equal `operation_id`. The compiler resolves a frame binding by
+    naming the operation that produces it (`compile._frame_from`), and that
+    binding only finds its step because the two are the same value. The day
+    one operation compiles to several steps, `_frame_from` has to name the
+    producing step and this validator comes off.
     """
 
     id: Identifier
@@ -535,10 +527,13 @@ class WorkflowStep(StrictModel):
             raise ValueError(f"arguments given both literally and by binding: {both!r}")
         return self
 
-    @property
-    def internal(self) -> bool:
-        """Whether the step carries out its operation under an id of its own."""
-        return self.id != self.operation_id
+    @model_validator(mode="after")
+    def _names_its_operation(self) -> WorkflowStep:
+        if self.id != self.operation_id:
+            raise ValueError(
+                f"step id {self.id!r} must equal its operation_id {self.operation_id!r}"
+            )
+        return self
 
 
 class EvidenceBinding(StrictModel):
@@ -584,28 +579,6 @@ class Workflow(StrictModel):
         if unknown:
             raise ValueError(f"the workflow refers to steps it does not hold: {unknown!r}")
         return self
-
-    @model_validator(mode="after")
-    def _internal_steps_follow_their_operation(self) -> Workflow:
-        own = {step.id for step in self.steps if not step.internal}
-        if missing := sorted({step.operation_id for step in self.steps} - own):
-            raise ValueError(f"every operation needs a step under its own id: {missing!r}")
-        for step in self.steps:
-            if not step.internal:
-                continue
-            frame = step.bindings.get(ArtifactKind.FRAME_REF.value)
-            if step.tool != _AGGREGATE or frame is None or frame.from_step != step.operation_id:
-                raise ValueError(
-                    f"step {step.id!r} carries out {step.operation_id!r} under an id of its "
-                    f"own, which only an aggregate of {step.operation_id!r}'s frame may"
-                )
-        return self
-
-    def reported_step(self, step_id: str) -> str:
-        """The step `step_id` reports as: its operation's step for an internal step
-        (`WorkflowStep.internal`), else `step_id` itself."""
-        step = next((step for step in self.steps if step.id == step_id), None)
-        return step.operation_id if step is not None else step_id
 
     def source_of(self, step_id: str) -> SelectedSource | None:
         """The source retrieval `step_id` was compiled from, or `None` for a step that retrieves nothing.

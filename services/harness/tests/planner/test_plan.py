@@ -41,6 +41,7 @@ from planner.plan import (
     MAX_OPTION_CHARS,
     MAX_PLAN_DECISIONS,
     MAX_PLAN_RECORD_CHARS,
+    MAX_PLAN_REQUIREMENTS,
     MAX_PREDICATES,
     MAX_QUESTION_CHARS,
     MAX_SOURCE_CHARS,
@@ -82,7 +83,9 @@ from planner.plan import (
     UnsupportedPlanError,
     WholeIsItsMemberError,
     WholeOf,
+    WholeSum,
     _build_shapes,
+    authored,
     authored_text,
     cut_user_text,
     frame_shapes,
@@ -101,6 +104,7 @@ from planner.plan import (
     split_of,
     whole_of_fault,
     windowed_pin,
+    with_whole_sums,
 )
 from planner.proof import mismatches
 from planner.records import (
@@ -7491,6 +7495,97 @@ def test_a_whole_covers_its_parts_parties_with_the_side_it_opens_as_one_total(
         ("recipient", False),
     ]
     assert Plan.model_validate_json(plan.model_dump_json()) == plan
+
+
+def test_a_summed_whole_reads_its_side_open_and_its_sum_closes_it(
+    decision: DecisionFactory,
+) -> None:
+    """G7 aid to Africa over G7 aid to every recipient, on a source leaving the
+    recipients open: the whole reads them open, one row each, and the sum
+    `propose_plan` added keeps the donor and sums them away, so the share divides
+    by one total. The plan the model wrote is the plan without the sum."""
+    sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
+    written = _g7_africa_share(whole=_G7_WHOLE)
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=with_whole_sums(written, sums),
+        whole_sums=sums,
+    )
+
+    shapes = frame_shapes(plan)
+    assert [(role.role, role.open) for role in shapes[_G7_WHOLE.id].roles] == [
+        ("donor", False),
+        ("recipient", True),
+    ]
+    assert [(role.role, role.open) for role in shapes["g7_total_aid_sum"].roles] == [
+        ("donor", False)
+    ]
+    assert authored(plan).evidence_requirements == tuple(written)
+    assert Plan.model_validate_json(plan.model_dump_json()) == plan
+
+
+def test_a_plan_at_the_requirement_limit_holds_the_sum_over_its_whole(
+    decision: DecisionFactory,
+) -> None:
+    """A plan stating `MAX_PLAN_REQUIREMENTS` requirements, one of them a whole
+    `propose_plan` sums: the sum is no requirement the model wrote, so the plan
+    still fits."""
+    sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
+    written = _g7_africa_share(whole=_G7_WHOLE)
+    fillers = [
+        DatasetRequirement(
+            id=f"series_{n}",
+            decision_ids=["measure"],
+            measure="official development assistance",
+            entities=[Entity(name="Kenya", role="recipient")],
+            period=Period(start=2020, end=2024),
+        )
+        for n in range(MAX_PLAN_REQUIREMENTS - len(written))
+    ]
+
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid, and aid to Kenya",
+        answer_mode=AnswerMode.SERIES,
+        evidence_requirements=with_whole_sums([*written, *fillers], sums),
+        whole_sums=sums,
+    )
+
+    assert len(plan.evidence_requirements) == MAX_PLAN_REQUIREMENTS + 1
+
+
+@pytest.mark.parametrize(
+    ("sums", "requirements"),
+    [
+        pytest.param(
+            (WholeSum(whole_id="g7_africa_aid", sum_id="g7_total_aid_sum"),),
+            None,
+            id="names-the-part",
+        ),
+        pytest.param(
+            (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),),
+            _g7_africa_share(whole=_G7_WHOLE),
+            id="sum-not-stated",
+        ),
+    ],
+)
+def test_a_plan_whose_whole_sums_are_not_its_wholes_aggregates_is_refused(
+    decision: DecisionFactory,
+    sums: tuple[WholeSum, ...],
+    requirements: list[Any] | None,
+) -> None:
+    written = _g7_africa_share(whole=_G7_WHOLE)
+
+    with pytest.raises(ValidationError, match="sum"):
+        _plan(
+            decision(),
+            question="G7 aid to Africa as a share of its total aid since the earliest year",
+            answer_mode=AnswerMode.COMPUTED,
+            evidence_requirements=requirements or with_whole_sums(written, sums),
+            whole_sums=sums,
+        )
 
 
 @pytest.mark.parametrize(

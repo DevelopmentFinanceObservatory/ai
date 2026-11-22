@@ -64,48 +64,9 @@ def test_step_ids_are_unique() -> None:
         )
 
 
-_AGGREGATE = ToolId(server="analysis-mcp", name="aggregate")
-
-
-@pytest.mark.parametrize(
-    ("summing", "error"),
-    [
-        pytest.param({"tool": _AGGREGATE}, None, id="sum-of-its-operation"),
-        pytest.param(
-            {"tool": ToolId(server="analysis-mcp", name="growth")},
-            "only an aggregate of 'debt'",
-            id="not-an-aggregate",
-        ),
-        pytest.param(
-            {"tool": _AGGREGATE, "operation_id": "totals"},
-            "only an aggregate of 'totals'",
-            id="reads-another-step",
-        ),
-        pytest.param(
-            {"tool": _AGGREGATE, "operation_id": "gone"},
-            "needs a step under its own id: \\['gone'\\]",
-            id="operation-with-no-step",
-        ),
-    ],
-)
-def test_a_step_under_an_id_of_its_own_only_sums_its_operations_frame(
-    summing: dict[str, object], error: str | None
-) -> None:
-    """The step summing a whole's open side carries out the retrieval's operation
-    under an id of its own, reading the retrieval's frame. Any other step under
-    an id of its own is a stray renamed step."""
-    fields = {"operation_id": "debt", "args": {}, "bindings": {"frame_ref": FRAME}} | summing
-    totals = _step("totals", tool=_AGGREGATE, args={}, bindings={"frame_ref": FRAME})
-    steps = [_step(), _step("debt_summed", **fields), totals]
-
-    def build() -> Workflow:
-        return Workflow(steps=steps, sources=[], evidence_bindings=[], terminal_steps=["totals"])
-
-    if error is None:
-        assert build().reported_step("debt_summed") == "debt"
-        return
-    with pytest.raises(ValidationError, match=error):
-        build()
+def test_a_step_names_the_operation_it_compiles() -> None:
+    with pytest.raises(ValidationError, match="'debt' must equal its operation_id 'totals'"):
+        _step(operation_id="totals")
 
 
 def test_a_workflow_records_the_phrase_each_source_was_searched_as(

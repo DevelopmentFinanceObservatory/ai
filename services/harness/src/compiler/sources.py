@@ -1223,6 +1223,24 @@ def identity_side(key: str) -> str:
     return flow_side(key) or key
 
 
+def open_side_column(source: SelectedSource, role: str) -> str | None:
+    """The role column `source` leaves open on the side of the flow `role` names, one
+    row per party there; `None` where it leaves none open there, binding that side
+    to a total, or where `role` names no side.
+
+    A whole (`planner.plan.WholeOf`) opening that side reads it open where Search
+    leaves it so, as the CRS does over every donor, and an aggregate sums it
+    (`planner.plan.WholeSum`).
+    """
+    side = flow_side(role)
+    if side is None:
+        return None
+    return next(
+        (axis.column for axis in source.open_entity_axes or () if flow_side(axis.column) == side),
+        None,
+    )
+
+
 def source_whole_side(source: SelectedSource, column: str) -> WholeSide | None:
     """What `source` binds on the role column `column`: the parties its definition's
     identity binds on that side (`identity_side`) and the named set it states there.

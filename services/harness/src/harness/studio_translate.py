@@ -74,7 +74,7 @@ from planner.pydantic_agent import PlannerAnswers, PlannerResponse
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.tools import PLAN_WRITES, running_plan_write
-from planner.workflow import ToolId, Workflow
+from planner.workflow import ToolId
 from pydantic import ValidationError
 
 from harness import plan_display
@@ -789,31 +789,9 @@ class _RecordingSurface:
         # step id). A call that returns or fails takes its entry with it
         # (`_record`); a cancelled one leaves it for `mark_step_failed`.
         self._in_flight: dict[tuple[str, str], float] = {}
-        # The step each internal step of the running plan reports as
-        # (`planner.workflow.Workflow.reported_step`), by conversation, so
-        # its call shares its operation's step line (`report_steps_as`).
-        self._reported: dict[str, dict[str, str]] = {}
 
     async def list_tools(self) -> list[ToolSchema]:
         return await self._surface.list_tools()
-
-    def report_steps_as(self, workflow: Workflow) -> None:
-        """Record the calls of each internal step of `workflow`, the plan the
-        current conversation runs, under the step it reports as
-        (`planner.workflow.Workflow.reported_step`): the step summing a
-        whole's open side shares its retrieval's step line, so the card's row
-        closes when the whole's total exists. The `execute` node and a resumed
-        run set it before their run starts (looked up via `getattr`, as
-        `mark_step_failed` is)."""
-        self._reported[current_conversation_id.get()] = {
-            step.id: step.operation_id for step in workflow.steps if step.internal
-        }
-
-    def _reported_step(self, step_id: str | None) -> str | None:
-        """`step_id`, or the step it reports as (`report_steps_as`)."""
-        if step_id is None:
-            return None
-        return self._reported.get(current_conversation_id.get(), {}).get(step_id, step_id)
 
     async def call_tool(
         self,
@@ -823,7 +801,7 @@ class _RecordingSurface:
         on_progress: ProgressCallback | None = None,
     ) -> ToolCallResult:
         started = time.monotonic()
-        step_id = self._reported_step(current_step_id.get())
+        step_id = current_step_id.get()
         if step_id is not None:
             self._in_flight[(current_conversation_id.get(), step_id)] = started
         try:
@@ -865,7 +843,7 @@ class _RecordingSurface:
     ) -> None:
         """Record one finished call, which is no longer in flight."""
         conversation = current_conversation_id.get()
-        step_id = self._reported_step(current_step_id.get())
+        step_id = current_step_id.get()
         if step_id is not None:
             self._in_flight.pop((conversation, step_id), None)
         self._records.append(
@@ -931,12 +909,8 @@ class _RecordingSurface:
         raised it, `outcome.refusal.value` otherwise) -- never a fixed
         string, so the step's record names the actual check that fired
         instead of one generic label for every masked failure.
-
-        An internal step's failure marks the step it reports as
-        (`report_steps_as`).
         """
         conversation = current_conversation_id.get()
-        step_id = self._reported_step(step_id) or step_id
         failed = {
             "outcome": "refusal",
             "refusal": {
@@ -1065,7 +1039,6 @@ class _RecordingSurface:
         self._in_flight = {
             key: started for key, started in self._in_flight.items() if key[0] != conversation
         }
-        self._reported.pop(conversation, None)
         self._records.forget(conversation)
 
     def count(self, conversation: str) -> int:

@@ -208,6 +208,9 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE: (
         "a share divides by a total that does not include the part it is a share of"
     ),
+    CompileIssueCode.WHOLE_SUM_UNMATCHED: (
+        "a total was planned for another dataset than the one it is read from"
+    ),
     CompileIssueCode.FRAME_UNITS_DIFFER: "the figures being combined are in different units",
     CompileIssueCode.FRAME_UNIT_UNBOUND: "one of the figures being combined states no unit",
     CompileIssueCode.FRAME_UNIT_FORMS_DIFFER: (

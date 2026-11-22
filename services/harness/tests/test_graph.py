@@ -61,15 +61,13 @@ from harness.early_mint import EarlyMints
 from harness.graph import answer as answer_module
 from harness.graph.events import PlannerStarted, StepProgress
 from harness.graph.execute import (
-    _CardPlace,
     _failed_step,
     _mark_masked_step_failed,
     _planner_refusal,
     _replan_refusal,
     record_served_scopes,
 )
-from harness.graph.execute import _step_progress as step_progress
-from harness.graph.plan_done import authored_report, frame_unavailable_reason, plan_done_node
+from harness.graph.plan_done import frame_unavailable_reason, plan_done_node
 from harness.graph.state import (
     APPROVE_PAUSE,
     ORCHESTRATOR_FRAMES_KEY,
@@ -544,26 +542,6 @@ async def test_a_plan_whose_card_places_fail_still_runs_with_unplaced_steps(
     assert "plan_done" in visited(seen)
     (logged,) = [r for r in caplog.records if r.name == "harness.graph.execute"]
     assert logged.exc_info is not None
-
-
-def test_an_internal_steps_progress_lands_on_its_operations_row(
-    decision: Callable[..., Decision],
-) -> None:
-    """`debt_summed` sums `debt`'s frame under an id of its own; the card has one
-    row for `debt`, so the sum's progress reports on that row, naming the
-    tool that runs."""
-    plan = _with_debt_summed(stored_split_plan(decision))
-    place = _CardPlace(position=1, count=3, description="debt", gives_answer=False)
-
-    progress = step_progress(
-        "debt_summed",
-        ProgressReport(progress=1, message=_RECEIVED),
-        workflow=plan.workflow,
-        tools={"debt": "get_data", "debt_summed": "aggregate"},
-        places={"debt": place},
-    )
-
-    assert (progress.step_id, progress.tool, progress.position) == ("debt", "aggregate", 1)
 
 
 # --- version-bound approval -----------------------------------------------------
@@ -2978,77 +2956,6 @@ async def test_a_stop_on_a_copy_names_the_requirement_the_model_wrote(
         ),
     ]
     assert ctx.state[ORCHESTRATOR_UNAVAILABLE_KEY] == unavailable
-
-
-def _with_debt_summed(plan: PlannerPlan) -> PlannerPlan:
-    """`plan` with `debt_summed`, an internal step summing `debt`'s frame by period
-    as the step after a whole's retrieval does (`WorkflowStep.internal`), which
-    `total` reads in place of `debt`."""
-    assert plan.workflow is not None
-    total = next(step for step in plan.workflow.steps if step.id == "total")
-    frame = total.bindings["frame_ref"].model_copy(update={"from_step": "debt_summed"})
-    steps: list[WorkflowStep] = []
-    for step in plan.workflow.steps:
-        if step.id == "total":
-            steps.append(step.model_copy(update={"bindings": {"frame_ref": frame}}))
-            continue
-        steps.append(step)
-        if step.id == "debt":
-            steps.append(total.model_copy(update={"id": "debt_summed", "operation_id": "debt"}))
-    workflow = {**plan.workflow.model_dump(), "steps": [s.model_dump() for s in steps]}
-    return PlannerPlan.model_validate({**plan.model_dump(), "workflow": workflow})
-
-
-def test_a_report_names_an_internal_step_by_its_operations_step(
-    decision: Callable[..., Decision],
-) -> None:
-    """What a run hands the planner names the step a user sees: a stop at
-    `debt_summed`, the internal sum of `debt`'s frame, reads as `debt`."""
-    plan = _with_debt_summed(stored_split_plan(decision))
-
-    report = authored_report(
-        {"step_id": "debt_summed", "message": "step 'debt_summed' was refused"}, plan
-    )
-
-    assert report == {"step_id": "debt", "message": "step 'debt' was refused"}
-
-
-async def test_a_stop_on_an_internal_step_lands_on_its_operations_step(
-    decision: Callable[..., Decision],
-) -> None:
-    """A stop on `debt_summed`, the step summing `debt`'s frame under an id of its
-    own, reports as `debt`: the plan record marks `debt` failed, the failed step
-    the agent reads is `debt`, and `total`, which reads the sum, failed at it."""
-    plan = _with_debt_summed(stored_split_plan(decision))
-    plan = PlannerPlan.model_validate(
-        {
-            **plan.model_dump(),
-            "asks": ["debt service each year", "its change"],
-            "answered": [{"ask": 0, "outputs": ["total"]}, {"ask": 1, "outputs": ["last_five"]}],
-        }
-    )
-    stop = Refused(
-        revision="rev1",
-        refusal=RefusalKind.STEP_REFUSED,
-        detail="'aggregate' refused: internal_error",
-        step_id="debt_summed",
-        requirement_id="debt",
-        payload=ToolFailure(code="internal_error", message="", retry_mode="do_not_retry"),
-    )
-    ctx = node_ctx(state={"plan": plan.model_dump_json()})
-    plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
-    node_input = {"frame_refs": [], "frame_ref_steps": [], "failed_step": _failed_step(stop)}
-    handed = (await plan_done.run(ctx, node_input)).output
-
-    (record,) = ctx.state[ORCHESTRATOR_PLAN_RECORDS_KEY]
-    assert [step["id"] for step in record["steps"] if step["failed"]] == ["debt"]
-    result = handed["body"]
-    assert result["failed_step"]["step_id"] == "debt"
-    assert [
-        (entry["step"], entry["status"], entry.get("failed_at"))
-        for ask in result["asks"]
-        for entry in ask["answered_by"]
-    ] == [("total", "failed", "debt"), ("last_five", "not_run", None)]
 
 
 def test_a_stop_on_a_copy_renames_it_only_where_a_field_names_a_step(

@@ -253,6 +253,31 @@ async def test_a_pin_over_other_years_is_moved_to_its_copy_over_the_requirements
     assert validate.translation_faults(run, calls) == []
 
 
+async def test_the_g7_share_s_whole_search_binds_compiles_with_no_added_sum() -> None:
+    # Search answers G7 aid over every recipient with the recipients bound to the
+    # developing countries' total, as DAC2a holds it, so `propose_plan` adds no sum
+    # over the whole and the share reads its retrieval.
+    entry.quiet_logs()
+    task = _task("share-g7-africa-of-g7-total-aid")
+    recording = entry.load_recording(task.id)
+    reference = validate.task_payloads(task)[0]
+    calls = entry.TranslationCalls(
+        recording.get("translation") or {}, schemas=await validate.tool_schemas()
+    )
+
+    run = await validate.accepted_run(task, recording, reference, calls)
+
+    assert validate.translation_faults(run, calls) == []
+    plan = run.probe.plan
+    assert plan is not None
+    assert plan.whole_sums == ()
+    assert [r.id for r in plan.evidence_requirements] == [
+        "g7_africa_aid",
+        "g7_total_aid",
+        "g7_africa_share",
+    ]
+
+
 class _LiveClient:
     """A data-mcp client whose every call `answer` answers, keeping what it was asked."""
 

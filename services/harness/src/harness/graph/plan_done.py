@@ -598,16 +598,11 @@ def authored_report(report: Any, plan: Plan) -> Any:
     `plan_done` hands the orchestrator reads through `shown_failure`. The
     run's outcome, and the `failed_step` `execute` hands `plan_done`, keep
     the copy's ids, which the run's lineage and `_stop_causes` look steps
-    up by. An internal step (`planner.workflow.WorkflowStep.internal`), such
-    as the sum a whole's open side takes, is named by its operation's step
-    the same way.
+    up by.
     """
-    origins = dict(copy_origins(plan.rolling_copies)) if plan.rolling_copies else {}
-    if plan.workflow is not None:
-        origins |= {step.id: step.operation_id for step in plan.workflow.steps if step.internal}
-    if not origins:
+    if not plan.rolling_copies:
         return report
-    return _authored(report, origins)
+    return _authored(report, copy_origins(plan.rolling_copies))
 
 
 def _authored(value: Any, origins: Mapping[str, str], *, names: bool = False) -> Any:
@@ -633,33 +628,25 @@ def _stop_causes(plan: Plan, step_id: str | None) -> dict[str, str]:
     rolling reader of the copy, whose results the stop withholds. The copy's
     origin ran on its own pin and is not among them. Every other stopped
     shown step maps to the step its first stopped input landed on, and a
-    stopped copy maps to nothing and is left out. An internal step
-    (`planner.workflow.WorkflowStep.internal`) reports as its operation's step
-    (`Workflow.reported_step`): a stop on it lands on that step, which stops
-    with it, and it is left out itself. Steps are in run order, so one pass
-    sees each step's inputs first, and the result keeps that order.
+    stopped copy maps to nothing and is left out. Steps are in run order, so
+    one pass sees each step's inputs first, and the result keeps that order.
     """
     if step_id is None:
         return {}
     steps = plan.workflow.steps if plan.workflow is not None else ()
-    internal = {step.id for step in steps if step.internal}
     hidden: set[str] = set()
     if plan.rolling_copies:
         shown = plan_display.shown_plan(plan).workflow
         kept = {step.id for step in shown.steps} if shown is not None else set()
         hidden = {step.id for step in steps} - kept
-    reported = plan.workflow.reported_step(step_id) if plan.workflow is not None else step_id
-    landed: dict[str, str | None] = {reported: None if reported in hidden else reported}
-    landed[step_id] = landed[reported]
+    landed: dict[str, str | None] = {step_id: None if step_id in hidden else step_id}
     for step in steps:
         inputs = [b.from_step for b in step.bindings.values() if b.from_step in landed]
         if step.id in landed or not inputs:
             continue
         cause = next((landed[i] for i in inputs if landed[i] is not None), None)
         landed[step.id] = cause if cause is not None or step.id in hidden else step.id
-    return {
-        step: cause for step, cause in landed.items() if cause is not None and step not in internal
-    }
+    return {step: cause for step, cause in landed.items() if cause is not None}
 
 
 def shown_failure(

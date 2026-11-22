@@ -48,6 +48,7 @@ from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
 from harness.planner_adapter import (
+    _as_authored,
     _reading_pin_sources,
 )
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
@@ -121,14 +122,17 @@ from planner.plan import (
     Unit,
     UnsupportedOperation,
     WholeOf,
+    WholeSum,
     WindowedPin,
     aligned_pins,
+    authored,
     clear_unsupported,
     compile_warnings,
     current_discovery_time_left,
     current_recorded_identity,
     fix_disagreements,
     held_sources,
+    inputs_of,
     is_dataset,
     is_scope_choice,
     is_search_pin,
@@ -9308,6 +9312,225 @@ async def test_a_declared_whole_over_every_donor_or_recipient_leaves_that_role_o
     assert stated.chosen.endswith(total), stated.chosen
     assert stated.rationale.endswith(f"count the same {alike}."), stated.rationale
     assert stated.slot in plan.requirement(_WHOLE).decision_ids
+
+
+def _summed_whole(plan: Plan) -> tuple[DatasetRequirement, list[EvidenceRequirement]]:
+    """The whole of `plan` (`DatasetRequirement.whole_of`) and every requirement
+    reading it."""
+    (whole,) = [
+        r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement) and r.whole_of
+    ]
+    return whole, [r for r in plan.evidence_requirements if whole.id in inputs_of(r)]
+
+
+# Search's answer for US health aid to Africa over every donor, binding the donors
+# to the published total of official donors as DAC2a does, where the CRS leaves
+# them open.
+_DONORS_BOUND: dict[str, Any] = {
+    "groups": {
+        "origin": {
+            "label": "official donors",
+            "total": "DACOfficialDonors",
+            "members": ["country/USA", "country/FRA"],
+        }
+    },
+    "bound": ["DACOfficialDonors"],
+}
+
+
+@pytest.mark.parametrize(
+    ("answer", "pooled", "summed"),
+    [
+        pytest.param({}, False, True, id="donors-open-read-directly"),
+        pytest.param({}, True, True, id="donors-open-planner-pool"),
+        pytest.param(_DONORS_BOUND, False, False, id="donors-bound"),
+    ],
+)
+async def test_a_whole_search_leaves_open_is_summed_by_one_step_admission_adds(
+    decision: DecisionFactory, answer: dict[str, Any], pooled: bool, summed: bool
+) -> None:
+    """US health aid to Africa as a share of every donor's. Where Search leaves the
+    donors open on the whole, as the CRS does, `propose_plan` adds one aggregate
+    summing them by year, keeping Africa, and every reader of the whole reads it, a
+    pool the planner wrote included; the planner is shown the plan without it.
+    Where Search binds the donors' total the plan is as written."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block, **answer)
+    ctx = _FakeToolContext()
+
+    result = await _share_over_every(surface, ctx, block, "donor", decision, pooled=pooled)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole, readers = _summed_whole(plan)
+    if not summed:
+        assert plan.whole_sums == ()
+        assert [type(reader) for reader in readers] == [
+            AggregateRequirement if pooled else ShareOfRequirement
+        ]
+        return
+    (added,) = readers
+    assert plan.whole_sums == (WholeSum(whole_id=whole.id, sum_id=added.id),)
+    assert isinstance(added, AggregateRequirement)
+    assert (added.reduction, added.group_by) == (Reduction.SUM, (GroupBy.PERIOD, GroupBy.ENTITY))
+    over_sum = [r for r in plan.evidence_requirements if added.id in inputs_of(r)]
+    assert [type(r) for r in over_sum] == [AggregateRequirement if pooled else ShareOfRequirement]
+    shown = _as_authored(plan)
+    assert shown is not None
+    assert added.id not in [r["id"] for r in shown["evidence_requirements"]]
+    assert "whole_sums" not in shown
+
+
+async def test_a_part_moved_between_datasets_takes_or_drops_the_sum_with_its_whole(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid to Africa over every donor, the part moved by amendment from a
+    dataset whose whole Search leaves the donors open, as the CRS does, to one
+    whose whole binds their total, as DAC2a does, and back: the sum goes with the
+    first move and comes back with the second."""
+    crs = _us_health_to_africa()
+    dac2a = json.loads(json.dumps(crs).replace(_AFRICA_PART, f"spec_{'d' * 32}"))
+    surface = _OpenedWholeCompiles(crs)
+    ctx = _FakeToolContext()
+    await _share_over_every(surface, ctx, crs, "donor", decision, pooled=False)
+    _show_blocks(ctx, crs, dac2a)
+    surface.part, surface.groups, surface.bound = (
+        dac2a,
+        _DONORS_BOUND["groups"],
+        _DONORS_BOUND["bound"],
+    )
+    tool = _tools_reading(cast(ToolSurface, surface))["propose_plan"]
+    summed: list[int] = []
+    for block in (dac2a, crs):
+        plan = load_plan(ctx.state)
+        assert plan is not None
+        part = plan.requirement(_PART)
+        assert isinstance(part, DatasetRequirement)
+
+        result = await call_planner_tool(
+            tool,
+            decisions=drafts([decision()]),
+            evidence_requirements=[part.model_copy(update={"source_spec_id": block["spec_id"]})],
+            amends_version=plan.version,
+            tool_context=ctx,
+        )
+
+        assert result["outcome"] == Outcome.OK.value, result
+        amended = load_plan(ctx.state)
+        assert amended is not None
+        summed.append(len(amended.whole_sums))
+    assert summed == [0, 1]
+
+
+async def test_an_added_sum_takes_an_id_no_requirement_of_the_plan_holds(
+    decision: DecisionFactory,
+) -> None:
+    """The sum over a whole is named `{whole}_sum`, or the first free id after it
+    where a requirement the planner wrote already holds that one."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+    await _share_over_every(surface, ctx, block, "donor", decision, pooled=False)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole, _ = _summed_whole(plan)
+    (pin,) = [pin for pin in aligned_pins(ctx.state) if pin.whole_axis is not None]
+    planners = AggregateRequirement(
+        id=f"{whole.id}_sum", input_id=whole.id, reduction=Reduction.SUM, group_by=()
+    )
+
+    sums = submission_service._whole_sums(
+        {whole.id: pin}, [*authored(plan).evidence_requirements, planners]
+    )
+
+    assert sums == (WholeSum(whole_id=whole.id, sum_id=f"{whole.id}_sum_2"),)
+
+
+async def test_a_whole_with_a_second_open_side_is_refused_at_admission(
+    decision: DecisionFactory,
+) -> None:
+    """Every recipient's US health aid as a share of every donor's aid to it: the
+    part keeps the recipients open in `across`, and Search leaves the donors open
+    on the whole, so no one aggregate sums the donors and keeps each recipient
+    apart, and the whole is refused under `two_sides_open`."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, block)
+    labels = {e["role"]: e["label"] for e in block["resolved"]["entities"]}
+    period = Period(start=2023, end=2023)
+
+    result = await call_planner_tool(
+        _tools_reading(cast(ToolSurface, surface))["propose_plan"],
+        question="What share of the aid to each recipient came from the United States?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            DatasetRequirement(
+                id=_PART,
+                decision_ids=["measure"],
+                measure="US aid",
+                entities=[Entity(name=labels["origin"], role="donor")],
+                across=["recipient"],
+                period=period,
+                source_spec_id=block["spec_id"],
+            ),
+            DatasetRequirement(
+                id="every_donor",
+                decision_ids=["measure"],
+                measure="total aid",
+                period=period,
+                whole_of=WholeOf(part=_PART, axis="donor"),
+            ),
+            ShareOfRequirement(
+                id=_SHARE,
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id=_PART),
+                denominator=RequirementSide(input_id="every_donor"),
+                axis="recipient",
+                denominator_scope=DenominatorScope.PER_AXIS,
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert result["detail"]["whole"]["cause"] == "two_sides_open"
+    assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize("restated", [False, True], ids=["whole-carried", "whole-restated"])
+async def test_an_amended_plan_keeps_one_sum_over_its_whole(
+    decision: DecisionFactory, restated: bool
+) -> None:
+    """A plan whose whole Search leaves open, amended: the amendment is read without
+    the sum and admission adds it again, so the plan holds one sum under the id it
+    had, whether the patch restates the whole and its share or leaves them."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+    await _share_over_every(surface, ctx, block, "donor", decision, pooled=False)
+    first = load_plan(ctx.state)
+    assert first is not None
+    whole, (added,) = _summed_whole(first)
+    shown = authored(first)
+    patch = [r for r in shown.evidence_requirements if r.id in {whole.id, _SHARE}]
+
+    amended = await call_planner_tool(
+        _tools_reading(cast(ToolSurface, surface))["propose_plan"],
+        decisions=drafts([decision(rationale="Reconsidered.")]),
+        evidence_requirements=patch if restated else [],
+        amends_version=first.version,
+        tool_context=ctx,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.whole_sums == first.whole_sums == (WholeSum(whole_id=whole.id, sum_id=added.id),)
+    ids = [r.id for r in plan.evidence_requirements]
+    assert len(ids) == len(set(ids)) == len(first.evidence_requirements)
 
 
 def test_a_whole_search_counts_on_another_provider_scope_says_what_each_counts() -> None:

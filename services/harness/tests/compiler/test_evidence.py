@@ -476,41 +476,32 @@ def test_an_identity_that_does_not_bind_a_required_entity_is_an_error(
 
 
 @pytest.mark.parametrize(
-    ("donors", "codes"),
+    ("bound", "codes"),
     [
-        (["country/USA"], []),
+        (["country/KEN"], []),
         (
-            ["country/GBR"],
+            ["country/GHA"],
             [("scope_entities_unbound", "error"), ("scope_entities_wider", "warning")],
         ),
     ],
-    ids=["binds-the-donor", "binds-another-donor"],
+    ids=["binds-kenya", "binds-ghana"],
 )
-def test_an_identity_binding_a_side_no_column_carries_compares_only_its_bound_sides(
+def test_an_identity_binding_a_side_no_column_carries_is_compared_with_every_named_entity(
     requirement: RequirementFactory,
     source: SourceFactory,
     caplog: pytest.LogCaptureFixture,
-    donors: list[str],
+    bound: list[str],
     codes: list[tuple[str, str]],
 ) -> None:
-    """US aid to Kenya, on a source whose identity binds the donor and a sector no
-    column carries, and leaves the recipient side unbound. The donor is compared
-    with what the identity binds there; Kenya, on the unbound recipient side, is
-    not, and the sector is logged."""
-    us = ResolvedEntity(role="origin", ref="country/USA", label="United States")
-    identity = _identity(entities={"origin": donors, "sector": ["dc/crs/120"]})
-    aid = requirement(
-        entities=[
-            Entity(name="United States", role="donor"),
-            Entity(name="Kenya", role="recipient"),
-        ]
-    )
+    # Nothing says which side `counterpart` is, so Kenya, named on `destination`, is
+    # compared with what it binds, and the identity is logged.
+    identity = _identity(entities={"counterpart": bound})
 
     with caplog.at_level(logging.WARNING, logger="compiler.evidence"):
-        found = _scope_codes(aid, source(identity=identity, entities=(us, KENYA_DESTINATION)))
+        found = _scope_codes(requirement(), source(identity=identity))
 
     assert found == codes
-    assert any("sector" in record.getMessage() for record in caplog.records)
+    assert any("counterpart" in record.getMessage() for record in caplog.records)
 
 
 def test_an_identity_bound_wider_than_the_requirement_is_a_warning(

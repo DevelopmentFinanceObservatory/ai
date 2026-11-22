@@ -98,7 +98,6 @@ from planner.plan import (
     SumOfRequirement,
     Unit,
     answering_results,
-    authored,
     authored_text,
     copy_origins,
     covered,
@@ -109,6 +108,7 @@ from planner.plan import (
     is_scope_choice,
     is_search_pin,
     side_entities,
+    unsplit,
 )
 from planner.records import (
     Breakdown,
@@ -159,16 +159,19 @@ def shown_plan(plan: Plan) -> Plan:
     The plan as stored runs a dataset read from its first year beside a copy
     of each step between it and its rolling-start readers
     (`Plan.rolling_copies`). The card, the plan record and the planner's
-    digest name the model's steps only. This is `planner.plan.authored`
+    digest name the model's steps only. This is `planner.plan.unsplit`
     without the copies' operations, workflow steps, evidence bindings and
     the sources compiled for those bindings, and with a warning that names
-    a copy naming its origin, once.
+    a copy naming its origin, once. It keeps the aggregates `propose_plan`
+    added to sum a whole (`Plan.whole_sums`), each a row of its own; the
+    planner's digest leaves them out
+    (`harness.planner_adapter._as_authored`).
 
     The result is a view for reading and is not validated. Shapes, which
     need the first years, are read off `plan` itself (`answer_scopes`).
     """
     origins = copy_origins(plan.rolling_copies)
-    shown = authored(plan)
+    shown = unsplit(plan)
     if not origins:
         return shown
     update: dict[str, object] = {}
@@ -253,9 +256,8 @@ def _without_copies(
 def step_rows(plan: Plan) -> list[dict[str, object]]:
     """One row per compiled workflow step, in the order the workflow runs them.
 
-    A step carrying out a copy the split added (`shown_plan`) has no row, nor
-    does an internal step (`planner.workflow.WorkflowStep.internal`), which
-    reports as its operation's step. Each row is the step's `id`, a composed `label` and `description`
+    A step carrying out a copy the split added (`shown_plan`) has no row.
+    Each row is the step's `id`, a composed `label` and `description`
     (`_label` and `_sentence`, read off the requirement the step's
     operation carries out), and `args`, the step's own literal arguments,
     unchanged. The description of a step whose result answers
@@ -341,18 +343,12 @@ def _stepped(
     """Each workflow step of `shown`, `plan` folded (`shown_plan`), in the order the
     workflow runs them, with the requirement its operation carries out and the
     scope its result gives where that result answers (`answer_scopes`), else `None`.
-    The row core `step_rows` and `card_rows` share; requires a compiled plan.
-
-    An internal step (`planner.workflow.WorkflowStep.internal`), the sum of the
-    side a whole's source leaves open (`compiler.compile.WholeOnSource.summed`),
-    is left out: it reports as its operation's step, the whole's one row."""
+    The row core `step_rows` and `card_rows` share; requires a compiled plan."""
     assert shown.translation is not None
     assert shown.workflow is not None
     scopes = answer_scopes(plan)
     operations_by_id = {operation.id: operation for operation in shown.translation.operations}
     for step in shown.workflow.steps:
-        if step.internal:
-            continue
         requirement = shown.requirement(operations_by_id[step.operation_id].requirement_id)
         yield step, requirement, scopes.get(requirement.id)
 
@@ -1913,8 +1909,7 @@ def ask_rows(plan: Plan) -> list[dict[str, object]]:
     both `answered_by` and a decline. `dropped` says the user's amendment
     removed the ask (`Plan.dropped_asks`), and such a row names no step and
     no decline. A step's id is that of the operation carrying out its
-    requirement: every operation has exactly one step under its own id, which
-    any internal step of it reports as (`planner.workflow.WorkflowStep`).
+    requirement (`planner.workflow.WorkflowStep`).
 
     Requires a plan carrying a `translation`.
     """

@@ -22,6 +22,7 @@ import pytest
 from compiler.sources import source_from_spec_block
 from harness import plan_display
 from harness.decision_pick import DecisionPick, decision_pick
+from harness.graph.plan_done import _stop_causes
 from harness.plan_display import (
     _card_label,
     _concepts,
@@ -3988,6 +3989,50 @@ def test_a_declared_donor_whole_is_named_by_its_parts_concept_and_the_donors_its
         f"ODA gross disbursements from United States to Kenya as a share of {whole_name}",
     ]
     assert share_wholes(plan) == {"share": divided_by}
+
+
+@pytest.mark.parametrize(
+    ("whole", "population", "summed"),
+    [(DAC_DONORS, "official donors (DAC)", False), (ALL_DONORS, "140 donors", True)],
+    ids=["donors-bound", "donors-open"],
+)
+def test_the_sum_over_a_whole_s_open_side_is_a_card_row_of_its_own(
+    decision: DecisionFactory, whole: dict[str, Any], population: str, summed: bool
+) -> None:
+    """The United States' share of ODA to Kenya over every donor, the share reading
+    the whole. Where the whole's source leaves the donors open, the sum
+    `propose_plan` adds over them is a step with a row of its own, worded as a
+    total by year, which a stop names as itself, and the share still divides by
+    the whole of every donor; where the source binds the donors' total there is
+    no such row."""
+    plan = us_share_of_kenya_oda(
+        decision, whole=whole, numerator=US_DONOR, whole_of=True, group_by=None
+    )
+
+    labels = [row["label"] for row in card_rows(plan)]
+
+    whole_name = f"ODA gross disbursements from {population} to Kenya"
+    assert labels == [
+        "Fetch ODA gross disbursements from United States to Kenya",
+        f"Fetch {whole_name}",
+        *([f"Total {whole_name} by year"] if summed else []),
+        f"ODA gross disbursements from United States to Kenya as a share of {whole_name}",
+    ]
+    assert [row["id"] for row in step_rows(plan)] == [
+        "us",
+        "all_oda",
+        *(["all_oda_sum"] if summed else []),
+        "share",
+    ]
+    assert share_wholes(plan) == {
+        "share": "from every donor" if summed else "from official donors (DAC)"
+    }
+    if summed:
+        # A stop in the sum is reported as the sum's own, and stops the share.
+        assert _stop_causes(plan, "all_oda_sum") == {
+            "all_oda_sum": "all_oda_sum",
+            "share": "all_oda_sum",
+        }
 
 
 def test_a_whole_keeps_apart_the_parties_its_part_names_several_of(

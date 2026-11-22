@@ -1438,13 +1438,10 @@ def _scope_issues(
     The identity is what `spec_id` hashes, so what it binds is what a
     retrieval against that spec can return. Only what it actually states is
     compared: a member it omits, or a role its `entities` leaves out
-    (`_identity_entities`), says nothing. An entity the requirement names is
-    compared with what the identity binds when its side is bound, or when no
-    column of the retrieval carries its side, so nothing shows where the
-    identity puts it. A named entity on a carried side the identity leaves
-    unbound, such as a recipient beside a donor the identity binds, is
-    checked against the source's entities alone. A side the identity binds
-    that no column carries, such as a sector, is logged and binds no party.
+    (`_identity_entities`), says nothing. A side the identity binds that no
+    column of the retrieval carries is logged, and every entity the
+    requirement names is compared with what it binds there, since nothing
+    says which side it is.
     """
     if not evidence.identity:
         return []
@@ -1456,7 +1453,8 @@ def _scope_issues(
         stray = sorted(set(bound) - carried)
         if stray:
             logger.warning(
-                "the identity of %s binds %r on sides no column of it carries",
+                "the identity of %s binds %r on sides no column of it carries; every "
+                "entity the requirement names is compared with them",
                 evidence.spec_id,
                 stray,
             )
@@ -1464,11 +1462,9 @@ def _scope_issues(
             one.ref
             for entity in requirement.entities
             for one in named_members(entity, evidence)
-            if (side := identity_side(one.role)) in bound or side not in carried
+            if stray or identity_side(one.role) in bound
         }
-        # What the identity binds on a side no column carries is no party a named
-        # entity can be.
-        refs = {ref for side, on_side in bound.items() if side in carried for ref in on_side}
+        refs = {ref for refs_on_role in bound.values() for ref in refs_on_role}
         issues.extend(_scope_entity_issues(requirement, named, refs))
     requested = evidence.identity.get("requested_window")
     if isinstance(requested, dict):

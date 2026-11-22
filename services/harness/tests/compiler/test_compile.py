@@ -80,7 +80,10 @@ from planner.plan import (
     SumOfRequirement,
     Unit,
     WholeOf,
+    WholeSum,
+    frame_shapes,
     settle_decisions,
+    with_whole_sums,
 )
 from planner.records import (
     DenominatorScope,
@@ -9001,28 +9004,38 @@ def test_a_share_divides_by_a_whole_that_holds_its_part(
     assert _codes(result) == codes
 
 
+_DAC_DEVELOPING = ResolvedEntity(
+    role="destination", ref="DACDevelopingCountries", label="developing countries (DAC)"
+)
+_DAC_DEVELOPING_GROUP = ResolvedGroup(
+    role="destination",
+    label="developing countries (DAC)",
+    ref="DACDevelopingCountries",
+    total="DACDevelopingCountries",
+)
+
+
 @pytest.mark.parametrize(
-    ("recipients", "groups", "summed"),
+    ("recipients", "groups", "summed", "codes"),
     [
-        pytest.param([], [], True, id="source-leaves-it-open"),
+        pytest.param([], [], True, [], id="source-leaves-it-open-summed"),
         pytest.param(
-            [
-                ResolvedEntity(
-                    role="destination",
-                    ref="DACDevelopingCountries",
-                    label="developing countries (DAC)",
-                )
-            ],
-            [
-                ResolvedGroup(
-                    role="destination",
-                    label="developing countries (DAC)",
-                    ref="DACDevelopingCountries",
-                    total="DACDevelopingCountries",
-                )
-            ],
+            [_DAC_DEVELOPING], [_DAC_DEVELOPING_GROUP], False, [], id="source-binds-its-total"
+        ),
+        # The share also reads one row per recipient there.
+        pytest.param(
+            [],
+            [],
             False,
-            id="source-binds-its-total",
+            [Code.WHOLE_SUM_UNMATCHED, Code.ENTITY_REQUIRED],
+            id="open-source-unsummed",
+        ),
+        pytest.param(
+            [_DAC_DEVELOPING],
+            [_DAC_DEVELOPING_GROUP],
+            True,
+            [Code.WHOLE_SUM_UNMATCHED],
+            id="bound-source-summed",
         ),
     ],
 )
@@ -9034,11 +9047,14 @@ def test_a_share_reads_its_whole_as_one_total_whichever_way_its_source_serves_it
     recipients: list[ResolvedEntity],
     groups: list[ResolvedGroup],
     summed: bool,
+    codes: list[Code],
 ) -> None:
-    """G7 aid to Kenya as a share of its whole over every recipient, the share
-    reading the whole directly. Where the whole's source binds the recipients'
-    total, the share reads its retrieval. Where it leaves the recipients open, a
-    step after the retrieval sums them by year, so the share reads one total."""
+    """G7 aid to Kenya as a share of its whole over every recipient. Where the
+    whole's source binds the recipients' total, the share reads its retrieval.
+    Where it leaves the recipients open, the plan sums them by year in an
+    aggregate `propose_plan` added (`Plan.whole_sums`), an ordinary step, and the
+    share reads that. The plan's shapes and the compiled steps' role keys agree.
+    A plan whose sum disagrees with the source either way is refused."""
     g7 = Entity(name="G7", role="donor")
     aid = requirement(
         id="aid",
@@ -9057,17 +9073,153 @@ def test_a_share_reads_its_whole_as_one_total_whichever_way_its_source_serves_it
         numerator=RequirementSide(input_id="aid"),
         denominator=RequirementSide(input_id="total"),
     )
+    sums = (WholeSum(whole_id="total", sum_id="total_sum"),) if summed else ()
+    plan = Plan.model_validate(
+        {
+            **_draft([decision()], [aid, whole, share]).model_dump(),
+            "evidence_requirements": with_whole_sums([aid, whole, share], sums),
+            "whole_sums": sums,
+        }
+    )
+    denominator = "sum_total" if summed else "fetch_total"
+    summing = (
+        [
+            _aggregate(
+                id="sum_total",
+                requirement_id="total_sum",
+                input="fetch_total",
+                group_by=(GroupBy.PERIOD, GroupBy.ENTITY),
+            )
+        ]
+        if summed
+        else []
+    )
 
     result = build(
-        _draft([decision()], [aid, whole, share]),
+        plan,
         _translation(
             RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
             RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            *summing,
             ShareOfOperation(
                 id="share",
                 requirement_id="share",
                 numerator=Side(input="fetch"),
-                denominator=Side(input="fetch_total"),
+                denominator=Side(input=denominator),
+            ),
+            terminal=["share"],
+        ),
+        discovered={
+            "aid": _flow_source(source, SPEC_KENYA, recipients=[_KENYA]),
+            "total": _flow_source(source, SPEC_OTHER, recipients=recipients, groups=groups),
+        },
+    )
+
+    assert _codes(result) == codes
+    if codes:
+        return
+    assert result.workflow is not None
+    steps = {step.id: step for step in result.workflow.steps}
+    assert steps["share"].bindings["denominator_frame_ref"].from_step == denominator
+    assert steps["fetch_total"].expected_role_keys == ("destination", "origin")
+    shapes = frame_shapes(plan)
+    if summed:
+        assert steps["sum_total"].args == {
+            "aggregation": "sum",
+            "group_by": ["time_period", "origin"],
+        }
+        assert steps["sum_total"].expected_role_keys == ("origin",)
+        assert [role.role for role in shapes["total"].roles] == ["donor", "recipient"]
+        assert [(role.role, role.open) for role in shapes["total_sum"].roles] == [("donor", False)]
+    else:
+        assert [(role.role, role.open) for role in shapes["total"].roles] == [
+            ("donor", False),
+            ("recipient", False),
+        ]
+
+
+@pytest.mark.parametrize(
+    ("recipients", "groups", "summed"),
+    [
+        pytest.param([], [], True, id="source-leaves-it-open"),
+        pytest.param(
+            [_DAC_DEVELOPING], [_DAC_DEVELOPING_GROUP], False, id="source-binds-its-total"
+        ),
+    ],
+)
+def test_a_planners_pool_over_a_whole_reads_the_sum_where_its_source_leaves_the_side_open(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    recipients: list[ResolvedEntity],
+    groups: list[ResolvedGroup],
+    summed: bool,
+) -> None:
+    """G7 aid to Kenya over its whole over every recipient, the planner pooling the
+    whole by year with `mean`. Over a source leaving the recipients open the pool
+    reads the sum `propose_plan` added, so it averages one total a year, as it does
+    reading a source binding the total; the plan compiles either way."""
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[Entity(name="G7", role="donor"), Entity(name="Kenya", role="recipient")],
+    )
+    whole = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[],
+        whole_of=WholeOf(part="aid", axis="recipient"),
+    )
+    pool = AggregateRequirement(
+        id="pool", input_id="total", reduction=Reduction.MEAN, group_by=(GroupBy.PERIOD,)
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="pool"),
+    )
+    sums = (WholeSum(whole_id="total", sum_id="total_sum"),) if summed else ()
+    written = [aid, whole, pool, share]
+    plan = Plan.model_validate(
+        {
+            **_draft([decision()], written).model_dump(),
+            "evidence_requirements": with_whole_sums(written, sums),
+            "whole_sums": sums,
+        }
+    )
+    pooled = "sum_total" if summed else "fetch_total"
+
+    result = build(
+        plan,
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            *(
+                [
+                    _aggregate(
+                        id="sum_total",
+                        requirement_id="total_sum",
+                        input="fetch_total",
+                        group_by=(GroupBy.PERIOD, GroupBy.ENTITY),
+                    )
+                ]
+                if summed
+                else []
+            ),
+            _aggregate(
+                id="pool",
+                requirement_id="pool",
+                input=pooled,
+                reduction=Reduction.MEAN,
+                group_by=(GroupBy.PERIOD,),
+            ),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="fetch"),
+                denominator=Side(input="pool"),
             ),
             terminal=["share"],
         ),
@@ -9079,24 +9231,8 @@ def test_a_share_reads_its_whole_as_one_total_whichever_way_its_source_serves_it
 
     assert result.workflow is not None, result.issues
     steps = {step.id: step for step in result.workflow.steps}
-    denominator = steps["share"].bindings["denominator_frame_ref"].from_step
-    assert steps["fetch_total"].expected_role_keys == ("destination", "origin")
-    if not summed:
-        assert (denominator, "fetch_total_summed" in steps) == ("fetch_total", False)
-        return
-    summing = steps[denominator]
-    assert (summing.id, summing.operation_id, summing.tool.name) == (
-        "fetch_total_summed",
-        "fetch_total",
-        "aggregate",
-    )
-    assert summing.args == {"aggregation": "sum", "group_by": ["time_period", "origin"]}
-    assert summing.bindings["frame_ref"].from_step == "fetch_total"
-    assert summing.expected_role_keys == ("origin",)
-    assert [binding.step_id for binding in result.workflow.evidence_bindings] == [
-        "fetch",
-        "fetch_total",
-    ]
+    assert steps["pool"].bindings["frame_ref"].from_step == pooled
+    assert steps["pool"].args == {"aggregation": "mean", "group_by": ["time_period"]}
 
 
 _RECORDED_CARDS = json.loads(
@@ -9235,86 +9371,3 @@ def test_a_recorded_g7_share_divides_by_the_whole_its_part_compiles_to(
     step_of = {step.operation_id: step for step in result.workflow.steps}
     assert step_of["g7_africa_share"].bindings["denominator_frame_ref"].from_step == "g7_total_aid"
     assert result.workflow.source_of(step_of["g7_total_aid"].id).spec_id == pins["g7_total_aid"]
-
-
-def test_a_level_filter_reads_a_whole_its_source_leaves_open_after_the_sum(
-    build: Callable[..., CompileResult],
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    source: SourceFactory,
-) -> None:
-    """Each country donor's aid to Kenya as a share of its aid to every recipient,
-    both sides kept to countries. The whole's source leaves the recipients open,
-    so its retrieval is shaped as its readers take it, after the step summing the
-    recipients away, and the country filter reads the donors' type column off
-    that sum, which keeps each grouped role's type column
-    (`compiler.frame_columns.bound_role_keys`)."""
-    aid = requirement(
-        id="aid",
-        measure="official development assistance",
-        entities=[Entity(name="Kenya", role="recipient")],
-        across=["donor"],
-    )
-    whole = requirement(
-        id="total",
-        measure="official development assistance",
-        entities=[],
-        across=["donor"],
-        whole_of=WholeOf(part="aid", axis="recipient"),
-    )
-    part_req, part_filter = _countries_of(
-        "aid", reads="fetch", filter_id="aid_countries", role="donor"
-    )
-    whole_req, whole_filter = _countries_of(
-        "total", reads="fetch_total", filter_id="total_countries", role="donor"
-    )
-    keyed: dict[str, Any] = {"axis": "donor", "denominator_scope": DenominatorScope.PER_AXIS}
-    share = ShareOfRequirement(
-        id="share",
-        decision_ids=["measure"],
-        numerator=RequirementSide(input_id="aid_countries"),
-        denominator=RequirementSide(input_id="total_countries"),
-        **keyed,
-    )
-    donors = OpenEntityAxis(column="origin", member_count=30)
-    recipients = OpenEntityAxis(column="destination", member_count=150)
-
-    result = build(
-        _draft([decision()], [aid, whole, part_req, whole_req, share]),
-        _translation(
-            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
-            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
-            part_filter,
-            whole_filter,
-            ShareOfOperation(
-                id="share",
-                requirement_id="share",
-                numerator=Side(input="aid_countries"),
-                denominator=Side(input="total_countries"),
-                **keyed,
-            ),
-            terminal=["share"],
-        ),
-        discovered={
-            "aid": source(
-                spec_id=SPEC_KENYA,
-                entities=(_KENYA,),
-                identity={"entities": {"destination": ["country/KEN"]}},
-                open_entity_axes=(donors,),
-            ),
-            "total": source(spec_id=SPEC_OTHER, entities=(), open_entity_axes=(donors, recipients)),
-        },
-    )
-
-    assert result.workflow is not None, result.issues
-    steps = {step.id: step for step in result.workflow.steps}
-    assert steps["fetch_total"].args["place_types"] is True
-    assert steps["fetch_total_summed"].args == {
-        "aggregation": "sum",
-        "group_by": ["time_period", "origin"],
-    }
-    countries = steps["total_countries"]
-    assert countries.bindings["frame_ref"].from_step == "fetch_total_summed"
-    assert countries.args["predicates"] == [
-        {"kind": "place_level", "column": "origin_type", "level": "Country"}
-    ]

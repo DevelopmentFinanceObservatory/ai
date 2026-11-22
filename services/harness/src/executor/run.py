@@ -1591,14 +1591,13 @@ class _Run:
         }
         # Each retrieval's evidence is held to its requirement as the compiler read it
         # on the approved source: a whole (`DatasetRequirement.whole_of`) covering what
-        # its part covers (`compiler.compile.wholes_on_their_sources`).
-        wholes = wholes_on_their_sources(
+        # its part covers (`compiler.compile.wholes_on_their_sources`). Every whole a
+        # retrieval reads has its approved source, so none is read without one.
+        self.retrieved: dict[str, DatasetRequirement] = wholes_on_their_sources(
             self.requirements,
             {b.requirement_id: self.approved_source[b.step_id] for b in workflow.evidence_bindings},
+            summed=(),
         )
-        self.retrieved: dict[str, DatasetRequirement] = {
-            rid: whole.retrieved for rid, whole in wholes.items()
-        }
         self.steps_by_id: dict[str, WorkflowStep] = {s.id: s for s in workflow.steps}
         # The entities each retrieval left out, by the role and ref its
         # approved source resolved them to, with their findings

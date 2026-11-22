@@ -42,6 +42,9 @@ from planner.plan import (
     Plan,
     RequirementSide,
     ShareOfRequirement,
+    WholeOf,
+    WholeSum,
+    whole_sum,
 )
 from planner.records import DenominatorScope, GroupBy, RankAmong, Reduction
 from planner.workflow import (
@@ -116,6 +119,8 @@ def us_share_of_kenya_oda(
     narrowed_from: str | None = None,
     narrowing: Sequence[Then] = (),
     then: Sequence[Then] = (),
+    whole_of: bool = False,
+    group_by: tuple[GroupBy, ...] | None = (GroupBy.PERIOD,),
 ) -> Plan:
     """The first plan of the module docstring, `all_oda` read from a source
     stating `whole`'s fields for the donors named `whole_donors` and the
@@ -125,7 +130,11 @@ def us_share_of_kenya_oda(
     donors named `us_donors`, by default `donor` alone. With `every_donor`,
     `us` reads every donor's ODA and totals it by year, as a share of one
     sector's ODA does. With `narrowed_from`, the share's numerator is
-    `donor` narrowed out of that retrieval, `us` or `all_oda`."""
+    `donor` narrowed out of that retrieval, `us` or `all_oda`. With `whole_of`,
+    `all_oda` is `us`'s whole over every donor, stating no coverage of its own,
+    which `propose_plan` sums (`all_oda_sum`, `Plan.whole_sums`) where `whole`
+    leaves the donors open. `group_by` is the total's, none reading the whole
+    itself."""
     kenya = Entity(name="Kenya", role="recipient")
     named = (donor,) if us_donors is None else us_donors
     donors = (
@@ -146,14 +155,18 @@ def us_share_of_kenya_oda(
             id="all_oda",
             decision_ids=["measure"],
             measure="ODA gross disbursements",
-            entities=[
+            entities=[]
+            if whole_of
+            else [
                 *(Entity(name=name, role="donor") for name in whole_donors),
                 *(Entity(name=name, role="recipient") for name in whole_recipients),
             ],
-            across=whole_across,
+            across=() if whole_of else whole_across,
             period=_PERIOD,
+            whole_of=WholeOf(part="us", axis="donor") if whole_of else None,
         ),
-        group_by=(GroupBy.PERIOD,),
+        summed=whole_of and bool(whole.get("open_entity_axes")),
+        group_by=group_by,
         reduction=whole_reduction,
         sources={"us": numerator, "all_oda": whole},
         numerator_by_year=every_donor,
@@ -237,6 +250,7 @@ def _compiled(
     narrowed_to: tuple[str, str] | None = None,
     narrowing: Sequence[Then] = (),
     then: Sequence[Then] = (),
+    summed: bool = False,
 ) -> Plan:
     """`numerator`'s share of `whole`, narrowed by each of `narrowing` in turn
     and totalled by `group_by` (`all_by_year`), or of `whole` itself when
@@ -245,9 +259,28 @@ def _compiled(
     `narrowed_to`, an input id and an entity, is that entity narrowed out of
     that input. The share is keyed by `axis` and divided by `scope` when
     given, then read by each of `then`, and the plan compiled with each
-    dataset read from a source stating `sources`' fields."""
-    steps: list[Then] = [*narrowing]
-    divisor = narrowing[-1][0].id if narrowing else whole.id
+    dataset read from a source stating `sources`' fields. With `summed`, the
+    whole is read through the sum `propose_plan` adds over its open side
+    (`planner.plan.with_whole_sums`)."""
+    steps: list[Then] = []
+    sums: tuple[WholeSum, ...] = ()
+    if summed:
+        sums = (WholeSum(whole_id=whole.id, sum_id=f"{whole.id}_sum"),)
+        added = whole_sum(whole, numerator, sums[0].sum_id)
+        steps.append(
+            (
+                added,
+                AggregateOperation(
+                    id=added.id,
+                    requirement_id=added.id,
+                    input=whole.id,
+                    reduction=added.reduction,
+                    group_by=added.group_by,
+                ),
+            )
+        )
+    steps.extend(narrowing)
+    divisor = steps[-1][0].id if steps else whole.id
     if group_by is not None:
         steps.append(_total("all_by_year", divisor, group_by, reduction))
         divisor = "all_by_year"
@@ -268,6 +301,7 @@ def _compiled(
     draft = Plan(
         question=question,
         decisions=decisions,
+        whole_sums=sums,
         evidence_requirements=[
             numerator,
             whole,

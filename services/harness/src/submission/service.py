@@ -65,6 +65,7 @@ from compiler.sources import (
     is_country,
     measure_named_by_query,
     open_entity_axes_of,
+    open_side_column,
     readable_groups,
     readable_source,
     slot_codes,
@@ -161,6 +162,7 @@ from planner.plan import (
     UnsupportedOperation,
     UnsupportedPlanError,
     WholeIsItsMemberError,
+    WholeSum,
     WindowedPin,
     aligned_entry,
     aligned_input,
@@ -203,6 +205,7 @@ from planner.plan import (
     load_terminal_declines,
     load_unsupported,
     open_window,
+    opened_role,
     period_licences_held,
     period_window,
     pin_slot_moves,
@@ -228,8 +231,10 @@ from planner.plan import (
     unstated_period_reductions,
     unstated_result_scopes,
     whole_of_fault,
+    whole_read,
     windowed_pin,
     windowed_pins,
+    with_whole_sums,
 )
 from planner.records import (
     MAX_IDENTIFIER_CHARS,
@@ -662,6 +667,12 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     )
     wholes = {rid: pin for rid, pin in targets.items() if pin.whole_axis is not None}
     moved = {rid: pin for rid, pin in targets.items() if pin.whole_axis is None}
+    # A whole Search leaves open on the side it opens is summed by a step of its own,
+    # derived again on every admission: the plan it amends is read without one
+    # (`statement`).
+    sums = _whole_sums(wholes, aligned_after)
+    if isinstance(sums, dict):
+        return sums
     settled, evidence_requirements = _without_replaced_whole_decisions(
         settle_decisions(drafts, aligned_after),
         evidence_requirements,
@@ -836,6 +847,14 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 asks_across_years=load_asks_across_years(view.state),
                 answered=patch.answered,
                 first_years=_first_years_on_record(requirements_after, shown=on_record, read=read),
+            )
+        if sums:
+            plan = Plan.model_validate(
+                {
+                    **plan.model_dump(),
+                    "evidence_requirements": with_whole_sums(plan.evidence_requirements, sums),
+                    "whole_sums": sums,
+                }
             )
         stated = plan.model_copy(
             update={
@@ -6611,6 +6630,67 @@ def _declared_wholes(
     return wholes
 
 
+def _whole_sums(
+    wholes: Mapping[str, AlignedPin], requirements: Sequence[EvidenceRequirement]
+) -> tuple[WholeSum, ...] | dict[str, object]:
+    """The aggregate each compiled whole of `wholes` takes over the side it opens
+    (`planner.plan.WholeSum`), in plan order, or the refusal for a whole one
+    aggregate cannot sum.
+
+    Search's answer for the whole (`AlignedPin.block`) either binds that side
+    to one total, as DAC2a binds developing countries, and the whole is read
+    as it is, or leaves it open with one row per party there, as the CRS does
+    over every donor (`compiler.sources.open_side_column`). An open side is
+    summed by period under the first free id of `{whole}_sum`,
+    `{whole}_sum_2` and on (`planner.plan.whole_sum`). Where the part also
+    leaves a party open in `across`, one aggregate cannot sum the opened side
+    and keep the other apart, and the whole answers `SHARE_WHOLE_UNDERIVABLE`
+    with cause `two_sides_open`. An answer stating no readable block is read
+    as binding the side; the compiler checks the whole against its source
+    again (`compiler.compile._Build._check_whole_sum`).
+    """
+    by_id = {requirement.id: requirement for requirement in requirements}
+    taken = set(by_id)
+    sums: list[WholeSum] = []
+    for requirement in requirements:
+        pin = wholes.get(requirement.id)
+        if pin is None or not isinstance(requirement, DatasetRequirement):
+            continue
+        if requirement.whole_of is None:
+            continue
+        part = by_id.get(requirement.whole_of.part)
+        if not isinstance(part, DatasetRequirement):
+            continue
+        role = opened_role(requirement, part)
+        block = pin.block
+        source = readable_source(block) if block is not None else None
+        if role is None or source is None or open_side_column(source, role) is None:
+            continue
+        if kept_open := whole_read(requirement, part).across:
+            return share_whole_underivable(
+                whole_id=requirement.id,
+                part_spec_id=pin.origin,
+                reason=(
+                    f"Search leaves every {requirement.whole_of.axis} open in the whole, and "
+                    f"{part.id!r} keeps every {' and '.join(kept_open)} apart in `across`, so "
+                    "one total cannot sum the first and keep the second apart; name the "
+                    f"parties {part.id!r} keeps apart in its `entities` in place of `across`"
+                ),
+                cause="two_sides_open",
+            )
+        stem = requirement.id[: MAX_IDENTIFIER_CHARS - len("_sum_99")]
+        sum_id = next(
+            candidate
+            for candidate in itertools.chain(
+                (f"{stem}_sum",), (f"{stem}_sum_{n}" for n in itertools.count(2))
+            )
+            if candidate not in taken
+        )
+        taken.add(sum_id)
+        sums.append(WholeSum(whole_id=requirement.id, sum_id=sum_id))
+    return tuple(sums)
+
+
 def _whole_slot(requirement_id: str) -> str:
     """The `Decision.slot` of the decision the whole `requirement_id`, compiled from
     its part, states (`_whole_decisions`). Nothing reads the slot back, since such a
@@ -7287,9 +7367,12 @@ def share_whole_underivable(
     - `part_outside_whole`, `whole_members_unstated`: Search's whole does not
       hold, or does not show it holds, a party the part names
       (`planner.source_reads._uncontained`).
+    - `two_sides_open`: Search's whole leaves the side it opens open beside a
+      party the part keeps open in `across` (`_whole_sums`).
 
-    `_declared_wholes` answers the first two kinds, and
-    `planner.source_reads.compile_whole` every kind but the first.
+    `_declared_wholes` answers the first two kinds, `_whole_sums`
+    `two_sides_open`, and `planner.source_reads.compile_whole` every other
+    kind but `part_unpinned`.
     `detail.requirement_id` names the whole for the refusal's sentence
     (`harness.sentences`).
     """

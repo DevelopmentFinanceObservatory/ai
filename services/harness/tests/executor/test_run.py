@@ -87,7 +87,9 @@ from planner.plan import (
     RequirementSide,
     ShareOfRequirement,
     WholeOf,
+    WholeSum,
     plan_revision,
+    with_whole_sums,
 )
 from planner.records import Period
 from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
@@ -1103,9 +1105,10 @@ async def test_a_wholes_retrieval_is_held_to_the_parties_its_part_covers(
     real_schemas: list[ToolSchema],
 ) -> None:
     """The United States' ODA to Kenya as a share of its whole over every donor, whose
-    source binds Kenya and leaves the donors open: the whole states no entity, and
-    its retrieval answering with Uganda's aid is refused, since the whole covers
-    what its part covers, Kenya included."""
+    source binds Kenya and leaves the donors open, so the plan sums them
+    (`Plan.whole_sums`): the whole states no entity, and its retrieval answering
+    with Uganda's aid is refused, since the whole covers what its part covers,
+    Kenya included."""
     usa = ResolvedEntity(role="origin", ref="country/USA", label="United States")
     kenya = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
     uganda = ResolvedEntity(role="destination", ref="country/UGA", label="Uganda")
@@ -1143,21 +1146,30 @@ async def test_a_wholes_retrieval_is_held_to_the_parties_its_part_covers(
         identity={"stat_var": "ODA", "entities": {"destination": [kenya.ref]}},
         open_entity_axes=(OpenEntityAxis(column="origin", member_count=40),),
     )
+    sums = (WholeSum(whole_id="all_oda", sum_id="all_oda_sum"),)
     draft = Plan(
         question="What share of ODA to Kenya does the United States give?",
         decisions=[decision()],
-        evidence_requirements=[part, whole, share],
+        evidence_requirements=with_whole_sums([part, whole, share], sums),
+        whole_sums=sums,
         status=PlanStatus.DRAFT,
     )
     translation = Translation(
         operations=[
             RetrieveOperation(id="us", requirement_id="us_oda", spec_id=SPEC_KENYA),
             RetrieveOperation(id="all", requirement_id="all_oda", spec_id=SPEC_POPULATION),
+            AggregateOperation(
+                id="all_summed",
+                requirement_id="all_oda_sum",
+                input="all",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD, GroupBy.ENTITY),
+            ),
             ShareOfOperation(
                 id="share",
                 requirement_id="share",
                 numerator=Side(input="us"),
-                denominator=Side(input="all"),
+                denominator=Side(input="all_summed"),
             ),
         ],
         terminal=["share"],

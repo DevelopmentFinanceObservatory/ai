@@ -47,7 +47,6 @@ from executor.run import (
 )
 from planner.plan import Plan as PlannerPlan
 from planner.plan import SessionState, aligned_pins, plan_revision, windowed_origins
-from planner.workflow import Workflow
 
 from harness import plan_display
 from harness.conversation import ledger_conversation_id
@@ -294,32 +293,14 @@ def _card_places(plan: PlannerPlan) -> dict[str, _CardPlace]:
     }
 
 
-def report_steps(tool_surface: ToolSurface, workflow: Workflow | None) -> None:
-    """Have `tool_surface` record each internal step of `workflow` under the step
-    it reports as, when it records calls at all
-    (`harness.studio_translate._RecordingSurface.report_steps_as`)."""
-    report = getattr(tool_surface, "report_steps_as", None)
-    if report is not None and workflow is not None:
-        report(workflow)
-
-
 def _step_progress(
-    step_id: str,
-    report: ProgressReport,
-    *,
-    workflow: Workflow | None,
-    tools: Mapping[str, str],
-    places: Mapping[str, _CardPlace],
+    step_id: str, report: ProgressReport, *, tool: str, place: _CardPlace | None
 ) -> StepProgress:
-    """Step `step_id`'s progress report, on the card row of the step it reports
-    as (`planner.workflow.Workflow.reported_step`), so an internal step's
-    progress lands on its operation's one row. Each row field is `None` when
-    the card shows no row for that step."""
-    row = workflow.reported_step(step_id) if workflow is not None else step_id
-    place = places.get(row)
+    """Step `step_id`'s progress report, with its `place` on the plan card,
+    each row field `None` when the card shows no row for the step."""
     return StepProgress(
-        step_id=row,
-        tool=tools.get(step_id, ""),
+        step_id=step_id,
+        tool=tool,
         message=report.message,
         position=place.position if place else None,
         count=place.count if place else None,
@@ -604,11 +585,11 @@ def execute_node(
         approved_run = ctx.state.get(APPROVED_RUN_KEY)
         await store_run_plan(run_ledger, revision=plan_revision(plan), plan=plan)
 
-        report_steps(tool_surface, plan.workflow)
-
         def on_progress(step_id: str, report: ProgressReport) -> None:
             ctx.emit(
-                _step_progress(step_id, report, workflow=plan.workflow, tools=tools, places=places)
+                _step_progress(
+                    step_id, report, tool=tools.get(step_id, ""), place=places.get(step_id)
+                )
             )
 
         try:
