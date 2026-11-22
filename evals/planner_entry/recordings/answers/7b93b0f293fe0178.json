@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_da118fc1bae9f4dd172c0468e48fe382",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_da118fc1bae9f4dd172c0468e48fe382: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"destination\":[\"country/ETH\"]},\"facets\":{\"provenance\":{\"ref\":\"provenance/ONEDAC2aBilateral\",\"state\":\"value\"},\"unit\":{\"request\":{\"currency\":\"USD\",\"prices\":\"current\"},\"state\":\"value\"}},\"identity_version\":\"spec1\",\"open_roles\":[\"origin\"],\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialFlow\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"DAC2aAidType206\",\"state\":\"value\"},\"property\":\"dac2aAidType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"dacTypeOfFinance\"},{\"binding\":{\"ref\":\"Disbursement\",\"state\":\"value\"},\"property\":\"financialFlowType\"},{\"binding\":{\"ref\":\"Net\",\"state\":\"value\"},\"property\":\"nettingBasis\"}]},\"spec_id\":\"spec_da118fc1bae9f4dd172c0468e48fe382\"}"
+}

@@ -39,6 +39,7 @@ from planner.plan import (
 )
 from planner.records import (
     DenominatorScope,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -201,7 +202,10 @@ def narrowing_step(requirement: EvidenceRequirement, plan: Plan) -> EvidenceRequ
             or (isinstance(current, RankRequirement) and current.limit is None)
             or (
                 isinstance(current, FilterRequirement)
-                and all(isinstance(predicate, PeriodThreshold) for predicate in current.predicates)
+                and all(
+                    isinstance(predicate, PeriodThreshold | PeriodIn)
+                    for predicate in current.predicates
+                )
             )
         ):
             current = plan.requirement(current.input_id)

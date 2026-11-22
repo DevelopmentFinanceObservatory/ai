@@ -1,0 +1,975 @@
+{
+  "comment": "One spec block of a `search` answer from dev dfo-apis (engine build 92e83a3b) for the part the Studio sent for \"humanitarian aid by DAC donor in 2019 and 2023\", {\"variable\": \"humanitarian aid\", \"entities\": [{\"text\": \"DAC donors\", \"name\": \"Development Assistance Committee\"}], \"time\": \"2019 to 2023\", \"open_roles\": [\"donor\"]}: it resolved `definite` to spec_449f4bc485d3613d7314397e8e546330, the 32 DAC members bound under `origin` as the group `groups/OECD.DAC`, and `resolved.role_axis_facts` counts the 163 recipients Search left open on `destination`. Trimmed to what the tests read: `scope`, `slot_options`, `sentence_plan`, `trace`, `unit_conversion`, `scope_choices` and `alternative_measures` are dropped.",
+  "spec": {
+    "spec_id": "spec_449f4bc485d3613d7314397e8e546330",
+    "definition": {
+      "schema_version": 1,
+      "spec_id": "spec_449f4bc485d3613d7314397e8e546330",
+      "identity": {
+        "identity_version": "spec1",
+        "shape": {
+          "kind": "statvar_schema",
+          "population_type": "FinancialFlow",
+          "measured_property": "amount",
+          "stat_type": "measuredValue",
+          "measurement_qualifier": "Nominal"
+        },
+        "slots": [
+          {
+            "property": "crsCooperationModality",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "crsPurpose",
+            "binding": {
+              "state": "set",
+              "refs": [
+                "CRSPurposeCode720",
+                "CRSPurposeCode730",
+                "CRSPurposeCode740"
+              ]
+            }
+          },
+          {
+            "property": "crsTypeOfFinance",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "crsTypeOfFlow",
+            "binding": {
+              "state": "value",
+              "ref": "CRSTypeOfFlow10"
+            }
+          },
+          {
+            "property": "financialFlowType",
+            "binding": {
+              "state": "value",
+              "ref": "Disbursement"
+            }
+          },
+          {
+            "property": "nettingBasis",
+            "binding": {
+              "state": "value",
+              "ref": "Gross"
+            }
+          }
+        ],
+        "entities": {
+          "origin": [
+            "country/AUS",
+            "country/AUT",
+            "country/BEL",
+            "country/CAN",
+            "country/CHE",
+            "country/CZE",
+            "country/DEU",
+            "country/DNK",
+            "country/ESP",
+            "country/EST",
+            "country/FIN",
+            "country/FRA",
+            "country/GBR",
+            "country/GRC",
+            "country/HUN",
+            "country/IRL",
+            "country/ISL",
+            "country/ITA",
+            "country/JPN",
+            "country/KOR",
+            "country/LTU",
+            "country/LUX",
+            "country/LVA",
+            "country/NLD",
+            "country/NOR",
+            "country/NZL",
+            "country/POL",
+            "country/PRT",
+            "country/SVK",
+            "country/SVN",
+            "country/SWE",
+            "country/USA"
+          ]
+        },
+        "requested_window": {
+          "kind": "range",
+          "start_year": 2019,
+          "end_year": 2023
+        }
+      }
+    },
+    "resolved": {
+      "shape": {
+        "shape_id": "financialflow_amount_measuredvalue_nominal",
+        "label": "gross disbursements (emergency response, reconstruction and rehabilitation and disaster preparedness, official development assistance)",
+        "population_type": {
+          "ref": "FinancialFlow",
+          "label": "financial flow"
+        },
+        "measured_property": {
+          "ref": "amount",
+          "label": "amount"
+        },
+        "stat_type": {
+          "ref": "measuredValue",
+          "label": "measuredValue"
+        },
+        "measurement_qualifier": {
+          "ref": "Nominal",
+          "label": "Nominal"
+        },
+        "measurement_denominator_unresolved": false,
+        "slot_keys": [
+          {
+            "axis": "how",
+            "property": {
+              "ref": "crsPurpose",
+              "label": "CRS purpose"
+            },
+            "label": "sector"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFinance",
+              "label": "CRS type of finance"
+            },
+            "label": "instrument"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFlow",
+              "label": "CRS type of flow"
+            },
+            "label": "flow"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "financialFlowType",
+              "label": "financial flow type"
+            },
+            "label": "financial flow type"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "nettingBasis",
+              "label": "netting basis"
+            },
+            "label": "netting basis"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "crsCooperationModality",
+              "label": "CRS cooperation modality"
+            },
+            "label": "modality"
+          },
+          {
+            "axis": "where",
+            "label": "place"
+          },
+          {
+            "axis": "when",
+            "label": "time window"
+          },
+          {
+            "axis": "source",
+            "label": "data source"
+          }
+        ],
+        "member_count": 87,
+        "member_digest": "0c4ee84db9d27efb2a5658e5e34582d802201e85354e7a5b6e717da26ea38a1d",
+        "refine_supported": true,
+        "data_commons": [
+          {
+            "id": "dfo",
+            "label": "Development Finance Observatory"
+          }
+        ]
+      },
+      "slots": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsPurpose",
+              "label": "CRS purpose"
+            },
+            "label": "sector"
+          },
+          "binding": {
+            "kind": "set",
+            "values": [
+              {
+                "ref": {
+                  "ref": "CRSPurposeCode720",
+                  "label": "emergency response"
+                },
+                "value_kind": "enum_value"
+              },
+              {
+                "ref": {
+                  "ref": "CRSPurposeCode730",
+                  "label": "reconstruction and rehabilitation"
+                },
+                "value_kind": "enum_value"
+              },
+              {
+                "ref": {
+                  "ref": "CRSPurposeCode740",
+                  "label": "disaster preparedness"
+                },
+                "value_kind": "enum_value"
+              }
+            ]
+          },
+          "expansion": {
+            "added": [
+              {
+                "ref": "CRSPurposeCode72010",
+                "label": "material relief assistance and service"
+              },
+              {
+                "ref": "CRSPurposeCode72040",
+                "label": "emergency food assistance"
+              },
+              {
+                "ref": "CRSPurposeCode72050",
+                "label": "relief co-ordination and support service"
+              },
+              {
+                "ref": "CRSPurposeCode73010",
+                "label": "immediate post-emergency reconstruction and rehabilitation"
+              },
+              {
+                "ref": "CRSPurposeCode74020",
+                "label": "multi-hazard response preparedness"
+              }
+            ]
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFinance",
+              "label": "CRS type of finance"
+            },
+            "label": "instrument"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFlow",
+              "label": "CRS type of flow"
+            },
+            "label": "flow"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "CRSTypeOfFlow10",
+                "label": "official development assistance"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "financialFlowType",
+              "label": "financial flow type"
+            },
+            "label": "financial flow type"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "Disbursement",
+                "label": "disbursement"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "nettingBasis",
+              "label": "netting basis"
+            },
+            "label": "netting basis"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "Gross",
+                "label": "gross"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsCooperationModality",
+              "label": "CRS cooperation modality"
+            },
+            "label": "modality"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "where",
+            "label": "place"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "when",
+            "label": "time window"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "value_kind": "time_window",
+              "time_window": {
+                "start_year": 2019,
+                "end_year": 2023
+              }
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "source",
+            "label": "data source"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        }
+      ],
+      "inapplicable_slots": [
+        "financialObligationType"
+      ],
+      "unresolved_slots": [],
+      "stat_vars": {
+        "member_count": 63,
+        "member_count_exact": true,
+        "served_count": 87,
+        "data_date_range": {
+          "start": "2019",
+          "end": "2023"
+        }
+      },
+      "entities": [
+        {
+          "ref": "country/AUS",
+          "label": "Australia",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/AUT",
+          "label": "Austria",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/BEL",
+          "label": "Belgium",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/CAN",
+          "label": "Canada",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/CHE",
+          "label": "Switzerland",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/CZE",
+          "label": "Czech Republic",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/DEU",
+          "label": "Germany",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/DNK",
+          "label": "Denmark",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/ESP",
+          "label": "Spain",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/EST",
+          "label": "Estonia",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/FIN",
+          "label": "Finland",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/FRA",
+          "label": "France",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/GBR",
+          "label": "United Kingdom",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/GRC",
+          "label": "Greece",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/HUN",
+          "label": "Hungary",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/IRL",
+          "label": "Ireland",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/ISL",
+          "label": "Iceland",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/ITA",
+          "label": "Italy",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/JPN",
+          "label": "Japan",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/KOR",
+          "label": "South Korea",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/LTU",
+          "label": "Lithuania",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/LUX",
+          "label": "Luxembourg",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/LVA",
+          "label": "Latvia",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/NLD",
+          "label": "Netherlands",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/NOR",
+          "label": "Norway",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/NZL",
+          "label": "New Zealand",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/POL",
+          "label": "Poland",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/PRT",
+          "label": "Portugal",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/SVK",
+          "label": "Slovakia",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/SVN",
+          "label": "Slovenia",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/SWE",
+          "label": "Sweden",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        },
+        {
+          "ref": "country/USA",
+          "label": "United States",
+          "entity_type": "Country",
+          "role": "origin",
+          "party_kind": "party",
+          "party_class": "official",
+          "multilateral": false
+        }
+      ],
+      "entity_groups": {
+        "origin": {
+          "label": "Development Assistance Committee",
+          "group_id": "groups/OECD.DAC"
+        }
+      },
+      "coverage": {
+        "kind": "breadth",
+        "has_data": true,
+        "dimensions": [
+          {
+            "label": "recipients",
+            "count": 163
+          },
+          {
+            "label": "sources",
+            "count": 1
+          },
+          {
+            "label": "variables",
+            "count": 63
+          }
+        ],
+        "window": {
+          "start_year": 2019,
+          "end_year": 2023
+        }
+      },
+      "headline": {
+        "year": 2023,
+        "year_named": true,
+        "named_window": {
+          "start_year": 2019,
+          "end_year": 2023
+        },
+        "observations": 3866,
+        "series": 3866,
+        "role_counts": {
+          "financingProvider": 32,
+          "financingRecipient": 152
+        },
+        "recent_years": [
+          {
+            "year": 2023,
+            "observations": 3866,
+            "series": 3866,
+            "role_counts": {
+              "financingProvider": 32,
+              "financingRecipient": 152
+            }
+          },
+          {
+            "year": 2022,
+            "observations": 3810,
+            "series": 3810,
+            "role_counts": {
+              "financingProvider": 32,
+              "financingRecipient": 159
+            }
+          },
+          {
+            "year": 2021,
+            "observations": 3742,
+            "series": 3742,
+            "role_counts": {
+              "financingProvider": 32,
+              "financingRecipient": 154
+            }
+          }
+        ]
+      },
+      "coverage_stamp": "860f403d263f3638d66bddbac61c88a64e4547fde8d831505d582ff18781ffad",
+      "facets": {
+        "provenance": {
+          "basis": "fallback",
+          "ref": "provenance/OECDCreditorReportingSystem",
+          "label": "OECD Creditor Reporting System (CRS)",
+          "source": {
+            "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd",
+            "label": "Organisation for Economic Co-operation and Development (OECD)"
+          },
+          "data_commons": {
+            "id": "dfo",
+            "label": "Development Finance Observatory"
+          },
+          "documentation": "/api/graph/documentation/provenance/OECDCreditorReportingSystem",
+          "account": "provider"
+        },
+        "unit": {
+          "basis": "fallback",
+          "ref": "CurrencyUSD",
+          "label": "US Dollar",
+          "currency": "USD"
+        }
+      },
+      "facet_options": [
+        {
+          "axis": "provenance",
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "provenance/OECDCreditorReportingSystem",
+                  "label": "OECD Creditor Reporting System (CRS)"
+                },
+                "value_kind": "source"
+              }
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        },
+        {
+          "axis": "unit",
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "CurrencyUSD",
+                  "label": "US Dollar"
+                },
+                "value_kind": "enum_value"
+              }
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        }
+      ],
+      "rendered_sentence": "Gross ODA disbursements to 163 recipients from the 32 Development Assistance Committee members for emergency response, reconstruction and rehabilitation, and disaster preparedness, 2019 to 2023. Current US dollars \u00b7 OECD Creditor Reporting System (CRS).",
+      "confidence": "medium",
+      "available_at_place": true,
+      "skills": [
+        "oda-crs"
+      ],
+      "measure_label": "gross disbursements",
+      "measure_label_axes": [
+        "populationType",
+        "measuredProperty",
+        "measurementQualifier",
+        "financialFlowType",
+        "nettingBasis"
+      ],
+      "open_axis_facts": [
+        {
+          "property": "crsCooperationModality",
+          "varies": true,
+          "distinct_count": 13,
+          "undeclared_count": 0,
+          "values": [
+            {
+              "value": {
+                "ref": "CRSCooperationModalityC01",
+                "label": "project-type intervention"
+              },
+              "count": 10
+            },
+            {
+              "value": {
+                "ref": "CRSCooperationModalityA02",
+                "label": "sector budget support"
+              },
+              "count": 7
+            },
+            {
+              "value": {
+                "ref": "CRSCooperationModalityB04",
+                "label": "basket fund and pooled funding"
+              },
+              "count": 5
+            },
+            {
+              "value": {
+                "ref": "CRSCooperationModalityB031",
+                "label": "contribution to multi-donor and multi-entity funding mechanism"
+              },
+              "count": 5
+            },
+            {
+              "value": {
+                "ref": "CRSCooperationModalityB032",
+                "label": "contribution to multi-donor and single-entity funding mechanism"
+              },
+              "count": 5
+            },
+            {
+              "value": {
+                "ref": "CRSCooperationModalityB033",
+                "label": "contribution to single-donor funding mechanism or earmarked contribution to a specific funding window or geographical location"
+              },
+              "count": 5
+            },
+            {
+              "value": {
+                "ref": "CRSCooperationModalityB03",
+                "label": "contribution to specific-purpose programme and fund managed by an international organisation"
+              },
+              "count": 5
+            },
+            {
+              "value": {
+                "ref": "CRSCooperationModalityB01",
+                "label": "core support to non-governmental organisations, other private bodies, public-private partnerships, and research institutes"
+              },
+              "count": 5
+            },
+            {
+              "value": {
+                "ref": "CRSCooperationModalityD01",
+                "label": "donor country personnel"
+              },
+              "count": 5
+            },
+            {
+              "value": {
+                "ref": "CRSCooperationModalityD02",
+                "label": "other technical assistance"
+              },
+              "count": 5
+            },
+            {
+              "value": {
+                "ref": "CRSCooperationModalityG01",
+                "label": "other administrative cost"
+              },
+              "count": 2
+            },
+            {
+              "value": {
+                "ref": "CRSCooperationModalityH02",
+                "label": "refugee and asylum seeker in donor country"
+              },
+              "count": 2
+            },
+            {
+              "value": {
+                "ref": "CRSCooperationModalityE01",
+                "label": "scholarship and training in donor country"
+              },
+              "count": 2
+            }
+          ]
+        },
+        {
+          "property": "crsTypeOfFinance",
+          "varies": true,
+          "distinct_count": 3,
+          "undeclared_count": 0,
+          "values": [
+            {
+              "value": {
+                "ref": "CRSTypeOfFinance110",
+                "label": "standard grant"
+              },
+              "count": 56
+            },
+            {
+              "value": {
+                "ref": "CRSTypeOfFinance421",
+                "label": "standard loan"
+              },
+              "count": 6
+            },
+            {
+              "value": {
+                "ref": "CRSTypeOfFinance210",
+                "label": "interest subsidy"
+              },
+              "count": 1
+            }
+          ]
+        }
+      ],
+      "role_axis_facts": [
+        {
+          "role": "destination",
+          "member_count": 163,
+          "members_available": true
+        }
+      ]
+    }
+  }
+}

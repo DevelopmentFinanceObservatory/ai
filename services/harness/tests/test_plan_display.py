@@ -104,6 +104,7 @@ from planner.records import (
     EvidenceIssueCode,
     GroupBy,
     GrowthChange,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -2986,6 +2987,9 @@ def test_a_period_that_follows_the_newest_data_says_so_beside_its_years(
                 input_id="debt",
                 predicates=(PeriodThreshold(op="eq", year=2024, rolling=latest),),
             ),
+            FilterRequirement(
+                id="apart", input_id="debt", predicates=(PeriodIn(years=(2015, 2020)),)
+            ),
         ],
         # The dataset starts where the plan does, so reading it whole splits nothing.
         first_years=[FirstYear(requirement_id="debt", year=2015)],
@@ -3006,11 +3010,13 @@ def test_a_period_that_follows_the_newest_data_says_so_beside_its_years(
         ),
         "fixed": f"The change in {measure} from 2015 to 2020, read as a percentage change.",
         "newest": "Keeps rows where the year is exactly 2024, following the newest year.",
+        "apart": "Keeps rows where the year is 2015 or 2020.",
     }
     assert (
         _label(plan.requirement("last_five"), plan)
         == f"Growth in {measure}, 2019-2024, following the newest year"
     )
+    assert _label(plan.requirement("apart"), plan) == "Keep 2015 and 2020"
 
 
 # --- A plan whose dataset is read from its first year -------------------------------

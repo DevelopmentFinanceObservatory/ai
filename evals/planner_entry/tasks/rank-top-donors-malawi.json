@@ -63,20 +63,6 @@
         ]
       },
       {
-        "slot": "every_donor",
-        "description": "Which donors the ranking compares.",
-        "options": [
-          "every donor",
-          "a named list of donors"
-        ],
-        "chosen": "every donor",
-        "resolved_by": "planner_default",
-        "rationale": "The question names no list, so every donor is ranked.",
-        "fixes": [
-          "among"
-        ]
-      },
-      {
         "slot": "ranked_year",
         "description": "Which year the ranking reads.",
         "options": [
@@ -125,7 +111,6 @@
         "window_end": 2024,
         "decision_ids": [
           "top_n",
-          "every_donor",
           "ranked_year"
         ]
       }

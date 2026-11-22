@@ -68,6 +68,7 @@ from planner.records import (
     EvidenceIssueCode,
     GrowthChange,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     RankAmong,
@@ -168,6 +169,10 @@ class CompileIssueCode(StrEnum):
     INPUT_IS_TERMINAL = "input_is_terminal"
     INPUT_SHAPE_UNSUPPORTED = "input_shape_unsupported"
     RANK_AXIS_REQUIRED = "rank_axis_required"
+    # A rank stating no reduction over a retrieval that leaves a party open
+    # which the rank neither keeps nor names, so each entity holds several
+    # rows a period (`_Build._check_rank`).
+    RANK_REDUCTION_REQUIRED = "rank_reduction_required"
     SHARE_AXIS_REQUIRED = "share_axis_required"
     SHARE_KEY_UNKNOWN = "share_key_unknown"
     QUOTIENT_AXIS_REQUIRED = "quotient_axis_required"
@@ -895,6 +900,54 @@ class _Build:
                 "names no axis; say which one to rank on",
                 operation_id=operation.id,
             )
+        if operation.reduction is not None or upstream is None:
+            return
+        several = _roles_several(operation, upstream)
+        if several:
+            self._issue(
+                CompileIssueCode.RANK_REDUCTION_REQUIRED,
+                f"operation {operation.id!r} ranks {operation.input!r}, whose "
+                f"{', '.join(map(repr, several))} also holds several parties; each entity holds "
+                "one row per party there in each period, so it has no single value to rank on "
+                "without a reduction",
+                operation_id=operation.id,
+                requirement_id=operation.requirement_id,
+            )
+            return
+        unkept = self._open_axes_unkept(operation.input, upstream)
+        if unkept:
+            columns = ", ".join(repr(axis.column) for axis in unkept)
+            self._issue(
+                CompileIssueCode.RANK_REDUCTION_REQUIRED,
+                f"operation {operation.id!r} ranks {operation.input!r}, whose source also "
+                f"leaves {columns} open over several members, a party the plan neither names "
+                "nor states in `across`; each entity holds one row per member of it in each "
+                "period, so it has no single value to rank on without a reduction",
+                operation_id=operation.id,
+                requirement_id=operation.requirement_id,
+            )
+
+    def _open_axes_unkept(self, op_id: str, read: ResolvedShape) -> list[OpenEntityAxis]:
+        """The open axes of the retrieval `op_id` reads through filters that `read` keeps no column of.
+
+        A retrieval returns a row for each member of every axis its source
+        leaves open, while its shape keeps only the columns its requirement
+        names or covers with `across` (`compiler.shapes`). An open axis
+        outside those, holding several members or an uncounted number,
+        repeats each kept entity once per member of it. Empty when `op_id`
+        reads no retrieval through filters alone, since an aggregate, a growth
+        or a two-sided step leaves one row per key.
+        """
+        retrieve_id = self._through_filters(op_id)
+        source = self.sources.get(retrieve_id)
+        if not isinstance(self.operations.get(retrieve_id), RetrieveOperation) or source is None:
+            return []
+        kept = {role.column for role in read.columns}
+        return [
+            axis
+            for axis in source.open_entity_axes or ()
+            if axis.column not in kept and axis.member_count != 1
+        ]
 
     def _check_key_axes(self, operation: ShareOfOperation | QuotientOfOperation) -> None:
         """Report a side whose key cannot resolve to a literal column.
@@ -2495,6 +2548,15 @@ class _Build:
                 if predicate.rolling is not None:
                     threshold[ROLLING_PARAMETER] = rolling_ref(predicate.rolling)
                 predicates.append(threshold)
+            elif isinstance(predicate, PeriodIn):
+                # An annual frame labels each row with its year as `YYYY`.
+                predicates.append(
+                    {
+                        "kind": "category_match",
+                        "column": TIME_PERIOD_COLUMN,
+                        "values": [str(year) for year in predicate.years],
+                    }
+                )
             elif isinstance(predicate, PlaceLevel):
                 column = self._place_level_column(operation, predicate)
                 if column is None:
@@ -2900,6 +2962,24 @@ class _Build:
                 i for i in operation_inputs(self.operations[op_id]) if i in self.operations
             )
         return reachable
+
+
+def _roles_several(operation: RankOperation, read: ResolvedShape) -> list[str]:
+    """The columns of `read` other than the one `operation` ranks by that hold several parties.
+
+    Empty for a frame of one role. A rank naming no axis over several roles
+    is `RANK_AXIS_REQUIRED`'s, so it gives none here.
+    """
+    if len(read.shape.roles) < 2 or operation.axis is None:
+        return []
+    axis = role_named(read.shape.roles, operation.axis)
+    if axis is None:
+        return []
+    return [
+        column.column
+        for role, column in zip(read.shape.roles, read.columns, strict=True)
+        if role is not axis and not role.single
+    ]
 
 
 def _axis_phrases(columns: Sequence[ResolvedRole]) -> list[str]:

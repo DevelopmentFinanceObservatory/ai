@@ -33,10 +33,10 @@
         "slot": "all_donors_total",
         "description": "What each donor's ODA is a share of.",
         "options": [
-          "the total from every donor",
-          "each donor's own total"
+          "pooled",
+          "per_axis"
         ],
-        "chosen": "the total from every donor",
+        "chosen": "pooled",
         "resolved_by": "planner_default",
         "rationale": "The question asks for a share of all ODA to Uganda, the total across every donor.",
         "fixes": {

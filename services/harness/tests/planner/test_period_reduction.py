@@ -9,7 +9,8 @@ computed from the step answers asks across years, and only those, or the step
 holds a licence. Where the planner reads the user's own words, in an entry
 the user's amendment opened, a step it names in
 `across_years` takes one, and keeps it while the step keeps its kind and
-states no other reduction (`planner.plan.period_licences_held`).
+states no other reduction (`planner.plan.period_licences_held`). Elsewhere
+`propose_plan` ignores the field.
 """
 
 from __future__ import annotations
@@ -114,7 +115,6 @@ POPULATION = Decision(
     chosen="every donor",
     resolved_by="planner_default",
     rationale="The question asks for the top donors among all of them.",
-    fixes=DecisionFixes(among=RankAmong.POPULATION),
 )
 ONE_TOTAL = Decision(
     slot="one_total",
@@ -149,8 +149,8 @@ YEARS_READ = ONE_YEAR.model_copy(
 SUMMED = Decision(
     slot="summed",
     description="Whether the years are summed or averaged.",
-    options=["summed", "averaged"],
-    chosen="summed",
+    options=["sum", "mean"],
+    chosen="sum",
     resolved_by="planner_default",
     rationale="Aid adds up over years.",
     fixes=DecisionFixes(reduction=Reduction.SUM),
@@ -623,7 +623,8 @@ def test_a_step_named_across_years_is_licensed_where_the_planner_reads_the_users
     decision: Callable[..., Decision], step: str, amendment: bool | None
 ) -> None:
     """The user amends a per-year plan at its card, asking for one figure. No
-    ask changes, so the planner names the step, in that entry only."""
+    ask changes, so the planner names the step, in that entry only. Elsewhere
+    the name is ignored, and the step combines its years with no licence."""
     build, _, _, _ = _STEPS[step]
     ctx = _context(amendment=amendment)
     _yearly(ctx, decision, step)
@@ -636,10 +637,54 @@ def test_a_step_named_across_years_is_licensed_where_the_planner_reads_the_users
         assert recorded is not None and recorded.version == 2
         assert recorded.period_licences == (_licence(step),)
         return
-    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
-    assert "(across years)" in result["message"]
+    _refused(result, _gap(years=EVERY_YEAR))
     recorded = load_plan(ctx.state)
     assert recorded is not None and recorded.version == 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("aggregate-for-a-marked-ask", id="aggregate-for-a-marked-ask"),
+        pytest.param("rank-for-a-marked-ask", id="rank-for-a-marked-ask"),
+        pytest.param("keeps-its-years", id="keeps-its-years"),
+    ],
+)
+def test_a_first_draft_naming_a_step_across_years_is_admitted_where_it_needs_no_licence(
+    decision: Callable[..., Decision], case: str
+) -> None:
+    """A first draft reads the orchestrator's brief. A step it names in
+    `across_years` that answers an ask marked (across years), or keeps its
+    years, is admitted, and the name grants nothing."""
+    if case == "keeps-its-years":
+        ctx = _context()
+        requirements = [_aid(), _total(group_by=(GroupBy.ENTITY, GroupBy.PERIOD))]
+        cited: list[Decision] = []
+    else:
+        build, cited, _, _ = _STEPS[case.split("-", 1)[0]]
+        ctx = _context(across_years=[0])
+        requirements = [_aid(), build()]
+
+    result = _propose(ctx, requirements, [decision(), *cited], across_years=["result"])
+
+    assert result["outcome"] == Outcome.OK.value, result
+    recorded = load_plan(ctx.state)
+    assert recorded is not None and recorded.period_licences == ()
+
+
+@pytest.mark.parametrize("step", sorted(_STEPS))
+def test_a_first_draft_naming_a_step_across_years_for_an_unmarked_ask_is_refused_unstated(
+    decision: Callable[..., Decision], step: str
+) -> None:
+    """The name is ignored outside an amendment entry, so a step combining
+    the years for an ask the brief leaves unmarked holds no licence."""
+    build, cited, _, _ = _STEPS[step]
+    ctx = _context()
+
+    result = _propose(ctx, [_aid(), build()], [decision(), *cited], across_years=["result"])
+
+    _refused(result, _gap(years=EVERY_YEAR))
+    assert load_plan(ctx.state) is None
 
 
 @pytest.mark.parametrize("step", sorted(_STEPS))
@@ -791,7 +836,7 @@ def test_a_later_entry_keeps_no_licence_for_another_reduction(
     decision: Callable[..., Decision], step: str
 ) -> None:
     """A user who asked for one total did not ask for a maximum, and a replan
-    reading the brief cannot name the maximum."""
+    reading the brief names the maximum to no effect."""
     build, _, _, _ = _STEPS[step]
     ctx = _context(amendment=True)
     _amended(ctx, decision, step)
@@ -800,8 +845,7 @@ def test_a_later_entry_keeps_no_licence_for_another_reduction(
     named = _propose(ctx, [_aid(), build(reduction=Reduction.MAX)], [], across_years=["result"])
 
     _refused(unnamed, _gap(years=EVERY_YEAR))
-    assert named["code"] == ProblemCode.INVALID_PLAN.value, named
-    assert "Take 'result' out of `across_years`" in named["message"]
+    _refused(named, _gap(years=EVERY_YEAR))
 
 
 @pytest.mark.parametrize(
@@ -1107,8 +1151,8 @@ def test_a_step_that_keeps_the_years_reduces_none(
 POOLED = Decision(
     slot="pooled",
     description="Whether each donor's share is of its own total or of all donors' total.",
-    options=["of all donors' total", "of its own total"],
-    chosen="of all donors' total",
+    options=["pooled", "per_axis"],
+    chosen="pooled",
     resolved_by="planner_default",
     rationale="The question asks how aid splits between donors.",
     fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED),
