@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from analysis_mcp.op_spec import Predicate as RunnerPredicate
 from common.unit_refs import PERCENT_UNIT
 from compiler.capabilities import CAPABILITIES, ToolCapability
 from compiler.compile import CompileIssueCode, CompileResult, compile_plan
@@ -86,6 +87,7 @@ from planner.records import (
     EvidenceIssueCode,
     GrowthChange,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -1670,23 +1672,37 @@ def test_degenerate_sides_are_detected_across_a_filter(
     assert Code.DEGENERATE_SIDES in _codes(result)
 
 
-def test_a_filter_step_writes_a_value_threshold_predicate(
+@pytest.mark.parametrize(
+    ("predicate", "written"),
+    [
+        pytest.param(
+            ValueThreshold(op="gt", value=0),
+            {"kind": "ordered_threshold", "column": "value", "op": "gt", "value": 0},
+            id="a-value-threshold",
+        ),
+        pytest.param(
+            PeriodIn(years=(2020, 2000)),
+            {"kind": "category_match", "column": "time_period", "values": ["2000", "2020"]},
+            id="years-asked-for-apart",
+        ),
+    ],
+)
+def test_a_filter_step_writes_its_predicate(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     requirement: RequirementFactory,
+    predicate: ValueThreshold | PeriodIn,
+    written: dict[str, Any],
 ) -> None:
     filter_req = FilterRequirement(
         id="filtered",
         decision_ids=["measure"],
         input_id="annual_debt_service",
-        predicates=(ValueThreshold(op="gt", value=0),),
+        predicates=(predicate,),
     )
-    plan = _draft([decision()], [requirement(), filter_req])
+    plan = _draft([decision()], [requirement(period=Period(start=2000, end=2020)), filter_req])
     filter_op = FilterOperation(
-        id="filtered",
-        requirement_id="filtered",
-        input="debt",
-        predicates=(ValueThreshold(op="gt", value=0),),
+        id="filtered", requirement_id="filtered", input="debt", predicates=(predicate,)
     )
 
     result = build(plan, _translation(_retrieve(), filter_op, terminal=["filtered"]))
@@ -1695,10 +1711,10 @@ def test_a_filter_step_writes_a_value_threshold_predicate(
     assert result.workflow is not None
     step = result.workflow.steps[1]
     assert step.tool.name == "filter"
-    assert step.args == {
-        "predicates": [{"kind": "ordered_threshold", "column": "value", "op": "gt", "value": 0}]
-    }
+    assert step.args == {"predicates": [written]}
     assert step.bindings == {"frame_ref": Binding(from_step="debt", output=ArtifactKind.FRAME_REF)}
+    # The runner's own filter vocabulary takes what the step writes.
+    TypeAdapter(RunnerPredicate).validate_python(written)
 
 
 def test_a_filter_step_writes_a_category_match_predicate_from_a_resolved_entity(

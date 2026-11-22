@@ -85,6 +85,7 @@ from planner.records import (
     OpenPeriodFault,
     OptionStatus,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     Predicate,
@@ -1697,9 +1698,9 @@ class FilterRequirement(TaggedModel):
         min_length=1,
         max_length=MAX_PREDICATES,
         description=(
-            "The conditions a row has to satisfy, all of them, to survive this filter. For "
-            "years asked for apart, as 2019 and 2023, the dataset's `period` runs from the "
-            "first to the last and a `period_threshold` of op 'ne' drops each year between."
+            "The conditions a row has to satisfy, all of them, to survive this filter. Years "
+            "asked for apart, as 2019 and 2023, are a `period_in` listing them, over a "
+            "dataset whose `period` runs from the first to the last."
         ),
     )
 
@@ -3941,8 +3942,8 @@ def keeps_one_level(predicates: Iterable[Predicate]) -> bool:
 
 
 def states_period_threshold(predicates: Iterable[Predicate]) -> bool:
-    """Whether `predicates` state a `PeriodThreshold`, which compares each row's year."""
-    return any(isinstance(predicate, PeriodThreshold) for predicate in predicates)
+    """Whether `predicates` state a `PeriodThreshold` or a `PeriodIn`, which read each row's year."""
+    return any(isinstance(predicate, PeriodThreshold | PeriodIn) for predicate in predicates)
 
 
 def _check_side_entity_is_named(

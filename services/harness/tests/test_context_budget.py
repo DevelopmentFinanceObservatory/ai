@@ -183,16 +183,16 @@ _REGENERATE = "just context-baseline"
 # behaviour a sentence at a time.
 PLANNER_SYSTEM_INSTRUCTION_CEILING = 20_150
 
-# Every planner tool declaration together measures 40,585 (`propose_plan` 37,591 and
-# 2,994 across the smaller ones). The margin is 3.5%.
+# Every planner tool declaration together measures 41,062 (`propose_plan` 38,068 and
+# 2,994 across the smaller ones). The margin is 2.3%.
 PLANNER_DECLARATIONS_TOTAL_CEILING = 42_000
 
 # `propose_plan`'s own declaration: the `DecisionDraft` and `EvidenceRequirement`
 # schemas with their `$defs` tree, and the patch, decline, answer and intent
-# arguments. Measured 37,591, with every field that refers to a definition holding a
+# arguments. Measured 38,068, with every field that refers to a definition holding a
 # copy of it under the field's own description. It sits in the static prefix every planner call
 # repeats, which Gemini's implicit cache can serve. Its field descriptions are what
-# the planner writes a plan from. The margin is 1.9%.
+# the planner writes a plan from. The margin is 0.6%.
 PROPOSE_PLAN_DECLARATION_CEILING = 38_300
 
 # The smaller planner declarations at once: `ask_user_question`, `get_skill` and

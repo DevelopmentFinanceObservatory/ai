@@ -68,6 +68,7 @@ from planner.records import (
     EvidenceIssueCode,
     GrowthChange,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     RankAmong,
@@ -2547,6 +2548,15 @@ class _Build:
                 if predicate.rolling is not None:
                     threshold[ROLLING_PARAMETER] = rolling_ref(predicate.rolling)
                 predicates.append(threshold)
+            elif isinstance(predicate, PeriodIn):
+                # An annual frame labels each row with its year as `YYYY`.
+                predicates.append(
+                    {
+                        "kind": "category_match",
+                        "column": TIME_PERIOD_COLUMN,
+                        "values": [str(year) for year in predicate.years],
+                    }
+                )
             elif isinstance(predicate, PlaceLevel):
                 column = self._place_level_column(operation, predicate)
                 if column is None:

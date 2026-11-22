@@ -688,11 +688,12 @@
                     "$ref": "#/$defs/Identifier"
                   },
                   "predicates": {
-                    "description": "The conditions a row has to satisfy, all of them, to survive this filter. For years asked for apart, as 2019 and 2023, the dataset's `period` runs from the first to the last and a `period_threshold` of op 'ne' drops each year between.",
+                    "description": "The conditions a row has to satisfy, all of them, to survive this filter. Years asked for apart, as 2019 and 2023, are a `period_in` listing them, over a dataset whose `period` runs from the first to the last.",
                     "items": {
                       "discriminator": {
                         "mapping": {
                           "entity_in": "#/$defs/EntityIn",
+                          "period_in": "#/$defs/PeriodIn",
                           "period_threshold": "#/$defs/PeriodThreshold",
                           "place_level": "#/$defs/PlaceLevel",
                           "value_threshold": "#/$defs/ValueThreshold"
@@ -705,6 +706,9 @@
                         },
                         {
                           "$ref": "#/$defs/PeriodThreshold"
+                        },
+                        {
+                          "$ref": "#/$defs/PeriodIn"
                         },
                         {
                           "$ref": "#/$defs/EntityIn"
@@ -863,6 +867,32 @@
                   "id",
                   "left_id",
                   "right_id"
+                ],
+                "type": "object"
+              },
+              "PeriodIn": {
+                "additionalProperties": false,
+                "description": "Keep rows whose year is one of `years`, held sorted and once each.",
+                "properties": {
+                  "kind": {
+                    "const": "period_in",
+                    "type": "string"
+                  },
+                  "years": {
+                    "description": "The years a row's year has to be one of, to survive.",
+                    "items": {
+                      "maximum": 2100,
+                      "minimum": 1900,
+                      "type": "integer"
+                    },
+                    "maxItems": 50,
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "years"
                 ],
                 "type": "object"
               },

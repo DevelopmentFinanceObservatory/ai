@@ -95,6 +95,7 @@ from planner.records import (
     EntityIn,
     GrowthChange,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -1223,7 +1224,7 @@ def _apart_mint_response() -> dict[str, Any]:
 def _years_apart_approved_plan(decision: Callable[..., Decision], schemas: dict[str, Any]) -> Plan:
     """The top three donors in 2019 and in 2023, as `planner.plan.FilterRequirement`'s
     `predicates` describe years asked for apart. The dataset reads 2019 to 2023 and
-    a filter takes out each year between. Translated, compiled and approved."""
+    a `period_in` filter keeps the two years. Translated, compiled and approved."""
     source = SelectedSource(
         spec_id=APART_SPEC,
         sentence="ODA disbursed by six DAC donors, 2019 to 2023",
@@ -1259,9 +1260,7 @@ def _years_apart_approved_plan(decision: Callable[..., Decision], schemas: dict[
                 id="two_years",
                 decision_ids=["measure"],
                 input_id="oda_disbursed",
-                predicates=tuple(
-                    PeriodThreshold(op="ne", year=year) for year in (2020, 2021, 2022)
-                ),
+                predicates=(PeriodIn(years=(2019, 2023)),),
             ),
             RankRequirement(
                 id="top_three",
@@ -1289,7 +1288,7 @@ def _years_apart_approved_plan(decision: Callable[..., Decision], schemas: dict[
     )
 
 
-async def test_years_asked_for_apart_run_and_chart_as_a_range_less_the_years_between(
+async def test_years_asked_for_apart_run_and_chart_as_the_listed_years_of_a_range(
     monkeypatch: pytest.MonkeyPatch,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., Any],
@@ -1299,8 +1298,8 @@ async def test_years_asked_for_apart_run_and_chart_as_a_range_less_the_years_bet
     pg_database_url: str,
 ) -> None:
     """2019 and 2023 compile against the mounted services' own tool schemas to a
-    retrieval of 2019 to 2023, a filter taking out 2020, 2021 and 2022, and a
-    per-year rank. The run keeps the top three donors in each of the two years and
+    retrieval of 2019 to 2023, a filter keeping 2019 and 2023 by the runner's
+    `category_match` on `time_period`, and a per-year rank. The run keeps the top three donors in each of the two years and
     no other year, and one chart draws them on the run's own frame."""
 
     async def fake_fetch(**_kwargs: Any) -> bytes:
@@ -1342,8 +1341,7 @@ async def test_years_asked_for_apart_run_and_chart_as_a_range_less_the_years_bet
     retrieve, kept, ranked = approved.workflow.steps
     assert (retrieve.tool.name, kept.tool.name, ranked.tool.name) == ("get_data", "filter", "rank")
     assert kept.args["predicates"] == [
-        {"kind": "ordered_threshold", "column": "time_period", "op": "ne", "value": str(year)}
-        for year in (2020, 2021, 2022)
+        {"kind": "category_match", "column": "time_period", "values": ["2019", "2023"]}
     ]
     assert sorted((row["time_period"], row["donor"]) for row in stored) == sorted(
         (year, donor) for year in ("2019", "2023") for donor in top_three

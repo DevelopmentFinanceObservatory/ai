@@ -123,13 +123,17 @@ on the denominator, by the role they state there or `'country'` where they
 state none, so each divides by its own counterpart; `JoinRequirement` joins
 two requirements' results on the keys they share; and `FilterRequirement` keeps
 the rows that satisfy every one of a conjunction of predicates: a value or
-year threshold, an `EntityIn` naming entities, or a `PlaceLevel` keeping one
-level of place, each stated once, since analysis-mcp's filter refuses a predicate
+year threshold, a `PeriodIn` listing the years to keep, an `EntityIn` naming
+entities, or a `PlaceLevel` keeping one level of place, each stated once, since analysis-mcp's filter refuses a predicate
 stated twice, an `EntityIn` naming the same entities in another order
 included. Two `EntityIn`s whose names resolve to one entity, such as one
 naming it under its role and one under none, write one predicate too, and the
 compiler refuses that filter with `bad_args`, by analysis-mcp's own op-spec
-check (`compiler.arguments.op_spec_errors`). An `EntityIn` keeps only names
+check (`compiler.arguments.op_spec_errors`). A `PeriodIn` states years asked
+for apart, as 2000 and 2020, in one predicate over a dataset read from the
+first to the last. Each year it lists has to be one its input holds, it takes
+no `rolling`, and the compiler writes it as analysis-mcp's `category_match` on
+`time_period` (`planner.shapes.year_filter`). An `EntityIn` keeps only names
 the dataset requirements behind its input state, under its `role` when it
 gives one (`planner.plan.unknown_names`, which the compiler reads for
 `unknown_entity`). A breakdown's codes are no entities. The frame holds the

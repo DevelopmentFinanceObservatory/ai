@@ -143,6 +143,18 @@ def test_a_rank_beside_one_donor_over_one_year_needs_no_reduction(
             id="a-donor-group-read-as-its-members",
         ),
         pytest.param(
+            "aggregate-two-donors-yearly",
+            (
+                Entity(name="United Kingdom", role="donor"),
+                Entity(name="Kenya", role="recipient"),
+            ),
+            (),
+            "recipient",
+            2022,
+            "binds 2 parties on its column",
+            id="a-source-binding-another-donor-beside-the-one-named",
+        ),
+        pytest.param(
             "rank-top-donors-malawi",
             (
                 Entity(name="Malawi", role="recipient"),
