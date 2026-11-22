@@ -11997,11 +11997,11 @@ def test_a_decision_naming_its_fields_records_the_plan_its_values_would(
 
 
 @pytest.mark.parametrize(
-    ("fixes", "derived_cites", "unpriced_cites"),
+    ("fixes", "options", "derived_cites", "unpriced_cites"),
     [
-        (["reduction"], (), ()),
-        (["reduction"], ("window",), ()),
-        (["unit"], (), ("window",)),
+        (["reduction"], ["sum", "mean"], (), ()),
+        (["reduction"], ["sum", "mean"], ("window",), ()),
+        (["unit"], ["2015 to 2024", "2010 to 2024"], (), ("window",)),
     ],
     ids=["field_the_kind_lacks", "values_disagree", "partly_stated"],
 )
@@ -12011,6 +12011,7 @@ def test_a_field_its_requirements_do_not_settle_is_left_off_the_decision(
     requirements: RequirementPair,
     derived_requirement: DerivedRequirementFactory,
     fixes: list[str],
+    options: list[str],
     derived_cites: tuple[str, ...],
     unpriced_cites: tuple[str, ...],
 ) -> None:
@@ -12023,7 +12024,10 @@ def test_a_field_its_requirements_do_not_settle_is_left_off_the_decision(
         _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
-        decisions=[*drafts([decision()]), _period_decision(fixes=fixes)],
+        decisions=[
+            *drafts([decision()]),
+            _period_decision(fixes=fixes, options=options, chosen=options[0]),
+        ],
         evidence_requirements=[
             dataset.model_copy(update={"decision_ids": ("measure", "window")}),
             derived.model_copy(update={"decision_ids": ("measure", *derived_cites)}),
@@ -13625,7 +13629,7 @@ def test_the_user_may_drop_the_series_their_decision_fixed(
 
 
 def test_a_patch_moving_a_shared_planner_decision_s_value_is_refused_until_restated() -> None:
-    """A planner decision fixing a period and a rank's `among` still backs the
+    """A planner decision fixing a period and a rank's `direction` still backs the
     rank once a patch moves only the dataset's period, so dropping it is
     refused, naming what still rests on it; restating it lands."""
     flows = DatasetRequirement(
@@ -13644,12 +13648,12 @@ def test_a_patch_moving_a_shared_planner_decision_s_value_is_refused_until_resta
     )
     scope = {
         "slot": "scope",
-        "description": "Which year, and among whom.",
-        "options": ["2024 among all", "2023 among all"],
-        "chosen": "2024 among all",
+        "description": "Which year, and which end of the ranking first.",
+        "options": ["2024, highest first", "2023, highest first"],
+        "chosen": "2024, highest first",
         "resolved_by": "planner_default",
-        "rationale": "The latest year, among every recipient.",
-        "fixes": ["period", "among"],
+        "rationale": "The latest year, largest recipients first.",
+        "fixes": ["period", "direction"],
     }
     moved = flows.model_copy(update={"period": Period(start=2023, end=2023)})
     tools = _tools_by_name()
@@ -13686,7 +13690,7 @@ def test_a_patch_moving_a_shared_planner_decision_s_value_is_refused_until_resta
     assert kept.version == first["version"]
     restated = call_planner_tool(
         tools["propose_plan"],
-        decisions=[{**scope, "chosen": "2023 among all"}],
+        decisions=[{**scope, "chosen": "2023, highest first"}],
         evidence_requirements=[moved],
         amends_version=first["version"],
         tool_context=ctx,
@@ -13695,7 +13699,7 @@ def test_a_patch_moving_a_shared_planner_decision_s_value_is_refused_until_resta
     plan = load_plan(ctx.state)
     assert plan is not None
     assert plan.decisions[0].fixes == DecisionFixes(
-        period=Period(start=2023, end=2023), among=RankAmong.POPULATION
+        period=Period(start=2023, end=2023), direction=RankDirection.HIGHEST_FIRST
     )
 
 
@@ -15264,9 +15268,7 @@ def _propose_for_creditors(
         _tools_by_name()["propose_plan"],
         question="general government debt service by creditor for 2031",
         answer_mode=AnswerMode.SERIES,
-        decisions=drafts(
-            [decision(fixes=DecisionFixes(among=RankAmong.POPULATION, across=tuple(across)))]
-        ),
+        decisions=drafts([decision(fixes=DecisionFixes(across=tuple(across)))]),
         evidence_requirements=requirements,
         answered=answered,
         declined=list(declined),
@@ -15546,7 +15548,13 @@ def test_a_pooled_share_counts_the_members_its_whole_resolves_its_group_to(
         question="What share of G7 ODA to Kenya came from each G7 donor each year?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts(
-            [decision(fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED))]
+            [
+                decision(
+                    options=["pooled", "per_axis"],
+                    chosen="pooled",
+                    fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED),
+                )
+            ]
         ),
         evidence_requirements=[
             dataset("part", "ODA gross disbursements", "G7", _PART_PIN),
@@ -15854,7 +15862,7 @@ def test_a_decline_of_two_parties_stands_when_each_pin_holds_one_of_them(
                 [
                     decision(
                         slot=party,
-                        fixes=DecisionFixes(among=RankAmong.POPULATION, across=(party,)),
+                        fixes=DecisionFixes(across=(party,)),
                     )
                     for party in ("creditor", "debtor")
                 ]
@@ -16092,7 +16100,7 @@ def test_a_breakdown_decline_counts_every_party_the_root_can_keep_on_its_pin(
     `held_named` when the refusal names no party held by naming."""
     ctx = _creditor_context((_EAC_SPEC, columns, asked), asks=[_EAC_ASK], by=by)
     dataset = {**_EAC_REQUIREMENT, **requirement, "decision_ids": ["measure"]}
-    fixes = DecisionFixes(among=RankAmong.POPULATION, across=tuple(dataset["across"]) or None)
+    fixes = DecisionFixes(across=tuple(dataset["across"]) or None)
 
     result = call_planner_tool(
         _tools_by_name()["propose_plan"],
@@ -16716,7 +16724,6 @@ _RANKED_ON = Decision(
     chosen="every donor",
     resolved_by=ResolvedBy.PLANNER_DEFAULT,
     rationale="The question asks for the top donor among all of them.",
-    fixes=DecisionFixes(among=RankAmong.POPULATION),
 )
 _BY_DONOR = Decision(
     slot="by_donor",
@@ -16910,8 +16917,7 @@ _GROWTH_SINCE_2010 = GrowthRequirement(
 def test_a_rank_proposed_without_among_records_the_population_its_axis_admits(
     requirements: list[EvidenceRequirement],
 ) -> None:
-    """No filter narrows the donors, so the rank is over every donor, and the
-    decision fixing `among` reads that value off it. A growth rolling from
+    """No filter narrows the donors, so the rank is over every donor. A growth rolling from
     before the dataset's stated 2015 reads years only its whole history holds,
     which the rank's input is built with."""
     ctx = _FakeToolContext()
@@ -16927,9 +16933,6 @@ def test_a_rank_proposed_without_among_records_the_population_its_axis_admits(
     plan = load_plan(ctx.state)
     assert plan is not None
     assert plan.requirement("top").among is RankAmong.POPULATION  # type: ignore[union-attr]
-    (population,) = (decision for decision in plan.decisions if decision.slot == "population")
-    assert population.fixes is not None
-    assert population.fixes.among is RankAmong.POPULATION
 
 
 def test_a_stored_plan_reading_a_whole_history_with_no_first_year_is_planned_again() -> None:

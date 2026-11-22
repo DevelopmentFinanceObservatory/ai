@@ -86,9 +86,7 @@
         "axis": "recipient",
         "id": "rank_top10",
         "window_end": 2022,
-        "decision_ids": [
-          "rank_among"
-        ],
+        "decision_ids": [],
         "direction": "highest_first"
       }
     ],
@@ -101,21 +99,6 @@
         "ask": 0
       }
     ],
-    "decisions": [
-      {
-        "rationale": "The question asks for the top ten recipients among all recipients of IDA disbursements, not a predefined list of named entities.",
-        "slot": "rank_among",
-        "resolved_by": "planner_default",
-        "options": [
-          "population",
-          "named"
-        ],
-        "fixes": [
-          "among"
-        ],
-        "chosen": "population",
-        "description": "Compare IDA recipients against the entire population of recipients in the DAC2a dataset for 2022."
-      }
-    ]
+    "decisions": []
   }
 }

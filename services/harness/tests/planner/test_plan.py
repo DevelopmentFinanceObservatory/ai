@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1116,11 +1117,72 @@ def test_a_calculation_the_question_states_outright_cites_no_decision(
 
 def test_a_draft_names_every_field_a_decision_fixes_but_the_pin() -> None:
     # Code alone writes the pin and the user's prices for a part
-    # (`submission.prices_choice`).
+    # (`submission.prices_choice`), and a rank's `among` is the one its input
+    # admits (`ranks_among_settled`).
     assert set(get_args(FixedField)) == set(DecisionFixes.model_fields) - {
         "source_spec_id",
         "prices",
+        "among",
     }
+
+
+def _choice_draft(fixes: tuple[str, ...], options: list[str]) -> DecisionDraft:
+    return DecisionDraft.model_validate(
+        {
+            "slot": "choice",
+            "description": "d",
+            "options": options,
+            "chosen": options[0],
+            "resolved_by": ResolvedBy.PLANNER_DEFAULT,
+            "rationale": "r",
+            "fixes": fixes,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("fixes", "options", "values"),
+    [
+        (("reduction",), ["the yearly sum", "mean"], "['sum', 'mean', 'max', 'min']"),
+        (("direction",), ["highest_first", "lowest"], "['highest_first', 'lowest_first']"),
+        (("denominator_scope",), ["pooled", "of its own total"], "['per_axis', 'pooled']"),
+        (("change",), ["relative_change", "absolute"], "['relative', 'absolute']"),
+        (("stat_vars",), ["sum", "one series each"], "['sum', 'separate']"),
+    ],
+    ids=["reduction", "direction", "denominator_scope", "change", "stat_vars"],
+)
+def test_a_decision_fixing_one_enum_field_lists_its_values_as_options(
+    fixes: tuple[str, ...], options: list[str], values: str
+) -> None:
+    """The card words each value of the field, so an option that is none
+    would print as the planner wrote it; the refusal names the values."""
+    with pytest.raises(ValidationError, match=re.escape(f"values {values}; replace")):
+        _choice_draft(fixes, options)
+
+
+@pytest.mark.parametrize(
+    ("fixes", "options"),
+    [
+        (("reduction",), ["sum", "mean"]),
+        (("reduction", "period"), ["summed over 2015-2024", "averaged over 2015-2024"]),
+        (("period",), ["2015-2024", "2018-2024"]),
+    ],
+    ids=["the-fields-values", "beside-another-field", "a-field-of-no-enum"],
+)
+def test_a_decision_fixing_one_enum_field_with_its_values_or_more_fields_is_admitted(
+    fixes: tuple[str, ...], options: list[str]
+) -> None:
+    assert _choice_draft(fixes, options).options == tuple(options)
+
+
+def test_a_draft_cannot_fix_a_ranks_among() -> None:
+    """The deployed slug options `among_population`/`among_named` printed as
+    'among population' on the card; a draft names no `among` at all."""
+    with pytest.raises(ValidationError) as refused:
+        _choice_draft(("among",), ["among_population", "among_named"])
+
+    (error,) = refused.value.errors()
+    assert (error["type"], error["loc"]) == ("literal_error", ("fixes", 0))
 
 
 @pytest.mark.parametrize(
@@ -2748,22 +2810,21 @@ def test_a_rank_stating_no_among_over_an_input_it_cannot_shape_is_refused(
         _plan(decision(), evidence_requirements=[dataset, unsettled])
 
 
-def test_among_population_with_no_decision_fixing_it_fails(
+def test_a_population_rank_needs_no_decision_fixing_among(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
+    """The input admits one `among`, so no decision chooses it."""
     dataset = requirement()
 
-    with pytest.raises(
-        ValidationError,
-        match=r"holds among='population', .* cites no decision whose `fixes` names `among`",
-    ):
-        _plan(
-            decision(),  # fixes=None
-            evidence_requirements=[
-                dataset,
-                _rank(dataset.id, among=RankAmong.POPULATION, reduction=Reduction.MEAN),
-            ],
-        )
+    plan = _plan(
+        decision(),  # fixes=None
+        evidence_requirements=[
+            dataset,
+            _rank(dataset.id, among=RankAmong.POPULATION, reduction=Reduction.MEAN),
+        ],
+    )
+
+    assert plan.requirement("ranked").among is RankAmong.POPULATION  # type: ignore[union-attr]
 
 
 def test_a_keyed_share_of_needs_a_denominator_scope() -> None:

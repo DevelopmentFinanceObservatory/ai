@@ -63,38 +63,6 @@
         }
       },
       {
-        "slot": "ranking_among",
-        "description": "Rank across all DAC donors in the dataset",
-        "options": [
-          "population",
-          "named"
-        ],
-        "chosen": "population",
-        "resolved_by": "planner_default",
-        "rationale": "The question asks for top DAC donors across the entire population of DAC donors.",
-        "fixes": {
-          "period": null,
-          "unit": null,
-          "entities": null,
-          "across": null,
-          "measure": null,
-          "source_spec_id": null,
-          "stat_vars": null,
-          "reduction": null,
-          "group_by": null,
-          "window_start": null,
-          "window_end": null,
-          "direction": null,
-          "predicates": null,
-          "among": "population",
-          "axis": null,
-          "denominator_scope": null,
-          "change": null,
-          "per_period": null,
-          "limit": null
-        }
-      },
-      {
         "slot": "scope_sector_spec_a0bae43fbff80e08f0a6982e2bb88ce5",
         "description": "Which sector codes the figures count.",
         "options": [
@@ -327,7 +295,6 @@
         "kind": "rank",
         "id": "top_dac_donors",
         "decision_ids": [
-          "ranking_among",
           "ranking_limit"
         ],
         "input_id": "donor_totals",

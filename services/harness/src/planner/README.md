@@ -516,11 +516,14 @@ state differently, so a value lives once, on the requirement, and nothing is
 refused for it. `Plan` holds every requirement citing a decision to each value
 its `fixes` states, `source_spec_id` aside (`fix_disagreements`). The plan
 record says whether the planner assumed a period, and the answer says a summed
-reading was the user's. A rank's `among='population'` and a `share_of`'s
-`denominator_scope='pooled'` each cite a decision whose `fixes` states the
-claim. A rank stating no `among` takes the one value its input admits before any
-decision reads it (`ranks_among_settled`): 'named' over an axis a filter
-narrowed, else 'population'. Code writes `fixes.source_spec_id`.
+reading was the user's. A `share_of`'s `denominator_scope='pooled'` cites a
+decision whose `fixes` states the claim. A rank's `among` is no decision a draft
+can fix: a rank stating none takes the one value its input admits
+(`ranks_among_settled`), 'named' over an axis a filter narrowed, else
+'population', and its step states the population it ranks. A decision fixing
+one field whose values are an enum (`ENUM_FIXED_FIELDS`: `stat_vars`,
+`reduction`, `direction`, `denominator_scope`, `change`) lists those values as
+its options, as the plan card words each value. Code writes `fixes.source_spec_id`.
 `propose_plan` sets it on the measure decision it writes for a pin of a measure
 a settled source offers (`_measure_decisions`) and moves it with the pin. A
 source a pending referral offers in place of a pin counts as settled, so a

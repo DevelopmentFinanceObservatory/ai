@@ -39,22 +39,7 @@
   "reference_payload": {
     "question": "Which three sectors received the most ODA in Kenya between 2015 and 2022?",
     "answer_mode": "computed",
-    "decisions": [
-      {
-        "slot": "all_sectors",
-        "description": "Which sectors the ranking compares.",
-        "options": [
-          "every sector",
-          "a named list of sectors"
-        ],
-        "chosen": "every sector",
-        "resolved_by": "planner_default",
-        "rationale": "The question names no list, so every member is ranked.",
-        "fixes": [
-          "among"
-        ]
-      }
-    ],
+    "decisions": [],
     "evidence_requirements": [
       {
         "kind": "dataset",
@@ -89,9 +74,7 @@
         "axis": "sector",
         "reduction": "sum",
         "limit": 3,
-        "decision_ids": [
-          "all_sectors"
-        ]
+        "decision_ids": []
       }
     ],
     "answered": [
@@ -109,22 +92,7 @@
       "payload": {
         "question": "Which three sectors received the most ODA in Kenya between 2015 and 2022?",
         "answer_mode": "computed",
-        "decisions": [
-          {
-            "slot": "all_sectors",
-            "description": "Which sectors the ranking compares.",
-            "options": [
-              "every sector",
-              "a named list of sectors"
-            ],
-            "chosen": "every sector",
-            "resolved_by": "planner_default",
-            "rationale": "The question names no list, so every member is ranked.",
-            "fixes": [
-              "among"
-            ]
-          }
-        ],
+        "decisions": [],
         "evidence_requirements": [
           {
             "kind": "dataset",
@@ -169,9 +137,7 @@
             "axis": "sector",
             "reduction": "sum",
             "limit": 3,
-            "decision_ids": [
-              "all_sectors"
-            ]
+            "decision_ids": []
           }
         ],
         "answered": [

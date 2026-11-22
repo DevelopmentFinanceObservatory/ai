@@ -25,7 +25,6 @@ from planner.plan import (
     AskAnswer,
     DatasetRequirement,
     Decision,
-    DecisionFixes,
     Entity,
     Period,
     PinSource,
@@ -51,7 +50,6 @@ POPULATION = Decision(
     chosen="every recipient",
     resolved_by="planner_default",
     rationale="The question asks for the top recipients among all of them.",
-    fixes=DecisionFixes(among=RankAmong.POPULATION),
 )
 
 

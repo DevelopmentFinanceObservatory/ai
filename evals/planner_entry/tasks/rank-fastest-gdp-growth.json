@@ -39,22 +39,7 @@
   "reference_payload": {
     "question": "Which five countries had the fastest GDP growth between 2015 and 2022?",
     "answer_mode": "computed",
-    "decisions": [
-      {
-        "slot": "every_country",
-        "description": "Which countries the ranking compares.",
-        "options": [
-          "every country with data",
-          "a named list of countries"
-        ],
-        "chosen": "every country with data",
-        "resolved_by": "planner_default",
-        "rationale": "The question names no list, so every member is ranked.",
-        "fixes": [
-          "among"
-        ]
-      }
-    ],
+    "decisions": [],
     "evidence_requirements": [
       {
         "kind": "dataset",
@@ -94,9 +79,7 @@
         "direction": "highest_first",
         "among": "population",
         "limit": 5,
-        "decision_ids": [
-          "every_country"
-        ]
+        "decision_ids": []
       }
     ],
     "answered": [

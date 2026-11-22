@@ -115,7 +115,6 @@ POPULATION = Decision(
     chosen="every donor",
     resolved_by="planner_default",
     rationale="The question asks for the top donors among all of them.",
-    fixes=DecisionFixes(among=RankAmong.POPULATION),
 )
 ONE_TOTAL = Decision(
     slot="one_total",
@@ -150,8 +149,8 @@ YEARS_READ = ONE_YEAR.model_copy(
 SUMMED = Decision(
     slot="summed",
     description="Whether the years are summed or averaged.",
-    options=["summed", "averaged"],
-    chosen="summed",
+    options=["sum", "mean"],
+    chosen="sum",
     resolved_by="planner_default",
     rationale="Aid adds up over years.",
     fixes=DecisionFixes(reduction=Reduction.SUM),
@@ -1152,8 +1151,8 @@ def test_a_step_that_keeps_the_years_reduces_none(
 POOLED = Decision(
     slot="pooled",
     description="Whether each donor's share is of its own total or of all donors' total.",
-    options=["of all donors' total", "of its own total"],
-    chosen="of all donors' total",
+    options=["pooled", "per_axis"],
+    chosen="pooled",
     resolved_by="planner_default",
     rationale="The question asks how aid splits between donors.",
     fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED),

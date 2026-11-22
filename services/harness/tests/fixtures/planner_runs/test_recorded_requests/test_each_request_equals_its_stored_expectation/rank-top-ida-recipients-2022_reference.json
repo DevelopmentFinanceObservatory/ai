@@ -30,38 +30,6 @@
     "answer_mode": "computed",
     "decisions": [
       {
-        "slot": "rank_among",
-        "description": "Compare IDA recipients against the entire population of recipients in the DAC2a dataset for 2022.",
-        "options": [
-          "population",
-          "named"
-        ],
-        "chosen": "population",
-        "resolved_by": "planner_default",
-        "rationale": "The question asks for the top ten recipients among all recipients of IDA disbursements, not a predefined list of named entities.",
-        "fixes": {
-          "period": null,
-          "unit": null,
-          "entities": null,
-          "across": null,
-          "measure": null,
-          "source_spec_id": null,
-          "stat_vars": null,
-          "reduction": null,
-          "group_by": null,
-          "window_start": null,
-          "window_end": null,
-          "direction": null,
-          "predicates": null,
-          "among": "population",
-          "axis": null,
-          "denominator_scope": null,
-          "change": null,
-          "per_period": null,
-          "limit": null
-        }
-      },
-      {
         "slot": "scope_measure_basis_spec_b84704bb0e9a0d4cd673dde2299a0709",
         "description": "Which basis the figures are measured on.",
         "options": [
@@ -165,9 +133,7 @@
       {
         "kind": "rank",
         "id": "rank_top10",
-        "decision_ids": [
-          "rank_among"
-        ],
+        "decision_ids": [],
         "input_id": "ida_disbursements",
         "direction": "highest_first",
         "among": "population",

@@ -109,7 +109,7 @@ USER_YEAR = Decision(
 TOP_TEN = DONOR_SCOPE.model_copy(
     update={
         "chosen": "the top 10 donors",
-        "fixes": DecisionFixes(limit=10, among=RankAmong.POPULATION),
+        "fixes": DecisionFixes(limit=10),
     }
 )
 # The DAC total's decision under the picked label, listing the period beside
@@ -230,7 +230,7 @@ def test_a_pick_that_changes_the_plans_shape_is_admitted_as_the_users(
     assert plan is not None
     picked = next(d for d in plan.decisions if d.slot == "donor_scope")
     assert (picked.chosen, picked.resolved_by) == ("the top 10 donors", ResolvedBy.USER)
-    assert picked.fixes == DecisionFixes(limit=10, among=RankAmong.POPULATION)
+    assert picked.fixes == DecisionFixes(limit=10)
     assert next(d for d in plan.decisions if d.slot == "year") == USER_YEAR
     assert [r.id for r in plan.evidence_requirements] == ["aid", "top"]
 
@@ -328,7 +328,7 @@ def test_a_restated_pick_its_requirements_fix_nothing_of_is_refused_saying_so(
     decision: Callable[..., Decision],
 ) -> None:
     """The plan states the picked option, cited only by the donors to Kenya,
-    which state neither a rank's limit nor what it ranks among: the decision
+    which state no rank's limit: the decision
     fixes nothing, and the refusal says the requirements citing it fix none
     of what it names."""
     ctx = _context()
@@ -448,11 +448,7 @@ def test_a_pick_releases_no_user_decision_of_a_requirement_it_did_not_change(
         pytest.param(TOP_TEN, id="fixing-the-rank"),
         pytest.param(
             TOP_TEN.model_copy(
-                update={
-                    "fixes": DecisionFixes(
-                        limit=10, among=RankAmong.POPULATION, period=Period(start=2022, end=2022)
-                    )
-                }
+                update={"fixes": DecisionFixes(limit=10, period=Period(start=2022, end=2022))}
             ),
             id="listing-the-period",
         ),
@@ -528,13 +524,7 @@ def test_a_pick_listing_entities_releases_no_user_decision_fixing_the_recipient(
     result = _propose_plan(
         ctx,
         decisions=drafts(
-            [
-                TOP_TEN.model_copy(
-                    update={
-                        "fixes": DecisionFixes(limit=10, among=RankAmong.POPULATION, entities=ghana)
-                    }
-                )
-            ]
+            [TOP_TEN.model_copy(update={"fixes": DecisionFixes(limit=10, entities=ghana)})]
         ),
         evidence_requirements=[
             aid.model_copy(update={"entities": ghana, "decision_ids": ("measure", "donor_scope")}),
@@ -1286,7 +1276,7 @@ RANKING = Decision(
     chosen="the top 10 donors",
     resolved_by=ResolvedBy.PLANNER_DEFAULT,
     rationale="Ten donors cover most of the aid.",
-    fixes=DecisionFixes(limit=10, among=RankAmong.POPULATION),
+    fixes=DecisionFixes(limit=10),
 )
 
 
@@ -1325,7 +1315,7 @@ def test_a_pick_keeping_part_of_what_it_replaces_unchanged_is_admitted(
                 RANKING.model_copy(
                     update={
                         "chosen": "the top 5 donors",
-                        "fixes": DecisionFixes(limit=5, among=RankAmong.POPULATION),
+                        "fixes": DecisionFixes(limit=5),
                     }
                 )
             ]
@@ -1340,7 +1330,7 @@ def test_a_pick_keeping_part_of_what_it_replaces_unchanged_is_admitted(
     picked = next(d for d in plan.decisions if d.slot == "donor_scope")
     assert (picked.chosen, picked.fixes) == (
         "the top 5 donors",
-        DecisionFixes(limit=5, among=RankAmong.POPULATION),
+        DecisionFixes(limit=5),
     )
     assert next(r for r in plan.evidence_requirements if r.id == "aid") == aid
 
@@ -1356,8 +1346,8 @@ async def test_a_pick_over_a_windowed_pin_cites_the_users_year_and_still_compile
     shape = Decision(
         slot="shape",
         description="How to combine each year's flows.",
-        options=["the yearly sum", "the yearly average"],
-        chosen="the yearly sum",
+        options=["sum", "mean"],
+        chosen="sum",
         resolved_by=ResolvedBy.PLANNER_DEFAULT,
         rationale="A sum is the usual reading.",
         fixes=DecisionFixes(reduction=Reduction.SUM),
@@ -1405,7 +1395,7 @@ async def test_a_pick_over_a_windowed_pin_cites_the_users_year_and_still_compile
         pick = decision_pick(
             shown,
             choice_id="decision/shape",
-            option_id=decision_option_id("the yearly average"),
+            option_id=decision_option_id("mean"),
             to_origin={copy.spec_id: copy.windowed_from},
             alignments={},
         )
@@ -1419,7 +1409,7 @@ async def test_a_pick_over_a_windowed_pin_cites_the_users_year_and_still_compile
                 [
                     shape.model_copy(
                         update={
-                            "chosen": "the yearly average",
+                            "chosen": "mean",
                             "fixes": DecisionFixes(reduction=Reduction.MEAN),
                         }
                     )
@@ -1587,7 +1577,7 @@ def test_a_pick_whose_decision_settles_to_the_cards_value_is_refused(
                 RANKING.model_copy(
                     update={
                         "chosen": "the top 5 donors",
-                        "fixes": DecisionFixes(limit=5, among=RankAmong.POPULATION, **listed),
+                        "fixes": DecisionFixes(limit=5, **listed),
                     }
                 )
             ]

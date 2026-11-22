@@ -30,38 +30,6 @@
     "answer_mode": "computed",
     "decisions": [
       {
-        "slot": "rank_among",
-        "description": "Compare donors against the entire reporting donor population in DAC2a",
-        "options": [
-          "population",
-          "named"
-        ],
-        "chosen": "population",
-        "resolved_by": "planner_default",
-        "rationale": "The question asks for the top five donors across all donors reporting aid to Ethiopia.",
-        "fixes": {
-          "period": null,
-          "unit": null,
-          "entities": null,
-          "across": null,
-          "measure": null,
-          "source_spec_id": null,
-          "stat_vars": null,
-          "reduction": null,
-          "group_by": null,
-          "window_start": null,
-          "window_end": null,
-          "direction": null,
-          "predicates": null,
-          "among": "population",
-          "axis": null,
-          "denominator_scope": null,
-          "change": null,
-          "per_period": null,
-          "limit": null
-        }
-      },
-      {
         "slot": "scope_measure_basis_spec_bffad92a5a891f080d65023aa313335c",
         "description": "Which basis the figures are measured on.",
         "options": [
@@ -169,9 +137,7 @@
       {
         "kind": "rank",
         "id": "top_five_donors",
-        "decision_ids": [
-          "rank_among"
-        ],
+        "decision_ids": [],
         "input_id": "ethiopia_oda_by_donor",
         "direction": "highest_first",
         "among": "population",
@@ -186,9 +152,7 @@
       {
         "kind": "rank",
         "id": "annual_top_five",
-        "decision_ids": [
-          "rank_among"
-        ],
+        "decision_ids": [],
         "input_id": "ethiopia_oda_by_donor",
         "direction": "highest_first",
         "among": "population",

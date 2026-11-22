@@ -28,40 +28,7 @@
   "plan": {
     "question": "Compare external debt across every African country, all at once, 2020 to 2024",
     "answer_mode": "computed",
-    "decisions": [
-      {
-        "slot": "every_african_country",
-        "description": "Which countries the 2024 ranking compares.",
-        "options": [
-          "every African country with data",
-          "a named list of countries"
-        ],
-        "chosen": "every African country with data",
-        "resolved_by": "planner_default",
-        "rationale": "The question asks for every African country, so every member is ranked.",
-        "fixes": {
-          "period": null,
-          "unit": null,
-          "entities": null,
-          "across": null,
-          "measure": null,
-          "source_spec_id": null,
-          "stat_vars": null,
-          "reduction": null,
-          "group_by": null,
-          "window_start": null,
-          "window_end": null,
-          "direction": null,
-          "predicates": null,
-          "among": "population",
-          "axis": null,
-          "denominator_scope": null,
-          "change": null,
-          "per_period": null,
-          "limit": null
-        }
-      }
-    ],
+    "decisions": [],
     "evidence_requirements": [
       {
         "kind": "dataset",
@@ -111,9 +78,7 @@
       {
         "kind": "rank",
         "id": "ranking_2024",
-        "decision_ids": [
-          "every_african_country"
-        ],
+        "decision_ids": [],
         "input_id": "debt_2024",
         "direction": "highest_first",
         "among": "population",

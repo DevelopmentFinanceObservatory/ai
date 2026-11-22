@@ -95,7 +95,6 @@
       },
       {
         "decision_ids": [
-          "ranking_among",
           "ranking_limit"
         ],
         "input_id": "donor_totals",
@@ -124,20 +123,6 @@
         ],
         "resolved_by": "planner_default",
         "chosen": "10"
-      },
-      {
-        "chosen": "population",
-        "rationale": "The question asks for top DAC donors across the entire population of DAC donors.",
-        "resolved_by": "planner_default",
-        "fixes": [
-          "among"
-        ],
-        "description": "Rank across all DAC donors in the dataset",
-        "options": [
-          "population",
-          "named"
-        ],
-        "slot": "ranking_among"
       }
     ]
   }

@@ -63,38 +63,6 @@
         }
       },
       {
-        "slot": "ranking_among",
-        "description": "Whether to rank donors among all DAC members or a named subset.",
-        "options": [
-          "population",
-          "named"
-        ],
-        "chosen": "population",
-        "resolved_by": "planner_default",
-        "rationale": "The question asks for DAC donors across the entire population of DAC donors.",
-        "fixes": {
-          "period": null,
-          "unit": null,
-          "entities": null,
-          "across": null,
-          "measure": null,
-          "source_spec_id": null,
-          "stat_vars": null,
-          "reduction": null,
-          "group_by": null,
-          "window_start": null,
-          "window_end": null,
-          "direction": null,
-          "predicates": null,
-          "among": "population",
-          "axis": null,
-          "denominator_scope": null,
-          "change": null,
-          "per_period": null,
-          "limit": null
-        }
-      },
-      {
         "slot": "scope_sector_spec_449f4bc485d3613d7314397e8e546330",
         "description": "Which sector codes the figures count.",
         "options": [
@@ -342,8 +310,7 @@
         "kind": "rank",
         "id": "rank_donors",
         "decision_ids": [
-          "ranking_limit",
-          "ranking_among"
+          "ranking_limit"
         ],
         "input_id": "two_years",
         "direction": "highest_first",

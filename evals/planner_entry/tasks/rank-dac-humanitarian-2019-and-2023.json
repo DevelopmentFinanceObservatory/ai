@@ -94,8 +94,7 @@
         "direction": "highest_first",
         "axis": "donor",
         "decision_ids": [
-          "ranking_limit",
-          "ranking_among"
+          "ranking_limit"
         ],
         "id": "rank_donors",
         "limit": 10,
@@ -129,20 +128,6 @@
         ],
         "slot": "ranking_limit",
         "rationale": "Top 10 is standard for presenting leading donors and matches earlier turns in the conversation."
-      },
-      {
-        "resolved_by": "planner_default",
-        "description": "Whether to rank donors among all DAC members or a named subset.",
-        "options": [
-          "population",
-          "named"
-        ],
-        "slot": "ranking_among",
-        "rationale": "The question asks for DAC donors across the entire population of DAC donors.",
-        "chosen": "population",
-        "fixes": [
-          "among"
-        ]
       }
     ],
     "answer_mode": "series"

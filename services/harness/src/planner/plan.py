@@ -49,6 +49,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, MutableMapp
 from contextvars import ContextVar
 from dataclasses import replace
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, overload
 
 import rfc8785
@@ -893,7 +894,6 @@ FixedField = Literal[
     "window_end",
     "direction",
     "predicates",
-    "among",
     "axis",
     "denominator_scope",
     "change",
@@ -904,12 +904,24 @@ FixedField = Literal[
 
 # `settle_decisions` builds the `Decision` from a draft, reading each named
 # field's value off the requirements that cite it.
+# The fields a draft names whose value is one member of an enum. A decision fixing one of
+# them alone chooses between that enum's values, and the plan card words each value
+# (`harness.plan_display.FIXED_VALUE_WORDS`).
+ENUM_FIXED_FIELDS: Mapping[str, type[StrEnum]] = {
+    "stat_vars": StatVarReading,
+    "reduction": Reduction,
+    "direction": RankDirection,
+    "denominator_scope": DenominatorScope,
+    "change": GrowthChange,
+}
+
+
 class DecisionDraft(_Choice):
     """One methodological choice, as a proposal states it: the fields it fixes, by name."""
 
     fixes: tuple[FixedField, ...] | None = Field(
         default=None,
-        max_length=len(DecisionFixes.model_fields.keys() - {"prices"}),
+        max_length=len(get_args(FixedField)),
         description=(
             "The requirement fields this decision settles, by name, whenever it settles "
             "what a requirement carries: the period, the unit, the entities, the measure, "
@@ -917,6 +929,24 @@ class DecisionDraft(_Choice):
             "requirements citing it. Empty when it is a rationale only."
         ),
     )
+
+    @model_validator(mode="after")
+    def _options_are_the_fields_values(self) -> DecisionDraft:
+        """Reject an option that is no value of the one enum field this decision fixes (`ENUM_FIXED_FIELDS`).
+
+        The card shows each value in its own words, which a slug such as
+        "among_population" never matches.
+        """
+        if self.fixes is None or len(self.fixes) != 1 or self.fixes[0] not in ENUM_FIXED_FIELDS:
+            return self
+        (field,) = self.fixes
+        values = [value.value for value in ENUM_FIXED_FIELDS[field]]
+        if unknown := [option for option in self.options if option not in values]:
+            raise ValueError(
+                f"decision {self.slot!r} fixes `{field}` alone, so each option is one of its "
+                f"values {values!r}; replace {unknown!r}"
+            )
+        return self
 
 
 # What a declared whole leaves open: the part's sector, or the party it names on one
@@ -4234,32 +4264,31 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
 def _check_population_claims_are_cited(
     requirements: Iterable[EvidenceRequirement], decisions_by_slot: dict[str, Decision]
 ) -> None:
-    """Reject a population-wide claim no cited decision states structurally.
+    """Reject a pooled share no cited decision states structurally.
 
-    A rank stating `among='population'` and a keyed share_of stating
-    `denominator_scope='pooled'` are each a figure computed over entities
-    nobody named, so either needs a cited `Decision` whose own `fixes` states
-    the same claim. Every slot in `decision_ids` is already known to name a
+    A keyed share_of stating `denominator_scope='pooled'` divides by a total
+    over entities nobody named, so it needs a cited `Decision` whose own
+    `fixes` states 'pooled'. A rank's `among` needs none: its input admits
+    one value (`_admitted_among`), and the rank's step states the population
+    it ranks. Every slot in `decision_ids` is already known to name a
     decision the plan makes.
     """
     for requirement in requirements:
-        if isinstance(requirement, RankRequirement) and requirement.among is RankAmong.POPULATION:
-            field, value = "among", RankAmong.POPULATION
-        elif (
+        if not (
             isinstance(requirement, ShareOfRequirement)
             and requirement.denominator_scope is DenominatorScope.POOLED
         ):
-            field, value = "denominator_scope", DenominatorScope.POOLED
-        else:
             continue
         cited = (decisions_by_slot[slot] for slot in requirement.decision_ids)
         if not any(
-            decision.fixes is not None and getattr(decision.fixes, field) == value
+            decision.fixes is not None
+            and decision.fixes.denominator_scope is DenominatorScope.POOLED
             for decision in cited
         ):
             raise ValueError(
-                f"{requirement.id!r} holds {field}={value.value!r}, a claim over entities "
-                f"nobody named, but cites no decision whose `fixes` names `{field}`; cite one"
+                f"{requirement.id!r} holds denominator_scope='pooled', a total over entities "
+                "nobody named, but cites no decision whose `fixes` names `denominator_scope`; "
+                "cite one"
             )
 
 
@@ -4682,8 +4711,8 @@ class Plan(StrictModel):
         every dataset requirement feeds a calculation. Then every requirement
         states each value a decision it cites fixes
         (`_check_requirements_honour_their_decisions`), and a population-wide
-        claim (`among='population'`, `denominator_scope='pooled'`) has to cite
-        a decision whose `fixes` states it. Last, each ask the plan
+        share (`denominator_scope='pooled'`) has to cite a decision whose
+        `fixes` states it. Last, each ask the plan
         carries is answered or declined exactly once, an answer naming any
         requirement the plan states, one another reads included
         (`_check_asks_accounted`), and an answer keeps in one output every
@@ -5475,7 +5504,7 @@ def unstated_result_scopes(plan: Plan) -> list[ResultScopeGap]:
     role by name (`_operand_roles`: a rank ordering it, a share or quotient
     keyed on it, or a place-level filter on it, since `_filter_shape`
     refuses an `EntityIn` naming a member of an open role, by
-    `unknown_names`), or, like `among='population'`
+    `unknown_names`), or, like `denominator_scope='pooled'`
     (`_check_population_claims_are_cited`), the dataset requirement that
     opened the role cites a decision whose `fixes` states its `across`, every
     word of it. An ask the result answers states the scope too when it
