@@ -323,6 +323,10 @@ on the same conversation, on the same or another instance: each change
 (an edit from `/composition`, a card the turn adds, swaps, revises or
 removes) applies under the conversation's row lock to the canvas as
 stored, so both writers' edits survive.
+The harness tells the model which cards are on the canvas and which are
+pinned, and no card's place on it: the blocks keep the order cards joined
+the canvas and any `reorder` ops, which is not the order Studio's board
+shows.
 
 ## Plan detail (delta 17, v1.2)
 
