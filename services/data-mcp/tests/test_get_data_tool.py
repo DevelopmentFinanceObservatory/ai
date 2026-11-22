@@ -3268,6 +3268,68 @@ async def test_statistics_are_fetched_and_rendered_in_the_digest(
     assert "first 1.0k (2015)" in text_of(result)
 
 
+@pytest.mark.parametrize("statistics_spent_their_share", [False, True])
+async def test_a_breakdown_code_cell_is_named_by_its_label_and_a_label_cell_stays(
+    monkeypatch: pytest.MonkeyPatch, statistics_spent_their_share: bool
+) -> None:
+    """A dcid cell reads as its label with the dcid after it, and a label cell as it
+    is. A statistics read that ran to its own deadline leaves the label read the
+    time the digest keeps beyond it."""
+    stored = _stored_definition()
+    cells = ("CRSPurposeCode15220", "agriculture")
+    clock = _FakeClock()
+    monkeypatch.setattr(get_data_tool, "_deadline_clock", clock)
+
+    async def fake_fetch(*, deadline: CallDeadline, **_kwargs: Any) -> list[SeriesStatisticsModel]:
+        if statistics_spent_their_share:
+            clock.now = deadline.expires_at
+        point = {"value": 1000.0, "period": "2015"}
+        return [
+            SeriesStatisticsModel.model_validate(
+                {
+                    "stat_var": "dcid:MalariaGrantDisbursements",
+                    "entities": [
+                        {"role": "recipient", "ref": "country/KEN"},
+                        {"role": "stat_var_crsPurpose", "ref": cell},
+                    ],
+                    "facet": {"unit": "USD"},
+                    "observations": 1,
+                    **dict.fromkeys(("first", "latest", "minimum", "maximum"), point),
+                }
+            )
+            for cell in cells
+        ]
+
+    monkeypatch.setattr(get_data_tool, "fetch_series_statistics", fake_fetch)
+    code = load_node_fixture("node_code")
+    node_requests: list[list[str]] = []
+    mint = _manifest_response_with_statistics(spec_id=stored.spec_id, series_count=len(cells))
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            return httpx2.Response(200, json=mint)
+        if request.url.path == _NODES_PATH:
+            dcids = json.loads(request.content)["dcids"]
+            node_requests.append(dcids)
+            entries = [
+                code if dcid == code["ref"] else {"ref": dcid, "status": "not_held"}
+                for dcid in dcids
+            ]
+            return httpx2.Response(200, json={"nodes": entries})
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    result = await _call_get_data(handler, _StubStore(stored), {"spec_id": stored.spec_id})
+
+    assert result.is_error is False
+    text = text_of(result)
+    assert (
+        "stat_var_crsPurpose civilian peace-building, conflict prevention and resolution "
+        "(CRSPurposeCode15220) · " in text
+    )
+    assert "stat_var_crsPurpose agriculture · " in text
+    assert node_requests == [list(cells)]
+
+
 async def test_a_statistics_fetch_failure_degrades_to_a_count_only_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4280,7 +4342,7 @@ class _RawAndSummedMint:
         self.bytes_by_cv = {self.raw_cv: raw_bytes, self.summed_cv: summed_bytes}
         self.fetched: list[str] = []
 
-    def _digest(self, content_version: str) -> str:
+    def digest_of(self, content_version: str) -> str:
         return f"sha256:{hashlib.sha256(self.bytes_by_cv[content_version]).hexdigest()}"
 
     def handler(self, request: httpx2.Request) -> httpx2.Response:
@@ -4292,13 +4354,13 @@ class _RawAndSummedMint:
                 json=_summed_manifest_response(
                     spec_id=self.spec_id,
                     content_version=self.summed_cv,
-                    artifact_digest=self._digest(self.summed_cv),
+                    artifact_digest=self.digest_of(self.summed_cv),
                 ),
             )
         response = _manifest_response(
             spec_id=self.spec_id,
             content_version=self.raw_cv,
-            artifact_digest=self._digest(self.raw_cv),
+            artifact_digest=self.digest_of(self.raw_cv),
         )
         # A sum one StatVar contributes to keeps the raw version, under its own rendering.
         response["artifacts"][0]["rendering"] = json.loads(request.content)["options"]
@@ -4357,7 +4419,10 @@ async def test_raw_and_summed_calls_for_one_spec_register_two_distinct_frames(
     assert sorted(upstream.fetched) == sorted([upstream.raw_cv, upstream.summed_cv])
     raw_ref = FrameRef(spec_id=stored.spec_id, content_version=upstream.raw_cv)
     summed_ref = frame_ref_for(
-        spec_id=stored.spec_id, content_version=upstream.summed_cv, groupby=_SUM_GROUPBY
+        spec_id=stored.spec_id,
+        content_version=upstream.summed_cv,
+        groupby=_SUM_GROUPBY,
+        artifact_digest=upstream.digest_of(upstream.summed_cv),
     )
     summed_content = results[order.index("sum")].structured_content
     assert summed_content is not None
@@ -4445,11 +4510,144 @@ async def test_a_breakdown_frame_registers_under_its_own_pair_with_the_code_colu
         spec_id=stored.spec_id,
         content_version=breakdown_cv,
         groupby=_SECTOR_BREAKDOWN_GROUPBY,
+        artifact_digest=breakdown_digest,
     )
     assert content["frame_ref"] == ref.model_dump(mode="json")
     assert content["role_keys"] == ["observationAbout", "stat_var_crsPurpose"]
     assert content["stat_var_count"] == 1
     assert await _distinct_stat_vars(frame_store, ref) == {f"dcid:{stored.spec_id}"}
+
+
+async def test_a_breakdown_apis_renders_again_is_a_new_frame_the_publisher_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """apis renders a breakdown's code cells another way (a label, then the code's dcid)
+    under the same `content_version` and rendering, linking a new artifact. With the
+    store warm from the first `get_data`, the second names a new frame held from the new
+    artifact, and the store read a publication makes (`MaterialisationStore.open`) of that
+    frame holds the new cells. The first frame stays as it was."""
+    monkeypatch.undo()  # the real `materialise_and_register`
+    stored = _stored_definition()
+    breakdown_cv = "cv_" + "c" * 32
+    rendered = [
+        _breakdown_frame_parquet(spec_id=stored.spec_id, sectors=["Humanitarian aid"]),
+        _breakdown_frame_parquet(spec_id=stored.spec_id, sectors=["crsPurpose/700"]),
+    ]
+    served = iter(rendered)
+    fetched: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets/capabilities":
+            return httpx2.Response(200, json={"groupby_level_axes": ["crsPurpose"]})
+        response = _manifest_response(
+            spec_id=stored.spec_id,
+            content_version=breakdown_cv,
+            artifact_digest=_digest(next(served)),
+        )
+        response["artifacts"][0]["rendering"] = json.loads(request.content)["options"]
+        return httpx2.Response(200, json=response)
+
+    async def fetch(*, artifact_digest: str, **_: Any) -> bytes:
+        fetched.append(artifact_digest)
+        return next(data for data in rendered if _digest(data) == artifact_digest)
+
+    monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", fetch)
+    frame_store = InMemoryMaterialisationStore()
+    set_frame_store(frame_store)
+
+    first, second = await _call_get_data_in_one_process(
+        handler,
+        _StubStore(stored),
+        [{"spec_id": stored.spec_id, "breakdown": _SECTOR_BREAKDOWN}] * 2,
+    )
+
+    assert [result.is_error for result in (first, second)] == [False, False]
+    assert first.structured_content is not None
+    assert second.structured_content is not None
+    refs = [
+        FrameRef.model_validate(result.structured_content["frame_ref"])
+        for result in (first, second)
+    ]
+    assert refs == [
+        frame_ref_for(
+            spec_id=stored.spec_id,
+            content_version=breakdown_cv,
+            groupby=_SECTOR_BREAKDOWN_GROUPBY,
+            artifact_digest=_digest(data),
+        )
+        for data in rendered
+    ]
+    assert fetched == [_digest(data) for data in rendered]
+    cells = []
+    for ref in refs:
+        held = await frame_store.open(ref)
+        assert held is not None
+        frame, _trace = await held.read(max_rows=10)
+        cells.append(frame.table.column("stat_var_crsPurpose").to_pylist())
+    assert cells == [["Humanitarian aid"], ["crsPurpose/700"]]
+
+
+async def test_a_file_apis_lists_only_as_incomplete_is_read_under_its_own_digest_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """apis links a file whose graph read failed under its rendering plus
+    `metadata: "incomplete"`, and lists it alone. With the store warm from a complete
+    file, `get_data` reads the incomplete one under its own digest and warns, and a
+    later complete file is a frame of its own."""
+    monkeypatch.undo()  # the real `materialise_and_register`
+    stored = _stored_definition()
+    breakdown_cv = "cv_" + "c" * 32
+    rendered = [
+        _breakdown_frame_parquet(spec_id=stored.spec_id, sectors=["Humanitarian aid"]),
+        _breakdown_frame_parquet(spec_id=stored.spec_id, sectors=["crsPurpose/700"]),
+        _breakdown_frame_parquet(spec_id=stored.spec_id, sectors=["Emergency response"]),
+    ]
+    incomplete = [False, True, False]
+    served = iter(zip(rendered, incomplete, strict=True))
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets/capabilities":
+            return httpx2.Response(200, json={"groupby_level_axes": ["crsPurpose"]})
+        data, metadata_incomplete = next(served)
+        response = _manifest_response(
+            spec_id=stored.spec_id, content_version=breakdown_cv, artifact_digest=_digest(data)
+        )
+        rendering = json.loads(request.content)["options"]
+        if metadata_incomplete:
+            rendering = {**rendering, "metadata": "incomplete"}
+        response["artifacts"][0]["rendering"] = rendering
+        return httpx2.Response(200, json=response)
+
+    async def fetch(*, artifact_digest: str, **_: Any) -> bytes:
+        return next(data for data in rendered if _digest(data) == artifact_digest)
+
+    monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", fetch)
+    frame_store = InMemoryMaterialisationStore()
+    set_frame_store(frame_store)
+
+    results = await _call_get_data_in_one_process(
+        handler,
+        _StubStore(stored),
+        [{"spec_id": stored.spec_id, "breakdown": _SECTOR_BREAKDOWN}] * 3,
+    )
+
+    assert [result.is_error for result in results] == [False, False, False]
+    contents = [result.structured_content for result in results]
+    assert all(content is not None for content in contents)
+    assert [FrameRef.model_validate(content["frame_ref"]) for content in contents if content] == [
+        frame_ref_for(
+            spec_id=stored.spec_id,
+            content_version=breakdown_cv,
+            groupby=_SECTOR_BREAKDOWN_GROUPBY,
+            artifact_digest=_digest(data),
+        )
+        for data in rendered
+    ]
+    assert [
+        [warning["code"] for warning in content["warnings"]] for content in contents if content
+    ] == [[], [get_data_tool.INCOMPLETE_METADATA_WARNING], []]
+    assert get_data_tool.INCOMPLETE_METADATA_WARNING in text_of(results[1])
+    assert get_data_tool.INCOMPLETE_METADATA_WARNING not in text_of(results[2])
 
 
 async def test_a_sole_contributor_summed_call_returns_the_raw_frame_without_error(
@@ -4481,7 +4679,10 @@ async def test_a_sole_contributor_summed_call_returns_the_raw_frame_without_erro
     assert upstream.fetched == [upstream.raw_cv, upstream.raw_cv]
     raw_ref = FrameRef(spec_id=stored.spec_id, content_version=upstream.raw_cv)
     summed_ref = frame_ref_for(
-        spec_id=stored.spec_id, content_version=upstream.raw_cv, groupby=_SUM_GROUPBY
+        spec_id=stored.spec_id,
+        content_version=upstream.raw_cv,
+        groupby=_SUM_GROUPBY,
+        artifact_digest=upstream.digest_of(upstream.raw_cv),
     )
     assert summed.structured_content["frame_ref"] == summed_ref.model_dump(mode="json")
     assert summed_ref != raw_ref
@@ -4966,12 +5167,18 @@ async def test_a_recorded_root_is_minted_again_with_its_options_and_scope(
         spec_id=stored.spec_id,
         content_version=upstream.content_version,
         columns=("observationAbout_type",),
+        artifact_digest=upstream.digest_by_rendering[True],
     )
     assert minted.options == options
     assert minted.stat_var_count == 1
     assert await frame_store.get(minted.frame) is not None
     assert await frame_store.get_mint_record(minted.frame) == MintRecord(
-        frame=minted.frame, dataset=dataset, options=options, scope=scope, stat_var_count=1
+        frame=minted.frame,
+        dataset=dataset,
+        options=options,
+        scope=scope,
+        stat_var_count=1,
+        artifact_digest=upstream.digest_by_rendering[True],
     )
 
 
@@ -5513,6 +5720,7 @@ async def test_a_typed_and_a_plain_read_of_one_mint_are_two_frames(
         dataset=dataset,
         options=plain_options | {"columns": ["observationAbout_type"]},
         stat_var_count=1,
+        artifact_digest=upstream.digest_by_rendering[True],
     )
     assert "observationAbout_type" not in plain_frame[0].columns
     assert typed_frame[0].table.column("observationAbout_type").to_pylist() == [
@@ -5713,6 +5921,7 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
         content_version=_FlowMint.CUT_VERSION,
         columns=KIND_COLUMNS,
         without_party_totals=True,
+        artifact_digest=_digest(upstream.artifacts[True]),
     )
     assert cut_ref != kept_ref
     # The repeat is a store hit: it fetches nothing and names the same frame.
@@ -5780,7 +5989,10 @@ async def test_a_typed_flow_frame_is_named_by_the_enrichment_of_its_own_roles(
     listed = ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS]
     named = FrameRef.model_validate(result.structured_content["frame_ref"])
     assert named == frame_ref_for(
-        spec_id=stored.spec_id, content_version=upstream.content_version, columns=tuple(listed)
+        spec_id=stored.spec_id,
+        content_version=upstream.content_version,
+        columns=tuple(listed),
+        artifact_digest=_digest(upstream.artifacts[False]),
     )
     record = await frame_store.get_mint_record(named)
     assert record is not None

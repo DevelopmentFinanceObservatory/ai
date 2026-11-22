@@ -12,7 +12,8 @@ and `harness.rolling_cards` read them.
 
 A call is keyed by its verb, the RFC 8785 form of its arguments, and what the store
 holds under each frame it names: the frame's `frame_sha256` and its trace without its
-`execution_identity`. A replayed call writes what the verb stored and returns its
+`execution_identity`, and without an unset `artifact_digest`, which a trace gained after the
+fixture was recorded. A replayed call writes what the verb stored and returns its
 answer. A call the fixture lacks fails the test.
 """
 
@@ -65,7 +66,7 @@ def _named_frames(verb: str, arguments: Mapping[str, Any]) -> list[Mapping[str, 
 
 async def _held(ref: Mapping[str, Any]) -> object:
     """What the store holds under `ref`: its frame's `frame_sha256` and its trace
-    without its `execution_identity`."""
+    without its `execution_identity` or an unset `artifact_digest`."""
     pair = FrameRef(spec_id=ref["spec_id"], content_version=ref["content_version"])
     held = await get_store().get(pair)
     if held is None:
@@ -74,6 +75,8 @@ async def _held(ref: Mapping[str, Any]) -> object:
     shown = _json(trace)
     assert isinstance(shown, dict)
     shown.pop("execution_identity", None)
+    if shown.get("artifact_digest", "") is None:
+        del shown["artifact_digest"]
     return {"frame": frame_sha256(frame), "trace": shown}
 
 

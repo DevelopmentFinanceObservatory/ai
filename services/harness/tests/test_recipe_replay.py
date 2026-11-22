@@ -593,6 +593,18 @@ async def test_a_replay_of_unmoved_data_names_the_frame_already_published(scene:
     assert len(scene.apis.published()) == posts
 
 
+async def test_a_root_with_a_member_this_build_does_not_know_is_replayed(scene: Scene) -> None:
+    """A recipe published by a build whose mint record carries a later member replays:
+    the roots are read as `read_mint_record` reads a stored record."""
+    original, recipe = await scene.fixed()
+    recipe = {**recipe, "roots": [{**root, "a_later_member": "x"} for root in recipe["roots"]]}
+
+    replayed = await scene.replay(recipe)
+
+    assert isinstance(replayed, Replayed)
+    assert replayed.frame == original
+
+
 async def test_without_an_execution_identity_from_dfo_apis_every_verb_is_called(
     scene: Scene,
 ) -> None:
@@ -788,6 +800,40 @@ async def test_a_kind_column_sum_registered_under_a_salted_pair_is_recognised_as
     assert isinstance(outcome, Refused)
     assert (outcome.stage == "mint") is (not stamp_kept)
     assert (outcome.code == "root_rendering_ambiguous") is (not stamp_kept)
+
+
+@pytest.mark.parametrize("digest_kept", [True, False], ids=["digest-kept", "digest-dropped"])
+async def test_a_sum_registered_under_a_pair_naming_its_files_digest_is_recognised_as_the_sum(
+    scene: Scene, digest_kept: bool
+) -> None:
+    """A root whose pair names the groupby and the digest of the file it was read from
+    must hand the digest back to `frame_ref_for` to be seen as the sum. Without it the
+    pair is not reproduced and the root reads as unsummed once a second StatVar
+    contributes."""
+    digest = "sha256:" + "d" * 64
+    _, recipe = await scene.fixed(OPTIONS | {"groupby": _GROUPBY})
+    (root,) = recipe["roots"]
+    root["frame"] = frame_ref_for(
+        spec_id=root["dataset"]["spec_id"],
+        content_version=root["dataset"]["content_version"],
+        groupby=_GROUPBY,
+        artifact_digest=digest,
+    ).model_dump()
+    if digest_kept:
+        root["artifact_digest"] = digest
+    scene.dataset.content_version = SECOND
+    scene.dataset.frame = Frame.build(
+        role_keys=["reporter"],
+        rows=reporter_rows(SECOND_VALUES) + reporter_rows(SECOND_VALUES, stat_var="dcid:Other"),
+    )
+    # A root past the mint stage reaches the verb, which answers busy.
+    scene.tools.answers["filter"] = _BUSY
+
+    outcome = await scene.replay(recipe)
+
+    ambiguous = isinstance(outcome, Refused) and outcome.code == "root_rendering_ambiguous"
+    assert ambiguous is (not digest_kept)
+    assert isinstance(outcome, Pending) is digest_kept
 
 
 async def test_a_recovered_one_stat_var_sum_that_now_holds_two_is_refused(scene: Scene) -> None:

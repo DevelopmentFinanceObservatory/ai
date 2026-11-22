@@ -20,6 +20,7 @@ import httpx2
 import pyarrow as pa
 import pytest
 from analysis_mcp import verbs as analysis_verbs
+from analysis_mcp.runner_client import RunnerClient, runner_holder
 from common.materialisation import (
     FrameRef,
     FrameTooLarge,
@@ -1937,6 +1938,86 @@ async def test_a_redraw_of_a_series_on_the_canvas_as_the_turn_began_states_no_fi
     assert _figures(redrawn["charts"][0]) == []
     assert _figures(named["charts"][0]) == [("NGA", 54.5, "2024")]
     assert _figures(next_turn["charts"][0]) == ([("NGA", 54.5, "2024")] if removed_first else [])
+
+
+_PEACE = "civilian peace-building, conflict prevention and resolution"
+
+
+@pytest.mark.parametrize("named", [_PEACE, "CRSPurposeCode15220"])
+async def test_a_table_of_breakdown_codes_names_its_series_by_their_labels(
+    monkeypatch: pytest.MonkeyPatch, named: str
+) -> None:
+    """A table whose `stat_var_crsPurpose` cells hold a code dcid and a label
+    names the code's series by its label with the dcid after it, read from the
+    graph for the dcid alone, and the label cell's by the label. A name the
+    model gives as the label or as the dcid finds the code's series with no
+    read of the frame's rows."""
+    envelope = resolved_revision("table")
+    template = envelope["component"]["rows"][0]
+    envelope["component"]["rows"] = [
+        {
+            **template,
+            "series_id": f"s_{number}",
+            "dimensions": {"stat_var_crsPurpose": cell},
+            "period": "2024",
+            "value": value,
+        }
+        for number, (cell, value) in enumerate(
+            [("CRSPurposeCode15220", 7.0), ("basic education", 3.0)]
+        )
+    ]
+    executor = FakeExecutor()
+    executor.written = drawn_cards.write_reply(envelope)
+    asked: list[list[str]] = []
+
+    def graph(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/api/graph/nodes"
+        dcids = json.loads(request.content)["dcids"]
+        asked.append(dcids)
+        code = {
+            "ref": "CRSPurposeCode15220",
+            "kind": "code",
+            "label": f"{_PEACE} (CRS Purpose)",
+            "code": {"property": "crsPurpose", "code_system": {"label": "CRS Purpose"}},
+        }
+        return httpx2.Response(200, json={"nodes": [code]})
+
+    runner_holder.set(
+        RunnerClient(
+            base_url="http://runner.test",
+            timeout_s=5.0,
+            read_timeout_s=5.0,
+            caller_principal=None,
+            auth=_no_token,
+            transport=httpx2.MockTransport(graph),
+        )
+    )
+    frame_reads: list[object] = []
+
+    async def frame_work(ref: object, work: object) -> None:
+        frame_reads.append(ref)
+
+    monkeypatch.setattr(orchestrator_tools, "_frame_work", frame_work)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    chart = _one_chart(frame_id_for(REF))[0] | {"state_values_for": [named]}
+
+    (card,) = (await tools["make_charts"]([chart], ctx))["charts"]
+
+    peace = f"{_PEACE} (CRSPurposeCode15220)"
+    assert card["holds"]["series"] == [peace, "basic education"]
+    assert "not_matched" not in card
+    assert "not_in_card" not in card
+    assert _figures(card) == [
+        (peace, 7.0, "2024", "largest"),
+        ("basic education", 3.0, "2024", "smallest"),
+    ]
+    assert asked == [["CRSPurposeCode15220"]]
+    assert frame_reads == []
+
+
+async def _no_token() -> dict[str, str]:
+    return {}
 
 
 def _bars(codes: list[str]) -> dict[str, Any]:
