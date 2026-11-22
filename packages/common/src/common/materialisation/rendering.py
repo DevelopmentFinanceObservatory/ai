@@ -57,7 +57,7 @@ ROOT_READ_OPTIONS = frozenset(
 # one of them, so this asks for the cheapest, a bare parquet file in the frame layout,
 # written with no projection and no graph name read. A mint with `columns` adds them
 # to these options, and its frame is that rendering
-# (`data_mcp.frame_materialisation._select_requested_artifact`).
+# (`data_mcp.frame_materialisation.select_requested_artifact`).
 DEFAULT_MINT_OPTIONS: Mapping[str, Any] = MappingProxyType(
     {"format": "parquet", "bundle": False, "layout": "frame"}
 )

@@ -473,8 +473,9 @@ async def _record_moved_pair(lost: MintRecord, frame: FramePair) -> tuple[str, s
 
     `frame` alone may be the raw head, the pair of the plain frame, when the rendering leaves
     the frame unchanged, so the frame is named as `get_data` names it (`frame_ref_for`) and
-    `frame` is the record's `dataset`. The stamp and the StatVar count described the old
-    frame, so neither is kept. A value that does not fit `FrameRef` writes nothing and names itself.
+    `frame` is the record's `dataset`. The stamp, the artifact digest and the StatVar count
+    described the old frame, so none is kept. A value that does not fit `FrameRef` writes
+    nothing and names itself.
     """
     try:
         dataset = FrameRef(spec_id=frame.spec_id, content_version=frame.content_version)
@@ -493,6 +494,7 @@ async def _record_moved_pair(lost: MintRecord, frame: FramePair) -> tuple[str, s
             "dataset": dataset,
             "stat_var_count": None,
             "enrichment_stamp": None,
+            "artifact_digest": None,
         }
     )
     await write_mint_record(moved, logger=logger)

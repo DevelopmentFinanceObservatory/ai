@@ -287,9 +287,11 @@ def root_identity(dataset: Mapping[str, str], *, enrichment_stamp: str | None) -
     """A root's identity: the apis `{spec_id, content_version}` its frame was
     minted from, and the enrichment stamp the frame was named under
     (`MintRecord.enrichment_stamp`) when it has one. apis keeps a version's
-    `content_version` across a change of party kinds, so the stamp is what tells two
-    frames of one version apart (`common.materialisation.frame_ref_for`).
-    Without a stamp the identity is the pair alone."""
+    `content_version` across a change of party kinds, so the stamp tells apart the
+    frames of one version read before and after such a change. A frame's name also
+    holds the digest of the file it was read from (`common.materialisation.frame_ref_for`),
+    which this identity does not, so two files apis rendered for one version under one
+    stamp share an identity. Without a stamp the identity is the pair alone."""
     identity = {"spec_id": dataset["spec_id"], "content_version": dataset["content_version"]}
     if enrichment_stamp is not None:
         identity["enrichment_stamp"] = enrichment_stamp

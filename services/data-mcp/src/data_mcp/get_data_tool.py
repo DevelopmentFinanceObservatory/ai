@@ -64,9 +64,11 @@ from data_mcp.frame_materialisation import (
     ENRICHMENT,
     KIND_COLUMNS,
     WITHOUT_PARTY_TOTALS,
+    is_incomplete_rendering,
     materialise_and_register,
     replayed_mint_options,
     resolved_options,
+    select_requested_artifact,
 )
 from data_mcp.get_data_digest import (
     BreakdownLevel,
@@ -84,6 +86,7 @@ from data_mcp.manifest import (
     DefinitionModel,
     Manifest,
     SeriesStatisticsModel,
+    WarningModel,
     render_validation_errors,
     strip_manifest,
 )
@@ -1083,22 +1086,47 @@ async def _finish_mint_response(
 
 
 def _narrowed_to_rendering(manifest: Manifest, *, options: Mapping[str, Any]) -> Manifest:
-    """`manifest` listing only the artifact whose `rendering` equals `options`, and the
-    statistics artifact.
+    """`manifest` listing only the artifact of the requested rendering
+    (`frame_materialisation.select_requested_artifact`), and the statistics artifact.
 
     apis answers a mint with one data rendering, the one it resolved for the request,
     beside the statistics, so the narrowed list holds the same artifacts unless the
-    rendering apis resolved differs from `options`. The resource links and the harness's freshness date
-    (`harness.provenance.data_artifact`) read the narrowed list, and so does the frame
-    fetch of a mint with columns or a groupby. A manifest without the requested
-    rendering keeps only its statistics, and `materialise_and_register` refuses such a
-    mint unless the store already holds the frame. A default mint's frame is the
+    rendering apis resolved differs from `options`. The resource links and the harness's
+    freshness date (`harness.provenance.data_artifact`) read the narrowed list, and so
+    does the frame fetch of a mint with columns or a groupby. A manifest without the
+    requested rendering keeps only its statistics, and `materialise_and_register`
+    refuses such a mint before it reads the store. A default mint's frame is the
     version's canonical frame, which the snapshot route lists and no mint response
     does.
+
+    A file apis linked after a failed graph metadata read is listed under its
+    incomplete rendering, and the narrowed manifest carries an
+    `INCOMPLETE_METADATA_WARNING` for it.
     """
     statistics = find_statistics_artifact(manifest)
-    artifacts = [a for a in manifest.artifacts if a.rendering == options or a is statistics]
-    return manifest.model_copy(update={"artifacts": artifacts})
+    requested = select_requested_artifact(manifest, options=options)
+    artifacts = [a for a in manifest.artifacts if a is requested or a is statistics]
+    warnings = list(manifest.warnings)
+    if requested is not None and is_incomplete_rendering(requested.rendering):
+        # First, so the digest's warning cap keeps it before apis' other warnings.
+        warnings.insert(0, _incomplete_metadata_warning())
+    return manifest.model_copy(update={"artifacts": artifacts, "warnings": warnings})
+
+
+# The code of the warning `get_data` adds when the file it read is one apis rendered after
+# a failed graph metadata read (`frame_materialisation.is_incomplete_rendering`).
+INCOMPLETE_METADATA_WARNING = "metadata_incomplete"
+
+
+def _incomplete_metadata_warning() -> WarningModel:
+    """The `INCOMPLETE_METADATA_WARNING` for a frame read from an incomplete file."""
+    return WarningModel(
+        code=INCOMPLETE_METADATA_WARNING,
+        severity="warn",
+        message="dfo-apis could not read the graph when it rendered this file, so some "
+        "labels or place types in the frame may be missing. A later get_data call reads "
+        "a complete file once dfo-apis renders one.",
+    )
 
 
 async def _post_mint(

@@ -84,7 +84,7 @@ from common.live_apis import (
     LiveApisNotConfigured,
     RefreshResult,
 )
-from common.materialisation import MintRecord, get_store
+from common.materialisation import MintRecord, get_store, read_mint_record
 from common.recipe import replay_key, root_identity
 from common.row_budget import RowBudget
 from common.telemetry import EventLevel, use_request_span
@@ -332,7 +332,7 @@ def _normal_form_and_roots(recipe: Mapping[str, Any]) -> tuple[str, list[MintRec
     if not isinstance(normal_form_hash, str) or not isinstance(roots, list):
         raise _Refusal(RECIPE_INVALID, "the stored recipe has no normal form hash or roots")
     try:
-        return normal_form_hash, [MintRecord.model_validate(root) for root in roots]
+        return normal_form_hash, [read_mint_record(root) for root in roots]
     except ValidationError as exc:
         raise _Refusal(
             RECIPE_INVALID,
