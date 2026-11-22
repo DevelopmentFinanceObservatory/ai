@@ -7573,12 +7573,6 @@ def test_a_plan_at_the_requirement_limit_holds_the_sum_over_its_whole(
             _g7_africa_share(whole=_G7_WHOLE),
             id="sum-not-stated",
         ),
-        # The whole leaves no party open beside the recipients it opens.
-        pytest.param(
-            (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum", kept_open=("donor",)),),
-            None,
-            id="keeps-a-side-the-whole-does-not-leave-open",
-        ),
     ],
 )
 def test_a_plan_whose_whole_sums_are_not_its_wholes_aggregates_is_refused(
@@ -7634,6 +7628,43 @@ def test_requirements_dropping_a_whole_drop_its_sum(decision: DecisionFactory) -
 
     assert rebuilt.whole_sums == ()
     assert rebuilt.evidence_requirements == tuple(restated)
+
+
+def test_a_part_naming_the_set_it_read_across_keeps_its_whole_s_sum(
+    decision: DecisionFactory,
+) -> None:
+    """Every G7 donor's aid to Africa, totalled, as a share of their aid to every
+    recipient, the recipients summed keeping each donor apart. The part restated
+    naming the G7 in place of its `across` donors, as the translator restates a
+    part whose pin holds that side to one set (`translator.discovery.name_pinned_groups`),
+    keeps the sum, which now keeps the G7 apart where it kept each donor."""
+    sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
+    g7 = Entity(name="Group of Seven", role="donor")
+    africa = Entity(name="Africa", role="recipient")
+    part, whole, total, share = _g7_africa_share(whole=_G7_WHOLE, pooled=True)
+    each = part.model_copy(update={"entities": (africa,), "across": ("donor",)})
+    pooled = AggregateRequirement(
+        id="g7_africa_pooled", input_id=each.id, reduction=Reduction.SUM, group_by=(GroupBy.PERIOD,)
+    )
+    over_pool = share.model_copy(update={"numerator": RequirementSide(input_id=pooled.id)})
+    written = [each, pooled, whole, total, over_pool]
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=with_whole_sums(written, sums),
+        whole_sums=sums,
+    )
+    named = each.model_copy(update={"entities": (africa, g7), "across": ()})
+
+    rebuilt = with_authored_requirements(plan, [named, *written[1:]])
+
+    assert rebuilt.whole_sums == sums
+    assert split_of(plan).kept_open == {"g7_total_aid_sum": ("donor",)}
+    assert split_of(rebuilt).kept_open == {"g7_total_aid_sum": ()}
+    assert [(role.role, role.open) for role in frame_shapes(rebuilt)["g7_total_aid_sum"].roles] == [
+        ("donor", False)
+    ]
 
 
 @pytest.mark.parametrize(

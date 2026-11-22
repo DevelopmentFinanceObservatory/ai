@@ -51,7 +51,6 @@ from planner.operations import (
     SumOfOperation,
     Translation,
 )
-from planner.parties import flow_side
 from planner.plan import (
     DatasetRequirement,
     Entity,
@@ -64,7 +63,7 @@ from planner.plan import (
     split_of,
     stated_names,
     unknown_names,
-    whole_read,
+    whole_on_source,
 )
 from planner.proof import mismatches
 from planner.records import (
@@ -337,19 +336,10 @@ def wholes_on_their_sources(
     summed: Collection[str],
 ) -> dict[str, DatasetRequirement]:
     """Each whole of `requirements_by_id` whose part it holds, read on the source
-    `discovered` holds for it, by requirement id.
+    `discovered` holds for it, by requirement id (`planner.plan.whole_on_source`).
 
-    A whole (`DatasetRequirement.whole_of`) covers what its part covers less
-    the side it opens (`planner.plan.whole_read`). On that side it reads what
-    its source, the compile of the part with the side left open, holds there,
-    under the part's role phrase for it (`planner.plan.opened_role`): the
-    side's word in `across` where the source leaves it open
-    (`compiler.sources.open_side_column`), which the aggregate `propose_plan`
-    added sums (`planner.plan.WholeSum`), else the entities it binds there by
-    their refs, the total Search counts the side as. A whole with no source
-    yet reads the side open where `summed` names it, as the plan reads it,
-    and as its part's coverage alone otherwise. So does a sector whole, which
-    opens no side.
+    A whole with no source yet reads the side it opens open where `summed`
+    names it, as the plan reads it.
     """
     wholes: dict[str, DatasetRequirement] = {}
     for requirement_id, whole in requirements_by_id.items():
@@ -358,27 +348,9 @@ def wholes_on_their_sources(
         part = requirements_by_id.get(whole.whole_of.part)
         if not isinstance(part, DatasetRequirement) or part.whole_of is not None:
             continue
-        covered = whole_read(whole, part)
-        role = opened_role(whole, part)
-        source = discovered.get(requirement_id)
-        if role is None:
-            wholes[requirement_id] = covered
-            continue
-        open_side = (
-            requirement_id in summed
-            if source is None
-            else open_side_column(source, role) is not None
+        wholes[requirement_id] = whole_on_source(
+            whole, part, discovered.get(requirement_id), summed=requirement_id in summed
         )
-        if open_side:
-            wholes[requirement_id] = covered.model_copy(update={"across": (*covered.across, role)})
-            continue
-        side = flow_side(role)
-        held = [
-            Entity(name=entity.label, role=role, dcid=entity.ref)
-            for entity in (source.entities if source is not None else ())
-            if flow_side(entity.role) == side
-        ]
-        wholes[requirement_id] = covered.model_copy(update={"entities": (*covered.entities, *held)})
     return wholes
 
 
@@ -469,6 +441,15 @@ class _Build:
         self._check_source_width()
         self._check_capabilities()
         self._build_steps()
+        # A whole whose source and sum disagree is proposed again before anything
+        # reading it is judged (`_check_whole_sum`), so only its own issue stands.
+        self.issues = [
+            issue
+            for issue in self.issues
+            if issue.code is CompileIssueCode.WHOLE_SUM_UNMATCHED
+            or issue.operation_id is None
+            or not self._reads_unmatched(issue.operation_id)
+        ]
 
     def workflow(self, warnings: tuple[EvidenceIssue, ...]) -> Workflow:
         """Build the workflow, every sequence of it in the canonical order `self.order` fixes."""
@@ -710,7 +691,7 @@ class _Build:
         role = opened_role(stated, part)
         if role is None:
             return
-        open_side = open_side_column(source, role) is not None
+        open_side = open_side_column(source.open_entity_axes, role) is not None
         summed = requirement.id in self.summed
         if open_side == summed:
             return
@@ -2505,23 +2486,17 @@ class _Build:
         return op_id
 
     def _aggregate_arguments(self, operation: AggregateOperation) -> Arguments | None:
-        """An aggregate's arguments: its `group_by` as literal columns (`_group_columns`).
-
-        The aggregate summing a whole's open side (`planner.plan.WholeSum`)
-        groups by period, every closed column and each open one it keeps
-        apart (`kept_open`), so it sums the opened side alone.
-        """
+        """An aggregate's arguments: its `group_by` as literal columns (`_group_columns`),
+        each open column the aggregate summing a whole's open side keeps apart
+        (`planner.plan.HistorySplit.kept_open`) among them."""
         resolved = self.shapes.get(operation.input)
         if resolved is None:
             return None
-        kept = self.kept_open.get(operation.requirement_id)
-        if kept is None:
-            group_by = _group_columns(operation.group_by, resolved.columns)
-        else:
-            group_by = [
-                TIME_PERIOD_COLUMN,
-                *(role.column for role in resolved.columns if not role.open or role.role in kept),
-            ]
+        group_by = _group_columns(
+            operation.group_by,
+            resolved.columns,
+            kept_open=self.kept_open.get(operation.requirement_id, ()),
+        )
         args: dict[str, JsonValue] = {
             "aggregation": operation.reduction.value,
             "group_by": group_by,
@@ -3009,12 +2984,6 @@ class _Build:
         tool: ToolId | None = None,
         finding: EvidenceIssueCode | None = None,
     ) -> None:
-        if (
-            code is not CompileIssueCode.WHOLE_SUM_UNMATCHED
-            and operation_id is not None
-            and self._reads_unmatched(operation_id)
-        ):
-            return
         self.issues.append(
             CompileIssue(
                 code=code,
@@ -3619,10 +3588,14 @@ def _role_columns(source: SelectedSource, requirement: DatasetRequirement) -> li
     return [column for column in every if column in wanted] or every
 
 
-def _group_columns(group_by: Sequence[GroupBy], roles: Sequence[ResolvedRole]) -> list[str]:
+def _group_columns(
+    group_by: Sequence[GroupBy], roles: Sequence[ResolvedRole], *, kept_open: Collection[str] = ()
+) -> list[str]:
     """`group_by` written as literal columns: every one of `roles` but the open ones for
     `ENTITY`, the breakdown's alone for `BREAKDOWN`, the frame's own period column for
-    `PERIOD`. An open column is left out of every group, so the aggregate sums it."""
+    `PERIOD`. An open column is left out of every group, so the aggregate sums it,
+    unless `kept_open` names its role, as the aggregate summing a whole's open side
+    keeps apart each party its part leaves open (`planner.plan.WholeSum`)."""
     columns: list[str] = []
     for key in group_by:
         if key is GroupBy.PERIOD:
@@ -3630,6 +3603,6 @@ def _group_columns(group_by: Sequence[GroupBy], roles: Sequence[ResolvedRole]) -
         elif key is GroupBy.BREAKDOWN:
             new = [role.column for role in roles if role.breakdown]
         else:
-            new = [role.column for role in roles if not role.open]
+            new = [role.column for role in roles if not role.open or role.role in kept_open]
         columns.extend(column for column in new if column not in columns)
     return columns

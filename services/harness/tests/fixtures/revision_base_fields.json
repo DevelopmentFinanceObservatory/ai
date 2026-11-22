@@ -246,8 +246,7 @@
   ],
   "planner.plan.WholeSum": [
     "whole_id",
-    "sum_id",
-    "kept_open"
+    "sum_id"
   ],
   "planner.plan.ScopeOptionState": [
     "option_id",

@@ -112,7 +112,6 @@ from pydantic import ConfigDict, Field, JsonValue, ValidationError, field_valida
 from compiler.frame_columns import columns_on_axes
 from compiler.sources import (
     identity_side,
-    party_class,
     pinned_stat_var,
     source_constraint_matches,
 )
@@ -1449,11 +1448,11 @@ def _scope_issues(
     identity puts it. A named entity on a carried side the identity leaves
     unbound, such as a recipient beside a donor the identity binds, is
     checked against the source's entities alone (`_entity_findings`). A key
-    no column carries is logged. The parties under it
-    (`compiler.sources.party_class`), such as a country under
-    `counterpart`, could sit on any side, so every named entity is compared
-    with them too; anything else there, such as a sector code, binds no
-    party.
+    no column carries is logged. The refs under it, such as a country or a
+    group under `counterpart`, could sit on any side, so every named entity is
+    compared with them too, the one on a carried side the identity leaves
+    unbound with them alone. A code the identity's own slots bind there
+    (`_slot_refs`), such as a sector's, binds no party and is left out.
     """
     if not evidence.identity:
         return []
@@ -1469,18 +1468,18 @@ def _scope_issues(
                 evidence.spec_id,
                 stray,
             )
-        # A party bound under a key no column carries could sit on any side.
-        stray_parties = {
-            ref for side in stray for ref in bound[side] if party_class(ref) is not None
-        }
-        named = {
-            one.ref
-            for entity in requirement.entities
-            for one in named_members(entity, evidence)
-            if stray_parties or (side := identity_side(one.role)) in bound or side not in carried
-        }
+        codes = _slot_refs(evidence.identity)
+        stray_refs = {ref for side in stray for ref in bound[side]} - codes
         refs = {ref for side, on_side in bound.items() if side in carried for ref in on_side}
-        issues.extend(_scope_entity_issues(requirement, named, refs | stray_parties))
+        compared: dict[str, set[str]] = {}
+        for entity in requirement.entities:
+            for one in named_members(entity, evidence):
+                side = identity_side(one.role)
+                if side in bound or side not in carried:
+                    compared.setdefault(one.ref, set()).update(refs, stray_refs)
+                elif stray_refs:
+                    compared.setdefault(one.ref, set()).update(stray_refs)
+        issues.extend(_scope_entity_issues(requirement, compared))
     requested = evidence.identity.get("requested_window")
     if isinstance(requested, dict):
         issues.extend(_scope_window_issues(requirement, requested))
@@ -1514,16 +1513,36 @@ def _identity_entities(entities: JsonValue) -> dict[str, set[str]] | None:
     return bound or None
 
 
+def _slot_refs(identity: Mapping[str, JsonValue]) -> set[str]:
+    """The codes `identity`'s slots bind, a `value` binding's `ref` and a `set`
+    binding's `refs`: a sector or a flow type, never a party."""
+    codes: set[str] = set()
+    slots = identity.get("slots")
+    for slot in slots if isinstance(slots, list) else ():
+        binding = slot.get("binding") if isinstance(slot, dict) else None
+        if not isinstance(binding, dict):
+            continue
+        if isinstance(ref := binding.get("ref"), str):
+            codes.add(ref)
+        if isinstance(refs := binding.get("refs"), list):
+            codes.update(ref for ref in refs if isinstance(ref, str))
+    return codes
+
+
 def _scope_entity_issues(
-    requirement: DatasetRequirement, wanted: set[str], bound: set[str]
+    requirement: DatasetRequirement, compared: Mapping[str, set[str]]
 ) -> list[EvidenceIssue]:
+    """The findings on each ref the requirement names that `compared` holds, against
+    the refs of the identity it is compared with there."""
     # A required entity is known by name; the refs it binds to are the ones
     # it names (`named_members`), a set's members included. One naming none
     # is already reported as missing or ambiguous, and has no ref to compare.
-    if not wanted:
+    if not compared:
         return []
+    wanted = set(compared)
+    bound = set().union(*compared.values())
     issues: list[EvidenceIssue] = []
-    if unbound := wanted - bound:
+    if unbound := {ref for ref, against in compared.items() if ref not in against}:
         issues.append(
             EvidenceIssue(
                 code=EvidenceIssueCode.SCOPE_ENTITIES_UNBOUND,

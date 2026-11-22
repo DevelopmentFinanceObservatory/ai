@@ -9016,19 +9016,35 @@ _DAC_DEVELOPING_GROUP = ResolvedGroup(
 
 
 @pytest.mark.parametrize(
-    ("recipients", "groups", "summed", "codes"),
+    ("recipients", "groups", "summed", "stray", "codes"),
     [
-        pytest.param([], [], True, [], id="source-leaves-it-open-summed"),
+        pytest.param([], [], True, False, [], id="source-leaves-it-open-summed"),
         pytest.param(
-            [_DAC_DEVELOPING], [_DAC_DEVELOPING_GROUP], False, [], id="source-binds-its-total"
+            [_DAC_DEVELOPING],
+            [_DAC_DEVELOPING_GROUP],
+            False,
+            False,
+            [],
+            id="source-binds-its-total",
         ),
         # The share would read one row per recipient there, which the sum
         # `propose_plan` derives again repairs, so that is the one issue.
-        pytest.param([], [], False, [Code.WHOLE_SUM_UNMATCHED], id="open-source-unsummed"),
+        pytest.param([], [], False, False, [Code.WHOLE_SUM_UNMATCHED], id="open-source-unsummed"),
+        # So it is where a step reading the whole is found at fault before the
+        # whole's source is read.
+        pytest.param(
+            [],
+            [],
+            False,
+            True,
+            [Code.WHOLE_SUM_UNMATCHED],
+            id="open-source-unsummed-with-a-stray-reader",
+        ),
         pytest.param(
             [_DAC_DEVELOPING],
             [_DAC_DEVELOPING_GROUP],
             True,
+            False,
             [Code.WHOLE_SUM_UNMATCHED],
             id="bound-source-summed",
         ),
@@ -9042,6 +9058,7 @@ def test_a_share_reads_its_whole_as_one_total_whichever_way_its_source_serves_it
     recipients: list[ResolvedEntity],
     groups: list[ResolvedGroup],
     summed: bool,
+    stray: bool,
     codes: list[Code],
 ) -> None:
     """G7 aid to Kenya as a share of its whole over every recipient. Where the
@@ -9049,7 +9066,9 @@ def test_a_share_reads_its_whole_as_one_total_whichever_way_its_source_serves_it
     Where it leaves the recipients open, the plan sums them by year in an
     aggregate `propose_plan` added (`Plan.whole_sums`), an ordinary step, and the
     share reads that. The plan's shapes and the compiled steps' role keys agree.
-    A plan whose sum disagrees with the source either way is refused."""
+    A plan whose sum disagrees with the source either way is refused, with no
+    other issue on a step reading the whole, a `stray` one carrying out no
+    requirement of the plan included."""
     g7 = Entity(name="G7", role="donor")
     aid = requirement(
         id="aid",
@@ -9096,6 +9115,11 @@ def test_a_share_reads_its_whole_as_one_total_whichever_way_its_source_serves_it
             RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
             RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
             *summing,
+            *(
+                [_aggregate(id="stray", requirement_id="stray", input="fetch_total")]
+                if stray
+                else []
+            ),
             ShareOfOperation(
                 id="share",
                 requirement_id="share",
@@ -9238,10 +9262,10 @@ def test_a_whole_its_source_leaves_open_on_both_sides_is_summed_keeping_the_part
 ) -> None:
     """Each donor's aid to Kenya as a share of its aid to every recipient. The
     whole's source leaves both the donors and the recipients open, and the sum
-    `propose_plan` added keeps the donors the part leaves open apart
-    (`WholeSum.kept_open`), so it groups by period and donor, summing the
-    recipients alone, and the share divides each donor by its own total. The
-    plan's shape of the sum keeps the donors open, as the compiled one does."""
+    `propose_plan` added keeps the donors the part leaves open apart, so it
+    groups by period and donor, summing the recipients alone, and the share
+    divides each donor by its own total. The plan's shape of the sum keeps the
+    donors open, as the compiled one does."""
     aid = requirement(
         id="aid",
         measure="official development assistance",
@@ -9262,7 +9286,7 @@ def test_a_whole_its_source_leaves_open_on_both_sides_is_summed_keeping_the_part
         denominator=RequirementSide(input_id="total"),
         **keyed,
     )
-    sums = (WholeSum(whole_id="total", sum_id="total_sum", kept_open=("donor",)),)
+    sums = (WholeSum(whole_id="total", sum_id="total_sum"),)
     plan = Plan.model_validate(
         {
             **_draft([decision()], [aid, whole, share]).model_dump(),

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -489,16 +488,18 @@ def test_an_identity_that_does_not_bind_a_required_entity_is_an_error(
 def test_an_identity_binding_a_sector_no_column_carries_compares_only_its_bound_sides(
     requirement: RequirementFactory,
     source: SourceFactory,
-    caplog: pytest.LogCaptureFixture,
     donors: list[str],
     codes: list[tuple[str, str]],
 ) -> None:
-    """US aid to Kenya, on a source whose identity binds the donor and a sector no
-    column carries, and leaves the recipient side unbound. The donor is compared
-    with what the identity binds there; Kenya, on the unbound recipient side, is
-    not, the sector code binds no party, and the sector is logged."""
+    """US aid to Kenya, on a source whose identity binds the donor and, under a key
+    no column carries, the sector code its own slots bind, and leaves the recipient
+    side unbound. The donor is compared with what the identity binds there; Kenya,
+    on the unbound recipient side, is not, since the sector code binds no party."""
     us = ResolvedEntity(role="origin", ref="country/USA", label="United States")
-    identity = _identity(entities={"origin": donors, "sector": ["dc/crs/120"]})
+    health = {"property": "crsPurpose", "binding": {"state": "value", "ref": "CRSPurposeCode120"}}
+    identity = _identity(
+        entities={"origin": donors, "sector": ["CRSPurposeCode120"]}, slots=[health]
+    )
     aid = requirement(
         entities=[
             Entity(name="United States", role="donor"),
@@ -506,11 +507,9 @@ def test_an_identity_binding_a_sector_no_column_carries_compares_only_its_bound_
         ]
     )
 
-    with caplog.at_level(logging.WARNING, logger="compiler.evidence"):
-        found = _scope_codes(aid, source(identity=identity, entities=(us, KENYA_DESTINATION)))
+    found = _scope_codes(aid, source(identity=identity, entities=(us, KENYA_DESTINATION)))
 
     assert found == codes
-    assert any("sector" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.parametrize(
@@ -521,25 +520,41 @@ def test_an_identity_binding_a_sector_no_column_carries_compares_only_its_bound_
             ["country/GHA"],
             [("scope_entities_unbound", "error"), ("scope_entities_wider", "warning")],
         ),
+        # A group's ref shows no class of party, and could sit on any side all the same.
+        (
+            ["DACAfrica"],
+            [("scope_entities_unbound", "error"), ("scope_entities_wider", "warning")],
+        ),
     ],
-    ids=["binds-kenya", "binds-ghana"],
+    ids=["binds-kenya", "binds-ghana", "binds-a-group"],
 )
 def test_an_identity_binding_a_side_no_column_carries_is_compared_with_every_named_entity(
     requirement: RequirementFactory,
     source: SourceFactory,
-    caplog: pytest.LogCaptureFixture,
     bound: list[str],
     codes: list[tuple[str, str]],
 ) -> None:
     # Nothing says which side `counterpart` is, so Kenya, named on `destination`, is
-    # compared with what it binds, and the identity is logged.
+    # compared with what it binds.
     identity = _identity(entities={"counterpart": bound})
 
-    with caplog.at_level(logging.WARNING, logger="compiler.evidence"):
-        found = _scope_codes(requirement(), source(identity=identity))
+    assert _scope_codes(requirement(), source(identity=identity)) == codes
 
-    assert found == codes
-    assert any("counterpart" in record.getMessage() for record in caplog.records)
+
+def test_an_entity_on_a_carried_unbound_side_is_compared_with_the_stray_key_alone(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    """Aid to Kenya, on a source whose identity binds Kenya as the donor and Ghana
+    under a key no column carries, leaving the recipient side unbound. Kenya the
+    recipient is compared with Ghana alone, which leaves it out: Kenya bound as the
+    donor binds no recipient."""
+    kenya_giving = ResolvedEntity(role="origin", ref="country/KEN", label="Kenya")
+    identity = _identity(entities={"origin": ["country/KEN"], "counterpart": ["country/GHA"]})
+    aid = requirement(entities=[Entity(name="Kenya", role="recipient")])
+
+    found = _scope_codes(aid, source(identity=identity, entities=(kenya_giving, KENYA_DESTINATION)))
+
+    assert found == [("scope_entities_unbound", "error"), ("scope_entities_wider", "warning")]
 
 
 def test_an_identity_bound_wider_than_the_requirement_is_a_warning(

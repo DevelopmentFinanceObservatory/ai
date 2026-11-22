@@ -1223,22 +1223,24 @@ def identity_side(key: str) -> str:
     return flow_side(key) or key
 
 
-def open_side_column(source: SelectedSource, role: str) -> str | None:
-    """The role column `source` leaves open on the side of the flow `role` names, one
-    row per party there; `None` where it leaves none open there, binding that side
-    to a total, or where `role` names no side.
+def open_side_column(axes: Iterable[OpenEntityAxis] | None, role: str) -> str | None:
+    """The role column of `axes`, the entity axes a spec block leaves open
+    (`open_entity_axes_of`, `SelectedSource.open_entity_axes`), on the side of the
+    flow `role` names, one row per party there; `None` where none is open there,
+    the block binding that side to a total, or where `role` names no side.
 
     A whole (`planner.plan.WholeOf`) opening that side reads it open where Search
     leaves it so, as the CRS does over every donor, and an aggregate sums it
-    (`planner.plan.WholeSum`).
+    (`planner.plan.WholeSum`). Admission reads the axes off Search's block for
+    the whole's pin (`submission.service._whole_sums`) and the compiler off the
+    source it reads for that pin (`compiler.compile._Build._check_whole_sum`),
+    both through `open_entity_axes_of`, which never fails on a block, so a
+    block whose other fields do not read still answers.
     """
     side = flow_side(role)
     if side is None:
         return None
-    return next(
-        (axis.column for axis in source.open_entity_axes or () if flow_side(axis.column) == side),
-        None,
-    )
+    return next((axis.column for axis in axes or () if flow_side(axis.column) == side), None)
 
 
 def source_whole_side(source: SelectedSource, column: str) -> WholeSide | None:

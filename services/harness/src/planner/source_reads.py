@@ -975,6 +975,7 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
         done = {
             _alignment_key(pin.origin, pin.option_ids, pin.whole_axis)
             for pin in aligned_pins(state)
+            if pin.complete
         }
         keys = [_alignment_key(item.spec_id, item.option_ids, item.whole_axis) for item in wanted]
         if not wanted or any(key in done for key in keys):

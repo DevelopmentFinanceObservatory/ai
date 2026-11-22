@@ -231,7 +231,6 @@ from planner.plan import (
     unstated_period_reductions,
     unstated_result_scopes,
     whole_of_fault,
-    whole_read,
     windowed_pin,
     windowed_pins,
     with_whole_sums,
@@ -671,8 +670,6 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     # derived again on every admission: the plan it amends is read without one
     # (`statement`).
     sums = _whole_sums(wholes, aligned_after)
-    if isinstance(sums, dict):
-        return sums
     settled, evidence_requirements = _without_replaced_whole_decisions(
         settle_decisions(drafts, aligned_after),
         evidence_requirements,
@@ -6595,7 +6592,8 @@ def _declared_wholes(
     (`whole_axis_held`, `planner.source_reads.compile_whole`) and every other choice
     held. `compiled` holds the wholes compiled so far
     (`AlignedPin.key`), so wholes declaring one part and axis share one
-    compile.
+    compile. One on record with no spec block is compiled again in its place
+    (`AlignedPin.complete`).
 
     Raises:
         _Unservable: With `BASES_UNALIGNED`, naming each whole not compiled
@@ -6619,7 +6617,7 @@ def _declared_wholes(
                 )
             )
         held = pins.get((pin, (), axis))
-        if held is not None:
+        if held is not None and held.complete:
             wholes[whole.id] = held
         else:
             wanted.setdefault(
@@ -6632,23 +6630,23 @@ def _declared_wholes(
 
 def _whole_sums(
     wholes: Mapping[str, AlignedPin], requirements: Sequence[EvidenceRequirement]
-) -> tuple[WholeSum, ...] | dict[str, object]:
+) -> tuple[WholeSum, ...]:
     """The aggregate each compiled whole of `wholes` takes over the side it opens
-    (`planner.plan.WholeSum`), in plan order, or the refusal for a whole one
-    aggregate cannot sum.
+    (`planner.plan.WholeSum`), in plan order.
 
-    Search's answer for the whole (`AlignedPin.block`) either binds that side
-    to one total, as DAC2a binds developing countries, and the whole is read
-    as it is, or leaves it open with one row per party there, as the CRS does
-    over every donor (`compiler.sources.open_side_column`). An open side is
-    summed by period under the first free id of `{whole}_sum`,
-    `{whole}_sum_2` and on (`planner.plan.whole_sum`), keeping apart each
-    party the part leaves open in `across` on its other sides
-    (`WholeSum.kept_open`). The block is read as the compiler reads the
-    whole's source (`compiler.sources.source_from_spec_block`), which checks
-    the pair again (`compiler.compile._Build._check_whole_sum`), so an answer
-    stating no block it can read answers `SHARE_WHOLE_UNDERIVABLE` with cause
-    `whole_unreadable`.
+    Search's answer for the whole (`AlignedPin.block`, which every pin
+    `_declared_wholes` returns holds) either binds that side to one total, as
+    DAC2a binds developing countries, and the whole is read as it is, or
+    leaves it open with one row per party there, as the CRS does over every
+    donor. The block's open axes say which (`compiler.sources.open_side_column`
+    over `compiler.sources.open_entity_axes_of`), read as the compiler reads
+    them off the whole's source when it checks the pair again
+    (`compiler.compile._Build._check_whole_sum`). That reading never fails on
+    a block, so a block whose other fields this release cannot read is summed
+    as Search serves it, and the compiler refers the whole back as it reads
+    the source (`translator.discovery._settled_whole`). An open side is summed
+    by period under the first free id of `{whole}_sum`, `{whole}_sum_2` and on
+    (`planner.plan.whole_sum`).
     """
     by_id = {requirement.id: requirement for requirement in requirements}
     taken = set(by_id)
@@ -6666,18 +6664,10 @@ def _whole_sums(
         if role is None:
             continue
         block = pin.block
-        source = readable_source(block) if block is not None else None
-        if source is None:
-            return share_whole_underivable(
-                whole_id=requirement.id,
-                part_spec_id=pin.origin,
-                reason=(
-                    f"Search's answer for the whole, {pin.spec_id}, states no dataset block "
-                    f"this release can read, so nothing says how it serves the {role} side"
-                ),
-                cause="whole_unreadable",
-            )
-        if open_side_column(source, role) is None:
+        assert block is not None, "a whole's compile holds its spec block (`_declared_wholes`)"
+        resolved = block.get("resolved")
+        axes = open_entity_axes_of(resolved if isinstance(resolved, Mapping) else {})
+        if open_side_column(axes, role) is None:
             continue
         stem = requirement.id[: MAX_IDENTIFIER_CHARS - len("_sum_99")]
         sum_id = next(
@@ -6688,13 +6678,7 @@ def _whole_sums(
             if candidate not in taken
         )
         taken.add(sum_id)
-        sums.append(
-            WholeSum(
-                whole_id=requirement.id,
-                sum_id=sum_id,
-                kept_open=whole_read(requirement, part).across,
-            )
-        )
+        sums.append(WholeSum(whole_id=requirement.id, sum_id=sum_id))
     return tuple(sums)
 
 
@@ -7374,12 +7358,9 @@ def share_whole_underivable(
     - `part_outside_whole`, `whole_members_unstated`: Search's whole does not
       hold, or does not show it holds, a party the part names
       (`planner.source_reads._uncontained`).
-    - `whole_unreadable`: Search's answer for the whole states no block the
-      compiler can read as its source (`_whole_sums`).
 
-    `_declared_wholes` answers the first two kinds, `_whole_sums`
-    `whole_unreadable`, and `planner.source_reads.compile_whole` every other
-    kind but `part_unpinned`.
+    `_declared_wholes` answers the first two kinds, and
+    `planner.source_reads.compile_whole` every other kind but `part_unpinned`.
     `detail.requirement_id` names the whole for the refusal's sentence
     (`harness.sentences`).
     """

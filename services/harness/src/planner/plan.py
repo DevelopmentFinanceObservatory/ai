@@ -54,7 +54,7 @@ from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, over
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
-from compiler.sources import source_from_spec_block, warning_code
+from compiler.sources import open_side_column, source_from_spec_block, warning_code
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from data_mcp.scope import ChoiceProvenance, ScopeAxis
@@ -2038,19 +2038,15 @@ class WholeSum(StrictModel):
     (`Plan.whole_sums`), and the model is shown the plan without it
     (`authored`).
 
-    `kept_open` is every party the whole keeps open beside that side, the
-    `across` words of its part on its other sides (`whole_read`): the
-    aggregate keeps each of them apart, one total per party there, as each
-    donor's total over every recipient.
+    The aggregate keeps apart every party the whole leaves open beside that
+    side, the `across` words of its part on its other sides (`whole_read`),
+    one total per party there, as each donor's total over every recipient.
+    They are read off the part as the plan states it (`HistorySplit.kept_open`),
+    so a part the translator rewrites keeps its sum in step.
     """
 
     whole_id: Identifier = Field(description="The whole whose open side the aggregate sums.")
     sum_id: Identifier = Field(description="The aggregate's id.")
-    kept_open: tuple[AcrossWord, ...] = Field(
-        default=(),
-        max_length=MAX_ACROSS_WORDS,
-        description="The `across` words of the whole the aggregate keeps apart.",
-    )
 
 
 class FirstYear(StrictModel):
@@ -2698,36 +2694,63 @@ def opened_role(whole: DatasetRequirement, part: DatasetRequirement) -> str | No
 def covered(requirement: DatasetRequirement, plan: Plan) -> DatasetRequirement:
     """Who `requirement` covers, in its own fields; any requirement but a whole as stated.
 
-    A whole (`whole_of`) covers its part's parties (`whole_read`) and, on the
-    side it opens, what its source serves there. Where `plan.whole_sums` sums
-    that side, the source leaves it open, and the side's word is in `across`,
-    one row per party there before the sum. Where the compiled source binds it,
-    the parties it binds there are entities, by their refs, as
-    `compiler.compile.wholes_on_their_sources` reads them. Before compile, and
-    for a stored plan whose source leaves the side open with no sum over it,
-    the side's word is in `across`, as a reader names the side off the source.
+    A whole (`whole_of`) covers what it reads on the source its plan's
+    workflow retrieves it from (`whole_on_source`), as the compiler reads it
+    (`compiler.compile.wholes_on_their_sources`). Before compile, it reads the
+    side it opens open where `plan.whole_sums` sums that side, a copy of the
+    whole included.
     """
     if requirement.whole_of is None:
         return requirement
     part = next((r for r in plan.evidence_requirements if r.id == requirement.whole_of.part), None)
     if not isinstance(part, DatasetRequirement):
         return requirement
-    read = whole_read(requirement, part)
-    role = opened_role(requirement, part)
+    origin = copy_origins(plan.rolling_copies).get(requirement.id, requirement.id)
+    return whole_on_source(
+        requirement,
+        part,
+        _compiled_source(plan, requirement.id),
+        summed=any(entry.whole_id == origin for entry in plan.whole_sums),
+    )
+
+
+def whole_on_source(
+    whole: DatasetRequirement,
+    part: DatasetRequirement,
+    source: SelectedSource | None,
+    *,
+    summed: bool,
+) -> DatasetRequirement:
+    """`whole`, the whole of `part`, covering what it reads on `source`, the source
+    compile retrieves it from, `None` before compile.
+
+    It covers its part's parties less the side it opens (`whole_read`), and on
+    that side what the source serves there: the side's word in `across`, one
+    row per party there, where the source leaves the side open
+    (`compiler.sources.open_side_column`), which the aggregate `propose_plan`
+    added sums (`WholeSum`); else the parties the source binds there, as
+    entities by their refs, the total Search counts the side as. With no
+    source the side reads open where `summed`, as admission read Search's
+    answer for the whole, and as `whole_read` reads it otherwise. A sector
+    whole opens no side.
+    """
+    read = whole_read(whole, part)
+    role = opened_role(whole, part)
     if role is None:
         return read
-    origin = copy_origins(plan.rolling_copies).get(requirement.id, requirement.id)
-    source = _compiled_source(plan, requirement.id)
-    summed = any(entry.whole_id == origin for entry in plan.whole_sums)
+    if source is None:
+        open_side = summed
+    else:
+        open_side = open_side_column(source.open_entity_axes, role) is not None
+    if open_side:
+        return read.model_copy(update={"across": (*read.across, role)})
     side = flow_side(role)
     held = [
         Entity(name=entity.label, role=role, dcid=entity.ref)
-        for entity in (source.entities if source is not None and not summed else ())
+        for entity in (source.entities if source is not None else ())
         if flow_side(entity.role) == side
     ]
-    if held:
-        return read.model_copy(update={"entities": (*read.entities, *held)})
-    return read.model_copy(update={"across": (*read.across, role)})
+    return read.model_copy(update={"entities": (*read.entities, *held)})
 
 
 def _compiled_source(plan: Plan, requirement_id: str) -> SelectedSource | None:
@@ -2749,12 +2772,9 @@ def _compiled_source(plan: Plan, requirement_id: str) -> SelectedSource | None:
 def wholes_as_read(
     requirements_by_id: Mapping[str, EvidenceRequirement], *, summed: Collection[str] = ()
 ) -> dict[str, EvidenceRequirement]:
-    """`requirements_by_id` with each whole whose part it holds read as `whole_read` reads it.
-
-    A whole `summed` names, one an aggregate sums the open side of
-    (`WholeSum`), also reads the side it opens in `across`, open, one row per
-    party there.
-    """
+    """`requirements_by_id` with each whole whose part it holds read before compile
+    (`whole_on_source`): the side it opens open, one row per party there, where
+    `summed` names it, one an aggregate sums the open side of (`WholeSum`)."""
     read: dict[str, EvidenceRequirement] = dict(requirements_by_id)
     for requirement_id, requirement in requirements_by_id.items():
         if not isinstance(requirement, DatasetRequirement) or requirement.whole_of is None:
@@ -2762,12 +2782,22 @@ def wholes_as_read(
         part = requirements_by_id.get(requirement.whole_of.part)
         if not isinstance(part, DatasetRequirement) or part.whole_of is not None:
             continue
-        whole = whole_read(requirement, part)
-        role = opened_role(requirement, part)
-        if requirement_id in summed and role is not None:
-            whole = whole.model_copy(update={"across": (*whole.across, role)})
-        read[requirement_id] = whole
+        read[requirement_id] = whole_on_source(
+            requirement, part, None, summed=requirement_id in summed
+        )
     return read
+
+
+def _whole_and_part(
+    requirements_by_id: Mapping[str, EvidenceRequirement], whole_id: str
+) -> tuple[DatasetRequirement, DatasetRequirement] | None:
+    """The whole `whole_id` names and its part, both dataset requirements of
+    `requirements_by_id`; `None` where either is not."""
+    whole = requirements_by_id.get(whole_id)
+    if not isinstance(whole, DatasetRequirement) or whole.whole_of is None:
+        return None
+    part = requirements_by_id.get(whole.whole_of.part)
+    return (whole, part) if isinstance(part, DatasetRequirement) else None
 
 
 def whole_sum(
@@ -2776,13 +2806,13 @@ def whole_sum(
     """The aggregate `entry` names, summing the side `whole`, the whole of `part`, opens.
 
     It sums by period, keeping every party the whole names on its other
-    sides (`whole_read`), each party it keeps open there (`WholeSum.kept_open`)
-    and its breakdown's codes, so its result is the whole as the plan reads
-    it, that side one total.
+    sides and each party it leaves open there (`whole_read`), and its
+    breakdown's codes, so its result is the whole as the plan reads it,
+    that side one total.
     """
     read = whole_read(whole, part)
     group_by: tuple[GroupBy, ...] = (GroupBy.PERIOD,)
-    if read.entities or entry.kept_open:
+    if read.entities or read.across:
         group_by = (GroupBy.PERIOD, GroupBy.ENTITY)
     elif read.breakdown is not None:
         group_by = (GroupBy.PERIOD, GroupBy.BREAKDOWN)
@@ -2797,14 +2827,7 @@ def whole_sums_made(
     """The entries of `sums` whose aggregate `with_whole_sums` adds to `requirements`:
     each naming a whole `requirements` states with its part."""
     by_id = {requirement.id: requirement for requirement in requirements}
-    made: list[WholeSum] = []
-    for entry in sums:
-        whole = by_id.get(entry.whole_id)
-        if not isinstance(whole, DatasetRequirement) or whole.whole_of is None:
-            continue
-        if isinstance(by_id.get(whole.whole_of.part), DatasetRequirement):
-            made.append(entry)
-    return tuple(made)
+    return tuple(entry for entry in sums if _whole_and_part(by_id, entry.whole_id) is not None)
 
 
 def with_whole_sums(
@@ -2818,13 +2841,11 @@ def with_whole_sums(
     out.
     """
     by_id = {requirement.id: requirement for requirement in requirements}
-    made: dict[str, AggregateRequirement] = {}
-    for entry in whole_sums_made(requirements, sums):
-        whole = by_id[entry.whole_id]
-        assert isinstance(whole, DatasetRequirement) and whole.whole_of is not None
-        part = by_id[whole.whole_of.part]
-        assert isinstance(part, DatasetRequirement)
-        made[whole.id] = whole_sum(whole, part, entry)
+    made: dict[str, AggregateRequirement] = {
+        entry.whole_id: whole_sum(*pair, entry)
+        for entry in sums
+        if (pair := _whole_and_part(by_id, entry.whole_id)) is not None
+    }
     renamed = {whole_id: aggregate.id for whole_id, aggregate in made.items()}
     summed: list[EvidenceRequirement] = []
     for requirement in requirements:
@@ -3174,8 +3195,8 @@ class HistorySplit(NamedTuple):
     `first_years` holds no year for (`whole_history_split`). `summed` names
     each whole an aggregate sums the open side of (`Plan.whole_sums`), a copy
     of one included, `sums` those aggregates, and `kept_open` maps each such
-    aggregate, a copy of one included, to the parties it keeps open
-    (`WholeSum.kept_open`, `split_of`).
+    aggregate, a copy of one included, to the parties it keeps open, read off
+    its whole's part (`whole_sum`, `split_of`).
     """
 
     requirements: tuple[EvidenceRequirement, ...]
@@ -5427,7 +5448,12 @@ def split_of(plan: Plan) -> HistorySplit:
     if not plan.whole_sums:
         return split
     wholes = {entry.whole_id for entry in plan.whole_sums}
-    kept = {entry.sum_id: entry.kept_open for entry in plan.whole_sums}
+    by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    kept = {
+        entry.sum_id: whole_read(*pair).across
+        for entry in plan.whole_sums
+        if (pair := _whole_and_part(by_id, entry.whole_id)) is not None
+    }
     origins = split.origins()
     return split._replace(
         summed=frozenset(
@@ -5771,33 +5797,16 @@ def _check_whole_sums(plan: Plan) -> None:
     model wrote.
 
     Each names a whole opening a side of the flow, one sum per whole, under an
-    id of its own, keeping apart exactly the parties the whole leaves open
-    beside that side (`WholeSum.kept_open`), and the plan less its copies
-    (`unsplit`) states exactly the plan the model wrote (`authored`) with
-    those aggregates added.
+    id of its own, and the plan less its copies (`unsplit`) states exactly the
+    plan the model wrote (`authored`) with those aggregates added.
     """
     by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
     for entry in plan.whole_sums:
-        whole = by_id.get(entry.whole_id)
-        part = (
-            by_id.get(whole.whole_of.part)
-            if isinstance(whole, DatasetRequirement) and whole.whole_of is not None
-            else None
-        )
-        if (
-            not isinstance(whole, DatasetRequirement)
-            or not isinstance(part, DatasetRequirement)
-            or opened_role(whole, part) is None
-        ):
+        pair = _whole_and_part(by_id, entry.whole_id)
+        if pair is None or opened_role(*pair) is None:
             raise ValueError(
                 f"the plan's sum {entry.sum_id!r} names {entry.whole_id!r}, which is no whole "
                 "opening a donor or recipient side of this plan"
-            )
-        if entry.kept_open != whole_read(whole, part).across:
-            raise ValueError(
-                f"the plan's sum {entry.sum_id!r} keeps apart {list(entry.kept_open)!r}, and "
-                f"the whole {entry.whole_id!r} leaves {list(whole_read(whole, part).across)!r} "
-                "open beside the side it opens"
             )
     wholes = [entry.whole_id for entry in plan.whole_sums]
     if len(set(wholes)) != len(wholes):
@@ -7024,6 +7033,14 @@ class AlignedPin(StrictModel):
         """The spec block Search answered the compile with, `None` where it states none."""
         block = self.digest.get("spec_block")
         return block if isinstance(block, Mapping) else None
+
+    @property
+    def complete(self) -> bool:
+        """Whether the pin holds what its readers read: a whole's compile its spec
+        block, which says how Search serves the side the whole opens
+        (`submission.service._whole_sums`), so one without is compiled again; any
+        other pin as it is."""
+        return self.whole_axis is None or self.block is not None
 
 
 def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
