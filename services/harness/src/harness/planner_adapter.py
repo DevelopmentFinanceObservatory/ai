@@ -93,6 +93,7 @@ from planner.plan import (
     record_optional_decline,
     record_unsupported,
     save_amendment_entry,
+    save_answered_in_words,
     save_decision_pick,
     save_pin_sources,
     save_plan,
@@ -503,6 +504,10 @@ class PlannerAdapter:
                 record_optional_decline(
                     state, UnsupportedOperation.NO_OPERATION_COVERS, terminal=True
                 )
+        # Whether this run reads the user's own-words answer, which a
+        # `starts_new_plan` call may name as the message asking a new
+        # question (`submission.service._restart_blocked`).
+        save_answered_in_words(state, answered is not None and _typed_reply(answer) is not None)
         ctx.state[_SKILLS_BEFORE_ENTRY_STATE_KEY] = len(skills_read(state))
         # A `resolve_definition` the request's wall-clock bound cuts keeps running here
         # for a later proposal in the same entry to be served, and is
@@ -891,12 +896,17 @@ class PlannerAdapter:
         """What `__call__` answers for a refusal that ends the entry: its plain
         sentence (`harness.sentences.refusal_sentence`), which the planner and
         the orchestrator read, whether another plan for the same ask could
-        succeed, and its code."""
+        succeed, and its code. A `QUESTION_FIXED` refusal also carries,
+        under `new_question_in`, which of the user's messages the call named
+        as asking the new question, when it named one."""
+        detail = refused.get("detail")
+        source = detail.get("new_question_in") if isinstance(detail, Mapping) else None
         return {
             "refused": {
                 "text": refusal_sentence(refused),
                 "final": refused.get("code") in PlannerAdapter._FINAL_CODES,
                 "code": refused.get("code"),
+                **({"new_question_in": source} if isinstance(source, str) else {}),
             }
         }
 
@@ -1128,6 +1138,15 @@ class _Answered(NamedTuple):
     referral: Mapping[str, Any] | None
 
 
+def _typed_reply(answer: object) -> str | None:
+    """The text the user typed in `answer`, the resume value of the
+    planner's ask (`resume_answers`), whose one question is `q1`, or `None`
+    when they typed none: a pick of an option, or a skip."""
+    reply = (resume_answers(answer) or {}).get("q1") or {}
+    text = reply.get("text") if reply.get("kind") == "text" else None
+    return text if isinstance(text, str) and text.strip() else None
+
+
 def _answer_text(answered: _Answered) -> str:
     """The close of the brief of the entry the user's answer resumes: the
     referral the run that asked saw last, the question it asked, then what the
@@ -1148,10 +1167,10 @@ def _answer_text(answered: _Answered) -> str:
     }
     reply = (resume_answers(answered.answer) or {}).get("q1") or {}
     picked = str(reply.get("spec_id")) if reply.get("kind") == "option" else None
-    text = reply.get("text") if reply.get("kind") == "text" else None
+    text = _typed_reply(answered.answer)
     if picked is not None:
         said = f"They picked {offered.get(picked, picked)!r}, id `{picked}`."
-    elif isinstance(text, str) and text.strip():
+    elif text is not None:
         said = f"They answered in their own words: {cut_user_text(text, MAX_QUESTION_CHARS)}"
     else:
         said = "They left the question unanswered, so nothing it asked is settled by them."

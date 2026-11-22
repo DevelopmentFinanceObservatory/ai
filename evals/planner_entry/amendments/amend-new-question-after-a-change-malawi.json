@@ -1,0 +1,209 @@
+{
+  "id": "amend-new-question-after-a-change-malawi",
+  "amendment": {
+    "base": "rank-top-donors-malawi",
+    "prior_plan": {
+      "question": "Which donors give the most official development assistance to Malawi?",
+      "answer_mode": "computed",
+      "decisions": [
+        {
+          "slot": "donor_rank_limit",
+          "description": "How many top donors to include in the ranking",
+          "options": [
+            "5",
+            "10",
+            "20"
+          ],
+          "chosen": "10",
+          "resolved_by": "planner_default",
+          "rationale": "Top 10 is standard for answering 'which donors give the most' without an explicit limit.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": null,
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": 10
+          }
+        },
+        {
+          "slot": "rank_among",
+          "description": "Whether to rank among all reporting providers or a preselected subset",
+          "options": [
+            "population",
+            "named"
+          ],
+          "chosen": "population",
+          "resolved_by": "planner_default",
+          "rationale": "The user asked generally which donors give the most, requiring comparison across all reporting donors.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": null,
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": "population",
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          }
+        },
+        {
+          "slot": "source_spec_d2b30b014e5744a917b48bce9d36f8b7",
+          "description": "How the flow is counted.",
+          "options": [
+            "gross disbursements",
+            "net disbursements"
+          ],
+          "chosen": "gross disbursements",
+          "resolved_by": "planner_default",
+          "rationale": "Search elected gross disbursements for this source.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": "spec_d2b30b014e5744a917b48bce9d36f8b7",
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          }
+        }
+      ],
+      "evidence_requirements": [
+        {
+          "kind": "dataset",
+          "id": "oda_malawi",
+          "decision_ids": [
+            "source_spec_d2b30b014e5744a917b48bce9d36f8b7"
+          ],
+          "measure": "official development assistance",
+          "entities": [
+            {
+              "name": "Malawi",
+              "role": "recipient"
+            }
+          ],
+          "across": [
+            "donor"
+          ],
+          "period": {
+            "start": 1960,
+            "end": 2024
+          },
+          "period_end_open": true,
+          "frequency": "annual",
+          "unit": null,
+          "source": null,
+          "source_ref": null,
+          "source_exclude": false,
+          "source_code": null,
+          "source_spec_id": "spec_d2b30b014e5744a917b48bce9d36f8b7",
+          "coverage": {
+            "on_missing": "report_gaps"
+          },
+          "stat_vars": null,
+          "breakdown": null
+        },
+        {
+          "kind": "rank",
+          "id": "top_donors",
+          "decision_ids": [
+            "donor_rank_limit",
+            "rank_among"
+          ],
+          "input_id": "oda_malawi",
+          "direction": "highest_first",
+          "among": "population",
+          "axis": "donor",
+          "reduction": "sum",
+          "window_start": 2024,
+          "window_end": 2024,
+          "per_period": false,
+          "limit": 10,
+          "rolling": {
+            "window_start": {
+              "anchor": "latest",
+              "offset": 0
+            },
+            "window_end": {
+              "anchor": "latest",
+              "offset": 0
+            }
+          }
+        }
+      ],
+      "declined": [],
+      "asks": [
+        "The donors that give the most ODA to Malawi"
+      ],
+      "answered": [
+        {
+          "ask": 0,
+          "outputs": [
+            "top_donors"
+          ]
+        }
+      ],
+      "ask_breakdowns": [
+        {
+          "ask": 0,
+          "by": [
+            "donor"
+          ],
+          "over": []
+        }
+      ],
+      "asks_across_years": [],
+      "period_licences": [],
+      "rolling_copies": [],
+      "first_years": [
+        {
+          "requirement_id": "oda_malawi",
+          "year": 1960
+        }
+      ],
+      "version": 1,
+      "previous_version": null,
+      "status": "draft",
+      "approved_revision": null,
+      "approved_at": null
+    },
+    "text": "Never mind the donors. How much ODA did the UK give Malawi in 2020?",
+    "new_question_in": "amendment"
+  }
+}

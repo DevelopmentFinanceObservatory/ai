@@ -143,6 +143,7 @@ from planner.plan import (
     FirstYear,
     FixDisagreement,
     FullHistory,
+    NewQuestionSource,
     OneYearRead,
     PinSource,
     PinVerdict,
@@ -166,6 +167,7 @@ from planner.plan import (
     aligned_pins,
     alignments,
     amendment_entry,
+    answered_in_words,
     authored,
     bound_fixes,
     check_acyclic,
@@ -375,6 +377,7 @@ class Proposal:
     across_years: Sequence[Any] = ()
     amends_version: int | None = None
     starts_new_plan: bool = False
+    new_question_in: NewQuestionSource | str | None = None
 
 
 # The most failing fields one `propose_plan` refusal names. A plan can fail on
@@ -525,8 +528,11 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         existing,
         amends_version=proposal.amends_version,
         starts_new_plan=proposal.starts_new_plan,
+        amendment_entry=in_amendment_entry,
         rounds_so_far=load_plan_rounds(view.state),
         question=question,
+        new_question_in=_new_question_source(proposal.new_question_in),
+        answered_in_words=answered_in_words(view.state),
     )
     if isinstance(resolved, dict):
         return resolved
@@ -1872,11 +1878,13 @@ _BUDGET_APPROVABLE = (
 )
 _BUDGET_FRESH = "The user's next message opens a fresh budget."
 
-# The refusal for a `starts_new_plan` call while a plan is recorded. The call is
-# how the model tells the harness the user's reply asks a different question,
-# so the message says what happened and that nothing further is needed from
-# it. `harness.planner_adapter` ends the turn on this code as it does on
-# `BUDGET_EXHAUSTED`.
+# The refusal for a `starts_new_plan` call while a plan is recorded, with or
+# without `amends_version`. The call is how the model tells the harness the
+# user's reply asks a different question, so the message says what happened
+# and that nothing further is needed from it. `harness.planner_adapter` ends
+# the planner's run on this code as it does on `BUDGET_EXHAUSTED`, and the
+# graph's `planner` node ends the turn, handing the reply on as the next
+# turn's question.
 _QUESTION_FIXED_RESTART = (
     "This turn's question is fixed, so `starts_new_plan` cannot open a plan for a "
     "different one; nothing is recorded, and the plan already on record stands "
@@ -1893,6 +1901,9 @@ def _resolve_intent(
     starts_new_plan: bool,
     rounds_so_far: int,
     question: str | None = None,
+    amendment_entry: bool = False,
+    new_question_in: NewQuestionSource | None = None,
+    answered_in_words: bool = False,
 ) -> tuple[Plan | None, int] | dict[str, object]:
     """Which plan a `propose_plan` call means, from what the call states.
 
@@ -1905,12 +1916,15 @@ def _resolve_intent(
     read as starting a fresh plan and drop every item it did not restate.
 
     With nothing recorded, the call is a first draft. With a plan recorded,
-    an `amends_version` naming that same version patches it. Anything else is
-    refused, naming the version to pass so the next call is correct.
-
-    `amends_version` and `starts_new_plan` are read in that order, so a call
-    stating both is treated as an amendment, since a payload shaped as a
-    patch is read as one. `rounds_so_far` counts the proposals made in this
+    a call stating `starts_new_plan` alone reports a different question. On
+    an entry the user's amendment opened (`amendment_entry`), so does a call
+    stating it beside `amends_version`: the user's words are what the call
+    classifies, and reading the pair as a patch would record an empty
+    amendment and drop the user's question. On any other entry (a replan
+    after a run, a pick's replan) there are no words of the user's to hand
+    on, so the pair is read as the patch its payload is. Otherwise an
+    `amends_version` naming the recorded version patches it. Anything else
+    is refused, naming the version to pass so the next call is correct. `rounds_so_far` counts the proposals made in this
     entry into the planner. `PlannerAdapter` zeroes it on every entry that is not
     a mid-turn resume. An amendment increments it, since every version opens a
     fresh discovery budget, and past `MAX_PLAN_ROUNDS` the call is refused
@@ -1921,7 +1935,7 @@ def _resolve_intent(
     held to `existing.question` rather than the call's own wording of the
     question it is answering:
 
-    - A restart (`starts_new_plan` with no `amends_version`) is refused with
+    - A restart, as above, is refused with
       `QUESTION_FIXED` before the round cap is even checked, ahead of
       `BUDGET_EXHAUSTED`. Both refusals record nothing, so nothing is lost
       by checking this one first, and a restart can never succeed under a
@@ -1938,8 +1952,13 @@ def _resolve_intent(
     """
     if existing is None:
         return None, 1
+    restart = starts_new_plan and (amends_version is None or amendment_entry)
     blocked = _restart_blocked(
-        existing, amends_version=amends_version, starts_new_plan=starts_new_plan
+        existing,
+        restart=restart,
+        new_question_in=new_question_in if amendment_entry else None,
+        amendment_entry=amendment_entry,
+        answered_in_words=answered_in_words,
     ) or _round_cap_blocked(existing, rounds_so_far=rounds_so_far)
     if blocked is not None:
         return blocked
@@ -1952,21 +1971,66 @@ def _resolve_intent(
 
 
 def _restart_blocked(
-    existing: Plan, *, amends_version: int | None, starts_new_plan: bool
+    existing: Plan,
+    *,
+    restart: bool,
+    new_question_in: NewQuestionSource | None,
+    amendment_entry: bool,
+    answered_in_words: bool,
 ) -> dict[str, object] | None:
-    """Return the `QUESTION_FIXED` refusal for a restart, or `None`.
+    """Return the refusal for a restart, or `None`: `QUESTION_FIXED`, whose
+    detail carries the call's `new_question_in` on an entry the user's
+    amendment opened: which of the user's messages asks the new question,
+    whose stored text the harness hands back as the next turn, or `none`
+    (`harness.graph.planning`). There, a restart that names no message, or
+    names `answer` while the run reads no own-words answer
+    (`answered_in_words`), is refused `INVALID_PLAN` first, correctable
+    within the round, since the harness would have no message to hand back.
 
     Split out of `_resolve_intent` to keep its own branch count within this
     project's `PLR0911` budget.
     """
-    if not (amends_version is None and starts_new_plan):
+    if not restart:
         return None
+    if amendment_entry and (
+        new_question_in is None
+        or (new_question_in is NewQuestionSource.ANSWER and not answered_in_words)
+    ):
+        stated = (
+            "names none"
+            if new_question_in is None
+            else "names `answer`, and the user answered no question of yours in their own words"
+        )
+        return problem(
+            ProblemCode.INVALID_PLAN,
+            "`starts_new_plan` names in `new_question_in` the user's message that states the "
+            f"new question, and this call {stated}. Name `amendment`, `answer` or `none` and "
+            "call again.",
+            outcome=Outcome.INVALID_INPUT,
+            action=Action(
+                call=PROPOSE_PLAN.call,
+                arguments={"starts_new_plan": True},
+                needs=("new_question_in",),
+            ),
+        )
     return problem(
         ProblemCode.QUESTION_FIXED,
         _QUESTION_FIXED_RESTART,
         outcome=Outcome.REFUSED,
-        detail={"version": existing.version},
+        detail={
+            "version": existing.version,
+            **({"new_question_in": new_question_in.value} if new_question_in else {}),
+        },
     )
+
+
+def _new_question_source(value: object) -> NewQuestionSource | None:
+    """`value`, a call's `new_question_in` as it arrived, as the message it
+    names, or `None` for no value or one that names no message."""
+    try:
+        return NewQuestionSource(value) if value is not None else None
+    except ValueError:
+        return None
 
 
 def _round_cap_blocked(existing: Plan, *, rounds_so_far: int) -> dict[str, object] | None:

@@ -12,7 +12,7 @@ explains the protocol around them, and `services/harness/tests/test_wire.py`
 pins the two together against the fixtures in
 `services/harness/tests/wire_fixtures/studio/`.
 
-v1 records its design decisions as numbered deltas (1–25; 16 is folded
+v1 records its design decisions as numbered deltas (1–28; 16 is folded
 into 11). The deltas are marked where they apply and listed in the delta
 index at the end.
 
@@ -22,12 +22,14 @@ breaking structural change bumps the version and ships a migration note.
 
 ## Endpoints
 
-| Method | Route                     | Returns                                                     |
-| ------ | ------------------------- | ----------------------------------------------------------- |
-| POST   | `/api/studio/turn`        | SSE stream of frames                                        |
-| POST   | `/api/studio/interrupt`   | a NEW SSE stream resuming the paused turn (delta 1)         |
-| POST   | `/api/studio/cancel`      | 204; aborts the conversation's in-flight segment (delta 14) |
-| POST   | `/api/studio/composition` | the new composition manifest, as a JSON body                |
+| Method | Route                     | Returns                                                                |
+| ------ | ------------------------- | ---------------------------------------------------------------------- |
+| POST   | `/api/studio/turn`        | SSE stream of frames                                                   |
+| POST   | `/api/studio/interrupt`   | a NEW SSE stream resuming the paused turn (delta 1)                    |
+| POST   | `/api/studio/resume`      | a NEW SSE stream carrying on a running turn its client left (delta 26) |
+| POST   | `/api/studio/cancel`      | 204; aborts the conversation's in-flight segment (delta 14)            |
+| POST   | `/api/studio/composition` | the new composition manifest, as a JSON body                           |
+| GET    | `/api/studio/state`       | the conversation as stored, as a JSON body; takes no lease (delta 26)  |
 
 The Studio's other routes (`/api/sources`, `/api/datasets/{spec_id}`,
 gallery, published views) are website/platform reads served outside the
@@ -45,9 +47,8 @@ Every studio request carries:
   verification check is one function in `harness/auth.py`, where full JWT
   validation plugs in later without touching routes.
 - `conversation_id` in the body: client-minted, stable for one
-  conversation. `session_id`, its earlier name, parses as a
-  deprecated alias in v1 (the fixtures still use it). Sending both
-  spellings in one body is refused.
+  conversation. `session_id`, its earlier name, is an unknown member and
+  is refused.
 
 Server-side conversation state is keyed on (principal derived from the
 token, `conversation_id`), so conversations are isolated per principal.
@@ -90,10 +91,11 @@ and the frame lineage behind it, exist only in that instance's process.
 A `composition.mutate` body also carries `conversation_id` (delta 5; the
 `request-05` fixture carries it).
 
-## Requests: four kinds, discriminated on `kind`
+## Requests: five kinds, discriminated on `kind`
 
 Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
-`CancelRequest` (`STUDIO_REQUEST_ADAPTER` parses the union).
+`CancelRequest`, `ResumeRequest` (`STUDIO_REQUEST_ADAPTER` parses the
+union). `GET /api/studio/state` takes query parameters and no body.
 
 - **`turn.request`** starts or continues a turn. `message` is the user's
   prose. `surface` ∈ `studio | download | embed` and is **optional with
@@ -106,7 +108,8 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
   (optional, default `true`; delta 11): when `false`, components the turn
   creates still stream as `component.created` but are NOT appended to the
   composition; the client adds them later with an `add` op (the Auto-add
-  toggle and the "✓ Added" chip).
+  toggle and the "✓ Added" chip). `after_turn` (optional; delta 28) names
+  the turn the request follows.
 - **`interrupt.response`** resumes a paused turn: `interrupt_id` echoed
   verbatim from the pausing frame, `decision` ∈
   `approve | amend | reject | answer | skip`. `payload` carries the
@@ -131,9 +134,13 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
   running segment when the server observes it (the response's ASGI call
   ends and the stream's owner cancels the work) but leaves the turn and
   its calculations unfinished: the next `turn.request` carries an unfinished
-  calculation on and lists its results, and a retried
+  calculation on and lists its results, a retried
   `interrupt.response` with the same answer carries the turn on where it
-  stopped. To end the work rather than leave it, send `cancel`.
+  stopped, and `turn.resume` carries the turn on with no answer
+  (delta 26). To end the work, send `cancel`.
+- **`turn.resume`** → `POST /api/studio/resume` (delta 26) carries on the
+  conversation's open turn `turn_index`, see "Resuming a turn and reading
+  the conversation" below.
 - **`composition.mutate`** applies canvas operations
   (`add | reorder | remove | pin | unpin | set_layout_hints | set_card_meta`) and returns the new manifest. `add` (delta 11) appends a
   block for a component this conversation already streamed (the server
@@ -154,21 +161,21 @@ each in `wire_fixtures/studio/` (elicitation has three: the plain
 question, the skippable free-text question, and two questions in one
 pause; `plan.proposed` has a second showing a failed switch).
 
-| `event`               | What it is                                                                                                                                  |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `message.delta`       | append to the streaming assistant message; text is GitHub-flavored Markdown (delta 15)                                                      |
-| `message.complete`    | final text for the turn's message                                                                                                           |
-| `plan.proposed`       | the plan awaiting approval; **pauses and ends the stream** (delta 1)                                                                        |
-| `plan.versioned`      | a new plan replaces the one `supersedes` names; a fresh `plan.proposed` follows. `version` can be lower than the superseded one (see below) |
-| `plan.approved`       | the plan the user approved; sent once, by the segment whose `approve` node takes the approval, and by no retry after it (delta 22)          |
-| `activity.step`       | one execution step, the only progress channel; `step_id` is the call's position within the stream (see `docs/frontend-interface.md`)        |
-| `component.created`   | a new card: opaque `payload` + `fact_summary` + inline `provenance`                                                                         |
-| `component.revised`   | new revision under the same `component_id`                                                                                                  |
-| `composition.updated` | the authoritative canvas manifest                                                                                                           |
-| `elicitation.request` | one to three clarifying questions; **pauses and ends the stream** (delta 1)                                                                 |
-| `suggestions`         | follow-up chips (may be empty in v1; delta 8)                                                                                               |
-| `error`               | stream-fatal tool error (delta 4)                                                                                                           |
-| `done`                | turn complete: `trace_id` + final composition or null                                                                                       |
+| `event`               | What it is                                                                                                                                                                                                                                      |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `message.delta`       | append to the streaming assistant message; text is GitHub-flavored Markdown (delta 15)                                                                                                                                                          |
+| `message.complete`    | final text for the turn's message                                                                                                                                                                                                               |
+| `plan.proposed`       | the plan awaiting approval; **pauses and ends the stream** (delta 1)                                                                                                                                                                            |
+| `plan.versioned`      | a new plan replaces the one `supersedes` names; a fresh `plan.proposed` follows. `version` can be lower than the superseded one (see below)                                                                                                     |
+| `plan.approved`       | the plan the user approved; sent by the segment whose `approve` node takes the approval, and again as the first frame of an answer retry or `turn.resume` that carries on a turn which already took it; a page keys it by `revision` (delta 22) |
+| `activity.step`       | one execution step, the only progress channel; `step_id` is the call's position within the stream (see `docs/frontend-interface.md`)                                                                                                            |
+| `component.created`   | a new card: opaque `payload` + `fact_summary` + inline `provenance`                                                                                                                                                                             |
+| `component.revised`   | new revision under the same `component_id`                                                                                                                                                                                                      |
+| `composition.updated` | the authoritative canvas manifest                                                                                                                                                                                                               |
+| `elicitation.request` | one to three clarifying questions; **pauses and ends the stream** (delta 1)                                                                                                                                                                     |
+| `suggestions`         | follow-up chips (may be empty in v1; delta 8)                                                                                                                                                                                                   |
+| `error`               | stream-fatal tool error (delta 4)                                                                                                                                                                                                               |
+| `done`                | turn complete: `trace_id` + final composition or null, and `new_question` (delta 27)                                                                                                                                                            |
 
 `component.created.payload` / `component.revised.payload` are the platform's resolved revision, passed through verbatim as the envelope `{schema_version, catalog_version, component_id, revision, provenance, component}` that dfo-spec-kit's `envelope.schema.json` defines. `payload.component` is the resolved component for its type, points included, and `payload.provenance` is the platform's provenance for that revision, authoritative for the card's back. The member is opaque to this contract, which does not restate its shape.
 
@@ -186,7 +193,8 @@ through the website proxy and Cloud Run are fragile.
 
 Amendment flow: `decision: "amend"` yields `plan.versioned` followed by a
 fresh `plan.proposed` (a new pause, new `interrupt_id`) on the new stream.
-The new `version` is higher than the one it supersedes.
+The new `version` is higher than the one it supersedes. An `amend` whose
+text asks a different question ends the turn instead (delta 27, below).
 
 A plan the harness cannot read when the client approves or amends it is
 planned again from the question. The new stream sends a `message.delta`
@@ -606,6 +614,83 @@ ignores it and an older harness omits it.
 
 `schema_version` stays 1.
 
+## Resuming a turn and reading the conversation (delta 26, v1.11)
+
+A turn makes progress only while a client holds its stream. When the client leaves, the server stops the running segment and clears the lease, and the turn stays open at the node it was running. A page that comes back reads the conversation's state and carries the turn on.
+
+### The turn index on every stream
+
+Every stream, from `/turn`, `/interrupt` and `/resume`, names the index of the turn it carries in the `x-dfo-turn-index` response header, a decimal integer from 1. It is the `turn.index` a state read gives that turn and the `turn_index` of its entry in `closed_since`, so a page keys each prompt and reply on the server's index and counts nothing itself. A refused request carries no header. The header leaves every frame as it was, so a client that ignores it reads the stream as before.
+
+### `GET /api/studio/state`
+
+`GET /api/studio/state?conversation_id=<id>&since=<n>` answers `ConversationRead` as a JSON body. It takes no lock and no lease, so it answers while a turn streams on any instance, and it changes nothing. An unknown `conversation_id` answers 404 `not_found`. Members with no value are left out, as frames leave them out.
+
+| Member         | What it holds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `turn`         | the latest turn: `index`, `status` (`running`, `paused`, `done`, `failed`, `cancelled`, `abandoned`), `trace_id`, `user_message` (as `closed_since` words it, so a page can show the prompt of a turn it never held), `approved`, the `plan.approved` frame of each plan the open turn approved, one per `revision`, absent when it approved none, `lease_live`, and `retry_after_seconds`, the lease's remaining time, while `lease_live` is true; absent before the first turn                                                                                                                                   |
+| `closed_since` | the closed turns after `since`, oldest first, at most 3: `turn_index`, `user_message`, `reply` (as `message.complete` sent it, empty when the turn closed with none), `component_ids`, `cards` (each id's stored card: `component_id`, `type`, `title`, `revision`, `fact_summary`; no `payload` or `provenance`, which the component id reads from the presentation platform), `approved`, the `plan.approved` frame of each plan the turn approved, one per `revision`, `error`, the code a turn that did not end cleanly closed on, and `new_question` on a turn ended by one (delta 27); empty without `since` |
+| `closed_total` | how many closed turns the conversation holds, which is the index of the last one                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `pause`        | when `turn.status` is `paused`: the `interrupt_id` to answer, its `kind` (`plan` or `elicitation`), and `frames`, the frames the pause was sent as, its `plan.proposed` or `elicitation.request` last, each with the `seq` it went out with                                                                                                                                                                                                                                                                                                                                                                        |
+| `manifest`     | the composition manifest; absent when the conversation has no canvas                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+
+`user_message` is the turn's record. It holds the message, with a `(then: ...)` line for each amendment, answer or switch on the turn's cards.
+
+Each read returns at most 3 closed turns, since each carries its cards. A page that lacks turns reads again with `since` set to the last `turn_index` it got, until it holds `closed_total` turns.
+
+A closed turn's `cards` are the cards at their current revision. A card a later turn revised shows that revision's `type`, `title`, `revision` and `fact_summary`. The canvas shows current cards, so a page drawing a closed turn's cards draws what the canvas holds.
+
+### Where a turn stands
+
+The server derives one standing for the latest turn from its stored record, its stored cursor, the lease, and the pause's stored entry. The read reports the standing as `turn.status`, and `/resume` acts on the same standing, so every status the read gives has one page action and one `/resume` answer.
+
+| Standing                                                                               | `turn.status`       | `lease_live` | `pause` | Page action                                                                                                                               | `/resume` answers                                      |
+| -------------------------------------------------------------------------------------- | ------------------- | ------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| a stream holds the turn, on any instance                                               | `running`           | `true`       | absent  | read again after `retry_after_seconds`, until the turn pauses, closes or its lease clears                                                 | 409 `transient_unavailable` with `retry_after_seconds` |
+| running, and no stream holds it                                                        | `running`           | `false`      | absent  | send `turn.resume`                                                                                                                        | 200, a new stream running the turn on                  |
+| paused on an answer `/interrupt` recorded and the turn has not yet taken               | `running`           | `false`      | absent  | send `turn.resume`                                                                                                                        | 200, a new stream carrying that answer on              |
+| paused on a question whose entry the server never stored, or stored without its frames | `running`           | `false`      | absent  | send `turn.resume`                                                                                                                        | 200, a new stream sending the pause again              |
+| paused on a question that awaits its answer                                            | `paused`            | `false`      | present | show `pause` and answer it with `interrupt.response`                                                                                      | 409 `edit_conflict`                                    |
+| closed                                                                                 | the record's status | `false`      | absent  | append the turns in `closed_since` the page lacks; send a closed turn's `new_question` as the next turn when the page holds none after it | 409 `edit_conflict`                                    |
+
+A live lease holds the turn whatever its record and cursor say, so a turn whose segment is still writing its pause or its close reads `running` until the write lands. A closed turn's status is the one its record states, since the record is what the stream told the client: `done` with no `error`, `cancelled` or `abandoned` for those codes, and `failed` for any other `error`, `state_not_saved` included. A closed status always comes with the turn's record, which a read with a lower `since` returns in `closed_since`.
+
+The server writes a turn's record and closes its cursor in one transaction. The closing write that commits a record closes the cursor with the status the record states. A turn recorded with its cursor open reads closed by the record, and the next request that loads the conversation closes the cursor.
+
+One failure stays ambiguous. A turn whose work failed ends its stream on the work's `error` frame. When the closing write that stores its record fails too, the store holds the turn running with no lease, which is what an instance that died mid-turn leaves. The read then reports `running` with `lease_live: false`, and `turn.resume` runs the turn on, although the page already showed its error. The store cannot tell the two apart, so the page follows the read. It resumes the turn and shows the stream the resume opens.
+
+### `POST /api/studio/resume`
+
+`POST /api/studio/resume` takes `{kind: "turn.resume", schema_version: 1, conversation_id, turn_index}` and answers a NEW SSE stream continuing the turn. The segment runs the node the turn stopped in again from its start, so the stream carries no `activity.step` lines for nodes before it. A `plan.approved` the turn has not yet sent goes out once, as on an `interrupt.response` retry. The stream opens with the `plan.approved` of each plan the turn already approved, under fresh `seq`s, since the client that left may have read none of them. A page keys them by `revision` and ignores one it holds. Frame numbers continue past every one the turn's earlier segments reserved (delta 2). The stream ends as any segment does: `done`, a pause, or an `error` frame.
+
+The route reads the standing before it claims the conversation and again after, since a segment whose lease lapsed can move the turn until the claim commits. Besides the answers in the table above:
+
+| Case                                               | Answer                                                                  |
+| -------------------------------------------------- | ----------------------------------------------------------------------- |
+| `turn_index` is not the conversation's latest turn | 409 `edit_conflict`, `refresh_then_retry`, `pointer: "/turn_index"`     |
+| a Stop is live for the turn                        | the turn closes `cancelled`, and the resume answers 409 `edit_conflict` |
+| unknown `conversation_id`                          | 404 `not_found`                                                         |
+
+Every 409 `edit_conflict` from `/resume` carries `refresh_then_retry` and `pointer: "/turn_index"`. Read the state again and follow what it shows. A resume whose client also leaves leaves the turn open in the same way, for the next resume.
+
+## A new question on the plan card (delta 27, v1.12)
+
+Users type new questions into the plan card's revise box. The client sends them as `amend`, and the planner decides whether the text changes the plan or asks something else (`propose_plan`'s `starts_new_plan`, with or without `amends_version`). For a new question, the turn ends with its plan set aside unapproved. The new stream sends a `message.complete` saying the plan was set aside for a new question, which a client without this delta still shows, then `done` with `new_question` and no `plan.versioned` or new card. `new_question` is the user's latest words as sent. That is the `amend` text or, when the planner asked a question about the amendment and the answer was the new question, the answer's text. The turn closes `done`, its pending interrupt is cleared, so a later answer to it gets 404, and the conversation's next turn sees that the plan was set aside for a new question.
+
+When the user's words ask for a new question without stating it, as "I want to ask something else" does, the planner names no message (`new_question_in` `none`). The turn closes `done` the same way, with the plan set aside, but `message.complete` reads "The plan was set aside. What would you like to ask?" and `done` carries no `new_question`. The client closes the card and waits for the user's next message.
+
+The client closes the card ("Taken as a new question") and sends `new_question` as the next `turn.request`, which is metered, opens its own trace, and plans or answers the question like any other. A state read's closed turn carries the same `new_question`, for a page that lost the stream before `done`. A client that ignores the field shows the message and loses the question. The delta adds one optional member, `done.new_question`, and keeps the existing frames, request kinds and turn statuses.
+
+## A turn that names the turn it follows (delta 28, v1.13)
+
+A page that sends a closed turn's `new_question` as the next turn sends it automatically, and two pages open on one conversation can both send it. `turn.request` gains an optional `after_turn`, the index of the turn the request follows, as a state read's `turn.index` or the stream's `x-dfo-turn-index` header gives it (0 before the first turn). The server compares it with the conversation's latest turn index under the row lock every turn's claim takes, in the claim's transaction, so of two requests naming the same turn at most one begins a turn. The other is answered 409:
+
+```json
+{"error": "edit_conflict", "retry": "refresh_then_retry", "constraint_id": "turn_moved", "pointer": "/after_turn", "detail": "the request follows turn 3, and the conversation's latest turn is 4", "fix": "read the conversation's state and show the turns it holds"}
+```
+
+`constraint_id: "turn_moved"` tells this refusal apart from a busy conversation, which answers 409 `transient_unavailable` with `retry_after_seconds`. A busy refusal comes first while another request's stream holds the conversation; once that stream ends, the retry answers `turn_moved`. On `turn_moved` the page reads the state, shows the turns it lacks, and does not send the question again. The check begins no turn, meters nothing and writes nothing. A request without `after_turn` is admitted as before.
+
 ## Count chips and count rows on the plan card (delta 29, v1.14)
 
 - Answers offer count chips, `apply_choice` chips with `choice_id`
@@ -678,7 +763,7 @@ Fixture values that are samples:
 1. `activity.step status=failed` is recoverable; a top-level `error` frame
    is stream-fatal and `done` does not follow.
 1. `Authorization: Bearer <token>` + client-minted `conversation_id` on
-   every request (`session_id` accepted as deprecated alias);
+   every request;
    `composition.mutate` gains `conversation_id`; conversation state keyed
    per principal; each conversation maps to its own platform
    `x-dfo-session` server-side.
@@ -744,6 +829,9 @@ Fixture values that are samples:
 1. `plan.proposed` gains an optional `new_plan`, `true` on a plan card that
    starts a new plan after an earlier plan in the same turn, so a first draft made after an
    earlier plan card in the turn reads as a new plan with its own `plan_version_id`.
+1. `POST /api/studio/resume` (`turn.resume`) carries on a running turn whose client left, on a new stream; `GET /api/studio/state` reads the conversation as stored (turn status and lease, closed turns after `since` with `closed_total`, the open pause and its frames, the manifest) with no lease; every stream names its turn in the `x-dfo-turn-index` header.
+1. `done` gains an optional `new_question`: an `amend` whose text asks a different question ends the turn, its plan set aside, and the client sends the text as the next `turn.request`. An `amend` that asks for a new question without stating it ends the turn the same way with no `new_question`, and the reply asks the user for their question.
+1. `turn.request` gains an optional `after_turn`, the turn it follows; a request whose `after_turn` is not the conversation's latest turn is refused 409 `edit_conflict` with `constraint_id: "turn_moved"` and begins no turn.
 1. `suggestions` gains count chips: `apply_choice` chips whose `choice_id`
    is `"<spec_id>:count"` and whose `option_id` is the spec_id of another
    way of counting the part's flow that Search offered, such as net

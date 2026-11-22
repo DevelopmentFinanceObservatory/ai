@@ -6,7 +6,8 @@ line of compact JSON, so a client that shows its model only `content` still
 sees the code, the retry mode and the fix. `refusal_text` renders that text
 for all four. `refusal_code` reads the code from a refusal's
 `structuredContent`. `detail_sentence` turns an upstream service's `detail`
-fragment into a sentence of a refusal's message.
+fragment into a sentence of a refusal's message. `REPOST_RECOVERS_CODES` are the
+refusal codes the same request sent once more can get past.
 
 Every refusal from those four also carries its code in `_meta` under
 `REFUSAL_META_KEY` (`refusal_meta`), where the combined server reads it.
@@ -30,6 +31,15 @@ from common.telemetry import current_trace_id
 
 # The tool result `_meta` key under which a refusal carries its code.
 REFUSAL_META_KEY = "org.one.dfo/refusal"
+
+# The codes a request sent once more, unchanged, can get past.
+# `upstream_version_changed` comes from a read of a source's newest version (the
+# analysis runner's Spec and `latest` roots and recipe replays, data-mcp's mint) whose
+# upstream refreshed twice while it loaded. dfo-apis caches rate tables by refresh
+# date, so the next request loads the refreshed table and reads the new version. A
+# ref pinned to a version that is gone refuses with another code. Each caller sends
+# the request once more, at once, and answers a second refusal as it stands.
+REPOST_RECOVERS_CODES = frozenset({"upstream_version_changed"})
 
 
 def refusal_text(

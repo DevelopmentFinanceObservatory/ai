@@ -108,6 +108,17 @@ APPROVED_RUN_KEY = "orchestrator:approved_run"
 # Written by the `planner` node, cleared by `plan_start`, and handed to the
 # agent by `plan_done`, since the amendment reaches the planner alone.
 ORCHESTRATOR_AMENDMENTS_KEY = "orchestrator:amendments"
+# The user's words typed on the plan card that the planner read as a new
+# question (`starts_new_plan`), written by the `planner` node as it ends the
+# turn on its `new_question` edge. The stream's `done` frame hands them to
+# the client to send as the next turn (`harness.studio_translate`).
+NEW_QUESTION_KEY = "orchestrator:new_question"
+# Set by the `planner` node as it ends the turn on its `new_question` edge
+# when the planner read the plan card's amendment as a new question that no
+# message of the user's states (`new_question_in` `none`). The turn closes
+# asking the user to send their question, and hands nothing back
+# (`harness.studio_translate`).
+ASK_FOR_QUESTION_KEY = "orchestrator:ask_for_question"
 # The state a planner entry replanning for a pick on the plan card puts back
 # when the replan does not land (`harness.graph.planning`), written when the
 # replan pauses on a planner-side ask and cleared when the entry ends, so it

@@ -1,0 +1,253 @@
+{
+  "id": "amend-new-question-share-health-kenya",
+  "amendment": {
+    "base": "share-health-oda-kenya",
+    "prior_plan": {
+      "question": "What share of Kenya's ODA went to health between 2015 and 2022?",
+      "answer_mode": "computed",
+      "decisions": [
+        {
+          "slot": "crs_stat_vars",
+          "description": "Whether to read providers' disbursements individually or summed across all providers for health aid",
+          "options": [
+            "sum",
+            "separate"
+          ],
+          "chosen": "sum",
+          "resolved_by": "planner_default",
+          "rationale": "Total health aid across all providers is needed.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": null,
+            "stat_vars": "sum",
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          }
+        },
+        {
+          "slot": "source_spec_8a11aefd4947af59104959f2fab852bf",
+          "description": "How the flow is counted.",
+          "options": [
+            "gross disbursements",
+            "net disbursements",
+            "commitments"
+          ],
+          "chosen": "gross disbursements",
+          "resolved_by": "planner_default",
+          "rationale": "Search elected gross disbursements for this source.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": "spec_8a11aefd4947af59104959f2fab852bf",
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          }
+        },
+        {
+          "slot": "source_spec_e511b06cd1033739fdaf8f1d028368d3",
+          "description": "How the flow is counted.",
+          "options": [
+            "gross disbursements",
+            "net disbursements"
+          ],
+          "chosen": "gross disbursements",
+          "resolved_by": "planner_default",
+          "rationale": "Search elected gross disbursements for this source.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": "spec_e511b06cd1033739fdaf8f1d028368d3",
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          }
+        },
+        {
+          "slot": "providers_differ_health_share",
+          "description": "Whether the inputs count the same providers' spending.",
+          "options": [
+            "each input as its dataset counts it",
+            "every input on one provider scope"
+          ],
+          "chosen": "each input as its dataset counts it",
+          "resolved_by": "planner_default",
+          "rationale": "The question asks for the inputs as their datasets count them, so they may count different providers' spending. Gross disbursements (health, official development assistance), from OECD Creditor Reporting System (CRS), does not say which providers it counts. Gross disbursements (official development assistance), from OECD DAC2A, does not say which providers it counts.",
+          "fixes": null,
+          "caveat": "providers_differ"
+        }
+      ],
+      "evidence_requirements": [
+        {
+          "kind": "dataset",
+          "id": "health_aid",
+          "decision_ids": [
+            "crs_stat_vars",
+            "source_spec_8a11aefd4947af59104959f2fab852bf"
+          ],
+          "measure": "Gross ODA disbursements to Kenya for health",
+          "entities": [
+            {
+              "name": "Kenya",
+              "role": "recipient"
+            }
+          ],
+          "across": [],
+          "period": {
+            "start": 2015,
+            "end": 2022
+          },
+          "period_end_open": false,
+          "frequency": "annual",
+          "unit": null,
+          "source": null,
+          "source_ref": null,
+          "source_exclude": false,
+          "source_code": null,
+          "source_spec_id": "spec_8a11aefd4947af59104959f2fab852bf",
+          "coverage": {
+            "on_missing": "report_gaps"
+          },
+          "stat_vars": "sum",
+          "breakdown": null
+        },
+        {
+          "kind": "dataset",
+          "id": "total_aid",
+          "decision_ids": [
+            "source_spec_e511b06cd1033739fdaf8f1d028368d3"
+          ],
+          "measure": "Gross disbursements to Kenya from official donors (DAC) for official development assistance",
+          "entities": [
+            {
+              "name": "Kenya",
+              "role": "recipient"
+            }
+          ],
+          "across": [],
+          "period": {
+            "start": 2015,
+            "end": 2022
+          },
+          "period_end_open": false,
+          "frequency": "annual",
+          "unit": null,
+          "source": null,
+          "source_ref": null,
+          "source_exclude": false,
+          "source_code": null,
+          "source_spec_id": "spec_e511b06cd1033739fdaf8f1d028368d3",
+          "coverage": {
+            "on_missing": "report_gaps"
+          },
+          "stat_vars": null,
+          "breakdown": null
+        },
+        {
+          "kind": "aggregate",
+          "id": "health_sum",
+          "decision_ids": [],
+          "input_id": "health_aid",
+          "reduction": "sum",
+          "group_by": [
+            "entity"
+          ]
+        },
+        {
+          "kind": "aggregate",
+          "id": "total_sum",
+          "decision_ids": [],
+          "input_id": "total_aid",
+          "reduction": "sum",
+          "group_by": [
+            "entity"
+          ]
+        },
+        {
+          "kind": "share_of",
+          "id": "health_share",
+          "decision_ids": [
+            "providers_differ_health_share"
+          ],
+          "numerator": {
+            "input_id": "health_sum",
+            "entity": "Kenya"
+          },
+          "denominator": {
+            "input_id": "total_sum",
+            "entity": "Kenya"
+          },
+          "axis": null,
+          "denominator_scope": null,
+          "accept_provider_difference": true
+        }
+      ],
+      "declined": [],
+      "asks": [
+        "Share of Kenya's ODA that went to health, 2015 to 2022"
+      ],
+      "answered": [
+        {
+          "ask": 0,
+          "outputs": [
+            "health_share"
+          ]
+        }
+      ],
+      "ask_breakdowns": [],
+      "asks_across_years": [
+        0
+      ],
+      "period_licences": [],
+      "rolling_copies": [],
+      "first_years": [],
+      "version": 1,
+      "previous_version": null,
+      "status": "draft",
+      "approved_revision": null,
+      "approved_at": null
+    },
+    "text": "Actually, what was Ghana's GDP in 2022?",
+    "new_question_in": "amendment"
+  }
+}

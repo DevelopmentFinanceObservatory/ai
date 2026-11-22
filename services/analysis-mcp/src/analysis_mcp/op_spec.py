@@ -100,6 +100,21 @@ _MAX_AGGREGATION_NAME_CHARS = 64
 # filter's typed interval refusal.
 _MAX_ORDERED_THRESHOLD_STRING_CHARS = 21
 MAX_RANK_LIMIT = 1000
+
+# The closed aggregation vocabulary of `aggregate` and `rank`.
+# `AggregateOpSpec.aggregation` is a plain `str`, not a pydantic `Literal`, so a
+# value outside this tuple reaches dfo-apis' analysis runner, which refuses it
+# `operation_uncovered` with the vocabulary in `fix`, rather than a generic schema
+# error.
+AGGREGATIONS: tuple[str, ...] = ("sum", "mean", "max", "min")
+
+# What the `aggregate` and `rank` tools tell a caller about `allow_sparse_breakdowns`.
+ALLOW_SPARSE_BREAKDOWNS_DESCRIPTION = (
+    "True counts an empty cell of a breakdown column (stat_var_<axis>, such as "
+    "stat_var_crsPurpose) as no flow, not a coverage gap. Set it for a flow that adds up, "
+    "such as aid by purpose, or when a coverage_insufficient refusal's fix names it. "
+    "Recipients, donors, years and stat_var still count every missing cell."
+)
 # The furthest a rolling period can sit behind the latest one, since the frame
 # grammar's years run from 0000 to 9999.
 MIN_ROLLING_OFFSET = -9999
@@ -156,9 +171,6 @@ class RelativeYear(BaseModel):
     anchor: Literal["latest"]
     offset: int = Field(strict=True, ge=MIN_ROLLING_OFFSET, le=0)
 
-
-# Why a call stating a `RelativeYear` refuses off the runner.
-RELATIVE_YEAR_ON_RUNNER_ONLY = "a relative year is resolved by the analysis runner only"
 
 # A `RelativeYear` as a tool lists it.
 _RELATIVE_YEAR_SCHEMA = {
@@ -517,9 +529,6 @@ Predicate = Annotated[
     Field(discriminator="kind"),
 ]
 
-# Rebuilds one predicate from its canonical dict, whichever kind it is.
-PredicateAdapter: TypeAdapter[Predicate] = TypeAdapter(Predicate)
-
 
 @with_config(ConfigDict(extra="forbid"))
 class ConvertedUnit(TypedDict):
@@ -605,10 +614,9 @@ class AggregateOpSpec(_OpSpecBase):
     """`aggregate`'s own reduction parameters.
 
     `aggregation` is deliberately a plain, length-bounded `str` rather than a
-    pydantic `Literal`. The closed vocabulary (`analysis_mcp.engine.
-    aggregate.AGGREGATIONS`) is enforced by the engine at runtime, so a
-    caller naming an aggregation outside the closed set reaches the tool's
-    own `operation_uncovered` refusal, with the vocabulary listed in `fix`,
+    pydantic `Literal`. The closed vocabulary (`AGGREGATIONS`) is enforced
+    by dfo-apis' analysis runner, so a caller naming an aggregation outside
+    the closed set reaches the runner's `operation_uncovered` refusal, with the vocabulary listed in `fix`,
     rather than a generic pydantic schema error indistinguishable from a
     malformed request.
 
@@ -617,6 +625,11 @@ class AggregateOpSpec(_OpSpecBase):
     candidate units in the refusal's `fix["units"]`). A retry supplying one
     of those values here, a unit ref or the object of a converted or
     composed unit, pins the aggregate to that unit's rows.
+
+    `allow_sparse_breakdowns`, left `False`, counts every `group_by` column in
+    the coverage grid. Set, the runner leaves the `stat_var_<axis>` columns a
+    summed breakdown keeps out of the grid, so a breakdown cell no row fills
+    counts as no gap. Every other column, `stat_var` included, still counts.
     """
 
     verb: Literal[Verb.AGGREGATE] = Verb.AGGREGATE
@@ -625,6 +638,7 @@ class AggregateOpSpec(_OpSpecBase):
     ] = ()
     aggregation: str = Field(min_length=1, max_length=_MAX_AGGREGATION_NAME_CHARS)
     unit: PinnedUnit | None = None
+    allow_sparse_breakdowns: Annotated[bool, HASHED_WHEN_SET] = False
 
 
 class _SlicePairOpSpec(_OpSpecBase):
@@ -673,7 +687,7 @@ class GrowthOpSpec(_OpSpecBase):
     """`growth`'s own endpoint policy parameters.
 
     `window_start`/`window_end` are whole calendar years (`YYYY`) -- the
-    endpoint policy (`analysis_mcp.engine.growth`'s own docstring) reads each
+    endpoint policy (`dfo_analysis_engine.engine.growth`'s own docstring) reads each
     entity's rows in those two years and counts coverage over the integer
     calendar span between them, so both are pinned to that
     format at the schema layer rather than the general `time_period` grammar
@@ -688,7 +702,7 @@ class GrowthOpSpec(_OpSpecBase):
     `(value_end - value_start) / value_start`, undefined -- and refused --
     over a zero or sign-crossing base; `absolute` computes
     `value_end - value_start` directly, defined over any base including
-    zero or a sign crossing (`analysis_mcp.engine.growth`'s own docstring).
+    zero or a sign crossing (`dfo_analysis_engine.engine.growth`'s own docstring).
     A `Literal` rather than `AggregateOpSpec.aggregation`'s open,
     engine-enforced `str`: the vocabulary is fixed at two members forever,
     so there is no retry-friendlier engine refusal being traded away by
@@ -732,7 +746,7 @@ class RankOpSpec(_OpSpecBase):
     required and non-empty, since ranking with no entity-identifying column
     would rank a single, undifferentiated row. `aggregation`, left `None`,
     ranks each entity's own single already-present value directly; set to
-    one of `analysis_mcp.engine.aggregate.AGGREGATIONS`, it reduces each
+    one of `AGGREGATIONS`, it reduces each
     entity's rows first (optionally windowed by `window_start`/`window_end`,
     which -- like `GrowthOpSpec`'s own fields -- must both be set or both be
     `None`) via the aggregate engine before ranking the reduced values.
@@ -742,7 +756,7 @@ class RankOpSpec(_OpSpecBase):
     `True`, the window's periods stay apart: each period is ranked on its
     own, and the output carries one row per entity per period whose own
     `value` is that entity's rank *position* in that period, not the
-    measured value the collapsing mode emits (`analysis_mcp.engine.rank`'s
+    measured value the collapsing mode emits (`dfo_analysis_engine.engine.rank`'s
     own module docstring). `aggregation` still means "reduce to one value
     before ranking", now per (entity, period) cell rather than per entity,
     needed only when a cell carries more than one row.
@@ -756,6 +770,14 @@ class RankOpSpec(_OpSpecBase):
     `rolling` says which of the window's years follow the latest period
     (`WindowRolling`), and names only a bound that is set. A bound may
     instead be a `RelativeYear`, as on `GrowthOpSpec`.
+
+    `partition_by`, left empty, ranks every entity in one ranking. Set, it
+    names the role columns of each partition: the entities sharing a
+    partition's values are ranked among themselves, with their own rank
+    numbers, ties and `limit`. It names no column `rank_by` names.
+
+    `allow_sparse_breakdowns` is `AggregateOpSpec`'s, over the grid of
+    `partition_by` and `rank_by`.
     """
 
     verb: Literal[Verb.RANK] = Verb.RANK
@@ -770,6 +792,17 @@ class RankOpSpec(_OpSpecBase):
     per_period: bool = False
     limit: Annotated[int | None, HASHED_WHEN_SET] = Field(default=None, ge=1, le=MAX_RANK_LIMIT)
     rolling: Annotated[WindowRolling | None, HASHED_WHEN_SET] = None
+    partition_by: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)], ...],
+        HASHED_WHEN_SET,
+    ] = ()
+    allow_sparse_breakdowns: Annotated[bool, HASHED_WHEN_SET] = False
+
+    @model_validator(mode="after")
+    def _partition_is_apart_from_the_ranked(self) -> RankOpSpec:
+        if shared := sorted(set(self.partition_by) & set(self.rank_by)):
+            raise ValueError(f"partition_by names columns rank_by names too: {shared}")
+        return self
 
     @model_validator(mode="after")
     def _window_bounds_are_paired(self) -> RankOpSpec:
@@ -840,7 +873,7 @@ class ShareOfOpSpec(_TwoSidedOpSpec):
     own docstring explains). `numerator_entity`/`denominator_entity` narrow
     each side; empty binds nothing, and -- unlike `compare`'s ambiguous-
     slice refusal -- more than one row per period on a side is not an
-    error here, it is summed (`analysis_mcp.engine.share_of`'s own
+    error here, it is summed (`dfo_analysis_engine.engine.share_of`'s own
     docstring: "fsum for any summed side").
 
     `numerator_unit`/`denominator_unit` pin each side's unit independently,
@@ -851,15 +884,13 @@ class ShareOfOpSpec(_TwoSidedOpSpec):
     key the output by -- one row per (key, period) instead of one row per
     period. `denominator_by` pairs each `numerator_by` column with the
     denominator's own column carrying that same role, **by name, never by
-    position**: `analysis_mcp.identity._normalise_parameters` and
-    `frame_ref_resolution.canonical_columns_or_refusal` both sort every
+    position**: `analysis_mcp.identity._normalise_parameters` sorts every
     array-shaped field, so two independently sorted column lists would
     silently pair the wrong columns whenever the two sides' own
     alphabetical orders disagree. `denominator_by` is a JSON
     object precisely so JCS sorts its *members*, not the pairing itself --
     the same reason `numerator_entity`/`denominator_entity` need no
-    canonicalisation of their own beyond key order (see
-    `frame_ref_resolution.canonical_entity_binding`'s own docstring).
+    canonicalisation of their own beyond key order.
     `denominator_by` left empty means a pooled denominator, the total every
     numerator key divides by; when non-empty it must name every
     `numerator_by` column -- a partial mapping is refused at the engine
@@ -872,7 +903,7 @@ class ShareOfOpSpec(_TwoSidedOpSpec):
 class QuotientOfOpSpec(_TwoSidedOpSpec):
     """`quotient_of`'s parameters: `ShareOfOpSpec`'s two slices and keying,
     divided per key and period over the periods each key shares with its
-    denominator (`analysis_mcp.engine.quotient_of`).
+    denominator (`dfo_analysis_engine.engine.quotient_of`).
 
     A non-empty `denominator_by` names every `numerator_by` column. A
     partial mapping pairs the columns it leaves out with nothing, so it is
@@ -904,7 +935,7 @@ class JoinOpSpec(_OpSpecBase):
 
     `join_keys` names the role columns to match rows on, beyond the
     `time_period` every join also matches on implicitly
-    (`analysis_mcp.engine.join`'s own docstring). Left empty (the default),
+    (`dfo_analysis_engine.engine.join`'s own docstring). Left empty (the default),
     the engine auto-detects the role columns both frames declare in common;
     a non-empty tuple pins the key list explicitly instead of relying on
     that auto-detection. The key list stays minimal and closed: no facet
