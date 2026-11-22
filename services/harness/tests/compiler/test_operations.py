@@ -294,7 +294,7 @@ def test_the_json_schema_advertises_kind_as_required(tagged: type[TaggedModel]) 
 
 
 def test_the_translation_schema_advertises_kind_as_required_for_every_tagged_part() -> None:
-    # Ten operations, and the four predicates a filter carries.
+    # Ten operations, and the five predicates a filter carries.
     definitions = Translation.model_json_schema()["$defs"]
     tagged = {
         name: schema
@@ -302,7 +302,7 @@ def test_the_translation_schema_advertises_kind_as_required_for_every_tagged_par
         if "kind" in schema.get("properties", {})
     }
 
-    assert len(tagged) == 14
+    assert len(tagged) == 15
     assert all(schema["required"][0] == "kind" for schema in tagged.values())
 
 

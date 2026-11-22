@@ -296,6 +296,10 @@
     "start",
     "end"
   ],
+  "planner.records.PeriodIn": [
+    "kind",
+    "years"
+  ],
   "planner.records.PeriodThreshold": [
     "kind",
     "op",

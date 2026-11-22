@@ -1,0 +1,182 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "What were the top ten recipients of IDA disbursements in 2022?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Rank the top ten recipients of International Development Association (IDA) gross disbursements in 2022, based on OECD DAC2a bilateral ODA gross disbursements data.",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "scope_measure_basis_spec_b84704bb0e9a0d4cd673dde2299a0709",
+        "description": "Which basis the figures are measured on.",
+        "options": [
+          "gross disbursements, current USD",
+          "net disbursements, current USD",
+          "grant equivalents (OECD headline), current USD",
+          "commitments, current USD"
+        ],
+        "chosen": "gross disbursements, current USD",
+        "resolved_by": "user",
+        "rationale": "The user's question asked for gross disbursements, current USD.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_b84704bb0e9a0d4cd673dde2299a0709",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        },
+        "scope": {
+          "choice_id": "spec_b84704bb0e9a0d4cd673dde2299a0709:measure_basis",
+          "axis": "measure_basis",
+          "options": [
+            {
+              "option_id": "measure_basis:gross",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "measure_basis:net",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "measure_basis:grant_equivalent",
+              "status": "unavailable",
+              "years": null,
+              "code": "basis_not_published"
+            },
+            {
+              "option_id": "measure_basis:commitments",
+              "status": "unavailable",
+              "years": null,
+              "code": "basis_not_published"
+            }
+          ],
+          "provenance": "explicit"
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "ida_disbursements",
+        "decision_ids": [
+          "scope_measure_basis_spec_b84704bb0e9a0d4cd673dde2299a0709"
+        ],
+        "measure": "International Development Association gross disbursements",
+        "entities": [
+          {
+            "name": "International Development Association",
+            "role": "donor"
+          }
+        ],
+        "across": [
+          "recipient"
+        ],
+        "period": {
+          "start": 2022,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_b84704bb0e9a0d4cd673dde2299a0709",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "rank",
+        "id": "rank_top10",
+        "decision_ids": [],
+        "input_id": "ida_disbursements",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": "recipient",
+        "reduction": "sum",
+        "window_start": 2022,
+        "window_end": 2022,
+        "per_period": false,
+        "limit": 10,
+        "rolling": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "top ten recipients of International Development Association gross disbursements in 2022"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "rank_top10"
+        ]
+      }
+    ],
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [
+          "recipient"
+        ],
+        "over": []
+      }
+    ],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

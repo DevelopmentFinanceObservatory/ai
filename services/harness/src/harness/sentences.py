@@ -149,6 +149,9 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
         "a calculation was asked of data in a shape it cannot read"
     ),
     CompileIssueCode.RANK_AXIS_REQUIRED: "a ranking needs to know what it ranks",
+    CompileIssueCode.RANK_REDUCTION_REQUIRED: (
+        "a ranking needs each entry's figures combined into one before it can order them"
+    ),
     CompileIssueCode.SHARE_AXIS_REQUIRED: "a share needs to know what it is a share of",
     CompileIssueCode.SHARE_KEY_UNKNOWN: "a share names a part the data does not hold",
     CompileIssueCode.QUOTIENT_AXIS_REQUIRED: "a division needs to know which values to pair",

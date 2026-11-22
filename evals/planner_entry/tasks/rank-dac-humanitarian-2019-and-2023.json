@@ -1,0 +1,135 @@
+{
+  "id": "rank-dac-humanitarian-2019-and-2023",
+  "kind": "rank",
+  "origin": "trace 0ce5468b",
+  "question": "Humanitarian aid by DAC donor in 2019 and 2023, both years in one chart.",
+  "searches": [
+    {
+      "parts": [
+        {
+          "variable": "humanitarian aid",
+          "entities": [
+            {
+              "text": "DAC donors",
+              "name": "Development Assistance Committee"
+            }
+          ],
+          "time": "2019 to 2023",
+          "open_roles": [
+            "donor"
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "Humanitarian aid by DAC donor in 2019 and 2023, comparing both years in one chart. Use the same counting basis as earlier turns (gross disbursements, current USD, CRS humanitarian aid sectors 720+730+740).",
+  "asks": [
+    {
+      "by": [
+        "donor"
+      ],
+      "text": "humanitarian aid by DAC donor in 2019 and 2023"
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "filter",
+    "rank"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "filter",
+    "rank"
+  ],
+  "unit_asked": true,
+  "period_reduction": "none",
+  "reference_payload": {
+    "question": "Humanitarian aid by DAC donor in 2019 and 2023, comparing both years in one chart. Use the same counting basis as earlier turns (gross disbursements, current USD, CRS humanitarian aid sectors 720+730+740).",
+    "evidence_requirements": [
+      {
+        "frequency": "annual",
+        "kind": "dataset",
+        "id": "req_humanitarian_aid",
+        "measure": "humanitarian aid",
+        "source_spec_id": "spec_449f4bc485d3613d7314397e8e546330",
+        "stat_vars": "sum",
+        "period": {
+          "start": 2019,
+          "end": 2023
+        },
+        "decision_ids": [],
+        "entities": [
+          {
+            "name": "Development Assistance Committee",
+            "role": "donor",
+            "members": true
+          }
+        ]
+      },
+      {
+        "kind": "filter",
+        "id": "two_years",
+        "input_id": "req_humanitarian_aid",
+        "decision_ids": [],
+        "predicates": [
+          {
+            "kind": "period_threshold",
+            "op": "ne",
+            "year": 2020
+          },
+          {
+            "kind": "period_threshold",
+            "op": "ne",
+            "year": 2021
+          },
+          {
+            "kind": "period_threshold",
+            "op": "ne",
+            "year": 2022
+          }
+        ]
+      },
+      {
+        "among": "population",
+        "direction": "highest_first",
+        "axis": "donor",
+        "decision_ids": [
+          "ranking_limit"
+        ],
+        "id": "rank_donors",
+        "limit": 10,
+        "per_period": true,
+        "kind": "rank",
+        "input_id": "two_years",
+        "reduction": "sum"
+      }
+    ],
+    "across_years": [],
+    "answered": [
+      {
+        "outputs": [
+          "rank_donors"
+        ],
+        "ask": 0
+      }
+    ],
+    "decisions": [
+      {
+        "resolved_by": "planner_default",
+        "fixes": [
+          "limit"
+        ],
+        "description": "How many top donors to include in the ranking chart.",
+        "chosen": "10",
+        "options": [
+          "10",
+          "5",
+          "20"
+        ],
+        "slot": "ranking_limit",
+        "rationale": "Top 10 is standard for presenting leading donors and matches earlier turns in the conversation."
+      }
+    ],
+    "answer_mode": "series"
+  }
+}

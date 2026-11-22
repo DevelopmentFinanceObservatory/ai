@@ -1,0 +1,360 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Humanitarian aid by DAC donor in 2019 and 2023, both years in one chart."
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Humanitarian aid by DAC donor in 2019 and 2023, comparing both years in one chart. Use the same counting basis as earlier turns (gross disbursements, current USD, CRS humanitarian aid sectors 720+730+740).",
+    "answer_mode": "series",
+    "decisions": [
+      {
+        "slot": "ranking_limit",
+        "description": "How many top donors to include in the ranking chart.",
+        "options": [
+          "10",
+          "5",
+          "20"
+        ],
+        "chosen": "10",
+        "resolved_by": "planner_default",
+        "rationale": "Top 10 is standard for presenting leading donors and matches earlier turns in the conversation.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": 10
+        }
+      },
+      {
+        "slot": "scope_sector_spec_449f4bc485d3613d7314397e8e546330",
+        "description": "Which sector codes the figures count.",
+        "options": [
+          "humanitarian aid (CRS 720 + 730 + 740)",
+          "emergency response, CRS 720 alone",
+          "reconstruction and rehabilitation, CRS 730 alone",
+          "disaster preparedness, CRS 740 alone"
+        ],
+        "chosen": "humanitarian aid (CRS 720 + 730 + 740)",
+        "resolved_by": "planner_default",
+        "rationale": "Search's default for this question.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_449f4bc485d3613d7314397e8e546330",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        },
+        "scope": {
+          "choice_id": "spec_449f4bc485d3613d7314397e8e546330:sector",
+          "axis": "sector",
+          "options": [
+            {
+              "option_id": "sector:720+730+740",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "sector:720",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "sector:730",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "sector:740",
+              "status": "available",
+              "years": null,
+              "code": null
+            }
+          ],
+          "provenance": "default"
+        }
+      },
+      {
+        "slot": "scope_measure_basis_spec_449f4bc485d3613d7314397e8e546330",
+        "description": "Which basis the figures are measured on.",
+        "options": [
+          "gross disbursements, current USD",
+          "net disbursements, current USD",
+          "grant equivalents (OECD headline), current USD",
+          "commitments, current USD"
+        ],
+        "chosen": "gross disbursements, current USD",
+        "resolved_by": "planner_default",
+        "rationale": "Search's default for this question.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_449f4bc485d3613d7314397e8e546330",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        },
+        "scope": {
+          "choice_id": "spec_449f4bc485d3613d7314397e8e546330:measure_basis",
+          "axis": "measure_basis",
+          "options": [
+            {
+              "option_id": "measure_basis:gross",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "measure_basis:net",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "measure_basis:grant_equivalent",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "measure_basis:commitments",
+              "status": "available",
+              "years": null,
+              "code": null
+            }
+          ],
+          "provenance": "default"
+        }
+      },
+      {
+        "slot": "scope_provider_spec_449f4bc485d3613d7314397e8e546330",
+        "description": "Whose spending the figures count.",
+        "options": [
+          "bilateral flows only",
+          "bilateral plus imputed multilateral"
+        ],
+        "chosen": "bilateral flows only",
+        "resolved_by": "planner_default",
+        "rationale": "Search's default for this question.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_449f4bc485d3613d7314397e8e546330",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        },
+        "scope": {
+          "choice_id": "spec_449f4bc485d3613d7314397e8e546330:provider",
+          "axis": "provider",
+          "options": [
+            {
+              "option_id": "provider:bilateral",
+              "status": "available",
+              "years": null,
+              "code": null
+            },
+            {
+              "option_id": "provider:inclusive",
+              "status": "available",
+              "years": null,
+              "code": null
+            }
+          ],
+          "provenance": "default"
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "req_humanitarian_aid",
+        "decision_ids": [
+          "scope_sector_spec_449f4bc485d3613d7314397e8e546330",
+          "scope_measure_basis_spec_449f4bc485d3613d7314397e8e546330",
+          "scope_provider_spec_449f4bc485d3613d7314397e8e546330"
+        ],
+        "measure": "humanitarian aid",
+        "entities": [
+          {
+            "name": "Development Assistance Committee",
+            "role": "donor",
+            "members": true
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2019,
+          "end": 2023
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_449f4bc485d3613d7314397e8e546330",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": "sum",
+        "breakdown": null
+      },
+      {
+        "kind": "filter",
+        "id": "two_years",
+        "decision_ids": [],
+        "input_id": "req_humanitarian_aid",
+        "predicates": [
+          {
+            "kind": "period_threshold",
+            "op": "ne",
+            "year": 2020,
+            "rolling": null
+          },
+          {
+            "kind": "period_threshold",
+            "op": "ne",
+            "year": 2021,
+            "rolling": null
+          },
+          {
+            "kind": "period_threshold",
+            "op": "ne",
+            "year": 2022,
+            "rolling": null
+          }
+        ]
+      },
+      {
+        "kind": "rank",
+        "id": "rank_donors",
+        "decision_ids": [
+          "ranking_limit"
+        ],
+        "input_id": "two_years",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": "donor",
+        "reduction": "sum",
+        "window_start": null,
+        "window_end": null,
+        "per_period": true,
+        "limit": 10,
+        "rolling": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "humanitarian aid by DAC donor in 2019 and 2023"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "rank_donors"
+        ]
+      }
+    ],
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [
+          "donor"
+        ],
+        "over": []
+      }
+    ],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

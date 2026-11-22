@@ -107,15 +107,14 @@ POPULATION = Decision(
     chosen="every donor",
     resolved_by="planner_default",
     rationale="The question asks for the top donors among all of them.",
-    fixes=DecisionFixes(among=RankAmong.POPULATION),
 )
 
 
 POOLED = Decision(
     slot="pooled",
     description="Whether each donor's share is of its own total or of all donors' total.",
-    options=["of all donors' total", "of its own total"],
-    chosen="of all donors' total",
+    options=["pooled", "per_axis"],
+    chosen="pooled",
     resolved_by="planner_default",
     rationale="The question asks how aid to Ghana splits between donors.",
     fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED),

@@ -1214,24 +1214,32 @@ def test_an_entity_role_outside_the_party_words_is_refused_and_records_nothing(
     assert PLAN_STATE_KEY not in ctx.state
 
 
-def test_a_first_draft_without_an_answer_mode_is_refused_and_records_nothing(
-    decision: DecisionFactory, requirements: RequirementPair
+@pytest.mark.parametrize(
+    ("lone", "mode"),
+    [
+        pytest.param(False, AnswerMode.COMPUTED, id="computed"),
+        pytest.param(True, AnswerMode.SERIES, id="series"),
+    ],
+)
+def test_a_first_draft_stating_no_answer_mode_takes_the_one_its_requirements_define(
+    decision: DecisionFactory, requirements: RequirementPair, lone: bool, mode: AnswerMode
 ) -> None:
+    """A dataset nothing reads is the answer, a series. A calculation reading
+    every dataset gives a computed answer."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
 
-    refused = call_planner_tool(
+    result = call_planner_tool(
         tools["propose_plan"],
         question="q",
         decisions=drafts([decision()]),
-        evidence_requirements=list(requirements),
+        evidence_requirements=list(requirements[:1] if lone else requirements),
         tool_context=ctx,
     )
 
-    assert refused["code"] == ProblemCode.INVALID_PLAN.value
-    assert refused["outcome"] == Outcome.INVALID_INPUT.value
-    assert "answer_mode" in str(refused["message"])
-    assert PLAN_STATE_KEY not in ctx.state
+    assert result["outcome"] == Outcome.OK.value, result
+    recorded = load_plan(ctx.state)
+    assert recorded is not None and recorded.answer_mode is mode
 
 
 def test_propose_plan_counts_the_rounds_a_question_has_been_through(
@@ -11990,11 +11998,11 @@ def test_a_decision_naming_its_fields_records_the_plan_its_values_would(
 
 
 @pytest.mark.parametrize(
-    ("fixes", "derived_cites", "unpriced_cites"),
+    ("fixes", "options", "derived_cites", "unpriced_cites"),
     [
-        (["reduction"], (), ()),
-        (["reduction"], ("window",), ()),
-        (["unit"], (), ("window",)),
+        (["reduction"], ["sum", "mean"], (), ()),
+        (["reduction"], ["sum", "mean"], ("window",), ()),
+        (["unit"], ["2015 to 2024", "2010 to 2024"], (), ("window",)),
     ],
     ids=["field_the_kind_lacks", "values_disagree", "partly_stated"],
 )
@@ -12004,6 +12012,7 @@ def test_a_field_its_requirements_do_not_settle_is_left_off_the_decision(
     requirements: RequirementPair,
     derived_requirement: DerivedRequirementFactory,
     fixes: list[str],
+    options: list[str],
     derived_cites: tuple[str, ...],
     unpriced_cites: tuple[str, ...],
 ) -> None:
@@ -12016,7 +12025,10 @@ def test_a_field_its_requirements_do_not_settle_is_left_off_the_decision(
         _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
-        decisions=[*drafts([decision()]), _period_decision(fixes=fixes)],
+        decisions=[
+            *drafts([decision()]),
+            _period_decision(fixes=fixes, options=options, chosen=options[0]),
+        ],
         evidence_requirements=[
             dataset.model_copy(update={"decision_ids": ("measure", "window")}),
             derived.model_copy(update={"decision_ids": ("measure", *derived_cites)}),
@@ -13618,7 +13630,7 @@ def test_the_user_may_drop_the_series_their_decision_fixed(
 
 
 def test_a_patch_moving_a_shared_planner_decision_s_value_is_refused_until_restated() -> None:
-    """A planner decision fixing a period and a rank's `among` still backs the
+    """A planner decision fixing a period and a rank's `direction` still backs the
     rank once a patch moves only the dataset's period, so dropping it is
     refused, naming what still rests on it; restating it lands."""
     flows = DatasetRequirement(
@@ -13637,12 +13649,12 @@ def test_a_patch_moving_a_shared_planner_decision_s_value_is_refused_until_resta
     )
     scope = {
         "slot": "scope",
-        "description": "Which year, and among whom.",
-        "options": ["2024 among all", "2023 among all"],
-        "chosen": "2024 among all",
+        "description": "Which year, and which end of the ranking first.",
+        "options": ["2024, highest first", "2023, highest first"],
+        "chosen": "2024, highest first",
         "resolved_by": "planner_default",
-        "rationale": "The latest year, among every recipient.",
-        "fixes": ["period", "among"],
+        "rationale": "The latest year, largest recipients first.",
+        "fixes": ["period", "direction"],
     }
     moved = flows.model_copy(update={"period": Period(start=2023, end=2023)})
     tools = _tools_by_name()
@@ -13679,7 +13691,7 @@ def test_a_patch_moving_a_shared_planner_decision_s_value_is_refused_until_resta
     assert kept.version == first["version"]
     restated = call_planner_tool(
         tools["propose_plan"],
-        decisions=[{**scope, "chosen": "2023 among all"}],
+        decisions=[{**scope, "chosen": "2023, highest first"}],
         evidence_requirements=[moved],
         amends_version=first["version"],
         tool_context=ctx,
@@ -13688,7 +13700,7 @@ def test_a_patch_moving_a_shared_planner_decision_s_value_is_refused_until_resta
     plan = load_plan(ctx.state)
     assert plan is not None
     assert plan.decisions[0].fixes == DecisionFixes(
-        period=Period(start=2023, end=2023), among=RankAmong.POPULATION
+        period=Period(start=2023, end=2023), direction=RankDirection.HIGHEST_FIRST
     )
 
 
@@ -15257,9 +15269,7 @@ def _propose_for_creditors(
         _tools_by_name()["propose_plan"],
         question="general government debt service by creditor for 2031",
         answer_mode=AnswerMode.SERIES,
-        decisions=drafts(
-            [decision(fixes=DecisionFixes(among=RankAmong.POPULATION, across=tuple(across)))]
-        ),
+        decisions=drafts([decision(fixes=DecisionFixes(across=tuple(across)))]),
         evidence_requirements=requirements,
         answered=answered,
         declined=list(declined),
@@ -15539,7 +15549,13 @@ def test_a_pooled_share_counts_the_members_its_whole_resolves_its_group_to(
         question="What share of G7 ODA to Kenya came from each G7 donor each year?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts(
-            [decision(fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED))]
+            [
+                decision(
+                    options=["pooled", "per_axis"],
+                    chosen="pooled",
+                    fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED),
+                )
+            ]
         ),
         evidence_requirements=[
             dataset("part", "ODA gross disbursements", "G7", _PART_PIN),
@@ -15847,7 +15863,7 @@ def test_a_decline_of_two_parties_stands_when_each_pin_holds_one_of_them(
                 [
                     decision(
                         slot=party,
-                        fixes=DecisionFixes(among=RankAmong.POPULATION, across=(party,)),
+                        fixes=DecisionFixes(across=(party,)),
                     )
                     for party in ("creditor", "debtor")
                 ]
@@ -16085,7 +16101,7 @@ def test_a_breakdown_decline_counts_every_party_the_root_can_keep_on_its_pin(
     `held_named` when the refusal names no party held by naming."""
     ctx = _creditor_context((_EAC_SPEC, columns, asked), asks=[_EAC_ASK], by=by)
     dataset = {**_EAC_REQUIREMENT, **requirement, "decision_ids": ["measure"]}
-    fixes = DecisionFixes(among=RankAmong.POPULATION, across=tuple(dataset["across"]) or None)
+    fixes = DecisionFixes(across=tuple(dataset["across"]) or None)
 
     result = call_planner_tool(
         _tools_by_name()["propose_plan"],
@@ -16424,12 +16440,24 @@ def test_a_period_rolling_at_its_end_is_pinned_from_its_own_start_with_no_end_ye
 
 
 @pytest.mark.usefixtures("gdp_on_record")
+@pytest.mark.parametrize(
+    ("start", "rolling"),
+    [
+        pytest.param(2019, _ROLLS_AT_BOTH_ENDS, id="from-the-stated-start"),
+        pytest.param(
+            2010,
+            {"window_start": {"anchor": "latest", "offset": -14}, **_ROLLS_AT_ITS_END},
+            id="from-before-the-stated-start",
+        ),
+    ],
+)
 def test_a_period_rolling_from_its_start_is_pinned_from_the_first_year_the_dataset_holds(
-    requirement: Callable[..., DatasetRequirement],
+    requirement: Callable[..., DatasetRequirement], start: int, rolling: dict[str, Any]
 ) -> None:
     """ "The last five years": the newest year the data holds can sit behind the
     one the plan read, so the retrieval starts where the dataset does, 1960, and
-    not at the plan's 2019. The copy survives the state round trip."""
+    not at the plan's 2019. The copy survives the state round trip. A window
+    starting before 2019 reads years only the whole history holds."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     pin = _GDP_ALL["spec_id"]
@@ -16447,7 +16475,7 @@ def test_a_period_rolling_from_its_start_is_pinned_from_the_first_year_the_datas
         answer_mode=AnswerMode.COMPUTED,
         evidence_requirements=[
             dataset.model_dump(mode="json"),
-            _growth_as_written(dataset, start=2019, rolling=_ROLLS_AT_BOTH_ENDS),
+            _growth_as_written(dataset, start=start, rolling=rolling),
         ],
         tool_context=ctx,
     )
@@ -16697,7 +16725,6 @@ _RANKED_ON = Decision(
     chosen="every donor",
     resolved_by=ResolvedBy.PLANNER_DEFAULT,
     rationale="The question asks for the top donor among all of them.",
-    fixes=DecisionFixes(among=RankAmong.POPULATION),
 )
 _BY_DONOR = Decision(
     slot="by_donor",
@@ -16854,6 +16881,59 @@ def test_only_a_reader_rolling_from_its_start_retrieves_every_year_the_dataset_h
     assert plan.first_years == (FirstYear(requirement_id="aid", year=_EVERY_YEAR_FROM),)
     assert plan.requirement("top").input_id == (copies[-1][0] if copies else requirements[-2].id)  # type: ignore[union-attr]
     assert stored_plan(ctx.state[PLAN_STATE_KEY], state_key=PLAN_STATE_KEY) == plan
+
+
+_GROWTH_SINCE_2010 = GrowthRequirement(
+    id="growth",
+    decision_ids=["by_donor"],
+    input_id="aid",
+    window_start=2010,
+    window_end=2024,
+    rolling=RollingWindow(
+        window_start=RelativePeriod(offset=-14), window_end=RelativePeriod(offset=0)
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "requirements",
+    [
+        pytest.param([_aid_to_kenya(), _top_donor(among=None)], id="the-newest-year"),
+        pytest.param(
+            [
+                _aid_to_kenya(),
+                _GROWTH_SINCE_2010,
+                _top_donor(
+                    "growth",
+                    among=None,
+                    window_start=None,
+                    window_end=None,
+                    rolling=None,
+                ),
+            ],
+            id="growth-from-before-the-stated-start",
+        ),
+    ],
+)
+def test_a_rank_proposed_without_among_records_the_population_its_axis_admits(
+    requirements: list[EvidenceRequirement],
+) -> None:
+    """No filter narrows the donors, so the rank is over every donor. A growth rolling from
+    before the dataset's stated 2015 reads years only its whole history holds,
+    which the rank's input is built with."""
+    ctx = _FakeToolContext()
+
+    result = _propose_split(
+        ctx,
+        requirements,
+        asks=_SERIES_AND_TOP[1:],
+        answered=[AskAnswer(ask=0, outputs=("top",))],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.requirement("top").among is RankAmong.POPULATION  # type: ignore[union-attr]
 
 
 def test_a_stored_plan_reading_a_whole_history_with_no_first_year_is_planned_again() -> None:

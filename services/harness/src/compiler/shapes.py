@@ -489,7 +489,8 @@ def _retrieve_resolved(
     `compile._check_sources` reports it as the source's
     `open_axis_unresolved` finding. A column is `surplus` when the source
     resolves an entity on it whose ref none of the requirement's entities
-    names.
+    names, and `single` when it is not open and the source binds one party
+    on it.
 
     A requirement stating a breakdown keeps its codes' column last
     (`breakdown_column`), a role nothing in the source resolves and so no
@@ -549,12 +550,14 @@ def _retrieve_resolved(
         surplus = any(
             entity.role == column and entity.ref not in named for entity in source.entities
         )
+        bound = {entity.ref for entity in source.entities if entity.role == column}
         dims.append(
             RoleDimension(
                 role=phrase,
                 requirement_id=operation.requirement_id,
                 open=is_open,
                 place=is_place,
+                single=not is_open and len(bound) == 1,
                 mixed_levels=is_place and opens_place_axis(source.open_entity_axes),
                 # An open entity axis is the only retrieval role for which
                 # compilation can request the matching enrichment column.

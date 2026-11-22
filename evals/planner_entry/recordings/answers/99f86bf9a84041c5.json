@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_4629344b6936ea547c23fadc65cfd976",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_4629344b6936ea547c23fadc65cfd976: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"origin\":[\"country/AUS\",\"country/AUT\",\"country/BEL\",\"country/CAN\",\"country/CHE\",\"country/CZE\",\"country/DEU\",\"country/DNK\",\"country/ESP\",\"country/EST\",\"country/FIN\",\"country/FRA\",\"country/GBR\",\"country/GRC\",\"country/HUN\",\"country/IRL\",\"country/ISL\",\"country/ITA\",\"country/JPN\",\"country/KOR\",\"country/LTU\",\"country/LUX\",\"country/LVA\",\"country/NLD\",\"country/NOR\",\"country/NZL\",\"country/POL\",\"country/PRT\",\"country/SVK\",\"country/SVN\",\"country/SWE\",\"country/USA\"]},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialFlow\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"state\":\"unbound\"},\"property\":\"crsCooperationModality\"},{\"binding\":{\"refs\":[\"CRSPurposeCode720\",\"CRSPurposeCode730\",\"CRSPurposeCode740\"],\"state\":\"set\"},\"property\":\"crsPurpose\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"crsTypeOfFinance\"},{\"binding\":{\"ref\":\"CRSTypeOfFlow10\",\"state\":\"value\"},\"property\":\"crsTypeOfFlow\"},{\"binding\":{\"ref\":\"Disbursement\",\"state\":\"value\"},\"property\":\"financialFlowType\"},{\"binding\":{\"ref\":\"Gross\",\"state\":\"value\"},\"property\":\"nettingBasis\"}]},\"spec_id\":\"spec_4629344b6936ea547c23fadc65cfd976\"}"
+}
