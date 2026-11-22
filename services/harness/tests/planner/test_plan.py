@@ -67,6 +67,7 @@ from planner.plan import (
     FixedField,
     FullHistory,
     GrowthRequirement,
+    HistorySplit,
     JoinRequirement,
     Period,
     Plan,
@@ -75,6 +76,7 @@ from planner.plan import (
     RankRequirement,
     RequirementSide,
     ResolvedBy,
+    RollingCopy,
     ScopeOptionState,
     ShareOfRequirement,
     SumOfRequirement,
@@ -92,6 +94,7 @@ from planner.plan import (
     full_history,
     is_scope_choice,
     load_plan,
+    origin_of,
     period_window,
     plan_revision,
     ranks_among_settled,
@@ -104,6 +107,7 @@ from planner.plan import (
     split_of,
     whole_of_fault,
     windowed_pin,
+    with_authored_requirements,
     with_whole_sums,
 )
 from planner.proof import mismatches
@@ -7569,6 +7573,12 @@ def test_a_plan_at_the_requirement_limit_holds_the_sum_over_its_whole(
             _g7_africa_share(whole=_G7_WHOLE),
             id="sum-not-stated",
         ),
+        # The whole leaves no party open beside the recipients it opens.
+        pytest.param(
+            (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum", kept_open=("donor",)),),
+            None,
+            id="keeps-a-side-the-whole-does-not-leave-open",
+        ),
     ],
 )
 def test_a_plan_whose_whole_sums_are_not_its_wholes_aggregates_is_refused(
@@ -7586,6 +7596,44 @@ def test_a_plan_whose_whole_sums_are_not_its_wholes_aggregates_is_refused(
             evidence_requirements=requirements or with_whole_sums(written, sums),
             whole_sums=sums,
         )
+
+
+def test_a_copy_of_a_whole_s_sum_is_named_as_the_whole() -> None:
+    """A rolling copy of the sum `propose_plan` added over a whole is named in
+    outward text as the whole the model wrote, which the planner can patch, and
+    not as the sum it is never shown."""
+    split = HistorySplit(
+        requirements=(),
+        copies=(RollingCopy(copy_id="total_sum_history", origin_id="total_sum"),),
+        whole_history={},
+        first_years_read=(),
+        first_year_unknown=(),
+        sums=(WholeSum(whole_id="total", sum_id="total_sum"),),
+    )
+
+    assert origin_of(split, "total_sum_history") == "total"
+    assert origin_of(split, "total_sum") == "total"
+
+
+def test_requirements_dropping_a_whole_drop_its_sum(decision: DecisionFactory) -> None:
+    """G7 aid to Africa over its whole, summed, restated with the whole a total of
+    its own: the plan keeps no sum over a whole it no longer states."""
+    sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
+    written = _g7_africa_share(whole=_G7_WHOLE, pooled=True)
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=with_whole_sums(written, sums),
+        whole_sums=sums,
+    )
+    total = _G7_WHOLE_STATED.model_copy(update={"whole_of": None})
+    restated = [total if r.id == total.id else r for r in written]
+
+    rebuilt = with_authored_requirements(plan, restated)
+
+    assert rebuilt.whole_sums == ()
+    assert rebuilt.evidence_requirements == tuple(restated)
 
 
 @pytest.mark.parametrize(

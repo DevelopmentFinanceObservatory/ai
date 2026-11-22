@@ -266,7 +266,7 @@ def _compiled(
     sums: tuple[WholeSum, ...] = ()
     if summed:
         sums = (WholeSum(whole_id=whole.id, sum_id=f"{whole.id}_sum"),)
-        added = whole_sum(whole, numerator, sums[0].sum_id)
+        added = whole_sum(whole, numerator, sums[0])
         steps.append(
             (
                 added,

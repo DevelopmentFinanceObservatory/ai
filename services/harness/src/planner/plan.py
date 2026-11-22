@@ -67,6 +67,7 @@ from planner.parties import (
     Party,
     PartyRole,
     across_party,
+    flow_side,
     party_among,
     role_party,
     same_party,
@@ -140,7 +141,7 @@ from planner.shapes import (
     years_run_out,
 )
 from planner.shapes import rejects as shape_rejects
-from planner.workflow import ResolvedGroup, Workflow
+from planner.workflow import ResolvedGroup, SelectedSource, Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -342,9 +343,11 @@ MAX_PLAN_DECISIONS = 24
 MAX_PLAN_REQUIREMENTS = 24
 
 # The most requirements a plan holds: the model writes at most
-# `MAX_PLAN_REQUIREMENTS` (`Plan._record_fits_the_size_limit`), and
-# `whole_history_split` copies each of them at most once.
-MAX_HELD_REQUIREMENTS = 2 * MAX_PLAN_REQUIREMENTS
+# `MAX_PLAN_REQUIREMENTS` (`Plan._record_fits_the_size_limit`), `propose_plan`
+# adds a sum for at most half of them, since each sums a whole the model wrote
+# beside its part (`WholeSum`), and `whole_history_split` copies each of these at
+# most once.
+MAX_HELD_REQUIREMENTS = 3 * MAX_PLAN_REQUIREMENTS
 
 # The most asks one brief may list, and the longest each may run. An ask is a
 # short line naming one output the user asked for, such as a chart or a
@@ -2034,10 +2037,20 @@ class WholeSum(StrictModel):
     (`with_whole_sums`). `propose_plan` writes it, never the model
     (`Plan.whole_sums`), and the model is shown the plan without it
     (`authored`).
+
+    `kept_open` is every party the whole keeps open beside that side, the
+    `across` words of its part on its other sides (`whole_read`): the
+    aggregate keeps each of them apart, one total per party there, as each
+    donor's total over every recipient.
     """
 
     whole_id: Identifier = Field(description="The whole whose open side the aggregate sums.")
     sum_id: Identifier = Field(description="The aggregate's id.")
+    kept_open: tuple[AcrossWord, ...] = Field(
+        default=(),
+        max_length=MAX_ACROSS_WORDS,
+        description="The `across` words of the whole the aggregate keeps apart.",
+    )
 
 
 class FirstYear(StrictModel):
@@ -2683,9 +2696,17 @@ def opened_role(whole: DatasetRequirement, part: DatasetRequirement) -> str | No
 
 
 def covered(requirement: DatasetRequirement, plan: Plan) -> DatasetRequirement:
-    """Who `requirement` covers, in its own fields: a whole (`whole_of`) its part's
-    parties (`whole_read`) and the word for the side it opens in `across`, as a
-    reader names the side's total off the source; any other requirement as stated."""
+    """Who `requirement` covers, in its own fields; any requirement but a whole as stated.
+
+    A whole (`whole_of`) covers its part's parties (`whole_read`) and, on the
+    side it opens, what its source serves there. Where `plan.whole_sums` sums
+    that side, the source leaves it open, and the side's word is in `across`,
+    one row per party there before the sum. Where the compiled source binds it,
+    the parties it binds there are entities, by their refs, as
+    `compiler.compile.wholes_on_their_sources` reads them. Before compile, and
+    for a stored plan whose source leaves the side open with no sum over it,
+    the side's word is in `across`, as a reader names the side off the source.
+    """
     if requirement.whole_of is None:
         return requirement
     part = next((r for r in plan.evidence_requirements if r.id == requirement.whole_of.part), None)
@@ -2693,7 +2714,36 @@ def covered(requirement: DatasetRequirement, plan: Plan) -> DatasetRequirement:
         return requirement
     read = whole_read(requirement, part)
     role = opened_role(requirement, part)
-    return read if role is None else read.model_copy(update={"across": (*read.across, role)})
+    if role is None:
+        return read
+    origin = copy_origins(plan.rolling_copies).get(requirement.id, requirement.id)
+    source = _compiled_source(plan, requirement.id)
+    summed = any(entry.whole_id == origin for entry in plan.whole_sums)
+    side = flow_side(role)
+    held = [
+        Entity(name=entity.label, role=role, dcid=entity.ref)
+        for entity in (source.entities if source is not None and not summed else ())
+        if flow_side(entity.role) == side
+    ]
+    if held:
+        return read.model_copy(update={"entities": (*read.entities, *held)})
+    return read.model_copy(update={"across": (*read.across, role)})
+
+
+def _compiled_source(plan: Plan, requirement_id: str) -> SelectedSource | None:
+    """The source `plan`'s workflow retrieves `requirement_id` from, `None` before
+    compile or where no step retrieves it."""
+    if plan.workflow is None:
+        return None
+    step_id = next(
+        (
+            binding.step_id
+            for binding in plan.workflow.evidence_bindings
+            if binding.requirement_id == requirement_id
+        ),
+        None,
+    )
+    return None if step_id is None else plan.workflow.source_of(step_id)
 
 
 def wholes_as_read(
@@ -2721,23 +2771,40 @@ def wholes_as_read(
 
 
 def whole_sum(
-    whole: DatasetRequirement, part: DatasetRequirement, sum_id: str
+    whole: DatasetRequirement, part: DatasetRequirement, entry: WholeSum
 ) -> AggregateRequirement:
-    """The aggregate `sum_id` summing the side `whole`, the whole of `part`, opens.
+    """The aggregate `entry` names, summing the side `whole`, the whole of `part`, opens.
 
     It sums by period, keeping every party the whole names on its other
-    sides (`whole_read`) and its breakdown's codes, so its result is the
-    whole as the plan reads it, that side one total (`WholeSum`).
+    sides (`whole_read`), each party it keeps open there (`WholeSum.kept_open`)
+    and its breakdown's codes, so its result is the whole as the plan reads
+    it, that side one total.
     """
     read = whole_read(whole, part)
     group_by: tuple[GroupBy, ...] = (GroupBy.PERIOD,)
-    if read.entities:
+    if read.entities or entry.kept_open:
         group_by = (GroupBy.PERIOD, GroupBy.ENTITY)
     elif read.breakdown is not None:
         group_by = (GroupBy.PERIOD, GroupBy.BREAKDOWN)
     return AggregateRequirement(
-        id=sum_id, input_id=whole.id, reduction=Reduction.SUM, group_by=group_by
+        id=entry.sum_id, input_id=whole.id, reduction=Reduction.SUM, group_by=group_by
     )
+
+
+def whole_sums_made(
+    requirements: Sequence[EvidenceRequirement], sums: Iterable[WholeSum]
+) -> tuple[WholeSum, ...]:
+    """The entries of `sums` whose aggregate `with_whole_sums` adds to `requirements`:
+    each naming a whole `requirements` states with its part."""
+    by_id = {requirement.id: requirement for requirement in requirements}
+    made: list[WholeSum] = []
+    for entry in sums:
+        whole = by_id.get(entry.whole_id)
+        if not isinstance(whole, DatasetRequirement) or whole.whole_of is None:
+            continue
+        if isinstance(by_id.get(whole.whole_of.part), DatasetRequirement):
+            made.append(entry)
+    return tuple(made)
 
 
 def with_whole_sums(
@@ -2752,13 +2819,12 @@ def with_whole_sums(
     """
     by_id = {requirement.id: requirement for requirement in requirements}
     made: dict[str, AggregateRequirement] = {}
-    for entry in sums:
-        whole = by_id.get(entry.whole_id)
-        if not isinstance(whole, DatasetRequirement) or whole.whole_of is None:
-            continue
-        part = by_id.get(whole.whole_of.part)
-        if isinstance(part, DatasetRequirement):
-            made[whole.id] = whole_sum(whole, part, entry.sum_id)
+    for entry in whole_sums_made(requirements, sums):
+        whole = by_id[entry.whole_id]
+        assert isinstance(whole, DatasetRequirement) and whole.whole_of is not None
+        part = by_id[whole.whole_of.part]
+        assert isinstance(part, DatasetRequirement)
+        made[whole.id] = whole_sum(whole, part, entry)
     renamed = {whole_id: aggregate.id for whole_id, aggregate in made.items()}
     summed: list[EvidenceRequirement] = []
     for requirement in requirements:
@@ -2871,6 +2937,7 @@ def _check_requirement_graph(
     whole_history: Mapping[str, int],
     origins: Mapping[str, str],
     summed: Collection[str] = (),
+    kept_open: Mapping[str, tuple[str, ...]] | None = None,
 ) -> None:
     """Reject requirements that do not agree with each other.
 
@@ -2890,7 +2957,8 @@ def _check_requirement_graph(
     one newest year states that year, one the datasets it rests on hold
     (`_check_rolling_years_agree`). An `ne`
     removes a fixed year from fixed years (`_check_exclusions_fixed`).
-    `whole_history`, `origins` and `summed` are as `_build_shapes` takes them.
+    `whole_history`, `origins`, `summed` and `kept_open` are as `_build_shapes`
+    takes them.
 
     Under `AnswerMode.SERIES`, a dataset requirement left unread by every
     other requirement is legal: it is the answer. Under `AnswerMode.COMPUTED`,
@@ -2928,7 +2996,13 @@ def _check_requirement_graph(
     _check_exclusions_fixed(requirements_by_id)
     _check_rolling_reads_open_periods(requirements_by_id)
     _check_rolling_years_agree(requirements_by_id)
-    _build_shapes(requirements_by_id, whole_history=whole_history, origins=origins, summed=summed)
+    _build_shapes(
+        requirements_by_id,
+        whole_history=whole_history,
+        origins=origins,
+        summed=summed,
+        kept_open=kept_open,
+    )
 
 
 def rolls(requirement: EvidenceRequirement) -> bool:
@@ -3099,7 +3173,9 @@ class HistorySplit(NamedTuple):
     year the split reads, and `first_year_unknown` those of them the plan's
     `first_years` holds no year for (`whole_history_split`). `summed` names
     each whole an aggregate sums the open side of (`Plan.whole_sums`), a copy
-    of one included, and `sums` those aggregates (`split_of`).
+    of one included, `sums` those aggregates, and `kept_open` maps each such
+    aggregate, a copy of one included, to the parties it keeps open
+    (`WholeSum.kept_open`, `split_of`).
     """
 
     requirements: tuple[EvidenceRequirement, ...]
@@ -3109,6 +3185,7 @@ class HistorySplit(NamedTuple):
     first_year_unknown: tuple[str, ...]
     summed: frozenset[str] = frozenset()
     sums: tuple[WholeSum, ...] = ()
+    kept_open: Mapping[str, tuple[str, ...]] = {}
 
     def origins(self) -> dict[str, str]:
         """Each clone's id mapped to its origin's."""
@@ -3116,8 +3193,11 @@ class HistorySplit(NamedTuple):
 
     def names(self) -> dict[str, str]:
         """Each id the model did not write mapped to the requirement outward text names
-        in its place: a clone's to its origin's, an added aggregate's to its whole's."""
-        return copy_origins(self.copies) | sum_origins(self.sums)
+        in its place: a clone's to its origin's, an added aggregate's to its whole's,
+        and a clone of an added aggregate to that aggregate's whole."""
+        wholes = sum_origins(self.sums)
+        clones = {copy: wholes.get(origin, origin) for copy, origin in self.origins().items()}
+        return clones | wholes
 
 
 def copy_origins(copies: Iterable[RollingCopy]) -> dict[str, str]:
@@ -3518,6 +3598,7 @@ def _split_shapes(split: HistorySplit) -> dict[str, FrameShape]:
         whole_history=split.whole_history,
         origins=split.origins(),
         summed=split.summed,
+        kept_open=split.kept_open,
     )
 
 
@@ -3527,6 +3608,7 @@ def _build_shapes(
     whole_history: Mapping[str, int],
     origins: Mapping[str, str],
     summed: Collection[str] = (),
+    kept_open: Mapping[str, tuple[str, ...]] | None = None,
 ) -> dict[str, FrameShape]:
     """Walk every requirement in the order the plan states them, each after its inputs
     (`requirement_step_order`), rejecting an illegal shape as it is found.
@@ -3542,7 +3624,8 @@ def _build_shapes(
     (`_dataset_shape`). Every other one starts at its stated period. A
     whole covers what its part covers (`wholes_as_read`), and one `summed`
     names reads the side it opens open, for the aggregate `propose_plan`
-    added to sum (`WholeSum`).
+    added to sum (`WholeSum`), which keeps apart the parties `kept_open`
+    names for it.
     `origins` maps each copy `whole_history_split` added to the requirement
     it copies, which a refusal names in its place: a copy reads other
     years than its origin, and the model wrote only the origin. A copy
@@ -3582,6 +3665,7 @@ def _build_shapes(
             requirements_by_id,
             first_year=whole_history.get(requirement_id),
             summed=requirement_id in summed,
+            kept_open=(kept_open or {}).get(requirement_id, ()),
         )
         sides = [shapes_by_id[input_id] for input_id in reads[requirement_id]]
         missed = anchor_misses(sides, over[requirement_id]) if len(sides) > 1 else None
@@ -3749,7 +3833,9 @@ def retrieved_period(requirement: DatasetRequirement, *, first_year: int | None)
     return Period(start=first_year, end=requirement.period.end)
 
 
-def _aggregate_shape(requirement: AggregateRequirement, input_shape: FrameShape) -> FrameShape:
+def _aggregate_shape(
+    requirement: AggregateRequirement, input_shape: FrameShape, *, kept_open: Collection[str] = ()
+) -> FrameShape:
     by_entity = GroupBy.ENTITY in requirement.group_by
     by_period = GroupBy.PERIOD in requirement.group_by
     by_breakdown = GroupBy.BREAKDOWN in requirement.group_by
@@ -3760,6 +3846,7 @@ def _aggregate_shape(requirement: AggregateRequirement, input_shape: FrameShape)
         by_period=by_period,
         by_breakdown=by_breakdown,
         reduction=requirement.reduction,
+        kept_open=kept_open,
     )
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
@@ -3769,6 +3856,7 @@ def _aggregate_shape(requirement: AggregateRequirement, input_shape: FrameShape)
         by_entity=by_entity,
         by_period=by_period,
         by_breakdown=by_breakdown,
+        kept_open=kept_open,
         step_id=requirement.id,
     )
 
@@ -4415,12 +4503,14 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
     *,
     first_year: int | None,
     summed: bool = False,
+    kept_open: Collection[str] = (),
 ) -> FrameShape:
     """Return the output shape `requirement` produces, raising on the first illegal input.
 
     `first_year` starts a dataset requirement's shape (`_dataset_shape`). A
     whole reads the side it opens as one closed total, unless it is `summed`
-    (`WholeSum`), when `wholes_as_read` has read that side open.
+    (`WholeSum`), when `wholes_as_read` has read that side open. An aggregate
+    summing such a side keeps the open parties `kept_open` names apart.
     """
     if isinstance(requirement, DatasetRequirement):
         part = (
@@ -4431,7 +4521,9 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
         opened = opened_role(requirement, part) if isinstance(part, DatasetRequirement) else None
         return _dataset_shape(requirement, first_year=first_year, opened=opened)
     if isinstance(requirement, AggregateRequirement):
-        return _aggregate_shape(requirement, shapes_by_id[requirement.input_id])
+        return _aggregate_shape(
+            requirement, shapes_by_id[requirement.input_id], kept_open=kept_open
+        )
     if isinstance(requirement, GrowthRequirement):
         return _growth_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, RankRequirement):
@@ -4958,6 +5050,7 @@ class Plan(StrictModel):
                 whole_history=split.whole_history,
                 origins=split.origins(),
                 summed=split.summed,
+                kept_open=split.kept_open,
             )
         except ValueError as error:
             raise _naming_origins(error, split) from error
@@ -5334,6 +5427,7 @@ def split_of(plan: Plan) -> HistorySplit:
     if not plan.whole_sums:
         return split
     wholes = {entry.whole_id for entry in plan.whole_sums}
+    kept = {entry.sum_id: entry.kept_open for entry in plan.whole_sums}
     origins = split.origins()
     return split._replace(
         summed=frozenset(
@@ -5342,6 +5436,11 @@ def split_of(plan: Plan) -> HistorySplit:
             if origins.get(requirement.id, requirement.id) in wholes
         ),
         sums=plan.whole_sums,
+        kept_open={
+            requirement.id: kept[origin]
+            for requirement in split.requirements
+            if (origin := origins.get(requirement.id, requirement.id)) in kept
+        },
     )
 
 
@@ -5394,7 +5493,8 @@ def with_authored_requirements(plan: Plan, requirements: Sequence[EvidenceRequir
     """`plan` stating `requirements` in place of those the model wrote, split again under its `first_years`.
 
     `requirements` stand for `authored(plan)`'s. The result carries them with
-    the aggregates `plan.whole_sums` names (`with_whole_sums`), and their
+    the aggregates `plan.whole_sums` names over wholes they state with their
+    parts (`whole_sums_made`, `with_whole_sums`), and their
     split (`split_of`) in `evidence_requirements` and `rolling_copies`, and a
     copy that copies the same origin in `plan` keeps `plan`'s pin for it,
     its own windowed pin (`submission.service._window_pins`).
@@ -5409,8 +5509,7 @@ def with_authored_requirements(plan: Plan, requirements: Sequence[EvidenceRequir
         for requirement in plan.evidence_requirements
         if requirement.id in origins and isinstance(requirement, DatasetRequirement)
     }
-    stating = {requirement.id for requirement in requirements}
-    sums = tuple(entry for entry in plan.whole_sums if entry.whole_id in stating)
+    sums = whole_sums_made(requirements, plan.whole_sums)
     stated = Plan.model_validate(
         {
             **plan.model_dump(),
@@ -5672,8 +5771,10 @@ def _check_whole_sums(plan: Plan) -> None:
     model wrote.
 
     Each names a whole opening a side of the flow, one sum per whole, under an
-    id of its own, and the plan less its copies (`unsplit`) states exactly the
-    plan the model wrote (`authored`) with those aggregates added.
+    id of its own, keeping apart exactly the parties the whole leaves open
+    beside that side (`WholeSum.kept_open`), and the plan less its copies
+    (`unsplit`) states exactly the plan the model wrote (`authored`) with
+    those aggregates added.
     """
     by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
     for entry in plan.whole_sums:
@@ -5691,6 +5792,12 @@ def _check_whole_sums(plan: Plan) -> None:
             raise ValueError(
                 f"the plan's sum {entry.sum_id!r} names {entry.whole_id!r}, which is no whole "
                 "opening a donor or recipient side of this plan"
+            )
+        if entry.kept_open != whole_read(whole, part).across:
+            raise ValueError(
+                f"the plan's sum {entry.sum_id!r} keeps apart {list(entry.kept_open)!r}, and "
+                f"the whole {entry.whole_id!r} leaves {list(whole_read(whole, part).across)!r} "
+                "open beside the side it opens"
             )
     wholes = [entry.whole_id for entry in plan.whole_sums]
     if len(set(wholes)) != len(wholes):

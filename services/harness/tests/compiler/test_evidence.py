@@ -476,6 +476,44 @@ def test_an_identity_that_does_not_bind_a_required_entity_is_an_error(
 
 
 @pytest.mark.parametrize(
+    ("donors", "codes"),
+    [
+        (["country/USA"], []),
+        (
+            ["country/GBR"],
+            [("scope_entities_unbound", "error"), ("scope_entities_wider", "warning")],
+        ),
+    ],
+    ids=["binds-the-donor", "binds-another-donor"],
+)
+def test_an_identity_binding_a_sector_no_column_carries_compares_only_its_bound_sides(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    caplog: pytest.LogCaptureFixture,
+    donors: list[str],
+    codes: list[tuple[str, str]],
+) -> None:
+    """US aid to Kenya, on a source whose identity binds the donor and a sector no
+    column carries, and leaves the recipient side unbound. The donor is compared
+    with what the identity binds there; Kenya, on the unbound recipient side, is
+    not, the sector code binds no party, and the sector is logged."""
+    us = ResolvedEntity(role="origin", ref="country/USA", label="United States")
+    identity = _identity(entities={"origin": donors, "sector": ["dc/crs/120"]})
+    aid = requirement(
+        entities=[
+            Entity(name="United States", role="donor"),
+            Entity(name="Kenya", role="recipient"),
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="compiler.evidence"):
+        found = _scope_codes(aid, source(identity=identity, entities=(us, KENYA_DESTINATION)))
+
+    assert found == codes
+    assert any("sector" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize(
     ("bound", "codes"),
     [
         (["country/KEN"], []),

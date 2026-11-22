@@ -91,6 +91,7 @@ from planner.plan import (
     ShareOfRequirement,
     SumOfRequirement,
     WholeOf,
+    covered,
     frame_shapes,
     scope_choice_slot,
     search_pin_slot,
@@ -4033,6 +4034,36 @@ def test_the_sum_over_a_whole_s_open_side_is_a_card_row_of_its_own(
             "all_oda_sum": "all_oda_sum",
             "share": "all_oda_sum",
         }
+
+
+@pytest.mark.parametrize(
+    ("whole", "donors", "across"),
+    [
+        (DAC_DONORS, [("official donors (DAC)", "DACOfficialDonors")], ()),
+        (ALL_DONORS, [], ("donor",)),
+    ],
+    ids=["donors-bound", "donors-open"],
+)
+def test_a_whole_covers_the_side_it_opens_as_its_compiled_source_serves_it(
+    decision: DecisionFactory,
+    whole: dict[str, Any],
+    donors: list[tuple[str, str]],
+    across: tuple[str, ...],
+) -> None:
+    """The United States' share of ODA to Kenya over every donor, compiled. Where
+    the whole's source binds the donors' total, the whole covers that total by its
+    ref; where it leaves the donors open, which the plan sums, it covers every
+    donor."""
+    plan = us_share_of_kenya_oda(
+        decision, whole=whole, numerator=US_DONOR, whole_of=True, group_by=None
+    )
+    stated = plan.requirement("all_oda")
+    assert isinstance(stated, DatasetRequirement)
+
+    read = covered(stated, plan)
+
+    assert [(e.name, e.dcid) for e in read.entities if e.role == "donor"] == donors
+    assert read.across == across
 
 
 def test_a_whole_keeps_apart_the_parties_its_part_names_several_of(

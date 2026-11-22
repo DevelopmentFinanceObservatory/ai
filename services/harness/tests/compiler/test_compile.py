@@ -9022,14 +9022,9 @@ _DAC_DEVELOPING_GROUP = ResolvedGroup(
         pytest.param(
             [_DAC_DEVELOPING], [_DAC_DEVELOPING_GROUP], False, [], id="source-binds-its-total"
         ),
-        # The share also reads one row per recipient there.
-        pytest.param(
-            [],
-            [],
-            False,
-            [Code.WHOLE_SUM_UNMATCHED, Code.ENTITY_REQUIRED],
-            id="open-source-unsummed",
-        ),
+        # The share would read one row per recipient there, which the sum
+        # `propose_plan` derives again repairs, so that is the one issue.
+        pytest.param([], [], False, [Code.WHOLE_SUM_UNMATCHED], id="open-source-unsummed"),
         pytest.param(
             [_DAC_DEVELOPING],
             [_DAC_DEVELOPING_GROUP],
@@ -9233,6 +9228,96 @@ def test_a_planners_pool_over_a_whole_reads_the_sum_where_its_source_leaves_the_
     steps = {step.id: step for step in result.workflow.steps}
     assert steps["pool"].bindings["frame_ref"].from_step == pooled
     assert steps["pool"].args == {"aggregation": "mean", "group_by": ["time_period"]}
+
+
+def test_a_whole_its_source_leaves_open_on_both_sides_is_summed_keeping_the_part_s_open_side(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+) -> None:
+    """Each donor's aid to Kenya as a share of its aid to every recipient. The
+    whole's source leaves both the donors and the recipients open, and the sum
+    `propose_plan` added keeps the donors the part leaves open apart
+    (`WholeSum.kept_open`), so it groups by period and donor, summing the
+    recipients alone, and the share divides each donor by its own total. The
+    plan's shape of the sum keeps the donors open, as the compiled one does."""
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[Entity(name="Kenya", role="recipient")],
+        across=["donor"],
+    )
+    whole = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[],
+        whole_of=WholeOf(part="aid", axis="recipient"),
+    )
+    keyed: dict[str, Any] = {"axis": "donor", "denominator_scope": DenominatorScope.PER_AXIS}
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="total"),
+        **keyed,
+    )
+    sums = (WholeSum(whole_id="total", sum_id="total_sum", kept_open=("donor",)),)
+    plan = Plan.model_validate(
+        {
+            **_draft([decision()], [aid, whole, share]).model_dump(),
+            "evidence_requirements": with_whole_sums([aid, whole, share], sums),
+            "whole_sums": sums,
+        }
+    )
+    donors = OpenEntityAxis(column="origin", member_count=30)
+    recipients = OpenEntityAxis(column="destination", member_count=150)
+
+    result = build(
+        plan,
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            _aggregate(
+                id="sum_total",
+                requirement_id="total_sum",
+                input="fetch_total",
+                group_by=(GroupBy.PERIOD, GroupBy.ENTITY),
+            ),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="fetch"),
+                denominator=Side(input="sum_total"),
+                **keyed,
+            ),
+            terminal=["share"],
+        ),
+        discovered={
+            "aid": source(
+                spec_id=SPEC_KENYA,
+                entities=(_KENYA,),
+                identity={"entities": {"destination": ["country/KEN"]}},
+                open_entity_axes=(donors,),
+            ),
+            "total": source(
+                spec_id=SPEC_OTHER,
+                entities=(),
+                open_entity_axes=(donors, recipients),
+            ),
+        },
+    )
+
+    assert result.workflow is not None, result.issues
+    steps = {step.id: step for step in result.workflow.steps}
+    assert steps["sum_total"].args == {
+        "aggregation": "sum",
+        "group_by": ["time_period", "origin"],
+    }
+    assert steps["share"].bindings["denominator_frame_ref"].from_step == "sum_total"
+    assert [(role.role, role.open) for role in frame_shapes(plan)["total_sum"].roles] == [
+        ("donor", True)
+    ]
 
 
 _RECORDED_CARDS = json.loads(

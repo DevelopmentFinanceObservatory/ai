@@ -6642,12 +6642,13 @@ def _whole_sums(
     as it is, or leaves it open with one row per party there, as the CRS does
     over every donor (`compiler.sources.open_side_column`). An open side is
     summed by period under the first free id of `{whole}_sum`,
-    `{whole}_sum_2` and on (`planner.plan.whole_sum`). Where the part also
-    leaves a party open in `across`, one aggregate cannot sum the opened side
-    and keep the other apart, and the whole answers `SHARE_WHOLE_UNDERIVABLE`
-    with cause `two_sides_open`. An answer stating no readable block is read
-    as binding the side; the compiler checks the whole against its source
-    again (`compiler.compile._Build._check_whole_sum`).
+    `{whole}_sum_2` and on (`planner.plan.whole_sum`), keeping apart each
+    party the part leaves open in `across` on its other sides
+    (`WholeSum.kept_open`). The block is read as the compiler reads the
+    whole's source (`compiler.sources.source_from_spec_block`), which checks
+    the pair again (`compiler.compile._Build._check_whole_sum`), so an answer
+    stating no block it can read answers `SHARE_WHOLE_UNDERIVABLE` with cause
+    `whole_unreadable`.
     """
     by_id = {requirement.id: requirement for requirement in requirements}
     taken = set(by_id)
@@ -6662,22 +6663,22 @@ def _whole_sums(
         if not isinstance(part, DatasetRequirement):
             continue
         role = opened_role(requirement, part)
+        if role is None:
+            continue
         block = pin.block
         source = readable_source(block) if block is not None else None
-        if role is None or source is None or open_side_column(source, role) is None:
-            continue
-        if kept_open := whole_read(requirement, part).across:
+        if source is None:
             return share_whole_underivable(
                 whole_id=requirement.id,
                 part_spec_id=pin.origin,
                 reason=(
-                    f"Search leaves every {requirement.whole_of.axis} open in the whole, and "
-                    f"{part.id!r} keeps every {' and '.join(kept_open)} apart in `across`, so "
-                    "one total cannot sum the first and keep the second apart; name the "
-                    f"parties {part.id!r} keeps apart in its `entities` in place of `across`"
+                    f"Search's answer for the whole, {pin.spec_id}, states no dataset block "
+                    f"this release can read, so nothing says how it serves the {role} side"
                 ),
-                cause="two_sides_open",
+                cause="whole_unreadable",
             )
+        if open_side_column(source, role) is None:
+            continue
         stem = requirement.id[: MAX_IDENTIFIER_CHARS - len("_sum_99")]
         sum_id = next(
             candidate
@@ -6687,7 +6688,13 @@ def _whole_sums(
             if candidate not in taken
         )
         taken.add(sum_id)
-        sums.append(WholeSum(whole_id=requirement.id, sum_id=sum_id))
+        sums.append(
+            WholeSum(
+                whole_id=requirement.id,
+                sum_id=sum_id,
+                kept_open=whole_read(requirement, part).across,
+            )
+        )
     return tuple(sums)
 
 
@@ -7367,11 +7374,11 @@ def share_whole_underivable(
     - `part_outside_whole`, `whole_members_unstated`: Search's whole does not
       hold, or does not show it holds, a party the part names
       (`planner.source_reads._uncontained`).
-    - `two_sides_open`: Search's whole leaves the side it opens open beside a
-      party the part keeps open in `across` (`_whole_sums`).
+    - `whole_unreadable`: Search's answer for the whole states no block the
+      compiler can read as its source (`_whole_sums`).
 
     `_declared_wholes` answers the first two kinds, `_whole_sums`
-    `two_sides_open`, and `planner.source_reads.compile_whole` every other
+    `whole_unreadable`, and `planner.source_reads.compile_whole` every other
     kind but `part_unpinned`.
     `detail.requirement_id` names the whole for the refusal's sentence
     (`harness.sentences`).

@@ -434,8 +434,12 @@ class _Build:
         self.discovered = discovered
         self.capabilities = capabilities
         split = split_of(plan)
-        # The wholes an aggregate `propose_plan` added sums the open side of.
+        # The wholes an aggregate `propose_plan` added sums the open side of, and the
+        # parties each such aggregate keeps open, by its requirement id.
         self.summed = split.summed
+        self.kept_open = split.kept_open
+        # The wholes whose source and the plan's sum over it disagree (`_check_whole_sum`).
+        self.unmatched: set[str] = set()
         stated = {r.id: r for r in plan.evidence_requirements}
         # The requirements as the plan states them, before each whole reads its part's
         # coverage (`_check_whole_sum`).
@@ -692,9 +696,10 @@ class _Build:
         where Search's compile of the whole leaves that side open
         (`planner.plan.WholeSum`). A source leaving it open with no sum would
         hand every reader one row per party there, and a sum over a source
-        binding the side would read a plan compiled for another source: a plan
-        stored before the sum existed, or one whose whole moved to another
-        dataset since `propose_plan` admitted it.
+        binding the side would read a plan admitted against another source.
+        Proposing the plan again derives the sum from the source, so every
+        other issue on a step reading the whole waits for that
+        (`_reads_unmatched`).
         """
         stated = self.plan_requirements.get(requirement.id)
         if not isinstance(stated, DatasetRequirement) or stated.whole_of is None:
@@ -711,6 +716,7 @@ class _Build:
             return
         held = "leaves every party open" if open_side else "binds one total"
         plan = "no sum over it" if open_side else "a sum over it"
+        self.unmatched.add(requirement.id)
         self._issue(
             CompileIssueCode.WHOLE_SUM_UNMATCHED,
             f"whole {requirement.id!r} reads source {source.spec_id}, which {held} on the "
@@ -799,6 +805,7 @@ class _Build:
             sources=self.sources,
             order=self.order,
             whole_history=self.whole_history,
+            kept_open=self.kept_open,
         )
         for reason in reasons:
             operation_id, _, detail = reason.partition(": ")
@@ -2498,12 +2505,26 @@ class _Build:
         return op_id
 
     def _aggregate_arguments(self, operation: AggregateOperation) -> Arguments | None:
+        """An aggregate's arguments: its `group_by` as literal columns (`_group_columns`).
+
+        The aggregate summing a whole's open side (`planner.plan.WholeSum`)
+        groups by period, every closed column and each open one it keeps
+        apart (`kept_open`), so it sums the opened side alone.
+        """
         resolved = self.shapes.get(operation.input)
         if resolved is None:
             return None
+        kept = self.kept_open.get(operation.requirement_id)
+        if kept is None:
+            group_by = _group_columns(operation.group_by, resolved.columns)
+        else:
+            group_by = [
+                TIME_PERIOD_COLUMN,
+                *(role.column for role in resolved.columns if not role.open or role.role in kept),
+            ]
         args: dict[str, JsonValue] = {
             "aggregation": operation.reduction.value,
-            "group_by": _group_columns(operation.group_by, resolved.columns),
+            "group_by": group_by,
         }
         return args, {"frame_ref": _frame_from(operation.input)}
 
@@ -2988,6 +3009,12 @@ class _Build:
         tool: ToolId | None = None,
         finding: EvidenceIssueCode | None = None,
     ) -> None:
+        if (
+            code is not CompileIssueCode.WHOLE_SUM_UNMATCHED
+            and operation_id is not None
+            and self._reads_unmatched(operation_id)
+        ):
+            return
         self.issues.append(
             CompileIssue(
                 code=code,
@@ -3026,6 +3053,25 @@ class _Build:
     def _source_upstream(self, op_id: str) -> SelectedSource | None:
         requirement_id = self._root_requirement_id(op_id)
         return self._source_of(requirement_id) if requirement_id is not None else None
+
+    def _reads_unmatched(self, op_id: str) -> bool:
+        """Whether operation `op_id` reads, directly or through other steps, a whole
+        `_check_whole_sum` found its sum unmatched for, other than retrieving it."""
+        if not self.unmatched:
+            return False
+        seen: set[str] = set()
+        pending = list(operation_inputs(self.operations[op_id])) if op_id in self.operations else []
+        while pending:
+            input_id = pending.pop()
+            if input_id in seen or (operation := self.operations.get(input_id)) is None:
+                continue
+            seen.add(input_id)
+            if isinstance(operation, RetrieveOperation):
+                if operation.requirement_id in self.unmatched:
+                    return True
+                continue
+            pending.extend(operation_inputs(operation))
+        return False
 
     def _root_requirement_ids(self, op_id: str) -> tuple[str, ...]:
         """Every dataset requirement `op_id`'s shape rests on, or none if it has no shape."""

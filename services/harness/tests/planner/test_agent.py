@@ -9230,7 +9230,9 @@ async def _share_over_every(
             id="recipient-crs",
         ),
         # The same, where Search's set for Africa names a class of party this release
-        # does not know. The whole posts the set by its label and ref, all it sends.
+        # does not know. The whole posts the set by its label and ref, all it sends,
+        # and Search's answer, holding the same set, is no source this release can
+        # read, so nothing says whether to sum the donors and the whole is refused.
         pytest.param(
             "africa_unknown_class",
             "donor",
@@ -9239,7 +9241,7 @@ async def _share_over_every(
             {"sector", "region", "measure_basis", "provider"},
             ["destination"],
             "recipients, sectors, measure basis and providers",
-            None,
+            "whole_unreadable",
             id="donor-part-set-of-an-unknown-class",
         ),
         # The same, where Search's set for Africa states a registry id that is not
@@ -9292,10 +9294,15 @@ async def test_a_declared_whole_over_every_donor_or_recipient_leaves_that_role_o
     if refused is not None:
         assert result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
         assert result["detail"]["whole"]["cause"] == refused
-        assert surface.calls == []
-        return
-    assert result["outcome"] == Outcome.OK.value, result
+        if refused != "whole_unreadable":
+            assert surface.calls == []
+            return
+    else:
+        assert result["outcome"] == Outcome.OK.value, result
     (call,) = surface.calls
+    assert list(call.get("entity_groups") or {}) == posted_groups
+    if refused is not None:
+        return
     scope = block["resolved"]["scope_choices"]
     column = "origin" if axis == "donor" else "destination"
     identity = json.loads(json.dumps(scope["base"]["identity"]))
@@ -9304,7 +9311,6 @@ async def test_a_declared_whole_over_every_donor_or_recipient_leaves_that_role_o
     assert {entry["axis"] for entry in call["scope_entries"]} == entries
     provider = "carried" if axis == "donor" else "explicit"
     assert {e["axis"]: e["provenance"] for e in call["scope_entries"]}["provider"] == provider
-    assert list(call.get("entity_groups") or {}) == posted_groups
     assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, _OPENED_WHOLE[axis])]
     plan = load_plan(ctx.state)
     assert plan is not None
@@ -9447,13 +9453,13 @@ async def test_an_added_sum_takes_an_id_no_requirement_of_the_plan_holds(
     assert sums == (WholeSum(whole_id=whole.id, sum_id=f"{whole.id}_sum_2"),)
 
 
-async def test_a_whole_with_a_second_open_side_is_refused_at_admission(
+async def test_a_whole_with_a_second_open_side_is_summed_keeping_that_side_apart(
     decision: DecisionFactory,
 ) -> None:
     """Every recipient's US health aid as a share of every donor's aid to it: the
     part keeps the recipients open in `across`, and Search leaves the donors open
-    on the whole, so no one aggregate sums the donors and keeps each recipient
-    apart, and the whole is refused under `two_sides_open`."""
+    on the whole, so the sum admission adds totals the donors and keeps each
+    recipient apart, grouped by entity."""
     block = _us_health_to_africa()
     surface = _OpenedWholeCompiles(block)
     ctx = _FakeToolContext()
@@ -9495,9 +9501,15 @@ async def test_a_whole_with_a_second_open_side_is_refused_at_admission(
         tool_context=ctx,
     )
 
-    assert result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
-    assert result["detail"]["whole"]["cause"] == "two_sides_open"
-    assert load_plan(ctx.state) is None
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole, (added,) = _summed_whole(plan)
+    assert plan.whole_sums == (
+        WholeSum(whole_id=whole.id, sum_id=added.id, kept_open=("recipient",)),
+    )
+    assert isinstance(added, AggregateRequirement)
+    assert added.group_by == (GroupBy.PERIOD, GroupBy.ENTITY)
 
 
 @pytest.mark.parametrize("restated", [False, True], ids=["whole-carried", "whole-restated"])
