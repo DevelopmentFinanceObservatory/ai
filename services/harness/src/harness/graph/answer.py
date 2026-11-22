@@ -1083,8 +1083,9 @@ def _step_dropped_key_sentences(record: StepRecord, plan: PlannerPlan) -> list[s
     """The sentences for the keys step `record` left out, in the plan's own
     words where the step's requirement gives them.
 
-    A step carries out the operation it is named for (`WorkflowStep.id`),
-    and that operation names its requirement. A join's sentences name its
+    A step carries out the operation `WorkflowStep.operation_id` names, its
+    own id's except for an internal step's (`WorkflowStep.internal`), and that
+    operation names its requirement. A join's sentences name its
     keys by their roles (`_join_key_noun`) and each side by its measure,
     with one sentence for the left side's entities and one for the right's.
     A quotient or
@@ -1092,8 +1093,11 @@ def _step_dropped_key_sentences(record: StepRecord, plan: PlannerPlan) -> list[s
     denominator's measure.
     """
     operations = plan.translation.operations if plan.translation is not None else ()
+    operation_id = (
+        plan.workflow.reported_step(record.step_id) if plan.workflow is not None else record.step_id
+    )
     requirement_id = next(
-        (operation.requirement_id for operation in operations if operation.id == record.step_id),
+        (operation.requirement_id for operation in operations if operation.id == operation_id),
         None,
     )
     requirements = {requirement.id: requirement for requirement in plan.evidence_requirements}

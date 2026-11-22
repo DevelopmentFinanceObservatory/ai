@@ -816,14 +816,22 @@ class _Build:
         `roots` back to the retrieval that produced it.
         """
         self._retrieve_by_requirement = {op.requirement_id: op.id for op in self._retrieves()}
+        # A whole's retrieval is shaped as its readers take it, after the step
+        # summing the side its source leaves open: with that side's axis closed.
+        shaped = dict(self.sources)
         for operation in self._retrieves():
-            if operation.requirement_id in self.summed:
-                taken = {*self.operations, *self.summing_steps.values()}
-                self.summing_steps[operation.id] = _summing_step_id(operation.id, taken)
+            summed = self.summed.get(operation.requirement_id)
+            if summed is None:
+                continue
+            taken = {*self.operations, *self.summing_steps.values()}
+            self.summing_steps[operation.id] = _summing_step_id(operation.id, taken)
+            if (source := shaped.get(operation.id)) is not None:
+                axes = tuple(a for a in source.open_entity_axes or () if a.column != summed)
+                shaped[operation.id] = source.model_copy(update={"open_entity_axes": axes})
         self.shapes, reasons = shapes_for(
             self.operations,
             requirements=self.requirements,
-            sources=self.sources,
+            sources=shaped,
             order=self.order,
             whole_history=self.whole_history,
         )

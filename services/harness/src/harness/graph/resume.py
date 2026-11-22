@@ -79,6 +79,7 @@ from harness.graph.answer import (
 )
 from harness.graph.delivery import Delivery, deliver
 from harness.graph.events import GraphEvent
+from harness.graph.execute import report_steps
 from harness.graph.interfaces import Executor
 from harness.graph.plan_done import HandBack, StepSummary
 from harness.plan_display import share_wholes
@@ -184,6 +185,7 @@ def run_resumer(
                 run_ledger, run.run_id, Fail(HarnessCode.RUN_RECORD_UNREADABLE.value, str(exc))
             )
             return run_hand_back(failed), None
+        report_steps(surface, submission.workflow)
         outcome = await resume_run(
             run,
             submission,

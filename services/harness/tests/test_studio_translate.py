@@ -40,6 +40,7 @@ from harness import studio_translate as studio_translate_module
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.decision_pick import DecisionPick, decision_pick
 from harness.graph.events import PlannerStarted, StepProgress
+from harness.graph.execute import report_steps
 from harness.graph.planning import planner_ask_pause
 from harness.graph.state import ORCHESTRATOR_PRIOR_LEDGER_KEY
 from harness.orchestrator_tools import _search_context
@@ -109,7 +110,7 @@ from planner.pydantic_agent import PlannerAnswers, PlannerResponse
 from planner.records import AmbiguousEntityReading, EntityCandidate, EntityKey
 from planner.session import PLANNER_ASK_PAUSE, session_steps
 from planner.tool_results import ProblemCode
-from planner.workflow import ToolId
+from planner.workflow import ArtifactKind, Binding, ToolId, Workflow, WorkflowStep
 from pydantic import BaseModel, ConfigDict, ValidationError
 from pydantic_ai.exceptions import ModelHTTPError
 from sqlalchemy import exc as sa_exc
@@ -1925,6 +1926,79 @@ async def test_a_step_cut_off_mid_call_closes_its_line_as_failed() -> None:
     assert final.detail == classed_sentence("transport_failed", "do_not_retry")
     assert is_user_sentence(final.detail)
     assert final.duration_ms is not None
+
+
+class _AnsweringSurface(_UnreachableSurface):
+    """A `ToolSurface` whose every call succeeds with an analysis verb's result."""
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, Any],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        return ToolCallResult(is_error=False, structured_content={"rows": 10})
+
+
+def _summed_whole_workflow() -> Workflow:
+    """`total` retrieved, then summed by `total_summed`, an internal step
+    carrying out `total`'s operation (`WorkflowStep.internal`)."""
+
+    def step(step_id: str, operation_id: str, tool: ToolId, **fields: Any) -> WorkflowStep:
+        return WorkflowStep(
+            id=step_id, operation_id=operation_id, tool=tool, input_schema_hash="h", **fields
+        )
+
+    frame = {"frame_ref": Binding(from_step="total", output=ArtifactKind.FRAME_REF)}
+    return Workflow(
+        steps=[
+            step("total", "total", ToolId(server="data-mcp", name="get_data")),
+            step(
+                "total_summed",
+                "total",
+                ToolId(server="analysis-mcp", name="aggregate"),
+                bindings=frame,
+            ),
+        ],
+        sources=[],
+        evidence_bindings=[],
+        terminal_steps=["total_summed"],
+    )
+
+
+@pytest.mark.parametrize("sum_failed", [False, True], ids=["summed", "sum-refused-after-its-call"])
+async def test_a_wholes_summing_step_reports_on_its_retrievals_line(sum_failed: bool) -> None:
+    """The step summing a whole's open side carries out the whole's retrieval
+    under an id of its own. Its progress and record land on the retrieval's
+    one line, under the card's label for it, and the line ends on the sum's
+    outcome, so the whole's row closes when its total exists."""
+    translator, surface_recorder = _progress_translator()
+    surface_recorder._surface = _AnsweringSurface()
+    workflow = _summed_whole_workflow()
+    surface_recorder.set_step_order("c1", ["total", "total_summed"], {"total": "Fetch the total"})
+    report_steps(surface_recorder, workflow)
+    for step_id, tool in (("total", "get_data"), ("total_summed", "aggregate")):
+        current_step_id.set(step_id)
+        await surface_recorder.call_tool(
+            tool=ToolId(server="analysis-mcp", name=tool), arguments={}
+        )
+    if sum_failed:
+        surface_recorder.mark_step_failed(
+            step_id="total_summed", tool="aggregate", code="shape_mismatch", detail="m"
+        )
+    (running,) = await translated(
+        translator, _progress(workflow.reported_step("total_summed"), tool="aggregate")
+    )
+
+    frames = await translator._drain_recorder()
+
+    assert {frame.step_id for frame in frames} == {running.step_id}
+    assert {frame.label for frame in (running, *frames)} == {"Fetch the total"}
+    assert [frame.status for frame in frames] == [
+        StepStatus.COMPLETE,
+        StepStatus.FAILED if sum_failed else StepStatus.COMPLETE,
+    ]
 
 
 async def test_a_call_abandoned_mid_flight_leaves_nothing_once_its_segment_drains() -> None:

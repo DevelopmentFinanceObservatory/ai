@@ -9235,3 +9235,86 @@ def test_a_recorded_g7_share_divides_by_the_whole_its_part_compiles_to(
     step_of = {step.operation_id: step for step in result.workflow.steps}
     assert step_of["g7_africa_share"].bindings["denominator_frame_ref"].from_step == "g7_total_aid"
     assert result.workflow.source_of(step_of["g7_total_aid"].id).spec_id == pins["g7_total_aid"]
+
+
+def test_a_level_filter_reads_a_whole_its_source_leaves_open_after_the_sum(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+) -> None:
+    """Each country donor's aid to Kenya as a share of its aid to every recipient,
+    both sides kept to countries. The whole's source leaves the recipients open,
+    so its retrieval is shaped as its readers take it, after the step summing the
+    recipients away, and the country filter reads the donors' type column off
+    that sum, which keeps each grouped role's type column
+    (`compiler.frame_columns.bound_role_keys`)."""
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[Entity(name="Kenya", role="recipient")],
+        across=["donor"],
+    )
+    whole = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[],
+        across=["donor"],
+        whole_of=WholeOf(part="aid", axis="recipient"),
+    )
+    part_req, part_filter = _countries_of(
+        "aid", reads="fetch", filter_id="aid_countries", role="donor"
+    )
+    whole_req, whole_filter = _countries_of(
+        "total", reads="fetch_total", filter_id="total_countries", role="donor"
+    )
+    keyed: dict[str, Any] = {"axis": "donor", "denominator_scope": DenominatorScope.PER_AXIS}
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid_countries"),
+        denominator=RequirementSide(input_id="total_countries"),
+        **keyed,
+    )
+    donors = OpenEntityAxis(column="origin", member_count=30)
+    recipients = OpenEntityAxis(column="destination", member_count=150)
+
+    result = build(
+        _draft([decision()], [aid, whole, part_req, whole_req, share]),
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            part_filter,
+            whole_filter,
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="aid_countries"),
+                denominator=Side(input="total_countries"),
+                **keyed,
+            ),
+            terminal=["share"],
+        ),
+        discovered={
+            "aid": source(
+                spec_id=SPEC_KENYA,
+                entities=(_KENYA,),
+                identity={"entities": {"destination": ["country/KEN"]}},
+                open_entity_axes=(donors,),
+            ),
+            "total": source(spec_id=SPEC_OTHER, entities=(), open_entity_axes=(donors, recipients)),
+        },
+    )
+
+    assert result.workflow is not None, result.issues
+    steps = {step.id: step for step in result.workflow.steps}
+    assert steps["fetch_total"].args["place_types"] is True
+    assert steps["fetch_total_summed"].args == {
+        "aggregation": "sum",
+        "group_by": ["time_period", "origin"],
+    }
+    countries = steps["total_countries"]
+    assert countries.bindings["frame_ref"].from_step == "fetch_total_summed"
+    assert countries.args["predicates"] == [
+        {"kind": "place_level", "column": "origin_type", "level": "Country"}
+    ]
