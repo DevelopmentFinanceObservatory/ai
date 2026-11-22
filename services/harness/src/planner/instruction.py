@@ -235,8 +235,8 @@ _VERSIONING = (
     "patching it through `amends_version`, whenever the user asks for a "
     "change. This turn's question is fixed, so when the user's reply asks "
     "a different question, call `propose_plan` with `starts_new_plan=true` "
-    "and, in `new_question_in`, the user's message that asks it, and stop "
-    "there.\n\n"
+    "and, in `new_question_in`, the user's message that states it or `none`, "
+    "and stop there.\n\n"
 )
 
 # How to read skills through `get_skill`, which the planner carries.

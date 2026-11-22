@@ -63,7 +63,7 @@ from entry import (
     tool_calls,
 )
 from google.genai import Client, types
-from harness.graph.state import NEW_QUESTION_KEY
+from harness.graph.state import ASK_FOR_QUESTION_KEY, NEW_QUESTION_KEY
 from harness.turn_events import PLANNER_ASK
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION
 
@@ -356,7 +356,8 @@ async def check_amendment(task: Task) -> list[str]:
     """Every fault in amendment task `task`: a scripted planner that asks about the
     amendment when the task scripts an answer, then reads the named message as a new
     question (`starts_new_plan` with `new_question_in`), ends the entry on it, and the
-    turn hands back the task's `new_question`."""
+    turn hands back the task's `new_question`, or, for `none`, nothing, asking the
+    user for their question."""
     amendment = task.amendment
     assert amendment is not None
     if amendment.new_question_in is None:
@@ -386,6 +387,9 @@ async def check_amendment(task: Task) -> list[str]:
     handed_back = run.state.get(NEW_QUESTION_KEY)
     if handed_back != amendment.new_question:
         faults.append(f"handed back {handed_back!r}, not {amendment.new_question!r}")
+    asked = run.state.get(ASK_FOR_QUESTION_KEY) is True
+    if asked != (amendment.new_question_in == "none"):
+        faults.append(f"asked the user for their question: {asked}")
     return faults
 
 

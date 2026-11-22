@@ -74,6 +74,7 @@ from harness.gemini_wire import model_retry_options
 from harness.graph.interfaces import PlannerModel
 from harness.graph.planning import plan_start, planner_node
 from harness.graph.state import (
+    ASK_FOR_QUESTION_KEY,
     NEW_QUESTION_KEY,
     ORCHESTRATOR_PENDING_KEY,
     ORCHESTRATOR_SPECS_KEY,
@@ -200,7 +201,8 @@ class Amendment(_Strict):
     question the planner asks about it, when the task scripts one. A task asking a
     new question names the message that asks it (`new_question_in`, `amendment` or
     `answer`) and the words the turn hands back (`new_question`), that message's
-    text; one that amends the plan states neither."""
+    text, or names `none` and hands back nothing; one that amends the plan states
+    neither."""
 
     base: str
     prior_plan: dict[str, Any]
@@ -217,8 +219,12 @@ class Amendment(_Strict):
             if self.new_question is not None:
                 raise ValueError("`new_question` comes with the `new_question_in` naming it")
             return self
-        if self.new_question_in not in named:
-            raise ValueError(f"`new_question_in` is one of {sorted(named)}")
+        if self.new_question_in not in {*named, "none"}:
+            raise ValueError(f"`new_question_in` is one of {sorted({*named, 'none'})}")
+        if self.new_question_in == "none":
+            if self.new_question is not None:
+                raise ValueError("`none` hands back no `new_question`")
+            return self
         if self.new_question != named[self.new_question_in]:
             raise ValueError("`new_question` is the text of the message `new_question_in` names")
         return self
@@ -1119,7 +1125,8 @@ async def run_entry(
     hand-off; its scripted `answer`, when it has one and `answers` is empty, replies to
     the planner's first question. The entry also ends when the planner reads the text
     as a new question, the `new_question` edge, which leaves the words it hands back
-    under `NEW_QUESTION_KEY`.
+    under `NEW_QUESTION_KEY`, or sets `ASK_FOR_QUESTION_KEY` when the planner names
+    no message.
     """
     probe = Probe()
     if translation is not None:
@@ -1446,7 +1453,7 @@ def stop_reason(run: EntryRun) -> str:
 def _unplanned_ending(run: EntryRun) -> str:
     """How an entry that recorded no plan, raised nothing and did not time out ended
     (`stop_reason`)."""
-    if run.state.get(NEW_QUESTION_KEY):
+    if run.state.get(NEW_QUESTION_KEY) or run.state.get(ASK_FOR_QUESTION_KEY):
         return "new_question"
     if run.probe.refused_code is not None:
         return run.probe.refused_code
@@ -1507,6 +1514,7 @@ def entry_record(
         "wall_s": round(run.wall_s, 3),
         "new_question_in": named_new_question(calls),
         "new_question": run.state.get(NEW_QUESTION_KEY),
+        "asked_for_question": run.state.get(ASK_FOR_QUESTION_KEY) is True,
     }
 
 

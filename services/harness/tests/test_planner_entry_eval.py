@@ -78,8 +78,8 @@ async def test_every_task_validates_and_the_set_covers_every_kind() -> None:
 @pytest.mark.parametrize("wrong", [False, True], ids=["as-recorded", "expecting-other-words"])
 async def test_each_amendment_task_hands_back_the_message_it_names(wrong: bool) -> None:
     """A scripted planner names each amendment task's message as asking a new
-    question, and the turn hands back that message's words. A task expecting other
-    words than the named message's is reported."""
+    question, and the turn hands back that message's words, or nothing for `none`.
+    A task expecting other words than the named message's is reported."""
     entry.quiet_logs()
     tasks = entry.load_amendment_tasks()
     assert tasks

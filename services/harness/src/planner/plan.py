@@ -6965,11 +6965,13 @@ class NewQuestionSource(TitlelessEnum):
     """Which of the user's messages a `starts_new_plan` call on the user's
     amendment says asks the new question: `amendment`, the change they
     asked for on the plan card, or `answer`, their own-words answer to the
-    question the planner asked about it. The harness hands that message on,
-    as stored, as the next turn (`harness.graph.planning`)."""
+    question the planner asked about it, which the harness hands on, as
+    stored, as the next turn; or `none`, which ends the turn asking the user
+    to send their question (`harness.graph.planning`)."""
 
     AMENDMENT = "amendment"
     ANSWER = "answer"
+    NONE = "none"
 
 
 class DecisionPick(StrictModel):

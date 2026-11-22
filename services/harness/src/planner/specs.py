@@ -141,8 +141,9 @@ _PROPOSE_PLAN_ARGUMENTS = {
     ),
     "new_question_in": (
         "With `starts_new_plan` on the user's amendment, the user's message "
-        "that asks the new question: the `amendment`, or their own-words "
-        "`answer` to your question. The harness sends it as the next turn."
+        "that states the new question, which the harness sends as the next turn: "
+        "the `amendment`, or their own-words `answer` to your question. With "
+        "`none` the harness asks the user for their question."
     ),
 }
 

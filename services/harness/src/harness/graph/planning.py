@@ -32,6 +32,7 @@ from harness.graph import switch as switch_module
 from harness.graph.events import GraphEvent, PlannerStarted
 from harness.graph.interfaces import PlannerModel
 from harness.graph.state import (
+    ASK_FOR_QUESTION_KEY,
     NEW_QUESTION_KEY,
     ORCHESTRATOR_AMENDMENTS_KEY,
     ORCHESTRATOR_BRIEF_KEY,
@@ -89,8 +90,9 @@ async def _draft(
     `QUESTION_FIXED` because the turn's question is fixed,
     `submission.service._resolve_intent`): the stored words of the user's
     message the call names go under `NEW_QUESTION_KEY` for the client to
-    send as the next turn (`_refused_entry`), and the plan
-    card is set aside unanswered. `"pending_refusal"` also goes to
+    send as the next turn, or, for a call naming `none`, `ASK_FOR_QUESTION_KEY`
+    is set so the turn closes asking the user to send their question
+    (`_refused_entry`), and the plan card is set aside unanswered. `"pending_refusal"` also goes to
     `approve`, for a planner that refuses to draft a plan at all
     (`PlannerAdapter`'s own `MAX_PLAN_ROUNDS` cap, or `QUESTION_FIXED` with
     no amendment's words to hand on) while `ctx.state["plan"]` still holds a
@@ -302,11 +304,15 @@ def _refused_entry(
     question is the stored text of the user's message the planner's
     `starts_new_plan` call names (`new_question_in`): `answer`, the text
     the user typed in `answer` to a question the planner asked about the
-    amendment, or else the amendment itself."""
+    amendment, or else the amendment itself. A call naming `none` ends the
+    turn on `ASK_FOR_QUESTION_KEY`, with no words to hand back."""
     if refused.get("code") == ProblemCode.QUESTION_FIXED and amendment:
         # The user asked a different question on the plan card. The turn
         # ends here, and the client sends the user's own message as the
-        # next turn.
+        # next turn, or the user is asked to send it.
+        if refused.get("new_question_in") == NewQuestionSource.NONE:
+            ctx.state[ASK_FOR_QUESTION_KEY] = True
+            return Next("new_question")
         typed = _typed_answer(answer)
         ctx.state[NEW_QUESTION_KEY] = (
             typed

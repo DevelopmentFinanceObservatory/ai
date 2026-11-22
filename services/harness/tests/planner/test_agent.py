@@ -2268,7 +2268,7 @@ def test_the_instruction_tells_the_planner_to_stop_on_a_different_question() -> 
 
     assert (
         "`starts_new_plan=true` and, in `new_question_in`, the user's message "
-        "that asks it, and stop there"
+        "that states it or `none`, and stop there"
     ) in instruction
 
 

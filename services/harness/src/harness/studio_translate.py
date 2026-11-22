@@ -103,6 +103,7 @@ from harness.scope_choices import REASON_COPY
 from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
 from harness.sentences import DROPPED_REASON, MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
+    ASK_FOR_QUESTION_REPLY,
     SET_ASIDE_REPLY,
     ConversationState,
     _PendingChoice,
@@ -2960,7 +2961,9 @@ class _Translator:
             },
         )
 
-    async def finish(self, *, new_question: str | None = None) -> list[Any]:
+    async def finish(
+        self, *, new_question: str | None = None, asked_for_question: bool = False
+    ) -> list[Any]:
         """Frames that close a segment that ran to the end of its events. A
         segment that did not pause closes the turn on the agent's answer,
         followed by one sentence for each loose match the turn used
@@ -2976,7 +2979,11 @@ class _Translator:
         read them, typed on the plan card, as a different question
         (`harness.graph.state.NEW_QUESTION_KEY`). The turn's record says it
         ended so (`studio_state.NEW_QUESTION`), and `done` carries the words
-        for the client to send as the next turn."""
+        for the client to send as the next turn. `asked_for_question` marks a
+        turn the planner ended on a new question no message of the user's
+        states (`harness.graph.state.ASK_FOR_QUESTION_KEY`): the reply is
+        `studio_state.ASK_FOR_QUESTION_REPLY`, the record says it ended so
+        (`studio_state.ASKED_FOR_QUESTION`), and `done` carries no words."""
         frames: list[Any] = [
             *self._take_restored(),
             *await self._drain_recorder(),
@@ -2993,14 +3000,19 @@ class _Translator:
         self._held.clear()
         if self.paused:
             return frames
+        set_aside = bool(new_question) or asked_for_question
         if new_question:
             # The planner ended the turn before the agent answered: the reply
             # says the plan was set aside, for a client that does not read
             # `done.new_question`.
             self._final_text = SET_ASIDE_REPLY
+        elif asked_for_question:
+            # The planner ended the turn on a new question no message states:
+            # the reply asks the user to send it.
+            self._final_text = ASK_FOR_QUESTION_REPLY
         answer, notes, basis = self._final_text, None, None
         # A set-aside turn's reply is the code's own, with no figures to note.
-        answered = bool(self._final_text) and not new_question
+        answered = bool(self._final_text) and not set_aside
         if self._final_text:
             notes = (
                 None
@@ -3058,6 +3070,7 @@ class _Translator:
             match_notes=notes,
             basis_line=basis,
             new_question=new_question,
+            asked_for_question=asked_for_question,
         )
         frames.append(
             Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=chips)

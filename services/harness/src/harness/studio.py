@@ -130,6 +130,7 @@ from harness.studio_store import (
     StudioStore,
     TurnMoved,
     TurnStanding,
+    asked_for_question,
     pause_entry,
     record_closed_turn,
     retry_delays,
@@ -949,7 +950,8 @@ class _SegmentWork:
         match outcome:
             case Outcome.DONE:
                 return outcome, await self._translator.finish(
-                    new_question=set_aside_question(segment.cursor)
+                    new_question=set_aside_question(segment.cursor),
+                    asked_for_question=asked_for_question(segment.cursor),
                 )
             case Outcome.PAUSED:
                 return outcome, await self._translator.finish()

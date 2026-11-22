@@ -1981,7 +1981,7 @@ def _restart_blocked(
     """Return the refusal for a restart, or `None`: `QUESTION_FIXED`, whose
     detail carries the call's `new_question_in` on an entry the user's
     amendment opened: which of the user's messages asks the new question,
-    whose stored text the harness hands back as the next turn
+    whose stored text the harness hands back as the next turn, or `none`
     (`harness.graph.planning`). There, a restart that names no message, or
     names `answer` while the run reads no own-words answer
     (`answered_in_words`), is refused `INVALID_PLAN` first, correctable
@@ -2003,9 +2003,9 @@ def _restart_blocked(
         )
         return problem(
             ProblemCode.INVALID_PLAN,
-            "`starts_new_plan` names in `new_question_in` the user's message that asks the "
-            f"new question, and this call {stated}. Name `amendment` or `answer` and call "
-            "again.",
+            "`starts_new_plan` names in `new_question_in` the user's message that states the "
+            f"new question, and this call {stated}. Name `amendment`, `answer` or `none` and "
+            "call again.",
             outcome=Outcome.INVALID_INPUT,
             action=Action(
                 call=PROPOSE_PLAN.call,

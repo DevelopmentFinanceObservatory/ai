@@ -115,6 +115,7 @@ from harness.db.commit import (
 from harness.db.jsonb import json_or_none, to_json_param
 from harness.fatal_codes import recorded_code
 from harness.graph.state import (
+    ASK_FOR_QUESTION_KEY,
     NEW_QUESTION_KEY,
     ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
@@ -1408,6 +1409,13 @@ def set_aside_question(cursor: Cursor) -> str | None:
     return None
 
 
+def asked_for_question(cursor: Cursor) -> bool:
+    """Whether turn `cursor` closed `done` with its plan card set aside for a
+    new question no message of the user's states, asking them to send it
+    (`harness.graph.state.ASK_FOR_QUESTION_KEY`)."""
+    return cursor.status is TurnStatus.DONE and cursor.state.get(ASK_FOR_QUESTION_KEY) is True
+
+
 def record_closed_turn(conversation: ConversationState, cursor: Cursor) -> str:
     """Record turn `cursor`, closed, on `conversation` as the client was told
     it ended, for a turn whose closing write never stored its record: keep
@@ -1418,7 +1426,12 @@ def record_closed_turn(conversation: ConversationState, cursor: Cursor) -> str:
     Returns the error recorded."""
     keep_turn_records(conversation, cursor.state)
     error = closed_turn_error(cursor)
-    conversation.close_turn(final_text="", error=error, new_question=set_aside_question(cursor))
+    conversation.close_turn(
+        final_text="",
+        error=error,
+        new_question=set_aside_question(cursor),
+        asked_for_question=asked_for_question(cursor),
+    )
     return error
 
 

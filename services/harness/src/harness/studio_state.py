@@ -461,6 +461,16 @@ NEW_QUESTION = "new_question"
 SET_ASIDE_REPLY = "The plan was set aside, since your message asks a new question."
 # What the conversation digest says of such a turn (`_history_turn`).
 _SET_ASIDE = "The user set this plan aside unapproved and asked a new question."
+# A turn record's `ended_by` for a turn whose plan card the user set aside for
+# a new question no message of theirs states, which closes asking them for it
+# (`harness.graph.state.ASK_FOR_QUESTION_KEY`).
+ASKED_FOR_QUESTION = "asked_for_question"
+# The reply such a turn closes on.
+ASK_FOR_QUESTION_REPLY = "The plan was set aside. What would you like to ask?"
+# What the conversation digest says of such a turn (`_history_turn`).
+_ASKED_FOR = (
+    "The user set this plan aside unapproved to ask a new question, and was asked to send it."
+)
 
 
 @dataclass
@@ -897,6 +907,7 @@ class ConversationState:
         match_notes: str | None = None,
         basis_line: str | None = None,
         new_question: str | None = None,
+        asked_for_question: bool = False,
     ) -> None:
         """Append the turn's record, once, since the resume protocol can end a
         turn from more than one code path. A turn recorded with an `error`
@@ -920,7 +931,9 @@ class ConversationState:
         plan card set aside, since the user typed a different question on
         it. The record keeps them as `new_question`, with `ended_by` set to
         `NEW_QUESTION`, and the conversation digest tells a later turn's
-        model the plan was set aside (`_history_turn`)."""
+        model the plan was set aside (`_history_turn`). `asked_for_question`
+        marks a turn whose plan card was set aside for a new question no
+        message of the user's states: its `ended_by` is `ASKED_FOR_QUESTION`."""
         if self.turn_recorded:
             return
         record: dict[str, Any]
@@ -953,6 +966,8 @@ class ConversationState:
         if new_question:
             record["ended_by"] = NEW_QUESTION
             record["new_question"] = new_question
+        elif asked_for_question:
+            record["ended_by"] = ASKED_FOR_QUESTION
         record["trace_id"] = self.trace_id
         record["usage"] = dataclasses.asdict(self.turn_usage)
         self.turns.append(record)
@@ -1556,6 +1571,8 @@ def _history_turn(
         record["error"] = _cut_text(turn["error"], _HISTORY_ERROR_BYTE_CAP >> shrink)
     if turn.get("ended_by") == NEW_QUESTION:
         record["ended"] = _SET_ASIDE
+    elif turn.get("ended_by") == ASKED_FOR_QUESTION:
+        record["ended"] = _ASKED_FOR
     return record
 
 

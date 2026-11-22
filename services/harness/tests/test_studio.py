@@ -3568,7 +3568,23 @@ class _AskingThenRestartRefusingPlanner(_RestartRefusingPlanner):
         return answer
 
 
+class _NamingRestartRefusingPlanner(_RestartRefusingPlanner):
+    """`_RestartRefusingPlanner`, whose refusal carries the user's message
+    its `starts_new_plan` call named in `new_question_in` (`named`)."""
+
+    def __init__(self, schemas: list[ToolSchema], *, named: str) -> None:
+        super().__init__(schemas)
+        self.named = named
+
+    async def __call__(self, *, question: str, **kwargs: Any) -> dict[str, Any]:
+        answer = await super().__call__(question=question, **kwargs)
+        if "refused" in answer:
+            answer["refused"]["new_question_in"] = self.named
+        return answer
+
+
 _GHANA = "Actually, what is Ghana's GDP?"
+_ASK_ELSE = "I'd like to ask something else instead."
 _KENYA_ODA = "what was Kenya's ODA in 2023?"
 
 
@@ -3578,6 +3594,7 @@ _KENYA_ODA = "what was Kenya's ODA in 2023?"
         pytest.param("show it for Kenya instead", _GHANA, "answer", _GHANA, id="answer-asks-it"),
         pytest.param(_KENYA_ODA, "separately", "amendment", _KENYA_ODA, id="amendment-asks-it"),
         pytest.param(_KENYA_ODA, "separately", None, _KENYA_ODA, id="none-named"),
+        pytest.param(_ASK_ELSE, "never mind", "none", None, id="no-message-asks-it"),
     ],
 )
 async def test_a_new_question_reached_through_a_planner_question_is_the_message_the_planner_names(
@@ -3585,7 +3602,7 @@ async def test_a_new_question_reached_through_a_planner_question_is_the_message_
     amended: str,
     typed: str,
     named: str | None,
-    handed_back: str,
+    handed_back: str | None,
 ) -> None:
     """The user amends the plan card, the planner asks which years, and the
     planner reads the answer as a different question (`QUESTION_FIXED`).
@@ -3593,7 +3610,8 @@ async def test_a_new_question_reached_through_a_planner_question_is_the_message_
     `starts_new_plan` call names, the answer or the amendment, and the
     amendment when it names none, so the question handed back is the user's
     words. An answer that is no question, such as "separately", is handed
-    back only when the planner names it."""
+    back only when the planner names it. A call naming `none` hands back
+    nothing, and the reply asks the user for their question."""
     app = _app(
         *_plan("kenya debt"),
         planner=_AskingThenRestartRefusingPlanner(schemas=real_schemas, named=named),
@@ -3620,7 +3638,61 @@ async def test_a_new_question_reached_through_a_planner_question_is_the_message_
 
     assert question["questions"][0]["question"] == "Which years?"
     assert answered[-1]["event"] == "done"
-    assert answered[-1]["new_question"] == handed_back
+    assert answered[-1].get("new_question") == handed_back
+    assert _frame(answered, "message.complete")["text"] == (
+        studio_state_module.SET_ASIDE_REPLY
+        if handed_back
+        else studio_state_module.ASK_FOR_QUESTION_REPLY
+    )
+
+
+async def test_a_new_question_no_message_states_ends_the_turn_asking_for_it(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The user types on the plan card that they want to ask something
+    else, and the planner's `starts_new_plan` call names `none`. The turn
+    ends `done` with nothing handed back and a reply asking for the
+    question; the state read, the stored record and the next turn's history
+    say so."""
+    planner = _NamingRestartRefusingPlanner(schemas=real_schemas, named="none")
+    app = _app(
+        *_plan("kenya debt"),
+        _text("Ghana's GDP in 2022 was 77 billion dollars."),
+        planner=planner,
+        tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("kenya debt"))
+        plan = _frame(first, "plan.proposed")
+        second = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(plan["interrupt_id"], "amend", _ASK_ELSE),
+        )
+        read = (
+            await client.get(
+                "/api/studio/state",
+                params={"conversation_id": CONVERSATION, "since": 0},
+                headers=AUTH,
+            )
+        ).json()
+        await _stream(client, "/api/studio/turn", _turn_body("what was Ghana's GDP in 2022?"))
+
+    assert "plan.proposed" not in _events(second)
+    assert second[-1]["event"] == "done"
+    assert "new_question" not in second[-1]
+    assert read["turn"]["status"] == "done"
+    (closed,) = read["closed_since"]
+    assert closed["reply"] == studio_state_module.ASK_FOR_QUESTION_REPLY
+    assert "new_question" not in closed
+    history = _digest(_model(app).requests[-1], "Earlier turns in this conversation")
+    assert history is not None
+    (record,) = history["turns"]
+    assert record["ended"] == studio_state_module._ASKED_FOR
+    reloaded = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert reloaded is not None
+    assert reloaded.turns[0]["ended_by"] == studio_state_module.ASKED_FOR_QUESTION
+    assert "new_question" not in reloaded.turns[0]
 
 
 async def test_an_edit_card_turn_whose_closing_write_failed_reads_abandoned_with_its_record() -> (
