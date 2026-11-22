@@ -606,7 +606,7 @@ ignores it and an older harness omits it.
 
 `schema_version` stays 1.
 
-## Count chips and count rows on the plan card (delta 28, v1.13)
+## Count chips and count rows on the plan card (delta 29, v1.14)
 
 - Answers offer count chips, `apply_choice` chips with `choice_id`
   `"<spec_id>:count"` (`docs/frontend-interface.md` 4.1.2).
