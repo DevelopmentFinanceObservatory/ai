@@ -34,15 +34,26 @@ the turn, and writes the card to the canvas (`StudioStore.change_canvas`).
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from common.mcp_telemetry import WRITE_TOKEN_KEY
+from compiler.surface import ToolSurface
 from pydantic import BaseModel
 
+from harness.card_unit import (
+    CARD_UNIT_KEY,
+    UnitMove,
+    card_unit_change,
+    retitled,
+    stored_block,
+    unit_card,
+)
 from harness.conversation import current_conversation_key
+from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.provenance import CARD_FRAME_KEY, CardLineage
+from harness.scope_choices import mark_planner_axes
 from harness.studio_state import (
     ConversationState,
     _block_title,
@@ -59,7 +70,9 @@ from harness.studio_translate import (
     closed_on_reply,
     failure_detail,
 )
-from harness.tool_contracts import HarnessCode, harness_refusal
+from harness.tool_contracts import HarnessCode, harness_refusal, resolver_digest
+from harness.unit_offer import unit_words
+from harness.unit_switch import UnitRefused, UnitResubmitted, resubmit_unit
 from harness.wire import (
     ActivityStep,
     CompositionActor,
@@ -101,9 +114,14 @@ _REBUILT_TEXT = (
 
 @dataclass(frozen=True)
 class EditClosed:
-    """The edit ends on `text`, its reply, and `done`."""
+    """The edit ends on `text`, its reply, and `done`. A reply that is not
+    `shown` is kept in the turn's record only, and the stream sends no
+    `message.complete`. `user_display` is the line a state read shows as the
+    user's message, when the record's own line is written for a model."""
 
     text: str
+    shown: bool = True
+    user_display: str | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +139,9 @@ class CanvasChange:
 
     change: Callable[[ConversationState], bool]
     lineage: CardLineage | None = None
+    # Search blocks the turn read, by spec_id, joined to the conversation's
+    # `turn_specs` once the write commits: process-local, so outside the write.
+    specs: Mapping[str, Any] | None = None
 
 
 # An edit emits a frame to number or one of the events above.
@@ -164,14 +185,19 @@ async def edit_event_frames(
     `DatabaseUnavailable`, and the stream ends as a lost lease does."""
     c = conversation
     match event:
-        case EditClosed(text=text):
-            return [*closed_on_reply(c, text, suggestions=True)]
+        case EditClosed(text=text, shown=shown, user_display=user_display):
+            return [
+                *closed_on_reply(c, text, suggestions=True, say=shown, user_display=user_display)
+            ]
         case EditFailed(error=error):
             return [_stream_fatal(c, error)]
-        case CanvasChange(change=change, lineage=lineage):
+        case CanvasChange(change=change, lineage=lineage, specs=specs):
             key = current_conversation_key.get()
             assert key is not None, "an edit runs only inside a conversation's stream"
-            if not await store.change_canvas(*key, change, lineage=lineage):
+            changed = await store.change_canvas(*key, change, lineage=lineage)
+            if specs:
+                c.turn_specs = {**c.turn_specs, **specs}
+            if not changed:
                 return []
             return [
                 CompositionUpdated(
@@ -180,6 +206,147 @@ async def edit_event_frames(
             ]
         case _:
             return [event.model_copy(update={"seq": c.next_seq()})]
+
+
+async def unit_events(
+    *,
+    recorder: _RecordingExecutor,
+    surface: ToolSurface | None,
+    conversation: ConversationState,
+    move: UnitMove,
+) -> AsyncGenerator[EditEvent]:
+    """The events of a card's unit change (`TurnRequest.apply_unit`), in code
+    with no model call: Search reads the card's spec in the new unit
+    (`harness.unit_switch.resubmit_unit`, through `surface`), `get_data`
+    fetches it with the arguments that shaped the card's frame
+    (`harness.card_unit.UnitCard.args`), and the card is written again from
+    its stored intent on the new frame and takes its own slot, as an Edit
+    Card recreate does. Its title says the new unit where it named the old
+    (`harness.card_unit.retitled`). The new card carries a fresh
+    `unit_change` starting on the new unit.
+
+    The turn's record names the change and the new spec_id
+    (`ConversationState.turn_user_message`), and the new reading joins the
+    turn's readings with its block, so the next turn's model reads the card
+    in the new unit. A step Search or the platform refuses ends the turn on
+    its sentence, the card unchanged. Failures serialise as `edit_events`'
+    do."""
+    try:
+        async for event in _unit_flow(
+            recorder=recorder, surface=surface, conversation=conversation, move=move
+        ):
+            yield event
+    except Exception as exc:
+        logger.exception("studio unit change failed (trace_id=%s)", conversation.trace_id)
+        yield EditFailed(exc)
+
+
+# What a closing message says before the reason for a unit change that did not land.
+_UNIT_UNCHANGED = "The card is unchanged."
+
+
+async def _unit_flow(
+    *,
+    recorder: _RecordingExecutor,
+    surface: ToolSurface | None,
+    conversation: ConversationState,
+    move: UnitMove,
+) -> AsyncGenerator[EditEvent]:
+    """`unit_events`' steps, their frames numbered by `edit_event_frames`."""
+    words = unit_words(move.unit, move.offer)
+    in_sentence = words[:1].lower() + words[1:]
+    if surface is None:
+        for event in _close("Changing a card's unit is not enabled on this deployment."):
+            yield event
+        return
+    described = await recorder(tool="describe_component", args={"component_id": move.component_id})
+    if described.get("outcome") != "ok":
+        for event in _refused("u1", "Read the card", _UNIT_UNCHANGED, described):
+            yield event
+        return
+    stored = (described.get("component_body") or {}).get("stored_intent") or {}
+    yield _step("u1", "Read the card")
+
+    label = f"Read the data in {in_sentence}"
+    resubmitted = await resubmit_unit(
+        surface,
+        reading=move.reading,
+        block=move.block,
+        unit=move.unit.model_dump(mode="json", exclude_none=True),
+        label=move.title,
+    )
+    if isinstance(resubmitted, UnitRefused):
+        yield _step("u2", label, failed=resubmitted.reason)
+        for event in _close(f"{_UNIT_UNCHANGED} {resubmitted.reason}"):
+            yield event
+        return
+    fetched = await recorder(
+        tool="get_data", args={"spec_id": resubmitted.spec_id, **move.card.args}
+    )
+    frame_refs = fetched.get("frame_refs") or []
+    if fetched.get("outcome") != "ok" or not frame_refs:
+        for event in _refused("u2", label, _UNIT_UNCHANGED, fetched):
+            yield event
+        return
+    yield _step("u2", label)
+
+    intent = {**stored, "frame_ref": frame_refs[0]}
+    if isinstance(stored.get("title"), str):
+        intent["title"] = retitled(
+            stored["title"], old=move.served, new=move.unit, offer=move.offer
+        )
+    held = intent.get("order")
+    if isinstance(held, dict) and "period" in held:
+        # The new unit can hold values at other periods than the old.
+        intent["order"] = _without_period(held)
+    written = await recorder(tool="write_component", args={"intent": intent})
+    if written.get("outcome") != "ok" or not written.get("component"):
+        for event in _refused("u3", "Redraw the card", _UNIT_UNCHANGED, written):
+            yield event
+        return
+    block = dict(resubmitted.spec)
+    readings = _read_again(move, resubmitted)
+    record_line = f"Changed {move.title} to {in_sentence} ({resubmitted.spec_id})."
+    display_line = f"Change {move.title} to {in_sentence}."
+
+    def record(work: ConversationState) -> None:
+        work.turn_user_message = record_line
+        work.turn_readings = [*work.turn_readings, *readings]
+
+    for event in _swapped(
+        recorder,
+        conversation,
+        component=written["component"],
+        old_component_id=move.component_id,
+        step_id="u3",
+        step_label="Redraw the card",
+        specs={resubmitted.spec_id: block},
+        also=record,
+    ):
+        yield event
+    # The card shows the change; the record keeps the sentence and the
+    # spec_id for the next turn's model, and a state read shows neither.
+    yield EditClosed(f"The card now shows {in_sentence}.", shown=False, user_display=display_line)
+
+
+def _read_again(move: UnitMove, resubmitted: UnitResubmitted) -> list[dict[str, Any]]:
+    """The readings, as JSON, of the part Search answered for the card's spec
+    in the new unit, named and asked as the reading it replaces."""
+    digest = resolver_digest({"parts": [dict(resubmitted.part)]})
+    reading = move.reading
+    for read in digest.get("part_digests") or ():
+        read["variable"] = (reading.text if reading is not None else None) or move.title
+    if reading is not None:
+        mark_planner_axes(digest, reading.planner_axes)
+    state: dict[str, Any] = {}
+    store_search(
+        state,
+        digest,
+        asked=[reading.asked_roles] if reading is not None else (),
+        held_open=[reading.open_roles] if reading is not None else (),
+        share_sides=[reading.share_over] if reading is not None else (),
+    )
+    return list(state.get(ORCHESTRATOR_SEARCHES_KEY) or ())
 
 
 async def _edit_flow(
@@ -199,40 +366,6 @@ async def _edit_flow(
     order this yields them.
     """
     c = conversation
-
-    def _step(
-        step_id: str,
-        label: str,
-        *,
-        failed: str | None = None,
-        produced: StepProduced | None = None,
-    ) -> ActivityStep:
-        """A finished step, failed when `failed` gives the sentence it shows."""
-        return ActivityStep(
-            event="activity.step",
-            seq=0,
-            step_id=step_id,
-            label=label,
-            status=StepStatus.FAILED if failed else StepStatus.COMPLETE,
-            detail=failed,
-            produced=produced,
-        )
-
-    def _close(text: str) -> list[EditEvent]:
-        return [EditClosed(text)]
-
-    def _refused(step_id: str, label: str, lead: str, result: dict[str, Any]) -> list[EditEvent]:
-        """The failed step and the closing message of a call that was refused.
-        Both give the sentence for the refusal's code. Its message, which is
-        written for a model, goes to the log."""
-        refusal = result.get("refusal")
-        refusal = refusal if isinstance(refusal, dict) else {}
-        logger.info("card edit refused (%s): %s", refusal.get("code"), refusal.get("message"))
-        sentence = failure_detail(refusal)
-        return [
-            _step(step_id, label, failed=sentence),
-            *_close(" ".join(part for part in (lead, sentence) if part)),
-        ]
 
     described = await recorder(tool="describe_component", args={"component_id": component_id})
     if described.get("outcome") != "ok":
@@ -360,22 +493,56 @@ async def _edit_flow(
         for frame in _refused("e2", step_label, lead, written):
             yield frame
         return
-    created = component_created(written["component"], step_id="e2")
-    component = written["component"]
+    for event in _swapped(
+        recorder,
+        c,
+        component=written["component"],
+        old_component_id=component_id,
+        step_id="e2",
+        step_label=step_label,
+    ):
+        yield event
+    for frame in _close(closing):
+        yield frame
+
+
+def _swapped(
+    recorder: _RecordingExecutor,
+    conversation: ConversationState,
+    *,
+    component: dict[str, Any],
+    old_component_id: str,
+    step_id: str,
+    step_label: str,
+    specs: Mapping[str, Any] | None = None,
+    also: Callable[[ConversationState], None] | None = None,
+) -> list[EditEvent]:
+    """The events of `component`, a card written to take card
+    `old_component_id`'s slot: the step `step_id`, labelled `step_label`,
+    that produced it, its `component.created` naming that step, and the
+    write that swaps it in, with its digest
+    entry, turn line and write token. A card whose unit can change carries
+    its `unit_change` and keeps its `UnitCard` with its entry
+    (`harness.card_unit`), its Search block read from `specs` and else from
+    the conversation. `also` makes the write's other changes, and `specs`
+    joins the turn's blocks once it commits."""
+    created = component_created(component, step_id=step_id)
     token = recorder.write_token(component)
-    # The step frame is yielded first. Frames are numbered in the order they
-    # are yielded, and the step precedes the card it produced on the wire.
-    yield _step(
-        "e2",
-        step_label,
-        produced=StepProduced(component_id=created.component_id, revision=created.revision),
-    )
-    yield created
+    lineage = recorder.card_lineage(component)
+    card = unit_card(component, lineage)
+    if card is not None:
+        block = (specs or {}).get(card.spec_id) or stored_block(
+            conversation.turn_specs, conversation.turns, card.spec_id
+        )
+        created.unit_change = card_unit_change(card, block)
+    kept = card.as_json() if card is not None and created.unit_change is not None else None
 
     def recreate(work: ConversationState) -> bool:
         if token:
             work.write_tokens = {**work.write_tokens, created.component_id: token}
         entry = _digest_entry(component)
+        if kept is not None:
+            entry[CARD_UNIT_KEY] = kept
         work.components[created.component_id] = entry
         work.turn_components.append(
             _turn_component_entry(
@@ -386,11 +553,58 @@ async def _edit_flow(
                 window=entry.get("time"),
             )
         )
-        return _replace_block(work, old_component_id=component_id, component=component)
+        if also is not None:
+            also(work)
+        return _replace_block(work, old_component_id=old_component_id, component=component)
 
-    yield CanvasChange(recreate, lineage=recorder.card_lineage(component))
-    for frame in _close(closing):
-        yield frame
+    # The step frame goes first. Frames are numbered in the order they are
+    # yielded, and the step precedes the card it produced on the wire.
+    return [
+        _step(
+            step_id,
+            step_label,
+            produced=StepProduced(component_id=created.component_id, revision=created.revision),
+        ),
+        created,
+        CanvasChange(recreate, lineage=lineage, specs=specs),
+    ]
+
+
+def _step(
+    step_id: str,
+    label: str,
+    *,
+    failed: str | None = None,
+    produced: StepProduced | None = None,
+) -> ActivityStep:
+    """A finished step, failed when `failed` gives the sentence it shows."""
+    return ActivityStep(
+        event="activity.step",
+        seq=0,
+        step_id=step_id,
+        label=label,
+        status=StepStatus.FAILED if failed else StepStatus.COMPLETE,
+        detail=failed,
+        produced=produced,
+    )
+
+
+def _close(text: str) -> list[EditEvent]:
+    return [EditClosed(text)]
+
+
+def _refused(step_id: str, label: str, lead: str, result: dict[str, Any]) -> list[EditEvent]:
+    """The failed step and the closing message of a call that was refused.
+    Both give the sentence for the refusal's code. Its message, which is
+    written for a model, goes to the log."""
+    refusal = result.get("refusal")
+    refusal = refusal if isinstance(refusal, dict) else {}
+    logger.info("card edit refused (%s): %s", refusal.get("code"), refusal.get("message"))
+    sentence = failure_detail(refusal)
+    return [
+        _step(step_id, label, failed=sentence),
+        *_close(" ".join(part for part in (lead, sentence) if part)),
+    ]
 
 
 def _is_no_op(component: dict[str, Any], current_revision: int) -> bool:

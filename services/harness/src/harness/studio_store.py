@@ -150,7 +150,14 @@ from harness.turn.store import (
     cursor_at,
     finish_on,
 )
-from harness.wire import STUDIO_FRAME_ADAPTER, CompositionManifest, ErrorCode, PlanProposed
+from harness.wire import (
+    STUDIO_FRAME_ADAPTER,
+    CompositionManifest,
+    ElicitationInput,
+    ErrorCode,
+    PlanProposed,
+    UnitOffer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -352,6 +359,8 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                     "question": q.question,
                     "options": dict(q.options),
                     "skippable": q.skippable,
+                    "input": q.input.value,
+                    **({"unit": q.unit.model_dump(mode="json")} if q.unit is not None else {}),
                 }
                 for q in p.questions
             ],
@@ -432,6 +441,9 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
                 question=q["question"],
                 options=dict(q["options"]),
                 skippable=q["skippable"],
+                # A question kept before inputs were stored is single-select.
+                input=ElicitationInput(q.get("input", ElicitationInput.SINGLE_SELECT)),
+                unit=UnitOffer.model_validate(q["unit"]) if q.get("unit") else None,
             )
             for q in entry["questions"]
         )

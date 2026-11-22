@@ -87,6 +87,9 @@ EVENT_FIXTURES = {
     "event-15-suggestions-apply-choice.json": Suggestions,
     "event-16-plan-approved.json": PlanApproved,
     "event-17-plan-proposed-switch-failed.json": PlanProposed,
+    "event-18-elicitation-unit.json": ElicitationRequest,
+    "event-19-component-unit-change.json": ComponentCreated,
+    "event-20-elicitation-multi-select.json": ElicitationRequest,
 }
 
 REQUEST_FIXTURES = {
@@ -104,6 +107,9 @@ REQUEST_FIXTURES = {
     "request-12-interrupt-answers.json": InterruptResponse,
     "request-13-turn-apply-choice.json": TurnRequest,
     "request-14-resume.json": ResumeRequest,
+    "request-15-interrupt-unit.json": InterruptResponse,
+    "request-16-turn-apply-unit.json": TurnRequest,
+    "request-17-interrupt-options.json": InterruptResponse,
 }
 
 
@@ -176,6 +182,89 @@ def test_a_request_naming_its_conversation_session_id_is_refused(name: str) -> N
     member of every request that names a conversation."""
     raw = _load(name)
     raw["session_id"] = raw.pop("conversation_id")
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
+def _unit_question() -> dict[str, Any]:
+    return _load("event-18-elicitation-unit.json")["questions"][0]
+
+
+def _with(raw: dict[str, Any], path: tuple[str, ...], value: Any) -> dict[str, Any]:
+    raw = copy.deepcopy(raw)
+    node = raw
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    return raw
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        pytest.param(lambda q: {**q, "unit": None}, id="unit-input-without-offer"),
+        pytest.param(lambda q: {**q, "input": "single_select"}, id="offer-on-another-input"),
+        pytest.param(lambda q: {**q, "allow_free_text": True}, id="unit-with-free-text"),
+        pytest.param(
+            lambda q: {**q, "options": [{"id": "o1", "label": "x"}]}, id="unit-with-options"
+        ),
+        pytest.param(
+            lambda q: _with(q, ("unit", "start", "base_year"), None), id="constant-without-year"
+        ),
+        pytest.param(
+            lambda q: _with(q, ("unit", "start", "prices"), "current"), id="current-with-year"
+        ),
+        pytest.param(
+            lambda q: _with(q, ("unit", "currencies", 0, "base_year_max"), None),
+            id="bounds-not-together",
+        ),
+        pytest.param(
+            lambda q: _with(
+                _with(q, ("unit", "currencies", 2, "base_year_min"), 2000),
+                ("unit", "currencies", 2, "base_year_max"),
+                2020,
+            ),
+            id="bounds-on-current-only-currency",
+        ),
+    ],
+)
+def test_a_malformed_unit_question_is_refused(fault: Callable[[dict[str, Any]], Any]) -> None:
+    raw = _load("event-18-elicitation-unit.json")
+    raw["questions"][0] = fault(copy.deepcopy(_unit_question()))
+
+    with pytest.raises(ValidationError):
+        STUDIO_FRAME_ADAPTER.validate_python(raw)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"kind": "options", "option_ids": []},
+        {"kind": "options", "option_ids": ["o1", "o1"]},
+        {"kind": "unit", "currency": "EUR", "prices": "constant"},
+        {"kind": "unit", "currency": "EUR", "prices": "current", "base_year": 2023},
+    ],
+)
+def test_a_malformed_answer_is_refused(answer: dict[str, Any]) -> None:
+    raw = _with(_load("request-15-interrupt-unit.json"), ("answers", "q1"), answer)
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
+def test_apply_unit_comes_alone() -> None:
+    raw = {**_load("request-16-turn-apply-unit.json"), "message": "hello"}
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
+def test_apply_unit_and_apply_choice_do_not_come_together() -> None:
+    raw = {
+        **_load("request-16-turn-apply-unit.json"),
+        "apply_choice": _load("request-13-turn-apply-choice.json")["apply_choice"],
+    }
 
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python(raw)

@@ -45,11 +45,12 @@ the turn's spans and its `studio.turn` log line.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import math
 import re
-from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import (
     suppress,
 )
@@ -76,6 +77,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
+from harness.card_unit import UnitMove, unit_move
 from harness.conversation import (
     current_conversation_caller,
     current_conversation_id,
@@ -103,6 +105,7 @@ from harness.studio_edit import (
     EditFailed,
     edit_event_frames,
     edit_events,
+    unit_events,
 )
 from harness.studio_state import (
     HEARTBEAT_INTERVAL_S,
@@ -174,11 +177,13 @@ from harness.turn.store import (
 )
 from harness.turn_budget import start_turn_budget
 from harness.turn_records import CHIP_STALE_NOTE, is_count_choice, stored_choice, stored_count
+from harness.unit_offer import offered_unit_refusal, unit_words
 from harness.wire import (
     MAX_CLOSED_SINCE,
     MAX_TURN_REQUEST_BYTES,
     AddOp,
     ApplyChoice,
+    ApplyUnit,
     CancelRequest,
     ClosedTurn,
     ComponentRefIntent,
@@ -187,12 +192,14 @@ from harness.wire import (
     CompositionMutation,
     ConversationRead,
     ElicitationAnswer,
+    ElicitationInput,
     ErrorCode,
     ErrorFrame,
     FactSummary,
     InterruptDecision,
     InterruptResponse,
     OptionAnswer,
+    OptionsAnswer,
     PendingPause,
     PlanApproved,
     PlanProposed,
@@ -206,6 +213,8 @@ from harness.wire import (
     TurnRequest,
     TurnState,
     TurnStatusName,
+    UnitAnswer,
+    UnitChoice,
 )
 
 logger = logging.getLogger(__name__)
@@ -267,24 +276,56 @@ _APPROVAL_DECISION = {
 }
 
 
+# The answer kinds each question input takes.
+_ANSWER_KINDS: dict[ElicitationInput, frozenset[str]] = {
+    ElicitationInput.SINGLE_SELECT: frozenset({"option", "text", "skipped"}),
+    ElicitationInput.MULTI_SELECT: frozenset({"options", "text", "skipped"}),
+    ElicitationInput.TEXT: frozenset({"text", "skipped"}),
+    ElicitationInput.UNIT: frozenset({"unit", "skipped"}),
+}
+
+
 def _answers_refusal(
     questions: tuple[_PendingQuestion, ...], answers: dict[str, ElicitationAnswer]
 ) -> str | None:
     """What is wrong with `answers` to `questions`, or `None`. Valid answers
-    name every question exactly once, pick only that question's offered
-    options, and skip only a skippable question."""
+    name every question exactly once, each of a kind its question's input
+    takes (`_ANSWER_KINDS`), pick only that question's offered options, name
+    a unit inside a unit question's offer, and skip only a skippable question."""
     asked = [question.id for question in questions]
     missing = [question_id for question_id in asked if question_id not in answers]
     extra = sorted(set(answers) - set(asked))
     if missing or extra:
         return f"answers must name exactly the questions {asked}: missing {missing}, extra {extra}"
     for question in questions:
-        answer = answers[question.id]
-        if isinstance(answer, OptionAnswer) and answer.option_id not in question.options:
-            return f"option {answer.option_id!r} is not offered by question {question.id!r}"
-        if isinstance(answer, SkippedAnswer) and not question.skippable:
+        if problem := _answer_refusal(question, answers[question.id]):
+            return problem
+    return None
+
+
+def _answer_refusal(question: _PendingQuestion, answer: ElicitationAnswer) -> str | None:
+    """What is wrong with `answer` to `question` (`_answers_refusal`), or `None`."""
+    kinds = _ANSWER_KINDS[question.input]
+    if answer.kind not in kinds:
+        return f"question {question.id!r} is answered by {sorted(kinds)}, not {answer.kind!r}"
+    match answer:
+        case OptionAnswer(option_id=option_id) if option_id not in question.options:
+            return f"option {option_id!r} is not offered by question {question.id!r}"
+        case OptionsAnswer(option_ids=option_ids) if unknown := [
+            option_id for option_id in option_ids if option_id not in question.options
+        ]:
+            return f"options {unknown} are not offered by question {question.id!r}"
+        case UnitAnswer() if question.unit is not None and (
+            problem := offered_unit_refusal(question.unit, _answered_unit(answer))
+        ):
+            return f"question {question.id!r}: {problem}"
+        case SkippedAnswer() if not question.skippable:
             return f"question {question.id!r} cannot be skipped"
     return None
+
+
+def _answered_unit(answer: UnitAnswer) -> UnitChoice:
+    return UnitChoice(currency=answer.currency, prices=answer.prices, base_year=answer.base_year)
 
 
 def _elicitation_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> str | None:
@@ -511,6 +552,35 @@ def _count_chip_refusal(
     return other.label
 
 
+def _unit_move(conversation: ConversationState, pick: ApplyUnit) -> UnitMove | JSONResponse:
+    """The unit change `pick` asks of `conversation` (`harness.card_unit.unit_move`),
+    or its HTTP refusal: 422 `scope_choice_stale` for a card off the canvas or
+    reading a spec other than `pick.spec_id`, and 422 `unit_not_offered` for a unit
+    its offer does not hold. `detail` is copy the client shows, and the
+    pointer is `/apply_unit`."""
+    move = unit_move(conversation, pick)
+    if isinstance(move, UnitMove):
+        return move
+    constraint, detail = move
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.CONSTRAINT_VIOLATION,
+            retry=RetryMode.DO_NOT_RETRY,
+            constraint_id=constraint,
+            detail=detail,
+            pointer="/apply_unit/unit" if constraint == "unit_not_offered" else "/apply_unit",
+        ),
+        status_code=422,
+    )
+
+
+def _unit_request_line(move: UnitMove) -> str:
+    """The history record's text for a unit change until it lands:
+    "Change Aid to Kenya to constant 2023 US dollars."."""
+    words = unit_words(move.unit, move.offer)
+    return f"Change {move.title} to {words[:1].lower()}{words[1:]}."
+
+
 def _turn_refusal_or_chip(
     conversation: ConversationState, body: TurnRequest
 ) -> JSONResponse | str | None:
@@ -629,11 +699,19 @@ def _given_answers(
     return {question.id: TextAnswer(kind="text", text=body.payload)}
 
 
-def _resume_answer(answer: ElicitationAnswer) -> dict[str, str]:
-    """One answer as the graph reads it: a pick names its candidate id."""
+def _resume_answer(answer: ElicitationAnswer) -> dict[str, Any]:
+    """One answer as the graph reads it (`harness.graph.state.resume_answers`):
+    a pick names its candidate id, several picks theirs, a unit its parts."""
     match answer:
         case OptionAnswer(option_id=option_id):
             return {"kind": "option", "spec_id": option_id}
+        case OptionsAnswer(option_ids=option_ids):
+            return {"kind": "options", "spec_ids": list(option_ids)}
+        case UnitAnswer():
+            return {
+                "kind": "unit",
+                **_answered_unit(answer).model_dump(mode="json", exclude_none=True),
+            }
         case TextAnswer(text=text):
             return {"kind": "text", "text": text}
         case SkippedAnswer():
@@ -642,17 +720,24 @@ def _resume_answer(answer: ElicitationAnswer) -> dict[str, str]:
 
 def _answered_lines(pending: _PendingInterrupt, answers: dict[str, ElicitationAnswer]) -> list[str]:
     """The answers the turn's record keeps, readable: an option's label, with
-    its spec_id when the option carries one, or the user's own words. A lone
-    question's answer stands alone. With several, each follows its question.
-    Skipped questions, and a legacy pick whose label was never kept, add
-    nothing."""
+    its spec_id when the option carries one, the labels of several picks, a
+    unit in words ("Constant 2023 US dollars"), or the user's own words. A
+    lone question's answer stands alone. With several, each follows its
+    question. Skipped questions, and a legacy pick whose label was never
+    kept, add nothing."""
     lines: list[str] = []
     for question in pending.questions:
+        said: str | None
         match answers[question.id]:
             case OptionAnswer(option_id=option_id):
                 said = question.options.get(option_id)
                 if said and option_id.startswith("spec_"):
                     said = f"{said} ({option_id})"
+            case OptionsAnswer(option_ids=option_ids):
+                labels = [question.options.get(option_id) for option_id in option_ids]
+                said = "; ".join(label for label in labels if label) or None
+            case UnitAnswer() as answer:
+                said = unit_words(_answered_unit(answer), question.unit)
             case TextAnswer(text=text):
                 said = text
             case SkippedAnswer():
@@ -772,6 +857,9 @@ class StudioRunner:
         run_ledger: StudioRunLedger | None = None,
     ) -> None:
         self.edit_model = edit_model
+        # The bare surface a card's unit change re-reads its spec through
+        # (`harness.studio_edit.unit_events`), off the Activity feed.
+        self.definition_surface = tool_surface
         self.run_ledger = run_ledger
         self.early_mints = early_mints
         self.store = store
@@ -1064,6 +1152,9 @@ class _EditWork:
     `conversation.renew_now` is the heartbeat's, so a Stop posted on this
     instance reaches it at once.
 
+    A card's unit change (`harness.studio_edit.unit_events`) runs as this
+    work too, `events` giving its events in place of the edit's.
+
     The edit ends on its reply and `done`, or on a stream-fatal `error`
     frame that records the turn failed, and the work ends `done` or
     `failed`. A heartbeat that reads a Stop first cancels the edit and the
@@ -1080,15 +1171,13 @@ class _EditWork:
         principal: str,
         conversation: ConversationState,
         segment_id: str,
-        component_id: str,
-        message: str,
+        events: Callable[[], AsyncIterator[EditEvent]],
     ) -> None:
         self._runner = runner
         self._principal = principal
         self._conversation = conversation
         self._segment_id = segment_id
-        self._component_id = component_id
-        self._message = message
+        self._events = events
         self._renew_now = asyncio.Event()
 
     def begin(self) -> None:
@@ -1103,13 +1192,7 @@ class _EditWork:
 
         async def edit() -> None:
             nonlocal ended
-            async for event in edit_events(
-                recorder=runner.recorder,
-                edit_model=runner.edit_model,
-                conversation=conversation,
-                component_id=self._component_id,
-                message=self._message,
-            ):
+            async for event in self._events():
                 emit(event)
                 if isinstance(event, (EditClosed, EditFailed)):
                     ended = event
@@ -1415,21 +1498,38 @@ def _stored_card(component_id: str, entry: Mapping[str, Any]) -> StoredCard | No
     )
 
 
+def _open_user_message(state: ConversationState) -> str:
+    """The latest turn's message as `_closed_turn` words it: the display line
+    its record keeps once it closed with one, else the turn's own line."""
+    if state.turn_recorded and state.turns:
+        display = state.turns[-1].get("user_display")
+        if isinstance(display, str) and display:
+            return display
+    return state.turn_user_message
+
+
 def _closed_turn(
     turn_index: int, record: Mapping[str, Any], components: Mapping[str, Mapping[str, Any]]
 ) -> ClosedTurn:
     """Turn `turn_index` as its stored record holds it. The reply is the
     answer with the notes and the basis line the stream appended to it
-    (`ConversationState.close_turn`), as its `message.complete` sent it."""
-    reply = "".join(
-        [
-            record.get("assistant") or "",
-            *(
-                f"\n\n{block}"
-                for key in ("match_notes", "basis_line")
-                if (block := record.get(key))
-            ),
-        ]
+    (`ConversationState.close_turn`), as its `message.complete` sent it,
+    and empty for a record whose stream sent none (`reply_shown: false`).
+    The user's message is the record's display line where it keeps one
+    (`user_display`), else its `user` line."""
+    reply = (
+        ""
+        if record.get("reply_shown") is False
+        else "".join(
+            [
+                record.get("assistant") or "",
+                *(
+                    f"\n\n{block}"
+                    for key in ("match_notes", "basis_line")
+                    if (block := record.get(key))
+                ),
+            ]
+        )
     )
     component_ids = [
         card["component_id"]
@@ -1444,7 +1544,7 @@ def _closed_turn(
     ]
     return ClosedTurn(
         turn_index=turn_index,
-        user_message=record.get("user") or "",
+        user_message=record.get("user_display") or record.get("user") or "",
         reply=reply,
         component_ids=component_ids,
         cards=cards,
@@ -1528,7 +1628,7 @@ def _conversation_read(stored: StoredConversation, *, since: int | None) -> Conv
             index=state.turn_index,
             status=status,
             trace_id=state.trace_id,
-            user_message=state.turn_user_message,
+            user_message=_open_user_message(state),
             approved=(
                 _approved_plans(state.turn_approved)
                 if status in (TurnStatusName.RUNNING, TurnStatusName.PAUSED)
@@ -2218,9 +2318,14 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
-                if body.component_ref is not None or body.apply_choice is not None:
-                    # The client refers to state (a card to edit or to follow
-                    # up on, or a chip under an answer) this store never had.
+                if (
+                    body.component_ref is not None
+                    or body.apply_choice is not None
+                    or body.apply_unit is not None
+                ):
+                    # The client refers to state (a card to edit, to follow up
+                    # on or to change the unit of, or a chip under an answer)
+                    # this store never had.
                     hold.release()
                     return _unknown_conversation_response(body.conversation_id)
                 try:
@@ -2251,9 +2356,15 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if isinstance(checked, JSONResponse):
                 hold.release()
                 return checked
+            moved = _unit_move(conversation, body.apply_unit) if body.apply_unit else None
+            if isinstance(moved, JSONResponse):
+                hold.release()
+                return moved
             chip_label = checked
             pick = body.apply_choice
             user_message = body.message if pick is None else f"count {chip_label}"
+            if moved is not None:
+                user_message = _unit_request_line(moved)
             # The conversation's identity, set in the request task's context
             # (`_set_turn_context` sets it again with the rest of the turn's)
             # before the turn begins, so the turn records the caller its MCP
@@ -2372,8 +2483,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio.store, principal, body.conversation_id, hold, claimed, turn=begun
                 )
                 return checked
+            moved = _unit_move(work, body.apply_unit) if body.apply_unit else None
+            if isinstance(moved, JSONResponse):
+                await _release_claim(
+                    studio.store, principal, body.conversation_id, hold, claimed, turn=begun
+                )
+                return moved
             chip_label = checked
             user_message = body.message if pick is None else f"count {chip_label}"
+            if moved is not None:
+                user_message = _unit_request_line(moved)
             left_open = await studio.turns.open_cursor(principal, body.conversation_id)
             if left_open is not None:
                 if not work.turn_recorded:
@@ -2396,7 +2515,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
             work.auto_add = body.auto_add
             work.turn_user_message = user_message
-            if pick is None:
+            if moved is not None:
+                # The change is the user's pick, not words Search should read.
+                work.turn_user_words = ""
+            elif pick is None:
                 work.turn_user_words = body.message
             else:
                 # The history record names the option the chip counts. Search
@@ -2406,7 +2528,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # The record's `spec_id` is the reading the `seed` node compiles,
                 # set once the chip applies, so the chip's own origin stays out.
                 work.turn_applied_choice = pick.model_dump(include={"choice_id", "option_id"})
-            editing = (
+            editing = moved is not None or (
                 body.component_ref is not None
                 and body.component_ref.intent is ComponentRefIntent.EDIT
             )
@@ -2445,6 +2567,31 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
             _set_turn_context(principal, body.conversation_id, conversation, settings)
+            if moved is not None:
+                # A card's unit change runs in code as an edit does: no graph,
+                # no model, the card redrawn in its slot.
+                return open_stream(
+                    _EditWork(
+                        studio,
+                        principal=principal,
+                        conversation=conversation,
+                        segment_id=segment_id,
+                        events=functools.partial(
+                            unit_events,
+                            recorder=studio.recorder,
+                            surface=studio.definition_surface,
+                            conversation=conversation,
+                            move=moved,
+                        ),
+                    ),
+                    owners=studio.owners,
+                    store=studio.store,
+                    conversation=conversation,
+                    principal=principal,
+                    conversation_id=body.conversation_id,
+                    segment_id=segment_id,
+                    hold=hold,
+                )
             if body.component_ref is not None and editing:
                 # The Edit Card route bypasses the graph entirely: no
                 # resolve, no plan, no turn on the loop, just the card, the
@@ -2457,8 +2604,14 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         principal=principal,
                         conversation=conversation,
                         segment_id=segment_id,
-                        component_id=body.component_ref.component_id,
-                        message=body.message,
+                        events=functools.partial(
+                            edit_events,
+                            recorder=studio.recorder,
+                            edit_model=studio.edit_model,
+                            conversation=conversation,
+                            component_id=body.component_ref.component_id,
+                            message=body.message,
+                        ),
                     ),
                     owners=studio.owners,
                     store=studio.store,

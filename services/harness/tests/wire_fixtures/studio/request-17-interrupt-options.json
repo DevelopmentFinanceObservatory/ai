@@ -1,0 +1,16 @@
+{
+  "kind": "interrupt.response",
+  "schema_version": 1,
+  "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E",
+  "interrupt_id": "elc_5e8a1c73d2b64f90",
+  "decision": "answer",
+  "answers": {
+    "q1": {
+      "kind": "options",
+      "option_ids": [
+        "o1",
+        "o2"
+      ]
+    }
+  }
+}

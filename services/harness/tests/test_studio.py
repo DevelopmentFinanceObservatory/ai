@@ -4368,6 +4368,61 @@ async def test_several_questions_resume_with_every_answer_in_one_reply() -> None
     assert record["user"] == "ambiguous q\n(then: How should the aid be counted? Gross)"
 
 
+async def test_a_multi_select_question_takes_several_ticks_and_refuses_a_single_pick() -> None:
+    """A `multi_select` question is a `multi_select` input offering free text. A
+    single pick is refused; several ticks reach the agent as the labels joined by
+    "; ", and the turn's record keeps them."""
+    app = _app(
+        call_part(
+            "ask_user",
+            {
+                "questions": [
+                    {
+                        "question": "Which sectors?",
+                        "multi_select": True,
+                        "options": [
+                            {"label": "Health"},
+                            {"label": "Education"},
+                            {"label": "Water"},
+                        ],
+                    }
+                ]
+            },
+        ),
+        _text("Done."),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        elicitation = _frame(first, "elicitation.request")
+        (question,) = elicitation["questions"]
+        assert (question["input"], question["allow_free_text"]) == ("multi_select", True)
+        ids = [option["id"] for option in question["options"]]
+
+        single = await client.post(
+            "/api/studio/interrupt",
+            json=_interrupt_body(
+                elicitation["interrupt_id"], "answer", answers={"q1": _pick(ids[0])}
+            ),
+            headers=AUTH,
+        )
+        assert single.status_code == 422
+
+        second = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(
+                elicitation["interrupt_id"],
+                "answer",
+                answers={"q1": {"kind": "options", "option_ids": [ids[0], ids[2]]}},
+            ),
+        )
+
+    assert _events(second)[-1] == "done"
+    assert "The user chose: Health; Water" in agent_read(_model(app).requests[-1])
+    (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+    assert record["user"] == "ambiguous q\n(then: Health; Water)"
+
+
 async def test_the_turn_record_keeps_a_picked_count_under_its_spec_id() -> None:
     """A pick whose option carries a spec_id is recorded as `label (spec_id)`,
     so a later turn can tell which series the user settled."""
@@ -7490,6 +7545,15 @@ _REFUSED_ANSWERS: dict[str, tuple[dict[str, Any], str]] = {
         {"answers": {"q1": _pick("o9"), "q2": {"kind": "skipped"}}},
         "option 'o9' is not offered by question 'q1'",
     ),
+    "unit-to-an-options-question": (
+        {
+            "answers": {
+                "q1": {"kind": "unit", "currency": "USD", "prices": "current"},
+                "q2": {"kind": "skipped"},
+            }
+        },
+        "question 'q1' is answered by ['option', 'skipped', 'text'], not 'unit'",
+    ),
     "payload-instead-of-answers": ({"payload": "o1"}, "carries answers, not a payload"),
     "no-answers": ({}, "requires answers"),
     "skip-of-the-whole-pause": ({"decision": "skip"}, "cannot be skipped as a whole"),
@@ -7513,6 +7577,99 @@ async def test_an_answer_that_does_not_fit_the_questions_is_refused(case: str) -
         elicitation["interrupt_id"]
         in app.state.studio.store.current(PRINCIPAL, CONVERSATION).pending
     )
+
+
+def _france_kenya_converted() -> dict[str, Any]:
+    """Search's answer for aid from France to Kenya, 2015 to 2023 in current US
+    dollars, which Search converts into US dollars at a base year from 2000 to
+    2023."""
+    envelope = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "data-mcp"
+            / "tests"
+            / "fixtures"
+            / "resolve_aid_france_kenya.json"
+        ).read_text()
+    )
+    envelope["parts"][0]["spec"]["resolved"].update(
+        price_bases=[
+            {"prices": "current", "via": "served"},
+            {"prices": "constant", "via": "unit_request"},
+        ],
+        unit_conversion={
+            "currencies": [
+                {
+                    "code": "USD",
+                    "noun": "US dollars",
+                    "current_years": {"start_year": 2000, "end_year": 2023},
+                    "constant_years": {"start_year": 2000, "end_year": 2023},
+                    "base_year_min": 2000,
+                    "base_year_max": 2023,
+                }
+            ],
+            "default_base_year": 2023,
+        },
+    )
+    return envelope
+
+
+@pytest.mark.parametrize(
+    ("unit", "refused"),
+    [
+        ({"currency": "EUR", "prices": "current"}, "currency 'EUR' is not offered"),
+        (
+            {"currency": "USD", "prices": "constant", "base_year": 1990},
+            "base year 1990 is outside 2000 to 2023 for USD",
+        ),
+        ({"currency": "USD", "prices": "constant", "base_year": 2023}, None),
+    ],
+    ids=["currency-not-offered", "base-year-outside", "offered"],
+)
+async def test_a_unit_question_takes_a_unit_inside_its_offer(
+    unit: dict[str, Any], refused: str | None
+) -> None:
+    """A unit question carries its offer and takes no options or free text. A
+    unit outside the offer is refused; one inside resumes the turn and the
+    turn's record keeps it in words."""
+    envelope = _france_kenya_converted()
+    spec_id = envelope["parts"][0]["spec"]["spec_id"]
+    app = _app(
+        search_call("aid from France to Kenya"),
+        call_part(
+            "ask_user", {"questions": [{"question": "In which prices?", "unit_of": spec_id}]}
+        ),
+        _text("Done."),
+        resolver=CannedSearch(envelope),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        elicitation = _frame(first, "elicitation.request")
+        (question,) = elicitation["questions"]
+        assert (question["input"], question.get("options"), question["allow_free_text"]) == (
+            "unit",
+            None,
+            False,
+        )
+        assert question["unit"]["start"] == {
+            "currency": "USD",
+            "prices": "constant",
+            "base_year": 2023,
+        }
+        body = _interrupt_body(
+            elicitation["interrupt_id"], "answer", answers={"q1": {"kind": "unit", **unit}}
+        )
+        if refused is not None:
+            response = await client.post("/api/studio/interrupt", json=body, headers=AUTH)
+            assert response.status_code == 422
+            assert refused in response.json()["detail"]
+            return
+        second = await _stream(client, "/api/studio/interrupt", body)
+
+    assert _events(second)[-1] == "done"
+    assert "The user chose constant 2023 US dollars." in agent_read(_model(app).requests[-1])
+    (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+    assert record["user"] == "France's aid to Kenya\n(then: Constant 2023 US dollars)"
 
 
 async def test_a_question_that_is_the_only_one_cannot_be_skipped_alone() -> None:

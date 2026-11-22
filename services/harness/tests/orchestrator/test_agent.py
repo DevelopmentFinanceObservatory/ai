@@ -224,19 +224,17 @@ def test_the_instruction_has_search_elect_the_measure_and_asks_only_what_search_
     assert "switch to another count" not in text
     assert "Search leaves a count open only when a part lists `candidates`" in text
     assert (
-        "ask about them with ask_user in one call: one question per measure, with `prices_of` "
-        "set to a part's spec_id and the `open_prices` entries as the options. Parts that "
-        "measure one thing over other years share one prices question, and one call holds at "
-        f"most {_NUMBER_WORDS[MAX_ASK_QUESTIONS]} questions" in text
+        "ask the unit with ask_user in one call: one question per measure, with `unit_of` "
+        "set to a part's spec_id, and `prices` set when a skill prefers current or constant. "
+        "Parts that measure one thing over other years share one unit question, and one call "
+        f"holds at most {_NUMBER_WORDS[MAX_ASK_QUESTIONS]} questions" in text
     )
     assert "one question per part" not in text
     assert "count question" not in text
     assert "a count or prices still open" not in text
     assert "even when the result lists no `other_prices`" not in text
-    assert (
-        "When they pick prices the result does not name, search again with that unit on the "
-        "part, and put any count the user named in `variable`" in text
-    )
+    assert "The answer to a unit question names the spec_id to fetch" in text
+    assert "search again with that unit on the part" not in text
     assert (
         "A request that adds or combines measures from different sources, such as aid and debt, "
         "goes to plan straight after search, without ask_user. The planner asks how to combine "

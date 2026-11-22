@@ -25,12 +25,15 @@ from data_mcp.search_tool import MAX_PARTS
 from planner.plan import AskBreakdown, SessionState, scope_unread, stored_plan, with_blocks
 from planner.plan import Plan as PlannerPlan
 from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
+from submission.prices_choice import measure_key
 
 from harness.tool_contracts import (
     reading_facts,
 )
 from harness.turn.store import SPECS_KEY, FrameKey, FrameKeys
-from harness.turn_records import Origin, SearchReading, open_prices
+from harness.turn_records import Origin, PricesForm, SearchReading, open_prices, prices_form
+from harness.unit_offer import unit_offer
+from harness.wire import UnitOffer
 
 if TYPE_CHECKING:
     from harness.turn.node import NodeCtx
@@ -67,6 +70,15 @@ ORCHESTRATOR_ALIGNED_SERVED_KEY = "orchestrator:aligned_served"
 # spec_id -> the warnings of the search part that returned it, as `search`
 # stores its block under `ORCHESTRATOR_SPECS_KEY`.
 ORCHESTRATOR_SPEC_WARNINGS_KEY = "orchestrator:spec_warnings"
+# The spec_ids whose unit the user settled this turn: each part a unit
+# question covered and the count picked beside it, whether Search served,
+# re-read or refused the chosen unit, and each spec_id it re-read them as.
+# Their prices are closed (`unit_settled`, `settle_unit`).
+ORCHESTRATOR_UNIT_SETTLED_KEY = "orchestrator:unit_settled"
+# The spec_ids the `ask` node re-read each part in, by the part a unit question
+# covered (`unit_reads`, `record_unit_read`), so the prices the user chose
+# reach the re-read series (`planner.call.prices_chosen`).
+ORCHESTRATOR_UNIT_READ_KEY = "orchestrator:unit_read"
 # The search readings of the conversation's earlier turns, with the warnings
 # of the spec_ids they name and the spec_ids whose block an earlier turn
 # stored, seeded by `harness.studio` from `ConversationState.
@@ -193,12 +205,26 @@ class AskQuestion(BaseModel):
         default_factory=list,
         description=(
             "the likely answers, at least one; the user may also write their own. Leave it "
-            "empty for a prices question, whose options are filled in for you"
+            "empty for a unit question, whose answers are filled in for you"
         ),
     )
-    prices_of: str | None = Field(
+    unit_of: str | None = Field(
         default=None,
-        description="for the prices question of a part that lists `open_prices`, that part's spec_id",
+        description="for the unit question of a part that lists `open_prices`, that part's spec_id",
+    )
+    prices: Literal["current", "constant"] | None = Field(
+        default=None,
+        description=(
+            "for a unit question, the prices a skill prefers the user starts on; leave it out "
+            "otherwise"
+        ),
+    )
+    multi_select: bool = Field(
+        default=False,
+        description=(
+            "true when several answers can hold together and the user may tick more than "
+            "one; the options are then plain labels, with no spec_id, and no `unit_of`"
+        ),
     )
 
 
@@ -243,6 +269,55 @@ def stored_sequence(state: SessionState, key: str) -> tuple[Any, ...]:
     return tuple(state.get(key) or ())
 
 
+def _turn_readings(state: SessionState) -> list[tuple[SearchReading, Mapping[str, Any]]]:
+    """Each reading of the turn with a spec_id, with its stored spec block, oldest first."""
+    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
+    found = []
+    for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY):
+        reading = SearchReading.model_validate(stored)
+        block = specs.get(reading.spec_id) if reading.spec_id is not None else None
+        if block is not None:
+            found.append((reading, block))
+    return found
+
+
+def unit_settled(state: SessionState) -> frozenset[str]:
+    """The spec_ids whose unit the user settled this turn (`ORCHESTRATOR_UNIT_SETTLED_KEY`)."""
+    return frozenset(stored_sequence(state, ORCHESTRATOR_UNIT_SETTLED_KEY))
+
+
+def settle_unit(state: SessionState, *spec_ids: str) -> None:
+    """Record `spec_ids` as settled in the unit the user chose: their prices are closed
+    from here, so no reading lists `open_prices` for them and a second unit question
+    on them is refused."""
+    state[ORCHESTRATOR_UNIT_SETTLED_KEY] = sorted({*unit_settled(state), *spec_ids})
+
+
+def unit_reads(state: SessionState) -> dict[str, list[str]]:
+    """The spec_ids each part a unit question covered was re-read in this turn
+    (`ORCHESTRATOR_UNIT_READ_KEY`), by the part."""
+    return {
+        str(part): [str(spec_id) for spec_id in spec_ids]
+        for part, spec_ids in stored_mapping(state, ORCHESTRATOR_UNIT_READ_KEY).items()
+        if isinstance(spec_ids, list)
+    }
+
+
+def record_unit_read(state: SessionState, part: str, spec_id: str) -> None:
+    """Record that `part`, which a unit question covered, was re-read as `spec_id`."""
+    reads = unit_reads(state)
+    reads[part] = list(dict.fromkeys([*reads.get(part, ()), spec_id]))
+    state[ORCHESTRATOR_UNIT_READ_KEY] = reads
+
+
+def _reading_prices(reading: SearchReading) -> dict[str, Any]:
+    """The arguments `harness.turn_records.open_prices` and `prices_form` read off `reading`."""
+    return {
+        "window": reading.window.model_dump() if reading.window is not None else None,
+        "other_prices": [offer.model_dump() for offer in reading.other_prices],
+    }
+
+
 def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
     """The `open_prices` entries of each reading of the turn whose prices are open,
     by its spec_id, each with its `prices`: the first the prices search read,
@@ -252,19 +327,13 @@ def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
     `ORCHESTRATOR_SPECS_KEY`. Only code reads `prices`: the readings the model
     reads carry the entries without it (`store_search`).
     """
-    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
     parts: dict[str, list[dict[str, Any]]] = {}
-    for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY):
-        reading = SearchReading.model_validate(stored)
-        block = specs.get(reading.spec_id) if reading.spec_id is not None else None
-        if block is None or reading.spec_id is None:
+    settled = unit_settled(state)
+    for reading, block in _turn_readings(state):
+        assert reading.spec_id is not None
+        if reading.spec_id in settled:
             continue
-        entries = open_prices(
-            block,
-            window=reading.window.model_dump() if reading.window is not None else None,
-            other_prices=[offer.model_dump() for offer in reading.other_prices],
-        )
-        if entries:
+        if entries := open_prices(block, **_reading_prices(reading)):
             parts[reading.spec_id] = [
                 {**entry, "prices": "current" if index == 0 else "constant"}
                 for index, entry in enumerate(entries)
@@ -272,14 +341,35 @@ def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
     return parts
 
 
+def prices_forms(state: SessionState) -> dict[str, PricesForm]:
+    """How the prices question of each reading of the turn whose prices are open is
+    asked, by its spec_id (`harness.turn_records.prices_form`): "unit" or "options"."""
+    forms: dict[str, PricesForm] = {}
+    settled = unit_settled(state)
+    for reading, block in _turn_readings(state):
+        assert reading.spec_id is not None
+        if reading.spec_id in settled:
+            continue
+        if (form := prices_form(block, **_reading_prices(reading))) != "closed":
+            forms[reading.spec_id] = form
+    return forms
+
+
 def prices_question(
-    question: AskQuestion, parts: Mapping[str, list[dict[str, Any]]]
+    question: AskQuestion,
+    parts: Mapping[str, list[dict[str, Any]]],
+    forms: Mapping[str, PricesForm],
 ) -> AskQuestion:
-    """`question` with, when it prices a part of `parts` (`AskQuestion.prices_of`),
-    that part's `open_prices` entries as its options."""
-    entries = parts.get(question.prices_of) if question.prices_of is not None else None
-    if entries is None:
+    """`question` with the answers code gives it when it asks the unit of a part of
+    `parts` (`AskQuestion.unit_of`): none for a part asked in the "unit" form
+    (`forms`), whose answer is a unit, and the part's `open_prices` entries, each
+    naming its spec_id but the reading's own, for one asked in the "options" form."""
+    part = question.unit_of
+    entries = parts.get(part) if part is not None else None
+    if part is None or entries is None:
         return question
+    if forms.get(part) == "unit":
+        return question.model_copy(update={"options": []})
     return question.model_copy(
         update={
             "options": [
@@ -289,18 +379,64 @@ def prices_question(
     )
 
 
+class UnitAsk(NamedTuple):
+    """A unit question's reach: `parts`, the spec_ids of the readings it covers, the
+    one it names first leading, and `offer`, the units every one of them converts into."""
+
+    parts: tuple[str, ...]
+    offer: UnitOffer
+
+
+def unit_asks(questions: Sequence[AskQuestion], state: SessionState) -> list[UnitAsk | None]:
+    """For each of `questions`, the reach of a unit question, `None` for any other
+    question or for one whose parts share no unit both bases serve.
+
+    A unit question is one whose `unit_of` part is asked in the "unit" form
+    (`prices_forms`). It covers that part and every other part asked in that
+    form measuring the same thing (equal `submission.prices_choice.measure_key`),
+    and offers what all of them
+    convert into (`harness.unit_offer.unit_offer`), starting on the prices
+    the question prefers (`AskQuestion.prices`).
+    """
+    forms = prices_forms(state)
+    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
+    measures = {part: measure_key(specs[part]) for part in forms if part in specs}
+    asks: list[UnitAsk | None] = []
+    for question in questions:
+        part = question.unit_of
+        if part is None or forms.get(part) != "unit" or part not in specs:
+            asks.append(None)
+            continue
+        key = measures.get(part)
+        parts = (
+            part,
+            *(
+                other
+                for other, form in forms.items()
+                if other != part
+                and form == "unit"
+                and other in specs
+                and key is not None
+                and measures.get(other) == key
+            ),
+        )
+        offer = unit_offer([specs[p] for p in parts], prefer=question.prices)
+        asks.append(UnitAsk(parts, offer) if offer is not None else None)
+    return asks
+
+
 def priced_options(
     questions: list[AskQuestion], state: SessionState
 ) -> list[dict[int, PricedOption]]:
     """For each of `questions`, the place of each option offering prices, with
     the part it prices and the prices: each option of a question pricing a
-    part (`AskQuestion.prices_of`) that is one of the part's `open_prices`
+    part (`AskQuestion.unit_of`) that is one of the part's `open_prices`
     entries (`open_parts`), matched by spec_id, else by label among the
     entries carrying none. A question pricing no part has none."""
     parts = open_parts(state)
     priced: list[dict[int, PricedOption]] = []
     for question in questions:
-        entries = parts.get(question.prices_of) if question.prices_of is not None else None
+        entries = parts.get(question.unit_of) if question.unit_of is not None else None
         marks: dict[int, PricedOption] = {}
         for index, option in enumerate(question.options):
             entry = next(
@@ -312,8 +448,8 @@ def priced_options(
                 ),
                 None,
             )
-            if entry is not None and question.prices_of is not None:
-                marks[index] = PricedOption(question.prices_of, entry["prices"])
+            if entry is not None and question.unit_of is not None:
+                marks[index] = PricedOption(question.unit_of, entry["prices"])
         priced.append(marks)
     return priced
 
@@ -348,21 +484,34 @@ def ask_candidates(
 
 
 def ask_questions(
-    questions: list[AskQuestion], priced: Sequence[Mapping[int, PricedOption]] = ()
+    questions: list[AskQuestion],
+    priced: Sequence[Mapping[int, PricedOption]] = (),
+    units: Sequence[UnitAsk | None] = (),
 ) -> list[dict[str, Any]]:
     """`PendingAsk.questions` as the clarify interrupt's payload entries: each
     under `q{n}`, its place in the call, with its candidates (`ask_candidates`),
-    each question's priced options read from `priced` by place."""
-    return [
-        {
+    each question's priced options read from `priced` by place, and
+    `multi_select` when the user may tick several. A unit
+    question of `units`, by place, carries `unit`: the spec_ids it covers
+    (`parts`) and its `offer` as `harness.wire.UnitOffer` JSON."""
+    entries = []
+    for index, question in enumerate(questions):
+        entry: dict[str, Any] = {
             "id": f"q{index + 1}",
             "question": question.question,
             "candidates": ask_candidates(
                 question.options, priced[index] if index < len(priced) else None
             ),
         }
-        for index, question in enumerate(questions)
-    ]
+        if question.multi_select:
+            entry["multi_select"] = True
+        if (unit := units[index] if index < len(units) else None) is not None:
+            entry["unit"] = {
+                "parts": list(unit.parts),
+                "offer": unit.offer.model_dump(mode="json", exclude_none=True),
+            }
+        entries.append(entry)
+    return entries
 
 
 def resume_answers(result: Any) -> dict[str, dict[str, Any]] | None:
@@ -371,9 +520,10 @@ def resume_answers(result: Any) -> dict[str, dict[str, Any]] | None:
 
     The value `harness.studio`'s `/interrupt` route resumes a clarify with
     is `{"answers": {question id: answer}}`, each answer
-    `{"kind": "option", "spec_id"}`, `{"kind": "text", "text"}` or
-    `{"kind": "skipped"}`. Any other value, such as the plan card's answer,
-    answers no question.
+    `{"kind": "option", "spec_id"}`, `{"kind": "options", "spec_ids"}`,
+    `{"kind": "unit", "currency", "prices", "base_year"?}`,
+    `{"kind": "text", "text"}` or `{"kind": "skipped"}`. Any other value,
+    such as the plan card's answer, answers no question.
     """
     if not isinstance(result, dict):
         return {}
@@ -571,8 +721,8 @@ def store_search(
     `held_open` those it asked to hold open, and `share_sides` the sides
     its `share_of` operations run over; each is empty when no part's are
     known. A `definite` part whose prices are open over several years reads
-    with `open_prices`, the options of its prices question
-    (`harness.turn_records.open_prices`).
+    with `open_prices` (`harness.turn_records.open_prices`), which tells the
+    model to ask its unit.
 
     A spec_id a part holds as its own keeps that part's block and warnings
     against a later part offering it as a candidate, since a pin of it is
@@ -604,10 +754,12 @@ def store_search(
             blocks[part["spec_id"]] = part["spec_block"]
             own.add(part["spec_id"])
             facts = reading_facts(part["spec_block"])
-            if prices := open_prices(
-                part["spec_block"],
-                window=part.get("window"),
-                other_prices=part.get("other_prices") or (),
+            if part["spec_id"] not in unit_settled(state) and (
+                prices := open_prices(
+                    part["spec_block"],
+                    window=part.get("window"),
+                    other_prices=part.get("other_prices") or (),
+                )
             ):
                 reading["open_prices"] = prices
         if mentions := reading.get("resolved_sources"):

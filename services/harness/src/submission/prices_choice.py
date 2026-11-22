@@ -1,11 +1,12 @@
 """The prices the user chose for a part answering an ask, held on the plan as their decision.
 
 A part is a search reading whose prices were open (`harness.turn_records.
-open_prices`). The orchestrator's prices question names its part, and code
-gives it the part's `open_prices` entries as options, each marked with the
-part and its prices (`harness.graph.state.priced_options`). The planner
-reads the user's picks off the answered interrupt, one per part
-(`planner.call.prices_chosen`).
+open_prices`). The orchestrator's unit question names its part (`unit_of`):
+code either offers a unit, or, when Search serves constant prices only as
+another reading, gives it the part's `open_prices` entries as options, each
+marked with the part and its prices (`harness.graph.state.priced_options`).
+The planner reads the user's answers off the answered interrupt, one per
+part (`planner.call.prices_chosen`).
 
 `prices_decisions` writes each pick as a `resolved_by=user` decision fixing
 the price basis alone (`DecisionFixes.prices`), cited by every dataset

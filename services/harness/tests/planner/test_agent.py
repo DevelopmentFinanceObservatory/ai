@@ -44,7 +44,7 @@ from data_mcp.definition_writes import MAX_IDENTITY_BYTES, windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
-from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, store_search
+from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, ORCHESTRATOR_UNIT_READ_KEY, store_search
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
 from harness.planner_adapter import (
@@ -12923,6 +12923,81 @@ def test_a_landed_plan_clears_a_prices_refusal_so_later_asks_keep_their_picks(
     assert prices_chosen(session_call(ctx)) == {
         _GROSS: PricesChoice("constant"),
         other: PricesChoice("constant"),
+    }
+
+
+_UNIT_OTHER = "spec_" + "f" * 32
+_UNIT_EUR = "spec_" + "9" * 32
+_UNIT_QUESTION = {
+    "id": "q1",
+    "question": "In which prices?",
+    "candidates": [],
+    "unit": {
+        "parts": [_GROSS, _UNIT_OTHER],
+        "offer": {
+            "currencies": [
+                {
+                    "code": "USD",
+                    "name": "US dollars",
+                    "prices": ["current", "constant"],
+                    "base_year_min": 2000,
+                    "base_year_max": 2023,
+                },
+                {"code": "EUR", "name": "euros", "prices": ["current"]},
+            ],
+            "presets": ["USD"],
+            "start": {"currency": "USD", "prices": "constant", "base_year": 2023},
+        },
+    },
+}
+_OTHER_QUESTION = {
+    "id": "q2",
+    "question": "Which Congo?",
+    "candidates": [{"spec_id": "o1", "label": "DR Congo"}],
+}
+
+
+@pytest.mark.parametrize(
+    ("questions", "answer", "reads", "chosen"),
+    [
+        (
+            [_UNIT_QUESTION],
+            {"answers": {"q1": {"kind": "unit", "currency": "USD", "prices": "current"}}},
+            {},
+            {_GROSS: "current", _UNIT_OTHER: "current"},
+        ),
+        ([_UNIT_QUESTION], {"skip": True}, {}, {_GROSS: "constant", _UNIT_OTHER: "constant"}),
+        ([_UNIT_QUESTION, _OTHER_QUESTION], {"skip": True}, {}, {}),
+        (
+            [_UNIT_QUESTION],
+            {"answers": {"q1": {"kind": "unit", "currency": "EUR", "prices": "current"}}},
+            {_GROSS: [_UNIT_EUR]},
+            {_GROSS: "current", _UNIT_EUR: "current", _UNIT_OTHER: "current"},
+        ),
+    ],
+    ids=["answered", "skipped", "whole-pause-skipped", "currency-changed"],
+)
+def test_a_unit_answer_sets_the_prices_of_every_part_its_question_covers(
+    questions: list[dict[str, Any]],
+    answer: dict[str, Any],
+    reads: dict[str, list[str]],
+    chosen: dict[str, str],
+) -> None:
+    """The `ask` node's unit question covers two parts. A unit answer sets
+    both to its prices, and each series the `ask` node re-read a part as,
+    which a currency change leaves outside the part's own currency. A skip of
+    the question goes on with the unit the chips started on. A skip of a
+    whole pause of several questions answers none of them, so it sets no
+    prices."""
+    ctx = _FakeToolContext()
+    ctx.state[ORCHESTRATOR_UNIT_READ_KEY] = reads
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": questions}),
+        user_answer(_ASK_PAUSE_ID, answer),
+    ]
+
+    assert prices_chosen(session_call(ctx)) == {
+        part: PricesChoice(prices) for part, prices in chosen.items()
     }
 
 

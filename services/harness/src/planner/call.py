@@ -21,7 +21,12 @@ from typing import Any, Literal, NamedTuple, Protocol
 
 from compiler.evidence import PriceBasis
 from harness.graph.orchestrate import counts_chosen
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers, stored_mapping
+from harness.graph.state import (
+    ORCHESTRATOR_SPECS_KEY,
+    resume_answers,
+    stored_mapping,
+    unit_reads,
+)
 from harness.plan_display import DECISION_CHOICE_PREFIX, decision_option_id
 from harness.turn_events import PLANNER_ASK
 from submission.prices_choice import (
@@ -203,6 +208,7 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
         for spec_id, source in pin_sources(call.state).items()
         if (block := source.spec_block(spec_id)) is not None
     }
+    reads = unit_reads(call.state)
     chosen: dict[str, PricesChoice] = {}
     refused: str | None = None
     asked: dict[str, str] = {}
@@ -236,7 +242,7 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
             elif part in chosen and chosen[part].prices == "constant":
                 chosen[part] = chosen[part]._replace(asked=True)
         else:
-            _priced_answers(step.args or {}, step.body, chosen, measures)
+            _priced_answers(step.args or {}, step.body, chosen, measures, reads=reads)
     return chosen
 
 
@@ -307,10 +313,33 @@ def _priced_answers(
     body: Mapping[str, Any],
     chosen: dict[str, PricesChoice],
     measures: Mapping[str, str | None],
+    *,
+    reads: Mapping[str, Sequence[str]],
 ) -> None:
     """Record in `chosen` what one clarify response says of each part its call
-    priced, each answer replacing the choices of its part's measure (`prices_chosen`)."""
-    answers = _answers(body.get("result"))
+    priced, each answer replacing the choices of its part's measure (`prices_chosen`).
+
+    A unit question (`harness.graph.state.ask_questions`, `unit`) sets the
+    prices of every part it covers, and of each series the `ask` node re-read
+    the part as (`reads`, `harness.graph.state.unit_reads`), whose currency
+    may differ from the part's: those of a unit answer, else those its chips
+    started on, which a skip goes on with (`harness.graph.orchestrate`). A
+    skip or dismissal of a whole pause of several questions sets none, as
+    the `ask` node hands it back unanswered; of a lone unit question it is
+    that question's skip."""
+    result = body.get("result")
+    answers = _answers(result)
+    units = _unit_questions(args)
+    lone = len(_question_candidates(args)) == 1
+    answered = result is not None and (resume_answers(result) is not None or lone)
+    for question_id, unit in units.items() if answered else ():
+        prices = _unit_prices(unit, answers.get(question_id))
+        for part in unit.get("parts") or ():
+            _release_measure(chosen, str(part), measures)
+            if prices is None:
+                continue
+            for priced in (str(part), *reads.get(str(part), ())):
+                chosen[priced] = PricesChoice(prices)
     for question_id, candidates in _question_candidates(args).items():
         marked = [c for c in candidates or () if isinstance(c, dict) and c.get("part")]
         answer = answers.get(question_id)
@@ -330,6 +359,34 @@ def _priced_answers(
         _release_measure(chosen, part, measures)
         if picked is not None:
             chosen[part] = picked
+
+
+def _unit_questions(args: dict[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """The `unit` entry of each unit question an ask's `args` put, by question id."""
+    payload = args.get("payload")
+    questions = payload.get("questions") if isinstance(payload, dict) else None
+    return {
+        str(question["id"]): question["unit"]
+        for question in questions or ()
+        if isinstance(question, dict)
+        and question.get("id")
+        and isinstance(question.get("unit"), dict)
+    }
+
+
+def _unit_prices(unit: Mapping[str, Any], answer: object) -> PriceBasis | None:
+    """The prices a unit question's `answer` settles: a unit answer's, else, as
+    for a skip, the prices its offer's chips started on."""
+    if isinstance(answer, dict) and answer.get("kind") == "unit":
+        prices = answer.get("prices")
+    else:
+        prices = ((unit.get("offer") or {}).get("start") or {}).get("prices")
+    match prices:
+        case "current":
+            return "current"
+        case "constant":
+            return "constant"
+    return None
 
 
 def _answers(result: object) -> dict[str, dict[str, Any]]:

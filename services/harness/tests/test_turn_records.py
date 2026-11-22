@@ -38,6 +38,7 @@ from harness.turn_records import (
     loose_match_notes,
     open_prices,
     part_name,
+    prices_form,
     render_readings,
     scope_chips,
     stored_count,
@@ -2087,6 +2088,23 @@ def test_plan_record_names_the_requirements_the_model_wrote(decision: Any) -> No
 _USD = {"basis": "fallback", "ref": "CurrencyUSD", "label": "US Dollar", "currency": "USD"}
 _CONSTANT_OFFER = {"spec_id": "spec_c", "label": "constant prices"}
 _SEVERAL_YEARS = {"start": 2015, "end": 2023, "source": "requested"}
+_BOTH_BASES = [
+    {"prices": "current", "via": "served"},
+    {"prices": "constant", "via": "unit_request"},
+]
+_CONVERSION = {
+    "currencies": [
+        {
+            "code": "USD",
+            "noun": "US dollars",
+            "current_years": {"start_year": 2000, "end_year": 2023},
+            "constant_years": {"start_year": 2000, "end_year": 2023},
+            "base_year_min": 2000,
+            "base_year_max": 2023,
+        }
+    ],
+    "default_base_year": 2023,
+}
 
 
 @pytest.mark.parametrize(
@@ -2166,7 +2184,52 @@ def test_prices_are_open_over_several_years_of_current_money_the_user_left_unpri
     block = {
         "spec_id": "spec_a",
         "definition": {"identity": identity},
-        "resolved": {"facets": {"unit": unit}},
+        "resolved": {
+            "facets": {"unit": unit},
+            "price_bases": _BOTH_BASES,
+            "unit_conversion": _CONVERSION,
+        },
     }
 
     assert open_prices(block, window=window, other_prices=other_prices) == options
+
+
+def _open_block(**resolved: Any) -> dict[str, Any]:
+    """A part whose prices are open by every check but the price_bases gate."""
+    return {
+        "spec_id": "spec_a",
+        "definition": {"identity": {}},
+        "resolved": {"facets": {"unit": _USD}, **resolved},
+    }
+
+
+@pytest.mark.parametrize(
+    ("resolved", "other_prices", "form"),
+    [
+        ({"price_bases": _BOTH_BASES, "unit_conversion": _CONVERSION}, [], "unit"),
+        ({"price_bases": _BOTH_BASES}, [_CONSTANT_OFFER], "options"),
+        ({"price_bases": _BOTH_BASES}, [{"label": "constant prices"}], "closed"),
+        ({"price_bases": _BOTH_BASES}, [], "closed"),
+        ({"price_bases": [{"prices": "current", "via": "served"}]}, [_CONSTANT_OFFER], "closed"),
+        ({"price_bases": []}, [_CONSTANT_OFFER], "closed"),
+        ({"unit_conversion": _CONVERSION}, [_CONSTANT_OFFER], "closed"),
+    ],
+    ids=[
+        "convertible",
+        "alternative-route-with-spec-id",
+        "alternative-route-without-spec-id",
+        "no-route-to-constant-data",
+        "current-served-alone",
+        "not-money",
+        "price_bases-absent",
+    ],
+)
+def test_prices_form_is_closed_unless_the_harness_can_serve_both_bases(
+    resolved: dict[str, Any], other_prices: list[dict[str, str]], form: str
+) -> None:
+    block = _open_block(**resolved)
+
+    assert prices_form(block, window=_SEVERAL_YEARS, other_prices=other_prices) == form
+    assert bool(open_prices(block, window=_SEVERAL_YEARS, other_prices=other_prices)) == (
+        form != "closed"
+    )

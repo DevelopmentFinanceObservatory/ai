@@ -1,0 +1,178 @@
+"""Tests for `harness.card_unit`: which cards can change unit, and how their frame and title move."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from data_mcp.get_data_tool import _SUM_STAT_VARS_GROUPBY, Breakdown
+from harness.card_unit import frame_arguments, retitled, unit_card
+from harness.provenance import CardLineage, ProvenanceInput
+from harness.wire import UnitChoice, UnitCurrency, UnitOffer, UnitPrices
+
+_DEFAULT = {"format": "parquet", "bundle": False, "layout": "frame"}
+_SPEC = "spec_" + "b" * 32
+_CV = "cv_" + "2" * 32
+
+
+@pytest.mark.parametrize(
+    ("rendering", "args"),
+    [
+        (_DEFAULT, {}),
+        (_DEFAULT | {"groupby": _SUM_STAT_VARS_GROUPBY}, {"stat_vars": "sum"}),
+        (
+            _DEFAULT | {"groupby": Breakdown(code_system="crsPurpose", level=0).groupby()},
+            {"breakdown": {"code_system": "crsPurpose", "level": 0}},
+        ),
+        (
+            _DEFAULT
+            | {
+                "columns": ["party_kind", "party_class", "party_whole"],
+                "without_party_totals": True,
+            },
+            {"without_party_totals": True},
+        ),
+        (
+            _DEFAULT | {"columns": ["observationAbout_type", "party_kind"]},
+            {"place_types": True},
+        ),
+        (_DEFAULT | {"columns": ["party_kind"]}, None),
+        (_DEFAULT | {"groupby": {"by": ["time_period", "stat_var"], "op": "sum"}}, None),
+        (_DEFAULT | {"format": "csv"}, None),
+        (_DEFAULT | {"unheard_of": 1}, None),
+        (_DEFAULT | {"metadata": "incomplete"}, {}),
+    ],
+    ids=[
+        "default",
+        "sum",
+        "breakdown",
+        "without-party-totals",
+        "place-types",
+        "kinds-alone",
+        "unknown-groupby",
+        "other-format",
+        "unknown-option",
+        "incomplete-metadata",
+    ],
+)
+def test_a_rendering_maps_back_to_the_get_data_arguments_that_mint_it(
+    rendering: dict[str, Any], args: dict[str, Any] | None
+) -> None:
+    assert frame_arguments(rendering) == args
+
+
+def _component(spec_id: str = _SPEC) -> dict[str, Any]:
+    return {"provenance": {"inputs": [{"spec_id": spec_id, "content_version": _CV}]}}
+
+
+def _lineage(frame: tuple[str, str], members: int = 1) -> CardLineage:
+    manifest = {
+        "definition": {"spec_id": _SPEC},
+        "content_version": _CV,
+        "artifacts": [{"rendering": {"statistics": "series"}}, {"rendering": _DEFAULT}],
+    }
+    return CardLineage(
+        component_id="cmp_1",
+        frame=frame,
+        lineage=tuple(ProvenanceInput(_SPEC, _CV, manifest) for _ in range(members)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("lineage", "spec_id", "readable"),
+    [
+        (_lineage((_SPEC, _CV)), _SPEC, True),
+        (_lineage(("spec_" + "d" * 32, "ocv_1")), _SPEC, False),
+        (_lineage((_SPEC, _CV), members=2), _SPEC, False),
+        (_lineage((_SPEC, _CV)), "spec_" + "e" * 32, False),
+        (None, _SPEC, False),
+    ],
+    ids=["retrieval-frame", "derived-frame", "several-retrievals", "other-input", "no-lineage"],
+)
+def test_only_a_card_on_one_retrievals_own_frame_can_change_unit(
+    lineage: CardLineage | None, spec_id: str, readable: bool
+) -> None:
+    card = unit_card(_component(spec_id), lineage)
+    assert (card is not None) is readable
+    if card is not None:
+        assert (card.spec_id, card.args) == (_SPEC, {})
+
+
+_OFFER = UnitOffer(
+    currencies=[
+        UnitCurrency(
+            code="USD",
+            name="US dollars",
+            prices=[UnitPrices.CURRENT, UnitPrices.CONSTANT],
+            base_year_min=2000,
+            base_year_max=2023,
+        ),
+        UnitCurrency(code="EUR", name="euros", prices=[UnitPrices.CURRENT]),
+    ],
+    presets=["USD"],
+    start=UnitChoice(currency="USD", prices=UnitPrices.CURRENT),
+)
+_CURRENT_USD = UnitChoice(currency="USD", prices=UnitPrices.CURRENT)
+_CONSTANT_2022_USD = UnitChoice(currency="USD", prices=UnitPrices.CONSTANT, base_year=2022)
+_CONSTANT_2023_USD = UnitChoice(currency="USD", prices=UnitPrices.CONSTANT, base_year=2023)
+_CURRENT_EUR = UnitChoice(currency="EUR", prices=UnitPrices.CURRENT)
+
+
+@pytest.mark.parametrize(
+    ("title", "old", "new", "expected"),
+    [
+        (
+            "Aid to Kenya, current US dollars",
+            _CURRENT_USD,
+            _CONSTANT_2023_USD,
+            "Aid to Kenya, constant 2023 US dollars",
+        ),
+        (
+            "Aid to Kenya (constant 2022 prices)",
+            _CONSTANT_2022_USD,
+            _CONSTANT_2023_USD,
+            "Aid to Kenya (constant 2023 prices)",
+        ),
+        (
+            "Aid to Kenya in 2022 prices",
+            _CONSTANT_2022_USD,
+            _CURRENT_USD,
+            "Aid to Kenya in current prices",
+        ),
+        (
+            "Aid to Kenya at current prices, USD",
+            _CURRENT_USD,
+            _CONSTANT_2023_USD,
+            "Aid to Kenya at constant 2023 prices, USD",
+        ),
+        ("Aid to Kenya, USD billions", _CURRENT_USD, _CURRENT_EUR, "Aid to Kenya, EUR billions"),
+        ("Aid to Kenya in 2022", _CONSTANT_2022_USD, _CONSTANT_2023_USD, "Aid to Kenya in 2022"),
+        ("Aid to Kenya", _CURRENT_USD, _CONSTANT_2023_USD, "Aid to Kenya"),
+        ("Aid to Kenya in euros", _CURRENT_EUR, _CURRENT_USD, "Aid to Kenya in US dollars"),
+        ("Aid to Kenya in US dollars", _CURRENT_USD, _CURRENT_EUR, "Aid to Kenya in euros"),
+        ("Euros to Kenya", _CURRENT_EUR, _CURRENT_USD, "US dollars to Kenya"),
+        (
+            "Aid to Kenya in current USD",
+            _CURRENT_USD,
+            _CONSTANT_2023_USD,
+            "Aid to Kenya in constant 2023 USD",
+        ),
+    ],
+    ids=[
+        "whole-unit",
+        "constant-prices",
+        "year-prices-to-current",
+        "current-prices",
+        "currency-code",
+        "a-year-alone-stands",
+        "no-unit-words",
+        "euros-to-us-dollars",
+        "us-dollars-to-euros",
+        "name-opens-the-title",
+        "current-currency-code",
+    ],
+)
+def test_a_title_names_the_new_unit_where_it_named_the_old(
+    title: str, old: UnitChoice, new: UnitChoice, expected: str
+) -> None:
+    assert retitled(title, old=old, new=new, offer=_OFFER) == expected

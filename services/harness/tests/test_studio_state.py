@@ -90,9 +90,11 @@ from harness.wire import (
     CompositionActor,
     CompositionBlock,
     CompositionManifest,
+    ElicitationInput,
     ErrorCode,
     MutationOp,
     PlanProposed,
+    UnitOffer,
 )
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
@@ -108,6 +110,30 @@ from .test_turn_records import _scoped_part, _top_donors
 from .test_turn_store import ADMITTED_RUN
 
 CONVERSATION = "conv_01test0000"
+
+# A unit question as `/interrupt` keeps it: its input and the offer an answer
+# must lie inside.
+_UNIT_QUESTION = _PendingQuestion(
+    id="q2",
+    question="In which prices?",
+    skippable=True,
+    input=ElicitationInput.UNIT,
+    unit=UnitOffer.model_validate(
+        {
+            "currencies": [
+                {
+                    "code": "USD",
+                    "name": "US dollars",
+                    "prices": ["current", "constant"],
+                    "base_year_min": 2000,
+                    "base_year_max": 2023,
+                }
+            ],
+            "presets": ["USD"],
+            "start": {"currency": "USD", "prices": "constant", "base_year": 2023},
+        }
+    ),
+)
 
 
 _ACCOUNT = "a" * 64
@@ -2010,6 +2036,7 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
             _PendingQuestion(
                 id="q1", question="Which count?", options={"spec_a": "Net"}, skippable=True
             ),
+            _UNIT_QUESTION,
         ),
         skippable=True,
         step_order=("step_b", "step_a"),
@@ -2063,6 +2090,7 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
         _PendingQuestion(
             id="q1", question="Which count?", options={"spec_a": "Net"}, skippable=True
         ),
+        _UNIT_QUESTION,
     )
     assert (pending.skippable, pending.legacy) == (True, False)
     assert pending.step_order == ("step_b", "step_a")
