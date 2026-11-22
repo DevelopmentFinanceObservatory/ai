@@ -278,12 +278,15 @@ class Source:
 class Freshness:
     """How current a card's data is, each date `None` where the card states none.
 
+    `partial_marks` words each (period, source) the description marks partial; a card
+    that states only the envelope boolean has none.
     `newer_download` is a source download after `last_refreshed` that the card's data
     does not hold.
     """
 
     data_through: str | None
     partial_period: bool
+    partial_marks: tuple[str, ...]
     last_refreshed: str | None
     next_expected: str | None
     newer_download: str | None
@@ -341,6 +344,7 @@ def card_facts(envelope: Mapping[str, Any]) -> CardFacts:
         else Freshness(
             data_through=freshness["data_through"],
             partial_period=freshness["partial_period"],
+            partial_marks=(),
             last_refreshed=freshness["last_refreshed"],
             next_expected=freshness["next_expected"],
             newer_download=None,
@@ -356,6 +360,11 @@ def card_facts(envelope: Mapping[str, Any]) -> CardFacts:
 def _described_facts(description: Mapping[str, Any]) -> CardFacts:
     cite = description["cite"]
     freshness = description["freshness"]
+    labels = {source["ref"]: source["label"] for source in description["sources"]}
+    partial_marks = tuple(
+        f"{mark['period']} is partial for {labels.get(mark['source'], mark['source'])}"
+        for mark in freshness.get("partial_periods") or ()
+    )
     return CardFacts(
         sources=tuple(
             Source(
@@ -369,7 +378,8 @@ def _described_facts(description: Mapping[str, Any]) -> CardFacts:
         ),
         freshness=Freshness(
             data_through=freshness.get("latest_period"),
-            partial_period=bool(freshness.get("partial_periods")),
+            partial_period=bool(partial_marks),
+            partial_marks=partial_marks,
             last_refreshed=freshness.get("source_downloaded_at_mint"),
             next_expected=freshness.get("next_release"),
             newer_download=freshness.get("source_downloaded_since"),
@@ -404,8 +414,11 @@ def freshness_text(facts: CardFacts) -> str | None:
         return None
     parts = []
     if freshness.data_through:
-        partial = ", the last period partial" if freshness.partial_period else ""
-        parts.append(f"Data through {freshness.data_through}{partial}")
+        parts.append(f"Data through {freshness.data_through}")
+    if freshness.partial_marks:
+        parts.extend(freshness.partial_marks)
+    elif freshness.partial_period:
+        parts.append("the card includes partial data")
     if freshness.last_refreshed:
         parts.append(f"last refreshed {freshness.last_refreshed}")
     if freshness.newer_download:

@@ -288,27 +288,42 @@ def test_warnings_and_a_partial_period_reach_the_footer() -> None:
 
     projection = text_projection(envelope)
 
-    assert "Data through 2024, the last period partial; last refreshed 2026-06-12" in projection
+    assert (
+        "Data through 2024; the card includes partial data; last refreshed 2026-06-12" in projection
+    )
+    assert "last period partial" not in projection
     assert "Warning, coverage gap: 2018 is not reported." in projection
 
 
 @pytest.mark.parametrize(
-    ("partial_periods", "worded"),
+    ("partial_periods", "footer"),
     [
-        ([{"source": "provenance/OECDCreditorReportingSystem", "period": "2025"}], True),
-        ([], False),
-        (None, False),
+        (
+            [{"source": "provenance/OECDCreditorReportingSystem", "period": "2025"}],
+            "Data through 2024; 2025 is partial for OECD Creditor Reporting System (CRS).",
+        ),
+        (
+            [
+                {"source": "provenance/OECDCreditorReportingSystem", "period": "2025"},
+                {"source": "provenance/Other", "period": "2024"},
+            ],
+            "Data through 2024; 2025 is partial for OECD Creditor Reporting System (CRS); "
+            "2024 is partial for provenance/Other.",
+        ),
+        ([], "Data through 2024."),
+        (None, "Data through 2024."),
     ],
 )
-def test_a_described_card_words_the_partial_period_its_description_states(
-    partial_periods: list[dict[str, str]] | None, worded: bool
+def test_a_described_card_names_the_source_and_period_its_description_marks_partial(
+    partial_periods: list[dict[str, str]] | None, footer: str
 ) -> None:
     envelope = resolved_revision("line_chart_description")
     envelope["description"]["freshness"]["partial_periods"] = partial_periods
 
     projection = text_projection(envelope)
 
-    assert (", the last period partial" in projection) is worded
+    assert footer in projection
+    assert "last period partial" not in projection
 
 
 def test_a_non_https_source_url_is_left_out() -> None:
