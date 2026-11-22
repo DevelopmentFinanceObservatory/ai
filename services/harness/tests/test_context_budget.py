@@ -192,8 +192,9 @@ PLANNER_DECLARATIONS_TOTAL_CEILING = 42_000
 # arguments. Measured 38,068, with every field that refers to a definition holding a
 # copy of it under the field's own description. It sits in the static prefix every planner call
 # repeats, which Gemini's implicit cache can serve. Its field descriptions are what
-# the planner writes a plan from. The margin is 0.6%.
-PROPOSE_PLAN_DECLARATION_CEILING = 38_300
+# the planner writes a plan from. It measures 38,522 once the `new_question_in`
+# argument joins it, and the ceiling leaves a 1.0% margin over that.
+PROPOSE_PLAN_DECLARATION_CEILING = 38_900
 
 # The smaller planner declarations at once: `ask_user_question`, `get_skill` and
 # `reject_plan`, measured 2,994 together. The margin is 25.9%, the margin the
