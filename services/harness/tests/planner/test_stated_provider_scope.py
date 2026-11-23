@@ -49,10 +49,12 @@ from planner.plan import (
 )
 from planner.specs import planner_tool_specs
 from planner.stated_scope import (
+    STATED_SCOPE_KEPT_STATE_KEY,
     STATED_SCOPE_STATE_KEY,
     ApisStatedScopeReader,
     StatedScopeReader,
     stated_scope_kept,
+    stated_uncompiled,
 )
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
@@ -1166,3 +1168,190 @@ async def test_a_revision_reads_the_stated_scope_before_admission(
 
     assert result["refused"]["code"] == code.value, result
     assert reader.calls == [[_G7, _DAC1_STATED, "official development assistance"]]
+
+
+_SUMMED = "US bilateral plus multilateral ODA"
+
+
+async def test_bilateral_plus_multilateral_words_name_dac1s_own_total() -> None:
+    """ "US bilateral plus multilateral ODA" on DAC1 total ODA: Search reads words
+    summing the two lines as the dataset's own summing option, which on DAC1 is the
+    total it is counted on, so the pin stands with no ask and no compile."""
+    ctx = _Context()
+    total = dac1_with_contributions()
+    _show(ctx, total)
+    surface = _Search(total)
+
+    result = await _propose(
+        ctx,
+        [_dataset("oda", total["spec_id"], _SUMMED, donor="United States")],
+        words=_SUMMED,
+        surface=surface,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == {"oda": total["spec_id"]}
+    assert surface.calls == []
+
+
+def _released() -> list[AgentRecord]:
+    """The ask for DAC1 counting imputed multilateral aid, answered "count it as
+    asked" (`_kept`)."""
+    return _kept("count it as asked")
+
+
+async def test_an_answer_not_to_keep_is_not_asked_again_in_the_turn() -> None:
+    """The user answered the ask for DAC1 with "count it as asked". The planner
+    proposing DAC1 again is refused with no ask: the user has answered, so the
+    refusal asks the planner to remove the figure or repin it."""
+    ctx = _Context(*_released())
+    _show(ctx, _block("dac1"))
+
+    result = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
+
+    assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
+    assert result["action"]["call"] == "propose_plan"
+    assert result["detail"]["unserved"] == [
+        {"requirement_id": "g7_total", "spec_id": DAC1, "option_id": _INCLUSIVE}
+    ]
+
+
+async def test_an_answer_not_to_keep_releases_a_keep_the_conversation_held() -> None:
+    """A turn opening with DAC1 kept for imputed multilateral aid, whose transcript
+    holds the user's answer not to keep it: DAC1 is refused again, and the plan
+    repinned to the DAC2a total counted that way is admitted, holding no keep in the
+    turn's state or the conversation's."""
+    seeded = _Context()
+    seeded.state[STATED_SCOPE_KEPT_STATE_KEY] = [[DAC1, _INCLUSIVE]]
+    ctx = _next_turn(seeded)
+    ctx.records = _released()
+    g7 = _block("g7_bilateral")
+    _show(ctx, _block("dac1"), g7)
+    surface = _Search(g7)
+
+    refused = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
+    repinned = await _propose(
+        ctx,
+        [_dataset("g7_total", g7["spec_id"], _DAC1_STATED, recipient="developing countries")],
+        words=_G7,
+        surface=surface,
+    )
+
+    assert refused["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, refused
+    assert repinned["outcome"] == Outcome.OK.value, repinned
+    assert _pins(ctx) == {"g7_total": _spec("g7_inclusive")}
+    assert stated_scope_kept(ctx.state) == frozenset()
+    conversation = ConversationState(
+        conversation_id="conv_01keep", stated_scope_kept=frozenset({(DAC1, _INCLUSIVE)})
+    )
+    keep_turn_records(conversation, ctx.state)
+    assert conversation.stated_scope_kept == frozenset()
+
+
+_G7_TOTAL_INCLUSIVE = (
+    "What share of G7 total ODA, including imputed multilateral aid, goes to Africa?"
+)
+
+
+async def test_a_total_under_imputed_multilateral_aid_is_aligned() -> None:
+    """ "What share of G7 total ODA, including imputed multilateral aid, goes to
+    Africa?" with the numerator stating imputed multilateral aid and the denominator
+    "G7 total ODA" on DAC2a: bilateral plus imputed multilateral aid is itself a
+    count of total ODA, so the denominator holds nothing of its own and is aligned
+    with the numerator."""
+    ctx = _Context()
+    blocks = _g7_blocks()
+    _show(ctx, *blocks)
+    surface = _Search(*blocks)
+    requirements = _g7_share(
+        numerator="ODA to Africa including imputed multilateral aid", denominator="G7 total ODA"
+    )
+
+    result = await _propose(
+        ctx, requirements, words=_G7_TOTAL_INCLUSIVE, surface=surface, answer_mode="computed"
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == {"africa": _spec("africa_inclusive"), "developing": _spec("g7_inclusive")}
+
+
+async def test_a_kept_total_holds_its_own_scope_in_a_share() -> None:
+    """G7 aid to Africa stating imputed multilateral aid over DAC1 total ODA, which
+    the user kept as published: the numerator is counted as stated, DAC1 holds what
+    it counts, and the share states the difference."""
+    ctx = _Context(*_kept(KEEP_PUBLISHED_OPTION))
+    blocks = [_block("africa_bilateral"), _block("dac1")]
+    _show(ctx, *blocks)
+    surface = _Search(*blocks)
+    requirements = [
+        _dataset("africa", _spec("africa_bilateral"), _STATED_INCLUSIVE, recipient="Africa"),
+        _dac1_total(_DAC1_STATED),
+        _share("africa", "g7_total"),
+    ]
+
+    result = await _propose(ctx, requirements, words=_G7, surface=surface, answer_mode="computed")
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == {"africa": _spec("africa_inclusive"), "g7_total": DAC1}
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [d.caveat for d in plan.decisions if d.caveat == "providers_differ"] == [
+        "providers_differ"
+    ]
+
+
+async def test_a_pin_switched_on_the_plan_card_offers_no_omitted_scope() -> None:
+    """G7 aid to Africa switched to bilateral flows on the plan card, its `measure`
+    naming no scope, under words asking for imputed multilateral aid: the switch is
+    the user's later word, so the plan is not refused for leaving the scope out."""
+    ctx = _Context()
+    switched = _block("africa_switched_bilateral")
+    _show(ctx, switched)
+
+    result = await _propose(
+        ctx, [_dataset("aid", switched["spec_id"], "net ODA", recipient="Africa")], words=_G7
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+
+
+async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_its_calculation() -> None:
+    """US aid to Kenya stating imputed multilateral aid, over a net total its share
+    counts it on: one compile moves it on both axes, and where Search refuses it the
+    refusal names the share and records nothing against the stated option, since
+    the measure basis may be what Search refused."""
+    ctx = _Context()
+    aid = provider_block(HEALTH, narrow=True, active=_BILATERAL)
+    total = basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance="explicit")
+    _show(ctx, aid, total)
+    surface = _Search(
+        aid, refusal={"code": "requested_option_unavailable", "retry_mode": "do_not_retry"}
+    )
+    requirements = [
+        _dataset("aid", HEALTH, _STATED_INCLUSIVE, donor="United States", recipient="Kenya"),
+        _dataset("total", TOTAL, "net ODA", donor="United States"),
+        _share("aid", "total"),
+    ]
+
+    result = await _propose(ctx, requirements, words=_G7, surface=surface)
+
+    assert result["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, result
+    (call,) = surface.calls
+    assert {e["option_id"] for e in call["scope_entries"]} >= {_INCLUSIVE, "measure_basis:net"}
+    assert stated_uncompiled(ctx.state) == {}
+
+
+async def test_a_sum_stating_the_scope_nowhere_is_refused_once_a_turn() -> None:
+    """Bilateral aid to Africa plus the imputed multilateral series, under words
+    asking for imputed multilateral aid, stating it in no `measure`: refused once,
+    and admitted proposed again unchanged, the planner's word that the user's words
+    qualify none of its figures."""
+    ctx = _Context()
+    _show(ctx, *_g7_blocks())
+    requirements, decisions = _africa_sum("bilateral aid")
+
+    first = await _propose(ctx, requirements, decisions, words=_G7, answer_mode="computed")
+    again = await _propose(ctx, requirements, decisions, words=_G7, answer_mode="computed")
+
+    assert first["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, first
+    assert again["outcome"] == Outcome.OK.value, again

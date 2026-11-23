@@ -1,5 +1,5 @@
 {
- "comment": "dfo-apis' stated-scope route's reading of each text the stated-scope admission tests post (POST /api/search/stated-scope, one entry of its `readings` per text): `search.engine.stated_scope.read_stated_scope` called on each text, its entries with a text origin kept, as the route answers.",
+ "comment": "dfo-apis' stated-scope route's answer for each text the stated-scope admission tests post: one entry of the `readings` that POST /api/search/stated-scope answers, recorded through the route's TestClient at dfo-apis 75bf7213e.",
  "readings": {
   "Show G7 aid to Africa as a share of G7 aid to all developing countries each year from 1970 to 2024, including imputed multilateral aid.": {
    "entries": [
@@ -17,7 +17,8 @@
    "total": false,
    "mentions": [
     "provider:inclusive"
-   ]
+   ],
+   "sums_providers": false
   },
   "Show G7 aid to Africa as a share of G7 aid to all developing countries each year from 1970 to 2024, including imputed multilateral aid.\n(then: Start in 1980.)": {
    "entries": [
@@ -35,7 +36,8 @@
    "total": false,
    "mentions": [
     "provider:inclusive"
-   ]
+   ],
+   "sums_providers": false
   },
   "What share of G7 ODA is bilateral?": {
    "entries": [
@@ -53,7 +55,8 @@
    "total": false,
    "mentions": [
     "provider:bilateral"
-   ]
+   ],
+   "sums_providers": false
   },
   "US bilateral aid to Kenya as a share of total US ODA": {
    "entries": [
@@ -71,7 +74,8 @@
    "total": true,
    "mentions": [
     "provider:bilateral"
-   ]
+   ],
+   "sums_providers": false
   },
   "How much bilateral aid does France give to Mali, and what is France's total ODA?": {
    "entries": [
@@ -89,7 +93,8 @@
    "total": true,
    "mentions": [
     "provider:bilateral"
-   ]
+   ],
+   "sums_providers": false
   },
   "What share of US ODA goes to multilaterals?": {
    "entries": [
@@ -107,7 +112,8 @@
    "total": false,
    "mentions": [
     "provider:multilateral"
-   ]
+   ],
+   "sums_providers": false
   },
   "Germany's bilateral ODA as a share of its GNI": {
    "entries": [
@@ -125,7 +131,8 @@
    "total": false,
    "mentions": [
     "provider:bilateral"
-   ]
+   ],
+   "sums_providers": false
   },
   "US bilateral aid to Kenya as a share of US ODA to Kenya including imputed multilateral": {
    "entries": [],
@@ -133,7 +140,8 @@
    "mentions": [
     "provider:bilateral",
     "provider:inclusive"
-   ]
+   ],
+   "sums_providers": false
   },
   "Show G7 bilateral aid to Africa as a share of G7 total aid to Africa including imputed multilateral aid, 2010 to 2024": {
    "entries": [],
@@ -141,12 +149,14 @@
    "mentions": [
     "provider:bilateral",
     "provider:inclusive"
-   ]
+   ],
+   "sums_providers": false
   },
   "Show G7 bilateral aid and imputed multilateral aid to Africa separately, 2010 to 2024": {
    "entries": [],
    "total": false,
-   "mentions": []
+   "mentions": [],
+   "sums_providers": false
   },
   "How much do African countries owe to bilateral creditors?": {
    "entries": [
@@ -164,12 +174,14 @@
    "total": false,
    "mentions": [
     "provider:bilateral"
-   ]
+   ],
+   "sums_providers": false
   },
   "Extend it to 2025.": {
    "entries": [],
    "total": false,
-   "mentions": []
+   "mentions": [],
+   "sums_providers": false
   },
   "net ODA": {
    "entries": [
@@ -185,22 +197,26 @@
     }
    ],
    "total": false,
-   "mentions": []
+   "mentions": [],
+   "sums_providers": false
   },
   "imputed multilateral ODA": {
    "entries": [],
    "total": false,
-   "mentions": []
+   "mentions": [],
+   "sums_providers": false
   },
   "imputed multilateral aid": {
    "entries": [],
    "total": false,
-   "mentions": []
+   "mentions": [],
+   "sums_providers": false
   },
   "official development assistance": {
    "entries": [],
    "total": false,
-   "mentions": []
+   "mentions": [],
+   "sums_providers": false
   },
   "net ODA including imputed multilateral aid": {
    "entries": [
@@ -228,7 +244,8 @@
    "total": false,
    "mentions": [
     "provider:inclusive"
-   ]
+   ],
+   "sums_providers": false
   },
   "official development assistance including imputed multilateral aid": {
    "entries": [
@@ -246,7 +263,8 @@
    "total": false,
    "mentions": [
     "provider:inclusive"
-   ]
+   ],
+   "sums_providers": false
   },
   "total aid including imputed multilateral aid": {
    "entries": [
@@ -264,7 +282,8 @@
    "total": true,
    "mentions": [
     "provider:inclusive"
-   ]
+   ],
+   "sums_providers": false
   },
   "bilateral ODA": {
    "entries": [
@@ -282,7 +301,8 @@
    "total": false,
    "mentions": [
     "provider:bilateral"
-   ]
+   ],
+   "sums_providers": false
   },
   "bilateral aid": {
    "entries": [
@@ -300,22 +320,26 @@
    "total": false,
    "mentions": [
     "provider:bilateral"
-   ]
+   ],
+   "sums_providers": false
   },
   "total ODA": {
    "entries": [],
    "total": true,
-   "mentions": []
+   "mentions": [],
+   "sums_providers": false
   },
   "ODA": {
    "entries": [],
    "total": false,
-   "mentions": []
+   "mentions": [],
+   "sums_providers": false
   },
   "GNI": {
    "entries": [],
    "total": false,
-   "mentions": []
+   "mentions": [],
+   "sums_providers": false
   },
   "multilateral ODA": {
    "entries": [
@@ -333,17 +357,20 @@
    "total": false,
    "mentions": [
     "provider:multilateral"
-   ]
+   ],
+   "sums_providers": false
   },
   "external debt": {
    "entries": [],
    "total": false,
-   "mentions": []
+   "mentions": [],
+   "sums_providers": false
   },
   "US aid to Kenya as a share of total US ODA": {
    "entries": [],
    "total": true,
-   "mentions": []
+   "mentions": [],
+   "sums_providers": false
   },
   "US bilateral aid to Kenya as a share of US ODA": {
    "entries": [
@@ -361,12 +388,77 @@
    "total": false,
    "mentions": [
     "provider:bilateral"
-   ]
+   ],
+   "sums_providers": false
   },
   "aid": {
    "entries": [],
    "total": false,
-   "mentions": []
+   "mentions": [],
+   "sums_providers": false
+  },
+  "US bilateral plus multilateral ODA": {
+   "entries": [
+    {
+     "axis": "provider",
+     "option_id": "provider:inclusive",
+     "origin": {
+      "kind": "text",
+      "text": "bilateral plus multilateral",
+      "start": 3,
+      "end": 30
+     }
+    }
+   ],
+   "total": false,
+   "mentions": [
+    "provider:inclusive"
+   ],
+   "sums_providers": true
+  },
+  "What share of G7 total ODA, including imputed multilateral aid, goes to Africa?": {
+   "entries": [
+    {
+     "axis": "provider",
+     "option_id": "provider:inclusive",
+     "origin": {
+      "kind": "text",
+      "text": "including imputed multilateral",
+      "start": 28,
+      "end": 58
+     }
+    }
+   ],
+   "total": true,
+   "mentions": [
+    "provider:inclusive"
+   ],
+   "sums_providers": false
+  },
+  "G7 total ODA": {
+   "entries": [],
+   "total": true,
+   "mentions": [],
+   "sums_providers": false
+  },
+  "ODA to Africa including imputed multilateral aid": {
+   "entries": [
+    {
+     "axis": "provider",
+     "option_id": "provider:inclusive",
+     "origin": {
+      "kind": "text",
+      "text": "including imputed multilateral",
+      "start": 14,
+      "end": 44
+     }
+    }
+   ],
+   "total": false,
+   "mentions": [
+    "provider:inclusive"
+   ],
+   "sums_providers": false
   }
  }
 }

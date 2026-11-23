@@ -1470,8 +1470,9 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
     `state`, a turn's state, holds, for `ConversationState.close_turn` to
     store with the turn. Each key holds the turn's whole value, so the latest
     write replaces. The blocks stay in process (`turn_specs`) until the turn
-    closes. The datasets the user kept as published this turn join the
-    conversation's (`ConversationState.stated_scope_kept`) at once."""
+    closes. The datasets the user keeps as published replace the conversation's
+    (`ConversationState.stated_scope_kept`) at once: the turn opened holding them,
+    so what it holds is every keep still in force."""
     if ORCHESTRATOR_PLAN_RECORDS_KEY in state:
         conversation.turn_plans = list(state[ORCHESTRATOR_PLAN_RECORDS_KEY] or [])
     if ORCHESTRATOR_SEARCHES_KEY in state:
@@ -1481,7 +1482,7 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
     if ORCHESTRATOR_APPLIED_KEY in state:
         conversation.turn_applied_choice = dict(state[ORCHESTRATOR_APPLIED_KEY] or {})
     if STATED_SCOPE_KEPT_STATE_KEY in state:
-        conversation.stated_scope_kept |= stated_scope_kept(state)
+        conversation.stated_scope_kept = stated_scope_kept(state)
 
 
 def set_aside_question(cursor: Cursor) -> str | None:

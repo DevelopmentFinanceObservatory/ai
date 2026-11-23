@@ -65,10 +65,15 @@ _MAX_TEXT_CHARS = 2000
 
 
 class StatedOption(StrictModel):
-    """A provider option a text states, with the words it was read from."""
+    """A provider option a text states, with the words it was read from.
+
+    `sums_providers` says the words sum the bilateral and multilateral lines naming no
+    imputed share ("bilateral plus multilateral"), which a dataset reads as its own
+    summing option (`StatedScopeReading.sums_providers`)."""
 
     option_id: str
     words: str
+    sums_providers: bool = False
 
 
 class TextReading(StrictModel):
@@ -88,7 +93,11 @@ class TextReading(StrictModel):
         """The provider part of Search's `reading`."""
         return cls(
             provider=tuple(
-                StatedOption(option_id=entry.option_id, words=entry.words)
+                StatedOption(
+                    option_id=entry.option_id,
+                    words=entry.words,
+                    sums_providers=reading.sums_providers,
+                )
                 for entry in reading.entries
                 if entry.axis == PROVIDER_AXIS
             ),
@@ -249,9 +258,9 @@ def stated_scope_kept(state: SessionState | Mapping[str, Any]) -> frozenset[tupl
 
 
 def save_stated_scope_kept(state: SessionState, kept: Iterable[tuple[str, str]]) -> None:
-    """Hold `kept` with every pair `STATED_SCOPE_KEPT_STATE_KEY` holds."""
-    pairs = sorted(stated_scope_kept(state) | set(kept))
-    state[STATED_SCOPE_KEPT_STATE_KEY] = [list(pair) for pair in pairs]
+    """Hold `kept` in `STATED_SCOPE_KEPT_STATE_KEY` in place of what it held, so a
+    keep the user released is gone."""
+    state[STATED_SCOPE_KEPT_STATE_KEY] = [list(pair) for pair in sorted(set(kept))]
 
 
 def unattributed_refused(state: SessionState) -> frozenset[str]:

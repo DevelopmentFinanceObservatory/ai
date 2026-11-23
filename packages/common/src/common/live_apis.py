@@ -227,12 +227,16 @@ class StatedScopeReading:
     (`read_stated_scopes`).
 
     `entries` hold one option per axis the text states one option on. `total` says the
-    text asks for a total. `mentions` are the provider options the text names, in order
-    of first mention, both options of a text naming two, which therefore has no
-    provider entry, included."""
+    text asks for a total. `sums_providers` says its provider entry sums the bilateral
+    and multilateral lines naming no imputed share ("bilateral plus multilateral"),
+    which a dataset reads as its own summing option: `provider:contributions` on DAC1.
+    `mentions` are the provider options the text names, in order of first mention,
+    both options of a text naming two, which therefore has no provider entry,
+    included."""
 
     entries: tuple[StatedScopeEntry, ...]
     total: bool
+    sums_providers: bool
     mentions: tuple[str, ...]
 
 
@@ -380,11 +384,16 @@ def _versions_page(response: httpx2.Response) -> tuple[list[DatasetVersion], str
 def _stated_scope_reading(value: object) -> StatedScopeReading | None:
     """One reading of the stated scope answer, or `None` when it is outside the
     contract: entries each naming an axis, an option and the words of a text origin, a
-    bool `total`, and mentions that are option ids."""
+    bool `total` and `sums_providers`, and mentions that are option ids."""
     if not isinstance(value, dict):
         return None
     entries, total, mentions = value.get("entries"), value.get("total"), value.get("mentions")
-    if not isinstance(entries, list) or not isinstance(total, bool):
+    sums_providers = value.get("sums_providers")
+    if (
+        not isinstance(entries, list)
+        or not isinstance(total, bool)
+        or not isinstance(sums_providers, bool)
+    ):
         return None
     named = [_text(mention) for mention in mentions] if isinstance(mentions, list) else None
     if named is None or None in named:
@@ -399,7 +408,10 @@ def _stated_scope_reading(value: object) -> StatedScopeReading | None:
             return None
         read.append(StatedScopeEntry(axis=axis, option_id=option_id, words=words))
     return StatedScopeReading(
-        entries=tuple(read), total=total, mentions=tuple(m for m in named if m is not None)
+        entries=tuple(read),
+        total=total,
+        sums_providers=sums_providers,
+        mentions=tuple(m for m in named if m is not None),
     )
 
 

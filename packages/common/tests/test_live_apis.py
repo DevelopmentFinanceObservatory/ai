@@ -638,9 +638,10 @@ NET_BILATERAL = {
         },
     ],
     "total": False,
+    "sums_providers": False,
     "mentions": ["provider:bilateral"],
 }
-TOTAL_ODA = {"entries": [], "total": True, "mentions": []}
+TOTAL_ODA = {"entries": [], "total": True, "sums_providers": False, "mentions": []}
 
 
 async def test_read_stated_scopes_reads_each_text_in_order_with_no_principal() -> None:
@@ -662,9 +663,10 @@ async def test_read_stated_scopes_reads_each_text_in_order_with_no_principal() -
                 ),
             ),
             total=False,
+            sums_providers=False,
             mentions=("provider:bilateral",),
         ),
-        StatedScopeReading(entries=(), total=True, mentions=()),
+        StatedScopeReading(entries=(), total=True, sums_providers=False, mentions=()),
     )
 
 
@@ -674,6 +676,10 @@ async def test_read_stated_scopes_reads_each_text_in_order_with_no_principal() -
         pytest.param({"readings": [NET_BILATERAL]}, id="one-reading-short"),
         pytest.param({"readings": [NET_BILATERAL, {**TOTAL_ODA, "total": "yes"}]}, id="total"),
         pytest.param({"readings": [NET_BILATERAL, {**TOTAL_ODA, "mentions": [1]}]}, id="mention"),
+        pytest.param(
+            {"readings": [NET_BILATERAL, {**TOTAL_ODA, "sums_providers": None}]},
+            id="sums-providers",
+        ),
         pytest.param(
             {"readings": [{**NET_BILATERAL, "entries": [{"axis": "provider"}]}, TOTAL_ODA]},
             id="entry",

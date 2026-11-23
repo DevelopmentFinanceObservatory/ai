@@ -77,7 +77,12 @@ from planner.plan import (
     save_plan_rounds,
     save_windowed_pins,
 )
-from planner.stated_scope import record_unattributed, save_stated_scope_kept, stated_scope_kept
+from planner.stated_scope import (
+    STATED_SCOPE_KEPT_STATE_KEY,
+    record_unattributed,
+    save_stated_scope_kept,
+    stated_scope_kept,
+)
 from planner.tool_results import ProblemCode
 
 # The session-state slot holding how many records of the turn's transcript
@@ -815,21 +820,27 @@ def _refused_unserved(body: Mapping[str, Any]) -> frozenset[tuple[str, str]] | N
     return frozenset(pairs) if len(pairs) == len(unserved) else None
 
 
-def stated_scope_keeps(call: PlannerCall) -> frozenset[tuple[str, str]]:
+def stated_scope_keeps(
+    call: PlannerCall,
+) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]]]:
     """Each pin and provider option the user chose to keep as published, answering
-    the ask a `stated_provider_dropped` refusal carries (`submission.service._stated_unserved`).
+    the ask a `stated_provider_dropped` refusal carries (`submission.service._stated_unserved`),
+    and each they chose not to keep, as `combination_picks` returns its picks and
+    declines.
 
     Read off the call's steps as `combination_picks` reads a combination: an ask whose
     `options` are `STATED_SCOPE_OPTIONS` asks about the pins the latest such refusal
     before it names, read off that refusal's own response, so the model cannot point
     the ask at other pins, and a refusal binds the first ask after it that reached the
-    user. An answer of `KEEP_PUBLISHED_OPTION` keeps them; any later answer about them
-    otherwise, free text or a skip included, releases them.
+    user. An answer of `KEEP_PUBLISHED_OPTION` keeps them; any other answer about them,
+    free text or a skip included, releases them, and the latest answer about a pair
+    decides.
     """
     offered = [dict(option) for option in STATED_SCOPE_OPTIONS]
     refused: frozenset[tuple[str, str]] | None = None
     asks: dict[str, frozenset[tuple[str, str]] | None] = {}
     kept: set[tuple[str, str]] = set()
+    released: set[tuple[str, str]] = set()
     for step in call.steps():
         if step.kind == "call":
             if (step.args or {}).get("options") == offered:
@@ -846,9 +857,11 @@ def stated_scope_keeps(call: PlannerCall) -> frozenset[tuple[str, str]]:
             option = answer.get("spec_id") if answer and answer.get("kind") == "option" else None
             if option == KEEP_PUBLISHED_OPTION:
                 kept |= pairs
+                released -= pairs
             else:
                 kept -= pairs
-    return frozenset(kept)
+                released |= pairs
+    return frozenset(kept), frozenset(released)
 
 
 @dataclass(frozen=True)
@@ -891,7 +904,13 @@ class CallSession:
         a plan admitted earlier in the turn, or in an earlier turn of the
         conversation, which Studio seeds the turn with
         (`planner.stated_scope.STATED_SCOPE_KEPT_STATE_KEY`)."""
-        return stated_scope_keeps(self.call) | stated_scope_kept(self.call.state)
+        kept, released = stated_scope_keeps(self.call)
+        return (stated_scope_kept(self.call.state) - released) | kept
+
+    def stated_scope_released(self) -> frozenset[tuple[str, str]]:
+        """The pins and options the user chose not to keep, answering an ask in the
+        turn's transcript (`stated_scope_keeps`)."""
+        return stated_scope_keeps(self.call)[1]
 
     def prices_answers(self) -> PricesAnswers:
         """`prices_answers` over the call."""
@@ -930,7 +949,8 @@ class CallSession:
             save_windowed_pins(state, admission.windowed_pins)
         save_alignments(state, admission.alignments)
         save_pin_verdicts(state, admission.pin_verdicts)
-        if admission.stated_scope_kept:
+        # A state that never held a keep gains none until the user keeps one.
+        if admission.stated_scope_kept or state.get(STATED_SCOPE_KEPT_STATE_KEY) is not None:
             save_stated_scope_kept(state, admission.stated_scope_kept)
         # Each admission replaces the record; a state that never held one
         # gains none until a row absorbs a part.

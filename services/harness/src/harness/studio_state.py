@@ -631,8 +631,9 @@ class ConversationState:
     # `(spec_id, option_id)` (`planner.stated_scope.STATED_SCOPE_KEPT_STATE_KEY`).
     # Not reset per turn: each turn's planner starts holding them
     # (`harness.studio._turn_opening`), so a keep is asked for once a
-    # conversation, and the turn's keeps are kept back as it streams
-    # (`harness.studio_store.keep_turn_records`).
+    # conversation, and what the turn holds replaces them as it streams
+    # (`harness.studio_store.keep_turn_records`). An answer releasing a keep
+    # removes it (`planner.call.stated_scope_keeps`); a later turn's words do not.
     stated_scope_kept: frozenset[tuple[str, str]] = field(default_factory=frozenset)
     # The current turn's record-in-progress; reset by begin_turn.
     # `turn_user_message` is the history record's text: the message, each
