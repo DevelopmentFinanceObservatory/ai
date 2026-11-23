@@ -459,6 +459,55 @@
     "provider:inclusive"
    ],
    "sums_providers": false
+  },
+  "How did average life expectancy in Kenya change each period since 2000, and how do the East African countries rank by it?": {
+   "entries": [],
+   "total": false,
+   "mentions": [],
+   "sums_providers": false
+  },
+  "How fast did life expectancy grow in Kenya since 2000?": {
+   "entries": [],
+   "total": false,
+   "mentions": [],
+   "sums_providers": false
+  },
+  "healthy life expectancy": {
+   "entries": [],
+   "total": false,
+   "mentions": [],
+   "sums_providers": false
+  },
+  "life expectancy at birth": {
+   "entries": [],
+   "total": false,
+   "mentions": [],
+   "sums_providers": false
+  },
+  "now for France": {
+   "entries": [],
+   "total": false,
+   "mentions": [],
+   "sums_providers": false
+  },
+  "Actually, count it including imputed multilateral aid": {
+   "entries": [
+    {
+     "axis": "provider",
+     "option_id": "provider:inclusive",
+     "origin": {
+      "kind": "text",
+      "text": "including imputed multilateral",
+      "start": 19,
+      "end": 49
+     }
+    }
+   ],
+   "total": false,
+   "mentions": [
+    "provider:inclusive"
+   ],
+   "sums_providers": false
   }
  }
 }

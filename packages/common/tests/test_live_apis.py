@@ -697,6 +697,26 @@ async def test_read_stated_scopes_answer_outside_the_contract_is_invalid(answer:
     assert raised.value.code == RESPONSE_INVALID
 
 
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    [(429, True), (408, True), (503, True), (400, False), (404, False), (403, False)],
+)
+async def test_a_refusal_with_no_problem_document_is_retryable_where_it_can_pass(
+    status: int, retryable: bool
+) -> None:
+    calls = Calls(httpx2.Response(status, text="Too Many Requests"))
+
+    async with make_client(calls) as client:
+        with pytest.raises(LiveApisError) as raised:
+            await client.read_stated_scopes(texts=["total ODA"])
+
+    assert (raised.value.status, raised.value.code, raised.value.retryable) == (
+        status,
+        None,
+        retryable,
+    )
+
+
 async def test_read_stated_scopes_raises_a_refusal() -> None:
     calls = Calls(problem(400, "request_invalid"))
 

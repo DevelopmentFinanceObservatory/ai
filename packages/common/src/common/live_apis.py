@@ -279,11 +279,17 @@ def _text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+# The statuses below 500 a proxy or load balancer answers, with no problem document,
+# for a call that can pass later: a request timeout, too early, and rate limited.
+_TRANSIENT_STATUSES = frozenset({408, 425, 429})
+
+
 def _error_from(response: httpx2.Response) -> LiveApisError:
     problem = _problem(response.content)
     if problem is None:
+        status = response.status_code
         return LiveApisError(
-            status=response.status_code, code=None, retryable=response.status_code >= 500
+            status=status, code=None, retryable=status >= 500 or status in _TRANSIENT_STATUSES
         )
     return LiveApisError(
         status=response.status_code,

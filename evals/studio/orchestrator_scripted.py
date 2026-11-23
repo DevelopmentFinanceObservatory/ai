@@ -463,7 +463,7 @@ def _planner_adapter(
     `stated_scope` is the reader of the provider scope the user's words state, as
     production's planner has (`harness.wiring.build_stated_scope_reader`)."""
     translate = build_translate(surface=surface)
-    specs = planner_specs(translate=translate, surface=surface)
+    specs = planner_specs(translate=translate, surface=surface, stated_scope=stated_scope)
     return PlannerAdapter(
         settings=settings,
         surface=surface,

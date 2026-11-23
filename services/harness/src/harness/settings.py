@@ -269,8 +269,10 @@ class Settings(BaseServiceSettings):
     # Whether `propose_plan` reads the provider scope the user's words state through
     # dfo-apis' stated-scope route (`PLANNER_STATED_SCOPE`,
     # `planner.stated_scope.read_stated_scope`). Off, admission applies none, and
-    # a plan needs no answer from the route; on, a route that does not answer
-    # refuses each proposal of a turn with words of the user's.
+    # a plan needs no answer from the route. On, in a turn with words of the user's,
+    # a read that can pass later (a timeout, a 5xx, a 408 or 429) refuses the
+    # proposal and asks the planner to propose again; one no retry changes (a 404,
+    # a refused request) ends the planner entry on `stated_scope_unreadable`.
     planner_stated_scope: bool = True
     # The combined server's limits for outside callers; see the class docstring.
     combined_mcp_requests_per_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)

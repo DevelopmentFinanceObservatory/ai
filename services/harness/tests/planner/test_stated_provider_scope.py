@@ -199,11 +199,18 @@ class _Search:
     """A tool surface whose `resolve_definition` compiles a pin of `blocks` on the
     provider option posted: a recorded DAC2a part on provider:inclusive as dev Search
     did (`_RECORDED_COMPILES`), any other as `_switched` makes it. With `refusal`, it
-    refuses every compile. Each call's arguments are recorded in `calls`."""
+    refuses every compile, or, with `refusing` too, each compile posting that option.
+    Each call's arguments are recorded in `calls`."""
 
-    def __init__(self, *blocks: Mapping[str, Any], refusal: Mapping[str, Any] | None = None):
+    def __init__(
+        self,
+        *blocks: Mapping[str, Any],
+        refusal: Mapping[str, Any] | None = None,
+        refusing: str | None = None,
+    ):
         self.blocks = blocks
         self.refusal = refusal
+        self.refusing = refusing
         self.calls: list[Mapping[str, Any]] = []
 
     async def list_tools(self) -> list[Any]:
@@ -215,7 +222,8 @@ class _Search:
         del on_progress
         assert tool.name == "resolve_definition", tool
         self.calls.append(arguments)
-        if self.refusal is not None:
+        posted = {entry["option_id"] for entry in arguments["scope_entries"]}
+        if self.refusal is not None and (self.refusing is None or self.refusing in posted):
             return ToolCallResult(is_error=True, structured_content=dict(self.refusal))
         (option_id,) = [
             e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "provider"
@@ -985,7 +993,13 @@ def _dac1_total(measure: str, *, period: tuple[int, int] = (1970, 2024)) -> dict
 
 def _kept(answer: str) -> list[AgentRecord]:
     """The `stated_provider_dropped` refusal of DAC1 for the G7 question, the
-    planner's ask carrying its options, and the user's `answer`."""
+    planner's ask carrying its options, and the user's pick of `answer`."""
+    return _asked({"spec_id": answer})
+
+
+def _asked(said: Any) -> list[AgentRecord]:
+    """The `stated_provider_dropped` refusal of DAC1 for the G7 question, the
+    planner's ask carrying its options, and what the user `said` (`one_answer`)."""
     refusal = {
         "outcome": Outcome.REFUSED.value,
         "code": ProblemCode.STATED_PROVIDER_DROPPED.value,
@@ -1000,7 +1014,7 @@ def _kept(answer: str) -> list[AgentRecord]:
     return [
         tool_answers(("propose-1", "propose_plan", refusal)),
         model_response(tool_call("ask-1", PLANNER_ASK, ask)),
-        user_answer("ask-1", one_answer({"spec_id": answer})),
+        user_answer("ask-1", one_answer(said)),
     ]
 
 
@@ -1129,18 +1143,50 @@ def _next_turn(ctx: _Context) -> _Context:
     return after
 
 
-@pytest.mark.parametrize(
-    ("words", "measure", "admitted"),
-    [
-        pytest.param(_G7_AMENDED, _DAC1_STATED, True, id="the-option-kept"),
-        pytest.param(_G7_BILATERAL, "bilateral ODA", False, id="another-option"),
-    ],
-)
-async def test_a_keep_lasts_the_conversation(words: str, measure: str, admitted: bool) -> None:
-    """The user kept DAC1 as published in one turn. A later turn, whose planner
-    reads no ask, admits DAC1 again for the option kept, as the conversation holds
-    the keep (`ConversationState.stated_scope_kept`); asked for another option DAC1
-    cannot count, it is refused with the ask again."""
+_FRANCE_NEXT = "now for France"
+_ASKED_AGAIN = "Actually, count it including imputed multilateral aid"
+
+
+async def test_a_keep_lasts_the_conversation_until_the_words_name_its_option() -> None:
+    """The user kept DAC1 as published in turn 1. Turn 2, "now for France", names no
+    provider scope, so it states nothing and the keep stands. Turn 3, "Actually, count
+    it including imputed multilateral aid", names the option kept again, so the keep does not
+    hold there: DAC1 is refused with the ask, and the user's new answer decides:
+    kept again, DAC1 is admitted; counted as asked, it is refused with no ask."""
+    first = _Context(*_kept(KEEP_PUBLISHED_OPTION))
+    _show(first, _block("dac1"))
+    kept = await _propose(first, [_dac1_total(_DAC1_STATED)], words=_G7)
+    assert kept["outcome"] == Outcome.OK.value, kept
+
+    second = _next_turn(first)
+    _show(second, _block("dac1"))
+    france = await _propose(second, [_dac1_total(_DAC1_STATED)], words=_FRANCE_NEXT, question=_G7)
+    assert france["outcome"] == Outcome.OK.value, france
+    assert stated_scope_kept(second.state) == {(DAC1, _INCLUSIVE)}
+
+    third = _next_turn(second)
+    _show(third, _block("dac1"))
+    again = await _propose(third, [_dac1_total(_DAC1_STATED)], words=_ASKED_AGAIN, question=_G7)
+    assert again["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, again
+    assert again["action"]["call"] == PLANNER_ASK
+
+    for answer, admitted in ((KEEP_PUBLISHED_OPTION, True), ("count it as asked", False)):
+        answered = _next_turn(second)
+        answered.records = _kept(answer)
+        _show(answered, _block("dac1"))
+        result = await _propose(
+            answered, [_dac1_total(_DAC1_STATED)], words=_ASKED_AGAIN, question=_G7
+        )
+        if admitted:
+            assert result["outcome"] == Outcome.OK.value, result
+        else:
+            assert result["action"]["call"] == "propose_plan", result
+
+
+async def test_a_keep_holds_for_its_own_option_only() -> None:
+    """The user kept DAC1 as published for imputed multilateral aid. A later turn
+    asking for bilateral flows, which this DAC1 cannot count either, is refused with
+    the ask: the keep was for the other option."""
     first = _Context(*_kept(KEEP_PUBLISHED_OPTION))
     _show(first, _block("dac1"))
     kept = await _propose(first, [_dac1_total(_DAC1_STATED)], words=_G7)
@@ -1148,16 +1194,14 @@ async def test_a_keep_lasts_the_conversation(words: str, measure: str, admitted:
 
     ctx = _next_turn(first)
     _show(ctx, _dac1_without_bilateral())
-    result = await _propose(ctx, [_dac1_total(measure)], words=words, question=words)
+    result = await _propose(
+        ctx, [_dac1_total("bilateral ODA")], words=_G7_BILATERAL, question=_G7_BILATERAL
+    )
 
-    if admitted:
-        assert result["outcome"] == Outcome.OK.value, result
-        assert _pins(ctx) == {"g7_total": DAC1}
-    else:
-        assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
-        assert result["detail"]["unserved"] == [
-            {"requirement_id": "g7_total", "spec_id": DAC1, "option_id": _BILATERAL}
-        ]
+    assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
+    assert result["detail"]["unserved"] == [
+        {"requirement_id": "g7_total", "spec_id": DAC1, "option_id": _BILATERAL}
+    ]
 
 
 async def test_an_unserved_stated_option_reads_as_words_with_the_code_in_detail() -> None:
@@ -1325,14 +1369,16 @@ def _released() -> list[AgentRecord]:
 async def test_an_answer_not_to_keep_is_not_asked_again_in_the_turn() -> None:
     """The user answered the ask for DAC1 with "count it as asked". The planner
     proposing DAC1 again is refused with no ask: the user has answered, so the
-    refusal asks the planner to remove the figure or repin it."""
+    refusal asks the planner to remove the figure or repin it to the DAC2a total on
+    record that counts the option."""
     ctx = _Context(*_released())
-    _show(ctx, _block("dac1"))
+    _show(ctx, _block("dac1"), _block("g7_bilateral"))
 
     result = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
 
     assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
     assert result["action"]["call"] == "propose_plan"
+    assert result["detail"]["serving"] == [_spec("g7_bilateral")]
     assert result["detail"]["unserved"] == [
         {"requirement_id": "g7_total", "spec_id": DAC1, "option_id": _INCLUSIVE}
     ]
@@ -1437,17 +1483,32 @@ async def test_a_pin_switched_on_the_plan_card_offers_no_omitted_scope() -> None
     assert result["outcome"] == Outcome.OK.value, result
 
 
-async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_its_calculation() -> None:
+@pytest.mark.parametrize(
+    ("refusing", "code"),
+    [
+        pytest.param(None, ProblemCode.STATED_PROVIDER_DROPPED, id="the-stated-scope-refused"),
+        pytest.param(
+            "measure_basis:net", ProblemCode.OPERATION_UNSUPPORTED, id="the-calculations-refused"
+        ),
+    ],
+)
+async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_what_search_refuses(
+    refusing: str | None, code: ProblemCode
+) -> None:
     """US aid to Kenya stating imputed multilateral aid, over a net total its share
-    counts it on: one compile moves it on both axes, and where Search refuses it the
-    refusal names the share and records nothing against the stated option, since
-    the measure basis may be what Search refused."""
+    counts it on: one compile moves it on both axes. Where Search refuses it, the
+    pin is compiled on the stated scope alone to find which move Search refuses. That
+    refused too, the pin cannot count what the user asked for and is refused with the
+    ask; served, the calculation's move is what Search refuses, and the refusal names
+    the share, recording nothing against the stated scope."""
     ctx = _Context()
     aid = provider_block(HEALTH, narrow=True, active=_BILATERAL)
     total = basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance="explicit")
     _show(ctx, aid, total)
     surface = _Search(
-        aid, refusal={"code": "requested_option_unavailable", "retry_mode": "do_not_retry"}
+        aid,
+        refusal={"code": "requested_option_unavailable", "retry_mode": "do_not_retry"},
+        refusing=refusing,
     )
     requirements = [
         _dataset("aid", HEALTH, _STATED_INCLUSIVE, donor="United States", recipient="Kenya"),
@@ -1457,10 +1518,22 @@ async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_its_ca
 
     result = await _propose(ctx, requirements, words=_G7, surface=surface)
 
-    assert result["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, result
-    (call,) = surface.calls
-    assert {e["option_id"] for e in call["scope_entries"]} >= {_INCLUSIVE, "measure_basis:net"}
-    assert stated_uncompiled(ctx.state) == {}
+    assert result["code"] == code.value, result
+    both, alone = surface.calls
+    assert {e["option_id"] for e in both["scope_entries"]} >= {_INCLUSIVE, "measure_basis:net"}
+    assert "measure_basis:net" not in {e["option_id"] for e in alone["scope_entries"]}
+    if code is ProblemCode.STATED_PROVIDER_DROPPED:
+        assert result["action"]["call"] == PLANNER_ASK
+        assert list(stated_uncompiled(ctx.state)) == [(HEALTH, _INCLUSIVE)]
+    else:
+        assert (
+            result["detail"]["basis"]["requirement_id"],
+            result["detail"]["basis"]["step_id"],
+        ) == (
+            "aid",
+            "share",
+        )
+        assert stated_uncompiled(ctx.state) == {}
 
 
 async def test_a_sum_stating_the_scope_nowhere_is_refused_once_a_turn() -> None:
@@ -1477,3 +1550,26 @@ async def test_a_sum_stating_the_scope_nowhere_is_refused_once_a_turn() -> None:
 
     assert first["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, first
     assert again["outcome"] == Outcome.OK.value, again
+
+
+@pytest.mark.parametrize(
+    "said",
+    [pytest.param("whichever is fine", id="free-text"), pytest.param({"skip": True}, id="skip")],
+)
+async def test_an_answer_outside_the_options_neither_keeps_nor_releases(said: Any) -> None:
+    """The user answered the ask for DAC1 in their own words, or skipped it. That is
+    no pick: DAC1 is refused with the ask again, and a keep the turn opened holding
+    stands."""
+    ctx = _Context(*_asked(said))
+    _show(ctx, _block("dac1"))
+
+    again = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
+
+    assert again["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, again
+    assert again["action"]["call"] == PLANNER_ASK
+
+    held = _Context(*_asked(said))
+    held.state[STATED_SCOPE_KEPT_STATE_KEY] = [[DAC1, _INCLUSIVE]]
+    _show(held, _block("dac1"))
+    kept = await _propose(held, [_dac1_total(_DAC1_STATED)], words=_G7)
+    assert kept["outcome"] == Outcome.OK.value, kept

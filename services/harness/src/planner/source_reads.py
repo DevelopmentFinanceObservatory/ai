@@ -19,7 +19,8 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from typing import Any, cast
+from datetime import datetime
+from typing import Any, NamedTuple, cast
 
 from compiler.sources import (
     WHOLE_COLUMNS,
@@ -201,6 +202,35 @@ def _refusing(refused: dict[str, object]) -> SourceRead:
     return lambda _: refused
 
 
+class _Compiled(NamedTuple):
+    """Search's compile of a pin (`compile_on_basis`): its part, spec_id and when it
+    was resolved."""
+
+    part: Mapping[str, Any]
+    spec_id: str
+    resolved_at: datetime | None
+
+
+class _Uncompiled(NamedTuple):
+    """Why Search answered no compile of a pin (`compile_on_basis`): its answer
+    (`cause`), whether it can answer later, and the refusal's reason."""
+
+    cause: str
+    retryable: bool
+    reason: str
+
+
+def _stated_refused(spec_id: str, option_id: str, cause: str) -> SourceRead:
+    """The read recording that Search refused for good to compile `spec_id` on the
+    stated provider option `option_id` (`planner.stated_scope.record_stated_uncompiled`),
+    so the next proposal is refused for a pin that cannot count it, with the ask."""
+
+    def record(into: SessionState) -> None:
+        record_stated_uncompiled(into, spec_id=spec_id, option_id=option_id, cause=cause)
+
+    return record
+
+
 async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the compile fails
     surface: ToolSurface,
     realignment: Realignment,
@@ -278,14 +308,8 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
             return lambda into: stated_compile_unanswered(
                 realignment, shown=held_sources(into), cause=cause
             )
-        (option_id,) = [o for o in realignment.option_ids if option_axis(o) == PROVIDER_AXIS]
-
-        def record(into: SessionState) -> None:
-            record_stated_uncompiled(
-                into, spec_id=realignment.spec_id, option_id=option_id, cause=cause
-            )
-
-        return record
+        (option_id,) = realignment.option_ids
+        return _stated_refused(realignment.spec_id, option_id, cause)
 
     missing = [axis for axis in axes if axis not in choices]
     if block is None or scope is None or missing:
@@ -293,45 +317,73 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
             f"{realignment.requirement_id!r}'s dataset has no "
             f"{' or '.join(missing or axes)} choice on record"
         )
-    switched = scope.entries
-    for option_id in realignment.option_ids:
-        switched = tuple(
-            switch_entries(
-                scope.model_copy(update={"entries": switched}),
-                choice=choices[option_axis(option_id)],
-                option_id=option_id,
-            )
-        )
-    entries = [entry.model_dump(mode="json", exclude_none=True) for entry in switched]
     groups = readable_wire_groups(block)
     if groups is None:
         return unservable(
             f"Search's named sets for {realignment.requirement_id!r}'s dataset are not readable"
         )
-    try:
-        part, resolved_at = await resolve_definition_at(
-            surface,
-            spec_id=scope.base.spec_id,
-            identity=scope.base.identity,
-            groups=groups,
-            scope_entries=entries,
-        )
-    except DefinitionNotResolvedError as exc:
-        if exc.retryable and realignment.stated:
-            return stated_uncompiled(str(exc), retryable=True)
-        if exc.retryable:
-            return _refusing(_basis_uncompiled(realignment, str(exc)))
-        return unservable(
-            f"Search does not count {realignment.requirement_id!r}'s dataset the way its "
-            f"calculation's other inputs share ({exc.code or 'refused'})"
-        )
-    spec = part.get("spec") if part.get("status") == "definite" else None
-    spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
-    if not isinstance(spec, Mapping) or not isinstance(spec_id, str):
-        return unservable(
-            f"Search holds no one dataset counting {realignment.requirement_id!r} the way "
-            "its calculation's other inputs share"
-        )
+    wire_groups = groups
+
+    async def attempt(option_ids: tuple[str, ...]) -> _Compiled | _Uncompiled:
+        """Search's compile of the pin on `option_ids`, or why it answered none."""
+        switched = scope.entries
+        for option_id in option_ids:
+            switched = tuple(
+                switch_entries(
+                    scope.model_copy(update={"entries": switched}),
+                    choice=choices[option_axis(option_id)],
+                    option_id=option_id,
+                )
+            )
+        try:
+            part, resolved_at = await resolve_definition_at(
+                surface,
+                spec_id=scope.base.spec_id,
+                identity=scope.base.identity,
+                groups=wire_groups,
+                scope_entries=[e.model_dump(mode="json", exclude_none=True) for e in switched],
+            )
+        except DefinitionNotResolvedError as exc:
+            return _Uncompiled(
+                cause=str(exc),
+                retryable=exc.retryable,
+                reason=(
+                    f"Search does not count {realignment.requirement_id!r}'s dataset the way "
+                    f"its calculation's other inputs share ({exc.code or 'refused'})"
+                ),
+            )
+        spec = part.get("spec") if part.get("status") == "definite" else None
+        if not isinstance(spec, Mapping) or not isinstance(spec.get("spec_id"), str):
+            return _Uncompiled(
+                cause="no one dataset",
+                retryable=False,
+                reason=(
+                    f"Search holds no one dataset counting {realignment.requirement_id!r} the "
+                    "way its calculation's other inputs share"
+                ),
+            )
+        return _Compiled(part=part, spec_id=spec["spec_id"], resolved_at=resolved_at)
+
+    compiled = await attempt(realignment.option_ids)
+    if isinstance(compiled, _Uncompiled):
+        if compiled.retryable and realignment.stated:
+            return stated_uncompiled(compiled.cause, retryable=True)
+        if compiled.retryable:
+            return _refusing(_basis_uncompiled(realignment, compiled.cause))
+        stated_option = realignment.stated_option
+        if stated_option is not None and not realignment.stated:
+            # The compile also carries a calculation's move: Search may refuse either.
+            # The stated option alone decides whether the pin can count what the user
+            # asked for; where it can, the calculation's refusal stands.
+            alone = await attempt((stated_option,))
+            if isinstance(alone, _Uncompiled):
+                if alone.retryable:
+                    return lambda into: stated_compile_unanswered(
+                        realignment, shown=held_sources(into), cause=alone.cause
+                    )
+                return _stated_refused(realignment.spec_id, stated_option, alone.cause)
+        return unservable(compiled.reason)
+    part, spec_id, resolved_at = compiled.part, compiled.spec_id, compiled.resolved_at
     digest = resolver_digest({"parts": [dict(part)]})
     mark_planner_axes(digest, planner_axes(block) | set(axes))
 

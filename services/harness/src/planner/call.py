@@ -49,6 +49,7 @@ from submission.prices_choice import (
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
+    COUNT_AS_ASKED_OPTION,
     KEEP_PUBLISHED_OPTION,
     STATED_SCOPE_OPTIONS,
     Admission,
@@ -82,6 +83,7 @@ from planner.stated_scope import (
     record_unattributed,
     save_stated_scope_kept,
     stated_scope_kept,
+    stated_scope_kept_earlier,
 )
 from planner.tool_results import ProblemCode
 
@@ -832,9 +834,9 @@ def stated_scope_keeps(
     `options` are `STATED_SCOPE_OPTIONS` asks about the pins the latest such refusal
     before it names, read off that refusal's own response, so the model cannot point
     the ask at other pins, and a refusal binds the first ask after it that reached the
-    user. An answer of `KEEP_PUBLISHED_OPTION` keeps them; any other answer about them,
-    free text or a skip included, releases them, and the latest answer about a pair
-    decides.
+    user. An answer of `KEEP_PUBLISHED_OPTION` keeps them and one of
+    `COUNT_AS_ASKED_OPTION` releases them; the latest such answer about a pair decides.
+    Free text or a skip does neither: the planner reads the user's words, or asks again.
     """
     offered = [dict(option) for option in STATED_SCOPE_OPTIONS]
     refused: frozenset[tuple[str, str]] | None = None
@@ -858,7 +860,7 @@ def stated_scope_keeps(
             if option == KEEP_PUBLISHED_OPTION:
                 kept |= pairs
                 released -= pairs
-            else:
+            elif option == COUNT_AS_ASKED_OPTION:
                 kept -= pairs
                 released |= pairs
     return frozenset(kept), frozenset(released)
@@ -906,6 +908,11 @@ class CallSession:
         (`planner.stated_scope.STATED_SCOPE_KEPT_STATE_KEY`)."""
         kept, released = stated_scope_keeps(self.call)
         return (stated_scope_kept(self.call.state) - released) | kept
+
+    def stated_scope_kept_earlier(self) -> frozenset[tuple[str, str]]:
+        """The keeps the turn opened holding (`planner.stated_scope.stated_scope_kept_earlier`),
+        less each the user kept again answering an ask this turn."""
+        return stated_scope_kept_earlier(self.call.state) - stated_scope_keeps(self.call)[0]
 
     def stated_scope_released(self) -> frozenset[tuple[str, str]]:
         """The pins and options the user chose not to keep, answering an ask in the
