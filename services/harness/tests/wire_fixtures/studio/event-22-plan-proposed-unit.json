@@ -1,0 +1,109 @@
+{
+  "event": "plan.proposed",
+  "seq": 9,
+  "interrupt_id": "approve",
+  "plan_version_id": "plan_01j9ze2k7d",
+  "version": 1,
+  "title": "Debt service paid by Kenya",
+  "steps": [
+    {
+      "id": "s1",
+      "label": "Fetch external debt service paid for Kenya",
+      "description": "Fetch it in constant 2020 euros, 2010\u20132014 and 2018\u20132023.",
+      "gives_answer": true
+    }
+  ],
+  "decisions": [
+    {
+      "id": "user_unit_spec_5c1e0a9b7d2f4e6a8b0c1d2e3f405162",
+      "question": "Which prices the figures are in.",
+      "chosen": "constant 2020 prices in EUR",
+      "reason": "The user chose constant 2020 prices in EUR.",
+      "resolved_by": "user",
+      "alternatives": [
+        "constant 2020 prices in EUR",
+        "current prices"
+      ],
+      "choice_id": "decision/user_unit_spec_5c1e0a9b7d2f4e6a8b0c1d2e3f405162",
+      "active_option_id": "EUR-constant-2020",
+      "options": [
+        {
+          "option_id": "EUR-constant-2020",
+          "label": "Constant 2020 Euros",
+          "status": "available"
+        },
+        {
+          "option_id": "EUR-current",
+          "label": "Current Euros",
+          "status": "available"
+        }
+      ],
+      "unit": {
+        "currencies": [
+          {
+            "code": "USD",
+            "name": "US dollars",
+            "prices": [
+              "current",
+              "constant"
+            ],
+            "base_year_min": 1970,
+            "base_year_max": 2024
+          },
+          {
+            "code": "EUR",
+            "name": "Euros",
+            "prices": [
+              "current",
+              "constant"
+            ],
+            "base_year_min": 1970,
+            "base_year_max": 2024
+          },
+          {
+            "code": "KES",
+            "name": "Kenyan shillings",
+            "prices": [
+              "current"
+            ]
+          }
+        ],
+        "presets": [
+          "USD",
+          "EUR",
+          "KES"
+        ],
+        "start": {
+          "currency": "EUR",
+          "prices": "constant",
+          "base_year": 2020
+        }
+      }
+    }
+  ],
+  "actions": [
+    "approve",
+    "amend",
+    "reject",
+    "switch"
+  ],
+  "requirements": [
+    {
+      "id": "debt_to_2014",
+      "kind": "dataset",
+      "sentence": "External debt service paid by Kenya, 2010\u20132014, in constant 2020 euros.",
+      "decision_ids": [
+        "user_unit_spec_5c1e0a9b7d2f4e6a8b0c1d2e3f405162"
+      ]
+    },
+    {
+      "id": "debt_since_2018",
+      "kind": "dataset",
+      "sentence": "External debt service paid by Kenya, 2018\u20132023, in constant 2020 euros.",
+      "decision_ids": [
+        "user_unit_spec_5c1e0a9b7d2f4e6a8b0c1d2e3f405162"
+      ]
+    }
+  ],
+  "revision": "rev_01j9ze2k7d"
+}

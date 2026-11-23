@@ -120,7 +120,7 @@ from harness.studio_store import StudioStore, keep_turn_records
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
-from harness.unit_offer import unit_words, whole_units
+from harness.unit_offer import unit_option_id, unit_words, whole_units
 from harness.wire import (
     ActivityStep,
     ApplyChoiceSuggestion,
@@ -1226,10 +1226,17 @@ def _data_phrase(plan: PlannerPlan) -> str | None:
 
 
 def _choice_members(
-    decision: Decision | None, plan: PlannerPlan, named: Callable[[str], str]
+    decision: Decision | None,
+    plan: PlannerPlan,
+    named: Callable[[str], str],
+    unit_offers: Mapping[str, UnitOffer],
 ) -> dict[str, Any]:
     """The `PlanDecision` members a switchable decision of `plan` adds: the id
     of its row, its active option and each option with its label and status.
+
+    A decision whose slot `unit_offers` holds, a unit question's whole unit
+    (`harness.graph.state.unit_row_offers`), takes `plan_display.
+    decision_choice_id` and that offer as `unit` (`_unit_members`).
 
     A scope decision's row takes `plan_display.choice_id`, and each option
     the status Search gave it, its years and why it is limited
@@ -1245,6 +1252,8 @@ def _choice_members(
     """
     if decision is None:
         return {}
+    if (offer := unit_offers.get(decision.slot)) is not None:
+        return _unit_members(decision, offer)
     if (row := plan_display.count_choice_id(plan, decision)) is not None:
         return {
             "choice_id": row,
@@ -1286,6 +1295,30 @@ def _choice_members(
             )
             for option in decision.options
         ],
+    }
+
+
+def _unit_members(decision: Decision, offer: UnitOffer) -> dict[str, Any]:
+    """The `PlanDecision` members of the row stating a unit question's whole
+    unit `decision`: its row id, `offer` as `unit`, and as options the whole
+    units a client that renders no unit picker switches between
+    (`whole_units`), each labelled in words (`unit_words`), status
+    "available", the offer's start active. A start in a currency that serves
+    one basis, which `whole_units` leaves out, is listed first."""
+    units = whole_units(offer)
+    start = unit_option_id(offer.start)
+    if start not in units:
+        units = {start: offer.start, **units}
+    return {
+        "choice_id": plan_display.decision_choice_id(decision),
+        "active_option_id": start,
+        "options": [
+            PlanDecisionOption(
+                option_id=option_id, label=unit_words(unit, offer), status="available"
+            )
+            for option_id, unit in units.items()
+        ],
+        "unit": offer,
     }
 
 
@@ -1432,7 +1465,8 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     card is in the turn. `moved` rides on a plan the `switch` node offers
     (`harness.graph.switch`): the other scope choices the switch moved;
     `switch_failed` on one it offers again after a switch that did not
-    apply (`_switch_failed`).
+    apply (`_switch_failed`). `unit_offers` rides on every card whose plan
+    states a unit question's whole unit (`harness.graph.approve.offer`).
     """
     fields = {
         key: value
@@ -1446,6 +1480,7 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
             "new_plan",
             "moved",
             "switch_failed",
+            "unit_offers",
         )
     }
     return PlannerPlan.model_validate(fields)
@@ -2443,6 +2478,10 @@ class _Translator:
                     )
                 conversation.latest_plan_version = version
             plan = _plan_from_payload(payload)
+            unit_offers = {
+                slot: UnitOffer.model_validate(offer)
+                for slot, offer in (payload.get("unit_offers") or {}).items()
+            }
             questions = plan_display.card_questions(plan)
             by_slot = {decision.slot: decision for decision in plan.decisions}
             named = functools.partial(plan_display.card_decision_text, plan=plan)
@@ -2531,6 +2570,7 @@ class _Translator:
                         held,
                         plan,
                         functools.partial(option_named, decision=held, options=offered),
+                        unit_offers,
                     ),
                 )
                 for index, decision in enumerate(payload.get("decisions", []))

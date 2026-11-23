@@ -26,14 +26,14 @@ from data_mcp.search_tool import MAX_PARTS
 from planner.plan import AskBreakdown, SessionState, Unit, scope_unread, stored_plan, with_blocks
 from planner.plan import Plan as PlannerPlan
 from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, ValidationError
-from submission.prices_choice import measure_key
+from submission.prices_choice import measure_key, unit_slot
 
 from harness.tool_contracts import (
     reading_facts,
 )
 from harness.turn.store import SPECS_KEY, FrameKey, FrameKeys
 from harness.turn_records import Origin, PricesForm, SearchReading, open_prices, prices_form
-from harness.unit_offer import unit_offer
+from harness.unit_offer import offered_unit_refusal, unit_offer
 from harness.wire import UnitChoice, UnitOffer
 
 logger = logging.getLogger(__name__)
@@ -375,6 +375,41 @@ def record_unit_served(
         mode="json"
     )
     state[ORCHESTRATOR_UNIT_SERVED_KEY] = served
+
+
+def unit_row_offers(state: SessionState) -> dict[str, UnitOffer]:
+    """The units the plan card's row for each unit question's whole unit offers,
+    by the row's decision slot (`submission.prices_choice.unit_slot`).
+
+    A question's parts are the records of `units_served` naming its lead part
+    as their `group`, the lead first. The offer is what every part's block on
+    record (`ORCHESTRATOR_SPECS_KEY`) converts into (`unit_offer`), starting
+    on the unit the parts are in now: the lead's served unit, else the first
+    part's that names one (`submission.prices_choice.decision_slots`). A
+    question with a part whose block is not on record, with no served unit,
+    or whose blocks share no unit both bases serve or leave its unit out,
+    offers none.
+    """
+    groups: dict[str, list[tuple[str, ServedUnit]]] = {}
+    for part, served in units_served(state).items():
+        if served.group is not None:
+            groups.setdefault(served.group, []).append((part, served))
+    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
+    offers: dict[str, UnitOffer] = {}
+    for lead, members in groups.items():
+        members.sort(key=lambda member: member[0] != lead)
+        if any(part not in specs for part, _ in members):
+            continue
+        unit = next((served.unit for _, served in members if served.unit is not None), None)
+        offer = unit_offer([specs[part] for part, _ in members])
+        if unit is None or offer is None:
+            continue
+        start = UnitChoice.model_validate(unit.model_dump(mode="json"))
+        if (refusal := offered_unit_refusal(offer, start)) is not None:
+            logger.warning("unit row for %s offers no switch: %s", lead, refusal)
+            continue
+        offers[unit_slot(lead)] = offer.model_copy(update={"start": start})
+    return offers
 
 
 def _reading_prices(reading: SearchReading) -> dict[str, Any]:

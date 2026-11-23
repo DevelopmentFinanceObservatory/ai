@@ -212,8 +212,7 @@ def whole_units(offer: UnitOffer) -> dict[str, UnitChoice]:
     the first offered currency that does, else the start's alone. The unit on
     the start's basis comes first, the start itself when its currency is the
     one. A constant unit takes the start's base year when the currency's
-    range holds it, else the currency's latest. An id names the unit,
-    "USD-current" or "USD-constant-2023".
+    range holds it, else the currency's latest. Each id is `unit_option_id`'s.
     """
     start = offer.start
     own = next(c for c in offer.currencies if c.code == start.currency)
@@ -229,11 +228,11 @@ def whole_units(offer: UnitOffer) -> dict[str, UnitChoice]:
         if year is None or not both.base_year_min <= year <= both.base_year_max:
             year = both.base_year_max
         units.append(UnitChoice(currency=both.code, prices=prices, base_year=year))
-    return {
-        "-".join(
-            str(part)
-            for part in (unit.currency, unit.prices.value, unit.base_year)
-            if part is not None
-        ): unit
-        for unit in units
-    }
+    return {unit_option_id(unit): unit for unit in units}
+
+
+def unit_option_id(unit: UnitChoice) -> str:
+    """The option id naming `unit`: "USD-current" or "USD-constant-2023"."""
+    return "-".join(
+        str(part) for part in (unit.currency, unit.prices.value, unit.base_year) if part is not None
+    )

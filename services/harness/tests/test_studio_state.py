@@ -93,6 +93,7 @@ from harness.wire import (
     CompositionManifest,
     ElicitationInput,
     ErrorCode,
+    MessageComplete,
     MutationOp,
     PlanProposed,
     UnitOffer,
@@ -1883,6 +1884,28 @@ def test_a_stored_pending_card_keeps_new_plan_beside_the_card(new_plan: bool) ->
     assert "new_plan" not in entry["card"]
     assert restored.card is not None
     assert bool(restored.card.new_plan) is new_plan
+
+
+def test_a_stored_pending_card_keeps_each_decision_s_unit_beside_the_card_and_frames() -> None:
+    """A unit row's offer marks the emitted frame. An instance rolled back to a
+    model without it cannot load a stored card or frame that holds it, so the
+    card and every frame are stored without it, the offers beside them, and
+    restored on load."""
+    raw = json.loads(
+        (
+            Path(__file__).parent / "wire_fixtures" / "studio" / "event-22-plan-proposed-unit.json"
+        ).read_text()
+    )
+    card = PlanProposed.model_validate(raw)
+    note = MessageComplete(event="message.complete", seq=8, text="Version 1 is still there.")
+    pending = _PendingInterrupt(adk_id="adk_1", kind="plan", card=card, frames=(note, card))
+
+    entry = studio_store._serialize_pending({"int_1": pending})["int_1"]
+    restored = studio_store._deserialize_entry(json.loads(json.dumps(entry)))
+
+    stored = [entry["card"], *entry["frames"]]
+    assert all("unit" not in d for frame in stored for d in frame.get("decisions") or ())
+    assert (restored.card, restored.frames) == (card, (note, card))
 
 
 def test_awaiting_answer_excludes_an_entry_marked_resuming() -> None:

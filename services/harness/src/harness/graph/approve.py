@@ -28,7 +28,7 @@ from planner.plan import (
 from harness.decision_pick import decision_pick
 from harness.early_mint import EarlyMints
 from harness.graph.events import GraphEvent
-from harness.graph.state import APPROVE_PAUSE, APPROVED_RUN_KEY, readable_plan
+from harness.graph.state import APPROVE_PAUSE, APPROVED_RUN_KEY, readable_plan, unit_row_offers
 from harness.turn.node import Next, Node, NodeCtx, Pause
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,10 @@ def offer(
     ctx: NodeCtx[GraphEvent], node_input: dict[str, Any], *, early_mints: EarlyMints | None
 ) -> Pause:
     """Pause on the plan card `node_input`, the plan the node before drafted
-    or revised.
+    or revised, with `unit_offers` beside it when one of its decisions is a
+    unit question's whole unit: the units that decision's row offers, by its
+    slot (`harness.graph.state.unit_row_offers`), which the card builder
+    (`harness.studio_translate`) reads, since it holds no session state.
 
     A card pending approval is offered to `early_mints` (`harness.early_mint`),
     which starts its retrievals unless it already started that revision. The
@@ -75,7 +78,14 @@ def offer(
                 early_mints.offer(offered)
 
             ctx.after_commit(start_retrievals)
-    return Pause(kind=APPROVE_PAUSE, payload=node_input, message=APPROVE_MESSAGE)
+    slots = {decision.get("slot") for decision in node_input.get("decisions") or ()}
+    offers = {
+        slot: offer.model_dump(mode="json")
+        for slot, offer in unit_row_offers(cast(SessionState, ctx.state)).items()
+        if slot in slots
+    }
+    payload = {**node_input, "unit_offers": offers} if offers else node_input
+    return Pause(kind=APPROVE_PAUSE, payload=payload, message=APPROVE_MESSAGE)
 
 
 def decide(

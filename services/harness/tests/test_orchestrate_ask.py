@@ -20,6 +20,7 @@ from compiler.surface import ProgressCallback, ToolCallResult, ToolId
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.tool_errors import ToolErrorCode
 from google.genai import types
+from harness.graph.approve import offer
 from harness.graph.orchestrate import answer_replies, ask_node, orchestrate_node
 from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
@@ -38,10 +39,12 @@ from harness.turn.loop import Outcome
 from harness.turn.node import NodeCtx, StopScope, TurnKey
 from harness.turn.transcript import Transcript
 from harness.turn_records import CandidateReading, SearchReading, WindowReading
+from harness.unit_offer import unit_offer
 from orchestrator.run import ToolsAnswered
 from planner.call import _picks
 from planner.plan import Unit
 from sqlalchemy.ext.asyncio import AsyncEngine
+from submission.prices_choice import prices_slot, unit_slot
 
 from .graph_turns import agent_read, given, opening_graph, opening_nodes, visited
 from .scripted_genai import call_part, reply, text_part
@@ -829,7 +832,9 @@ async def test_a_unit_answer_records_the_series_fetched_and_the_unit_it_is_serve
 async def test_a_unit_answer_records_each_part_under_the_question_s_lead_part() -> None:
     """A unit question covers its part and the part measuring the same thing
     over other years. Each part's record names the question's lead part as
-    its group, so the parts' prices are one decision on the plan."""
+    its group, so the parts' prices are one decision on the plan, and the
+    plan card's row for it offers what both parts convert into, starting on
+    the unit answered. A part's own prices row offers no unit."""
     search = _UnitSearch()
     state: dict[str, Any] = {
         ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: _FRANCE_KENYA, _OTHER: _other_window()},
@@ -858,6 +863,16 @@ async def test_a_unit_answer_records_each_part_under_the_question_s_lead_part() 
     assert {part: served.group for part, served in units_served(state).items()} == {
         _FK_GROSS: _FK_GROSS,
         _OTHER: _FK_GROSS,
+    }
+    row, own = unit_slot(_FK_GROSS), prices_slot(_OTHER)
+    card = offer(ctx, {"decisions": [{"slot": row}, {"slot": own}]}, early_mints=None)
+    shared = unit_offer([_FRANCE_KENYA, _other_window()])
+    assert shared is not None
+    assert card.payload["unit_offers"] == {
+        row: {
+            **shared.model_dump(mode="json"),
+            "start": {"currency": "USD", "prices": "constant", "base_year": 2020},
+        }
     }
 
 

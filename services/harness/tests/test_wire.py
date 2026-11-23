@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from harness.unit_offer import unit_words, whole_units
+from harness.unit_offer import unit_option_id, unit_words, whole_units
 from harness.wire import (
     MAX_OPERATION_PHRASE_CHARS,
     MAX_SEED_COUNT,
@@ -95,6 +95,7 @@ EVENT_FIXTURES = {
     "event-19-component-unit-change.json": ComponentCreated,
     "event-20-elicitation-multi-select.json": ElicitationRequest,
     "event-21-elicitation-unit-pick.json": ElicitationRequest,
+    "event-22-plan-proposed-unit.json": PlanProposed,
 }
 
 REQUEST_FIXTURES = {
@@ -117,6 +118,7 @@ REQUEST_FIXTURES = {
     "request-17-interrupt-options.json": InterruptResponse,
     "request-18-interrupt-unit-pick.json": InterruptResponse,
     "request-19-turn-client-features.json": TurnRequest,
+    "request-20-interrupt-switch-unit.json": InterruptResponse,
 }
 
 
@@ -206,6 +208,30 @@ def test_the_unit_pick_fixture_offers_the_unit_fixture_s_whole_units() -> None:
     assert [(option["id"], option["label"]) for option in pick["options"]] == [
         (option_id, unit_words(unit, offer)) for option_id, unit in whole_units(offer).items()
     ]
+
+
+def test_the_unit_row_fixture_offers_its_whole_units_the_start_active() -> None:
+    """The plan card's row for a unit question's whole unit carries the offer,
+    starting on the unit the parts are in, and as options the whole units of
+    that currency, which a client that renders no unit picker switches between."""
+    card = PlanProposed.model_validate(_load("event-22-plan-proposed-unit.json"))
+    (row,) = card.decisions
+    assert row.unit is not None and row.options is not None
+
+    assert row.active_option_id == unit_option_id(row.unit.start)
+    assert [(option.option_id, option.label) for option in row.options] == [
+        (option_id, unit_words(unit, row.unit)) for option_id, unit in whole_units(row.unit).items()
+    ]
+
+
+def test_the_unit_switch_fixture_names_its_unit_as_the_option() -> None:
+    """A unit switch's `option_id` names the unit it carries, as the row's
+    whole units are named, so an old client's pick and a new client's unit
+    reach the harness alike."""
+    switch = InterruptResponse.model_validate(_load("request-20-interrupt-switch-unit.json"))
+    assert switch.unit is not None
+
+    assert switch.option_id == unit_option_id(switch.unit)
 
 
 def test_turn_request_surface_defaults_to_studio() -> None:
@@ -536,6 +562,19 @@ def test_a_scope_decision_missing_or_misstating_a_member_is_refused(
         PlanDecision.model_validate({**_SCOPE_ROW, **change})
 
 
+_ROW_MEMBERS = ("choice_id", "active_option_id", "options")
+
+
+def test_a_decision_offering_a_unit_without_its_row_is_refused() -> None:
+    """Only a row a switch can name carries a unit offer."""
+    (row,) = _load("event-22-plan-proposed-unit.json")["decisions"]
+    plain = {key: value for key, value in row.items() if key not in _ROW_MEMBERS}
+
+    assert PlanDecision.model_validate(row).unit is not None
+    with pytest.raises(ValidationError):
+        PlanDecision.model_validate(plain)
+
+
 def test_studio_frame_adapter_still_discriminates_plan_proposed() -> None:
     frame = STUDIO_FRAME_ADAPTER.validate_python(_load("event-03-plan-proposed.json"))
 
@@ -656,6 +695,9 @@ _SWITCH = {
 }
 
 
+_UNIT = {"currency": "EUR", "prices": "constant", "base_year": 2015}
+
+
 def test_a_switch_names_its_choice_option_and_plan_revision() -> None:
     accepted = STUDIO_REQUEST_ADAPTER.validate_python(_SWITCH)
 
@@ -678,6 +720,32 @@ def test_a_switch_names_its_choice_option_and_plan_revision() -> None:
         pytest.param({"decision": "approve"}, id="approve-with-switch-members"),
         pytest.param(
             {"decision": "amend", "payload": "x", "choice_id": None}, id="amend-with-some"
+        ),
+        pytest.param({"option_id": None, "unit": _UNIT}, id="unit-switch-without-option"),
+        pytest.param(
+            {"decision": "approve", "choice_id": None, "option_id": None, "unit": _UNIT},
+            id="approve-with-unit",
+        ),
+        pytest.param(
+            {
+                "decision": "amend",
+                "payload": "x",
+                "choice_id": None,
+                "option_id": None,
+                "plan_revision": None,
+                "unit": _UNIT,
+            },
+            id="amend-with-unit",
+        ),
+        pytest.param(
+            {
+                "decision": "reject",
+                "choice_id": None,
+                "option_id": None,
+                "plan_revision": None,
+                "unit": _UNIT,
+            },
+            id="reject-with-unit",
         ),
     ],
 )

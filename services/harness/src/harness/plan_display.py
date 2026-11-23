@@ -1674,8 +1674,11 @@ def switchable_decision(decision: Decision) -> bool:
     writes (`planner.plan.is_code_written`) are not: a search pin's measure
     and a scope choice switch through Search (`choice_id`), and one
     qualifying the answer (`Decision.caveat`) reaches the card only as a
-    caveat. Nor is the prices of a whole unit a unit answer chose for a part
-    (`_states_whole_unit`): the card shows that row with no other options.
+    caveat. Nor is the prices of a whole unit a unit answer chose
+    (`_states_whole_unit`): the row of a unit question's whole unit
+    (`submission.prices_choice.unit_slot`) offers the units its parts convert
+    into (`harness.studio_translate`), and a row a part's whole unit states
+    under its own prices slot offers no other option.
     """
     return (
         decision.fixes is not None
