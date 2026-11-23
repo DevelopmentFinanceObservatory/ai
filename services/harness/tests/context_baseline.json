@@ -305,6 +305,159 @@
           }
         ]
       }
+    },
+    {
+      "agent": "planner",
+      "scenario": "stated-scope",
+      "call_index": 0,
+      "total_chars": 69542,
+      "system_instruction_chars": 20497,
+      "declaration_total_chars": 41742,
+      "declarations": [
+        {
+          "name": "propose_plan",
+          "chars": 38748
+        },
+        {
+          "name": "ask_user_question",
+          "chars": 1908
+        },
+        {
+          "name": "get_skill",
+          "chars": 868
+        },
+        {
+          "name": "reject_plan",
+          "chars": 218
+        }
+      ],
+      "contents": {
+        "total_chars": 7902,
+        "buckets": [
+          {
+            "bucket": "text(planner-brief)",
+            "count": 1,
+            "chars": 7897
+          },
+          {
+            "bucket": "text",
+            "count": 1,
+            "chars": 5
+          }
+        ]
+      }
+    },
+    {
+      "agent": "planner",
+      "scenario": "stated-scope",
+      "call_index": 1,
+      "total_chars": 102425,
+      "system_instruction_chars": 20497,
+      "declaration_total_chars": 41742,
+      "declarations": [
+        {
+          "name": "propose_plan",
+          "chars": 38748
+        },
+        {
+          "name": "ask_user_question",
+          "chars": 1908
+        },
+        {
+          "name": "get_skill",
+          "chars": 868
+        },
+        {
+          "name": "reject_plan",
+          "chars": 218
+        }
+      ],
+      "contents": {
+        "total_chars": 40623,
+        "buckets": [
+          {
+            "bucket": "functionResponse:get_skill",
+            "count": 1,
+            "chars": 32671
+          },
+          {
+            "bucket": "text(planner-brief)",
+            "count": 1,
+            "chars": 7897
+          },
+          {
+            "bucket": "functionCall:get_skill",
+            "count": 1,
+            "chars": 50
+          },
+          {
+            "bucket": "text",
+            "count": 1,
+            "chars": 5
+          }
+        ]
+      }
+    },
+    {
+      "agent": "planner",
+      "scenario": "stated-scope",
+      "call_index": 2,
+      "total_chars": 103602,
+      "system_instruction_chars": 20497,
+      "declaration_total_chars": 41742,
+      "declarations": [
+        {
+          "name": "propose_plan",
+          "chars": 38748
+        },
+        {
+          "name": "ask_user_question",
+          "chars": 1908
+        },
+        {
+          "name": "get_skill",
+          "chars": 868
+        },
+        {
+          "name": "reject_plan",
+          "chars": 218
+        }
+      ],
+      "contents": {
+        "total_chars": 41638,
+        "buckets": [
+          {
+            "bucket": "functionResponse:get_skill",
+            "count": 1,
+            "chars": 32671
+          },
+          {
+            "bucket": "text(planner-brief)",
+            "count": 1,
+            "chars": 7897
+          },
+          {
+            "bucket": "functionResponse:propose_plan",
+            "count": 1,
+            "chars": 964
+          },
+          {
+            "bucket": "functionCall:propose_plan",
+            "count": 1,
+            "chars": 51
+          },
+          {
+            "bucket": "functionCall:get_skill",
+            "count": 1,
+            "chars": 50
+          },
+          {
+            "bucket": "text",
+            "count": 1,
+            "chars": 5
+          }
+        ]
+      }
     }
   ],
   "declaration_digests": {

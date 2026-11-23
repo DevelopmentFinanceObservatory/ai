@@ -124,7 +124,13 @@ from planner.skills import (
 )
 from planner.source_reads import with_source_reads
 from planner.specs import PROPOSE_PLAN, planner_specs
-from planner.stated_scope import StatedScopeReader, proposal_measures, read_stated_scope
+from planner.stated_scope import (
+    StatedScopeReader,
+    proposal_measures,
+    read_stated_scope,
+    record_keep_answer,
+    stated_scope_record,
+)
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import (
@@ -135,15 +141,17 @@ from planner.tools import (
 )
 from planner.workflow import ElectedMeasure, SelectedSource
 from submission.prices_choice import PricesAnswers
-from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from submission.service import (
+    KEEP_PUBLISHED_OPTION,
     Proposal,
     SourceReadings,
     pinned_sources,
     refused_in_force,
     searched_pins,
+    stated_scope_line,
     submit,
 )
+from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import CutCalls, current_cut_calls, resolving_once
 from translator.mechanical import clear_compile_failures
 from translator.referral import ReferralKind
@@ -457,7 +465,17 @@ class PlannerAdapter:
         # user once: every entry starts with none waiting.
         asked = load_pending_ask(state)
         answered = (
-            _Answered(asked, answer, ctx.state.get(_ASKED_REFERRAL_STATE_KEY))
+            _Answered(
+                asked,
+                answer,
+                ctx.state.get(_ASKED_REFERRAL_STATE_KEY),
+                # The question whether to keep a dataset counted as published is
+                # `propose_plan`'s own (`planner.tools.pause_on_keep_question`):
+                # the user's answer is recorded here, and admission reads it.
+                by_propose=record_keep_answer(
+                    state, call_id=asked.call_id, keep=_kept_as_published(answer)
+                ),
+            )
             if asked is not None and answer is not None
             else None
         )
@@ -588,8 +606,10 @@ class PlannerAdapter:
                 )
                 sources = {k: v for k, v in sources.items() if k not in excluded}
                 save_pin_sources(state, sources)
+                stated_line = await self._stated_scope_line(state, sources)
                 message = self._message(
                     question=question,
+                    stated_line=stated_line,
                     prior_plan=_as_authored(changing),
                     refusal=refusal,
                     refused=excluded,
@@ -974,6 +994,18 @@ class PlannerAdapter:
 
     # -- messages -----------------------------------------------------------
 
+    async def _stated_scope_line(self, state: SessionState, shown: Mapping[str, PinSource]) -> str:
+        """The brief's line on the provider option the turn's words state
+        (`submission.service.stated_scope_line`), read at entry through the
+        stated-scope reader, each text once a turn (`read_stated_scope`). A read
+        Search does not answer renders nothing: `propose_plan` reads again, and its
+        admission refuses a plan that leaves the option out."""
+        if self._stated_scope is None:
+            return ""
+        if await read_stated_scope(state, self._stated_scope, measures=()) is not None:
+            return ""
+        return stated_scope_line(stated_scope_record(state), shown)
+
     def _message(
         self,
         *,
@@ -984,6 +1016,7 @@ class PlannerAdapter:
         canvas_digest: dict[str, Any] | None,
         conversation_digest: dict[str, Any] | None,
         ledger: RenderedReadings = _NO_READINGS,
+        stated_line: str = "",
         skills: Sequence[Mapping[str, Any]] = (),
         refused: Sequence[str] = (),
         pick: DecisionPick | None = None,
@@ -999,7 +1032,8 @@ class PlannerAdapter:
         the call asks for (`_ask_text`).
 
         `ledger` is the rendered search readings (`_readings_ledger`), the
-        brief's opening section. `skills` holds the skill pages read on
+        brief's opening section, closed by `stated_line`, the line on the provider
+        scope the turn's words state (`_stated_scope_line`). `skills` holds the skill pages read on
         earlier calls (`planner.skills.SKILLS_READ_STATE_KEY`), which follow
         it verbatim (`_skills_section`). A compiled source of the plan being
         changed states no measure choice the ledger already names
@@ -1023,6 +1057,7 @@ class PlannerAdapter:
         return "".join(
             [
                 _READINGS_CONTEXT.format(readings=ledger.text),
+                stated_line,
                 _skills_section(skills),
                 _section("What is already on the user's canvas", canvas_digest),
                 _section("Earlier turns in this conversation", conversation_digest),
@@ -1169,12 +1204,22 @@ _ASKED_REFERRAL_INTRO = (
 
 
 class _Answered(NamedTuple):
-    """The ask the planner's last run ended on, the user's answer to it, and
-    the referral that run saw last, as `propose_plan` answered it, if any."""
+    """The ask the planner's last run ended on, the user's answer to it, the
+    referral that run saw last, as `propose_plan` answered it, if any, and whether
+    `propose_plan` raised the ask itself."""
 
     ask: AcceptedAsk
     answer: object
     referral: Mapping[str, Any] | None
+    by_propose: bool = False
+
+
+def _kept_as_published(answer: object) -> bool:
+    """Whether `answer`, the resume value of the keep question, picks
+    `KEEP_PUBLISHED_OPTION`. Any other answer, a skip or a dismissal included,
+    does not keep."""
+    reply = (resume_answers(answer) or {}).get("q1") or {}
+    return reply.get("kind") == "option" and reply.get("spec_id") == KEEP_PUBLISHED_OPTION
 
 
 def _typed_reply(answer: object) -> str | None:
@@ -1219,8 +1264,13 @@ def _answer_text(answered: _Answered) -> str:
         if answered.referral is not None
         else ""
     )
+    asker = (
+        f"`{PROPOSE_PLAN}` put to them"
+        if answered.by_propose
+        else f"you asked through `{PLANNER_ASK}`"
+    )
     return (
-        f"{referral}\nThe user answered the question you asked through `{PLANNER_ASK}`: "
+        f"{referral}\nThe user answered the question {asker}: "
         f"{question}\n{said}\nWhat they chose is the user's decision. Carry on from it.\n"
     )
 

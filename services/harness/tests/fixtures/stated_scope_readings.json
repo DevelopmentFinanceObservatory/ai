@@ -517,6 +517,41 @@
     "provider:bilateral"
    ],
    "sums_providers": false
+  },
+  "How much did life expectancy in Kenya grow from 2015 to 2022, in per cent?": {
+   "entries": [],
+   "total": false,
+   "mentions": [],
+   "sums_providers": false
+  },
+  "bilateral net disbursements including imputed multilateral aid": {
+   "entries": [
+    {
+     "axis": "measure_basis",
+     "option_id": "measure_basis:net",
+     "origin": {
+      "kind": "text",
+      "text": "net",
+      "start": 10,
+      "end": 13
+     }
+    }
+   ],
+   "total": false,
+   "mentions": [
+    "provider:bilateral",
+    "provider:inclusive"
+   ],
+   "sums_providers": false
+  },
+  "bilateral and multilateral ODA": {
+   "entries": [],
+   "total": false,
+   "mentions": [
+    "provider:bilateral",
+    "provider:multilateral"
+   ],
+   "sums_providers": false
   }
  }
 }

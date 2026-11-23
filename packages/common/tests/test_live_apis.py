@@ -11,7 +11,6 @@ import pytest
 from common import live_apis
 from common.apis_auth import TOKEN_HEADER, ApisAuthError, AuthProvider
 from common.live_apis import (
-    _MAX_RETRY_AFTER_S,
     FRAME_NOT_REFRESHABLE,
     PRINCIPAL_HEADER,
     PUBLISH_CONFLICT,
@@ -1109,27 +1108,20 @@ async def test_a_retryable_5xx_is_retried_until_it_succeeds() -> None:
 
 
 @pytest.mark.parametrize(
-    ("answer", "waits"),
+    "answer",
     [
-        (
-            httpx2.Response(
-                429, headers={"Retry-After": str(int(_MAX_RETRY_AFTER_S))}, text="slow down"
-            ),
-            _MAX_RETRY_AFTER_S,
-        ),
-        (problem(429, "rate_limited", retryable=True), None),
-        (httpx2.Response(425, text="too early"), None),
-        (httpx2.Response(429, headers={"Retry-After": "\u0663".encode()}, text="slow down"), None),
-        (httpx2.Response(503, headers={"Retry-After": "30"}, text="unavailable"), None),
+        httpx2.Response(429, headers={"Retry-After": "30"}, text="slow down"),
+        problem(429, "rate_limited", retryable=True),
+        httpx2.Response(425, text="too early"),
+        httpx2.Response(408, text="timeout"),
     ],
-    ids=["429-waits-its-retry-after", "429-problem", "425", "non-ascii-digit", "5xx-backs-off"],
+    ids=["429-retry-after-unread", "429-problem", "425", "408"],
 )
-async def test_a_transient_answer_is_retried_after_its_retry_after_or_the_backoff(
-    answer: httpx2.Response, waits: float | None
+async def test_a_transient_4xx_is_retried_after_the_jittered_backoff(
+    answer: httpx2.Response,
 ) -> None:
-    """A 408, 425 or 429 that can pass is retried in place, as a 5xx is, waiting the
-    `Retry-After` it names in ASCII digits, else the jittered backoff (up to 1 s
-    here). A 5xx always waits the backoff."""
+    """A 408, 425 or 429 that can pass is retried in place, as a 5xx is, after the
+    jittered backoff (up to 1 s here); a `Retry-After` it names is not read."""
     calls = Calls(answer, ok({"status": "current", "frame": FRAME.as_json()}))
     slept: list[float] = []
 
@@ -1139,29 +1131,7 @@ async def test_a_transient_answer_is_retried_after_its_retry_after_or_the_backof
     assert result == Current(FRAME)
     assert len(calls.requests) == 2
     assert len(slept) == 1
-    if waits is None:
-        assert 0 <= slept[0] <= 1.0
-    else:
-        assert slept == [waits]
-
-
-async def test_a_retry_after_past_the_cap_is_raised_at_once() -> None:
-    """A 408 naming a `Retry-After` longer than `_MAX_RETRY_AFTER_S` is raised at
-    once, still retryable, so the caller decides whether to wait."""
-    calls = Calls(httpx2.Response(408, headers={"Retry-After": "120"}, text="timeout"))
-    slept: list[float] = []
-
-    async with make_client(calls, max_attempts=3, slept=slept) as client:
-        with pytest.raises(LiveApisError) as raised:
-            await client.refresh_frame(spec_id=SPEC, content_version=CV)
-
-    assert (raised.value.status, raised.value.retryable, raised.value.retry_after_s) == (
-        408,
-        True,
-        120.0,
-    )
-    assert len(calls.requests) == 1
-    assert slept == []
+    assert 0 <= slept[0] <= 1.0
 
 
 @pytest.mark.parametrize(

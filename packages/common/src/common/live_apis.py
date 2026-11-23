@@ -31,9 +31,8 @@ carries its `code` and `constraint_id`.
 
 Every call returns the same answer on a repeat (a PUT of the same recipe, a
 refresh behind single-flight, a render that appends no revision), so transport
-failures and `retryable` 5xx, 408, 425 and 429 answers are retried up to `max_attempts`
-after a jittered backoff. A 408, 425 or 429 naming a `Retry-After` waits that long
-instead, when it is at most `_MAX_RETRY_AFTER_S`; one naming longer is raised at once.
+failures and `retryable` 5xx, 408, 425 and 429 answers are retried up to `max_attempts`,
+each after a jittered backoff.
 `stream_render_data` sends one attempt, since a body already begun cannot be resent.
 
 `analysis_execution_identity` reads apis' capabilities document and keeps its answer
@@ -103,9 +102,7 @@ class LiveApisError(Exception):
 
     `status` is the HTTP status and `code` the problem body's machine-readable
     code, `None` when the body is not a problem document. `constraint_id` names the
-    cause of a 409. `detail` is apis' own text. `retry_after_s` is the delay in
-    seconds the answer's `Retry-After` header names, `None` where it names none or
-    names a date.
+    cause of a 409. `detail` is apis' own text.
     """
 
     def __init__(
@@ -116,14 +113,12 @@ class LiveApisError(Exception):
         retryable: bool,
         constraint_id: str | None = None,
         detail: str | None = None,
-        retry_after_s: float | None = None,
     ) -> None:
         self.status = status
         self.code = code
         self.retryable = retryable
         self.constraint_id = constraint_id
         self.detail = detail
-        self.retry_after_s = retry_after_s
         super().__init__(f"dfo-apis call failed: status={status} code={code}")
 
 
@@ -289,28 +284,15 @@ def _text(value: object) -> str | None:
 # for a call that can pass later: a request timeout, too early, and rate limited.
 _TRANSIENT_STATUSES = frozenset({408, 425, 429})
 
-# The longest `Retry-After` a call waits out in place (`LiveApisClient._send`). A
-# longer one is raised at once, still retryable, so the caller decides.
-_MAX_RETRY_AFTER_S = 2.0
-
-
-def _retry_after(response: httpx2.Response) -> float | None:
-    """The seconds `response`'s `Retry-After` header names; `None` for no header or
-    an HTTP date, which the client's backoff replaces."""
-    value = response.headers.get("retry-after", "").strip()
-    return float(value) if value.isascii() and value.isdigit() else None
-
 
 def _error_from(response: httpx2.Response) -> LiveApisError:
     problem = _problem(response.content)
-    retry_after = _retry_after(response)
     if problem is None:
         status = response.status_code
         return LiveApisError(
             status=status,
             code=None,
             retryable=status >= 500 or status in _TRANSIENT_STATUSES,
-            retry_after_s=retry_after,
         )
     return LiveApisError(
         status=response.status_code,
@@ -318,7 +300,6 @@ def _error_from(response: httpx2.Response) -> LiveApisError:
         retryable=problem["retryable"],
         constraint_id=_text(problem.get("constraint_id")),
         detail=_text(problem.get("detail")),
-        retry_after_s=retry_after,
     )
 
 
@@ -482,8 +463,7 @@ class LiveApisClient:
             connect_timeout_s: Connection deadline of each attempt.
             read_timeout_s: Read deadline of each attempt.
             max_attempts: Attempts of one call, retries included.
-            backoff_base_s: The first retry waits up to this long, each later one twice as
-                long, where a 408, 425 or 429 names no `Retry-After`.
+            backoff_base_s: The first retry waits up to this long, each later one twice as long.
             sleep: Backoff sleep, replaced in tests.
             clock: Monotonic seconds, which time the capabilities answer's `max-age`.
         """
@@ -780,11 +760,10 @@ class LiveApisClient:
         params: Mapping[str, Any] | None = None,
     ) -> httpx2.Response:
         """Issue one call, retrying a transport failure, a `retryable` 5xx, or a
-        `retryable` 408, 425 or 429 (`_TRANSIENT_STATUSES`).
+        `retryable` 408, 425 or 429 (`_TRANSIENT_STATUSES`), each after a jittered
+        backoff.
 
-        A retry waits a jittered backoff. A 408, 425 or 429 naming a `Retry-After`
-        waits that long instead, up to `_MAX_RETRY_AFTER_S`, and one naming longer is
-        raised at once. Returns the 2xx response.
+        Returns the 2xx response.
         """
         headers = await self._with_auth(headers)
         attempt = 0
@@ -798,14 +777,7 @@ class LiveApisClient:
             )
             if not transient or attempt >= self._max_attempts:
                 raise error
-            wait = error.retry_after_s if error.status in _TRANSIENT_STATUSES else None
-            if wait is not None and wait > _MAX_RETRY_AFTER_S:
-                raise error
-            await self._sleep(
-                wait
-                if wait is not None
-                else random.uniform(0, self._backoff_base_s * 2 ** (attempt - 1))
-            )
+            await self._sleep(random.uniform(0, self._backoff_base_s * 2 ** (attempt - 1)))
 
     async def _with_auth(self, headers: Mapping[str, str] | None) -> dict[str, str]:
         """`headers` plus the auth hook's, minted after the principal check has passed.

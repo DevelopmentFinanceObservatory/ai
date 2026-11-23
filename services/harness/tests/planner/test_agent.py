@@ -3574,7 +3574,7 @@ def test_asking_the_user_rejects_a_recommendation_naming_no_candidate() -> None:
     ("candidates", "options", "refused"),
     [
         ([], [dict(option) for option in COMBINATION_OPTIONS], False),
-        ([], [dict(option) for option in STATED_SCOPE_OPTIONS], False),
+        ([], [dict(option) for option in STATED_SCOPE_OPTIONS], True),
         ([], [{"id": "add them", "label": "Add them"}, {"id": "no", "label": "No"}], True),
         (
             [{"spec_id": SPEC, "label": "a candidate"}],

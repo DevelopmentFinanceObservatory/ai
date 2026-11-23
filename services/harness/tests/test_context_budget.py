@@ -83,11 +83,14 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import httpx2
 import pytest
+from common.live_apis import LiveApisClient
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp.skills_client import PAGE_CHARS, continuation_line, page_of, with_closing_line
 from google.genai import types
 from harness import planner_adapter, studio_state
+from harness.conversation import current_user_message
 from harness.planner_adapter import (
     _PLAN_MEASURE_CHOICE_CAP,
     _PLAN_SOURCE_SENTENCE_CAP,
@@ -141,6 +144,7 @@ from planner.plan import (
 )
 from planner.records import GroupBy, Reduction
 from planner.specs import planner_specs
+from planner.stated_scope import ApisStatedScopeReader, StatedScopeReader
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
 from translator.tool import build_translate
@@ -244,6 +248,13 @@ BRIEF_CEILING = 15_800
 # plus the scenario's two-requirement plan. Measured 7,568.
 RECORDED_BRIEF_CEILING = 9_460
 
+# The line the planner brief gains where the user's words state a provider option
+# (`submission.service.stated_scope_line`), measured as the `STATED_SCOPE` brief less
+# the realistic one: the user's phrase, the option, the datasets on record that
+# can be counted as it, and the instruction to carry the phrase. Measured 245 with
+# none on record; each one listed adds its spec_id. The margin is 25%.
+STATED_SCOPE_LINE_CEILING = 306
+
 
 # The measured scenario ----------------------------------------------------------
 
@@ -252,10 +263,26 @@ RECORDED_BRIEF_CEILING = 9_460
 # at their maxima.
 BOUNDED_CONTEXT = "bounded-context"
 
+# The third: the realistic round under the user's words stating imputed
+# multilateral aid, read through a stated-scope reader, so the brief carries the
+# line on it (`harness.planner_adapter.PlannerAdapter._stated_scope_line`).
+STATED_SCOPE = "stated-scope"
 
-def _adapter(scripted: ScriptedGenai) -> PlannerAdapter:
+# The words of the `STATED_SCOPE` round, which Search reads as stating
+# `provider:inclusive` (`fixtures/stated_scope_readings.json`).
+_STATED_WORDS = (
+    "Show G7 aid to Africa as a share of G7 aid to all developing countries each year from "
+    "1970 to 2024, including imputed multilateral aid."
+)
+_STATED_READINGS = Path(__file__).resolve().parent / "fixtures" / "stated_scope_readings.json"
+
+
+def _adapter(
+    scripted: ScriptedGenai, *, stated_scope: StatedScopeReader | None = None
+) -> PlannerAdapter:
     """The adapter the recorded round runs on, over a canned data-mcp surface, its
-    model calls answered by `scripted`."""
+    model calls answered by `scripted`, reading the stated scope through
+    `stated_scope` when given."""
     return PlannerAdapter(
         settings=Settings(),
         surface=FixtureSurface(
@@ -263,6 +290,24 @@ def _adapter(scripted: ScriptedGenai) -> PlannerAdapter:
             responses={"search": _NO_DATA_SEARCH_RESPONSE, "get_skill": _skill_page()},
         ),
         client=scripted.client,
+        stated_scope=stated_scope,
+    )
+
+
+def _stated_scope_reader() -> StatedScopeReader:
+    """Search's stated-scope reader answering each text as dfo-apis' route did
+    (`_STATED_READINGS`), and any other as stating nothing."""
+    recorded = json.loads(_STATED_READINGS.read_text())["readings"]
+    nothing = {"entries": [], "total": False, "mentions": [], "sums_providers": False}
+
+    def answer(request: httpx2.Request) -> httpx2.Response:
+        texts = json.loads(request.content)["texts"]
+        return httpx2.Response(
+            200, json={"readings": [recorded.get(text, nothing) for text in texts]}
+        )
+
+    return ApisStatedScopeReader(
+        LiveApisClient(base_url="http://apis.test", transport=httpx2.MockTransport(answer))
     )
 
 
@@ -338,13 +383,16 @@ async def _recorded_round(
     derived_requirement: Callable[..., Any],
     context: dict[str, Any],
     state: dict[str, Any] | None = None,
+    stated_words: str | None = None,
 ) -> dict[str, tuple[list[dict[str, Any]], list[Any]]]:
     """One plan-then-translate round, with every request the planner's model was handed.
 
     `context` is what the planner brief carries besides the plan: the search
     `readings`, the `canvas_digest` and
     `conversation_digest`, and the `question` when it is not the draft's own.
-    `state` is what the session holds before the round, such as the asks.
+    `state` is what the session holds before the round, such as the asks. With
+    `stated_words`, the turn's words are those and the adapter reads the stated
+    scope (`_stated_scope_reader`).
 
     Returns `{"planner": (records, requests)}`: the `context_probe.compose`
     records in call order, and the requests as `ModelRequest` objects, which the
@@ -352,12 +400,18 @@ async def _recorded_round(
     """
     draft = _gdp_plan(decision, requirement, derived_requirement)
     scripted = ScriptedGenai(_script())
-    adapter = _adapter(scripted)
+    adapter = _adapter(
+        scripted, stated_scope=_stated_scope_reader() if stated_words is not None else None
+    )
 
     arguments: dict[str, Any] = {"question": draft.question, **context}
-    output = await PlannerHarness(state).run(
-        adapter, prior_plan=draft.model_dump(mode="json"), **arguments
-    )
+    token = current_user_message.set(stated_words)
+    try:
+        output = await PlannerHarness(state).run(
+            adapter, prior_plan=draft.model_dump(mode="json"), **arguments
+        )
+    finally:
+        current_user_message.reset(token)
     assert output is not None and "refused" in output, output
 
     requests = [_as_model_request(request) for request in scripted.requests]
@@ -449,11 +503,12 @@ async def measured(
     """
     measured: dict[tuple[str, str], tuple[list[dict[str, Any]], list[Any]]] = {}
     recorded = _recorded_brief()
-    scenarios: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = [
-        ("realistic", recorded["context"], recorded["state"]),
-        (BOUNDED_CONTEXT, _bounded_context(), None),
+    scenarios: list[tuple[str, dict[str, Any], dict[str, Any] | None, str | None]] = [
+        ("realistic", recorded["context"], recorded["state"], None),
+        (BOUNDED_CONTEXT, _bounded_context(), None, None),
+        (STATED_SCOPE, recorded["context"], recorded["state"], _STATED_WORDS),
     ]
-    for scenario, context, state in scenarios:
+    for scenario, context, state, stated_words in scenarios:
         round_measured = await _recorded_round(
             scenario=scenario,
             decision=decision,
@@ -461,6 +516,7 @@ async def measured(
             derived_requirement=derived_requirement,
             context=context,
             state=state,
+            stated_words=stated_words,
         )
         measured[(scenario, "planner")] = round_measured["planner"]
 
@@ -646,6 +702,20 @@ def test_no_segment_grows_past_its_ceiling(records: list[dict[str, Any]]) -> Non
         "a segment of the planner request outgrew its stated bound:\n  "
         + "\n  ".join(over)
         + f"\nA deliberate change means {_REGENERATE}, then this file's ceiling constant."
+    )
+
+
+def test_the_stated_scope_line_stays_under_its_ceiling(records: list[dict[str, Any]]) -> None:
+    """The `STATED_SCOPE` round's brief is the realistic one plus the line on the
+    provider option the user's words state, held to `STATED_SCOPE_LINE_CEILING`;
+    a brief no longer than the realistic one carried no line."""
+    stated = _largest(records, scenario=STATED_SCOPE, agent="planner")
+    realistic = _largest(records, scenario="realistic", agent="planner")
+    added = bucket_chars(stated, BRIEF_BUCKET) - bucket_chars(realistic, BRIEF_BUCKET)
+    assert 0 < added <= STATED_SCOPE_LINE_CEILING, (
+        f"the stated-scope line adds {added} chars to the brief, outside "
+        f"(0, {STATED_SCOPE_LINE_CEILING}]. A deliberate change means {_REGENERATE}, then "
+        "this file's ceiling constant."
     )
 
 

@@ -36,6 +36,7 @@ from planner.tools import (
     REJECT_PLAN,
     EndRun,
     ask_user,
+    pause_on_keep_question,
     propose,
     propose_and_translate,
     propose_reading_sources,
@@ -292,19 +293,18 @@ def planner_tool_specs(
     """
 
     def propose_plan(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
-        del end_run
-        return propose(call, arguments)
+        return pause_on_keep_question(propose(call, arguments), call, end_run)
 
     async def propose_plan_reading(
         call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]
     ) -> object:
-        del end_run
-        return await propose_reading_sources(
+        answer = await propose_reading_sources(
             call,
             arguments,
             surface=surface,
             stated_scope=stated_scope,
         )
+        return pause_on_keep_question(answer, call, end_run)
 
     async def propose_plan_translating(
         call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]

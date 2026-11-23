@@ -32,14 +32,13 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 from compiler.surface import ToolSurface
 from harness.turn_events import PLANNER_ASK
 from submission.prices_choice import PRICES_OPTIONS
 from submission.service import (
     COMBINATION_OPTIONS,
-    STATED_SCOPE_OPTIONS,
     Proposal,
     submit,
 )
@@ -58,7 +57,6 @@ from planner.call import (
     PlannerCall,
     answered_since_referral,
     candidate_ids,
-    stated_scope_ask_owed,
 )
 from planner.plan import (
     Plan,
@@ -70,7 +68,12 @@ from planner.plan import (
     split_of,
 )
 from planner.source_reads import with_source_reads
-from planner.stated_scope import StatedScopeReader, proposal_measures, read_stated_scope
+from planner.stated_scope import (
+    StatedScopeReader,
+    proposal_measures,
+    read_stated_scope,
+    record_keep_asked,
+)
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 
 logger = logging.getLogger(__name__)
@@ -236,8 +239,8 @@ def ask_refusal(args: Mapping[str, Any]) -> dict[str, object] | None:
     question (`harness.studio_translate._planner_question`).
     `message` is the question as text. Each of `candidates` is a
     mapping, read by its `spec_id` and `label`. `options` are
-    `COMBINATION_OPTIONS`, `PRICES_OPTIONS` or `STATED_SCOPE_OPTIONS` exactly, as a
-    refusal's action carries them, offered without `candidates`. A `recommended_spec_id` names
+    `COMBINATION_OPTIONS` or `PRICES_OPTIONS` exactly, as a refusal's action
+    carries them, offered without `candidates`. A `recommended_spec_id` names
     one of `candidates`.
     """
     if not isinstance(args.get("message"), str):
@@ -254,11 +257,7 @@ def ask_refusal(args: Mapping[str, Any]) -> dict[str, object] | None:
             outcome=Outcome.INVALID_INPUT,
         )
     options = args.get("options") or []
-    fixed = (
-        [dict(o) for o in COMBINATION_OPTIONS],
-        [dict(o) for o in PRICES_OPTIONS],
-        [dict(o) for o in STATED_SCOPE_OPTIONS],
-    )
+    fixed = ([dict(o) for o in COMBINATION_OPTIONS], [dict(o) for o in PRICES_OPTIONS])
     if options and (candidates or options not in fixed):
         return problem(
             ProblemCode.INVALID_ARGUMENTS,
@@ -345,23 +344,6 @@ def _ask_check(args: Mapping[str, Any], state: SessionState) -> dict[str, object
             authored_answer(referral.model_dump(mode="json"), split_of(plan))
         )
     return _entity_ask_unbound(referral, args.get("candidates"))
-
-
-def _stated_ask_open(call: PlannerCall, args: Mapping[str, Any]) -> dict[str, object] | None:
-    """The refusal for an ask without `STATED_SCOPE_OPTIONS` while the user is owed
-    the ask a `stated_provider_dropped` refusal carries (`stated_scope_keeps` reads
-    only that ask's answer), or `None`."""
-    if args.get("options") == [dict(o) for o in STATED_SCOPE_OPTIONS]:
-        return None
-    if not stated_scope_ask_owed(call):
-        return None
-    return problem(
-        ProblemCode.INVALID_ARGUMENTS,
-        "The last `propose_plan` refusal asks the user whether to keep a dataset counted "
-        "as published. Ask that with the `options` its action carries, unchanged, before "
-        "asking anything else.",
-        outcome=Outcome.INVALID_INPUT,
-    )
 
 
 def _ask_beside_ask(call: PlannerCall) -> dict[str, object] | None:
@@ -496,6 +478,45 @@ def ready_and_end(
     return declared
 
 
+def pause_on_keep_question(
+    answer: dict[str, object], call: PlannerCall, end_run: EndRun
+) -> dict[str, object]:
+    """`propose_plan`'s `answer`, pausing the run on the keep question it carries.
+
+    A `STATED_PROVIDER_DROPPED` refusal carrying `detail.ask`
+    (`submission.service._stated_unserved`) holds the question whether to keep its
+    pins counted as published, built in code. The propose call raises it itself:
+    the ask waits under the call's own id (`PENDING_ASK_STATE_KEY`), the pairs it
+    asks about are recorded (`planner.stated_scope.record_keep_asked`), and the run
+    ends (`end_run`). The user's answer is recorded by the entry it resumes
+    (`harness.planner_adapter.PlannerAdapter`). A response that also calls
+    `PLANNER_ASK` would put two questions to the user, so the refusal asks the planner
+    to propose again on its own and nothing pauses. Any other answer is returned as
+    it is."""
+    detail = answer.get("detail")
+    ask = detail.get("ask") if isinstance(detail, dict) else None
+    if answer.get("code") != ProblemCode.STATED_PROVIDER_DROPPED.value or not isinstance(ask, dict):
+        return answer
+    unserved: list[dict[str, Any]] = cast(dict[str, Any], detail)["unserved"]
+    if any(c.name == PLANNER_ASK for c in call.response_calls()):
+        return {
+            **answer,
+            "message": f"{answer['message']} The user has to be asked whether to keep it as "
+            f"published, which `{PROPOSE_PLAN_PROPOSER.call}` asks itself, and this response "
+            f"also calls `{PLANNER_ASK}`. Propose again in a response with no other call.",
+        }
+    call_id = call.call_id
+    assert call_id is not None, "every function call has an id"
+    call.state[PENDING_ASK_STATE_KEY] = {"call_id": call_id, "args": dict(ask)}
+    record_keep_asked(
+        call.state,
+        call_id=call_id,
+        pairs=[(str(item["spec_id"]), str(item["option_id"])) for item in unserved],
+    )
+    end_run()
+    return answer
+
+
 def ask_user(
     call: PlannerCall,
     end_run: EndRun,
@@ -521,7 +542,7 @@ def ask_user(
         "rationale": rationale,
     }
     state = call.state
-    refusal = _ask_check(args, state) or _stated_ask_open(call, args) or _ask_beside_ask(call)
+    refusal = _ask_check(args, state) or _ask_beside_ask(call)
     if refusal is not None:
         return refusal
     call_id = call.call_id
@@ -615,7 +636,7 @@ async def propose_and_translate(
         stated_scope=stated_scope,
     )
     if result.get("outcome") != Outcome.OK.value:
-        return result
+        return pause_on_keep_question(result, call, end_run)
     return ready_and_end({**result, "translation": await translate(call)}, call, end_run)
 
 

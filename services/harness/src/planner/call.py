@@ -5,9 +5,7 @@ was asked and answered in its session, in order (`Step`). The readers here
 answer from those steps: the spec_ids the user elected (`elected_spec_ids`),
 what they answered since the translator's referral
 (`answers_since_referral`), the combinations they were asked to add up
-(`combination_picks`), the datasets they kept as published although those cannot
-count the provider scope their words asked for (`stated_scope_keeps`), whether they
-spoke since a plan version was recorded (`user_spoke_since_recorded`), and the prices
+(`combination_picks`), whether they spoke since a plan version was recorded (`user_spoke_since_recorded`), and the prices
 they chose (`prices_chosen`).
 `CallSession` is the `submission.service.SessionView` over a call, through
 those readers. `planner.session.SessionCall` is the call the planner serves a
@@ -49,8 +47,6 @@ from submission.prices_choice import (
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
-    KEEP_PUBLISHED_OPTION,
-    STATED_SCOPE_OPTIONS,
     Admission,
     Combination,
     ReferralAnswers,
@@ -78,10 +74,10 @@ from planner.plan import (
     save_windowed_pins,
 )
 from planner.stated_scope import (
-    STATED_SCOPE_KEPT_STATE_KEY,
+    Pair,
+    RefusedRequirement,
+    record_keep_offered,
     record_unattributed,
-    save_stated_scope_kept,
-    stated_scope_kept,
 )
 from planner.tool_results import ProblemCode
 
@@ -801,93 +797,6 @@ def combination_picks(
     return picks, declined
 
 
-def _refused_unserved(body: Mapping[str, Any]) -> frozenset[tuple[str, str]] | None:
-    """Each pin and provider option a `stated_provider_dropped` refusal names in its
-    `detail.unserved`, or `None` for any other body."""
-    if body.get("code") != ProblemCode.STATED_PROVIDER_DROPPED.value:
-        return None
-    detail = body.get("detail")
-    unserved = detail.get("unserved") if isinstance(detail, dict) else None
-    if not isinstance(unserved, list):
-        return None
-    pairs = {
-        (item["spec_id"], item["option_id"])
-        for item in unserved
-        if isinstance(item, dict)
-        and isinstance(item.get("spec_id"), str)
-        and isinstance(item.get("option_id"), str)
-    }
-    return frozenset(pairs) if len(pairs) == len(unserved) else None
-
-
-def stated_scope_ask_owed(call: PlannerCall) -> bool:
-    """Whether the user is owed the ask the latest `stated_provider_dropped` refusal
-    carries (`submission.service._stated_unserved`): no ask offering
-    `STATED_SCOPE_OPTIONS` reached the user after it, and no later `propose_plan`
-    answer replaced it. The ask takes only those options, so while it is owed an ask
-    without them, which Studio shows as an open question (`allow_free_text`), is
-    refused (`planner.tools.ask_user`)."""
-    offered = [dict(option) for option in STATED_SCOPE_OPTIONS]
-    owed = False
-    for step in call.steps():
-        if step.kind == "call":
-            if (step.args or {}).get("options") == offered:
-                owed = False
-        elif step.kind == "response" and step.name == PROPOSE_PLAN_PROPOSER.call:
-            action = step.body.get("action")
-            owed = (
-                _refused_unserved(step.body) is not None
-                and isinstance(action, Mapping)
-                and action.get("call") == PLANNER_ASK
-            )
-    return owed
-
-
-def stated_scope_keeps(
-    call: PlannerCall,
-) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]]]:
-    """Each pin and provider option the user chose to keep as published, answering
-    the ask a `stated_provider_dropped` refusal carries (`submission.service._stated_unserved`),
-    and each they chose not to keep, as `combination_picks` returns its picks and
-    declines.
-
-    Read off the call's steps as `combination_picks` reads a combination: an ask whose
-    `options` are `STATED_SCOPE_OPTIONS` asks about the pins the latest such refusal
-    before it names, read off that refusal's own response, so the model cannot point
-    the ask at other pins, and a refusal binds the first ask after it that reached the
-    user. The ask takes no free text (`harness.studio_translate._planner_question`).
-    An answer of `KEEP_PUBLISHED_OPTION` keeps them and any other answer
-    (`COUNT_AS_ASKED_OPTION`, a skip, a dismissal) releases them for the turn, so the
-    user is not asked again; the latest answer about a pair decides.
-    """
-    offered = [dict(option) for option in STATED_SCOPE_OPTIONS]
-    refused: frozenset[tuple[str, str]] | None = None
-    asks: dict[str, frozenset[tuple[str, str]] | None] = {}
-    kept: set[tuple[str, str]] = set()
-    released: set[tuple[str, str]] = set()
-    for step in call.steps():
-        if step.kind == "call":
-            if (step.args or {}).get("options") == offered:
-                asks[str(step.call_id)], refused = refused, None
-            else:
-                asks.pop(str(step.call_id), None)
-        elif step.kind == "response":
-            refused = _refused_unserved(step.body) or refused
-        elif step.kind == "answer" and step.call_id in asks:
-            pairs = asks[step.call_id]
-            if pairs is None:
-                continue
-            answer = _answers(step.body.get("result")).get("q1")
-            option = answer.get("spec_id") if answer and answer.get("kind") == "option" else None
-            if option == KEEP_PUBLISHED_OPTION:
-                kept |= pairs
-                released -= pairs
-            else:
-                kept -= pairs
-                released |= pairs
-    return frozenset(kept), frozenset(released)
-
-
 @dataclass(frozen=True)
 class CallSession:
     """The `submission.service.SessionView` over one planner tool call.
@@ -923,17 +832,6 @@ class CallSession:
         """`user_spoke_since_recorded` over the call."""
         return user_spoke_since_recorded(self.call, version)
 
-    def stated_scope_kept(self) -> frozenset[tuple[str, str]]:
-        """`stated_scope_keeps` over the call, with each pair a plan admitted earlier
-        in the turn kept (`planner.stated_scope.STATED_SCOPE_KEPT_STATE_KEY`)."""
-        kept, released = stated_scope_keeps(self.call)
-        return (stated_scope_kept(self.call.state) - released) | kept
-
-    def stated_scope_released(self) -> frozenset[tuple[str, str]]:
-        """The pins and options the user chose not to keep, answering an ask in the
-        turn's transcript (`stated_scope_keeps`)."""
-        return stated_scope_keeps(self.call)[1]
-
     def prices_answers(self) -> PricesAnswers:
         """`prices_answers` over the call."""
         return prices_answers(self.call)
@@ -958,9 +856,17 @@ class CallSession:
         """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
         record_reduction_refused_asks(self.call.state, asks)
 
-    def record_scope_unattributed(self, option_id: str) -> None:
-        """Record a `STATED_SCOPE_UNATTRIBUTED` refusal for `option_id` in the call's state."""
-        record_unattributed(self.call.state, option_id)
+    def record_scope_unattributed(
+        self, option_id: str, refused: Iterable[RefusedRequirement]
+    ) -> None:
+        """Record a `STATED_SCOPE_UNATTRIBUTED` refusal for `option_id`, given to a plan
+        whose dataset requirements are `refused`, in the call's state."""
+        record_unattributed(self.call.state, option_id, refused)
+
+    def record_keep_offered(self, pairs: Iterable[Pair]) -> None:
+        """Record that a refusal listed the datasets serving `pairs`
+        (`planner.stated_scope.record_keep_offered`) in the call's state."""
+        record_keep_offered(self.call.state, pairs)
 
     def record_admission(self, admission: Admission) -> None:
         """Record `admission` in the call's state, with how many records of
@@ -971,9 +877,6 @@ class CallSession:
             save_windowed_pins(state, admission.windowed_pins)
         save_alignments(state, admission.alignments)
         save_pin_verdicts(state, admission.pin_verdicts)
-        # A state that never held a keep gains none until the user keeps one.
-        if admission.stated_scope_kept or state.get(STATED_SCOPE_KEPT_STATE_KEY) is not None:
-            save_stated_scope_kept(state, admission.stated_scope_kept)
         # Each admission replaces the record; a state that never held one
         # gains none until a row absorbs a part.
         if admission.unit_rows or state.get(UNIT_ROWS_STATE_KEY) is not None:

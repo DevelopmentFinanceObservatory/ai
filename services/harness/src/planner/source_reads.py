@@ -67,6 +67,7 @@ from submission.service import (
     save_searched_pin,
     scopes_wanted,
     share_whole_underivable,
+    stated_alone_unanswered,
     stated_compile_unanswered,
     unpinned_wanted,
     unread_part,
@@ -110,6 +111,7 @@ from planner.stated_scope import (
     combined_refused,
     record_combined_refused,
     record_stated_uncompiled,
+    stated_compile_unreachable,
 )
 from planner.tool_results import Outcome, ProblemCode, problem
 
@@ -216,13 +218,14 @@ class _Compiled(NamedTuple):
     resolved_at: datetime | None
 
 
-# The cause `compile_on_basis` gives for a stated option where Search refuses stating
-# no code, where it does not answer (which states none), where it answers with no
-# one dataset, and where the pin's record cannot be posted (no choice on the axis,
-# unreadable named sets).
+# The cause `compile_on_basis` gives where Search refuses stating no code, where it
+# does not answer (which states none), where it answers with no one dataset, where
+# the call cannot reach it for good, and where the pin's record cannot be posted (no
+# choice on the axis, unreadable named sets).
 _REFUSED = "refused"
 _UNANSWERED = "unanswered"
 _NO_ONE_DATASET = "no_one_dataset"
+_UNREACHABLE = "unreachable"
 _NO_CHOICE = "no_choice_on_record"
 _GROUPS_UNREADABLE = "groups_unreadable"
 
@@ -230,12 +233,22 @@ _GROUPS_UNREADABLE = "groups_unreadable"
 class _Uncompiled(NamedTuple):
     """Why Search answered no compile of a pin (`compile_on_basis`): its answer in
     words (`cause`) and as a code (`code`), whether it can answer later, and the
-    refusal's reason."""
+    refusal's reason, and whether the call cannot reach Search for good, which is no
+    answer of Search's about the pin (`unreachable`)."""
 
     cause: str
     code: str
     retryable: bool
     reason: str
+    unreachable: bool = False
+
+
+def _alone_unanswered(realignment: Realignment, option_id: str, cause: str) -> SourceRead:
+    """The read answering `submission.service.stated_alone_unanswered` for
+    `realignment`'s pin, whose compile on `option_id` alone Search did not answer."""
+    return lambda into: stated_alone_unanswered(
+        realignment, option_id=option_id, shown=held_sources(into), cause=cause
+    )
 
 
 def _stated_refused(spec_id: str, option_id: str, cause: str) -> SourceRead:
@@ -302,9 +315,14 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     stated option alone, since Search may refuse either move. A later proposal posts
     only that second compile. Where Search refuses it for good too, its code is
     recorded as above: the pin cannot count what the user asked for. Where Search
-    does not answer it, the proposal answers `stated_compile_unanswered`, to propose
-    again. Where it compiles, the first compile's refusal stands
-    (`OPERATION_UNSUPPORTED`).
+    does not answer it, the proposal answers `stated_alone_unanswered`, to propose
+    again, once: a second time, and where it compiles, the first compile's refusal
+    stands (`OPERATION_UNSUPPORTED`).
+
+    A compile carrying a stated option that cannot reach Search for good, either of
+    the two, is a fault of the system and no answer about the pin: it records
+    nothing against the option and ends the entry
+    (`planner.stated_scope.stated_compile_unreachable`).
 
     A declared whole (`Realignment.whole_axis`) is compiled by `compile_whole`.
     """
@@ -375,7 +393,13 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
             )
         except DefinitionNotResolvedError as exc:
             code = exc.code or (
-                _UNANSWERED if exc.retryable else _REFUSED if exc.refused else _NO_ONE_DATASET
+                _UNANSWERED
+                if exc.retryable
+                else _REFUSED
+                if exc.refused
+                else _NO_ONE_DATASET
+                if exc.no_part
+                else _UNREACHABLE
             )
             return _Uncompiled(
                 cause=str(exc),
@@ -385,6 +409,7 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
                     f"Search does not count {realignment.requirement_id!r}'s dataset the way "
                     f"its calculation's other inputs share ({code})"
                 ),
+                unreachable=code == _UNREACHABLE,
             )
         spec = part.get("spec") if part.get("status") == "definite" else None
         if not isinstance(spec, Mapping) or not isinstance(spec.get("spec_id"), str):
@@ -407,6 +432,16 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
         if held is None
         else _Uncompiled(cause=held.code, code=held.code, retryable=False, reason=held.reason)
     )
+    if (
+        isinstance(compiled, _Uncompiled)
+        and compiled.unreachable
+        and (realignment.stated or stated_option is not None)
+    ):
+        return _refusing(
+            stated_compile_unreachable(
+                spec_id=realignment.spec_id, option_ids=realignment.option_ids
+            )
+        )
     if isinstance(compiled, _Uncompiled):
         if compiled.retryable and realignment.stated:
             return stated_uncompiled(compiled.code, retryable=True)
@@ -418,10 +453,18 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
         # The stated option alone decides whether the pin can count what the user
         # asked for. The refused compile is held for the turn, so proposing again
         # posts only the stated option's.
-        refusal = CombinedRefusal(code=compiled.code, reason=compiled.reason)
+        refusal = held or CombinedRefusal(code=compiled.code, reason=compiled.reason)
         alone = await attempt((stated_option,))
-        if isinstance(alone, _Uncompiled) and alone.retryable:
-            answer = stated_uncompiled(alone.code, retryable=True)
+        if isinstance(alone, _Uncompiled) and alone.unreachable:
+            return _refusing(
+                stated_compile_unreachable(spec_id=realignment.spec_id, option_ids=(stated_option,))
+            )
+        if isinstance(alone, _Uncompiled) and alone.retryable and refusal.unanswered:
+            # Search did not answer it once already: the calculation's refusal stands.
+            answer = unservable(refusal.reason, code=refusal.code)
+        elif isinstance(alone, _Uncompiled) and alone.retryable:
+            refusal = refusal._replace(unanswered=refusal.unanswered + 1)
+            answer = _alone_unanswered(realignment, stated_option, alone.code)
         elif isinstance(alone, _Uncompiled):
             answer = _stated_refused(realignment.spec_id, stated_option, alone.code)
         else:

@@ -16,14 +16,13 @@ propose again; one no retry changes (a 404, a refused request) ends the entry on
 `STATED_SCOPE_UNREADABLE`. A turn with no words of the user's, such as a
 chip's or one outside Studio, holds no reading, and admission applies no stated scope.
 
-Three more slots belong to the rule: the datasets the user chose to keep as published
-although they cannot count the provider scope their words asked for
-(`STATED_SCOPE_KEPT_STATE_KEY`), which holds for the turn, the options a
-`STATED_SCOPE_UNATTRIBUTED` refusal was given for (`UNATTRIBUTED_STATE_KEY`), which is
-given once a turn, the pins Search refused to compile on a stated option
-(`UNCOMPILED_STATE_KEY`), and the compiles moving a stated option beside a
-calculation's axis that Search refused (`COMBINED_REFUSED_STATE_KEY`), which a later
-proposal does not post again.
+Four more slots belong to the rule, each holding for the turn: where the question
+whether to keep a dataset that cannot count the provider scope the user's words ask
+for stands (`KEEP_STATE_KEY`), the plan each `STATED_SCOPE_UNATTRIBUTED` refusal was
+given to (`UNATTRIBUTED_STATE_KEY`), which passes proposed again unchanged, the pins
+Search refused to compile on a stated option (`UNCOMPILED_STATE_KEY`), and the
+compiles moving a stated option beside a calculation's axis that Search refused
+(`COMBINED_REFUSED_STATE_KEY`), which a later proposal does not post again.
 """
 
 from __future__ import annotations
@@ -47,13 +46,13 @@ logger = logging.getLogger(__name__)
 # text read this turn (`StatedScopeRecord`).
 STATED_SCOPE_STATE_KEY = "planner:stated_scope"
 
-# The session-state slot holding each dataset the user chose to keep as published
-# although it cannot count the provider option their words asked for, as
-# `[spec_id, option_id]` pairs (`stated_scope_kept`).
-STATED_SCOPE_KEPT_STATE_KEY = "planner:stated_scope_kept"
+# The session-state slot holding where the question whether to keep a dataset
+# counted as published stands this turn (`KeepQuestion`).
+KEEP_STATE_KEY = "planner:stated_scope_keep"
 
-# The session-state slot holding the provider options a `STATED_SCOPE_UNATTRIBUTED`
-# refusal was given for this turn (`unattributed_refused`).
+# The session-state slot holding, by provider option, the dataset requirements a
+# `STATED_SCOPE_UNATTRIBUTED` refusal was given for this turn, each as
+# `[requirement_id, pin, measure]` (`unattributed_refused`).
 UNATTRIBUTED_STATE_KEY = "planner:stated_scope_unattributed"
 
 # The session-state slot holding each pin Search refused to compile on the provider
@@ -63,7 +62,7 @@ UNCOMPILED_STATE_KEY = "planner:stated_scope_uncompiled"
 
 # The session-state slot holding each compile moving a stated provider option and a
 # calculation's axis together that Search refused for good this turn, as
-# `[spec_id, option_ids, code, reason]` (`combined_refused`).
+# `[spec_id, option_ids, code, reason, unanswered]` (`combined_refused`).
 COMBINED_REFUSED_STATE_KEY = "planner:stated_scope_combined_refused"
 
 # The most texts Search's reader takes in one call (`StatedScopeRequest` in dfo-apis).
@@ -285,30 +284,130 @@ def _stated_scope_unreadable(*, status: int | None, code: str | None) -> dict[st
     )
 
 
-def stated_scope_kept(state: SessionState) -> frozenset[tuple[str, str]]:
-    """Each dataset the user kept as published, with the provider option it cannot
-    count (`STATED_SCOPE_KEPT_STATE_KEY`)."""
-    return frozenset(
-        (str(spec_id), str(option_id))
-        for spec_id, option_id in state.get(STATED_SCOPE_KEPT_STATE_KEY) or ()
+def stated_compile_unreachable(*, spec_id: str, option_ids: Sequence[str]) -> dict[str, object]:
+    """The `STATED_SCOPE_UNREADABLE` problem for a compile of `spec_id` on
+    `option_ids`, which carry a provider option the user's words state, that cannot
+    reach Search for good (`planner.source_reads.compile_on_basis`). It is a fault of
+    the system, no answer about the pin, so nothing is recorded against the option
+    and the user is asked nothing; it ends the entry, as an unreadable stated scope
+    does (`_stated_scope_unreadable`). `detail` names the compile for the logs."""
+    return problem(
+        ProblemCode.STATED_SCOPE_UNREADABLE,
+        f"Search cannot be reached to count {spec_id} the way the user's words ask, and "
+        "proposing again fails the same way, so nothing was recorded.",
+        outcome=Outcome.REFUSED,
+        detail={"read": "stated_compile", "spec_id": spec_id, "option_ids": list(option_ids)},
     )
 
 
-def save_stated_scope_kept(state: SessionState, kept: Iterable[tuple[str, str]]) -> None:
-    """Hold `kept` in `STATED_SCOPE_KEPT_STATE_KEY` in place of what it held, so a
-    keep the user released is gone."""
-    state[STATED_SCOPE_KEPT_STATE_KEY] = [list(pair) for pair in sorted(set(kept))]
+type Pair = tuple[str, str]
 
 
-def unattributed_refused(state: SessionState) -> frozenset[str]:
-    """The provider options a `STATED_SCOPE_UNATTRIBUTED` refusal was given for this
-    turn (`UNATTRIBUTED_STATE_KEY`)."""
-    return frozenset(state.get(UNATTRIBUTED_STATE_KEY) or ())
+class KeepQuestion(StrictModel):
+    """Where the question whether to keep a dataset counted as published stands this
+    turn, each entry a pin and the provider option it cannot count.
+
+    `offered` are the pairs a `STATED_PROVIDER_DROPPED` refusal listed the datasets on
+    record serving for, which it does once (`record_keep_offered`). `asked_call_id` is
+    the `propose_plan` call whose pause puts the question about `asked` to the user
+    (`record_keep_asked`, `planner.tools.pause_on_keep_question`). `kept` and
+    `released` are the pairs the user answered: kept as published, or not
+    (`record_keep_answer`). Code writes every field; admission reads them."""
+
+    offered: tuple[Pair, ...] = ()
+    asked_call_id: str | None = None
+    asked: tuple[Pair, ...] = ()
+    kept: tuple[Pair, ...] = ()
+    released: tuple[Pair, ...] = ()
 
 
-def record_unattributed(state: SessionState, option_id: str) -> None:
-    """Record a `STATED_SCOPE_UNATTRIBUTED` refusal given for `option_id`."""
-    state[UNATTRIBUTED_STATE_KEY] = sorted(unattributed_refused(state) | {option_id})
+def keep_question(state: SessionState) -> KeepQuestion:
+    """Where the keep question stands this turn (`KEEP_STATE_KEY`)."""
+    held = state.get(KEEP_STATE_KEY)
+    return KeepQuestion.model_validate(held) if held else KeepQuestion()
+
+
+def _save_keep_question(state: SessionState, question: KeepQuestion) -> None:
+    state[KEEP_STATE_KEY] = question.model_dump(mode="json")
+
+
+def _with(pairs: Iterable[Pair], more: Iterable[Pair]) -> tuple[Pair, ...]:
+    return tuple(sorted({*pairs, *more}))
+
+
+def record_keep_offered(state: SessionState, pairs: Iterable[Pair]) -> None:
+    """Record that a refusal listed the datasets on record serving `pairs`."""
+    question = keep_question(state)
+    _save_keep_question(
+        state, question.model_copy(update={"offered": _with(question.offered, pairs)})
+    )
+
+
+def record_keep_asked(state: SessionState, *, call_id: str, pairs: Iterable[Pair]) -> None:
+    """Record that the pause of `propose_plan` call `call_id` asks the user about `pairs`."""
+    _save_keep_question(
+        state,
+        keep_question(state).model_copy(
+            update={"asked_call_id": call_id, "asked": tuple(sorted(set(pairs)))}
+        ),
+    )
+
+
+def record_keep_answer(state: SessionState, *, call_id: str, keep: bool) -> bool:
+    """Record the user's answer to the keep question the pause of `call_id` asked:
+    the pairs it asked about are kept when `keep`, else released. Answers whether
+    `call_id` asked it; an answer to any other ask records nothing."""
+    question = keep_question(state)
+    if question.asked_call_id is None or question.asked_call_id != call_id:
+        return False
+    asked = set(question.asked)
+    kept = (set(question.kept) | asked) if keep else set(question.kept) - asked
+    released = set(question.released) - asked if keep else set(question.released) | asked
+    _save_keep_question(
+        state,
+        question.model_copy(
+            update={
+                "asked_call_id": None,
+                "asked": (),
+                "kept": tuple(sorted(kept)),
+                "released": tuple(sorted(released)),
+            }
+        ),
+    )
+    return True
+
+
+type RefusedRequirement = tuple[str, str | None, str]
+
+
+def unattributed_refused(
+    state: SessionState,
+) -> dict[str, frozenset[RefusedRequirement]]:
+    """By provider option, the dataset requirements of the plan a
+    `STATED_SCOPE_UNATTRIBUTED` refusal was given for this turn, each its id, pin
+    and `measure` (`UNATTRIBUTED_STATE_KEY`)."""
+    held = state.get(UNATTRIBUTED_STATE_KEY) or {}
+    return {
+        str(option_id): frozenset(
+            (str(requirement_id), None if pin is None else str(pin), str(measure))
+            for requirement_id, pin, measure in refused
+        )
+        for option_id, refused in held.items()
+    }
+
+
+def record_unattributed(
+    state: SessionState, option_id: str, refused: Iterable[RefusedRequirement]
+) -> None:
+    """Record a `STATED_SCOPE_UNATTRIBUTED` refusal given for `option_id` to a plan
+    whose dataset requirements are `refused`, in place of any given for it before."""
+    held = {
+        option: sorted(entries, key=str) for option, entries in unattributed_refused(state).items()
+    }
+    held[option_id] = sorted(refused, key=str)
+    state[UNATTRIBUTED_STATE_KEY] = {
+        option: [list(entry) for entry in entries] for option, entries in held.items()
+    }
 
 
 def stated_uncompiled(state: SessionState) -> dict[tuple[str, str], str]:
@@ -322,10 +421,12 @@ def stated_uncompiled(state: SessionState) -> dict[tuple[str, str], str]:
 
 class CombinedRefusal(NamedTuple):
     """Search's refusal for good of a compile moving a stated provider option and a
-    calculation's axis together: its code and the refusal's reason."""
+    calculation's axis together: its code, the refusal's reason, and how many times
+    Search did not answer the compile of the stated option alone since."""
 
     code: str
     reason: str
+    unanswered: int = 0
 
 
 def combined_refused(state: SessionState) -> dict[tuple[str, tuple[str, ...]], CombinedRefusal]:
@@ -333,8 +434,11 @@ def combined_refused(state: SessionState) -> dict[tuple[str, tuple[str, ...]], C
     together that Search refused for good this turn, by pin and option ids
     (`COMBINED_REFUSED_STATE_KEY`)."""
     return {
-        (str(spec_id), tuple(str(o) for o in option_ids)): CombinedRefusal(str(code), str(reason))
-        for spec_id, option_ids, code, reason in state.get(COMBINED_REFUSED_STATE_KEY) or ()
+        (str(spec_id), tuple(str(o) for o in option_ids)): CombinedRefusal(
+            str(code), str(reason), int(unanswered)
+        )
+        for spec_id, option_ids, code, reason, unanswered in state.get(COMBINED_REFUSED_STATE_KEY)
+        or ()
     }
 
 
@@ -345,8 +449,7 @@ def record_combined_refused(
     later proposal compiles the stated option alone (`planner.source_reads.compile_on_basis`)."""
     held = {**combined_refused(state), (spec_id, tuple(option_ids)): refusal}
     state[COMBINED_REFUSED_STATE_KEY] = [
-        [pin, list(options), held_refusal.code, held_refusal.reason]
-        for (pin, options), held_refusal in sorted(held.items())
+        [pin, list(options), *held_refusal] for (pin, options), held_refusal in sorted(held.items())
     ]
 
 
