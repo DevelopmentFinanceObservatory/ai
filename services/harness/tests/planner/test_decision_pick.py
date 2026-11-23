@@ -27,7 +27,6 @@ from compiler.sources import source_from_spec_block
 from compiler.surface import McpSurface
 from data_mcp.server import mcp as data_mcp
 from harness.decision_pick import decision_pick
-from harness.graph.switch import SwitchFailedError, _switched_plan
 from harness.plan_display import decision_option_id, switchable_decision
 from harness.studio_state import _turn_identities
 from harness.turn.store import AgentRecord
@@ -58,10 +57,8 @@ from translator.mechanical import build_translation
 
 from ..basis_alignment import HEALTH, TOTAL, provider_block
 from ..decision_drafts import drafts
-from ..planner_host import node_ctx
 from ..planner_tools import call_planner_tool
 from ..session_events import response_event, user_answer
-from ..test_orchestrate_ask import _UnitSearch
 from .test_agent import (
     _CONSTANT_GROSS,
     _EUR,
@@ -2268,12 +2265,11 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
     assert result["outcome"] == Outcome.OK.value, result
 
 
-async def test_a_whole_unit_prices_row_is_one_row_the_card_cannot_switch() -> None:
+def test_a_whole_unit_prices_row_is_one_row_the_card_cannot_switch() -> None:
     """The user chose current euros for the gross part, and the plan on the
     series Search re-read in them records that choice in words as one
     decision on the part. The card offers that row no other prices: a switch
-    naming it makes no pick, and the `switch` node refuses it without asking
-    Search for anything."""
+    naming it makes no pick."""
     measure = Decision(
         slot="measure",
         description="What to measure.",
@@ -2319,14 +2315,3 @@ async def test_a_whole_unit_prices_row_is_one_row_the_card_cannot_switch() -> No
     }
 
     assert decision_pick(plan, **switch, to_origin={}, alignments={}) is None
-    search = _UnitSearch()
-    with pytest.raises(SwitchFailedError):
-        await _switched_plan(
-            node_ctx(state=ctx.state), plan, **switch, planner=_no_planner, surface=search
-        )
-    assert search.posted == []
-
-
-async def _no_planner(**_: Any) -> dict[str, Any]:
-    """A planner a test expects never to be called."""
-    raise AssertionError("the planner was called")

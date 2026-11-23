@@ -383,7 +383,7 @@ def _count_block(block: Mapping[str, Any], count: str) -> dict[str, Any] | None:
 class UnitRead:
     """What `read_part_in_unit` did for a part: `label`, the part's name in
     words; `target`, the series it read, the part or the count picked beside
-    it; `served`, the unit the part is served in; and `result`, Search's
+    it; `served`, the unit that series is served in; and `result`, Search's
     answer, `None` when the part was served in the unit as it stands."""
 
     label: str
@@ -422,7 +422,7 @@ async def read_part_in_unit(
         if reading is not None:
             resubmitted = reading.model_copy(update={"scope": None})
     settle_unit(state, part, target)
-    served = served_unit(block)
+    served = served_unit(target_block)
     read_count = target if target != part else None
     if count is None and served == unit:
         record_unit_served(state, part, part, unit)
@@ -435,7 +435,7 @@ async def read_part_in_unit(
         label=label,
     )
     if isinstance(result, UnitRefused):
-        record_unit_served(state, part, target, served_unit(target_block), count=read_count)
+        record_unit_served(state, part, target, served, count=read_count)
         return UnitRead(label, target, served, result)
     settle_unit(state, result.spec_id)
     record_unit_read(state, part, result.spec_id)

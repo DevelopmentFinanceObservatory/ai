@@ -196,11 +196,11 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
     the part's choice, as they do on the orchestrator's question, and a skip
     keeps it, marking a constant choice `asked`. A switch of the part's
     prices row on the plan card (`_prices_switched`) is a new answer for the
-    part, marked `asked` too, keeping the currency a whole unit chosen for
-    the part held (`_switched_choice`), while its replan is under way or once
-    the plan on record states it (`_switch_stands`). Any other `propose_plan`
-    response, the plan landing included, clears the refusal, so no later ask
-    of another kind is read as that one. A message the user typed
+    part, marked `asked` too, while its replan is under way or once the plan
+    on record states it (`_switch_stands`). The row of a whole unit a unit
+    question chose has no switch (`harness.plan_display.switchable_decision`).
+    Any other `propose_plan` response, the plan landing included, clears the
+    refusal, so no later ask of another kind is read as that one. A message the user typed
     (a `message` step) releases every choice and clears the refusal, and an
     amendment of the approval card (`_is_amendment`) releases every choice.
     An answer to any other question leaves them standing. A Studio turn is
@@ -232,16 +232,8 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
         elif (switched := _prices_switched(step.body)) is not None:
             part, basis = switched
             if _switch_stands(call.state, part, basis):
-                held = chosen.get(part)
-                # A whole unit is chosen for the part and the series fetched
-                # for it alike, and the switch moves both.
-                keys = dict.fromkeys(
-                    (part, *(p for p, c in chosen.items() if held is not None and c == held))
-                )
-                for priced in keys:
-                    _release_measure(chosen, priced, measures)
-                for priced in keys:
-                    chosen[priced] = _switched_choice(held, basis)
+                _release_measure(chosen, part, measures)
+                chosen[part] = PricesChoice(basis, asked=True)
         elif step.call_id in asked:
             part = asked.pop(step.call_id)
             answer = _answers(step.body.get("result")).get("q1") or {}
@@ -280,17 +272,6 @@ def _prices_switched(body: Mapping[str, Any]) -> tuple[str, PriceBasis] | None:
         None,
     )
     return (slot.removeprefix(PRICES_SLOT_PREFIX), basis) if basis is not None else None
-
-
-def _switched_choice(held: PricesChoice | None, basis: PriceBasis) -> PricesChoice:
-    """The choice a switch of a part's prices row to `basis` makes over `held`,
-    the part's choice before it: `held` itself when it already names a whole
-    unit in `basis`, else `basis`, keeping the currency `held` holds the part
-    to (`PricesChoice.held_currency`)."""
-    if held is not None and held.unit is not None and held.prices == basis:
-        return held._replace(asked=True)
-    currency = held.held_currency if held is not None else None
-    return PricesChoice(basis, asked=True, currency=currency)
 
 
 def _switch_stands(state: Any, part: str, basis: PriceBasis) -> bool:
@@ -367,8 +348,12 @@ def _priced_answers(
     answered = result is not None and (resume_answers(result) is not None or lone)
     for question_id, unit in units.items() if answered else ():
         prices = _unit_prices(unit, answers.get(question_id))
-        for part in map(str, unit.get("parts") or ()):
+        parts = [str(part) for part in unit.get("parts") or ()]
+        # The parts share one measure (`unit_asks`), so release them all before
+        # setting any, or releasing one part would drop the choice just set for another.
+        for part in parts:
             _release_measure(chosen, part, measures)
+        for part in parts:
             if (fetched := served.get(part)) is not None:
                 if fetched.unit is not None:
                     chosen[part] = PricesChoice(

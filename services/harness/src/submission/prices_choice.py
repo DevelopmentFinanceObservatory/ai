@@ -95,16 +95,12 @@ class PricesChoice(NamedTuple):
 
     A unit question's answer also names the whole `unit`, currency and base
     year with the prices, that the series `spec_id` is served in: the series
-    the agent fetches for the part (`harness.graph.state.units_served`). A
-    switch of the part's prices row on the plan card to the other prices
-    keeps that unit's `currency` alone, since the new prices name no base
-    year."""
+    the agent fetches for the part (`harness.graph.state.units_served`)."""
 
     prices: PriceBasis
     spec_id: str | None = None
     asked: bool = False
     unit: Unit | None = None
-    currency: str | None = None
 
     @classmethod
     def of_candidate(cls, candidate: Mapping[str, Any]) -> PricesChoice | None:
@@ -127,16 +123,15 @@ class PricesChoice(NamedTuple):
 
     @property
     def held_currency(self) -> str | None:
-        """The currency the choice holds the part to: a whole `unit`'s, else
-        the `currency` kept from one; `None` when it holds none."""
-        return self.unit.currency if self.unit is not None else self.currency
+        """The currency the choice holds the part to: a whole `unit`'s; `None`
+        when it names none."""
+        return self.unit.currency if self.unit is not None else None
 
     @property
     def words(self) -> str:
         """What the user chose in words: the prices, with the base year and
         currency of a whole `unit`, "constant 2020 prices in EUR". The prices
-        decision's `chosen`, so a plan-card switch to the other prices, which
-        picks `label`, is the decision a replan states."""
+        decision's `chosen`."""
         if self.unit is None:
             return self.label
         year = f" {self.unit.base_year}" if self.unit.base_year is not None else ""
@@ -210,14 +205,18 @@ class Parts:
     def priced_by(self, choices: Mapping[str, PricesChoice]) -> Parts:
         """These parts, with the parts `choices` prices marked, and the series
         fetched for each part a choice holds to a currency
-        (`PricesChoice.held_currency`), whose currency may differ from the part's."""
+        (`PricesChoice.held_currency`), whose currency may differ from the part's.
+        A fetched series that is itself a part `choices` prices stays that
+        part's alone, so no series belongs to two parts."""
         return replace(
             self,
             priced=frozenset(choices),
             fetched={
                 choice.spec_id: part
                 for part, choice in choices.items()
-                if choice.held_currency is not None and choice.spec_id not in (None, part)
+                if choice.held_currency is not None
+                and choice.spec_id is not None
+                and choice.spec_id not in choices
             },
         )
 
@@ -708,7 +707,6 @@ def prices_decisions(
         if not reading:
             continue
         slot = prices_slot(part)
-        held = f", in {choice.currency}" if choice.unit is None and choice.currency else ""
         decisions.append(
             Decision(
                 slot=slot,
@@ -719,7 +717,7 @@ def prices_decisions(
                 ),
                 chosen=choice.words,
                 resolved_by=ResolvedBy.USER,
-                rationale=f"The user chose {choice.words}{held}.",
+                rationale=f"The user chose {choice.words}.",
                 fixes=DecisionFixes(prices=choice.prices),
             )
         )

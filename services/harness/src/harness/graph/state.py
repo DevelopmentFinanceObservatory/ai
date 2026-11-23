@@ -326,8 +326,7 @@ class ServedUnit(BaseModel):
     that series is served in, `None` when its unit cannot be read as one a
     plan states (`stated_unit`), and `count`, the other count of the part
     the user picked in the same pause and Search read in the part's place,
-    `None` when the part's own count was read, as in records written before
-    the count was recorded."""
+    `None` when the part's own count was read or the record names no count."""
 
     spec_id: str
     unit: Unit | None
