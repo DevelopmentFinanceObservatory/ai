@@ -102,6 +102,7 @@ from common.telemetry import deploy_release, record_turn_outcome, start_telemetr
 from compiler.surface import transient
 from executor.ledger import RunStatus
 from fastapi.responses import JSONResponse
+from planner.stated_scope import STATED_SCOPE_KEPT_STATE_KEY, stated_scope_kept
 from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -179,6 +180,7 @@ _KEY_LATEST_PLAN_VERSION = "latest_plan_version"
 _KEY_AUTO_ADD = "auto_add"
 _KEY_CLIENT_FEATURES = "client_features"
 _KEY_TIMED_OUT_CALLS = "timed_out_calls"
+_KEY_STATED_SCOPE_KEPT = "stated_scope_kept"
 _KEY_TURN_USER_MESSAGE = "turn_user_message"
 _KEY_TURN_USER_WORDS = "turn_user_words"
 _KEY_TURN_FINAL_TEXT = "turn_final_text"
@@ -200,6 +202,7 @@ _SCALAR_KEYS = frozenset(
         _KEY_AUTO_ADD,
         _KEY_CLIENT_FEATURES,
         _KEY_TIMED_OUT_CALLS,
+        _KEY_STATED_SCOPE_KEPT,
         _KEY_TURN_USER_MESSAGE,
         _KEY_TURN_USER_WORDS,
         _KEY_TURN_FINAL_TEXT,
@@ -546,6 +549,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_AUTO_ADD: state.auto_add,
         _KEY_CLIENT_FEATURES: sorted(state.client_features),
         _KEY_TIMED_OUT_CALLS: sorted(state.timed_out_calls),
+        _KEY_STATED_SCOPE_KEPT: [list(pair) for pair in sorted(state.stated_scope_kept)],
         _KEY_TURN_USER_MESSAGE: state.turn_user_message,
         _KEY_TURN_USER_WORDS: state.turn_user_words,
         _KEY_TURN_FINAL_TEXT: state.turn_final_text,
@@ -609,6 +613,10 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.client_features = declared_features(list(value or ()))
         elif key == _KEY_TIMED_OUT_CALLS:
             state.timed_out_calls = set(value)
+        elif key == _KEY_STATED_SCOPE_KEPT:
+            state.stated_scope_kept = frozenset(
+                (str(spec_id), str(option_id)) for spec_id, option_id in value or ()
+            )
         elif key == _KEY_TURN_USER_MESSAGE:
             state.turn_user_message = value
         elif key == _KEY_TURN_USER_WORDS:
@@ -1462,7 +1470,8 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
     `state`, a turn's state, holds, for `ConversationState.close_turn` to
     store with the turn. Each key holds the turn's whole value, so the latest
     write replaces. The blocks stay in process (`turn_specs`) until the turn
-    closes."""
+    closes. The datasets the user kept as published this turn join the
+    conversation's (`ConversationState.stated_scope_kept`) at once."""
     if ORCHESTRATOR_PLAN_RECORDS_KEY in state:
         conversation.turn_plans = list(state[ORCHESTRATOR_PLAN_RECORDS_KEY] or [])
     if ORCHESTRATOR_SEARCHES_KEY in state:
@@ -1471,6 +1480,8 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
         conversation.turn_specs = dict(state[ORCHESTRATOR_SPECS_KEY] or {})
     if ORCHESTRATOR_APPLIED_KEY in state:
         conversation.turn_applied_choice = dict(state[ORCHESTRATOR_APPLIED_KEY] or {})
+    if STATED_SCOPE_KEPT_STATE_KEY in state:
+        conversation.stated_scope_kept |= stated_scope_kept(state)
 
 
 def set_aside_question(cursor: Cursor) -> str | None:

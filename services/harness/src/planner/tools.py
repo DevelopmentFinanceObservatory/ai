@@ -68,6 +68,7 @@ from planner.plan import (
     split_of,
 )
 from planner.source_reads import with_source_reads
+from planner.stated_scope import StatedScopeReader, proposal_measures, read_stated_scope
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 
 logger = logging.getLogger(__name__)
@@ -529,9 +530,18 @@ async def propose_reading_sources(
     arguments: Mapping[str, Any],
     *,
     surface: ToolSurface | None,
+    stated_scope: StatedScopeReader | None = None,
 ) -> dict[str, object]:
-    """`propose`. With a `surface`, the source reads a refusal asks for are made,
-    and the proposal is made again (`with_source_reads`)."""
+    """`propose`. With a `stated_scope` reader, the turn's words and each dataset
+    requirement's `measure` are read first (`read_stated_scope`), and a read Search
+    does not answer is the answer. With a `surface`, the source reads a refusal asks
+    for are made, and the proposal is made again (`with_source_reads`)."""
+    if stated_scope is not None:
+        unread = await read_stated_scope(
+            call.state, stated_scope, measures=proposal_measures(call.state, arguments)
+        )
+        if unread is not None:
+            return unread
 
     def draft() -> dict[str, object]:
         return propose(call, arguments)
@@ -548,6 +558,7 @@ async def propose_and_translate(
     arguments: Mapping[str, Any],
     translate: Translate,
     surface: ToolSurface | None,
+    stated_scope: StatedScopeReader | None = None,
 ) -> dict[str, object]:
     """`propose_reading_sources` over `arguments`, translating the plan it records.
 
@@ -578,6 +589,7 @@ async def propose_and_translate(
         call,
         arguments,
         surface=surface,
+        stated_scope=stated_scope,
     )
     if result.get("outcome") != Outcome.OK.value:
         return result

@@ -363,6 +363,14 @@ STOP_SENTENCES: Mapping[StopCode | ProblemCode, str] = {
     ProblemCode.SHARE_OF_ITSELF: (
         "A share{at} would divide a figure by itself, so nothing was recorded."
     ),
+    ProblemCode.STATED_PROVIDER_DROPPED: (
+        "The data the plan reads{at} cannot count the providers' spending the question asks "
+        "for, so nothing was recorded."
+    ),
+    ProblemCode.STATED_SCOPE_UNATTRIBUTED: (
+        "The plan{at} does not say which figures count the providers' spending the question "
+        "asks for, so nothing was recorded."
+    ),
     ProblemCode.ASK_NOT_UNDERSTOOD: (
         "Part of the request could not be matched to data{at}, so nothing was recorded."
     ),
@@ -417,6 +425,13 @@ STOP_REASONS: Mapping[StopCode | ProblemCode, str] = {
         "{lead}the figures the plan combines count different providers' spending"
     ),
     ProblemCode.SHARE_OF_ITSELF: "{lead}a share would divide a figure by itself",
+    ProblemCode.STATED_PROVIDER_DROPPED: (
+        "{lead}the data the plan reads cannot count the providers' spending the question asks for"
+    ),
+    ProblemCode.STATED_SCOPE_UNATTRIBUTED: (
+        "{lead}the plan does not say which figures count the providers' spending the question "
+        "asks for"
+    ),
     ProblemCode.ASK_NOT_UNDERSTOOD: "{lead}part of the request could not be matched to data",
     ProblemCode.SEARCH_REFUSED: "Search refused to look up the data{at}",
     ProblemCode.SURFACE_UNAVAILABLE: "a service the plan needs could not be reached",
@@ -838,6 +853,8 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ProblemCode.WHOLE_IS_ITS_MEMBER,
             ProblemCode.SHARE_WHOLE_UNDERIVABLE,
             ProblemCode.PROVIDERS_UNALIGNED,
+            ProblemCode.STATED_PROVIDER_DROPPED,
+            ProblemCode.STATED_SCOPE_UNATTRIBUTED,
             ProblemCode.SHARE_OF_ITSELF,
         }
     ),

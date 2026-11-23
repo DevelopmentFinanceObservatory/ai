@@ -66,6 +66,7 @@ from submission.service import (
     save_searched_pin,
     scopes_wanted,
     share_whole_underivable,
+    stated_compile_unanswered,
     unpinned_wanted,
     unread_part,
     whole_axis_held,
@@ -103,6 +104,7 @@ from planner.plan import (
 from planner.records import (
     OpenPeriodFault,
 )
+from planner.stated_scope import record_stated_uncompiled
 from planner.tool_results import Outcome, ProblemCode, problem
 
 logger = logging.getLogger(__name__)
@@ -239,7 +241,12 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     and can later, `OPERATION_UNSUPPORTED` when it refuses the options or
     answers with no one dataset, or when what it posts of the part's entity
     groups is not readable, since a resubmit posted without them can bind
-    another population.
+    another population. A pin compiled on the provider option its
+    requirement's `measure` states in the user's words (`Realignment.stated`)
+    answers `submission.service.stated_compile_unanswered` where Search can
+    answer later, and otherwise records the refusal
+    (`planner.stated_scope.record_stated_uncompiled`), so the next proposal is
+    refused for a pin that cannot count the option, with the ask that keeps it.
 
     A declared whole (`Realignment.whole_axis`) is compiled by `compile_whole`.
     """
@@ -254,6 +261,8 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     axes = [option_axis(option_id) for option_id in realignment.option_ids]
 
     def unservable(reason: str) -> SourceRead:
+        if realignment.stated:
+            return stated_uncompiled(reason, retryable=False)
         return lambda into: basis_unservable(
             spec_id=realignment.spec_id,
             option_ids=realignment.option_ids,
@@ -263,6 +272,20 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
             record=lambda operation: record_unsupported(into, operation),
             proposer=PROPOSE_PLAN_PROPOSER,
         )
+
+    def stated_uncompiled(cause: str, *, retryable: bool) -> SourceRead:
+        if retryable:
+            return lambda into: stated_compile_unanswered(
+                realignment, shown=held_sources(into), cause=cause
+            )
+        (option_id,) = [o for o in realignment.option_ids if option_axis(o) == PROVIDER_AXIS]
+
+        def record(into: SessionState) -> None:
+            record_stated_uncompiled(
+                into, spec_id=realignment.spec_id, option_id=option_id, cause=cause
+            )
+
+        return record
 
     missing = [axis for axis in axes if axis not in choices]
     if block is None or scope is None or missing:
@@ -294,6 +317,8 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
             scope_entries=entries,
         )
     except DefinitionNotResolvedError as exc:
+        if exc.retryable and realignment.stated:
+            return stated_uncompiled(str(exc), retryable=True)
         if exc.retryable:
             return _refusing(_basis_uncompiled(realignment, str(exc)))
         return unservable(

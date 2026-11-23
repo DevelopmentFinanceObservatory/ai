@@ -128,6 +128,14 @@ class ProblemCode(StrEnum):
     # provider scope of its other inputs, which the planner repairs
     # (`submission.service._providers_unaligned`).
     PROVIDERS_UNALIGNED = "providers_unaligned"
+    # A dataset requirement whose `measure` states the provider scope the user's words
+    # ask for pins a dataset that cannot count it, and the user did not choose to keep
+    # it as published (`submission.service._stated_unserved`).
+    STATED_PROVIDER_DROPPED = "stated_provider_dropped"
+    # The user's words state one provider scope a pinned dataset can count, and no
+    # requirement's `measure` states it or is counted on it
+    # (`submission.service._stated_unattributed`).
+    STATED_SCOPE_UNATTRIBUTED = "stated_scope_unattributed"
     # A share or quotient whose two sides read one series over the same years and
     # entities, which divides a figure by itself
     # (`submission.service._share_of_itself`).

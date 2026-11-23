@@ -1,8 +1,9 @@
 """One async client for the apis routes live Studio shares use.
 
-Four consumers share it: the harness refresh endpoint and replayer, the recipe
-backfill job, the recovery routine for root frames, and presentation-mcp's rebuild
-of a lost summed or cut frame. Each call is one apis
+Five consumers share it: the harness refresh endpoint and replayer, the recipe
+backfill job, the recovery routine for root frames, presentation-mcp's rebuild
+of a lost summed or cut frame, and the planner's read of the provider scope the
+user's words state (`read_stated_scopes`). Each call is one apis
 route and returns a small typed result or raises `LiveApisError`.
 
 Two credentials, sent in apis' principal header (`PRINCIPAL_HEADER`):
@@ -12,7 +13,8 @@ Two credentials, sent in apis' principal header (`PRINCIPAL_HEADER`):
 - `live_refresh_principal` (`LIVE_REFRESH_PRINCIPAL`) on `refresh_frame`,
   `render` and `stream_render_data`.
 
-`read_component`, `list_versions` and `analysis_execution_identity` need neither.
+`read_component`, `list_versions`, `analysis_execution_identity` and
+`read_stated_scopes` need neither.
 A call whose principal is unset or blank raises `LiveApisNotConfigured` before any
 request is made. Neither value appears in an exception message, an attribute or a
 `repr`.
@@ -44,7 +46,7 @@ import json
 import random
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, Self
@@ -65,6 +67,7 @@ _COMPONENT_PATH = "/api/presentation/components/{component_id}"
 _RENDER_PATH = "/api/presentation/components/{component_id}/revisions/{revision}/render"
 _RENDER_DATA_PATH = f"{_RENDER_PATH}/data"
 _CAPABILITIES_PATH = "/api/datasets/capabilities"
+_STATED_SCOPE_PATH = "/api/search/stated-scope"
 
 # The capabilities field naming the engine apis' analysis runner computes with.
 _EXECUTION_IDENTITY_FIELD = "analysis_execution_identity"
@@ -208,6 +211,31 @@ class ComponentRead:
     body: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class StatedScopeEntry:
+    """One scope option a text states (`StatedScopeReading.entries`): its axis, its
+    option and the words of the text it was read from."""
+
+    axis: str
+    option_id: str
+    words: str
+
+
+@dataclass(frozen=True)
+class StatedScopeReading:
+    """What one text states of its scope, as Search's reader reads it
+    (`read_stated_scopes`).
+
+    `entries` hold one option per axis the text states one option on. `total` says the
+    text asks for a total. `mentions` are the provider options the text names, in order
+    of first mention, both options of a text naming two, which therefore has no
+    provider entry, included."""
+
+    entries: tuple[StatedScopeEntry, ...]
+    total: bool
+    mentions: tuple[str, ...]
+
+
 @dataclass
 class RenderDataStream:
     """An open render data response. `chunks` is single use and ends with the
@@ -347,6 +375,32 @@ def _versions_page(response: httpx2.Response) -> tuple[list[DatasetVersion], str
             raise _invalid(response, "versions answer")
         page.append(version)
     return page, _text(cursor)
+
+
+def _stated_scope_reading(value: object) -> StatedScopeReading | None:
+    """One reading of the stated scope answer, or `None` when it is outside the
+    contract: entries each naming an axis, an option and the words of a text origin, a
+    bool `total`, and mentions that are option ids."""
+    if not isinstance(value, dict):
+        return None
+    entries, total, mentions = value.get("entries"), value.get("total"), value.get("mentions")
+    if not isinstance(entries, list) or not isinstance(total, bool):
+        return None
+    named = [_text(mention) for mention in mentions] if isinstance(mentions, list) else None
+    if named is None or None in named:
+        return None
+    read: list[StatedScopeEntry] = []
+    for entry in entries:
+        origin = entry.get("origin") if isinstance(entry, dict) else None
+        axis = _text(entry.get("axis")) if isinstance(entry, dict) else None
+        option_id = _text(entry.get("option_id")) if isinstance(entry, dict) else None
+        words = _text(origin.get("text")) if isinstance(origin, dict) else None
+        if axis is None or option_id is None or words is None:
+            return None
+        read.append(StatedScopeEntry(axis=axis, option_id=option_id, words=words))
+    return StatedScopeReading(
+        entries=tuple(read), total=total, mentions=tuple(m for m in named if m is not None)
+    )
 
 
 def _required_frame(response: httpx2.Response, value: object, what: str) -> FramePair:
@@ -645,6 +699,26 @@ class LiveApisClient:
             self._execution_identity = identity
             self._execution_identity_expires = self._clock() + _max_age(response)
             return identity
+
+    async def read_stated_scopes(self, *, texts: Sequence[str]) -> tuple[StatedScopeReading, ...]:
+        """The scope each of `texts` states, in order, as Search's reader reads it.
+
+        One call for every text. apis takes at most 64 texts of at most 2,000
+        characters each, and refuses more with `request_invalid`.
+
+        Raises:
+            LiveApisError: apis refused the call, or answered a reading count other
+                than one per text or a reading outside the contract
+                (`response_invalid`).
+        """
+        response = await self._send("POST", _STATED_SCOPE_PATH, json={"texts": list(texts)})
+        readings = _json_object(response, "stated scope answer").get("readings")
+        if not isinstance(readings, list) or len(readings) != len(texts):
+            raise _invalid(response, "stated scope answer")
+        read = [_stated_scope_reading(reading) for reading in readings]
+        if any(reading is None for reading in read):
+            raise _invalid(response, "stated scope answer")
+        return tuple(reading for reading in read if reading is not None)
 
     # Wire.
 

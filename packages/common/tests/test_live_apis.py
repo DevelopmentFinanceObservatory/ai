@@ -30,6 +30,8 @@ from common.live_apis import (
     Moved,
     Pending,
     RecipeWritten,
+    StatedScopeEntry,
+    StatedScopeReading,
 )
 
 DATASETS_PRINCIPAL = "datasets-principal-7f3a"
@@ -617,6 +619,86 @@ async def test_render_raises_each_registered_refusal(status: int, code: str) -> 
             await client.render(component_id="cmp_1", revision=3, frame=FRAME)
 
     assert (raised.value.status, raised.value.code) == (status, code)
+
+
+# read_stated_scopes
+
+# dfo-apis' reading of "net bilateral ODA" (`POST /api/search/stated-scope`).
+NET_BILATERAL = {
+    "entries": [
+        {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:net",
+            "origin": {"kind": "text", "text": "net", "start": 0, "end": 3},
+        },
+        {
+            "axis": "provider",
+            "option_id": "provider:bilateral",
+            "origin": {"kind": "text", "text": "bilateral", "start": 4, "end": 13},
+        },
+    ],
+    "total": False,
+    "mentions": ["provider:bilateral"],
+}
+TOTAL_ODA = {"entries": [], "total": True, "mentions": []}
+
+
+async def test_read_stated_scopes_reads_each_text_in_order_with_no_principal() -> None:
+    calls = Calls(ok({"readings": [NET_BILATERAL, TOTAL_ODA]}))
+
+    async with make_client(calls) as client:
+        readings = await client.read_stated_scopes(texts=["net bilateral ODA", "total ODA"])
+
+    (request,) = calls.requests
+    assert (request.method, request.url.path) == ("POST", "/api/search/stated-scope")
+    assert PRINCIPAL_HEADER not in request.headers
+    assert body_of(request) == {"texts": ["net bilateral ODA", "total ODA"]}
+    assert readings == (
+        StatedScopeReading(
+            entries=(
+                StatedScopeEntry(axis="measure_basis", option_id="measure_basis:net", words="net"),
+                StatedScopeEntry(
+                    axis="provider", option_id="provider:bilateral", words="bilateral"
+                ),
+            ),
+            total=False,
+            mentions=("provider:bilateral",),
+        ),
+        StatedScopeReading(entries=(), total=True, mentions=()),
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param({"readings": [NET_BILATERAL]}, id="one-reading-short"),
+        pytest.param({"readings": [NET_BILATERAL, {**TOTAL_ODA, "total": "yes"}]}, id="total"),
+        pytest.param({"readings": [NET_BILATERAL, {**TOTAL_ODA, "mentions": [1]}]}, id="mention"),
+        pytest.param(
+            {"readings": [{**NET_BILATERAL, "entries": [{"axis": "provider"}]}, TOTAL_ODA]},
+            id="entry",
+        ),
+        pytest.param({"read": []}, id="no-readings"),
+    ],
+)
+async def test_read_stated_scopes_answer_outside_the_contract_is_invalid(answer: object) -> None:
+    calls = Calls(ok(answer))
+
+    async with make_client(calls) as client:
+        with pytest.raises(LiveApisError) as raised:
+            await client.read_stated_scopes(texts=["net bilateral ODA", "total ODA"])
+
+    assert raised.value.code == RESPONSE_INVALID
+
+
+async def test_read_stated_scopes_raises_a_refusal() -> None:
+    calls = Calls(problem(400, "request_invalid"))
+
+    async with make_client(calls) as client:
+        with pytest.raises(LiveApisError) as raised:
+            await client.read_stated_scopes(texts=["x" * 2001])
+
+    assert (raised.value.status, raised.value.code) == (400, "request_invalid")
 
 
 # stream_render_data

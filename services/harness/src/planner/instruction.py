@@ -155,7 +155,11 @@ _PLANNING = (
     "Bilateral plus imputed multilateral aid from the CRS or DAC2a is one "
     "dataset requirement with no `sum_of`: pin a reading whose `scope "
     "provider` is `provider:inclusive`, or leave it unpinned with a "
-    "`measure` naming bilateral plus imputed multilateral aid.\n\n"
+    "`measure` naming bilateral plus imputed multilateral aid. Where the "
+    'user\'s words say whose spending to count, such as "bilateral" or '
+    '"including imputed multilateral aid", write those words into the '
+    "`measure` of each dataset requirement they apply to, on every side of a "
+    "calculation when they qualify the whole question, and into no other.\n\n"
     "When the answer is one total of two different sources, such as "
     "bilateral aid from another table plus imputed multilateral aid, "
     "state a `sum_of`, "

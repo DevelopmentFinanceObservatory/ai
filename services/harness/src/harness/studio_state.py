@@ -626,6 +626,14 @@ class ConversationState:
     # wait bought nothing (`_stream_fatal`'s timeout handling reads and
     # updates this).
     timed_out_calls: set[str] = field(default_factory=set)
+    # Each dataset the user chose to keep as published although it cannot count
+    # the provider scope their words asked for, with that option, as
+    # `(spec_id, option_id)` (`planner.stated_scope.STATED_SCOPE_KEPT_STATE_KEY`).
+    # Not reset per turn: each turn's planner starts holding them
+    # (`harness.studio._turn_opening`), so a keep is asked for once a
+    # conversation, and the turn's keeps are kept back as it streams
+    # (`harness.studio_store.keep_turn_records`).
+    stated_scope_kept: frozenset[tuple[str, str]] = field(default_factory=frozenset)
     # The current turn's record-in-progress; reset by begin_turn.
     # `turn_user_message` is the history record's text: the message, each
     # amendment and answer, and each switch on a plan card (`add_to_turn`).

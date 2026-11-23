@@ -124,6 +124,7 @@ from planner.skills import (
 )
 from planner.source_reads import with_source_reads
 from planner.specs import PROPOSE_PLAN, planner_specs
+from planner.stated_scope import StatedScopeReader, proposal_measures, read_stated_scope
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import (
@@ -355,6 +356,7 @@ class PlannerAdapter:
         specs: Sequence[ToolSpec] | None = None,
         client: Client | None = None,
         on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
+        stated_scope: StatedScopeReader | None = None,
     ) -> None:
         # `translate` replaces the translation `propose_plan` runs, and `specs`
         # the tools (`planner.specs.planner_specs` over the surface and that
@@ -368,7 +370,12 @@ class PlannerAdapter:
         #
         # `on_tool_answered` observes each planner tool's name and the answer
         # the model reads for the call (`PlannerRun.tool_answered`).
+        #
+        # `stated_scope` is Search's reader of the provider scope the user's
+        # words state, which `propose_plan` and `revise` read before admission
+        # (`planner.stated_scope.read_stated_scope`); `None` reads none.
         self._client = client
+        self._stated_scope = stated_scope
         self._on_tool_answered = on_tool_answered
         model_name = (
             agent_settings if agent_settings is not None else AgentSettings()
@@ -402,6 +409,7 @@ class PlannerAdapter:
             else planner_specs(
                 translate=self._translate,
                 surface=self._surface,
+                stated_scope=stated_scope,
             )
         )
         # Built once and shared by every run, each of which names its own
@@ -716,6 +724,16 @@ class PlannerAdapter:
         proposal = Proposal(
             evidence_requirements=list(evidence_requirements), amends_version=prior.version
         )
+        if self._stated_scope is not None:
+            unread = await read_stated_scope(
+                state,
+                self._stated_scope,
+                measures=proposal_measures(
+                    state, {"evidence_requirements": list(evidence_requirements)}
+                ),
+            )
+            if unread is not None:
+                return self._revision_refused(unread, words=plan_display.plan_words(prior))
         recorded = await with_source_reads(
             lambda: submit(
                 view,

@@ -46,6 +46,8 @@ from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
 from langfuse import Langfuse
 from planner.settings import AgentSettings
+from planner.stated_scope import apis_stated_scope_reader
+from presentation_mcp.settings import Settings as PresentationSettings
 from summarise import latest, read_records, write_records, write_summary
 
 RESULTS_DIR = EVAL_DIR / ".results"
@@ -141,6 +143,14 @@ async def run_all(args: argparse.Namespace, tasks: list[Task], arms: list[str]) 
         arm: PrefixCache() if shared is not None and ARMS[arm].edits else shared for arm in arms
     }
     gate = asyncio.Semaphore(args.concurrency)
+    # The reader production's planner reads the user's stated provider scope through
+    # (`harness.wiring.build_planner`); a task reads it only where its words reach
+    # the planner (`user_message_searched`).
+    stated_scope = (
+        apis_stated_scope_reader(base_url=PresentationSettings().dfo_apis_url)
+        if Settings().planner_stated_scope
+        else None
+    )
 
     async def one(triple: Triple, count: int, total: int) -> None:
         arm, task_id, rep = triple
@@ -151,6 +161,7 @@ async def run_all(args: argparse.Namespace, tasks: list[Task], arms: list[str]) 
                 prefix_cache=prefix_caches[arm],
                 edits=ARMS[arm].edits,
                 timeout_s=args.run_timeout,
+                stated_scope=stated_scope,
             )
         record = entry_record(
             task=by_id[task_id],

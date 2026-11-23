@@ -30,6 +30,7 @@ from planner.plan import (
     NewQuestionSource,
 )
 from planner.skills import DFO_FAQ_SKILL_ID, read_skill_page
+from planner.stated_scope import StatedScopeReader
 from planner.tool_spec import REQUIRED, Parameter, ToolSpec
 from planner.tools import (
     REJECT_PLAN,
@@ -262,6 +263,7 @@ def planner_tool_specs(
     *,
     translate: Translate | None = None,
     surface: ToolSurface | None = None,
+    stated_scope: StatedScopeReader | None = None,
 ) -> list[ToolSpec]:
     """The planner's tools: `ask_user_question`, `propose_plan` and `reject_plan`.
 
@@ -277,6 +279,12 @@ def planner_tool_specs(
     no answer on record states (`read_full_history`). Given, `propose_plan`'s
     body is a coroutine function. Omitted, it reads nothing and refuses such a
     plan `first_year_unknown`.
+
+    `stated_scope` is Search's reader of the provider scope the user's words
+    and each requirement's `measure` state, which `propose_plan` reads before
+    admission (`planner.stated_scope.read_stated_scope`). Given, `propose_plan`'s
+    body is a coroutine function. Omitted, admission applies the scope only
+    where a reading is already held.
 
     Raises:
         ValueError: `propose_plan`'s parameters and their descriptions differ
@@ -295,6 +303,7 @@ def planner_tool_specs(
             call,
             arguments,
             surface=surface,
+            stated_scope=stated_scope,
         )
 
     async def propose_plan_translating(
@@ -307,12 +316,13 @@ def planner_tool_specs(
             arguments=arguments,
             translate=translate,
             surface=surface,
+            stated_scope=stated_scope,
         )
 
     body = propose_plan
     if translate is not None:
         body = propose_plan_translating
-    elif surface is not None:
+    elif surface is not None or stated_scope is not None:
         body = propose_plan_reading
     return [
         ToolSpec(
@@ -368,11 +378,16 @@ def skill_tool_spec(surface: ToolSurface) -> ToolSpec:
     )
 
 
-def planner_specs(*, translate: Translate, surface: ToolSurface) -> list[ToolSpec]:
+def planner_specs(
+    *,
+    translate: Translate,
+    surface: ToolSurface,
+    stated_scope: StatedScopeReader | None = None,
+) -> list[ToolSpec]:
     """The planner's tools as sent to a model with `planner.instruction.planner_instruction`,
     in the order the model is shown them: `get_skill` (`skill_tool_spec`), then
     `planner_tool_specs`, each argument as that function documents it."""
     return [
         skill_tool_spec(surface),
-        *planner_tool_specs(translate=translate, surface=surface),
+        *planner_tool_specs(translate=translate, surface=surface, stated_scope=stated_scope),
     ]

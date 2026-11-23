@@ -11,6 +11,8 @@ import logging
 from typing import Any
 
 from compiler.surface import ToolSurface
+from planner.stated_scope import apis_stated_scope_reader
+from presentation_mcp.settings import Settings as PresentationSettings
 
 from harness.graph.interfaces import PlannerModel
 from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
@@ -34,8 +36,18 @@ def build_planner(
     `harness.server.create_app` already built for the `execute` node, so the
     two compile against one set of schemas, read once. `prefix_cache` is the
     process's shared prompt-prefix cache, passed on to the planner's model.
+    `propose_plan` reads the provider scope the user's words state from dfo-apis
+    (`DFO_APIS_URL`, as presentation-mcp's settings hold it) unless
+    `planner_stated_scope` is off.
     """
-    return PlannerAdapter(settings=settings, surface=surface, prefix_cache=prefix_cache)
+    stated_scope = (
+        apis_stated_scope_reader(base_url=PresentationSettings().dfo_apis_url)
+        if settings.planner_stated_scope
+        else None
+    )
+    return PlannerAdapter(
+        settings=settings, surface=surface, prefix_cache=prefix_cache, stated_scope=stated_scope
+    )
 
 
 def handing_back_planner_failures(planner: PlannerModel) -> PlannerModel:

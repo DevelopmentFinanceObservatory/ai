@@ -5,8 +5,10 @@ was asked and answered in its session, in order (`Step`). The readers here
 answer from those steps: the spec_ids the user elected (`elected_spec_ids`),
 what they answered since the translator's referral
 (`answers_since_referral`), the combinations they were asked to add up
-(`combination_picks`), whether they spoke since a plan version was recorded
-(`user_spoke_since_recorded`), and the prices they chose (`prices_chosen`).
+(`combination_picks`), the datasets they kept as published although those cannot
+count the provider scope their words asked for (`stated_scope_keeps`), whether they
+spoke since a plan version was recorded (`user_spoke_since_recorded`), and the prices
+they chose (`prices_chosen`).
 `CallSession` is the `submission.service.SessionView` over a call, through
 those readers. `planner.session.SessionCall` is the call the planner serves a
 tool with.
@@ -47,6 +49,8 @@ from submission.prices_choice import (
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
+    KEEP_PUBLISHED_OPTION,
+    STATED_SCOPE_OPTIONS,
     Admission,
     Combination,
     ReferralAnswers,
@@ -73,6 +77,7 @@ from planner.plan import (
     save_plan_rounds,
     save_windowed_pins,
 )
+from planner.stated_scope import record_unattributed, save_stated_scope_kept, stated_scope_kept
 from planner.tool_results import ProblemCode
 
 # The session-state slot holding how many records of the turn's transcript
@@ -791,6 +796,61 @@ def combination_picks(
     return picks, declined
 
 
+def _refused_unserved(body: Mapping[str, Any]) -> frozenset[tuple[str, str]] | None:
+    """Each pin and provider option a `stated_provider_dropped` refusal names in its
+    `detail.unserved`, or `None` for any other body."""
+    if body.get("code") != ProblemCode.STATED_PROVIDER_DROPPED.value:
+        return None
+    detail = body.get("detail")
+    unserved = detail.get("unserved") if isinstance(detail, dict) else None
+    if not isinstance(unserved, list):
+        return None
+    pairs = {
+        (item["spec_id"], item["option_id"])
+        for item in unserved
+        if isinstance(item, dict)
+        and isinstance(item.get("spec_id"), str)
+        and isinstance(item.get("option_id"), str)
+    }
+    return frozenset(pairs) if len(pairs) == len(unserved) else None
+
+
+def stated_scope_keeps(call: PlannerCall) -> frozenset[tuple[str, str]]:
+    """Each pin and provider option the user chose to keep as published, answering
+    the ask a `stated_provider_dropped` refusal carries (`submission.service._stated_unserved`).
+
+    Read off the call's steps as `combination_picks` reads a combination: an ask whose
+    `options` are `STATED_SCOPE_OPTIONS` asks about the pins the latest such refusal
+    before it names, read off that refusal's own response, so the model cannot point
+    the ask at other pins, and a refusal binds the first ask after it that reached the
+    user. An answer of `KEEP_PUBLISHED_OPTION` keeps them; any later answer about them
+    otherwise, free text or a skip included, releases them.
+    """
+    offered = [dict(option) for option in STATED_SCOPE_OPTIONS]
+    refused: frozenset[tuple[str, str]] | None = None
+    asks: dict[str, frozenset[tuple[str, str]] | None] = {}
+    kept: set[tuple[str, str]] = set()
+    for step in call.steps():
+        if step.kind == "call":
+            if (step.args or {}).get("options") == offered:
+                asks[str(step.call_id)], refused = refused, None
+            else:
+                asks.pop(str(step.call_id), None)
+        elif step.kind == "response":
+            refused = _refused_unserved(step.body) or refused
+        elif step.kind == "answer" and step.call_id in asks:
+            pairs = asks[step.call_id]
+            if pairs is None:
+                continue
+            answer = _answers(step.body.get("result")).get("q1")
+            option = answer.get("spec_id") if answer and answer.get("kind") == "option" else None
+            if option == KEEP_PUBLISHED_OPTION:
+                kept |= pairs
+            else:
+                kept -= pairs
+    return frozenset(kept)
+
+
 @dataclass(frozen=True)
 class CallSession:
     """The `submission.service.SessionView` over one planner tool call.
@@ -826,6 +886,13 @@ class CallSession:
         """`user_spoke_since_recorded` over the call."""
         return user_spoke_since_recorded(self.call, version)
 
+    def stated_scope_kept(self) -> frozenset[tuple[str, str]]:
+        """`stated_scope_keeps` over the call, with each pair the state holds: kept by
+        a plan admitted earlier in the turn, or in an earlier turn of the
+        conversation, which Studio seeds the turn with
+        (`planner.stated_scope.STATED_SCOPE_KEPT_STATE_KEY`)."""
+        return stated_scope_keeps(self.call) | stated_scope_kept(self.call.state)
+
     def prices_answers(self) -> PricesAnswers:
         """`prices_answers` over the call."""
         return prices_answers(self.call)
@@ -850,6 +917,10 @@ class CallSession:
         """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
         record_reduction_refused_asks(self.call.state, asks)
 
+    def record_scope_unattributed(self, option_id: str) -> None:
+        """Record a `STATED_SCOPE_UNATTRIBUTED` refusal for `option_id` in the call's state."""
+        record_unattributed(self.call.state, option_id)
+
     def record_admission(self, admission: Admission) -> None:
         """Record `admission` in the call's state, with how many records of
         the turn's transcript the call read (`PLAN_READ_STATE_KEY`)."""
@@ -859,6 +930,8 @@ class CallSession:
             save_windowed_pins(state, admission.windowed_pins)
         save_alignments(state, admission.alignments)
         save_pin_verdicts(state, admission.pin_verdicts)
+        if admission.stated_scope_kept:
+            save_stated_scope_kept(state, admission.stated_scope_kept)
         # Each admission replaces the record; a state that never held one
         # gains none until a row absorbs a part.
         if admission.unit_rows or state.get(UNIT_ROWS_STATE_KEY) is not None:
