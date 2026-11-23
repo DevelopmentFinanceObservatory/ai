@@ -213,7 +213,9 @@ def test_the_unit_pick_fixture_offers_the_unit_fixture_s_whole_units() -> None:
 def test_the_unit_row_fixture_offers_its_whole_units_the_start_active() -> None:
     """The plan card's row for a unit question's whole unit carries the offer,
     starting on the unit the parts are in, and as options the whole units of
-    that currency, which a client that renders no unit picker switches between."""
+    that currency, which a client that renders no unit picker switches between.
+    Its `chosen` and `alternatives` are those options' labels, as the
+    harness words them."""
     card = PlanProposed.model_validate(_load("event-22-plan-proposed-unit.json"))
     (row,) = card.decisions
     assert row.unit is not None and row.options is not None
@@ -222,6 +224,8 @@ def test_the_unit_row_fixture_offers_its_whole_units_the_start_active() -> None:
     assert [(option.option_id, option.label) for option in row.options] == [
         (option_id, unit_words(unit, row.unit)) for option_id, unit in whole_units(row.unit).items()
     ]
+    assert row.chosen == unit_words(row.unit.start, row.unit)
+    assert row.alternatives == [option.label for option in row.options]
 
 
 def test_the_unit_switch_fixture_names_its_unit_as_the_option() -> None:

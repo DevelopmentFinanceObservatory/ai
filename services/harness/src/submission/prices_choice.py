@@ -273,7 +273,11 @@ def plan_held_choices(
     U is the one `units` holds for the slot, the unit a switch of the row
     picked, else the one its citing requirements state (`plan_unit`), and
     every member of the row with a series in U holds U, whether or not
-    `choices` still holds a choice for it, as after a message the user typed:
+    `choices` still holds a choice for it, as in a switch's revision of the
+    row after the user typed a message. Outside such a revision, a message
+    the user typed or an amendment of the card since the plan landed
+    releases the row, and `submission.service._user_prices` does not call
+    this:
 
     - each distinct pin of the requirements citing the row, as that pin;
     - each part the unit question's answer put on the row (`answered`) that

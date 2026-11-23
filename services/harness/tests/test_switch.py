@@ -2555,17 +2555,30 @@ async def test_a_unit_row_switch_one_part_cannot_be_read_in_leaves_every_part_as
     assert {key: state.get(key) for key in before} == before
 
 
-@pytest.mark.parametrize("refused", [False, True], ids=["read", "refused"])
+class _StoppedUnitRevisingPlanner(_UnitRevisingPlanner):
+    """A `_UnitRevisingPlanner` whose revision finishes in the step the user's
+    Stop comes in, which it takes on the turn's open `StopScope`."""
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs["ctx"].stop.take("stop_1"), "the revision runs under the open stop scope"
+        return await super().revise(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "early", ["read", "refused", "no-block", "stopped"], ids=lambda early: early
+)
 async def test_a_unit_row_switch_reads_a_window_the_plan_left_out_in_the_unit(
-    refused: bool,
+    early: str,
 ) -> None:
     """The unit question covered two windows, and the plan reads the recent
     one alone, its row having absorbed only that window. A switch of the
     row to constant 2015 US dollars asks Search for the early window's
     series in that unit beside the recent pin, and records the early
     window's read once the revision lands, so a later plan adding the
-    window is pinned to it. When Search refuses the early window, the
-    switch fails whole and records nothing."""
+    window is pinned to it. The row offers what its pins convert into, so
+    when Search refuses the early window, or no block on record states its
+    series, the switch lands all the same and records nothing for it. A
+    switch the user stops records nothing."""
     plan = _unit_plan()
     plan = plan.model_copy(
         update={
@@ -2576,25 +2589,42 @@ async def test_a_unit_row_switch_reads_a_window_the_plan_left_out_in_the_unit(
     )
     state = _unit_state(plan)
     state[UNIT_ROWS_STATE_KEY] = {_UNIT_SLOT: {_FK_GROSS: ["recent"]}}
-    search = _RefusingEarlyWindow() if refused else _UnitSearch()
+    if early == "no-block":
+        del state[ORCHESTRATOR_SPECS_KEY][_READ_EARLY]
+    search = _RefusingEarlyWindow() if early == "refused" else _UnitSearch()
     unit = {**_USD_2023, "base_year": 2015}
+    planner = _StoppedUnitRevisingPlanner() if early == "stopped" else _UnitRevisingPlanner()
+    node = switch_module.switch_node(planner=cast(Any, planner), definition_surface=search)
 
-    offered, planner = await _switch_unit(
-        state, {"choice_id": _UNIT_ROW, "option_id": "USD-constant-2015", "unit": unit}, search
+    done = await node.run(
+        node_ctx(state=state),
+        {
+            "switch": {
+                "choice_id": _UNIT_ROW,
+                "option_id": "USD-constant-2015",
+                "unit": unit,
+            }
+        },
     )
 
-    assert sorted(map(_is_early, search.posted)) == [False, True]
-    assert _requested_units(search) == [unit, unit]
-    if refused:
-        assert offered["switch_failed"]["code"] == "requested_option_unavailable"
-        assert planner.revisions == []
+    assert isinstance(done, Next) and done.label == "offer"
+    offered = done.output
+    assert sorted(map(_is_early, search.posted)) == (
+        [False] if early == "no-block" else [False, True]
+    )
+    assert _requested_units(search) == [unit] * len(search.posted)
+    if early == "stopped":
+        assert offered["switch_failed"]["code"] == SWITCH_CANCELLED
         assert units_reread(state) == {}
         return
     assert "switch_failed" not in offered, offered.get("switch_failed")
-    early = next(posted["spec_id"] for posted in search.posted if _is_early(posted))
     (revision,) = planner.revisions
     assert [r["id"] for r in revision["evidence_requirements"]] == ["recent"]
-    assert units_reread(state) == {_OTHER: ServedUnit(spec_id=early, unit=Unit(**unit))}
+    if early != "read":
+        assert units_reread(state) == {}
+        return
+    read = next(posted["spec_id"] for posted in search.posted if _is_early(posted))
+    assert units_reread(state) == {_OTHER: ServedUnit(spec_id=read, unit=Unit(**unit))}
 
 
 @pytest.mark.parametrize(

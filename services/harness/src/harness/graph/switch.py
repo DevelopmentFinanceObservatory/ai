@@ -151,6 +151,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    ORCHESTRATOR_UNIT_REREAD_KEY,
     ORCHESTRATOR_UNIT_SETTLED_KEY,
     conversation_readings,
     counted_from,
@@ -237,13 +238,16 @@ _DRAFTING_PREFIXES = ("planner:", "translator:")
 # spec mapping, which the turn store writes as given (`harness.turn.store`), so
 # a block the revision added is deleted and one it rewrote is put back. A unit
 # row's switch also settles each series it re-read (`harness.graph.orchestrate.
-# reread_in_unit`), so a switch that fails leaves those unsettled.
+# reread_in_unit`), so a switch that fails leaves those unsettled, and records
+# what it read the row's unread parts as (`record_units_reread`), which a
+# stopped switch takes back.
 _RESTORED_KEYS: Mapping[str, Any] = {
     "plan": None,
     ORCHESTRATOR_SEARCHES_KEY: [],
     ORCHESTRATOR_SPECS_KEY: {},
     ORCHESTRATOR_SPEC_WARNINGS_KEY: {},
     ORCHESTRATOR_UNIT_SETTLED_KEY: [],
+    ORCHESTRATOR_UNIT_REREAD_KEY: {},
 }
 
 
@@ -758,7 +762,8 @@ async def _switched_unit(
     (`harness.graph.state.unit_row_offers`). Each pin is read in the unit
     picked at once (`_reread_pin`), with the series the unit question's
     answer fetched for each part of the row the plan has not absorbed
-    (`submission.prices_choice.unabsorbed_parts`), each series Search read
+    (`submission.prices_choice.unabsorbed_parts`) where Search reads it
+    (`_reread_unread`), each series Search read
     is held as the source of the series it replaces (`_hold_read_sources`),
     and each such part's read is recorded for a later plan to pin
     (`harness.graph.state.record_units_reread`) once the revision lands. Every
@@ -773,8 +778,8 @@ async def _switched_unit(
             no requirement cites it, the row offers no unit, or the unit
             picked lies outside its offer or is the one it holds; as
             Search's refusal says (`harness.unit_switch.UnitRefused`) when
-            it cannot read a pin, or such a part, in the unit; and as the
-            revision's refusal when it is refused.
+            it cannot read a pin in the unit; and as the revision's refusal
+            when it is refused.
     """
     state = cast(SessionState, ctx.state)
     if not any(d.slot == slot for d in plan.decisions):
@@ -808,10 +813,17 @@ async def _switched_unit(
             rows=absorbed_rows(state),
         )
     }
-    series = list(dict.fromkeys([*pins, *outside.values()]))
+    unread = [one for one in dict.fromkeys(outside.values()) if one not in pins]
+    series = [*pins, *unread]
     readings = _readings(ctx)
     reads = await run_together(
-        _reread_pin(ctx, one, picked, surface=surface, readings=readings) for one in series
+        [
+            *(_reread_pin(ctx, pin, picked, surface=surface, readings=readings) for pin in pins),
+            *(
+                _reread_unread(ctx, one, picked, surface=surface, readings=readings)
+                for one in unread
+            ),
+        ]
     )
     refused = next((read for read in reads if isinstance(read, UnitRefused)), None)
     if refused is not None:
@@ -920,6 +932,26 @@ async def _reread_pin(
     return await reread_in_unit(
         state, surface, reading=reading, block=block, unit=unit, label=label
     )
+
+
+async def _reread_unread(
+    ctx: NodeCtx[GraphEvent],
+    series: str,
+    unit: UnitChoice,
+    *,
+    surface: ToolSurface,
+    readings: Sequence[SearchReading],
+) -> UnitResubmitted | None:
+    """`_reread_pin` for the series a unit question's answer fetched for a
+    part of the row the plan does not read: `None` when no block on record
+    states it or Search refuses it in `unit`. The row offers what its pins
+    convert into (`harness.graph.state.unit_row_offers`), so such a part
+    cannot hold the switch back; with no read in `unit`, it sits on no row
+    (`submission.prices_choice.plan_held_choices`)."""
+    if pin_block(cast(SessionState, ctx.state), series) is None:
+        return None
+    read = await _reread_pin(ctx, series, unit, surface=surface, readings=readings)
+    return read if isinstance(read, UnitResubmitted) else None
 
 
 def _count_reading(reading: SearchReading | None, block: Mapping[str, Any]) -> SearchReading | None:

@@ -17,12 +17,12 @@
     {
       "id": "user_unit_spec_5c1e0a9b7d2f4e6a8b0c1d2e3f405162",
       "question": "Which prices the figures are in.",
-      "chosen": "constant 2020 prices in EUR",
+      "chosen": "Constant 2020 Euros",
       "reason": "The user chose constant 2020 prices in EUR.",
       "resolved_by": "user",
       "alternatives": [
-        "constant 2020 prices in EUR",
-        "current prices"
+        "Constant 2020 Euros",
+        "Current Euros"
       ],
       "choice_id": "decision/user_unit_spec_5c1e0a9b7d2f4e6a8b0c1d2e3f405162",
       "active_option_id": "EUR-constant-2020",
