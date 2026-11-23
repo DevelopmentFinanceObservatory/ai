@@ -7241,11 +7241,13 @@ def _stated_claims(
         ):
             claims[requirement_id] = option_id
             continue
-        cause = (
-            f"Search does not compile it counted that way: {refused}"
-            if refused is not None
-            else (offered.availability.code if offered is not None else None) or "not offered"
-        )
+        if refused is not None:
+            cause, code = "Search does not compile it counted that way", refused
+        elif offered is not None:
+            cause = "Search does not publish it counted that way"
+            code = offered.availability.code or "unavailable"
+        else:
+            cause, code = "the dataset has no option counting it that way", "not_offered"
         unserved.append(
             _Unserved(
                 requirement_id=requirement_id,
@@ -7254,6 +7256,7 @@ def _stated_claims(
                 label=basis.label(option_id),
                 words=option.words,
                 cause=cause,
+                code=code,
             )
         )
     declined = [item for item in unserved if (item.pin, item.option_id) in released]
@@ -7387,7 +7390,8 @@ def _pinned_by_plan(
 class _Unserved(NamedTuple):
     """A requirement whose `measure` states, in the user's `words`, a provider option
     its pin cannot count (`_stated_claims`): its id, the pin, the option and its
-    reader's label, and why the pin cannot count it (`cause`)."""
+    reader's label, and why the pin cannot count it: `cause` as a phrase for the model,
+    `code` as Search answered it, which stays in the refusal's `detail`."""
 
     requirement_id: str
     pin: str
@@ -7395,6 +7399,7 @@ class _Unserved(NamedTuple):
     label: str
     words: str | None
     cause: str
+    code: str
 
 
 def _stated_unserved(
@@ -7472,6 +7477,7 @@ def _stated_unserved(
                 }
                 for item in unserved
             ],
+            "causes": {item.requirement_id: item.code for item in unserved},
             "serving": [spec_id for spec_id, _ in serving],
         },
     )
@@ -7521,7 +7527,7 @@ def stated_compile_unanswered(
 ) -> dict[str, object]:
     """The `SURFACE_UNAVAILABLE` refusal for a pin Search did not compile, and can
     later, on the provider option its requirement's `measure` states in the user's
-    words (`Realignment.stated`), `cause` what Search answered. The same plan
+    words (`Realignment.stated`), `cause` what Search answered, kept in `detail` only. The same plan
     proposed again can be served. A compile Search refuses for good is recorded
     instead (`planner.stated_scope.record_stated_uncompiled`), and `_stated_claims`
     refuses the pin as one that cannot count the option."""
@@ -7535,10 +7541,10 @@ def stated_compile_unanswered(
     return problem(
         ProblemCode.SURFACE_UNAVAILABLE,
         f"Search did not compile {realignment.spec_id}, which {realignment.requirement_id!r} "
-        f"pins, counted as {label}, which its `measure` asks for: {cause}. The plan is sound "
+        f"pins, counted as {label}, which its `measure` asks for. The plan is sound "
         "and nothing was recorded; propose it again.",
         outcome=Outcome.REFUSED,
-        detail={"basis": realignment.detail()},
+        detail={"basis": realignment.detail(), "cause": cause},
     )
 
 

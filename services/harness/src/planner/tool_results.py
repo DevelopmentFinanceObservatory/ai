@@ -136,6 +136,10 @@ class ProblemCode(StrEnum):
     # requirement's `measure` states it or is counted on it
     # (`submission.service._stated_unattributed`).
     STATED_SCOPE_UNATTRIBUTED = "stated_scope_unattributed"
+    # Search's reader of the provider scope the user's words state refused the read for a
+    # reason no retry changes, so no plan can be admitted on a reading
+    # (`planner.stated_scope.read_stated_scope`).
+    STATED_SCOPE_UNREADABLE = "stated_scope_unreadable"
     # A share or quotient whose two sides read one series over the same years and
     # entities, which divides a figure by itself
     # (`submission.service._share_of_itself`).

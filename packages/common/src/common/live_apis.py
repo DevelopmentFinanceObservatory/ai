@@ -715,8 +715,9 @@ class LiveApisClient:
     async def read_stated_scopes(self, *, texts: Sequence[str]) -> tuple[StatedScopeReading, ...]:
         """The scope each of `texts` states, in order, as Search's reader reads it.
 
-        One call for every text. apis takes at most 64 texts of at most 2,000
-        characters each, and refuses more with `request_invalid`.
+        One call for every text. apis takes at most 64 texts, each at most its
+        `max_query_chars` (apis' capabilities document), and refuses more with
+        `request_invalid`, which the caller keeps its texts under.
 
         Raises:
             LiveApisError: apis refused the call, or answered a reading count other

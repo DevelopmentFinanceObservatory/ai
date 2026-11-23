@@ -32,6 +32,7 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness import studio
 from harness.conversation import current_user_message
 from harness.planner_adapter import PlannerAdapter
+from harness.sentences import TERMINAL_PROPOSE_CODES
 from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.studio_store import keep_turn_records
@@ -39,6 +40,7 @@ from harness.turn.store import AgentRecord
 from harness.turn_events import PLANNER_ASK
 from harness.wire import TurnRequest
 from planner.plan import (
+    MAX_MEASURE_CHARS,
     AlignedPin,
     DatasetRequirement,
     PinSource,
@@ -130,16 +132,22 @@ class _Context:
 class _Reader:
     """Search's reader as dfo-apis' route answers it for the recorded texts
     (`_READINGS`), through `LiveApisClient`, recording each call's texts in `calls`.
-    With `failing`, the route answers 503 to every call."""
+    With `failing`, the route answers 503 to every call, and with `refusing` the status
+    and body given, which is no retry's cure when the body says `retryable: false`."""
 
-    def __init__(self, *, failing: bool = False) -> None:
+    def __init__(
+        self, *, failing: bool = False, refusing: tuple[int, dict[str, Any]] | None = None
+    ) -> None:
         self.calls: list[list[str]] = []
         self.failing = failing
+        self.refusing = refusing
 
     def handler(self, request: httpx2.Request) -> httpx2.Response:
         assert (request.method, request.url.path) == ("POST", "/api/search/stated-scope")
         texts = json.loads(request.content)["texts"]
         self.calls.append(texts)
+        if self.refusing is not None:
+            return httpx2.Response(self.refusing[0], json=self.refusing[1])
         if self.failing:
             return httpx2.Response(503, json={"code": "unavailable", "retryable": True})
         return httpx2.Response(200, json={"readings": [_READINGS[text] for text in texts]})
@@ -354,6 +362,97 @@ async def test_a_route_that_does_not_answer_refuses_the_proposal_and_records_not
     assert result["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, result
     assert result["detail"] == {"read": "stated_scope"}
     assert load_plan(ctx.state) is None
+
+
+async def test_a_retryable_failure_asks_to_propose_again_without_vouching_for_the_plan() -> None:
+    """Admission has not run when the read fails, so the refusal does not call the plan
+    sound, and carries none of Search's codes."""
+    ctx = _Context()
+    _show(ctx, _block("africa_bilateral"))
+
+    result = await _propose(
+        ctx,
+        [_dataset("aid", _spec("africa_bilateral"), "net ODA", recipient="Africa")],
+        words=_G7,
+        reader=_Reader(failing=True),
+    )
+
+    assert result["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, result
+    assert "propose" in result["message"]
+    assert "sound" not in result["message"]
+    assert "unavailable" not in result["message"]
+
+
+@pytest.mark.parametrize(
+    "refusing",
+    [
+        pytest.param((404, {"detail": "not found"}), id="route-not-deployed"),
+        pytest.param((422, {"code": "request_invalid", "retryable": False}), id="request-refused"),
+    ],
+)
+async def test_a_permanent_failure_stops_the_entry_naming_the_read(
+    refusing: tuple[int, dict[str, Any]],
+) -> None:
+    """A route no retry changes ends the planner's entry on a terminal refusal, so the
+    turn stops at once and the planner does not loop; the refusal names the read in
+    `detail` and keeps Search's codes and statuses out of its text."""
+    ctx = _Context()
+    _show(ctx, _block("africa_bilateral"))
+
+    result = await _propose(
+        ctx,
+        [_dataset("aid", _spec("africa_bilateral"), "net ODA", recipient="Africa")],
+        words=_G7,
+        reader=_Reader(refusing=refusing),
+    )
+
+    assert result["code"] == ProblemCode.STATED_SCOPE_UNREADABLE.value, result
+    assert result["code"] in {code.value for code in TERMINAL_PROPOSE_CODES}
+    assert result["detail"]["read"] == "stated_scope"
+    assert "request_invalid" not in result["message"]
+    assert str(refusing[0]) not in result["message"]
+    assert "retry" not in result["message"].lower() or "fails the same way" in result["message"]
+    assert load_plan(ctx.state) is None
+
+
+async def test_a_measure_over_the_plans_cap_gets_the_validation_error_unread() -> None:
+    """A `measure` Plan validation refuses (`MAX_MEASURE_CHARS`) is never sent to the
+    route, whose own cap it could break, so the planner reads the validation error."""
+    ctx = _Context()
+    _show(ctx, _block("africa_bilateral"))
+    reader = _Reader()
+    measure = "net ODA " * 30
+    assert len(measure) > MAX_MEASURE_CHARS
+
+    result = await _propose(
+        ctx,
+        [_dataset("aid", _spec("africa_bilateral"), measure, recipient="Africa")],
+        words=_G7,
+        reader=reader,
+    )
+
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    assert reader.calls == [[_G7]]
+
+
+async def test_the_words_are_cut_to_the_routes_cap_from_their_start() -> None:
+    """Studio bounds a message by the request's bytes alone, so the read cuts the words
+    to the route's per-text cap, keeping their end as Search reads a message."""
+    ctx = _Context()
+    _show(ctx, _block("africa_bilateral"))
+    reader = _Reader()
+    words = "x" * 5000 + _G7
+    reader.failing = True
+    await _propose(
+        ctx,
+        [_dataset("aid", _spec("africa_bilateral"), "net ODA", recipient="Africa")],
+        words=words,
+        reader=reader,
+    )
+
+    sent = reader.calls[0][0]
+    assert words.endswith(sent)
+    assert len(sent) < len(words)
 
 
 async def test_each_text_is_read_once_a_turn() -> None:
@@ -1061,6 +1160,28 @@ async def test_a_keep_lasts_the_conversation(words: str, measure: str, admitted:
         ]
 
 
+async def test_an_unserved_stated_option_reads_as_words_with_the_code_in_detail() -> None:
+    """The refusal's text tells the planner why the pin cannot count the option as a
+    phrase; Search's availability code stays in `detail.causes`."""
+    ctx = _Context()
+    block = _dac1_without_bilateral()
+    (choice,) = [
+        c for c in block["resolved"]["scope_choices"]["choices"] if c["axis"] == "provider"
+    ]
+    for option in choice["options"]:
+        if option["option_id"] == _BILATERAL:
+            option["availability"] = {"status": "unavailable", "code": "provider_not_offered"}
+    _show(ctx, block)
+
+    result = await _propose(
+        ctx, [_dac1_total("bilateral ODA")], words=_G7_BILATERAL, question=_G7_BILATERAL
+    )
+
+    assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
+    assert "provider_not_offered" not in result["message"]
+    assert result["detail"]["causes"] == {"g7_total": "provider_not_offered"}
+
+
 @pytest.mark.parametrize(
     ("refusal", "code"),
     [
@@ -1092,6 +1213,7 @@ async def test_a_stated_compile_search_refuses_cannot_count_the_scope(
 
     assert result["code"] == code.value, result
     assert len(surface.calls) == 1
+    assert refusal["code"] not in result["message"]
     if code is ProblemCode.STATED_PROVIDER_DROPPED:
         assert result["detail"]["unserved"] == [
             {"requirement_id": "aid", "spec_id": africa["spec_id"], "option_id": _INCLUSIVE}

@@ -265,13 +265,13 @@ class Settings(BaseServiceSettings):
     # carried the card waits for those calls before it closes
     # (`EARLY_MINT_WAIT_S`).
     early_mint: bool = True
+    early_mint_wait_s: float = Field(default=3.0, gt=0, allow_inf_nan=False)
     # Whether `propose_plan` reads the provider scope the user's words state through
     # dfo-apis' stated-scope route (`PLANNER_STATED_SCOPE`,
     # `planner.stated_scope.read_stated_scope`). Off, admission applies none, and
     # a plan needs no answer from the route; on, a route that does not answer
     # refuses each proposal of a turn with words of the user's.
     planner_stated_scope: bool = True
-    early_mint_wait_s: float = Field(default=3.0, gt=0, allow_inf_nan=False)
     # The combined server's limits for outside callers; see the class docstring.
     combined_mcp_requests_per_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     combined_mcp_burst: int = Field(default=20, ge=1)

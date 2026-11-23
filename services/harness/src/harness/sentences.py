@@ -95,6 +95,7 @@ TERMINAL_PROPOSE_CODES = frozenset(
         ProblemCode.QUESTION_FIXED,
         ProblemCode.NOTHING_TO_PLAN,
         ProblemCode.PRICES_UNSERVED,
+        ProblemCode.STATED_SCOPE_UNREADABLE,
     }
 )
 
@@ -341,6 +342,11 @@ STOP_SENTENCES: Mapping[StopCode | ProblemCode, str] = {
         "{chosen}, which the user chose, so nothing was recorded. Search once for {reading} in "
         "{chosen}."
     ),
+    ProblemCode.STATED_SCOPE_UNREADABLE: (
+        "The providers' spending the question asks for could not be read from Search, and "
+        "reading it again fails the same way, so nothing was recorded. The fault is in the "
+        "system, not the request."
+    ),
     ProblemCode.OPERATION_UNSUPPORTED: (
         "This cannot be calculated as planned{at}, because {unsupported}, so nothing was recorded."
     ),
@@ -410,6 +416,9 @@ STOP_REASONS: Mapping[StopCode | ProblemCode, str] = {
     ProblemCode.BUDGET_EXHAUSTED: "this request has used its budget of {rounds} plan drafts",
     ProblemCode.NOTHING_TO_PLAN: "this system cannot calculate what was asked",
     ProblemCode.PRICES_UNSERVED: "{lead}no series found is in the prices chosen",
+    ProblemCode.STATED_SCOPE_UNREADABLE: (
+        "the providers' spending the question asks for could not be read from Search"
+    ),
     ProblemCode.OPERATION_UNSUPPORTED: "{mixed}",
     ProblemCode.BASES_UNALIGNED: (
         "{lead}the figures the plan combines could not be put on one measure basis and "
@@ -961,6 +970,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ExecutorCode.PUBLICATION_ERROR,
             StopCode.TRANSLATION_INTERNAL_FAILURE,
             StopCode.PLANNER_TOOL_FAILED,
+            ProblemCode.STATED_SCOPE_UNREADABLE,
             *_NOT_DRAFTED_CODES,
         }
     ),

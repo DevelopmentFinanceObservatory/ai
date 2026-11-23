@@ -69,11 +69,12 @@ from harness.turn.loop import Graph
 from harness.turn.node import NodeCtx
 from harness.turn.store import TurnStore
 from harness.turn_budget import current_turn_budget
-from harness.wiring import handing_back_planner_failures
+from harness.wiring import build_stated_scope_reader, handing_back_planner_failures
 from orchestrator.agent import orchestrator_agent
 from orchestrator.model import orchestrator_model
 from planner.plan import Plan, SessionState, save_plan
 from planner.specs import planner_specs
+from planner.stated_scope import StatedScopeReader
 from planner.tool_spec import ToolSpec
 from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.tool import build_translate
@@ -453,11 +454,14 @@ def _planner_adapter(
     answer: OfferedPlans | PlannerScript,
     tools: Callable[[Sequence[ToolSpec]], Sequence[ToolSpec]] = tuple,
     on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
+    stated_scope: StatedScopeReader | None = None,
 ) -> PlannerAdapter:
     """The real adapter, built with `settings`, over `surface`, its model calls
     answered by `answer`, its tools the ones the adapter builds for itself
     (`planner.specs.planner_specs` over `surface` and its translation) as
-    `tools` changes them, and each tool's answer told to `on_tool_answered`."""
+    `tools` changes them, and each tool's answer told to `on_tool_answered`.
+    `stated_scope` is the reader of the provider scope the user's words state, as
+    production's planner has (`harness.wiring.build_stated_scope_reader`)."""
     translate = build_translate(surface=surface)
     specs = planner_specs(translate=translate, surface=surface)
     return PlannerAdapter(
@@ -467,12 +471,15 @@ def _planner_adapter(
         specs=tools(specs),
         client=scripted_client(answer),
         on_tool_answered=on_tool_answered,
+        stated_scope=stated_scope,
     )
 
 
 def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) -> FastAPI:
     """The studio for one case, its conversations and turns stored on `engine`."""
     settings = Settings()
+    # Closed with the app by `orchestrator_client` (`app.state.stated_scope`).
+    stated_scope = build_stated_scope_reader(settings)
     orchestrator_genai = scripted_client(
         OrchestratorScript(
             script=[_part_from_step(step) for step in scenario["orchestrator"]], log=log
@@ -488,7 +495,11 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
     if planner_script is None:
         plans = OfferedPlans(log=log)
         adapter = _planner_adapter(
-            settings, surface=surface, answer=plans, tools=use_compiled_proposals
+            settings,
+            surface=surface,
+            answer=plans,
+            tools=use_compiled_proposals,
+            stated_scope=stated_scope,
         )
         planner = handing_back_planner_failures(
             ScriptedPairPlanner(
@@ -504,6 +515,7 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
             ),
             answer=script,
             on_tool_answered=log.planner_tool_answered,
+            stated_scope=stated_scope,
         )
         planner = handing_back_planner_failures(adapter)
 
@@ -543,6 +555,7 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
     )
     app = FastAPI()
     app.state.settings = settings
+    app.state.stated_scope = stated_scope
     app.include_router(create_studio_router(studio, settings=settings))
     return app
 
@@ -563,7 +576,11 @@ async def orchestrator_client(
         timeout=30.0,
         headers={"Authorization": f"Bearer {token}"},
     ) as client:
-        yield client, log
+        try:
+            yield client, log
+        finally:
+            if app.state.stated_scope is not None:
+                await app.state.stated_scope.aclose()
 
 
 __all__ = ["Log", "build_studio", "orchestrator_client", "search_envelope"]
