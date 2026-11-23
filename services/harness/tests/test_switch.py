@@ -109,7 +109,7 @@ from submission.service import (
     save_searched_pin,
     scope_choice_decisions,
 )
-from translator.discovery import RESOLVED_STATE_PREFIX
+from translator.discovery import RESOLVED_STATE_PREFIX, _PinRecords, _resolve_pin_block
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .graph_turns import given, opening_graph
@@ -2753,8 +2753,9 @@ async def test_a_unit_row_switch_after_a_scope_switch_keeps_the_scope_switched_t
     dollars. The card's sector row switches it to CRS 120 and 130 through
     Search. A switch of the unit row to constant 2023 US dollars then posts
     the scope's base in that unit with the switched sector, re-pins the
-    requirement to what Search answers and records the part read with that
-    scope."""
+    requirement to what Search answers, holds that answer as the pin's
+    source, which the revision's discovery reads, and records the part read
+    with that scope."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     scoped = _scoped_plan(pin, scope, schemas=real_schemas)
@@ -2819,12 +2820,18 @@ async def test_a_unit_row_switch_after_a_scope_switch_keeps_the_scope_switched_t
     unit_spec, unit_identity_posted = unit_identity(
         switched.scope.base.identity, {"currency": "USD", "prices": "constant", "base_year": 2023}
     )
+    # Search compiles the base with the scope entries and mints the answer
+    # under the compile's own spec_id, as it does for the sector switch, so a
+    # search for the answer's identity alone does not find it again.
+    compiled = copy.deepcopy(envelope["parts"][0]["spec"]["definition"]["identity"])
+    compiled["facets"] = {"unit": {"request": _USD_2023}}
+    read_spec = spec_id_for(canonicalize(compiled))
     read = copy.deepcopy(envelope)
     read["parts"][0]["variable_text"] = unit_spec
     read["parts"][0]["spec"] = {
         **read["parts"][0]["spec"],
-        "spec_id": unit_spec,
-        "definition": {"schema_version": 1, "spec_id": unit_spec, "identity": unit_identity_posted},
+        "spec_id": read_spec,
+        "definition": {"schema_version": 1, "spec_id": read_spec, "identity": compiled},
     }
     search._answer[unit_spec] = read
     by_unit = await node.run(
@@ -2848,9 +2855,13 @@ async def test_a_unit_row_switch_after_a_scope_switch_keeps_the_scope_switched_t
     assert "sector:120+130" in {e["option_id"] for e in entry["scope_entries"]}
     revised = PlannerPlan.model_validate_json(state["plan"])
     (dataset,) = [r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)]
-    assert (dataset.source_spec_id, dataset.unit) == (unit_spec, Unit(**_USD_2023))
+    assert (dataset.source_spec_id, dataset.unit) == (read_spec, Unit(**_USD_2023))
     served = units_served(cast(Any, state))[pin]
-    assert (served.spec_id, served.scope_of) == (unit_spec, new_pin)
+    assert (served.spec_id, served.scope_of) == (read_spec, new_pin)
+    # The revision's discovery reads the re-pinned dataset from the block
+    # held for it, as it reads the sector switch's compile.
+    held = _resolve_pin_block(_PinRecords(cast(Any, state)), plan=revised, requirement=dataset)
+    assert held is not None and held["spec_id"] == read_spec
 
 
 async def test_a_unit_row_switch_reads_the_count_picked_beside_the_unit_again() -> None:

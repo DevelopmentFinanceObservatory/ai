@@ -143,7 +143,7 @@ from translator.discovery import (
 from harness.decision_pick import picks_the_chosen_option
 from harness.graph.events import GraphEvent
 from harness.graph.interfaces import PlannerModel
-from harness.graph.orchestrate import read_part_in_unit, turn_id
+from harness.graph.orchestrate import UnitRead, read_part_in_unit, turn_id
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -193,7 +193,7 @@ from harness.turn_records import (
     stored_count,
 )
 from harness.unit_offer import offered_unit_refusal, row_units, unit_option_id, unit_phrase
-from harness.unit_switch import UnitRefused
+from harness.unit_switch import UnitRefused, UnitResubmitted
 from harness.wire import RetryMode, UnitChoice, UnitOffer
 
 logger = logging.getLogger(__name__)
@@ -763,7 +763,8 @@ async def _switched_unit(
     recomputed from state (`harness.graph.state.unit_row_offers`). Each part
     is read in the unit picked at once (`read_part_in_unit`), the count read
     in its place re-read again in its place and a scope a switch moved it to
-    kept (`ServedUnit.scope_of`), and every requirement citing the
+    kept (`ServedUnit.scope_of`), each series Search read is held as a pin
+    source (`_hold_read_sources`), and every requirement citing the
     row, as the planner states it (`submission.service.statement`), is
     re-pinned to the series the part it reads (`_covering_members`) is
     fetched as now (`planner.plan.repinned`) and states the unit. The plan is
@@ -822,6 +823,7 @@ async def _switched_unit(
         )
     now = units_served(state)
     moves = {served.spec_id: now[part].spec_id for part, served in members.items()}
+    _hold_read_sources(ctx, members, reads)
     blocks = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)
     requirements: list[dict[str, Any]] = []
     for requirement in covered:
@@ -864,6 +866,33 @@ async def _switched_unit(
         "revision": plan_revision(revised_plan),
         "moved": [],
     }
+
+
+def _hold_read_sources(
+    ctx: NodeCtx[GraphEvent], members: Mapping[str, ServedUnit], reads: Sequence[UnitRead]
+) -> None:
+    """Hold each series Search read a unit row's part as (`reads`, in
+    `members`' order) as a pin source (`planner.plan.pin_sources`), the
+    source of the series the part was fetched as before replaced by it
+    (`_pin_source`), as a scope switch holds what it compiles. Admission and
+    the revision's discovery read the re-pinned requirement's dataset from
+    that block (`translator.discovery`), so a series Search answered for
+    scope entries, which a search for its identity alone does not find
+    again, is found."""
+    state = cast(SessionState, ctx.state)
+    sources = pin_sources(state)
+    readings = _readings(ctx)
+    held: dict[str, PinSource] = {}
+    for served, read in zip(members.values(), reads, strict=True):
+        if not isinstance(result := read.result, UnitResubmitted):
+            continue
+        reading = next((r for r in readings if r.spec_id == result.spec_id), None)
+        if reading is None:
+            continue
+        digest = resolver_digest({"parts": [dict(result.part)]})
+        held[result.spec_id] = _pin_source(sources.get(served.spec_id), digest, reading)
+    if held:
+        save_pin_sources(state, {**sources, **held})
 
 
 def _counted_parts(
