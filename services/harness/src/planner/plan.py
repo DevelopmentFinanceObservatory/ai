@@ -2668,13 +2668,12 @@ def without_stated_coverage(requirement: EvidenceRequirement) -> EvidenceRequire
     """`requirement` without the `entities` and `across` it states where it is a whole
     (`stated_coverage_fault`).
 
-    A proposal stating them is refused (`submission.service._Patch`), so only a
-    plan stored before that refusal holds them. The stored plan keeps them, since
-    they fed the revision its user approved (`plan_revision`), and every reader
-    of the whole's coverage derives it from the part (`whole_read`). The
-    planner's view of the plan drops them
-    (`harness.planner_adapter._as_authored`), so an amendment repeating what it
-    was shown is not refused.
+    A proposal stating them is refused (`submission.service._Patch`), and a stored
+    plan can still hold them. The stored plan keeps them, since they feed the
+    revision its user approved (`plan_revision`), and every reader of the whole's
+    coverage derives it from the part (`whole_read`). The planner's view of the
+    plan drops them (`harness.planner_adapter._as_authored`), so an amendment
+    repeating what it was shown is not refused.
     """
     if (
         not isinstance(requirement, DatasetRequirement)

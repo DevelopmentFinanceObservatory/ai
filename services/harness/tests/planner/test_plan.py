@@ -7538,9 +7538,9 @@ def test_a_whole_covers_its_parts_parties_with_the_side_it_opens_as_one_total(
 def test_an_approved_plan_stored_with_a_whole_stating_coverage_runs_without_reapproval(
     decision: DecisionFactory,
 ) -> None:
-    """A plan approved while a whole could state its part's `entities` and `across`
-    runs as approved once stored and reloaded: those fields fed the revision the
-    user approved. The planner is shown the whole without them, so an amendment
+    """An approved plan whose whole states its part's `entities` and `across` runs
+    as approved once stored and reloaded: those fields feed the revision the user
+    approved. The planner is shown the whole without them, so an amendment
     restating it as shown is admitted."""
     plan = _plan(
         decision(),
@@ -7548,8 +7548,8 @@ def test_an_approved_plan_stored_with_a_whole_stating_coverage_runs_without_reap
         answer_mode=AnswerMode.COMPUTED,
         evidence_requirements=_g7_africa_share(whole=_G7_WHOLE),
     )
-    # The plan as the release before the refusal held it: `model_copy` skips
-    # validation, as loading it then did not strip the stated fields.
+    # A whole stating the fields a proposal is refused for: `model_copy` skips
+    # the validation that refuses them.
     legacy = plan.model_copy(
         update={
             "evidence_requirements": tuple(

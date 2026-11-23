@@ -1893,6 +1893,9 @@ class _Build:
         States alone. A denominator so narrowed to countries alone holds no other
         country (`compiler.sources.countries_apart`). A numerator whose entity does
         not resolve on its frame is not checked, since the side check reports it.
+        A numerator source that keeps no bound party, as where the numerator names
+        a set whose members it resolves and the source binds the set's total, is
+        checked on every party it binds.
         A share whose sources are all the numerator's and whose denominator keeps
         every party its sources bind is not read, nor one whose sources are not
         all known or whose denominator sources state no identity, and a source
@@ -1942,8 +1945,11 @@ class _Build:
                 part = source_whole_side(numerator, column)
                 if part is None:
                     continue
-                kept = self._kept_parties(
-                    operation.numerator, requirement_id, numerator, column, part.bound, selected
+                kept = (
+                    self._kept_parties(
+                        operation.numerator, requirement_id, numerator, column, part.bound, selected
+                    )
+                    or part.bound
                 )
                 labels = {entity.ref: entity.label for entity in numerator.entities}
                 for party in kept:
@@ -1979,7 +1985,9 @@ class _Build:
             CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE,
             f"operation {operation.id!r} divides by a denominator that does not hold "
             f"{', '.join(dict.fromkeys(outside))}, which its numerator names, so the share "
-            f"would not be a part of its whole{whole_of}",
+            f"would not be a part of its whole{whole_of}; to divide by a figure that does "
+            "not hold the numerator, such as each donor's aid over one donor's total, use "
+            "quotient_of",
             operation_id=operation.id,
         )
 
@@ -1997,7 +2005,9 @@ class _Build:
         Each source's bound parties are narrowed to those that still reach `side`
         (`_kept_parties`). Where the entity `side` names does not resolve on its
         frame, or narrowing leaves a source no bound party there, nothing shows
-        which parties it keeps, so it holds every party it binds.
+        which parties it keeps, so it holds every party it binds. A source
+        narrowed off the total of the named set it states there no longer holds
+        that set's members.
         """
         selected = self._side_selection(op_id, side)
         whole: list[WholeSide] = []
@@ -2010,7 +2020,9 @@ class _Build:
                 side, requirement_id, source, column, held.bound, selected or None
             )
             if kept and kept != held.bound:
-                held = held._replace(bound=kept)
+                # A named set holds its members only while its total is kept.
+                group = held.group if held.group is not None and held.group.total in kept else None
+                held = held._replace(bound=kept, group=group)
                 narrowed = True
             whole.append(held)
         return whole, narrowed
@@ -2032,8 +2044,9 @@ class _Build:
         filter between the retrieval and `side` keeps none of the labels
         `source` resolves it under on `column` (`_retained_labels`). A party
         `source` resolves no label for on `column` stays, since no filter can
-        name it. A filter behind a verb that reads several inputs, such as a
-        `sum_of`, is not walked, so the parties it drops stay.
+        name it. Filters are read only where `side.input` reaches the retrieval
+        through single-input operations; behind a verb that reads several
+        inputs, such as a `share_of` or a `sum_of`, every bound party stays.
         """
         kept = bound
         if selected is not None and selected[0] == column:
@@ -2042,15 +2055,33 @@ class _Build:
         retrieved = self.shapes.get(retrieve_id) if retrieve_id is not None else None
         columns = retrieved.columns if retrieved is not None else ()
         role = next((one for one in columns if one.column == column), None)
-        if role is None:
+        if (
+            role is None
+            or retrieve_id is None
+            or not self._single_input_chain(side.input, retrieve_id)
+        ):
             return kept
         labels = self._retained_labels(side.input, role)
-        dropped = {
+        resolved = {entity.ref for entity in source.entities if entity.role == column}
+        retained = {
             entity.ref
             for entity in source.entities
-            if entity.role == column and entity.label.casefold() not in labels
+            if entity.role == column and entity.label.casefold() in labels
         }
-        return tuple(party for party in kept if party not in dropped)
+        return tuple(party for party in kept if party not in resolved - retained)
+
+    def _single_input_chain(self, op_id: str, target: str) -> bool:
+        """Whether `op_id` reads `target` through single-input operations alone, or is it."""
+        seen: set[str] = set()
+        while op_id not in seen:
+            if op_id == target:
+                return True
+            seen.add(op_id)
+            operation = self.operations.get(op_id)
+            if not isinstance(operation, _SINGLE_INPUT):
+                return False
+            op_id = operation.input
+        return False
 
     def _side_selection(
         self, op_id: str, side: Side
