@@ -158,7 +158,7 @@ from harness.studio_translate import (
     recorded_fatal,
 )
 from harness.turn import transcript as entries
-from harness.turn.events import Paused, TurnEvent, TurnFailed
+from harness.turn.events import Paused, TurnEvent, TurnFailed, pause_state
 from harness.turn.loop import (
     Answer,
     Graph,
@@ -1116,7 +1116,7 @@ class _SegmentWork:
                     interrupt_id=pause.interrupt_id,
                     round=pause.round,
                     payload=pause.payload,
-                    state=self._cursor.state,
+                    state=pause_state(self._cursor.state),
                 )
             )
             return Segment(cursor=self._cursor, outcome=Outcome.PAUSED)

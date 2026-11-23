@@ -37,6 +37,7 @@ from harness.graph.state import (
     unit_row_offers,
 )
 from harness.turn.node import Next, Node, NodeCtx, Pause
+from harness.wire import UnitOffer
 
 logger = logging.getLogger(__name__)
 
@@ -90,26 +91,28 @@ def offer(
 
             ctx.after_commit(start_retrievals)
     state = cast(SessionState, ctx.state)
-    on_record = stored_plan(state.get("plan"), state_key="plan")
-    slots = {decision.get("slot") for decision in node_input.get("decisions") or ()}
-    offers = (
-        {
-            slot: offer
-            for slot, offer in unit_row_offers(
-                state,
-                statement(
-                    on_record,
-                    to_origin=windowed_origins(state),
-                    alignments=alignments(state),
-                ),
-            ).items()
-            if slot in slots
-        }
-        if on_record is not None
-        else {}
-    )
-    save_card_unit_offers(state, node_input.get("revision"), offers)
+    revision = node_input.get("revision")
+    try:
+        offers = _card_unit_offers(state, node_input)
+    except Exception:
+        # The unit picker is an extra on the card: a plan it cannot read
+        # still pauses for approval, its unit rows offering no switch.
+        logger.exception("plan card unit offers not built: revision=%s", revision)
+        offers = {}
+    save_card_unit_offers(state, revision, offers)
     return Pause(kind=APPROVE_PAUSE, payload=node_input, message=APPROVE_MESSAGE)
+
+
+def _card_unit_offers(state: SessionState, node_input: Mapping[str, Any]) -> dict[str, UnitOffer]:
+    """The units each row of the plan card `node_input` for a unit
+    question's whole unit offers, by its slot, read off the plan on record
+    as the planner states it (`harness.graph.state.unit_row_offers`)."""
+    on_record = stored_plan(state.get("plan"), state_key="plan")
+    if on_record is None:
+        return {}
+    slots = {decision.get("slot") for decision in node_input.get("decisions") or ()}
+    stated = statement(on_record, to_origin=windowed_origins(state), alignments=alignments(state))
+    return {slot: offer for slot, offer in unit_row_offers(state, stated).items() if slot in slots}
 
 
 def decide(

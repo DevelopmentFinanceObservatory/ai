@@ -778,8 +778,9 @@ async def _switched_unit(
             no requirement cites it, the row offers no unit, or the unit
             picked lies outside its offer or is the one it holds; as
             Search's refusal says (`harness.unit_switch.UnitRefused`) when
-            it cannot read a pin in the unit; and as the revision's refusal
-            when it is refused.
+            it cannot read a pin in the unit, or for now a series of a part
+            the plan does not read; and as the revision's refusal when it
+            is refused.
     """
     state = cast(SessionState, ctx.state)
     if not any(d.slot == slot for d in plan.decisions):
@@ -941,17 +942,22 @@ async def _reread_unread(
     *,
     surface: ToolSurface,
     readings: Sequence[SearchReading],
-) -> UnitResubmitted | None:
+) -> UnitResubmitted | UnitRefused | None:
     """`_reread_pin` for the series a unit question's answer fetched for a
     part of the row the plan does not read: `None` when no block on record
-    states it or Search refuses it in `unit`. The row offers what its pins
-    convert into (`harness.graph.state.unit_row_offers`), so such a part
-    cannot hold the switch back; with no read in `unit`, it sits on no row
-    (`submission.prices_choice.plan_held_choices`)."""
+    states it or Search refuses it in `unit` for good. The row offers what
+    its pins convert into (`harness.graph.state.unit_row_offers`), so such a
+    part cannot hold the switch back; with no read in `unit`, it sits on no
+    row (`submission.prices_choice.plan_held_choices`). A refusal the same
+    switch can escape (`UnitRefused.retryable`) is answered as it stands, so
+    the switch fails and can be asked again, and the part is not left off
+    the row by a passing fault."""
     if pin_block(cast(SessionState, ctx.state), series) is None:
         return None
     read = await _reread_pin(ctx, series, unit, surface=surface, readings=readings)
-    return read if isinstance(read, UnitResubmitted) else None
+    if isinstance(read, UnitRefused):
+        return read if read.retryable else None
+    return read
 
 
 def _count_reading(reading: SearchReading | None, block: Mapping[str, Any]) -> SearchReading | None:

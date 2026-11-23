@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
@@ -49,6 +50,7 @@ from executor.outcomes import Accepted
 from executor.run import execute_approved_plan
 from fastmcp import Client
 from harness.decision_pick import DecisionPick
+from harness.graph import approve as approve_module
 from harness.graph import switch as switch_module
 from harness.graph.approve import offer
 from harness.graph.state import (
@@ -2492,7 +2494,12 @@ class _UnitRevisingPlanner(_Planner):
 
 class _RefusingEarlyWindow(_UnitSearch):
     """`_UnitSearch` refusing, as Search refuses an option it does not serve,
-    the part read over 2010 to 2014 alone."""
+    the part read over 2010 to 2014 alone, or, `for_now`, as a Search that
+    could not answer just now refuses it."""
+
+    def __init__(self, *, for_now: bool = False) -> None:
+        super().__init__()
+        self.for_now = for_now
 
     async def call_tool(
         self, *, tool: ToolId, arguments: Any, on_progress: ProgressCallback | None = None
@@ -2500,11 +2507,12 @@ class _RefusingEarlyWindow(_UnitSearch):
         window = arguments["identity"].get("requested_window") or {}
         if window.get("start") == 2010:
             self.posted.append(dict(arguments))
-            return ToolCallResult(
-                is_error=True,
-                structured_content={"code": "requested_option_unavailable"},
-                text="refused",
+            refusal = (
+                {"code": "upstream_unavailable", "retry_mode": "retry_after_delay"}
+                if self.for_now
+                else {"code": "requested_option_unavailable"}
             )
+            return ToolCallResult(is_error=True, structured_content=refusal, text="refused")
         return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
 
 
@@ -2614,7 +2622,9 @@ class _StoppedUnitRevisingPlanner(_UnitRevisingPlanner):
 
 
 @pytest.mark.parametrize(
-    "early", ["read", "refused", "no-block", "stopped"], ids=lambda early: early
+    "early",
+    ["read", "refused", "refused-for-now", "no-block", "stopped"],
+    ids=lambda early: early,
 )
 async def test_a_unit_row_switch_reads_a_window_the_plan_left_out_in_the_unit(
     early: str,
@@ -2627,7 +2637,9 @@ async def test_a_unit_row_switch_reads_a_window_the_plan_left_out_in_the_unit(
     window is pinned to it. The row offers what its pins convert into, so
     when Search refuses the early window, or no block on record states its
     series, the switch lands all the same and records nothing for it. A
-    switch the user stops records nothing."""
+    Search that could not answer for the early window just now fails the
+    switch, which asking again can escape, so no passing fault leaves the
+    window off the row. A switch the user stops records nothing."""
     plan = _unit_plan()
     plan = plan.model_copy(
         update={
@@ -2640,7 +2652,11 @@ async def test_a_unit_row_switch_reads_a_window_the_plan_left_out_in_the_unit(
     state[UNIT_ROWS_STATE_KEY] = {_UNIT_SLOT: {_FK_GROSS: ["recent"]}}
     if early == "no-block":
         del state[ORCHESTRATOR_SPECS_KEY][_READ_EARLY]
-    search = _RefusingEarlyWindow() if early == "refused" else _UnitSearch()
+    search = (
+        _RefusingEarlyWindow(for_now=early == "refused-for-now")
+        if early.startswith("refused")
+        else _UnitSearch()
+    )
     unit = {**_USD_2023, "base_year": 2015}
     planner = _StoppedUnitRevisingPlanner() if early == "stopped" else _UnitRevisingPlanner()
     node = switch_module.switch_node(planner=cast(Any, planner), definition_surface=search)
@@ -2664,6 +2680,11 @@ async def test_a_unit_row_switch_reads_a_window_the_plan_left_out_in_the_unit(
     assert _requested_units(search) == [unit] * len(search.posted)
     if early == "stopped":
         assert offered["switch_failed"]["code"] == SWITCH_CANCELLED
+        assert units_reread(state) == {}
+        return
+    if early == "refused-for-now":
+        assert offered["switch_failed"]["retryable"] is True
+        assert planner.revisions == []
         assert units_reread(state) == {}
         return
     assert "switch_failed" not in offered, offered.get("switch_failed")
@@ -3282,6 +3303,32 @@ async def test_a_unit_row_offers_what_the_series_a_scope_switch_read_converts_in
     PlannerPlan.model_validate(
         {key: value for key, value in card.payload.items() if key not in _OLDER_CARD_KEYS}
     )
+
+
+def test_a_card_whose_unit_offers_cannot_be_built_pauses_with_no_unit_picker(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The plan card's unit row offers a switch. When building that offer
+    raises, the card still pauses for approval, unchanged, with no offer
+    recorded beside it, so its unit row shows no picker, and the error is
+    logged with the card's revision."""
+    plan = _unit_plan()
+    payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
+    shown = node_ctx(state=_unit_state(plan))
+    offer(shown, payload, early_mints=None)
+    assert card_unit_offers(shown.state, payload["revision"])
+
+    def unreadable(*args: object, **kwargs: object) -> dict[str, object]:
+        raise ValueError("a unit conversion entry this release does not read")
+
+    monkeypatch.setattr(approve_module, "unit_row_offers", unreadable)
+    ctx = node_ctx(state=_unit_state(plan))
+    with caplog.at_level(logging.ERROR, logger=approve_module.__name__):
+        card = offer(ctx, payload, early_mints=None)
+
+    assert (card.kind, card.payload) == ("approve", payload)
+    assert card_unit_offers(ctx.state, payload["revision"]) == {}
+    assert any(payload["revision"] in record.getMessage() for record in caplog.records)
 
 
 async def test_a_unit_row_switch_reads_the_count_picked_beside_the_unit_again() -> None:

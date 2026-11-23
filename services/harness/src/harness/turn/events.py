@@ -8,6 +8,7 @@ is their union.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,13 +24,29 @@ class NodeDone:
     output: Any = None
 
 
+# The turn-state key holding the units each unit row of the plan card the
+# `approve` node paused on offers, which the node records beside its pause
+# (`harness.graph.state.save_card_unit_offers`).
+APPROVE_UNIT_OFFERS_KEY = "approve:unit_offers"
+# The turn-state keys a pause's report carries (`Paused.state`).
+_REPORTED_KEYS = (APPROVE_UNIT_OFFERS_KEY,)
+
+
+def pause_state(state: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of the entries of `state` a pause's report carries
+    (`Paused.state`), as they stand when the pause commits."""
+    return {key: copy.deepcopy(state[key]) for key in _REPORTED_KEYS if key in state}
+
+
 @dataclass(frozen=True)
 class Paused:
     """The turn paused on a question of `kind` to the user under the wire id
     `interrupt_id`, as its pause `round`. Emitted once the cursor that holds
-    the pause committed. `state` is the turn's state the pause committed
-    with, held in process only: what the pause's node recorded beside its
-    payload (`harness.graph.state.card_unit_offers`)."""
+    the pause committed. `state` is a copy, held in process only, of the
+    entries of the turn's state the pause committed with that its node
+    recorded beside its payload (`pause_state`): the plan card's unit offers
+    (`harness.graph.state.card_unit_offers`). Later writes to the turn's
+    state do not reach it."""
 
     kind: str
     interrupt_id: str

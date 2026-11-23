@@ -41,6 +41,7 @@ from submission.prices_choice import UNIT_SLOT_PREFIX, measure_key, plan_unit
 from harness.tool_contracts import (
     reading_facts,
 )
+from harness.turn.events import APPROVE_UNIT_OFFERS_KEY
 from harness.turn.store import SPECS_KEY, FrameKey, FrameKeys
 from harness.turn_records import Origin, PricesForm, SearchReading, open_prices, prices_form
 from harness.unit_offer import offered_unit_refusal, unit_offer
@@ -184,11 +185,6 @@ ASK_FOR_QUESTION_KEY = "orchestrator:ask_for_question"
 # is set only while such a replan is paused. Outside the drafting prefixes
 # the restore resets (`harness.graph.switch._DRAFTING_PREFIXES`).
 PICK_REPLAN_KEY = "switch:pick_replan"
-# The units each unit row of the plan card the `approve` node paused on
-# offers, by the row's slot, with the revision of that card's plan
-# (`harness.graph.approve.offer`, `card_unit_offers`). They sit beside the
-# pause, since a pause's payload is read back as a plan.
-APPROVE_UNIT_OFFERS_KEY = "approve:unit_offers"
 # The status a plan hand-back carries when the planner made no plan, and
 # when the approved plan ran; `studio_translate._Translator` shows the first as
 # a failed step and the second as nothing.
@@ -538,7 +534,10 @@ def save_card_unit_offers(
     state: SessionState, revision: object, offers: Mapping[str, UnitOffer]
 ) -> None:
     """Record `offers` as the units the rows of the plan card of `revision`
-    offer (`APPROVE_UNIT_OFFERS_KEY`), or clear the record when none does."""
+    offer (`harness.turn.events.APPROVE_UNIT_OFFERS_KEY`), or clear the
+    record when none does. They sit beside the pause, since a pause's
+    payload is read back as a plan, and its report carries a copy
+    (`harness.turn.events.Paused.state`)."""
     if not offers:
         if state.get(APPROVE_UNIT_OFFERS_KEY) is not None:
             state[APPROVE_UNIT_OFFERS_KEY] = None
