@@ -49,6 +49,7 @@ from harness.graph.state import (
     UnitAsk,
     ask_candidates,
     ask_questions,
+    count_block,
     pending_action,
     priced_options,
     record_unit_read,
@@ -366,16 +367,6 @@ def _latest_reading(state: Any, spec_id: str) -> SearchReading | None:
     return None
 
 
-def _count_block(block: Mapping[str, Any], count: str) -> dict[str, Any] | None:
-    """`block` with the definition of `count`, another count it offers
-    (`resolved.alternative_measures`), in place of its own; `None` when it offers none."""
-    for alternative in (block.get("resolved") or {}).get("alternative_measures") or ():
-        definition = alternative.get("definition") if isinstance(alternative, Mapping) else None
-        if isinstance(definition, Mapping) and definition.get("spec_id") == count:
-            return {**block, "definition": dict(definition)}
-    return None
-
-
 @dataclass(frozen=True)
 class UnitRead:
     """What `read_part_in_unit` did for a part: `label`, the part's name in
@@ -397,6 +388,7 @@ async def read_part_in_unit(
     *,
     group: str,
     count: str | None = None,
+    scope_of: str | None = None,
 ) -> UnitRead:
     """Settle `part`, which the unit question led by `group` covers, in
     `unit`: the part as it stands when served in that
@@ -405,7 +397,9 @@ async def read_part_in_unit(
     of it. With `count`, another count of the part the user picked in the same
     pause, the count's definition is re-read in place of the part's, with the
     part's reading for its roles and named sets; the part's scope base is
-    left out, since it compiles the part's own count.
+    left out, since it compiles the part's own count. With `scope_of`, the
+    series a scope switch moved the part to, the part is re-read with the
+    scope of that series' newest reading, so the switch stands.
 
     The part, and the count, are settled on every path, so the question is
     not asked of them again, and the series fetched for the part is recorded
@@ -416,15 +410,16 @@ async def read_part_in_unit(
     block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(part) or {}
     reading = _latest_reading(state, part)
     label = (reading.text if reading is not None else None) or part
-    target, target_block, resubmitted = part, block, reading
-    if count is not None and (counted := _count_block(block, count)) is not None:
+    scoped = _latest_reading(state, scope_of) if scope_of is not None else None
+    target, target_block, resubmitted = part, block, scoped or reading
+    if count is not None and (counted := count_block(block, count)) is not None:
         target, target_block = count, counted
-        if reading is not None:
-            resubmitted = reading.model_copy(update={"scope": None})
+        if resubmitted is not None:
+            resubmitted = resubmitted.model_copy(update={"scope": None})
     settle_unit(state, part, target)
     served = served_unit(target_block)
     read_count = target if target != part else None
-    if count is None and served == unit:
+    if count is None and scoped is None and served == unit:
         record_unit_served(state, part, part, unit, group=group, chosen=unit)
         return UnitRead(label, target, served, None)
     result = await resubmit_unit(
@@ -435,12 +430,28 @@ async def read_part_in_unit(
         label=label,
     )
     if isinstance(result, UnitRefused):
-        record_unit_served(state, part, target, served, group=group, chosen=unit, count=read_count)
+        record_unit_served(
+            state,
+            part,
+            target,
+            served,
+            group=group,
+            chosen=unit,
+            count=read_count,
+            scope_of=scope_of,
+        )
         return UnitRead(label, target, served, result)
     settle_unit(state, result.spec_id)
     record_unit_read(state, part, result.spec_id)
     record_unit_served(
-        state, part, result.spec_id, unit, group=group, chosen=unit, count=read_count
+        state,
+        part,
+        result.spec_id,
+        unit,
+        group=group,
+        chosen=unit,
+        count=read_count,
+        scope_of=scope_of,
     )
     digest = resolver_digest({"parts": [dict(result.part)]})
     for read in digest.get("part_digests") or ():

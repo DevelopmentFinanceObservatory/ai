@@ -65,7 +65,10 @@ fails the whole switch. A row stating a part's whole unit under the part's
 own prices slot (`submission.prices_choice.prices_slot`) cannot be switched,
 nor can a unit row no part is recorded on (`harness.graph.state.
 ServedUnit.row`), as when the parts are recorded with no group or no unit
-chosen.
+chosen. A count or scope switch that moves the series a unit question's part
+is fetched as records the part as read in that count or with that scope
+(`harness.graph.state.move_unit_served`), so a later switch of its unit row
+re-reads the series the plan pins.
 
 A switch Search refuses (`requested_option_unavailable`,
 `conflicting_requested_options`), or one that fails anywhere else, offers
@@ -151,6 +154,7 @@ from harness.graph.state import (
     ORCHESTRATOR_UNIT_SETTLED_KEY,
     ServedUnit,
     conversation_readings,
+    move_unit_served,
     readable_plan,
     stated_unit,
     store_search,
@@ -611,6 +615,14 @@ async def _switched_plan(
             held_open=[item.reading.open_roles],
             share_sides=[item.reading.share_over],
         )
+    move_unit_served(
+        state,
+        {
+            part: served.model_copy(update={"spec_id": new, "scope_of": new})
+            for part, served in units_served(state).items()
+            if (new := moved_to.get(served.spec_id)) is not None
+        },
+    )
     logger.info(
         "plan switched: choice_id=%s option_id=%s sources=%d version=%d",
         choice_id,
@@ -654,7 +666,9 @@ async def _switched_count(
     (`planner.plan.repinned`) in one revision, and the plan is revised with
     no model call, the user's pick of each count held
     (`PlannerModel.revise`'s `picked`), so the measure decision admission
-    writes for each new pin is the user's. Nothing else moves.
+    writes for each new pin is the user's. A unit question's part fetched
+    as a pin that moves is recorded as read in that count (`_counted_parts`).
+    Nothing else moves.
 
     Raises:
         SwitchFailedError: If the row offers no count under `option_id`, no
@@ -712,6 +726,7 @@ async def _switched_count(
         )
     revised_plan = PlannerPlan.model_validate(revised["plan"])
     ctx.state["plan"] = revised_plan.model_dump_json()
+    move_unit_served(state, _counted_parts(ctx, moves, label=label))
     logger.info(
         "plan count switched: choice_id=%s moves=%s version=%d",
         choice_id,
@@ -747,7 +762,8 @@ async def _switched_unit(
     nor re-pinned. The row's offer is the one the card showed,
     recomputed from state (`harness.graph.state.unit_row_offers`). Each part
     is read in the unit picked at once (`read_part_in_unit`), the count read
-    in its place re-read again in its place, and every requirement citing the
+    in its place re-read again in its place and a scope a switch moved it to
+    kept (`ServedUnit.scope_of`), and every requirement citing the
     row, as the planner states it (`submission.service.statement`), is
     re-pinned to the series the part it reads (`_covering_members`) is
     fetched as now (`planner.plan.repinned`) and states the unit. The plan is
@@ -786,7 +802,15 @@ async def _switched_unit(
         raise _choice_gone()
     member_of = _covering_members(state, covered, members)
     reads = await run_together(
-        read_part_in_unit(state, surface, part, picked, group=lead, count=served.count)
+        read_part_in_unit(
+            state,
+            surface,
+            part,
+            picked,
+            group=lead,
+            count=served.count,
+            scope_of=served.scope_of,
+        )
         for part, served in members.items()
     )
     refused = next((read.result for read in reads if isinstance(read.result, UnitRefused)), None)
@@ -840,6 +864,27 @@ async def _switched_unit(
         "revision": plan_revision(revised_plan),
         "moved": [],
     }
+
+
+def _counted_parts(
+    ctx: NodeCtx[GraphEvent], moves: Mapping[str, str], *, label: str
+) -> dict[str, ServedUnit]:
+    """The record of each unit question's part fetched as a pin a count
+    switch moves (`moves`, old pin to new) to the count `label`: fetched as
+    the new pin and read as the part's own count of that label
+    (`_count_spec_ids`), `None` when the label is the part's own count. A
+    part offering no count of that label keeps its record, so its unit row
+    cannot be switched rather than re-read in the count it left."""
+    moved: dict[str, ServedUnit] = {}
+    for part, served in units_served(cast(SessionState, ctx.state)).items():
+        if (new := moves.get(served.spec_id)) is None:
+            continue
+        if (count := _count_spec_ids(ctx, part).get(label)) is None:
+            continue
+        moved[part] = served.model_copy(
+            update={"spec_id": new, "count": count if count != part else None}
+        )
+    return moved
 
 
 def _covering_members(

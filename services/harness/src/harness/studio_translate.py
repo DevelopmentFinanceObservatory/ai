@@ -1309,10 +1309,14 @@ def _unit_members(decision: Decision, offer: UnitOffer) -> dict[str, Any]:
     unit `decision`: its row id, `offer` as `unit`, and as options the whole
     units a client that renders no unit picker switches between
     (`row_units`), each labelled in words (`unit_words`), status
-    "available", the offer's start active."""
+    "available", the offer's start active. Its `chosen` is the start in
+    those words and its `alternatives` every option's label, so the row
+    reads as its options do."""
     units = row_units(offer)
     start = unit_option_id(offer.start)
     return {
+        "chosen": unit_words(offer.start, offer),
+        "alternatives": [unit_words(unit, offer) for unit in units.values()],
         "choice_id": plan_display.decision_choice_id(decision),
         "active_option_id": start,
         "options": [
@@ -2554,31 +2558,36 @@ class _Translator:
                 for row in plan_display.ask_rows(plan)
             ]
             decisions = [
-                PlanDecision(
-                    id=decision.get("slot", f"d{index + 1}"),
-                    question=questions[decision.get("slot", "")],
-                    chosen=option_named(decision.get("chosen", ""), decision=held, options=offered),
-                    alternatives=(
-                        [
-                            option_named(option, decision=held, options=offered)
-                            for option in decision["options"]
-                        ]
-                        if decision.get("options") is not None
-                        else None
-                    ),
-                    # A reason saying only that Search's default holds says nothing.
-                    reason=""
-                    if _search_default(held)
-                    else named(decision.get("rationale", ""), decision=held),
-                    resolved_by=_RESOLVED_BY_TO_WIRE.get(
-                        decision.get("resolved_by", ""), "default"
-                    ),
-                    **_choice_members(
-                        held,
-                        plan,
-                        functools.partial(option_named, decision=held, options=offered),
-                        unit_offers,
-                    ),
+                PlanDecision.model_validate(
+                    {
+                        "id": decision.get("slot", f"d{index + 1}"),
+                        "question": questions[decision.get("slot", "")],
+                        "chosen": option_named(
+                            decision.get("chosen", ""), decision=held, options=offered
+                        ),
+                        "alternatives": (
+                            [
+                                option_named(option, decision=held, options=offered)
+                                for option in decision["options"]
+                            ]
+                            if decision.get("options") is not None
+                            else None
+                        ),
+                        # A reason saying only that Search's default holds says nothing.
+                        "reason": ""
+                        if _search_default(held)
+                        else named(decision.get("rationale", ""), decision=held),
+                        "resolved_by": _RESOLVED_BY_TO_WIRE.get(
+                            decision.get("resolved_by", ""), "default"
+                        ),
+                        # A unit row words its choice and alternatives as its options.
+                        **_choice_members(
+                            held,
+                            plan,
+                            functools.partial(option_named, decision=held, options=offered),
+                            unit_offers,
+                        ),
+                    }
                 )
                 for index, decision in enumerate(payload.get("decisions", []))
                 if decision.get("slot") in questions

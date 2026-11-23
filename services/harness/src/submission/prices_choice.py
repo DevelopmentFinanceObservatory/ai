@@ -343,16 +343,14 @@ class Parts:
         measuring what it measures (`_measures`), whatever the shown order,
         else the first such reading. Readings differing only in window are
         one part; another count or currency is another measure, save the
-        currency a whole unit the user chose holds a priced reading to
-        (`held`): a reading measuring what that reading measures in that
-        currency is that reading's part, so the user's unit holds it."""
+        currency a whole unit the user chose holds a part to (`held`), a
+        part in constant prices included: a reading measuring what that part
+        measures in that currency is that part's, so the user's unit holds it."""
         holder = next(
             (
                 one
-                for one in self._readings
-                if one in self.held
-                and one != reading
-                and reading in self.same_measure(one, self.held[one])
+                for one, currency in self.held.items()
+                if one != reading and reading in self.same_measure(one, currency)
             ),
             None,
         )

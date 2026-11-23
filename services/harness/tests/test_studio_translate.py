@@ -827,8 +827,9 @@ def test_a_unit_question_s_row_offers_its_unit_and_the_whole_units_beside_it(
     the start's currency, the start active, or the start first and then both
     bases of a currency serving both. With no currency serving both, the
     start is the one whole unit, and the row still switches, to any other
-    unit its offer holds. A part's own whole-unit prices row, with no offer,
-    still offers no switch."""
+    unit its offer holds. The row's choice and alternatives read as its
+    options. A part's own whole-unit prices row, with no offer, still
+    offers no switch."""
     plan = _us_health_share()
     dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
     row = Decision(
@@ -878,6 +879,10 @@ def test_a_unit_question_s_row_offers_its_unit_and_the_whole_units_beside_it(
     assert [(o.option_id, o.label, o.status) for o in unit_row.options or ()] == [
         (option_id, label, "available") for option_id, label in options
     ]
+    assert (unit_row.chosen, unit_row.alternatives) == (
+        options[0][1],
+        [label for _, label in options],
+    )
     assert (rows[own.slot].choice_id, rows[own.slot].unit) == (None, None)
     assert PlanAction.SWITCH in card.actions
     (pending,) = translator._conversation.pending.values()

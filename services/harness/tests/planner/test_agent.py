@@ -13263,6 +13263,78 @@ def test_a_unit_answer_holds_every_window_of_the_measure_its_question_covers(
     ] == [1, 1]
 
 
+_CONSTANT_2015 = "spec_" + "c1" * 16
+_CONSTANT_2015_EUR = "spec_" + "c2" * 16
+_EUR_WINDOW = "spec_" + "c3" * 16
+
+
+def test_a_planner_window_in_the_currency_a_constant_part_is_held_to_cites_the_unit_row(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The unit question covers the gross part, a search's reading in
+    constant 2015 US dollars. The user chose current euros, and Search
+    re-read the part in them. The planner pins a window of the same measure
+    in current euros a search found apart. That window is the part's, so
+    its requirement cites the unit row, beside the part's re-read series."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    part = _constant_block()
+    part["spec_id"] = part["definition"]["spec_id"] = _CONSTANT_2015
+    part["resolved"]["facets"]["unit"] = {
+        **part["resolved"]["facets"]["unit"],
+        "ref": "ConstantUSD_2015",
+        "label": "Constant 2015 US Dollar",
+    }
+    window = _read_in(_EUR_WINDOW, _EUR)
+    window["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    _show_blocks(ctx, part, _read_in(_CONSTANT_2015_EUR, _EUR), window)
+    eur = UnitChoice.model_validate(_EUR)
+    record_unit_read(ctx.state, _CONSTANT_2015, _CONSTANT_2015_EUR)
+    record_unit_served(
+        ctx.state, _CONSTANT_2015, _CONSTANT_2015_EUR, eur, group=_CONSTANT_2015, chosen=eur
+    )
+    question = {**_UNIT_QUESTION, "unit": {**_UNIT_QUESTION["unit"], "parts": [_CONSTANT_2015]}}
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+        user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+    dataset, _ = requirements
+    in_eur = {"unit": Unit(**_EUR)}
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [
+            dataset.model_copy(
+                update={"id": "all", "source_spec_id": _CONSTANT_2015_EUR, **in_eur}
+            ),
+            dataset.model_copy(
+                update={
+                    "id": "recent",
+                    "source_spec_id": _EUR_WINDOW,
+                    "period": Period(start=2020, end=2024),
+                    **in_eur,
+                }
+            ),
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    row = f"user_unit_{_CONSTANT_2015}"
+    assert [row in plan.requirement(rid).decision_ids for rid in ("all", "recent")] == [
+        True,
+        True,
+    ]
+
+
 _EUR_WHOLE = "spec_" + "4" * 32
 
 
@@ -13357,7 +13429,7 @@ def test_a_window_the_planner_pins_in_the_unit_the_user_answered_falls_under_tha
         ("unit", False, ["user_unit"], ["user_unit"]),
         ("none", False, ["currency_unit"], ["currency_unit"]),
         ("bare-prices", False, ["currency_unit"], ["currency_unit"]),
-        ("unit", True, ["user_unit"], ["currency_unit", "user_unit"]),
+        ("unit", True, ["user_unit"], ["user_unit"]),
     ],
     ids=["unit-answered", "no-answer", "bare-prices-answered", "unit-and-measure"],
 )
@@ -13371,11 +13443,10 @@ def test_a_planner_decision_stating_the_unit_the_user_answered_goes_from_the_pla
 ) -> None:
     """The user chose current euros for both windows of the gross part. The
     planner states that unit a second time, in a decision of its own cited
-    by both windows. Fixing `unit` alone, the plan lands with the user's
-    answer as the one decision on the unit, and neither window cites the
-    planner's. Fixing the measure too, both windows still cite it, and it
-    fixes the measure alone, so a switch of the user's unit leaves it true.
-    With no unit answer, or a bare current prices answer, which holds no
+    by both windows, fixing `unit` alone or the measure too. The plan lands
+    with the user's answer as the one decision on the unit, and neither
+    window cites the planner's, which goes with no citation left. With no
+    unit answer, or a bare current prices answer, which holds no
     currency, the planner's decision stating the unit stands, cited by the
     requirements it fixes."""
     tools = _tools_by_name()
@@ -13460,18 +13531,66 @@ def test_a_planner_decision_stating_the_unit_the_user_answered_goes_from_the_pla
         [slot for slot in plan.requirement(rid).decision_ids if slot in named.values()]
         for rid in ("all", "recent")
     ] == [[named[slot] for slot in cited]] * 2
-    if not with_measure:
-        return
-    kept = next(d for d in plan.decisions if d.slot == "currency_unit")
-    assert kept.fixes is not None
-    assert kept.fixes.measure == dataset.measure
 
-    # The user's unit row is switched to current US dollars, which both
-    # windows are served in: the revision lands with the planner's decision
-    # still cited.
+
+_DE_KENYA_EUR = "spec_" + "d1" * 16
+
+
+def test_a_planner_unit_decision_stays_whole_on_a_requirement_the_user_s_unit_does_not_hold(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose current euros for the gross part, which Search re-read
+    in them. The planner pins it in euros beside aid from Germany to Kenya
+    in euros, which no unit question covered, both citing a decision of its
+    own fixing the unit and the measure. The gross part's requirement cites
+    the user's unit row and not the planner's decision; the other keeps
+    citing it whole. A switch of the user's row to current US dollars then
+    lands, and the planner's decision still fixes euros, the unit of the one
+    requirement citing it."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    german = _read_in(_DE_KENYA_EUR, _EUR)
+    german["definition"]["identity"]["entities"] = {
+        "destination": ["country/KEN"],
+        "origin": ["country/DEU"],
+    }
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), german)
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, _ = requirements
+    currency = decision(
+        slot="currency_unit",
+        description="Currency and price basis for the flows.",
+        options=["current euros", "current USD"],
+        chosen="current euros",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="The figures are stated in one currency.",
+        fixes=DecisionFixes(unit=Unit(**_EUR), measure=dataset.measure),
+    )
+    stated = {"unit": Unit(**_EUR), "decision_ids": ["currency_unit"]}
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        currency,
+        [
+            dataset.model_copy(update={"id": "france", "source_spec_id": _EUR_READ, **stated}),
+            dataset.model_copy(update={"id": "germany", "source_spec_id": _DE_KENYA_EUR, **stated}),
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    row = f"user_unit_{_GROSS}"
+    cites = {
+        rid: [s for s in plan.requirement(rid).decision_ids if s in {row, "currency_unit"}]
+        for rid in ("france", "germany")
+    }
+    assert cites == {"france": [row], "germany": ["currency_unit"]}
+
     usd = UnitChoice.model_validate(_USD)
-    for part in (_GROSS, _GROSS_2020):
-        record_unit_served(ctx.state, part, part, usd, group=_GROSS, chosen=usd)
+    record_unit_served(ctx.state, _GROSS, _GROSS, usd, group=_GROSS, chosen=usd)
     switched = call_planner_tool(
         tools["propose_plan"],
         question="q",
@@ -13479,17 +13598,22 @@ def test_a_planner_decision_stating_the_unit_the_user_answered_goes_from_the_pla
         amends_version=plan.version,
         decisions=[],
         evidence_requirements=[
-            plan.requirement(rid).model_copy(update={"source_spec_id": pin, "unit": Unit(**_USD)})
-            for rid, pin in (("all", _GROSS), ("recent", _GROSS_2020))
+            plan.requirement("france").model_copy(
+                update={"source_spec_id": _GROSS, "unit": Unit(**_USD)}
+            )
         ],
         tool_context=ctx,
     )
+
     assert switched["outcome"] == Outcome.OK.value, switched
     revised = load_plan(ctx.state)
     assert revised is not None
+    kept = next(d for d in revised.decisions if d.slot == "currency_unit")
+    assert kept.fixes is not None and kept.fixes.unit == Unit(**_EUR)
     assert [
-        "currency_unit" in revised.requirement(rid).decision_ids for rid in ("all", "recent")
-    ] == [True, True]
+        "currency_unit" in revised.requirement(rid).decision_ids for rid in ("france", "germany")
+    ] == [False, True]
+    assert revised.requirement("germany").unit == Unit(**_EUR)
 
 
 def test_a_carried_planner_decision_stating_the_unit_the_user_answered_goes_on_amendment(
