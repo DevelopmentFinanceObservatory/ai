@@ -682,7 +682,8 @@
       "call_id": null,
       "args": null,
       "body": {},
-      "name": null
+      "name": null,
+      "record": 0
     },
     {
       "kind": "response",
@@ -703,7 +704,8 @@
           "warnings": []
         }
       },
-      "name": "propose_plan"
+      "name": "propose_plan",
+      "record": 2
     },
     {
       "kind": "response",
@@ -724,7 +726,8 @@
           "warnings": []
         }
       },
-      "name": "propose_plan"
+      "name": "propose_plan",
+      "record": 4
     }
   ],
   "state": {

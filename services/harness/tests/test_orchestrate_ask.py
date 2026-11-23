@@ -28,6 +28,7 @@ from harness.graph.state import (
     AskQuestion,
     ServedUnit,
     ask_questions,
+    card_unit_offers,
     open_parts,
     prices_forms,
     settle_unit,
@@ -911,7 +912,8 @@ async def test_a_unit_answer_records_each_part_under_the_question_s_lead_part() 
     card = offer(ctx, {"decisions": [{"slot": row}, {"slot": own}]}, early_mints=None)
     shared = unit_offer([_FRANCE_KENYA, _other_window()])
     assert shared is not None
-    assert card.payload["unit_offers"] == {
+    offers = card_unit_offers(ctx.state, card.payload.get("revision"))
+    assert {slot: unit.model_dump(mode="json") for slot, unit in offers.items()} == {
         row: {
             **shared.model_dump(mode="json"),
             "start": {"currency": "USD", "prices": "constant", "base_year": 2020},

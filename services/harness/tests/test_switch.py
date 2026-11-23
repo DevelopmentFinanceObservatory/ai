@@ -59,6 +59,7 @@ from harness.graph.state import (
     ORCHESTRATOR_UNIT_SETTLED_KEY,
     PICK_REPLAN_KEY,
     ServedUnit,
+    card_unit_offers,
     unit_row_offers,
     units_reread,
 )
@@ -73,6 +74,7 @@ from harness.scripted_plan import scripted_fetch_series_stats
 from harness.sentences import StopCode
 from harness.settings import Settings
 from harness.studio_state import ConversationState
+from harness.turn import transcript
 from harness.turn.events import NodeDone, TurnFailed
 from harness.turn.loop import Outcome, stop_turn
 from harness.turn.node import Next, NodeCtx
@@ -80,7 +82,7 @@ from harness.turn.store import Cursor, TurnStatus
 from harness.turn_records import SearchReading
 from harness.wire import UnitChoice
 from orchestrator.call import OrchestratorCall
-from planner.call import PlannerCall
+from planner.call import PLAN_READ_STATE_KEY, PlannerCall
 from planner.plan import (
     DECISION_PICK_STATE_KEY,
     AnswerMode,
@@ -147,7 +149,7 @@ from .scope_scenarios import (
 from .scripted_genai import ScriptedGenai, call_part, reply
 from .scripted_planner import SIGNED
 from .scripted_tools import plan_call, scripted_orchestrator
-from .session_events import one_answer
+from .session_events import one_answer, turn_pause, user_answer
 from .test_orchestrate_ask import (
     _AID,
     _BOTH_BASES,
@@ -2239,6 +2241,53 @@ async def test_a_count_row_switch_repins_the_plan_to_the_other_count_with_no_sea
     assert count_choice_id(revised, moved) == row
 
 
+async def test_a_revision_landing_records_what_it_read_and_a_failed_switch_puts_it_back() -> None:
+    """A count switch's revision, admitted for real, records how many
+    transcript records it read as the point the plan on record landed
+    (`planner.call.PLAN_READ_STATE_KEY`), so a user's answer before the
+    switch reads as older than the plan it revised. A switch that then
+    fails puts the point back where it stood, with the plan."""
+    plan, state, recording = await _counted_entry()
+    (counted,) = [d for d in plan.decisions if d.slot.startswith("source_")]
+    row = count_choice_id(plan, counted)
+    state["plan"] = plan.model_dump_json()
+    state[PLAN_READ_STATE_KEY] = 1
+    read: list[object] = []
+
+    async def translate(call: PlannerCall) -> dict[str, object]:
+        read.append(call.state.get(PLAN_READ_STATE_KEY))
+        raise SwitchFailedError("The plan cannot be read.", code="plan_not_ready")
+
+    surface = entry.RecordedSurface(recording.get("tools") or {})
+    adapter = PlannerAdapter(settings=Settings(), surface=surface, translate=translate)
+    conversation = ConversationState(conversation_id="c1")
+    conversation.turn_specs = dict(state[ORCHESTRATOR_SPECS_KEY])
+    records = [
+        transcript.user_message("Total ODA to Kenya."),
+        turn_pause("approve", "int_card", {}),
+        user_answer("int_card", {"approved": None}),
+    ]
+    ctx = node_ctx(state=copy.deepcopy(state), records=records)
+    node = switch_module.switch_node(planner=cast(Any, adapter), definition_surface=surface)
+    token = current_recorded_identity.set(conversation.recorded_identity)
+    try:
+        offered = await node.run(
+            ctx,
+            {
+                "switch": {
+                    "choice_id": row,
+                    "option_id": decision_option_id("net disbursements"),
+                }
+            },
+        )
+    finally:
+        current_recorded_identity.reset(token)
+
+    assert read == [len(records)]
+    assert isinstance(offered, Next) and "switch_failed" in offered.output
+    assert ctx.state[PLAN_READ_STATE_KEY] == 1
+
+
 async def test_a_count_row_standing_for_two_pins_switches_both() -> None:
     """Germany's share of ODA to Ethiopia pins two sources, each counted as
     gross disbursements beside net, and the card lists their counts as one
@@ -3176,6 +3225,19 @@ async def test_a_unit_row_switch_after_a_scope_and_a_count_switch_keeps_both(
     assert (moved.source_spec_id, moved.unit) == (read_spec, Unit(**_USD_2023))
 
 
+# The keys beside the plan in an `approve` pause's payload that a release
+# reading no unit rows takes out before reading the rest as a plan.
+_OLDER_CARD_KEYS = (
+    "summary",
+    "revision",
+    "refusal_note",
+    "restarted",
+    "new_plan",
+    "moved",
+    "switch_failed",
+)
+
+
 async def test_a_unit_row_offers_what_the_series_a_scope_switch_read_converts_into(
     real_schemas: list[ToolSchema],
 ) -> None:
@@ -3183,7 +3245,8 @@ async def test_a_unit_row_offers_what_the_series_a_scope_switch_read_converts_in
     dollars, and the card's sector row switches it to CRS 120 and 130, which
     Search converts into constant US dollars up to base year 2020 alone. The
     card offered with the switched plan offers that range on the unit row,
-    starting on the unit the plan states."""
+    starting on the unit the plan states, beside a pause that holds the
+    plan card alone."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     plan = _unit_scoped_plan(pin, scope, schemas=real_schemas)
@@ -3210,9 +3273,15 @@ async def test_a_unit_row_offers_what_the_series_a_scope_switch_read_converts_in
     assert "switch_failed" not in by_scope.output, by_scope.output.get("switch_failed")
     card = offer(ctx, by_scope.output, early_mints=None)
 
-    (currency,) = card.payload["unit_offers"][row]["currencies"]
+    unit = card_unit_offers(ctx.state, card.payload["revision"])[row].model_dump(mode="json")
+    (currency,) = unit["currencies"]
     assert (currency["code"], currency["base_year_max"]) == ("USD", 2020)
-    assert card.payload["unit_offers"][row]["start"] == {**_USD, "base_year": None}
+    assert unit["start"] == {**_USD, "base_year": None}
+    # The stored pause is the plan card alone, which a release reading no
+    # unit rows still reads back as a plan.
+    PlannerPlan.model_validate(
+        {key: value for key, value in card.payload.items() if key not in _OLDER_CARD_KEYS}
+    )
 
 
 async def test_a_unit_row_switch_reads_the_count_picked_beside_the_unit_again() -> None:

@@ -752,7 +752,8 @@
       "call_id": null,
       "args": null,
       "body": {},
-      "name": null
+      "name": null,
+      "record": 0
     },
     {
       "kind": "call",
@@ -761,7 +762,8 @@
         "message": "Which source did you mean?"
       },
       "body": {},
-      "name": null
+      "name": null,
+      "record": 1
     },
     {
       "kind": "answer",
@@ -772,7 +774,8 @@
       "body": {
         "result": "2020"
       },
-      "name": null
+      "name": null,
+      "record": 4
     },
     {
       "kind": "response",
@@ -793,7 +796,8 @@
           "warnings": []
         }
       },
-      "name": "propose_plan"
+      "name": "propose_plan",
+      "record": 6
     }
   ],
   "state": {

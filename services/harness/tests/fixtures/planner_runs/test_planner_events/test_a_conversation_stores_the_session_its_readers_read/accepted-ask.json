@@ -155,7 +155,8 @@
       "call_id": null,
       "args": null,
       "body": {},
-      "name": null
+      "name": null,
+      "record": 0
     },
     {
       "kind": "call",
@@ -164,7 +165,8 @@
         "message": "Which donor do you mean?"
       },
       "body": {},
-      "name": null
+      "name": null,
+      "record": 1
     }
   ],
   "frames": [

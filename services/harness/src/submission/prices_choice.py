@@ -210,9 +210,9 @@ class PricesAnswers(NamedTuple):
     """What the user answered on prices, read off a planner call's steps in
     one walk (`planner.call.prices_answers`): `chosen`, the choices by part
     (`planner.call.prices_chosen`); `fresh`, the parts of `chosen` set since
-    the plan on record landed; and `released`, whether the user typed a
-    message or amended the plan card since it landed, which releases its
-    unit rows (`plan_held_choices`)."""
+    the plan on record was recorded (`planner.call.PLAN_READ_STATE_KEY`);
+    and `released`, whether the user typed a message or amended the plan
+    card since then, which releases its unit rows (`plan_held_choices`)."""
 
     chosen: Mapping[str, PricesChoice]
     fresh: frozenset[str] = frozenset()
@@ -275,7 +275,7 @@ def plan_held_choices(
     every member of the row with a series in U holds U, whether or not
     `choices` still holds a choice for it, as in a switch's revision of the
     row after the user typed a message. Outside such a revision, a message
-    the user typed or an amendment of the card since the plan landed
+    the user typed or an amendment of the card since the plan was recorded
     releases the row, and `submission.service._user_prices` does not call
     this:
 
@@ -287,10 +287,14 @@ def plan_held_choices(
       fetched kept as one of the part's (`PricesChoice.former`). A part
       with neither holds nothing.
 
-    Two answers stand over the row: a part answered since the plan landed
-    (`fresh`) holds its row's choices as answered, and a pin a choice
-    outside the row holds, as a bare prices answer the user gave on it
-    after a refusal, keeps that choice. A row `plan` does not state, or
+    Two answers stand over the row. A member answered since the plan was
+    recorded (`fresh`) holds that answer, and the pins of the requirements
+    that read it when the row absorbed it (`rows`) are held to nothing;
+    the row holds every other member (`row_members_left`). An answer that
+    puts a member back on the row, a new unit answer, or one on a row whose
+    members are not recorded, holds the whole row as answered. And a pin a
+    choice outside the row holds, as a bare prices answer the user gave on
+    it after a refusal, keeps that choice. A row `plan` does not state, or
     whose requirements state no one unit, keeps the choices `choices` gives it.
     """
     held = dict(choices)
@@ -299,23 +303,29 @@ def plan_held_choices(
         if not slot.startswith(UNIT_SLOT_PREFIX):
             continue
         group = slot.removeprefix(UNIT_SLOT_PREFIX)
-        live = [part for part, choice in held.items() if choice.group == group]
-        members = [part for part, answer in answered.items() if answer.group == group]
-        if any(part in fresh for part in (*live, *members)):
+        left = _members_left(choices, slot, answered=answered, rows=rows, fresh=fresh)
+        if left is None:
             continue
         unit = units.get(slot) or plan_unit(plan, slot)
         if unit is None:
             continue
+        unheld = {rid for part in left for rid in rows[slot].get(part, ())}
         pins = dict.fromkeys(
             requirement.source_spec_id
             for requirement in plan.evidence_requirements
             if isinstance(requirement, DatasetRequirement)
             and slot in requirement.decision_ids
+            and requirement.id not in unheld
             and requirement.source_spec_id is not None
         )
-        held = {part: choice for part, choice in held.items() if choice.group != group}
+        held = {
+            part: choice for part, choice in held.items() if choice.group != group or part in left
+        }
         holds = [(pin, pin, None) for pin in pins]
+        members = [part for part, answer in answered.items() if answer.group == group]
         for part in unabsorbed_parts(plan, slot, members, rows=rows):
+            if part in left:
+                continue
             answer = answered[part]
             if answer.unit == unit:
                 holds.append((part, answer.spec_id, None))
@@ -327,6 +337,56 @@ def plan_held_choices(
                     unit.prices, spec_id, unit=unit, group=group, former=former
                 )
     return held
+
+
+def row_members_left(
+    choices: Mapping[str, PricesChoice],
+    plan: Plan,
+    *,
+    answered: Mapping[str, AnsweredPart] = MappingProxyType({}),
+    rows: AbsorbedRows = MappingProxyType({}),
+    fresh: Collection[str] = (),
+) -> dict[str, frozenset[str]]:
+    """The unit row slots each requirement of `plan` stops citing, by its id:
+    the rows a member answered since the plan was recorded left
+    (`plan_held_choices`), for each requirement that read the member when
+    its row absorbed it (`rows`). The row's unit is then the one its other
+    requirements state (`plan_unit`), and the row stays switchable."""
+    left: dict[str, set[str]] = {}
+    for decision in plan.decisions:
+        slot = decision.slot
+        if not slot.startswith(UNIT_SLOT_PREFIX):
+            continue
+        parts = _members_left(choices, slot, answered=answered, rows=rows, fresh=fresh) or ()
+        for part in parts:
+            for rid in rows[slot].get(part, ()):
+                left.setdefault(rid, set()).add(slot)
+    return {rid: frozenset(slots) for rid, slots in left.items()}
+
+
+def _members_left(
+    choices: Mapping[str, PricesChoice],
+    slot: str,
+    *,
+    answered: Mapping[str, AnsweredPart],
+    rows: AbsorbedRows,
+    fresh: Collection[str],
+) -> frozenset[str] | None:
+    """The members of the unit row under `slot` an answer since the plan was
+    recorded (`fresh`) took off it, or `None` when an answer holds the
+    whole row as answered (`plan_held_choices`): one that puts a member on
+    the row, or one on a row whose members `rows` does not record."""
+    group = slot.removeprefix(UNIT_SLOT_PREFIX)
+    live = [part for part, choice in choices.items() if choice.group == group]
+    members = [part for part, answer in answered.items() if answer.group == group]
+    answers = {part for part in (*live, *members) if part in fresh}
+    if not answers:
+        return frozenset()
+    if slot not in rows or any(
+        (choice := choices.get(part)) is not None and choice.group == group for part in answers
+    ):
+        return None
+    return frozenset(answers)
 
 
 class PricesChoice(NamedTuple):

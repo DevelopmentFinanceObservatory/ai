@@ -211,10 +211,12 @@ from pydantic_core import to_jsonable_python
 from submission import service as submission_service
 from submission.prices_choice import (
     PRICES_OPTIONS,
+    AnsweredPart,
     Parts,
     PricesChoice,
     plan_held_choices,
     prices_decisions,
+    row_members_left,
     whole_unit_slots,
 )
 from submission.service import (
@@ -14640,6 +14642,276 @@ def test_a_typed_message_after_the_plan_landed_releases_its_unit_row(
     revised = load_plan(ctx.state)
     assert revised is not None
     assert revised.requirement(dataset.id).unit == Unit(**_USD)
+
+
+def _constant_row_switched(
+    tools: dict[str, ToolSpec], ctx: _FakeToolContext, decision: Decision, dataset: Any
+) -> Plan:
+    """The user chose constant 2020 US dollars for the gross part, the plan
+    landed with its unit row in them, and a switch of the row to constant
+    2023 dollars landed. The plan the switch revised."""
+    _show_blocks(ctx, _offering_constant(), _constant_block(), _read_in(_READ_2020, _USD_2020))
+    _unit_answered(ctx, _USD_2020, _READ_2020, _USD_2020)
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision,
+        [dataset.model_copy(update={"source_spec_id": _READ_2020, "unit": Unit(**_USD_2020)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement(dataset.id).model_copy(update={"source_spec_id": _CONSTANT_GROSS})],
+        {f"user_unit_{_GROSS}": Unit(**_USD_2023)},
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    return revised
+
+
+def test_a_skip_of_the_prices_ask_after_a_unit_switch_keeps_the_switched_unit(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose constant 2020 US dollars for the gross part, and a
+    switch of the plan's unit row moved it to constant 2023 dollars. The
+    planner then asked which prices to go on in, and the user skipped,
+    which only marks the constant choice asked. A proposal keeping the
+    switched plan lands in 2023 dollars: the skip sets nothing newer than
+    the switch."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    dataset, _ = requirements
+    revised = _constant_row_switched(tools, ctx, decision(), dataset)
+    ctx.records = [
+        *ctx.records,
+        _prices_refused_event(_GROSS, asks_user=True),
+        _prices_options_ask(),
+        _ask_response("ask-prices", {"result": {"skip": True}}),
+    ]
+
+    again = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=revised.version,
+        decisions=[],
+        evidence_requirements=[revised.requirement(dataset.id)],
+        tool_context=ctx,
+    )
+
+    assert again["outcome"] == Outcome.OK.value, again
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.requirement(dataset.id).unit == Unit(**_USD_2023)
+
+
+# A part on the gross part's unit row with a measure of its own, as Search
+# reads it in current pounds.
+_OTHER_GBP = "spec_" + "0d" * 16
+
+
+@pytest.mark.parametrize(
+    ("answer", "left"),
+    [
+        (PricesChoice("current", asked=True), True),
+        (
+            PricesChoice("current", _EUR_READ, unit=Unit(**_EUR), group=_GROSS),
+            False,
+        ),
+    ],
+    ids=["prices-answer", "unit-answer"],
+)
+def test_a_member_answered_after_a_unit_switch_leaves_the_row_and_the_rest_hold_it(
+    answer: PricesChoice, left: bool
+) -> None:
+    """A unit answer in current euros put the gross part and another part
+    on one unit row, the plan read each under a requirement of its own, and
+    a switch moved the row to current pounds. The user then answered
+    current prices for the other part alone. That part holds its answer and
+    its requirement stops citing the row, while the gross part holds
+    pounds, so the row states one unit and stays switchable. A new unit
+    answer on the row holds the whole row as answered."""
+    row = f"user_unit_{_GROSS}"
+    gbp, eur = Unit(**_GBP), Unit(**_EUR)
+    plan = Plan(
+        question="q",
+        decisions=[
+            Decision(
+                slot=row,
+                description="Which prices the figures are in.",
+                options=("current prices in GBP", "constant prices"),
+                chosen="current prices in GBP",
+                resolved_by=ResolvedBy.USER,
+                rationale="The user chose current prices in GBP.",
+                fixes=DecisionFixes(prices="current"),
+            )
+        ],
+        evidence_requirements=[
+            DatasetRequirement(
+                id=rid,
+                decision_ids=[row],
+                measure=rid,
+                entities=[Entity(name="Kenya", role="recipient")],
+                period=Period(start=2018, end=2022),
+                source_spec_id=pin,
+                unit=gbp,
+            )
+            for rid, pin in (("gross", _GBP_READ), ("other", _OTHER_GBP))
+        ],
+        version=2,
+    )
+    answered = {
+        _GROSS: AnsweredPart(_GROSS, _EUR_READ, eur),
+        _UNIT_OTHER: AnsweredPart(_GROSS, _UNIT_OTHER, eur),
+    }
+    rows = {row: {_GROSS: ("gross",), _UNIT_OTHER: ("other",)}}
+    first = PricesChoice("current", _EUR_READ, unit=eur, group=_GROSS)
+    choices = {_GROSS: first, _UNIT_OTHER: answer}
+    fresh = {_UNIT_OTHER}
+
+    held = plan_held_choices(choices, plan, units={}, answered=answered, rows=rows, fresh=fresh)
+    moved = row_members_left(choices, plan, answered=answered, rows=rows, fresh=fresh)
+
+    if left:
+        assert held == {
+            _UNIT_OTHER: answer,
+            _GBP_READ: PricesChoice("current", _GBP_READ, unit=gbp, group=_GROSS),
+        }
+        assert moved == {"other": frozenset({row})}
+    else:
+        assert held == choices
+        assert moved == {}
+
+
+def test_a_count_switch_after_a_refused_amendment_keeps_the_switched_unit(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose current euros for the gross part, and the plan landed
+    with its unit row in them. The user amended the card, the amendment's
+    entry was refused and the card offered again, and the user switched the
+    row to current US dollars. A count or scope switch's revision, which
+    moves no unit row, still holds the row to dollars: one re-pinning the
+    part on its euro read is refused and told dollars and their read. The
+    amendment came before the unit switch's plan, so it releases nothing."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_USD_READ, _USD))
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, _ = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    ctx.records = [
+        *ctx.records,
+        turn_pause("approve", "int_card", {}),
+        user_answer("int_card", {"amendment": "Add 2023 too."}),
+    ]
+    row = f"user_unit_{_GROSS}"
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement(dataset.id).model_copy(update={"source_spec_id": _USD_READ})],
+        {row: Unit(**_USD)},
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+    revised = load_plan(ctx.state)
+    assert revised is not None
+
+    counted = _switch_unit_row(
+        ctx,
+        revised,
+        [
+            revised.requirement(dataset.id).model_copy(
+                update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)}
+            )
+        ],
+        {},
+    )
+
+    assert counted["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, counted
+    assert (counted["detail"]["unit"], counted["detail"].get("pin")) == (_USD, _USD_READ)
+
+
+def test_a_unit_switch_discards_a_unit_answer_whose_entry_was_refused(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The plan landed with the gross part's unit row in current US
+    dollars. The user amended the card and answered the unit question again
+    with current euros, the amendment's entry was refused and the card
+    offered again, and the user switched the row to current pounds. The
+    switch lands, and so does the replan of a pick holding the pounds the
+    card shows: the euro answer came before the switch's plan."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_GBP_READ, _GBP))
+    _unit_answered(ctx, _USD, _GROSS, _USD)
+    dataset, _ = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _GROSS, "unit": Unit(**_USD)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    record_unit_served(
+        ctx.state,
+        _GROSS,
+        _EUR_READ,
+        UnitChoice.model_validate(_EUR),
+        group=_GROSS,
+        chosen=UnitChoice.model_validate(_EUR),
+    )
+    question = {**_UNIT_QUESTION, "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS]}}
+    ctx.records = [
+        *ctx.records,
+        turn_pause("approve", "int_card", {}),
+        user_answer("int_card", {"amendment": "In euros, please."}),
+        turn_pause("ask", "int_ask_again", {"questions": [question]}),
+        user_answer("int_ask_again", {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+    row = f"user_unit_{_GROSS}"
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement(dataset.id).model_copy(update={"source_spec_id": _GBP_READ})],
+        {row: Unit(**_GBP)},
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+    revised = load_plan(ctx.state)
+    assert revised is not None
+
+    replanned = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=revised.version,
+        decisions=[],
+        evidence_requirements=[revised.requirement(dataset.id)],
+        tool_context=ctx,
+    )
+
+    assert replanned["outcome"] == Outcome.OK.value, replanned
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [d.chosen for d in plan.decisions if d.slot == row] == ["current prices in GBP"]
 
 
 @pytest.mark.parametrize("first_reads_gross", [True, False], ids=["at-once", "on-amendment"])

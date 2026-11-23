@@ -8,7 +8,8 @@ is their union.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -26,13 +27,16 @@ class NodeDone:
 class Paused:
     """The turn paused on a question of `kind` to the user under the wire id
     `interrupt_id`, as its pause `round`. Emitted once the cursor that holds
-    the pause committed."""
+    the pause committed. `state` is the turn's state the pause committed
+    with, held in process only: what the pause's node recorded beside its
+    payload (`harness.graph.state.card_unit_offers`)."""
 
     kind: str
     interrupt_id: str
     round: int
     payload: dict[str, Any]
     message: str = ""
+    state: Mapping[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
 
 @dataclass(frozen=True)

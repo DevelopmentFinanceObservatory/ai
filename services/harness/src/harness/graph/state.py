@@ -184,6 +184,11 @@ ASK_FOR_QUESTION_KEY = "orchestrator:ask_for_question"
 # is set only while such a replan is paused. Outside the drafting prefixes
 # the restore resets (`harness.graph.switch._DRAFTING_PREFIXES`).
 PICK_REPLAN_KEY = "switch:pick_replan"
+# The units each unit row of the plan card the `approve` node paused on
+# offers, by the row's slot, with the revision of that card's plan
+# (`harness.graph.approve.offer`, `card_unit_offers`). They sit beside the
+# pause, since a pause's payload is read back as a plan.
+APPROVE_UNIT_OFFERS_KEY = "approve:unit_offers"
 # The status a plan hand-back carries when the planner made no plan, and
 # when the approved plan ran; `studio_translate._Translator` shows the first as
 # a failed step and the second as nothing.
@@ -527,6 +532,34 @@ def unit_row_offers(state: SessionState, plan: PlannerPlan) -> dict[str, UnitOff
             continue
         offers[slot] = offer.model_copy(update={"start": start})
     return offers
+
+
+def save_card_unit_offers(
+    state: SessionState, revision: object, offers: Mapping[str, UnitOffer]
+) -> None:
+    """Record `offers` as the units the rows of the plan card of `revision`
+    offer (`APPROVE_UNIT_OFFERS_KEY`), or clear the record when none does."""
+    if not offers:
+        if state.get(APPROVE_UNIT_OFFERS_KEY) is not None:
+            state[APPROVE_UNIT_OFFERS_KEY] = None
+        return
+    state[APPROVE_UNIT_OFFERS_KEY] = {
+        "revision": revision,
+        "offers": {slot: offer.model_dump(mode="json") for slot, offer in offers.items()},
+    }
+
+
+def card_unit_offers(state: Mapping[str, Any], revision: object) -> dict[str, UnitOffer]:
+    """The units the rows of the plan card of `revision` offer, by the row's
+    slot, as the `approve` node recorded them in `state`; none for a card of
+    another revision or a state that records none."""
+    stored = state.get(APPROVE_UNIT_OFFERS_KEY)
+    if not isinstance(stored, Mapping) or stored.get("revision") != revision:
+        return {}
+    return {
+        str(slot): UnitOffer.model_validate(offer)
+        for slot, offer in (stored.get("offers") or {}).items()
+    }
 
 
 def _reading_prices(reading: SearchReading) -> dict[str, Any]:

@@ -88,6 +88,7 @@ from harness.graph.state import (
     APPROVE_PAUSE,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
+    card_unit_offers,
 )
 from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
@@ -1476,8 +1477,7 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     card is in the turn. `moved` rides on a plan the `switch` node offers
     (`harness.graph.switch`): the other scope choices the switch moved;
     `switch_failed` on one it offers again after a switch that did not
-    apply (`_switch_failed`). `unit_offers` rides on every card whose plan
-    states a unit question's whole unit (`harness.graph.approve.offer`).
+    apply (`_switch_failed`).
     """
     fields = {
         key: value
@@ -1491,7 +1491,6 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
             "new_plan",
             "moved",
             "switch_failed",
-            "unit_offers",
         )
     }
     return PlannerPlan.model_validate(fields)
@@ -2489,10 +2488,7 @@ class _Translator:
                     )
                 conversation.latest_plan_version = version
             plan = _plan_from_payload(payload)
-            unit_offers = {
-                slot: UnitOffer.model_validate(offer)
-                for slot, offer in (payload.get("unit_offers") or {}).items()
-            }
+            unit_offers = card_unit_offers(pause.state, payload.get("revision"))
             questions = plan_display.card_questions(plan)
             by_slot = {decision.slot: decision for decision in plan.decisions}
             named = functools.partial(plan_display.card_decision_text, plan=plan)

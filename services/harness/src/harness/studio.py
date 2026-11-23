@@ -1116,6 +1116,7 @@ class _SegmentWork:
                     interrupt_id=pause.interrupt_id,
                     round=pause.round,
                     payload=pause.payload,
+                    state=self._cursor.state,
                 )
             )
             return Segment(cursor=self._cursor, outcome=Outcome.PAUSED)

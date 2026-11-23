@@ -213,7 +213,8 @@
       "call_id": null,
       "args": null,
       "body": {},
-      "name": null
+      "name": null,
+      "record": 0
     },
     {
       "kind": "call",
@@ -222,7 +223,8 @@
         "message": "Which source did you mean?"
       },
       "body": {},
-      "name": null
+      "name": null,
+      "record": 1
     }
   ],
   "state": {

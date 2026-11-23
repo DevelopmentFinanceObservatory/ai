@@ -283,6 +283,7 @@ from submission.prices_choice import (
     part_readings,
     plan_held_choices,
     prices_decisions,
+    row_members_left,
     whole_unit_slots,
 )
 
@@ -351,8 +352,8 @@ class SessionView(Protocol):
     def prices_answers(self) -> PricesAnswers:
         """The prices the user picked answering an ask, by the part each
         prices, until released, with the parts an answer given since the plan
-        on record landed priced, and whether the user's words since then
-        release its unit rows."""
+        on record was recorded priced, and whether the user's words since then
+        release its unit rows. A revision of the plan in code reads neither."""
         ...
 
     def switched_units(self) -> Mapping[str, Unit]:
@@ -736,6 +737,15 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     )
     answers = view.prices_answers()
     chosen = _user_prices(view, answers, previous)
+    if left := _rows_left(view, answers, previous):
+        # A requirement reading a member that left its unit row stops citing
+        # the row, so the row's unit is the one its other requirements state.
+        evidence_requirements = _without_held_unit_citations(
+            requirements_after, evidence_requirements, held=left
+        )
+        requirements_after = _requirements_after(
+            previous, evidence_requirements, removed_evidence_requirements
+        )
     shown_parts = Parts.of_shown(
         pins,
         sources.get,
@@ -1040,34 +1050,55 @@ def _user_prices(
     row's unit, whether or not the turn still holds the answer. The plan's
     pins stand for each part the row absorbed
     (`submission.prices_choice.absorbed_rows`), so a count or scope switch
-    that moves a pin moves the series the unit holds, and an answer the
-    plan has not read (`PricesAnswers.fresh`) holds its parts. A message the
-    user typed or an amendment of the card since the plan landed releases
-    its rows (`PricesAnswers.released`), as it releases every choice, save
-    in a switch's revision of a unit row, which states the row's new unit.
+    that moves a pin moves the series the unit holds, and a member answered
+    since the plan was recorded (`PricesAnswers.fresh`) holds its answer. A
+    message the user typed or an amendment of the card since then releases
+    its rows (`PricesAnswers.released`), as it releases every choice. A
+    revision of the plan in code reads neither (`SessionView.prices_answers`).
     """
-    chosen = answers.chosen
-    units = view.switched_units()
-    reread = units_reread(view.state)
-    if previous is None or (answers.released and not units):
-        return chosen
+    if previous is None or answers.released:
+        return answers.chosen
     return plan_held_choices(
-        chosen,
+        answers.chosen,
         previous,
-        units=units,
-        answered={
-            part: AnsweredPart(
-                served.row,
-                served.spec_id,
-                served.unit,
-                (read.spec_id, read.unit) if (read := reread.get(part)) is not None else None,
-            )
-            for part, served in units_served(view.state).items()
-            if served.row is not None
-        },
+        units=view.switched_units(),
+        answered=_answered_parts(view),
         rows=absorbed_rows(view.state),
         fresh=answers.fresh,
     )
+
+
+def _rows_left(
+    view: SessionView, answers: PricesAnswers, previous: Plan | None
+) -> dict[str, frozenset[str]]:
+    """The unit row slots each requirement of `previous` stops citing, by its
+    id, as a member it read left its row (`submission.prices_choice.row_members_left`),
+    under the same reading of the user's answers as `_user_prices`."""
+    if previous is None or answers.released:
+        return {}
+    return row_members_left(
+        answers.chosen,
+        previous,
+        answered=_answered_parts(view),
+        rows=absorbed_rows(view.state),
+        fresh=answers.fresh,
+    )
+
+
+def _answered_parts(view: SessionView) -> dict[str, AnsweredPart]:
+    """Each part a unit question's answer put on a unit row, with the series
+    fetched for it and the one a switch of its row re-read it as."""
+    reread = units_reread(view.state)
+    return {
+        part: AnsweredPart(
+            served.row,
+            served.spec_id,
+            served.unit,
+            (read.spec_id, read.unit) if (read := reread.get(part)) is not None else None,
+        )
+        for part, served in units_served(view.state).items()
+        if served.row is not None
+    }
 
 
 def _without_user_prices(drafts: Sequence[DecisionDraft]) -> list[DecisionDraft]:

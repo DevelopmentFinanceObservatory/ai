@@ -1068,6 +1068,7 @@ async def drive[E](
                     round=cursor.round + 1,
                     payload=result.payload,
                     message=result.message,
+                    state=ctx.state,
                 )
                 if isinstance(result, Pause)
                 else NodeDone(node=node, label=result.label, output=result.output),

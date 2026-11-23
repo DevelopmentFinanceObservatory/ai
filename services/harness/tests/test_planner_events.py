@@ -342,4 +342,4 @@ def test_the_answer_to_a_planner_pause_answers_the_ask_the_pause_names() -> None
 
     *_, answered = session_steps(records)
 
-    assert answered == Step("answer", "a1", first, {"result": picked})
+    assert answered == Step("answer", "a1", first, {"result": picked}, record=4)

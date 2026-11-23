@@ -909,7 +909,8 @@
       "call_id": null,
       "args": null,
       "body": "{}",
-      "name": null
+      "name": null,
+      "record": 0
     },
     {
       "kind": "call",
@@ -924,7 +925,8 @@
         ]
       },
       "body": "{}",
-      "name": null
+      "name": null,
+      "record": 1
     },
     {
       "kind": "answer",
@@ -948,7 +950,8 @@
           }
         }
       },
-      "name": null
+      "name": null,
+      "record": 4
     },
     {
       "kind": "response",
@@ -969,7 +972,8 @@
           "warnings": []
         }
       },
-      "name": "propose_plan"
+      "name": "propose_plan",
+      "record": 6
     },
     {
       "kind": "call",
@@ -1339,7 +1343,8 @@
         }
       },
       "body": "{}",
-      "name": null
+      "name": null,
+      "record": 7
     },
     {
       "kind": "answer",
@@ -1717,7 +1722,8 @@
           }
         }
       },
-      "name": null
+      "name": null,
+      "record": 8
     },
     {
       "kind": "call",
@@ -2094,7 +2100,8 @@
         }
       },
       "body": "{}",
-      "name": null
+      "name": null,
+      "record": 9
     }
   ],
   "state": {
@@ -3502,6 +3509,7 @@
       }
     },
     "translator:resolved_at:58ae810a38d0ecd754c74ce4a3e9e3197c5c0907dbacd6553baf0c20f53025f0": "<time>",
+    "planner:plan_read": 9,
     "planner:windowed_pins": [
       {
         "spec_id": "spec_77645131d09c3fa24a6efa571795dd27",

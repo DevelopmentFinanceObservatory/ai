@@ -14,7 +14,7 @@ tool with.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, NamedTuple, Protocol
@@ -73,7 +73,13 @@ from planner.plan import (
     save_plan_rounds,
     save_windowed_pins,
 )
-from planner.tool_results import Outcome, ProblemCode
+from planner.tool_results import ProblemCode
+
+# The session-state slot holding how many records of the turn's transcript
+# the call that recorded the plan on record read (`CallSession.record_admission`).
+# A step from a later record came after the plan (`prices_answers`). The
+# state is the turn's own, so the count is always of this turn's transcript.
+PLAN_READ_STATE_KEY = "planner:plan_read"
 
 
 class Step(NamedTuple):
@@ -86,6 +92,9 @@ class Step(NamedTuple):
     with its id, the `args` of the nearest preceding call sharing that id
     (`None` when none precedes it) and the response body.
     `response` is any other tool's response, with its `name` and body.
+    `record` is the position in the turn's transcript of the record the step
+    was read from (`planner.session.session_steps`), which places it before
+    or after the plan on record was recorded (`PLAN_READ_STATE_KEY`).
     """
 
     kind: Literal["message", "call", "answer", "response"]
@@ -93,6 +102,7 @@ class Step(NamedTuple):
     args: dict[str, Any] | None = None
     body: Mapping[str, Any] = MappingProxyType({})
     name: str | None = None
+    record: int = 0
 
 
 class ResponseCall(NamedTuple):
@@ -132,6 +142,10 @@ class PlannerCall(Protocol):
     def response_calls(self) -> Sequence[ResponseCall]:
         """The calls of the model response that holds the call being served, in order,
         or none when the call has no id or no response holds it."""
+        ...
+
+    def records_read(self) -> int:
+        """How many records of the turn's transcript the call reads."""
         ...
 
 
@@ -219,11 +233,17 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
 
 def prices_answers(call: PlannerCall) -> PricesAnswers:
     """`prices_chosen` over `call`, with the parts whose choice a step after
-    the last `propose_plan` response that landed a plan set (`fresh`), and
-    whether a message the user typed or an amendment of the approval card
-    came after it (`released`), in one walk of its steps. With no response
-    in the call's session landing a plan, every part is fresh and any such
-    step releases: the plan on record has read neither
+    the plan on record was recorded set (`fresh`), and whether a message the
+    user typed or an amendment of the approval card came after it
+    (`released`), in one walk of its steps.
+
+    The plan on record was recorded once the call recording it had read the
+    first `plan_read` records of the turn's transcript, so a step from a
+    later record comes after it. Every admission records that count, a
+    revision of the plan in code included (`CallSession.record_admission`).
+    With no plan recorded this turn, every step comes after it: every part
+    is fresh and any such step releases. A skip of the planner's prices
+    question that marks a choice `asked` sets nothing
     (`submission.prices_choice.plan_held_choices`)."""
     measures = {
         spec_id: measure_key(block)
@@ -232,19 +252,27 @@ def prices_answers(call: PlannerCall) -> PricesAnswers:
     }
     reads = unit_reads(call.state)
     served = units_served(call.state)
+    since = plan_read(call.state)
     chosen: dict[str, PricesChoice] = {}
     refused: str | None = None
     asked: dict[str, str] = {}
     offered = [dict(option) for option in PRICES_OPTIONS]
-    set_at: dict[str, int] = {}
-    landed = -1
-    spoke = -1
-    for index, step in enumerate(call.steps()):
-        before = dict(chosen)
+    fresh: set[str] = set()
+    released = False
+    after = False
+
+    def choose(part: str, choice: PricesChoice) -> None:
+        # A choice set again, even to what it was, is a new answer.
+        chosen[part] = choice
+        if after:
+            fresh.add(part)
+
+    for step in call.steps():
+        after = step.record >= since
         if step.kind == "message":
             chosen.clear()
             refused = None
-            spoke = index
+            released = released or after
         elif step.kind == "response":
             if step.name == PROPOSE_PLAN_PROPOSER.call:
                 refused = _prices_refused(step.body)
@@ -253,40 +281,42 @@ def prices_answers(call: PlannerCall) -> PricesAnswers:
                 asked[str(step.call_id)], refused = refused, None
         elif _is_amendment(step.body):
             chosen.clear()
-            spoke = index
+            released = released or after
         elif (switched := _prices_switched(step.body)) is not None:
             part, basis = switched
             if _switch_stands(call.state, part, basis):
                 _release_measure(chosen, part, measures)
-                chosen[part] = PricesChoice(basis, asked=True)
+                choose(part, PricesChoice(basis, asked=True))
         elif step.call_id in asked:
             part = asked.pop(step.call_id)
             answer = _answers(step.body.get("result")).get("q1") or {}
             basis = PRICES_PICKS.get(str(answer.get("spec_id")))
             if answer.get("kind") == "option" and basis is not None:
                 _release_measure(chosen, part, measures)
-                chosen[part] = PricesChoice(basis, asked=True)
+                choose(part, PricesChoice(basis, asked=True))
             elif _said(answer):
                 _release_measure(chosen, part, measures)
             elif part in chosen and chosen[part].prices == "constant":
                 chosen[part] = chosen[part]._replace(asked=True)
         else:
             _priced_answers(
-                step.args or {}, step.body, chosen, measures, reads=reads, served=served
+                step.args or {},
+                step.body,
+                chosen,
+                measures,
+                reads=reads,
+                served=served,
+                choose=choose,
             )
-        # A choice set again, even to what it was, is a new answer.
-        set_at |= {part: index for part, choice in chosen.items() if before.get(part) is not choice}
-        if (
-            step.kind == "response"
-            and step.name == PROPOSE_PLAN_PROPOSER.call
-            and step.body.get("outcome") == Outcome.OK.value
-        ):
-            landed = index
-    return PricesAnswers(
-        chosen,
-        frozenset(part for part in chosen if set_at.get(part, -1) > landed),
-        released=spoke > landed,
-    )
+    return PricesAnswers(chosen, frozenset(fresh.intersection(chosen)), released=released)
+
+
+def plan_read(state: SessionState) -> int:
+    """How many records of the turn's transcript the call recording the plan
+    on record read (`PLAN_READ_STATE_KEY`), 0 when no plan was recorded this
+    turn."""
+    read = state.get(PLAN_READ_STATE_KEY)
+    return read if isinstance(read, int) else 0
 
 
 def _prices_switched(body: Mapping[str, Any]) -> tuple[str, PriceBasis] | None:
@@ -360,9 +390,11 @@ def _priced_answers(
     *,
     reads: Mapping[str, Sequence[str]],
     served: Mapping[str, ServedUnit],
+    choose: Callable[[str, PricesChoice], None],
 ) -> None:
-    """Record in `chosen` what one clarify response says of each part its call
-    priced, each answer replacing the choices of its part's measure (`prices_chosen`).
+    """Record in `chosen`, through `choose`, what one clarify response says of
+    each part its call priced, each answer replacing the choices of its
+    part's measure (`prices_chosen`).
 
     A unit question (`harness.graph.state.ask_questions`, `unit`) sets the
     unit of every part it covers to the one the series the agent fetches for
@@ -395,15 +427,18 @@ def _priced_answers(
         for part in parts:
             if (fetched := served.get(part)) is not None:
                 if fetched.unit is not None:
-                    chosen[part] = PricesChoice(
-                        fetched.unit.prices,
-                        fetched.spec_id,
-                        unit=fetched.unit,
-                        group=fetched.row,
+                    choose(
+                        part,
+                        PricesChoice(
+                            fetched.unit.prices,
+                            fetched.spec_id,
+                            unit=fetched.unit,
+                            group=fetched.row,
+                        ),
                     )
             elif prices is not None:
                 for priced in (part, *reads.get(part, ())):
-                    chosen[priced] = PricesChoice(prices)
+                    choose(priced, PricesChoice(prices))
     for question_id, candidates in _question_candidates(args).items():
         marked = [c for c in candidates or () if isinstance(c, dict) and c.get("part")]
         answer = answers.get(question_id)
@@ -422,7 +457,7 @@ def _priced_answers(
         )
         _release_measure(chosen, part, measures)
         if picked is not None:
-            chosen[part] = picked
+            choose(part, picked)
 
 
 def _unit_questions(args: dict[str, Any]) -> dict[str, Mapping[str, Any]]:
@@ -816,8 +851,10 @@ class CallSession:
         record_reduction_refused_asks(self.call.state, asks)
 
     def record_admission(self, admission: Admission) -> None:
-        """Record `admission` in the call's state."""
+        """Record `admission` in the call's state, with how many records of
+        the turn's transcript the call read (`PLAN_READ_STATE_KEY`)."""
         state = self.call.state
+        state[PLAN_READ_STATE_KEY] = self.call.records_read()
         if admission.windowed_pins is not None:
             save_windowed_pins(state, admission.windowed_pins)
         save_alignments(state, admission.alignments)

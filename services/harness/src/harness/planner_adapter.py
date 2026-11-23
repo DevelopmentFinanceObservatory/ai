@@ -133,6 +133,7 @@ from planner.tools import (
     load_pending_ask,
 )
 from planner.workflow import ElectedMeasure, SelectedSource
+from submission.prices_choice import PricesAnswers
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from submission.service import (
     Proposal,
@@ -325,6 +326,12 @@ class _RevisionSession(CallSession):
         """Always: the revision answers the user's own switch."""
         del version
         return True
+
+    def prices_answers(self) -> PricesAnswers:
+        """The prices the user chose, with no part answered and nothing said
+        since the plan the revision amends: the revision reads that plan and
+        its own switch (`units`), so every unit row holds as the plan states it."""
+        return PricesAnswers(super().prices_answers().chosen)
 
     def elected_spec_ids(self) -> frozenset[str]:
         """The spec_ids the user picked, each that replaces one of them, and

@@ -15,7 +15,7 @@ import logging
 import ssl
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 
 import aiohttp
@@ -41,7 +41,7 @@ from harness.conversation import current_conversation_id, current_conversation_k
 from harness.decision_pick import DecisionPick, decision_pick
 from harness.graph.events import PlannerStarted, StepProgress
 from harness.graph.planning import planner_ask_pause
-from harness.graph.state import ORCHESTRATOR_PRIOR_LEDGER_KEY
+from harness.graph.state import ORCHESTRATOR_PRIOR_LEDGER_KEY, save_card_unit_offers
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import decision_choice_id, decision_option_id
 from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
@@ -165,16 +165,28 @@ def _translator() -> _Translator:
     )
 
 
-def _pause(kind: str, payload: dict[str, Any], *, message: str = "") -> Paused:
-    """The turn's pause of `kind` on `payload`, under a wire id of its own."""
+def _pause(
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    message: str = "",
+    state: Mapping[str, Any] = MappingProxyType({}),
+) -> Paused:
+    """The turn's pause of `kind` on `payload`, under a wire id of its own,
+    committed with `state`."""
     return Paused(
-        kind=kind, interrupt_id=_wire_id("int"), round=1, payload=payload, message=message
+        kind=kind,
+        interrupt_id=_wire_id("int"),
+        round=1,
+        payload=payload,
+        message=message,
+        state=state,
     )
 
 
-def _card(payload: dict[str, Any]) -> Paused:
-    """The `approve` node's pause offering the plan card `payload`."""
-    return _pause("approve", payload)
+def _card(payload: dict[str, Any], *, state: Mapping[str, Any] = MappingProxyType({})) -> Paused:
+    """The `approve` node's pause offering the plan card `payload`, committed with `state`."""
+    return _pause("approve", payload, state=state)
 
 
 async def _stored_conversation(engine: AsyncEngine) -> tuple[StudioStore, ConversationState]:
@@ -859,14 +871,11 @@ def test_a_unit_question_s_row_offers_its_unit_and_the_whole_units_beside_it(
     offer = UnitOffer(currencies=currencies, presets=[c.code for c in currencies[:2]], start=start)
     translator = _translator()
 
+    state: dict[str, Any] = {}
+    save_card_unit_offers(state, "rev-1", {row.slot: offer})
+
     (card,) = translator._interrupt_frames(
-        _card(
-            {
-                **plan.model_dump(mode="json"),
-                "revision": None,
-                "unit_offers": {row.slot: offer.model_dump(mode="json")},
-            }
-        )
+        _card({**plan.model_dump(mode="json"), "revision": "rev-1"}, state=state)
     )
 
     rows = {decision.id: decision for decision in card.decisions}

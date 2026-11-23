@@ -1350,7 +1350,7 @@ class PlanDecision(_WireModel):
     The decision stating the whole unit a unit question's answer holds its
     parts to has `choice_id` `"decision/user_unit_<lead part>"` and `unit`,
     the units its parts convert into with `start` the unit they are in now;
-    its `options` are whole units (`harness.unit_offer.whole_units`), each
+    its `options` are whole units (`harness.unit_offer.row_units`), each
     id naming its unit (`harness.unit_offer.unit_option_id`), so a client
     that renders no unit picker switches between them. A decision without
     `choice_id` cannot be switched, and only one with `choice_id` carries

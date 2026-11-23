@@ -100,6 +100,10 @@ class SessionCall:
         """
         return self._steps
 
+    def records_read(self) -> int:
+        """How many records the call reads: every record of `records`."""
+        return len(self.records)
+
     def response_calls(self) -> Sequence[ResponseCall]:
         """The calls of the planner model's response that holds the call's own
         (`_response_holding`)."""
@@ -178,6 +182,9 @@ def session_steps(records: Records, *, serving: str | None = None) -> Iterator[S
     the user, so the answer to the pause is the answer to that call. Every
     other tool's response is a `response` step.
 
+    Each step carries the position of the record it was read from
+    (`Step.record`).
+
     `serving` is the id of the tool call being served. The calls of its own
     model response that no record answers yet (`_in_flight_calls`) yield no
     step, so a call running beside an ask reads the transcript as it stood
@@ -189,14 +196,14 @@ def session_steps(records: Records, *, serving: str | None = None) -> Iterator[S
     calls: dict[str, dict[str, Any]] = {}
     # The call each planner-side pause's wire id put to the user.
     asks: dict[str, str] = {}
-    for record in records:
+    for index, record in enumerate(records):
         if record.agent == "loop":
             if record.kind == transcript.PAUSE and record.body["kind"] == PLANNER_ASK_PAUSE:
                 asks[str(record.body["interrupt_id"])] = str(record.body["payload"][ASKED_CALL_ID])
                 continue
             step = _loop_step(record, calls, asks)
             if step is not None:
-                yield step
+                yield step._replace(record=index)
             continue
         for call in function_calls(record):
             call_id = call.get("id")
@@ -208,10 +215,15 @@ def session_steps(records: Records, *, serving: str | None = None) -> Iterator[S
             ):
                 continue
             calls[call_id] = dict(call.get("args") or {})
-            yield Step("call", call_id, calls[call_id])
+            yield Step("call", call_id, calls[call_id], record=index)
         for response in function_responses(record):
             if response.get("name") != PLANNER_ASK:
-                yield Step("response", body=response.get("response") or {}, name=response["name"])
+                yield Step(
+                    "response",
+                    body=response.get("response") or {},
+                    name=response["name"],
+                    record=index,
+                )
 
 
 def _loop_step(
