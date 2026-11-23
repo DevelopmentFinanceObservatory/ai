@@ -44,7 +44,13 @@ from data_mcp.definition_writes import MAX_IDENTITY_BYTES, windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
-from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, store_search
+from harness.graph.state import (
+    ORCHESTRATOR_SEARCHES_KEY,
+    ORCHESTRATOR_UNIT_READ_KEY,
+    record_unit_read,
+    record_unit_served,
+    store_search,
+)
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
 from harness.planner_adapter import (
@@ -61,6 +67,7 @@ from harness.turn.events import Paused
 from harness.turn.store import AgentRecord
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import RecordedIdentity, SearchReading, _periods
+from harness.wire import UnitChoice
 from planner import source_reads as planner_source_reads
 from planner import specs
 from planner import tools as planner_tools
@@ -13235,6 +13242,217 @@ def test_a_landed_plan_clears_a_prices_refusal_so_later_asks_keep_their_picks(
         _GROSS: PricesChoice("constant"),
         other: PricesChoice("constant"),
     }
+
+
+_UNIT_OTHER = "spec_" + "f" * 32
+_UNIT_EUR = "spec_" + "9" * 32
+_UNIT_QUESTION = {
+    "id": "q1",
+    "question": "In which prices?",
+    "candidates": [],
+    "unit": {
+        "parts": [_GROSS, _UNIT_OTHER],
+        "offer": {
+            "currencies": [
+                {
+                    "code": "USD",
+                    "name": "US dollars",
+                    "prices": ["current", "constant"],
+                    "base_year_min": 2000,
+                    "base_year_max": 2023,
+                },
+                {"code": "EUR", "name": "euros", "prices": ["current"]},
+            ],
+            "presets": ["USD"],
+            "start": {"currency": "USD", "prices": "constant", "base_year": 2023},
+        },
+    },
+}
+_OTHER_QUESTION = {
+    "id": "q2",
+    "question": "Which Congo?",
+    "candidates": [{"spec_id": "o1", "label": "DR Congo"}],
+}
+
+
+@pytest.mark.parametrize(
+    ("questions", "answer", "reads", "chosen"),
+    [
+        (
+            [_UNIT_QUESTION],
+            {"answers": {"q1": {"kind": "unit", "currency": "USD", "prices": "current"}}},
+            {},
+            {_GROSS: "current", _UNIT_OTHER: "current"},
+        ),
+        ([_UNIT_QUESTION], {"skip": True}, {}, {_GROSS: "constant", _UNIT_OTHER: "constant"}),
+        ([_UNIT_QUESTION, _OTHER_QUESTION], {"skip": True}, {}, {}),
+        (
+            [_UNIT_QUESTION],
+            {"answers": {"q1": {"kind": "unit", "currency": "EUR", "prices": "current"}}},
+            {_GROSS: [_UNIT_EUR]},
+            {_GROSS: "current", _UNIT_EUR: "current", _UNIT_OTHER: "current"},
+        ),
+    ],
+    ids=["answered", "skipped", "whole-pause-skipped", "currency-changed"],
+)
+def test_a_unit_answer_sets_the_prices_of_every_part_its_question_covers(
+    questions: list[dict[str, Any]],
+    answer: dict[str, Any],
+    reads: dict[str, list[str]],
+    chosen: dict[str, str],
+) -> None:
+    """The `ask` node's unit question covers two parts. A unit answer sets
+    both to its prices, and each series the `ask` node re-read a part as,
+    which a currency change leaves outside the part's own currency. A skip of
+    the question goes on with the unit the chips started on. A skip of a
+    whole pause of several questions answers none of them, so it sets no
+    prices."""
+    ctx = _FakeToolContext()
+    ctx.state[ORCHESTRATOR_UNIT_READ_KEY] = reads
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": questions}),
+        user_answer(_ASK_PAUSE_ID, answer),
+    ]
+
+    assert prices_chosen(session_call(ctx)) == {
+        part: PricesChoice(prices) for part, prices in chosen.items()
+    }
+
+
+_EUR_READ = "spec_" + "8" * 32
+_READ_2020 = "spec_" + "7" * 32
+_EUR = {"currency": "EUR", "prices": "current"}
+_USD_2020 = {"currency": "USD", "prices": "constant", "base_year": 2020}
+_USD_2023 = {"currency": "USD", "prices": "constant", "base_year": 2023}
+_USD = {"currency": "USD", "prices": "current"}
+
+
+def _read_in(spec_id: str, unit: dict[str, Any]) -> dict[str, Any]:
+    """The France to Kenya block as Search re-reads it in `unit` under `spec_id`,
+    its identity requesting the unit (`data_mcp.definition_writes.unit_identity`)."""
+    block = copy.deepcopy(_FRANCE_KENYA)
+    block["spec_id"] = block["definition"]["spec_id"] = spec_id
+    block["definition"]["identity"]["facets"] = {"unit": {"request": unit}}
+    block["resolved"]["alternative_measures"] = []
+    return block
+
+
+def _unit_answered(
+    ctx: _FakeToolContext, chose: dict[str, Any], fetched: str, served: dict[str, Any]
+) -> None:
+    """The user answered the unit question on the gross part with `chose`, and
+    the `ask` node recorded that the agent fetches `fetched`, served in `served`."""
+    question = {**_UNIT_QUESTION, "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS]}}
+    if fetched != _GROSS:
+        record_unit_read(ctx.state, _GROSS, fetched)
+    record_unit_served(ctx.state, _GROSS, fetched, UnitChoice.model_validate(served))
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+        user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **chose}}}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("chose", "fetched", "shown", "pin", "stated"),
+    [
+        (_EUR, _EUR_READ, lambda: [_FRANCE_KENYA, _read_in(_EUR_READ, _EUR)], _GROSS, _USD),
+        (
+            _USD_2020,
+            _READ_2020,
+            lambda: [_offering_constant(), _constant_block(), _read_in(_READ_2020, _USD_2020)],
+            _CONSTANT_GROSS,
+            _USD_2023,
+        ),
+    ],
+    ids=["currency", "base-year"],
+)
+def test_a_plan_in_another_unit_than_the_user_chose_is_refused_and_told_the_series(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    chose: dict[str, Any],
+    fetched: str,
+    shown: Callable[[], list[dict[str, Any]]],
+    pin: str,
+    stated: dict[str, Any],
+) -> None:
+    """The user chose current euros, or constant 2020 US dollars, for the gross
+    part, and Search re-read it in that unit. A plan pinning a series of the
+    part in the same prices but another currency or base year is refused,
+    told the unit and the re-read series to pin; one pinning that series in
+    that unit lands."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, *shown())
+    _unit_answered(ctx, chose, fetched, chose)
+    dataset, derived = requirements
+
+    refused = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": pin, "unit": Unit(**stated)}), derived],
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert (refused["detail"]["unit"], refused["detail"]["pin"]) == (chose, fetched)
+    assert load_plan(ctx.state) is None
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": fetched, "unit": Unit(**chose)}), derived],
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+
+
+def test_a_plan_on_the_part_in_another_unit_is_refused_with_no_block_for_the_re_read(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose current euros for the gross part, and Search re-read it
+    in them, but no block on record states the re-read series. A plan pinning
+    the part in current US dollars is still refused and told the unit and the
+    series the agent fetches."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA)
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, derived = requirements
+
+    refused = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _GROSS, "unit": Unit(**_USD)}), derived],
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert (refused["detail"]["unit"], refused["detail"]["pin"]) == (_EUR, _EUR_READ)
+    assert load_plan(ctx.state) is None
+
+
+def test_a_unit_search_refused_holds_the_plan_to_the_unit_the_series_is_served_in(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose constant 2020 euros, and Search refused to re-read the
+    gross part in them, so the agent fetches it as served, in current US
+    dollars. A plan on the served series in that unit lands, as nothing holds
+    it to the unit Search could not serve."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA)
+    _unit_answered(ctx, {**_USD_2020, "currency": "EUR"}, _GROSS, _USD)
+    dataset, derived = requirements
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _GROSS, "unit": Unit(**_USD)}), derived],
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
 
 
 _DAC2A = "provenance/OECDDAC2A"

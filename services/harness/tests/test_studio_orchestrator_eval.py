@@ -1034,6 +1034,13 @@ async def test_a_question_with_no_options_and_no_answer_text_is_a_miss(
             ["t: elicitation question 1 allow_free_text=False, expected True"],
         ),
         ({"skippable": True}, ["t: elicitation skippable=False, expected True"]),
+        (
+            {"input": "unit"},
+            [
+                "t: elicitation question 1 input=single_select, expected unit",
+                "t: elicitation question 2 input=single_select, expected unit",
+            ],
+        ),
     ],
 )
 def test_an_elicitation_expectation_reads_every_question(
@@ -1046,13 +1053,64 @@ def test_an_elicitation_expectation_reads_every_question(
         "interrupt_id": "int_1",
         "skippable": False,
         "questions": [
-            {"id": "q1", "question": "a", "options": [option] * 3, "allow_free_text": False},
-            {"id": "q2", "question": "b", "options": [option] * 2, "allow_free_text": True},
+            {
+                "id": "q1",
+                "question": "a",
+                "input": "single_select",
+                "options": [option] * 3,
+                "allow_free_text": False,
+            },
+            {
+                "id": "q2",
+                "question": "b",
+                "input": "single_select",
+                "options": [option] * 2,
+                "allow_free_text": True,
+            },
         ],
     }
     turn = {"message": "q", "expect": {"elicitation": rules}}
 
     assert run._check_turn_expectations(turn, [pause], label="t") == violations
+
+
+_UNIT_OFFER = {
+    "currencies": [
+        {
+            "code": "USD",
+            "name": "US dollars",
+            "prices": ["current", "constant"],
+            "base_year_min": 2000,
+            "base_year_max": 2023,
+        }
+    ],
+    "presets": ["USD"],
+    "start": {"currency": "USD", "prices": "current"},
+}
+
+
+@pytest.mark.parametrize(
+    ("scripted", "sent"),
+    [
+        ([], {"kind": "unit", "currency": "USD", "prices": "current"}),
+        (
+            [{"unit": {"prices": "constant"}}],
+            {"kind": "unit", "currency": "USD", "prices": "constant", "base_year": 2023},
+        ),
+    ],
+    ids=["start", "changed"],
+)
+def test_a_unit_question_is_answered_with_its_start_changed_by_the_script(
+    scripted: list[dict[str, Any]], sent: dict[str, Any]
+) -> None:
+    run = _load("run")
+    pause = {
+        "questions": [
+            {"id": "q1", "question": "In which prices?", "input": "unit", "unit": _UNIT_OFFER}
+        ]
+    }
+
+    assert run._elicitation_reply(pause, scripted) == ({"q1": sent}, None)
 
 
 def test_a_figure_in_a_later_question_grounds_the_answer() -> None:

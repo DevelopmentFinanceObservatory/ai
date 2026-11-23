@@ -1,0 +1,10 @@
+{
+  "kind": "turn.request",
+  "schema_version": 1,
+  "conversation_id": "sess_01j9zc0000",
+  "message": "How much did health aid to Ethiopia fall after 2021?",
+  "client_features": [
+    "unit_question",
+    "multi_select"
+  ]
+}

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import (
     Callable,
+    Collection,
     Mapping,
     Sequence,
 )
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from compiler.surface import ToolSurface
 from orchestrator.agent import Orchestrator
 from orchestrator.run import (
     Answered,
@@ -28,28 +30,43 @@ from orchestrator.run import (
     StoredHistory,
     run_orchestrator,
 )
+from planner.plan import SessionState
 from pydantic import BaseModel, Field, model_validator
 from pydantic_ai.models import Model
 
+from harness.gemini_agent import RecordingState
 from harness.graph.events import AgentStatus, GraphEvent
 from harness.graph.state import (
     ORCHESTRATOR_GIVEN_BACK_ASKS_KEY,
     ORCHESTRATOR_HISTORY_KEY,
     ORCHESTRATOR_PENDING_KEY,
+    ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
     AskOption,
     AskQuestion,
     PendingAsk,
-    PricedOption,
     TurnInput,
+    UnitAsk,
     ask_candidates,
     ask_questions,
     pending_action,
     priced_options,
+    record_unit_read,
+    record_unit_served,
     resume_answers,
+    settle_unit,
+    store_search,
     stored_mapping,
+    stored_sequence,
+    unit_asks,
 )
+from harness.scope_choices import mark_planner_axes
+from harness.tool_contracts import resolver_digest
 from harness.turn.node import Next, Node, NodeCtx, Pause, TurnKey
+from harness.turn_records import SearchReading
+from harness.unit_offer import served_unit, unit_words
+from harness.unit_switch import UnitRefused, resubmit_unit
+from harness.wire import UnitChoice, UnitOffer
 
 
 class AgentHandBack(BaseModel):
@@ -62,6 +79,9 @@ class AgentHandBack(BaseModel):
     reads beside `text` in the call's result (`response`); a seed hand-back
     is text alone. `status` is the line Studio shows while the agent reads
     it, and `failure` the refusal a plan failed with, when one did.
+    `written` names the turn state keys the node wrote in reading the
+    answer, which reach Studio with the answer (`orchestrator.run.HandBack`);
+    the agent reads none of it.
     """
 
     answers: Literal["plan", "ask_user"] | None
@@ -69,6 +89,7 @@ class AgentHandBack(BaseModel):
     text: str
     body: dict[str, Any] = Field(default_factory=dict)
     failure: dict[str, Any] | None = None
+    written: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _body_answers_a_call(self) -> AgentHandBack:
@@ -146,7 +167,11 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
             if stored is None:
                 raise RuntimeError(f"no conversation waits on the {hand_back.answers} hand-back")
             history = StoredHistory.model_validate(stored)
-            resumed = HandBack(answers=hand_back.answers, result=hand_back.response())
+            resumed = HandBack(
+                answers=hand_back.answers,
+                result=hand_back.response(),
+                written=tuple(hand_back.written),
+            )
         run = run_orchestrator(
             orchestrator,
             state=ctx.state,
@@ -185,87 +210,282 @@ _SETTLED = "Each answered choice is settled. Do not ask it again."
 async def _ask(ctx: NodeCtx[GraphEvent], node_input: dict[str, Any]) -> Pause:
     """Put the agent's questions to the user in one pause, each under its id
     with its options as candidates (`ask_questions`). Each prices option
-    carries the part and prices code reads for it (`priced_options`), which
-    the turn's search results do not change while the pause is open."""
+    carries the part and prices code reads for it (`priced_options`), and a
+    unit question the parts it covers and its offer (`unit_asks`), which the
+    turn's search results do not change while the pause is open."""
     questions = PendingAsk.model_validate(node_input).questions
     return Pause(
         kind="ask",
         message=questions[0].question,
-        payload={"questions": ask_questions(questions, priced_options(questions, ctx.state))},
+        payload={
+            "questions": ask_questions(
+                questions,
+                priced_options(questions, ctx.state),
+                unit_asks(questions, ctx.state),
+            )
+        },
     )
 
 
-async def _answered(
-    ctx: NodeCtx[GraphEvent], node_input: dict[str, Any], answer: dict[str, Any]
-) -> Next:
-    """Hand the user's `answer` back in the options' own words
-    (`answer_replies`), as the result of the agent's `ask_user` call
-    (`AgentHandBack`)."""
-    questions = PendingAsk.model_validate(node_input).questions
-    answers = resume_answers(answer)
-    if answers is None:
-        replies = [""] * len(questions)
-        them = (
-            "the question. Do not answer it or search for it"
-            if len(questions) == 1
-            else "the questions. Do not answer them or search for them"
+def ask_node(*, definition_surface: ToolSurface) -> Node[GraphEvent]:
+    """The `ask` node: the agent's question to the user, a pause, and the answer
+    handed back, re-reading a unit answer's parts through `definition_surface`."""
+
+    async def answered(
+        ctx: NodeCtx[GraphEvent], node_input: dict[str, Any], answer: dict[str, Any]
+    ) -> Next:
+        """Hand the user's `answer` back in the options' own words
+        (`answer_replies`), as the result of the agent's `ask_user` call
+        (`AgentHandBack`).
+
+        A unit question's answer, and its skip, which goes on with the unit
+        the question started on, are read in code first: each part the
+        question covers is re-read in that unit (`_unit_reply`), and the
+        reply names the spec_id to fetch. Skipping the whole pause skips a
+        lone unit question the same way. The node writes the state through
+        one view, and the hand-back names the keys it wrote, so Studio
+        reads a re-read's block before the agent fetches it."""
+        state = RecordingState(ctx.state)
+        questions = PendingAsk.model_validate(node_input).questions
+        answers = resume_answers(answer)
+        units = unit_asks(questions, state)
+        if answers is None and len(questions) == 1 and units[0] is not None:
+            answers = {"q1": {"kind": "skipped"}}
+        if answers is None:
+            replies = [""] * len(questions)
+            them = (
+                "the question. Do not answer it or search for it"
+                if len(questions) == 1
+                else "the questions. Do not answer them or search for them"
+            )
+            closing = (
+                f"The user skipped {them}: close the turn in a sentence and ask what else you "
+                "can help with."
+            )
+        else:
+            picked = _picked_spec_ids(questions, answers)
+            settled = {
+                index: await _unit_reply(
+                    state,
+                    definition_surface,
+                    ask,
+                    answers.get(f"q{index + 1}") or {"kind": "skipped"},
+                    picked=picked,
+                )
+                for index, ask in enumerate(units)
+                if ask is not None
+            }
+            replies = answer_replies(questions, answers, settled=settled)
+            closing = _SETTLED
+            # The user answered, and may ask for other outputs than a plan call
+            # given back was held to.
+            state[ORCHESTRATOR_GIVEN_BACK_ASKS_KEY] = None
+        if len(questions) == 1:
+            lines = [f"You asked the user: {questions[0].question}", *filter(None, replies)]
+        else:
+            lines = ["You asked the user:"]
+            lines += [
+                f"{number}. {question.question} {reply}".rstrip()
+                for number, (question, reply) in enumerate(zip(questions, replies, strict=True), 1)
+            ]
+        if answers is not None and (
+            paired := measure_pair_reply(
+                questions,
+                answers,
+                stored_mapping(state, ORCHESTRATOR_SPECS_KEY),
+                settled={part for ask in units if ask is not None for part in ask.parts},
+            )
+        ):
+            lines.append(paired)
+        hand_back = AgentHandBack(
+            answers="ask_user",
+            status="Reading your answer",
+            text="\n".join([*lines, closing]),
+            written=list(state.written),
         )
-        closing = (
-            f"The user skipped {them}: close the turn in a sentence and ask what else you "
-            "can help with."
-        )
-    else:
-        replies = answer_replies(questions, answers, priced_options(questions, ctx.state))
-        closing = _SETTLED
-        # The user answered, and may ask for other outputs than a plan call
-        # given back was held to.
-        ctx.state[ORCHESTRATOR_GIVEN_BACK_ASKS_KEY] = None
-    if len(questions) == 1:
-        lines = [f"You asked the user: {questions[0].question}", *filter(None, replies)]
-    else:
-        lines = ["You asked the user:"]
-        lines += [
-            f"{number}. {question.question} {reply}".rstrip()
-            for number, (question, reply) in enumerate(zip(questions, replies, strict=True), 1)
-        ]
-    if answers is not None and (
-        paired := measure_pair_reply(
-            questions, answers, stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)
-        )
-    ):
-        lines.append(paired)
-    hand_back = AgentHandBack(
-        answers="ask_user", status="Reading your answer", text="\n".join([*lines, closing])
+        return Next("next", hand_back.model_dump(mode="json"))
+
+    return Node(run=_ask, resume=answered)
+
+
+def answered_unit(offer: UnitOffer, answer: Mapping[str, Any]) -> UnitChoice:
+    """The unit `answer` to a unit question names; any other answer, a skip
+    included, goes on with the unit the question's chips started on."""
+    if answer.get("kind") != "unit":
+        return offer.start
+    return UnitChoice.model_validate(
+        {key: answer.get(key) for key in ("currency", "prices", "base_year")}
     )
-    return Next("next", hand_back.model_dump(mode="json"))
 
 
-# The agent's question to the user: a pause, and the answer handed back.
-ask: Node[GraphEvent] = Node(run=_ask, resume=_answered)
+async def _unit_reply(
+    state: SessionState,
+    surface: ToolSurface,
+    ask: UnitAsk,
+    answer: Mapping[str, Any],
+    *,
+    picked: Sequence[str],
+) -> str:
+    """The reply to a unit question: the unit the user chose, or the starting
+    unit when they left it to the agent, then a sentence for each part it
+    covers (`_part_in_unit`)."""
+    unit = answered_unit(ask.offer, answer)
+    words = _in_sentence(unit_words(unit, ask.offer))
+    lead = (
+        f"The user chose {words}."
+        if answer.get("kind") == "unit"
+        else f"The user left this to you: go on in {words}."
+    )
+    offers = _offers(stored_mapping(state, ORCHESTRATOR_SPECS_KEY))
+    sentences = [lead]
+    for part in ask.parts:
+        count = next(
+            (
+                spec_id
+                for spec_id in picked
+                if spec_id != part
+                and (offer := offers.get(spec_id)) is not None
+                and offer.block == part
+                and offer.axis == "what"
+            ),
+            None,
+        )
+        sentences.append(
+            await _part_in_unit(state, surface, part, unit, offer=ask.offer, count=count)
+        )
+    return " ".join(sentences)
+
+
+def _in_sentence(words: str) -> str:
+    """`harness.unit_offer.unit_words` inside a sentence: "constant 2023 US dollars"."""
+    return words[:1].lower() + words[1:]
+
+
+def _latest_reading(state: Any, spec_id: str) -> SearchReading | None:
+    """The turn's newest reading of `spec_id`."""
+    for stored in reversed(stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY)):
+        if stored.get("spec_id") == spec_id:
+            return SearchReading.model_validate(stored)
+    return None
+
+
+def _count_block(block: Mapping[str, Any], count: str) -> dict[str, Any] | None:
+    """`block` with the definition of `count`, another count it offers
+    (`resolved.alternative_measures`), in place of its own; `None` when it offers none."""
+    for alternative in (block.get("resolved") or {}).get("alternative_measures") or ():
+        definition = alternative.get("definition") if isinstance(alternative, Mapping) else None
+        if isinstance(definition, Mapping) and definition.get("spec_id") == count:
+            return {**block, "definition": dict(definition)}
+    return None
+
+
+async def _part_in_unit(
+    state: SessionState,
+    surface: ToolSurface,
+    part: str,
+    unit: UnitChoice,
+    *,
+    offer: UnitOffer,
+    count: str | None,
+) -> str:
+    """What the agent fetches for `part` in `unit`: the part as it stands when
+    served in that unit, else the part Search re-reads in it
+    (`harness.unit_switch.resubmit_unit`), stored as the turn's newest reading
+    of it. With `count`, another count of the part the user picked in the same
+    pause, the count's definition is re-read in place of the part's, with the
+    part's reading for its roles and named sets; the part's scope base is
+    left out, since it compiles the part's own count. A unit Search does not
+    serve is a sentence telling the agent to fetch as served and say so.
+
+    The part, and the count, are settled on every path, so the question is
+    not asked of them again, and the series fetched for the part is recorded
+    with the unit it is served in (`record_unit_served`): `unit`, unless
+    Search refuses it, when the series keeps the unit it is served in."""
+    words = _in_sentence(unit_words(unit, offer))
+    block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(part) or {}
+    reading = _latest_reading(state, part)
+    label = (reading.text if reading is not None else None) or part
+    target, target_block, resubmitted = part, block, reading
+    if count is not None and (counted := _count_block(block, count)) is not None:
+        target, target_block = count, counted
+        if reading is not None:
+            resubmitted = reading.model_copy(update={"scope": None})
+    settle_unit(state, part, target)
+    served = served_unit(block)
+    if count is None and served == unit:
+        record_unit_served(state, part, part, unit)
+        return f"{label} ({part}) is served in {words}: fetch it as it stands."
+    result = await resubmit_unit(
+        surface,
+        reading=resubmitted,
+        block=target_block,
+        unit=unit.model_dump(mode="json", exclude_none=True),
+        label=label,
+    )
+    if isinstance(result, UnitRefused):
+        record_unit_served(state, part, target, served_unit(target_block))
+        as_served = f", in {_in_sentence(unit_words(served, offer))}," if served is not None else ""
+        return (
+            f"Search could not serve {words} for {label}: {result.reason} Fetch {target} as "
+            f"served{as_served} and say so."
+        )
+    settle_unit(state, result.spec_id)
+    record_unit_read(state, part, result.spec_id)
+    record_unit_served(state, part, result.spec_id, unit)
+    digest = resolver_digest({"parts": [dict(result.part)]})
+    for read in digest.get("part_digests") or ():
+        read["variable"] = label
+    if reading is not None:
+        mark_planner_axes(digest, reading.planner_axes)
+    store_search(
+        state,
+        digest,
+        asked=[reading.asked_roles] if reading is not None else (),
+        held_open=[reading.open_roles] if reading is not None else (),
+        share_sides=[reading.share_over] if reading is not None else (),
+    )
+    return f"Search read {label} in {words} as {result.spec_id}: fetch it in place of {target}."
 
 
 def answer_replies(
     questions: list[AskQuestion],
     answers: dict[str, dict[str, Any]],
-    priced: Sequence[Mapping[int, PricedOption]] = (),
+    *,
+    settled: Mapping[int, str] | None = None,
 ) -> list[str]:
     """What the user answered to each of `questions`, in order, from `answers`
     keyed by question id (`resume_answers`): a pick in the option's own words
-    with its spec_id when it carries one, the user's own words, or, for a question
+    with its spec_id when it carries one, the labels of several picks of a
+    `multi_select` question joined by "; ", the user's own words, or, for a question
     the user skipped or left unanswered, the first option as the agent's to
-    go on with. A pick of constant prices no search listed, an option of
-    `priced` (`priced_options`) in constant prices with no spec_id, asks
-    for one search of its part in those prices."""
+    go on with. `settled` holds the reply to each unit question by place,
+    which code wrote (`_unit_reply`)."""
     replies = []
     for index, question in enumerate(questions):
-        prices = priced[index] if index < len(priced) else {}
+        if settled and index in settled:
+            replies.append(settled[index])
+            continue
         answer = answers.get(f"q{index + 1}") or {"kind": "skipped"}
         if answer.get("kind") == "text":
             replies.append(f"The user answered in their own words: {answer['text']}")
             continue
-        if answer.get("kind") != "option":
-            first = question.options[0].label
-            replies.append(f"The user left this to you. Go on with {first}.")
+        if answer.get("kind") == "options" and question.options:
+            ids = [candidate["spec_id"] for candidate in ask_candidates(question.options)]
+            labels = [
+                question.options[ids.index(picked)].label
+                for picked in answer.get("spec_ids") or ()
+                if picked in ids
+            ]
+            if labels:
+                replies.append(f"The user chose: {'; '.join(labels)}")
+                continue
+        if answer.get("kind") != "option" or not question.options:
+            first = question.options[0].label if question.options else None
+            replies.append(
+                f"The user left this to you. Go on with {first}."
+                if first
+                else "The user left this to you."
+            )
             continue
         place = _picked_place(question, answer)
         option = question.options[place] if place is not None else None
@@ -273,11 +493,6 @@ def answer_replies(
             replies.append(f"The user chose: {answer.get('spec_id')}")
         elif option.spec_id:
             replies.append(f"The user chose: {option.label} ({option.spec_id})")
-        elif (stamp := prices.get(place)) is not None and stamp.prices == "constant":
-            replies.append(
-                f"The user chose: {option.label}, which no search listed. Search once for "
-                f"that part ({stamp.part}) in constant prices."
-            )
         else:
             replies.append(f"The user chose: {option.label}")
     return replies
@@ -417,6 +632,8 @@ def measure_pair_reply(
     questions: list[AskQuestion],
     answers: dict[str, dict[str, Any]],
     specs: Mapping[str, Any],
+    *,
+    settled: Collection[str] = (),
 ) -> str | None:
     """The one reading the count and prices answers name together, read
     against `specs`, the turn's search blocks by spec_id
@@ -429,11 +646,12 @@ def measure_pair_reply(
     when the block lists none, asks for one search. A count picked alone
     that the block lists only at another price basis than its own reading
     gets a line saying so. None for any other answers: each answer's own
-    line then stands.
+    line then stands. Blocks in `settled`, the parts a unit question of the
+    pause covers, get no line: code has re-read them in the chosen unit.
     """
     offers = _offers(specs)
     for block, picks in _block_picks(_picked_spec_ids(questions, answers), offers).items():
-        if "what" not in picks:
+        if "what" not in picks or block in settled:
             continue
         if "unit" in picks:
             reading, listed = _paired(picks, offers)

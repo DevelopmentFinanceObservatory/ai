@@ -6,7 +6,8 @@ verified first: an identity must hash to the spec_id it is stored under, so
 a write can only ever add the definition its spec_id names.
 `caller_definition` checks a definition this service did not read from
 Search itself, as the apis service's registry takes it, and `windowed_identity`
-computes an identity over other years and the spec_id it hashes to.
+computes an identity over other years and `unit_identity` one in another unit, each with
+the spec_id it hashes to.
 """
 
 from __future__ import annotations
@@ -136,3 +137,40 @@ def windowed_identity(
     """
     windowed = {**identity, "requested_window": dict(window)}
     return spec_id_for(canonicalize(windowed)), windowed
+
+
+def unit_identity(
+    identity: Mapping[str, Any], unit: Mapping[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """`identity` stating `unit` as its unit, and the spec_id that hashes from it.
+
+    `unit` is the request of a `value` unit binding, `{"currency": "EUR",
+    "prices": "constant", "base_year": 2024}`, which replaces `facets.unit`
+    whole (`facets` is created when the identity has none, and its other
+    facets stay). The result is in the identity core's normal form
+    (`search.models.identity` in dfo-apis): a binding holds exactly one of
+    `request` and `ref`, `base_year` is an integer present exactly when
+    prices are constant, and `currency` is the upper-case ISO 4217 code.
+
+    Raises:
+        ValueError: If `unit` is not in that form.
+    """
+    currency, prices, base_year = unit.get("currency"), unit.get("prices"), unit.get("base_year")
+    if not isinstance(currency, str) or currency != currency.upper() or not currency:
+        raise ValueError(f"a unit's currency is an upper-case ISO 4217 code, not {currency!r}")
+    request: dict[str, Any] = {"currency": currency, "prices": prices}
+    if prices == "constant":
+        if not isinstance(base_year, int) or isinstance(base_year, bool):
+            raise ValueError("a constant-price unit states an integer base_year")
+        request["base_year"] = base_year
+    elif prices == "current":
+        if base_year is not None:
+            raise ValueError("a current-price unit states no base_year")
+    else:
+        raise ValueError(f"a unit's prices are 'current' or 'constant', not {prices!r}")
+    facets = {
+        **(identity.get("facets") or {}),
+        "unit": {"state": "value", "request": request},
+    }
+    edited = {**identity, "facets": facets}
+    return spec_id_for(canonicalize(edited)), edited

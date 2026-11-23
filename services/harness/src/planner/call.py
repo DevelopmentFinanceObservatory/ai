@@ -21,7 +21,14 @@ from typing import Any, Literal, NamedTuple, Protocol
 
 from compiler.evidence import PriceBasis
 from harness.graph.orchestrate import counts_chosen
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers, stored_mapping
+from harness.graph.state import (
+    ORCHESTRATOR_SPECS_KEY,
+    ServedUnit,
+    resume_answers,
+    stored_mapping,
+    unit_reads,
+    units_served,
+)
 from harness.plan_display import DECISION_CHOICE_PREFIX, decision_option_id
 from harness.turn_events import PLANNER_ASK
 from submission.prices_choice import (
@@ -189,8 +196,9 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
     the part's choice, as they do on the orchestrator's question, and a skip
     keeps it, marking a constant choice `asked`. A switch of the part's
     prices row on the plan card (`_prices_switched`) is a new answer for the
-    part, marked `asked` too, while its replan is under way or once the plan
-    on record states it (`_switch_stands`). Any other `propose_plan`
+    part, marked `asked` too, keeping the currency a whole unit chosen for
+    the part held (`_switched_choice`), while its replan is under way or once
+    the plan on record states it (`_switch_stands`). Any other `propose_plan`
     response, the plan landing included, clears the refusal, so no later ask
     of another kind is read as that one. A message the user typed
     (a `message` step) releases every choice and clears the refusal, and an
@@ -203,6 +211,8 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
         for spec_id, source in pin_sources(call.state).items()
         if (block := source.spec_block(spec_id)) is not None
     }
+    reads = unit_reads(call.state)
+    served = units_served(call.state)
     chosen: dict[str, PricesChoice] = {}
     refused: str | None = None
     asked: dict[str, str] = {}
@@ -222,8 +232,16 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
         elif (switched := _prices_switched(step.body)) is not None:
             part, basis = switched
             if _switch_stands(call.state, part, basis):
-                _release_measure(chosen, part, measures)
-                chosen[part] = PricesChoice(basis, asked=True)
+                held = chosen.get(part)
+                # A whole unit is chosen for the part and the series fetched
+                # for it alike, and the switch moves both.
+                keys = dict.fromkeys(
+                    (part, *(p for p, c in chosen.items() if held is not None and c == held))
+                )
+                for priced in keys:
+                    _release_measure(chosen, priced, measures)
+                for priced in keys:
+                    chosen[priced] = _switched_choice(held, basis)
         elif step.call_id in asked:
             part = asked.pop(step.call_id)
             answer = _answers(step.body.get("result")).get("q1") or {}
@@ -236,7 +254,9 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
             elif part in chosen and chosen[part].prices == "constant":
                 chosen[part] = chosen[part]._replace(asked=True)
         else:
-            _priced_answers(step.args or {}, step.body, chosen, measures)
+            _priced_answers(
+                step.args or {}, step.body, chosen, measures, reads=reads, served=served
+            )
     return chosen
 
 
@@ -262,6 +282,17 @@ def _prices_switched(body: Mapping[str, Any]) -> tuple[str, PriceBasis] | None:
     return (slot.removeprefix(PRICES_SLOT_PREFIX), basis) if basis is not None else None
 
 
+def _switched_choice(held: PricesChoice | None, basis: PriceBasis) -> PricesChoice:
+    """The choice a switch of a part's prices row to `basis` makes over `held`,
+    the part's choice before it: `held` itself when it already names a whole
+    unit in `basis`, else `basis`, keeping the currency `held` holds the part
+    to (`PricesChoice.held_currency`)."""
+    if held is not None and held.unit is not None and held.prices == basis:
+        return held._replace(asked=True)
+    currency = held.held_currency if held is not None else None
+    return PricesChoice(basis, asked=True, currency=currency)
+
+
 def _switch_stands(state: Any, part: str, basis: PriceBasis) -> bool:
     """Whether a switch of `part`'s prices row to `basis` holds: its replan is
     under way (`planner.plan.decision_pick` names the row), or the plan on
@@ -272,8 +303,9 @@ def _switch_stands(state: Any, part: str, basis: PriceBasis) -> bool:
     if pick is not None and pick.slot == slot:
         return True
     plan = load_plan(state)
-    label = PricesChoice(basis).label
-    return plan is not None and any(d.slot == slot and d.chosen == label for d in plan.decisions)
+    return plan is not None and any(
+        d.slot == slot and d.fixes is not None and d.fixes.prices == basis for d in plan.decisions
+    )
 
 
 def _release_measure(
@@ -307,10 +339,42 @@ def _priced_answers(
     body: Mapping[str, Any],
     chosen: dict[str, PricesChoice],
     measures: Mapping[str, str | None],
+    *,
+    reads: Mapping[str, Sequence[str]],
+    served: Mapping[str, ServedUnit],
 ) -> None:
     """Record in `chosen` what one clarify response says of each part its call
-    priced, each answer replacing the choices of its part's measure (`prices_chosen`)."""
-    answers = _answers(body.get("result"))
+    priced, each answer replacing the choices of its part's measure (`prices_chosen`).
+
+    A unit question (`harness.graph.state.ask_questions`, `unit`) sets the
+    unit of every part it covers to the one the series the agent fetches for
+    it is served in (`served`, `harness.graph.state.units_served`), and of
+    that series, whose currency may differ from the part's: the unit the
+    user chose, or the one its chips started on for a skip, unless Search
+    refused it, when the part keeps the unit it is served in. A part whose
+    served unit cannot be stated takes no choice. A part with no served unit
+    recorded, answered in a turn paused before the `ask` node recorded one,
+    takes the prices of the answer, as does each series the part was re-read
+    as (`reads`, `harness.graph.state.unit_reads`). A skip or dismissal of a
+    whole pause of several questions sets none, as the `ask` node hands it
+    back unanswered; of a lone unit question it is that question's skip."""
+    result = body.get("result")
+    answers = _answers(result)
+    units = _unit_questions(args)
+    lone = len(_question_candidates(args)) == 1
+    answered = result is not None and (resume_answers(result) is not None or lone)
+    for question_id, unit in units.items() if answered else ():
+        prices = _unit_prices(unit, answers.get(question_id))
+        for part in map(str, unit.get("parts") or ()):
+            _release_measure(chosen, part, measures)
+            if (fetched := served.get(part)) is not None:
+                if fetched.unit is not None:
+                    choice = PricesChoice(fetched.unit.prices, fetched.spec_id, unit=fetched.unit)
+                    for priced in dict.fromkeys((part, fetched.spec_id)):
+                        chosen[priced] = choice
+            elif prices is not None:
+                for priced in (part, *reads.get(part, ())):
+                    chosen[priced] = PricesChoice(prices)
     for question_id, candidates in _question_candidates(args).items():
         marked = [c for c in candidates or () if isinstance(c, dict) and c.get("part")]
         answer = answers.get(question_id)
@@ -330,6 +394,34 @@ def _priced_answers(
         _release_measure(chosen, part, measures)
         if picked is not None:
             chosen[part] = picked
+
+
+def _unit_questions(args: dict[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """The `unit` entry of each unit question an ask's `args` put, by question id."""
+    payload = args.get("payload")
+    questions = payload.get("questions") if isinstance(payload, dict) else None
+    return {
+        str(question["id"]): question["unit"]
+        for question in questions or ()
+        if isinstance(question, dict)
+        and question.get("id")
+        and isinstance(question.get("unit"), dict)
+    }
+
+
+def _unit_prices(unit: Mapping[str, Any], answer: object) -> PriceBasis | None:
+    """The prices a unit question's `answer` settles: a unit answer's, else, as
+    for a skip, the prices its offer's chips started on."""
+    if isinstance(answer, dict) and answer.get("kind") == "unit":
+        prices = answer.get("prices")
+    else:
+        prices = ((unit.get("offer") or {}).get("start") or {}).get("prices")
+    match prices:
+        case "current":
+            return "current"
+        case "constant":
+            return "constant"
+    return None
 
 
 def _answers(result: object) -> dict[str, dict[str, Any]]:
