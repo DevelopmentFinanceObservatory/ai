@@ -339,15 +339,10 @@ class _Parties(NamedTuple):
     `sources` is the source of each dataset requirement the frame rests on, by its
     id. `kept` holds, for each such requirement and donor or recipient column its
     source resolves entities on, the refs of those entities still on the frame.
-    `columns` are the donor and recipient columns the parties speak for, and
-    `complete` is false where they are some of the frame's parties only, as behind
-    a `sum_of` one of whose sides keeps parties nothing here reads.
     """
 
     sources: Mapping[str, SelectedSource]
     kept: Mapping[tuple[str, str], frozenset[str]]
-    columns: frozenset[str] = frozenset(WHOLE_COLUMNS.values())
-    complete: bool = True
 
 
 def wholes_on_their_sources(
@@ -1908,18 +1903,17 @@ class _Build:
         to Kenya from a source resolving Kenya and the United States keeps Kenya,
         and a denominator naming the United States from that source holds the
         United States alone. A numerator's parties on a column its source resolves
-        no entity on are those its identity binds. A numerator summing a side whose
-        parties are unknown keeps at least its other side's, which are checked. A
-        denominator holds its identity's parties and named set until the plan
-        narrows it; narrowed, it holds the parties it keeps, its named set only
-        while the set's total is among them, and no country it does not keep
+        no entity on are those its identity binds. A denominator holds its
+        identity's parties and named set until the plan narrows it; narrowed, it
+        holds the parties it keeps, its named set only while the set's total is
+        among them, and no country it does not keep
         (`compiler.sources.countries_apart`). A column the denominator is keyed by
         pairs its rows key by key and is not checked here: `_check_keys_overlap`
         refuses two key columns sharing no entity, and analysis-mcp reports a
         numerator key the denominator lacks as `unmatched_key`.
 
-        Nothing is checked where the numerator's parties or the denominator's whole
-        are unknown, where either keeps no party on a column, where the
+        Nothing is checked where either operand's parties are unknown, whether or
+        not it names an entity, where either keeps no party on a column, where the
         denominator's key column does not resolve, or where both rest on the same
         sources and the denominator narrows none; each skip is logged. A party
         nothing shows is inside or outside is not refused. The refusal names
@@ -1930,7 +1924,7 @@ class _Build:
         """
         part = self._side_parties(operation.id, operation.numerator)
         whole = self._side_parties(operation.id, operation.denominator)
-        if part is None or whole is None or not whole.complete:
+        if part is None or whole is None:
             logger.info(
                 "share %r: the parties an operand keeps are unknown, so its numerator's "
                 "are not checked",
@@ -1969,9 +1963,7 @@ class _Build:
         # Each party found outside, in words, with the column it is found on.
         outside: dict[str, str] = {}
         for axis, column in WHOLE_COLUMNS.items():
-            if column not in part.columns & whole.columns or (
-                keyed is not None and keyed.column == column
-            ):
+            if keyed is not None and keyed.column == column:
                 continue
             held = [
                 side
@@ -2037,45 +2029,16 @@ class _Build:
 
     def _side_parties(self, op_id: str, side: Side) -> _Parties | None:
         """The parties `side` of the two-sided operation `op_id` keeps: those of its
-        input (`_parties_behind`), narrowed to the entity it names.
-
-        Where its input's parties are unknown, the side keeps at most the entities
-        its name resolves to on its frame, and is read on their column alone
-        (`_named_parties`). `None` where they are unknown and the side names
-        nothing, or where the name does not resolve on the side's frame
-        (`_frame_entity`), which the side check reports."""
+        input (`_parties_behind`), narrowed to the entity it names. `None` where they
+        are unknown, whether or not the side names an entity, or where the name does
+        not resolve on the side's frame (`_frame_entity`), which the side check
+        reports."""
         parties = self._parties_behind(side.input)
-        if side.entity is None:
+        if parties is None or side.entity is None:
             return parties
-        members = self._frame_entity(op_id, side.input, side.entity)
-        if not isinstance(members, tuple):
+        if not isinstance(self._frame_entity(op_id, side.input, side.entity), tuple):
             return None
-        if parties is None:
-            return self._named_parties(side.input, members)
         return self._narrowed_parties(side.input, parties, side=side)
-
-    def _named_parties(self, input_id: str, members: tuple[ResolvedEntity, ...]) -> _Parties | None:
-        """The parties a side naming `members` on the frame at `input_id` keeps,
-        whose own parties are unknown: those members, on their column alone, from
-        the source of the requirement that column came from. `None` where the
-        column is no donor or recipient column, or the source states no identity."""
-        column = members[0].role
-        resolved = self.shapes.get(input_id)
-        columns = resolved.columns if resolved is not None else ()
-        role = next((one for one in columns if one.column == column), None)
-        source = self._role_source(role) if role is not None else None
-        if (
-            role is None
-            or source is None
-            or source.identity is None
-            or column not in WHOLE_COLUMNS.values()
-        ):
-            return None
-        return _Parties(
-            {role.requirement_id: source},
-            {(role.requirement_id, column): frozenset(member.ref for member in members)},
-            columns=frozenset({column}),
-        )
 
     def _parties_behind(self, op_id: str) -> _Parties | None:
         """The parties the frame at `op_id` still holds on the donor and recipient
@@ -2088,9 +2051,8 @@ class _Build:
         still carries to the members left there (`_column_members`); one keeping
         rows by their values or place level is unknown. A `sum` aggregate keeps the
         parties it adds, whatever it groups by. A `sum_of` keeps the parties of
-        both its sides (`_side_parties`), on the columns both speak for; where one
-        side's are unknown, it keeps the other's, marked incomplete. Every other
-        operation is unknown.
+        both its sides (`_side_parties`), and is unknown where either side's are.
+        Every other operation is unknown.
         """
         if op_id not in self._parties:
             # Seeded first, so an operation reading itself is unknown.
@@ -2112,9 +2074,14 @@ class _Build:
             case AggregateOperation(input=input_id, reduction=Reduction.SUM):
                 return self._parties_behind(input_id)
             case SumOfOperation(left=left, right=right):
-                return _summed_parties(
-                    self._side_parties(op_id, left), self._side_parties(op_id, right)
-                )
+                left_parties = self._side_parties(op_id, left)
+                right_parties = self._side_parties(op_id, right)
+                if left_parties is None or right_parties is None:
+                    return None
+                kept = dict(left_parties.kept)
+                for key, refs in right_parties.kept.items():
+                    kept[key] = kept.get(key, frozenset()) | refs
+                return _Parties({**left_parties.sources, **right_parties.sources}, kept)
             case _:
                 return None
 
@@ -3735,24 +3702,6 @@ def _narrowed_by_side(
 def _resolved_refs(source: SelectedSource, column: str) -> frozenset[str]:
     """The refs of every entity `source` resolves on the role column `column`."""
     return frozenset(entity.ref for entity in source.entities if entity.role == column)
-
-
-def _summed_parties(left: _Parties | None, right: _Parties | None) -> _Parties | None:
-    """The parties a `sum_of` of sides keeping `left` and `right` keeps
-    (`_Build._parties_behind`): both, on the columns both speak for, or the one
-    side's that is known, marked incomplete."""
-    if left is None or right is None:
-        known = right if left is None else left
-        return None if known is None else known._replace(complete=False)
-    kept = dict(left.kept)
-    for key, refs in right.kept.items():
-        kept[key] = kept.get(key, frozenset()) | refs
-    return _Parties(
-        {**left.sources, **right.sources},
-        kept,
-        columns=left.columns & right.columns,
-        complete=left.complete and right.complete,
-    )
 
 
 def _held_side(

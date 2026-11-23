@@ -7583,9 +7583,7 @@ def _reading_the_division(kind: str) -> tuple[EvidenceRequirement, Operation]:
     ("kind", "args"),
     [
         ("compare", {"left_entity": _KENYA_ON_KEY, "right_entity": _UGANDA_ON_KEY}),
-        # Kenya's ratio over Uganda's holds no part of a whole, so the share check
-        # refuses it; `compare` covers both sides binding on the key column.
-        ("share_of", None),
+        ("share_of", {"numerator_entity": _KENYA_ON_KEY, "denominator_entity": _UGANDA_ON_KEY}),
         (
             "filter",
             {
@@ -7603,7 +7601,7 @@ def test_an_entity_named_on_a_keyed_division_binds_on_its_key_column(
     source: SourceFactory,
     verb: str,
     kind: str,
-    args: dict[str, Any] | None,
+    args: dict[str, Any],
 ) -> None:
     # A keyed division rests on two retrievals and holds one series per
     # recipient under its numerator's key column, so a reader naming a
@@ -7619,11 +7617,6 @@ def test_an_entity_named_on_a_keyed_division_binds_on_its_key_column(
         discovered=discovered,
     )
 
-    if args is None:
-        assert [(issue.code, issue.operation_id) for issue in result.issues] == [
-            (CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE, "picked")
-        ]
-        return
     assert result.ok, result.issues
     assert result.workflow is not None
     step = result.workflow.steps[-1]
@@ -9093,10 +9086,10 @@ _UNBOUND = (Code.SOURCE_UNUSABLE, "fetch")
             "threshold",
             "africa",
             None,
-            _REFUSED,
+            [],
             id="named-after-a-value-threshold",
         ),
-        pytest.param("United States", "mean", "africa", None, _REFUSED, id="named-after-a-mean"),
+        pytest.param("United States", "mean", "africa", None, [], id="named-after-a-mean"),
         pytest.param(
             "United States",
             "filtered-threshold",
@@ -9110,7 +9103,7 @@ _UNBOUND = (Code.SOURCE_UNUSABLE, "fetch")
             "unknown-side",
             "africa",
             None,
-            _REFUSED,
+            [],
             id="sum-of-a-side-of-unknown-parties",
         ),
         pytest.param(
@@ -9161,11 +9154,9 @@ def test_a_share_checks_only_the_entities_each_operand_keeps(
     (`kenya-plus-us`), holds Kenya and not Nigeria. A denominator filtered to Africa
     and summed, on a source binding Africa's members (`africa-members-summed`), holds
     Nigeria and not the United States. A value threshold or a mean keeps rows nothing
-    here can name, so a numerator naming the United States after one keeps at most the
-    United States and is refused, while one filtered to the United States before a
-    threshold and naming nothing after it is not checked. A numerator summing the
-    United States with a side whose parties are unknown keeps at least the United
-    States, so it is refused."""
+    here can name, so a numerator read through one is not checked, whether it names
+    the United States after it or was filtered to the United States before it. Nor is
+    a numerator summing the United States with a side read through a threshold."""
     g7 = Entity(name="G7", role="donor")
     recipients = [
         g7,
