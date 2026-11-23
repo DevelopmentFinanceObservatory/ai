@@ -715,6 +715,55 @@ async def test_a_count_read_again_in_a_unit_keeps_the_part_s_roles_and_no_pair_n
     assert "search once for that reading" not in handed.output["text"]
     assert {_FK_GROSS, _FK_NET} <= set(unit_settled(state))
     assert unit_reads(state) == {_FK_GROSS: [posted["spec_id"]]}
+    assert units_served(state)[_FK_GROSS].count == _FK_NET
+
+
+async def test_a_count_refused_a_unit_is_fetched_in_the_unit_the_count_is_served_in() -> None:
+    """The net count picked beside a unit answer is served in current euros,
+    the gross part in current US dollars, and Search refuses the chosen unit
+    for the net count. The agent is told to fetch the net count as served in
+    euros, the unit plan admission holds the part to."""
+    search = _UnitSearch(refusal={"code": "requested_option_unavailable"})
+    block = copy.deepcopy(_FRANCE_KENYA)
+    (net,) = block["resolved"]["alternative_measures"]
+    net["definition"]["identity"]["facets"] = {
+        "unit": {"request": {"currency": "EUR", "prices": "current"}}
+    }
+    state: dict[str, Any] = {
+        ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: block},
+        ORCHESTRATOR_SEARCHES_KEY: [_open_reading(_FK_GROSS, text=_AID)],
+    }
+    ctx = NodeCtx(
+        key=TurnKey("user-1", "conv", 1),
+        inputs={"message": "Aid to Kenya since 2018?"},
+        state=state,
+        transcript=Transcript(),
+        emit=lambda event: None,
+        stop=StopScope(),
+    )
+    questions = [
+        {
+            "question": "How should aid be counted?",
+            "options": [
+                {"label": "gross disbursements", "spec_id": _FK_GROSS},
+                {"label": "net disbursements", "spec_id": _FK_NET},
+            ],
+        },
+        {"question": "In which prices?", "unit_of": _FK_GROSS},
+    ]
+    answer = _answers(
+        q1={"kind": "option", "spec_id": _FK_NET},
+        q2={"kind": "unit", "currency": "USD", "prices": "constant", "base_year": 2023},
+    )
+    node = ask_node(definition_surface=search)
+    assert node.resume is not None
+
+    handed = await node.resume(ctx, {"questions": questions}, answer)
+
+    assert units_served(state)[_FK_GROSS] == ServedUnit(
+        spec_id=_FK_NET, unit=Unit(currency="EUR", prices="current"), count=_FK_NET
+    )
+    assert f"Fetch {_FK_NET} as served, in current EUR, and say so." in handed.output["text"]
 
 
 @pytest.mark.parametrize(

@@ -47,6 +47,12 @@ from planner.records import (
     RankDirection,
 )
 
+# How a plan card and `harness.turn_records.open_prices` word each prices
+# basis, the labels of a part's prices decision when the user chose no
+# whole unit (`submission.prices_choice.PricesChoice.label`).
+CURRENT_PRICES = "current prices"
+CONSTANT_PRICES = "constant prices"
+
 # Each level of place in words, in the singular: "Keep countries", "Rank the top 5 continents".
 _LEVEL_NOUNS: dict[PlaceType, str] = {
     PlaceType.COUNTRY: "country",
