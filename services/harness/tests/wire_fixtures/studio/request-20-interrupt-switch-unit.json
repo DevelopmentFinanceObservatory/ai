@@ -1,0 +1,15 @@
+{
+  "kind": "interrupt.response",
+  "schema_version": 1,
+  "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E",
+  "interrupt_id": "approve",
+  "decision": "switch",
+  "choice_id": "decision/user_unit_spec_5c1e0a9b7d2f4e6a8b0c1d2e3f405162",
+  "option_id": "USD-constant-2015",
+  "plan_revision": "rev_01j9ze2k7d",
+  "unit": {
+    "currency": "USD",
+    "prices": "constant",
+    "base_year": 2015
+  }
+}

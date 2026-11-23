@@ -311,7 +311,8 @@
       "call_id": null,
       "args": null,
       "body": {},
-      "name": null
+      "name": null,
+      "record": 0
     },
     {
       "kind": "response",
@@ -322,14 +323,16 @@
         "code": "plan_invalid",
         "message": "Pin a source."
       },
-      "name": "propose_plan"
+      "name": "propose_plan",
+      "record": 2
     },
     {
       "kind": "message",
       "call_id": null,
       "args": null,
       "body": {},
-      "name": null
+      "name": null,
+      "record": 4
     }
   ],
   "state": {

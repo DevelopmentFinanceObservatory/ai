@@ -135,7 +135,7 @@ from planner.workflow import (
     WorkflowStep,
 )
 from pydantic import BaseModel
-from submission.prices_choice import PricesChoice, prices_slot
+from submission.prices_choice import PricesChoice, prices_slot, unit_slot
 from submission.service import SourceReadings, _card_names
 from translator.mechanical import build_translation
 
@@ -5209,11 +5209,12 @@ def _planner_decision(**update: Any) -> Decision:
     )
 
 
-def _prices_decision(choice: PricesChoice) -> Decision:
+def _prices_decision(choice: PricesChoice, *, slot: str | None = None) -> Decision:
     """The decision `propose_plan` writes for `choice`, the prices the user
-    chose for a part, as `submission.prices_choice.prices_decisions` words it."""
+    chose for a part, under `slot`, the part's prices slot unless given, as
+    `submission.prices_choice.prices_decisions` words it."""
     return Decision(
-        slot=prices_slot(_SPEC_A),
+        slot=slot or prices_slot(_SPEC_A),
         description="Which prices the figures are in.",
         options=tuple(
             choice.words if label == choice.label else label
@@ -5250,6 +5251,13 @@ def _prices_decision(choice: PricesChoice) -> Decision:
             ),
             False,
         ),
+        (
+            _prices_decision(
+                PricesChoice("current", unit=Unit(currency="EUR", prices="current")),
+                slot=unit_slot(_SPEC_A),
+            ),
+            False,
+        ),
     ],
     ids=[
         "fixes_fields",
@@ -5260,6 +5268,7 @@ def _prices_decision(choice: PricesChoice) -> Decision:
         "prices",
         "whole_unit",
         "whole_unit_in_usd",
+        "unit_question",
     ],
 )
 def test_only_a_planner_decision_settling_fields_switches_on_the_card(

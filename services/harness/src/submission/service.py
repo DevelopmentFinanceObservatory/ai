@@ -73,7 +73,7 @@ from compiler.sources import (
 )
 from data_mcp.scope import ChoiceOrigin, ScopeAxis
 from data_mcp.settings import Settings as DataMcpSettings
-from harness.graph.state import conversation_readings
+from harness.graph.state import conversation_readings, units_reread, units_served
 from harness.plan_display import plan_words
 from harness.scope_choices import (
     ANY_REPORTERS,
@@ -158,6 +158,7 @@ from planner.plan import (
     SessionState,
     ShareOfRequirement,
     SumOfRequirement,
+    Unit,
     UnreadablePickError,
     UnsupportedOperation,
     UnsupportedPlanError,
@@ -270,11 +271,20 @@ from translator.referral import USER_DECIDES, Referral, ReferralKind, load_refer
 from translator.tool import authored_answer
 
 from submission.prices_choice import (
-    PRICES_SLOT_PREFIX,
+    USER_PRICES_SLOT_PREFIXES,
+    AbsorbedRows,
+    AnsweredPart,
     Parts,
+    PricesAnswers,
     PricesChoice,
+    absorbed,
+    absorbed_rows,
     base_year_refusal,
+    part_readings,
+    plan_held_choices,
     prices_decisions,
+    row_members_left,
+    whole_unit_slots,
 )
 
 # What a combination ask asks about: the `sum_of` requirement's id and the
@@ -339,8 +349,18 @@ class SessionView(Protocol):
         """Whether the user has said anything (an answer, an amendment, a new message) since plan `version` was recorded."""
         ...
 
-    def prices_chosen(self) -> Mapping[str, PricesChoice]:
-        """The prices the user picked answering an ask, by the part each prices, until released."""
+    def prices_answers(self) -> PricesAnswers:
+        """The prices the user picked answering an ask, by the part each
+        prices, until released, with the parts an answer given since the plan
+        on record was recorded priced, and whether the user's words since then
+        release its unit rows. A revision of the plan in code reads neither."""
+        ...
+
+    def switched_units(self) -> Mapping[str, Unit]:
+        """The whole unit a switch of a unit row on the plan card picked, by
+        the row's slot (`submission.prices_choice.unit_slot`), which the plan
+        this proposal revises states in place of the one it held. Empty
+        outside such a revision."""
         ...
 
     def decision_pick(self) -> DecisionPick | None:
@@ -426,7 +446,10 @@ class Admission:
     to a compile in place of the pin it states (`planner.plan.AlignedInput`),
     to replace those on record: they belong to this plan, so a fresh plan
     holding none writes none. `pin_verdicts` are admission's verdicts on the
-    plan's pins (`_pin_verdicts`), to replace those on record.
+    plan's pins (`_pin_verdicts`), to replace those on record. `unit_rows`
+    is what each unit row has absorbed of the user's unit answers, those on
+    record with this plan's (`submission.prices_choice.absorbed`), to
+    replace them.
     """
 
     plan: Plan
@@ -434,6 +457,7 @@ class Admission:
     windowed_pins: tuple[WindowedPin, ...] | None
     alignments: tuple[AlignedInput, ...]
     pin_verdicts: tuple[PinVerdict, ...]
+    unit_rows: AbsorbedRows
 
 
 def submit(
@@ -509,10 +533,26 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         # shape: a value that is no list states none.
         stated = raw if isinstance(raw := proposal.evidence_requirements, list) else []
         readings = SourceReadings.of_shown(held_sources(view.state))
+        # The plan the proposal amends, as the chain below resolves it.
+        intent = _intent(view, proposal)
+        amended = intent[0] if not isinstance(intent, dict) else None
         return base_year_refusal(
             exc,
             stated,
-            choices=view.prices_chosen(),
+            choices=_user_prices(
+                view,
+                view.prices_answers(),
+                statement(
+                    amended,
+                    to_origin={
+                        copy.spec_id: copy.windowed_from
+                        for copy in windowed_pins(view.state).values()
+                    },
+                    alignments=alignments(view.state),
+                )
+                if amended is not None
+                else None,
+            ),
             parts=Parts.of_shown(
                 pin_sources(view.state),
                 readings.get,
@@ -532,16 +572,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     removed_evidence_requirements = patch.removed_evidence_requirements
     existing = load_plan(view.state)
     referral = _authored_referral(view, existing)
-    resolved = _resolve_intent(
-        existing,
-        amends_version=proposal.amends_version,
-        starts_new_plan=proposal.starts_new_plan,
-        amendment_entry=in_amendment_entry,
-        rounds_so_far=load_plan_rounds(view.state),
-        question=question,
-        new_question_in=_new_question_source(proposal.new_question_in),
-        answered_in_words=answered_in_words(view.state),
-    )
+    resolved = _intent(view, proposal)
     if isinstance(resolved, dict):
         return resolved
     previous, rounds = resolved
@@ -704,21 +735,33 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     requirements_after = _requirements_after(
         previous, evidence_requirements, removed_evidence_requirements
     )
+    answers = view.prices_answers()
+    chosen = _user_prices(view, answers, previous)
+    if left := _rows_left(view, answers, previous):
+        # A requirement reading a member that left its unit row stops citing
+        # the row, so the row's unit is the one its other requirements state.
+        evidence_requirements = _without_held_unit_citations(
+            requirements_after, evidence_requirements, held=left
+        )
+        requirements_after = _requirements_after(
+            previous, evidence_requirements, removed_evidence_requirements
+        )
+    shown_parts = Parts.of_shown(
+        pins,
+        sources.get,
+        sources.block,
+        pinned=[
+            requirement.source_spec_id
+            for requirement in requirements_after
+            if isinstance(requirement, DatasetRequirement)
+            and requirement.source_spec_id is not None
+        ],
+    )
     priced = prices_decisions(
-        view.prices_chosen(),
+        chosen,
         evidence_requirements,
         requirements_after,
-        parts=Parts.of_shown(
-            pins,
-            sources.get,
-            sources.block,
-            pinned=[
-                requirement.source_spec_id
-                for requirement in requirements_after
-                if isinstance(requirement, DatasetRequirement)
-                and requirement.source_spec_id is not None
-            ],
-        ),
+        parts=shown_parts,
         propose=proposer.call,
     )
     if isinstance(priced, dict):
@@ -730,6 +773,13 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         requirements_after = _requirements_after(
             previous, evidence_requirements, removed_evidence_requirements
         )
+    # Each part of a unit answer a requirement reads is absorbed by its row,
+    # on the record of the plan this proposal amends; a fresh plan starts one.
+    unit_rows = absorbed(
+        absorbed_rows(view.state) if previous is not None else {},
+        answers.chosen,
+        part_readings(chosen, requirements_after, parts=shown_parts),
+    )
     unmade = _unmade_prices_citations(
         requirements_after, _decisions_after(previous, settled, removed=removed_decisions)
     )
@@ -740,6 +790,30 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         requirements_after = _requirements_after(
             previous, evidence_requirements, removed_evidence_requirements
         )
+    # The user's whole unit answer owns the unit of every requirement it
+    # holds, so none of those cites a decision of the planner's fixing a unit.
+    stated_decisions = _decisions_after(previous, settled, removed=removed_decisions)
+    held_units = _units_the_user_holds(
+        requirements_after, stated_decisions, whole_units=whole_unit_slots(chosen)
+    )
+    if (refusal := _unit_fixed_with_more(held_units, stated_decisions, proposer)) is not None:
+        return refusal
+    if held_units:
+        evidence_requirements = _without_held_unit_citations(
+            requirements_after, evidence_requirements, held=held_units
+        )
+        requirements_after = _requirements_after(
+            previous, evidence_requirements, removed_evidence_requirements
+        )
+        cited = {slot for requirement in requirements_after for slot in requirement.decision_ids}
+        gone = {slot for slots in held_units.values() for slot in slots} - cited
+        settled = [decision for decision in settled if decision.slot not in gone]
+        if previous is not None and gone:
+            # Code removes the carried ones, so none reads as the user's
+            # decision dropped, and the plan amended holds none of them.
+            previous = previous.model_copy(
+                update={"decisions": tuple(d for d in previous.decisions if d.slot not in gone)}
+            )
     read = full_histories(view.state)
     definition_lookup = load_log(view.state).recorded_definition
     settled = [
@@ -940,17 +1014,207 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         windowed_pins=tuple(copies) if copies or held_copies else None,
         alignments=tuple(entries.values()),
         pin_verdicts=verdicts,
+        unit_rows=unit_rows,
     )
 
 
+def _intent(view: SessionView, proposal: Proposal) -> tuple[Plan | None, int] | dict[str, object]:
+    """The plan `proposal` amends, `None` for a fresh plan, with the round
+    count it brings the entry to, or the refusal of its intent
+    (`_resolve_intent`)."""
+    return _resolve_intent(
+        load_plan(view.state),
+        amends_version=proposal.amends_version,
+        starts_new_plan=proposal.starts_new_plan,
+        amendment_entry=amendment_entry(view.state),
+        rounds_so_far=load_plan_rounds(view.state),
+        question=proposal.question,
+        new_question_in=_new_question_source(proposal.new_question_in),
+        answered_in_words=answered_in_words(view.state),
+    )
+
+
+def _user_prices(
+    view: SessionView, answers: PricesAnswers, previous: Plan | None
+) -> Mapping[str, PricesChoice]:
+    """The prices the user chose (`answers`, `SessionView.prices_answers`), each unit row
+    `previous`, the plan amended as the planner states it, holds read off it
+    (`submission.prices_choice.plan_held_choices`), a row a switch of the
+    card moved in the unit it picked (`SessionView.switched_units`).
+
+    The unit question's answer seeds the plan that first states its row.
+    From then on every member of the row with a series in the row's unit,
+    each part the answer put on it (`harness.graph.state.units_served`),
+    read in that unit by a switch of the row when the plan does not read it
+    (`harness.graph.state.units_reread`), and each pin citing it, holds the
+    row's unit, whether or not the turn still holds the answer. The plan's
+    pins stand for each part the row absorbed
+    (`submission.prices_choice.absorbed_rows`), so a count or scope switch
+    that moves a pin moves the series the unit holds, and a member answered
+    since the plan was recorded (`PricesAnswers.fresh`) holds its answer. A
+    message the user typed or an amendment of the card since then releases
+    its rows (`PricesAnswers.released`), as it releases every choice. A
+    revision of the plan in code reads neither (`SessionView.prices_answers`).
+    """
+    if previous is None or answers.released:
+        return answers.chosen
+    return plan_held_choices(
+        answers.chosen,
+        previous,
+        units=view.switched_units(),
+        answered=_answered_parts(view),
+        rows=absorbed_rows(view.state),
+        fresh=answers.fresh,
+    )
+
+
+def _rows_left(
+    view: SessionView, answers: PricesAnswers, previous: Plan | None
+) -> dict[str, frozenset[str]]:
+    """The unit row slots each requirement of `previous` stops citing, by its
+    id, as a member it read left its row (`submission.prices_choice.row_members_left`),
+    under the same reading of the user's answers as `_user_prices`."""
+    if previous is None or answers.released:
+        return {}
+    return row_members_left(
+        answers.chosen,
+        previous,
+        answered=_answered_parts(view),
+        rows=absorbed_rows(view.state),
+        fresh=answers.fresh,
+    )
+
+
+def _answered_parts(view: SessionView) -> dict[str, AnsweredPart]:
+    """Each part a unit question's answer put on a unit row, with the series
+    fetched for it and the one a switch of its row re-read it as."""
+    reread = units_reread(view.state)
+    return {
+        part: AnsweredPart(
+            served.row,
+            served.spec_id,
+            served.unit,
+            (read.spec_id, read.unit) if (read := reread.get(part)) is not None else None,
+        )
+        for part, served in units_served(view.state).items()
+        if served.row is not None
+    }
+
+
 def _without_user_prices(drafts: Sequence[DecisionDraft]) -> list[DecisionDraft]:
-    """`drafts` less any under a slot of the prices the user chose (`PRICES_SLOT_PREFIX`).
+    """`drafts` less any under a slot of the prices the user chose (`USER_PRICES_SLOT_PREFIXES`).
 
     Code alone writes those (`prices_decisions`). A draft there can only copy
     the user's decision or change it, and none may change it, so the user's
     decision stands as code derives or carries it, whatever a draft restates.
     """
-    return [draft for draft in drafts if not draft.slot.startswith(PRICES_SLOT_PREFIX)]
+    return [draft for draft in drafts if not draft.slot.startswith(USER_PRICES_SLOT_PREFIXES)]
+
+
+def _units_the_user_holds(
+    requirements: Sequence[EvidenceRequirement],
+    decisions: Sequence[Decision],
+    *,
+    whole_units: Collection[str],
+) -> dict[str, frozenset[str]]:
+    """The planner's decisions fixing a unit the user's whole unit answer
+    holds, by each requirement citing them.
+
+    A requirement citing a decision recording a whole unit the user chose
+    (`whole_units`, `submission.prices_choice.whole_unit_slots`) states the
+    unit that answer holds it to, which code writes and a switch of its plan
+    card row moves. A decision the planner wrote
+    (`planner.plan.is_code_written`) fixing `unit` on such a requirement
+    states that choice a second time: one fixing the unit alone is not cited
+    there, and one fixing other fields too is refused
+    (`_unit_fixed_with_more`). A requirement the user's answer does not hold
+    keeps citing it whole, so its fixes and wording stay true of every
+    requirement citing it. The plan card shows the user's answer once, and a
+    switch of it is not held back by the planner's copy. A bare prices
+    answer, current or constant, holds no unit, so the planner's decision
+    stating one stands.
+    """
+    by_slot = {decision.slot: decision for decision in decisions}
+    held: dict[str, frozenset[str]] = {}
+    for requirement in requirements:
+        if not any(slot in whole_units for slot in requirement.decision_ids):
+            continue
+        slots = frozenset(
+            slot
+            for slot in requirement.decision_ids
+            if (decision := by_slot.get(slot)) is not None
+            and not is_code_written(decision)
+            and decision.fixes is not None
+            and decision.fixes.unit is not None
+        )
+        if slots:
+            held[requirement.id] = slots
+    return held
+
+
+def _unit_fixed_with_more(
+    held: Mapping[str, frozenset[str]], decisions: Sequence[Decision], proposer: Proposer
+) -> dict[str, object] | None:
+    """The `USER_DECISION_CONTRADICTED` refusal of the first planner decision
+    `held` names (`_units_the_user_holds`) that fixes more than the unit, or
+    `None`.
+
+    Admission takes a decision fixing the unit alone off each requirement
+    the user's whole unit holds. One fixing other fields too states them on
+    that requirement, which code cannot keep while dropping its `unit`, as
+    its wording names the unit, so the planner restates it without `unit`
+    or stops citing it there. `detail` names the decision's `slot`, the
+    `requirement_id` citing it and the other `fields` it fixes.
+    """
+    by_slot = {decision.slot: decision for decision in decisions}
+    for requirement_id, slots in held.items():
+        for slot in sorted(slots):
+            fixes = by_slot[slot].fixes
+            assert fixes is not None
+            fields = sorted(set(fixes.model_dump(exclude_none=True)) - {"unit", "prices"})
+            if not fields:
+                continue
+            return problem(
+                ProblemCode.USER_DECISION_CONTRADICTED,
+                f"{requirement_id!r} states the unit the user chose, and it cites "
+                f"{slot!r}, which fixes `unit` with {', '.join(fields)}. Restate "
+                f"{slot!r} without `unit`, or cite it on {requirement_id!r} no longer.",
+                outcome=Outcome.REFUSED,
+                action=Action(call=proposer.call, needs=("decisions", "evidence_requirements")),
+                detail={"slot": slot, "requirement_id": requirement_id, "fields": fields},
+            )
+    return None
+
+
+def _without_held_unit_citations(
+    requirements: Sequence[EvidenceRequirement],
+    patch: Sequence[EvidenceRequirement],
+    *,
+    held: Mapping[str, frozenset[str]],
+) -> list[EvidenceRequirement]:
+    """`patch` with each requirement `held` names restated without citing the
+    slots it maps that requirement to (`_units_the_user_holds`).
+
+    `requirements` is every requirement the patched plan states. One `patch`
+    states is replaced in place; a carried one is appended, so `Plan.amend`
+    replaces it.
+    """
+    rewritten = {
+        requirement.id: requirement.model_copy(
+            update={
+                "decision_ids": tuple(
+                    slot for slot in requirement.decision_ids if slot not in held[requirement.id]
+                )
+            }
+        )
+        for requirement in requirements
+        if requirement.id in held
+    }
+    stated = {requirement.id for requirement in patch}
+    return [
+        *(rewritten.get(requirement.id, requirement) for requirement in patch),
+        *(requirement for rid, requirement in rewritten.items() if rid not in stated),
+    ]
 
 
 def _unmade_prices_citations(
@@ -970,7 +1234,7 @@ def _unmade_prices_citations(
         slot
         for requirement in requirements
         for slot in requirement.decision_ids
-        if slot.startswith(PRICES_SLOT_PREFIX) and slot not in made
+        if slot.startswith(USER_PRICES_SLOT_PREFIXES) and slot not in made
     )
 
 
@@ -1047,7 +1311,7 @@ def _slot_code_writes(slot: str) -> bool:
     Those are a pin's measure and scope decisions (`search_pin_slot`,
     `scope_choice_slot`), the decisions a compiled whole or a calculation
     whose inputs differ on an aligned axis states (`_whole_slot`, `_DIFFERENCES`),
-    and the prices the user chose for a part (`submission.prices_choice.prices_slot`).
+    and the prices the user chose (`submission.prices_choice.decision_slots`).
     """
     return slot.startswith(
         (
@@ -1055,7 +1319,7 @@ def _slot_code_writes(slot: str) -> bool:
             *(scope_choice_slot("", axis) for axis in get_args(ScopeAxis)),
             _whole_slot(""),
             *(difference.prefix for difference in _DIFFERENCES.values()),
-            PRICES_SLOT_PREFIX,
+            *USER_PRICES_SLOT_PREFIXES,
         )
     )
 

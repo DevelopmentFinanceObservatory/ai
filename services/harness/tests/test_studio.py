@@ -100,6 +100,7 @@ from harness.settings import Settings
 from harness.studio import (
     _acquire_or_conflict,
     _spec_use_sink,
+    _switch_answer,
     create_studio_router,
 )
 from harness.studio_edit import _canvas_is_behind
@@ -8149,6 +8150,131 @@ async def test_a_planner_decision_switch_is_checked_as_a_scope_switch_and_resume
     conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
     assert conversation.approvals == []
     assert conversation.turn_user_message.endswith("(then: use the top 10 donors)")
+
+
+# The row of a unit question's whole unit a plan card shows
+# (`PlanDecision.unit`), in constant 2020 euros, as the wire fixture states it.
+_UNIT_DECISION = PlanDecision.model_validate(
+    next(
+        decision
+        for decision in json.loads(
+            (
+                Path(__file__).parent
+                / "wire_fixtures"
+                / "studio"
+                / "event-22-plan-proposed-unit.json"
+            ).read_text()
+        )["decisions"]
+        if decision.get("unit")
+    )
+)
+assert _UNIT_DECISION.choice_id is not None and _UNIT_DECISION.options is not None
+_UNIT_ROW = _UNIT_DECISION.choice_id
+_USD_2015 = {"currency": "USD", "prices": "constant", "base_year": 2015}
+
+
+@pytest.mark.parametrize(
+    ("switch", "line"),
+    [
+        ({"option_id": "USD-constant-2015", "unit": _USD_2015}, "use constant 2015 US dollars"),
+        ({"option_id": "EUR-current"}, "use current Euros"),
+        (
+            {"option_id": "EUR-current", "unit": {"currency": "EUR", "prices": "current"}},
+            "use current Euros",
+        ),
+    ],
+    ids=["unlisted-unit", "listed-option", "listed-unit"],
+)
+async def test_a_unit_row_switch_takes_any_unit_its_offer_holds_and_hands_it_on(
+    switch: dict[str, Any], line: str
+) -> None:
+    """A switch of a unit row may carry `unit`, any unit the row's offer
+    holds, named by `option_id`, though the row's whole units do not list it.
+    A unit `option_id` does not name, one outside the offer, the one the row
+    holds and a unit on a row offering none are refused 422. Constant 2015
+    US dollars, or current euros the row lists, by its option or as a unit,
+    resumes the plan, and the turn's record names that unit in one form."""
+    app = _app(*_plan())
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(
+            app,
+            client,
+            choices={
+                _CHOICE_ID: _SHOWN_CHOICE,
+                _UNIT_ROW: _PendingChoice(
+                    active=_UNIT_DECISION.active_option_id or "",
+                    options={
+                        option.option_id: _PendingOption(label=option.label, status=option.status)
+                        for option in _UNIT_DECISION.options
+                    },
+                ),
+            },
+        )
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        pending = conversation.pending[plan["interrupt_id"]]
+        assert pending.card is not None
+        pending.card = pending.card.model_copy(
+            update={"decisions": [*pending.card.decisions, _UNIT_DECISION]}
+        )
+        await app.state.studio.store.save(PRINCIPAL, CONVERSATION)
+        cases = [
+            {"option_id": "USD-constant-2016", "unit": _USD_2015},
+            {"option_id": "USD-constant-1960", "unit": {**_USD_2015, "base_year": 1960}},
+            {
+                "option_id": "EUR-constant-2020",
+                "unit": {"currency": "EUR", "prices": "constant", "base_year": 2020},
+            },
+            {"choice_id": _CHOICE_ID, "option_id": "sector:120+130", "unit": _USD_2015},
+        ]
+        refused = [
+            await client.post(
+                "/api/studio/interrupt",
+                json=_switch_body(plan, **{"choice_id": _UNIT_ROW, **change}),
+                headers=AUTH,
+            )
+            for change in cases
+        ]
+        await _stream(
+            client,
+            "/api/studio/interrupt",
+            _switch_body(plan, choice_id=_UNIT_ROW, **switch),
+        )
+
+    assert [(r.status_code, r.json().get("constraint_id")) for r in refused] == [
+        (422, "switch_option_unavailable")
+    ] * len(cases)
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    assert conversation.approvals == []
+    assert conversation.turn_user_message.endswith(f"(then: {line})")
+
+
+@pytest.mark.parametrize(
+    ("change", "switch"),
+    [
+        ({}, {"choice_id": _CHOICE_ID, "option_id": "sector:120"}),
+        (
+            {"option_id": "USD-constant-2015", "unit": _USD_2015},
+            {"choice_id": _CHOICE_ID, "option_id": "USD-constant-2015", "unit": _USD_2015},
+        ),
+    ],
+    ids=["option", "unit"],
+)
+def test_a_switch_hands_the_approve_node_its_row_option_and_unit(
+    change: dict[str, Any], switch: dict[str, Any]
+) -> None:
+    """The `switch` the paused `approve` node is handed names the row and the
+    option, and the unit when the answer carries one."""
+    body = InterruptResponse.model_validate(
+        {
+            **_interrupt_body("approve", "switch"),
+            "choice_id": _CHOICE_ID,
+            "option_id": "sector:120",
+            "plan_revision": "rev",
+            **change,
+        }
+    )
+
+    assert _switch_answer(body) == switch
 
 
 class _AskingPickPlanner(ScriptedPlannerModel):

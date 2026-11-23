@@ -12,6 +12,8 @@ from compiler.surface import ProgressCallback
 from harness.decision_pick import DecisionPick
 
 if TYPE_CHECKING:
+    from planner.plan import Unit
+
     from harness.graph.events import GraphEvent
     from harness.turn.node import NodeCtx
 
@@ -118,6 +120,7 @@ class PlannerModel(Protocol):
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],
         picked: Collection[str] = (),
+        units: Mapping[str, Unit] | None = None,
     ) -> dict[str, Any]:
         """Amend `prior_plan` with `evidence_requirements` and compile it again, calling no model.
 
@@ -126,7 +129,10 @@ class PlannerModel(Protocol):
         restated, and every decision the pins state follows its pin.
         `inherits` maps each new spec_id to the one it replaces. `picked`
         holds the spec_ids the user picked by the switch, such as another
-        count on a count row, whose measure decision is then theirs. Answers as
+        count on a count row, whose measure decision is then theirs, and
+        `units` the whole unit a switch of a unit row picked, by the row's
+        slot (`submission.prices_choice.unit_slot`), which admission holds
+        the row's requirements to. Answers as
         `__call__` does: the revised plan, `PENDING_APPROVAL`, with its
         summary, or a refusal. A refusal may leave the planner's own drafting
         state changed, which the caller restores.

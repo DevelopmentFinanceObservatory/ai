@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from harness.unit_offer import served_unit, unit_offer, unit_words, whole_units
+from harness.unit_offer import served_unit, unit_offer, unit_phrase, unit_words, whole_units
 from harness.wire import UnitChoice, UnitCurrency, UnitOffer, UnitPrices
 
 
@@ -85,6 +85,7 @@ def test_a_unit_reads_in_the_offer_s_words_or_by_its_code(unit: UnitChoice, word
     offer = unit_offer([_block(_currency("USD", "US dollars"))])
 
     assert unit_words(unit, offer) == words
+    assert unit_phrase(unit, offer) == words[0].lower() + words[1:]
 
 
 def test_a_currency_with_an_inverted_base_year_range_is_left_out() -> None:

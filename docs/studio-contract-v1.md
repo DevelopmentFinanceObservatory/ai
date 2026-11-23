@@ -12,7 +12,7 @@ explains the protocol around them, and `services/harness/tests/test_wire.py`
 pins the two together against the fixtures in
 `services/harness/tests/wire_fixtures/studio/`.
 
-v1 records its design decisions as numbered deltas (1–28; 16 is folded
+v1 records its design decisions as numbered deltas (1–31; 16 is folded
 into 11). The deltas are marked where they apply and listed in the delta
 index at the end.
 
@@ -813,6 +813,28 @@ Otherwise the change runs in code, with no model call, as the Edit Card route do
 
 `schema_version` stays 1.
 
+## A unit row on the plan card (delta 31, v1.16)
+
+After the user answers a unit question, the plan card states the unit in one row for the parts the question covered that are served in the unit chosen. That row can be switched to another unit. A part Search could not read in that unit has a row of its own stating the unit it is served in, with no `choice_id`, and a switch of the unit row leaves it as it is.
+
+- `PlanDecision` gains an optional `unit`, a `UnitOffer`, set only on a row that also carries `choice_id`, `active_option_id` and `options`. The row's `choice_id` is `"decision/user_unit_<lead part>"`, the lead part being the first spec_id the question covered. `unit.currencies` lists every unit all the series the plan reads for those parts convert into, a count or scope switch of the card included, and `unit.start` is the unit the plan states for them now.
+- The row's `options` are whole units, so a client that renders no unit picker switches between them: both price bases of the start's currency, the start first and active; or, when that currency serves one basis, the start and then both bases of the first offered currency that serves both. Each `option_id` names its unit as a unit question's whole units do (`USD-current`, `USD-constant-2023`), and each `status` is `available`.
+- `interrupt.response` gains an optional `unit`, a `UnitChoice`, allowed only with `decision: "switch"`. `choice_id`, `option_id` and `plan_revision` stay required; `option_id` names the unit `unit` carries in the same form. The harness reads `unit` when present, else the unit `option_id` names among the row's options, and refuses a unit outside the row's offer. A switch re-reads in that unit every series the plan reads for the parts the row covers and offers the revised plan; one series Search cannot re-read leaves every part as it was, and the plan comes back with `switch_failed`.
+- A row stating a unit without `choice_id` cannot be switched.
+
+```json
+{
+  "kind": "interrupt.response",
+  "decision": "switch",
+  "choice_id": "decision/user_unit_spec_5c1e…",
+  "option_id": "USD-constant-2015",
+  "plan_revision": "rev_01j9ze2k7d",
+  "unit": {"currency": "USD", "prices": "constant", "base_year": 2015}
+}
+```
+
+`schema_version` stays 1.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -934,3 +956,4 @@ Fixture values that are samples:
    `"<requirement id>:count"`, so a switch can name it (see "Count chips and
    count rows on the plan card").
 1. `elicitation.request` questions gain `input: "unit"` with a `unit` offer, and `multi_select` is emitted; answers gain `{kind: "unit", ...}` and `{kind: "options", option_ids}`. `turn.request` and `interrupt.response` gain `client_features`; a client that declares no `unit_question` or `multi_select` gets those questions as `single_select` (see "Question forms a client declares"). `component.created` gains `unit_change` and `replaces`; `turn.request` gains `apply_unit`, which comes alone (see "A unit question, a card's unit change and several answers").
+1. `plan.proposed.decisions[]` gains `unit` on the row stating a unit question's whole unit, whose `options` are whole units; `interrupt.response` gains `unit` on a `switch` (see "A unit row on the plan card").

@@ -327,7 +327,8 @@
       "call_id": null,
       "args": null,
       "body": {},
-      "name": null
+      "name": null,
+      "record": 0
     },
     {
       "kind": "response",
@@ -338,7 +339,8 @@
         "status": "ready",
         "summary": "Aid to Ghana."
       },
-      "name": "propose_plan"
+      "name": "propose_plan",
+      "record": 2
     }
   ],
   "frames": [
