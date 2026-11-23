@@ -7583,7 +7583,9 @@ def _reading_the_division(kind: str) -> tuple[EvidenceRequirement, Operation]:
     ("kind", "args"),
     [
         ("compare", {"left_entity": _KENYA_ON_KEY, "right_entity": _UGANDA_ON_KEY}),
-        ("share_of", {"numerator_entity": _KENYA_ON_KEY, "denominator_entity": _UGANDA_ON_KEY}),
+        # Kenya's ratio over Uganda's holds no part of a whole, so the share check
+        # refuses it; `compare` covers both sides binding on the key column.
+        ("share_of", None),
         (
             "filter",
             {
@@ -7601,7 +7603,7 @@ def test_an_entity_named_on_a_keyed_division_binds_on_its_key_column(
     source: SourceFactory,
     verb: str,
     kind: str,
-    args: dict[str, Any],
+    args: dict[str, Any] | None,
 ) -> None:
     # A keyed division rests on two retrievals and holds one series per
     # recipient under its numerator's key column, so a reader naming a
@@ -7617,6 +7619,11 @@ def test_an_entity_named_on_a_keyed_division_binds_on_its_key_column(
         discovered=discovered,
     )
 
+    if args is None:
+        assert [(issue.code, issue.operation_id) for issue in result.issues] == [
+            (CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE, "picked")
+        ]
+        return
     assert result.ok, result.issues
     assert result.workflow is not None
     step = result.workflow.steps[-1]
@@ -9082,9 +9089,30 @@ _UNBOUND = (Code.SOURCE_UNUSABLE, "fetch")
             id="filter-above-a-sum-of-two",
         ),
         pytest.param(
-            "United States", "threshold", "africa", None, [], id="read-through-a-value-threshold"
+            "United States",
+            "threshold",
+            "africa",
+            None,
+            _REFUSED,
+            id="named-after-a-value-threshold",
         ),
-        pytest.param("United States", "mean", "africa", None, [], id="read-through-a-mean"),
+        pytest.param("United States", "mean", "africa", None, _REFUSED, id="named-after-a-mean"),
+        pytest.param(
+            "United States",
+            "filtered-threshold",
+            "africa",
+            None,
+            [],
+            id="named-before-a-value-threshold",
+        ),
+        pytest.param(
+            ("United States", "Ethiopia"),
+            "unknown-side",
+            "africa",
+            None,
+            _REFUSED,
+            id="sum-of-a-side-of-unknown-parties",
+        ),
         pytest.param(
             "Nigeria",
             "entity",
@@ -9132,8 +9160,12 @@ def test_a_share_checks_only_the_entities_each_operand_keeps(
     retrieval, by an aggregate over a filter (`same`) or by a `sum_of` of two sides
     (`kenya-plus-us`), holds Kenya and not Nigeria. A denominator filtered to Africa
     and summed, on a source binding Africa's members (`africa-members-summed`), holds
-    Nigeria and not the United States. A numerator read through a value threshold or a
-    mean keeps rows nothing here can name, so it is not checked."""
+    Nigeria and not the United States. A value threshold or a mean keeps rows nothing
+    here can name, so a numerator naming the United States after one keeps at most the
+    United States and is refused, while one filtered to the United States before a
+    threshold and naming nothing after it is not checked. A numerator summing the
+    United States with a side whose parties are unknown keeps at least the United
+    States, so it is refused."""
     g7 = Entity(name="G7", role="donor")
     recipients = [
         g7,
@@ -9156,13 +9188,21 @@ def test_a_share_checks_only_the_entities_each_operand_keeps(
         )
 
     def summing(sum_id: str, left: str, right: str) -> None:
-        """A sum of `left` from G7 aid and `right` from a second, disjoint dataset."""
+        """A sum of `left` from G7 aid and `right` from a second, disjoint dataset,
+        that one read through a value threshold where its parties are unknown."""
+        right_input, right_op, right_entity = "more", "fetch_more", right
+        if reading == "unknown-side":
+            above = ValueThreshold(op="gt", value=0)
+            requirements.append(narrowed("more_kept", "more", above))
+            operations.append(narrowing("more_kept", "fetch_more", above))
+            right_input = right_op = "more_kept"
+            right_entity = None
         requirements.append(
             SumOfRequirement(
                 id=sum_id,
                 decision_ids=["measure"],
                 left=RequirementSide(input_id="aid", entity=left),
-                right=RequirementSide(input_id="more", entity=right),
+                right=RequirementSide(input_id=right_input, entity=right_entity),
             )
         )
         operations.append(
@@ -9170,7 +9210,7 @@ def test_a_share_checks_only_the_entities_each_operand_keeps(
                 id=sum_id,
                 requirement_id=sum_id,
                 left=Side(input="fetch", entity=left),
-                right=Side(input="fetch_more", entity=right),
+                right=Side(input=right_op, entity=right_entity),
             )
         )
 
@@ -9191,11 +9231,18 @@ def test_a_share_checks_only_the_entities_each_operand_keeps(
             flows = _flow_source(source, spec_id, recipients=[_KENYA, _UNITED_STATES, _NIGERIA])
             pinned = _pinned(stat_var, {"identity": flows.identity})
             discovered[requirement_id] = flows.model_copy(update=pinned)
+        more = recipients
+        if reading == "unknown-side":
+            # Aid to Ethiopia alone, read through a value threshold below.
+            more = [g7, Entity(name="Ethiopia", role="recipient")]
+            flows = _flow_source(source, _SPEC_THIRD, recipients=[_ETHIOPIA])
+            pinned = _pinned("ImputedMultilateralAid", {"identity": flows.identity})
+            discovered["more"] = flows.model_copy(update=pinned)
         requirements.append(
             requirement(
                 id="more",
                 measure="imputed multilateral official development assistance",
-                entities=recipients,
+                entities=more,
             )
         )
         operations.append(
@@ -9219,6 +9266,17 @@ def test_a_share_checks_only_the_entities_each_operand_keeps(
         operations.append(narrowing("kept", "fetch", ValueThreshold(op="gt", value=0)))
         numerator_input = numerator_op = "kept"
         numerator_entity = numerator
+    elif reading == "filtered-threshold":
+        picked = EntityIn(names=(numerator,))
+        requirements += [
+            narrowed("picked", "aid", picked),
+            narrowed("kept", "picked", ValueThreshold(op="gt", value=0)),
+        ]
+        operations += [
+            narrowing("picked", "fetch", picked),
+            narrowing("kept", "picked", ValueThreshold(op="gt", value=0)),
+        ]
+        numerator_input = numerator_op = "kept"
     elif reading == "mean":
         by_entity = (GroupBy.PERIOD, GroupBy.ENTITY)
         requirements.append(
@@ -9458,8 +9516,10 @@ def test_a_keyed_share_reads_its_key_column_by_how_it_divides(
     the United States alone, so Germany's and France's rows are no part of it: the
     figures are ratios, which `quotient_of` computes, and the share is refused. Over
     each donor's own aid, filtered to the United States and Germany (`per_axis`),
-    rows pair donor by donor and France's finds no partner, which the share's key
-    check owns, so the donor column is not checked for containment."""
+    rows pair donor by donor, so the donor column is not checked for containment.
+    France's row finds no partner there, which analysis-mcp reports as
+    `unmatched_key`; the compiler refuses only key columns sharing no donor
+    (`keys_disjoint`)."""
     donors = [
         ResolvedEntity(role="origin", ref="country/USA", label="United States"),
         ResolvedEntity(role="origin", ref="country/DEU", label="Germany"),
