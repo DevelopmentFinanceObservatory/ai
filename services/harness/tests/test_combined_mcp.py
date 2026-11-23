@@ -38,7 +38,7 @@ from analysis_mcp.verbs import FOLLOWS_TREE
 from common import auth as mcp_auth
 from common import refusal as refusal_module
 from common import telemetry
-from common.logging import configure_logging
+from common.logging import JSON_FIELDS, configure_logging
 from common.materialisation import FrameRef, MintRecord
 from common.materialisation import get_store as get_frame_store
 from common.refusal import internal_error_message, refusal_meta
@@ -2804,6 +2804,27 @@ async def test_the_request_log_names_the_host_and_what_it_declared_about_views(
         f"combined mcp call resource outcome=ArtifactRefusalError revision={revision} caller=ip:test "
         f'{call_host} uri="dfo://artifact" {user_agent}',
     ]
+    # Each call record also carries the message's keys as structured fields, text
+    # decoded and absent values `None`.
+    call_fields = [
+        getattr(r, JSON_FIELDS)
+        for r in caplog.records
+        if r.name == "harness.combined_mcp" and r.getMessage().startswith("combined mcp call")
+    ]
+    seen = revision != "2025-11-25"
+    host = {
+        "client": name[:128] if seen else None,
+        "client_version": "2.5.0" if seen else None,
+        "views": ("declared" if apps_host else "undeclared") if seen else "unknown",
+        "view_mime_types": [UI_MIME_TYPE] if seen and apps_host else None,
+    }
+    common = {"revision": revision, "caller": "ip:test", "user_agent": "Host/2.5", **host}
+    assert [{k: v for k, v in fields.items() if k != "trace_id"} for fields in call_fields] == [
+        {"tool": "write_component", "outcome": "not_found", **common},
+        {"outcome": "ok", "uri": presentation_server._RENDERER_URI, **common},
+        {"outcome": "ArtifactRefusalError", "uri": "dfo://artifact", **common},
+    ]
+    assert all(re.fullmatch(r"[0-9a-f]{32}", fields["trace_id"]) for fields in call_fields)
     # The dfo-infra log parser (infra/stacks/telemetry/sql/parse_mcp_line.sql, `mcp_line`)
     # reads these lines into mcp_daily. A line it does not match counts as `unparsed`.
     # The pattern is copied from that file, with BigQuery's `r'...'` quoting removed.
@@ -2834,7 +2855,7 @@ async def test_a_client_supplied_tool_name_cannot_forge_a_log_field(
     """A plain tool name is logged bare, and any other name, which the server
     may not know, as a capped JSON string."""
     app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
-    odd = "x y=z\nw"
+    odd = 'x "y=z\nw'
 
     async with running_lifespan(app):
         with caplog.at_level(logging.INFO, logger="harness.combined_mcp"):
@@ -2845,17 +2866,24 @@ async def test_a_client_supplied_tool_name_cannot_forge_a_log_field(
                 await client.call_tool("summarise", {}, raise_on_error=False)
                 await client.call_tool("n" * 300, {}, raise_on_error=False)
 
-    lines = [
-        r.getMessage()
+    records = [
+        r
         for r in caplog.records
         if r.name == "harness.combined_mcp" and r.getMessage().startswith("combined mcp call")
     ]
+    lines = [r.getMessage() for r in records]
     assert [line.split(" outcome=")[0] for line in lines] == [
         f"combined mcp call tool={json.dumps(odd)}",
         "combined mcp call tool=summarise",
         f"combined mcp call tool={json.dumps('n' * 128)}",
     ]
     assert all(line.count(" outcome=") == 1 and "\n" not in line for line in lines)
+    # The `tool` field is the message's value decoded: quotes and newlines intact,
+    # a long name cut to 128 characters.
+    shown = [line.split(" outcome=")[0].removeprefix("combined mcp call tool=") for line in lines]
+    decoded = [json.loads(v) if v.startswith('"') else v for v in shown]
+    assert decoded == [odd, "summarise", "n" * 128]
+    assert [getattr(r, JSON_FIELDS)["tool"] for r in records] == decoded
 
 
 @pytest.mark.parametrize(
