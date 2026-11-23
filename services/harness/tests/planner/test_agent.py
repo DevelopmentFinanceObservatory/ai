@@ -223,6 +223,7 @@ from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
     SEARCHED_PINS_STATE_KEY,
+    STATED_SCOPE_OPTIONS,
     AlignedPin,
     Realignment,
     SourceReadings,
@@ -3573,6 +3574,7 @@ def test_asking_the_user_rejects_a_recommendation_naming_no_candidate() -> None:
     ("candidates", "options", "refused"),
     [
         ([], [dict(option) for option in COMBINATION_OPTIONS], False),
+        ([], [dict(option) for option in STATED_SCOPE_OPTIONS], True),
         ([], [{"id": "add them", "label": "Add them"}, {"id": "no", "label": "No"}], True),
         (
             [{"spec_id": SPEC, "label": "a candidate"}],
@@ -3580,7 +3582,7 @@ def test_asking_the_user_rejects_a_recommendation_naming_no_candidate() -> None:
             True,
         ),
     ],
-    ids=["refusals-options", "other-options", "options-with-candidates"],
+    ids=["refusals-options", "stated-scope-options", "other-options", "options-with-candidates"],
 )
 def test_asking_the_user_takes_only_the_options_a_refusal_carries(
     candidates: list[dict[str, str]], options: list[dict[str, str]], refused: bool

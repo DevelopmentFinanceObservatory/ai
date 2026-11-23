@@ -32,7 +32,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 from compiler.surface import ToolSurface
 from harness.turn_events import PLANNER_ASK
@@ -68,6 +68,12 @@ from planner.plan import (
     split_of,
 )
 from planner.source_reads import with_source_reads
+from planner.stated_scope import (
+    StatedScopeReader,
+    proposal_measures,
+    read_stated_scope,
+    record_keep_asked,
+)
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 
 logger = logging.getLogger(__name__)
@@ -472,6 +478,52 @@ def ready_and_end(
     return declared
 
 
+def pause_on_keep_question(
+    answer: dict[str, object],
+    call: PlannerCall,
+    end_run: EndRun,
+    *,
+    arguments: Mapping[str, Any],
+) -> dict[str, object]:
+    """`propose_plan`'s `answer` to `arguments`, pausing the run on the keep question
+    it carries.
+
+    A `STATED_PROVIDER_DROPPED` refusal carrying `detail.ask`
+    (`submission.service._stated_unserved`) holds the question whether to keep its
+    pins counted as published, built in code. The propose call raises it itself:
+    the ask waits under the call's own id (`PENDING_ASK_STATE_KEY`), the pairs it
+    asks about and `arguments`, which the resumed entry shows as the plan to propose
+    again, are recorded (`planner.stated_scope.record_keep_asked`), and the run
+    ends (`end_run`). The user's answer is recorded by the entry it resumes
+    (`harness.planner_adapter.PlannerAdapter`). A response that also calls
+    `PLANNER_ASK` would put two questions to the user, so the refusal asks the planner
+    to propose again on its own and nothing pauses. Any other answer is returned as
+    it is."""
+    detail = answer.get("detail")
+    ask = detail.get("ask") if isinstance(detail, dict) else None
+    if answer.get("code") != ProblemCode.STATED_PROVIDER_DROPPED.value or not isinstance(ask, dict):
+        return answer
+    unserved: list[dict[str, Any]] = cast(dict[str, Any], detail)["unserved"]
+    if any(c.name == PLANNER_ASK for c in call.response_calls()):
+        return {
+            **answer,
+            "message": f"{answer['message']} The user has to be asked whether to keep it as "
+            f"published, which `{PROPOSE_PLAN_PROPOSER.call}` asks itself, and this response "
+            f"also calls `{PLANNER_ASK}`. Propose again in a response with no other call.",
+        }
+    call_id = call.call_id
+    assert call_id is not None, "every function call has an id"
+    call.state[PENDING_ASK_STATE_KEY] = {"call_id": call_id, "args": dict(ask)}
+    record_keep_asked(
+        call.state,
+        call_id=call_id,
+        pairs=[(str(item["spec_id"]), str(item["option_id"])) for item in unserved],
+        proposal=arguments,
+    )
+    end_run()
+    return answer
+
+
 def ask_user(
     call: PlannerCall,
     end_run: EndRun,
@@ -529,9 +581,18 @@ async def propose_reading_sources(
     arguments: Mapping[str, Any],
     *,
     surface: ToolSurface | None,
+    stated_scope: StatedScopeReader | None = None,
 ) -> dict[str, object]:
-    """`propose`. With a `surface`, the source reads a refusal asks for are made,
-    and the proposal is made again (`with_source_reads`)."""
+    """`propose`. With a `stated_scope` reader, the turn's words and each dataset
+    requirement's `measure` are read first (`read_stated_scope`), and a read Search
+    does not answer is the answer. With a `surface`, the source reads a refusal asks
+    for are made, and the proposal is made again (`with_source_reads`)."""
+    if stated_scope is not None:
+        unread = await read_stated_scope(
+            call.state, stated_scope, measures=proposal_measures(call.state, arguments)
+        )
+        if unread is not None:
+            return unread
 
     def draft() -> dict[str, object]:
         return propose(call, arguments)
@@ -548,6 +609,7 @@ async def propose_and_translate(
     arguments: Mapping[str, Any],
     translate: Translate,
     surface: ToolSurface | None,
+    stated_scope: StatedScopeReader | None = None,
 ) -> dict[str, object]:
     """`propose_reading_sources` over `arguments`, translating the plan it records.
 
@@ -578,9 +640,10 @@ async def propose_and_translate(
         call,
         arguments,
         surface=surface,
+        stated_scope=stated_scope,
     )
     if result.get("outcome") != Outcome.OK.value:
-        return result
+        return pause_on_keep_question(result, call, end_run, arguments=arguments)
     return ready_and_end({**result, "translation": await translate(call)}, call, end_run)
 
 

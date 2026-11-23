@@ -30,6 +30,8 @@ from common.live_apis import (
     Moved,
     Pending,
     RecipeWritten,
+    StatedScopeEntry,
+    StatedScopeReading,
 )
 
 DATASETS_PRINCIPAL = "datasets-principal-7f3a"
@@ -75,9 +77,11 @@ def make_client(
     auth: AuthProvider | None = None,
     max_attempts: int = 1,
     clock: Callable[[], float] | None = None,
+    slept: list[float] | None = None,
 ) -> LiveApisClient:
-    async def no_sleep(_: float) -> None:
-        return None
+    async def sleep(seconds: float) -> None:
+        if slept is not None:
+            slept.append(seconds)
 
     return LiveApisClient(
         base_url="http://apis.test",
@@ -86,7 +90,8 @@ def make_client(
         auth=auth,
         transport=httpx2.MockTransport(handler),
         max_attempts=max_attempts,
-        sleep=no_sleep,
+        read_timeout_s=50.0,
+        sleep=sleep,
         **({} if clock is None else {"clock": clock}),
     )
 
@@ -619,6 +624,112 @@ async def test_render_raises_each_registered_refusal(status: int, code: str) -> 
     assert (raised.value.status, raised.value.code) == (status, code)
 
 
+# read_stated_scopes
+
+# dfo-apis' reading of "net bilateral ODA" (`POST /api/search/stated-scope`).
+NET_BILATERAL = {
+    "entries": [
+        {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:net",
+            "origin": {"kind": "text", "text": "net", "start": 0, "end": 3},
+        },
+        {
+            "axis": "provider",
+            "option_id": "provider:bilateral",
+            "origin": {"kind": "text", "text": "bilateral", "start": 4, "end": 13},
+        },
+    ],
+    "total": False,
+    "sums_providers": False,
+    "mentions": ["provider:bilateral"],
+}
+TOTAL_ODA = {"entries": [], "total": True, "sums_providers": False, "mentions": []}
+
+
+async def test_read_stated_scopes_reads_each_text_in_order_with_no_principal() -> None:
+    calls = Calls(ok({"readings": [NET_BILATERAL, TOTAL_ODA]}))
+
+    async with make_client(calls) as client:
+        readings = await client.read_stated_scopes(texts=["net bilateral ODA", "total ODA"])
+
+    (request,) = calls.requests
+    assert (request.method, request.url.path) == ("POST", "/api/search/stated-scope")
+    assert PRINCIPAL_HEADER not in request.headers
+    assert body_of(request) == {"texts": ["net bilateral ODA", "total ODA"]}
+    assert readings == (
+        StatedScopeReading(
+            entries=(
+                StatedScopeEntry(axis="measure_basis", option_id="measure_basis:net", words="net"),
+                StatedScopeEntry(
+                    axis="provider", option_id="provider:bilateral", words="bilateral"
+                ),
+            ),
+            total=False,
+            sums_providers=False,
+            mentions=("provider:bilateral",),
+        ),
+        StatedScopeReading(entries=(), total=True, sums_providers=False, mentions=()),
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param({"readings": [NET_BILATERAL]}, id="one-reading-short"),
+        pytest.param({"readings": [NET_BILATERAL, {**TOTAL_ODA, "total": "yes"}]}, id="total"),
+        pytest.param({"readings": [NET_BILATERAL, {**TOTAL_ODA, "mentions": [1]}]}, id="mention"),
+        pytest.param(
+            {"readings": [NET_BILATERAL, {**TOTAL_ODA, "sums_providers": None}]},
+            id="sums-providers",
+        ),
+        pytest.param(
+            {"readings": [{**NET_BILATERAL, "entries": [{"axis": "provider"}]}, TOTAL_ODA]},
+            id="entry",
+        ),
+        pytest.param({"read": []}, id="no-readings"),
+    ],
+)
+async def test_read_stated_scopes_answer_outside_the_contract_is_invalid(answer: object) -> None:
+    calls = Calls(ok(answer))
+
+    async with make_client(calls) as client:
+        with pytest.raises(LiveApisError) as raised:
+            await client.read_stated_scopes(texts=["net bilateral ODA", "total ODA"])
+
+    assert raised.value.code == RESPONSE_INVALID
+
+
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    [(429, True), (408, True), (503, True), (400, False), (404, False), (403, False)],
+)
+async def test_a_refusal_with_no_problem_document_is_retryable_where_it_can_pass(
+    status: int, retryable: bool
+) -> None:
+    calls = Calls(httpx2.Response(status, text="Too Many Requests"))
+
+    async with make_client(calls) as client:
+        with pytest.raises(LiveApisError) as raised:
+            await client.read_stated_scopes(texts=["total ODA"])
+
+    assert (raised.value.status, raised.value.code, raised.value.retryable) == (
+        status,
+        None,
+        retryable,
+    )
+
+
+async def test_read_stated_scopes_raises_a_refusal() -> None:
+    calls = Calls(problem(400, "request_invalid"))
+
+    async with make_client(calls) as client:
+        with pytest.raises(LiveApisError) as raised:
+            await client.read_stated_scopes(texts=["x" * 2001])
+
+    assert (raised.value.status, raised.value.code) == (400, "request_invalid")
+
+
 # stream_render_data
 
 
@@ -994,6 +1105,33 @@ async def test_a_retryable_5xx_is_retried_until_it_succeeds() -> None:
 
     assert result == Current(FRAME)
     assert len(calls.requests) == 2
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx2.Response(429, headers={"Retry-After": "30"}, text="slow down"),
+        problem(429, "rate_limited", retryable=True),
+        httpx2.Response(425, text="too early"),
+        httpx2.Response(408, text="timeout"),
+    ],
+    ids=["429-retry-after-unread", "429-problem", "425", "408"],
+)
+async def test_a_transient_4xx_is_retried_after_the_jittered_backoff(
+    answer: httpx2.Response,
+) -> None:
+    """A 408, 425 or 429 that can pass is retried in place, as a 5xx is, after the
+    jittered backoff (up to 1 s here); a `Retry-After` it names is not read."""
+    calls = Calls(answer, ok({"status": "current", "frame": FRAME.as_json()}))
+    slept: list[float] = []
+
+    async with make_client(calls, max_attempts=3, slept=slept) as client:
+        result = await client.refresh_frame(spec_id=SPEC, content_version=CV)
+
+    assert result == Current(FRAME)
+    assert len(calls.requests) == 2
+    assert len(slept) == 1
+    assert 0 <= slept[0] <= 1.0
 
 
 @pytest.mark.parametrize(

@@ -78,7 +78,7 @@ from harness.turn.loop import Graph
 from harness.turn.store import FrameLineage, TurnStore
 from harness.turn_budget import current_turn_budget
 from harness.wire import TURN_INDEX_HEADER
-from harness.wiring import build_planner, handing_back_planner_failures
+from harness.wiring import build_planner, build_stated_scope_reader, handing_back_planner_failures
 
 logger = logging.getLogger(__name__)
 
@@ -426,6 +426,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.live_refresh.aclose()
     except Exception:
         logger.exception("failed to close the live refresh clients during shutdown")
+    try:
+        if app.state.stated_scope is not None:
+            await app.state.stated_scope.aclose()
+    except Exception:
+        logger.exception("failed to close the stated-scope reader during shutdown")
     # Disposes whatever `build_database` opened: the engine for the
     # plain-`DATABASE_URL` backend, and the engine plus the connector for the
     # Cloud SQL Connector path (`harness.db.engine.DatabaseHandle`). Guarded
@@ -607,6 +612,9 @@ def create_app(
     # One for the process, shared by the planner and the orchestrator
     # across every conversation (`harness.prefix_cache`).
     prefix_cache = PrefixCache() if resolved_settings.studio_prefix_cache else None
+    # One for the process, since it holds a connection pool `_lifespan` closes.
+    stated_scope = build_stated_scope_reader(resolved_settings)
+    app.state.stated_scope = stated_scope
     logger.info("orchestrator thinking level: %s", resolved_settings.orchestrator_thinking_level)
 
     @functools.cache
@@ -647,7 +655,10 @@ def create_app(
             # and the turn goes on.
             planner=handing_back_planner_failures(
                 build_planner(
-                    settings=resolved_settings, surface=tool_surface, prefix_cache=prefix_cache
+                    settings=resolved_settings,
+                    surface=tool_surface,
+                    prefix_cache=prefix_cache,
+                    stated_scope=stated_scope,
                 )
             ),
             # Its spans carry the messages as the planner's do

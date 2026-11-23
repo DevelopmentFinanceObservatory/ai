@@ -1,8 +1,9 @@
 """One async client for the apis routes live Studio shares use.
 
-Four consumers share it: the harness refresh endpoint and replayer, the recipe
-backfill job, the recovery routine for root frames, and presentation-mcp's rebuild
-of a lost summed or cut frame. Each call is one apis
+Five consumers share it: the harness refresh endpoint and replayer, the recipe
+backfill job, the recovery routine for root frames, presentation-mcp's rebuild
+of a lost summed or cut frame, and the planner's read of the provider scope the
+user's words state (`read_stated_scopes`). Each call is one apis
 route and returns a small typed result or raises `LiveApisError`.
 
 Two credentials, sent in apis' principal header (`PRINCIPAL_HEADER`):
@@ -12,7 +13,8 @@ Two credentials, sent in apis' principal header (`PRINCIPAL_HEADER`):
 - `live_refresh_principal` (`LIVE_REFRESH_PRINCIPAL`) on `refresh_frame`,
   `render` and `stream_render_data`.
 
-`read_component`, `list_versions` and `analysis_execution_identity` need neither.
+`read_component`, `list_versions`, `analysis_execution_identity` and
+`read_stated_scopes` need neither.
 A call whose principal is unset or blank raises `LiveApisNotConfigured` before any
 request is made. Neither value appears in an exception message, an attribute or a
 `repr`.
@@ -29,7 +31,8 @@ carries its `code` and `constraint_id`.
 
 Every call returns the same answer on a repeat (a PUT of the same recipe, a
 refresh behind single-flight, a render that appends no revision), so transport
-failures and `retryable` 5xx refusals are retried up to `max_attempts`.
+failures and `retryable` 5xx, 408, 425 and 429 answers are retried up to `max_attempts`,
+each after a jittered backoff.
 `stream_render_data` sends one attempt, since a body already begun cannot be resent.
 
 `analysis_execution_identity` reads apis' capabilities document and keeps its answer
@@ -44,7 +47,7 @@ import json
 import random
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, Self
@@ -65,6 +68,7 @@ _COMPONENT_PATH = "/api/presentation/components/{component_id}"
 _RENDER_PATH = "/api/presentation/components/{component_id}/revisions/{revision}/render"
 _RENDER_DATA_PATH = f"{_RENDER_PATH}/data"
 _CAPABILITIES_PATH = "/api/datasets/capabilities"
+_STATED_SCOPE_PATH = "/api/search/stated-scope"
 
 # The capabilities field naming the engine apis' analysis runner computes with.
 _EXECUTION_IDENTITY_FIELD = "analysis_execution_identity"
@@ -208,6 +212,35 @@ class ComponentRead:
     body: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class StatedScopeEntry:
+    """One scope option a text states (`StatedScopeReading.entries`): its axis, its
+    option and the words of the text it was read from."""
+
+    axis: str
+    option_id: str
+    words: str
+
+
+@dataclass(frozen=True)
+class StatedScopeReading:
+    """What one text states of its scope, as Search's reader reads it
+    (`read_stated_scopes`).
+
+    `entries` hold one option per axis the text states one option on. `total` says the
+    text asks for a total. `sums_providers` says its provider entry sums the bilateral
+    and multilateral lines naming no imputed share ("bilateral plus multilateral"),
+    which a dataset reads as its own summing option (`provider:contributions` on DAC1).
+    `mentions` are the provider options the text names, in order of first mention,
+    both options of a text naming two, which therefore has no provider entry,
+    included."""
+
+    entries: tuple[StatedScopeEntry, ...]
+    total: bool
+    sums_providers: bool
+    mentions: tuple[str, ...]
+
+
 @dataclass
 class RenderDataStream:
     """An open render data response. `chunks` is single use and ends with the
@@ -247,11 +280,19 @@ def _text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+# The statuses below 500 a proxy or load balancer answers, with no problem document,
+# for a call that can pass later: a request timeout, too early, and rate limited.
+_TRANSIENT_STATUSES = frozenset({408, 425, 429})
+
+
 def _error_from(response: httpx2.Response) -> LiveApisError:
     problem = _problem(response.content)
     if problem is None:
+        status = response.status_code
         return LiveApisError(
-            status=response.status_code, code=None, retryable=response.status_code >= 500
+            status=status,
+            code=None,
+            retryable=status >= 500 or status in _TRANSIENT_STATUSES,
         )
     return LiveApisError(
         status=response.status_code,
@@ -347,6 +388,40 @@ def _versions_page(response: httpx2.Response) -> tuple[list[DatasetVersion], str
             raise _invalid(response, "versions answer")
         page.append(version)
     return page, _text(cursor)
+
+
+def _stated_scope_reading(value: object) -> StatedScopeReading | None:
+    """One reading of the stated scope answer, or `None` when it is outside the
+    contract: entries each naming an axis, an option and the words of a text origin, a
+    bool `total` and `sums_providers`, and mentions that are option ids."""
+    if not isinstance(value, dict):
+        return None
+    entries, total, mentions = value.get("entries"), value.get("total"), value.get("mentions")
+    sums_providers = value.get("sums_providers")
+    if (
+        not isinstance(entries, list)
+        or not isinstance(total, bool)
+        or not isinstance(sums_providers, bool)
+    ):
+        return None
+    named = [_text(mention) for mention in mentions] if isinstance(mentions, list) else None
+    if named is None or None in named:
+        return None
+    read: list[StatedScopeEntry] = []
+    for entry in entries:
+        origin = entry.get("origin") if isinstance(entry, dict) else None
+        axis = _text(entry.get("axis")) if isinstance(entry, dict) else None
+        option_id = _text(entry.get("option_id")) if isinstance(entry, dict) else None
+        words = _text(origin.get("text")) if isinstance(origin, dict) else None
+        if axis is None or option_id is None or words is None:
+            return None
+        read.append(StatedScopeEntry(axis=axis, option_id=option_id, words=words))
+    return StatedScopeReading(
+        entries=tuple(read),
+        total=total,
+        sums_providers=sums_providers,
+        mentions=tuple(m for m in named if m is not None),
+    )
 
 
 def _required_frame(response: httpx2.Response, value: object, what: str) -> FramePair:
@@ -646,6 +721,27 @@ class LiveApisClient:
             self._execution_identity_expires = self._clock() + _max_age(response)
             return identity
 
+    async def read_stated_scopes(self, *, texts: Sequence[str]) -> tuple[StatedScopeReading, ...]:
+        """The scope each of `texts` states, in order, as Search's reader reads it.
+
+        One call for every text. apis takes at most 64 texts, each at most its
+        `max_query_chars` (apis' capabilities document), and refuses more with
+        `request_invalid`, which the caller keeps its texts under.
+
+        Raises:
+            LiveApisError: apis refused the call, or answered a reading count other
+                than one per text or a reading outside the contract
+                (`response_invalid`).
+        """
+        response = await self._send("POST", _STATED_SCOPE_PATH, json={"texts": list(texts)})
+        readings = _json_object(response, "stated scope answer").get("readings")
+        if not isinstance(readings, list) or len(readings) != len(texts):
+            raise _invalid(response, "stated scope answer")
+        read = [_stated_scope_reading(reading) for reading in readings]
+        if any(reading is None for reading in read):
+            raise _invalid(response, "stated scope answer")
+        return tuple(reading for reading in read if reading is not None)
+
     # Wire.
 
     def _datasets_headers(self) -> dict[str, str]:
@@ -663,7 +759,9 @@ class LiveApisClient:
         json: Any | None = None,
         params: Mapping[str, Any] | None = None,
     ) -> httpx2.Response:
-        """Issue one call, retrying a transport failure or a `retryable` 5xx.
+        """Issue one call, retrying a transport failure, a `retryable` 5xx, or a
+        `retryable` 408, 425 or 429 (`_TRANSIENT_STATUSES`), each after a jittered
+        backoff.
 
         Returns the 2xx response.
         """
@@ -674,7 +772,9 @@ class LiveApisClient:
             error = await self._attempt(method, path, headers=headers, json=json, params=params)
             if isinstance(error, httpx2.Response):
                 return error
-            transient = error.retryable and (error.status is None or error.status >= 500)
+            transient = error.retryable and (
+                error.status is None or error.status >= 500 or error.status in _TRANSIENT_STATUSES
+            )
             if not transient or attempt >= self._max_attempts:
                 raise error
             await self._sleep(random.uniform(0, self._backoff_base_s * 2 ** (attempt - 1)))
