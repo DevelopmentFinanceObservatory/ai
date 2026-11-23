@@ -20,15 +20,17 @@ Three more slots belong to the rule: the datasets the user chose to keep as publ
 although they cannot count the provider scope their words asked for
 (`STATED_SCOPE_KEPT_STATE_KEY`), which holds for the turn, the options a
 `STATED_SCOPE_UNATTRIBUTED` refusal was given for (`UNATTRIBUTED_STATE_KEY`), which is
-given once a turn, and the pins Search refused to compile on a stated option
-(`UNCOMPILED_STATE_KEY`).
+given once a turn, the pins Search refused to compile on a stated option
+(`UNCOMPILED_STATE_KEY`), and the compiles moving a stated option beside a
+calculation's axis that Search refused (`COMBINED_REFUSED_STATE_KEY`), which a later
+proposal does not post again.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from common.apis_auth import apis_auth_provider
 from common.live_apis import LiveApisClient, LiveApisError, StatedScopeReading
@@ -58,6 +60,11 @@ UNATTRIBUTED_STATE_KEY = "planner:stated_scope_unattributed"
 # option a requirement's `measure` states, with that option and Search's answer, as
 # `[spec_id, option_id, cause]` (`stated_uncompiled`).
 UNCOMPILED_STATE_KEY = "planner:stated_scope_uncompiled"
+
+# The session-state slot holding each compile moving a stated provider option and a
+# calculation's axis together that Search refused for good this turn, as
+# `[spec_id, option_ids, code, reason]` (`combined_refused`).
+COMBINED_REFUSED_STATE_KEY = "planner:stated_scope_combined_refused"
 
 # The most texts Search's reader takes in one call (`StatedScopeRequest` in dfo-apis).
 _MAX_TEXTS = 64
@@ -311,6 +318,36 @@ def stated_uncompiled(state: SessionState) -> dict[tuple[str, str], str]:
         (str(spec_id), str(option_id)): str(cause)
         for spec_id, option_id, cause in state.get(UNCOMPILED_STATE_KEY) or ()
     }
+
+
+class CombinedRefusal(NamedTuple):
+    """Search's refusal for good of a compile moving a stated provider option and a
+    calculation's axis together: its code and the refusal's reason."""
+
+    code: str
+    reason: str
+
+
+def combined_refused(state: SessionState) -> dict[tuple[str, tuple[str, ...]], CombinedRefusal]:
+    """Each compile of a pin on a stated provider option and a calculation's axis
+    together that Search refused for good this turn, by pin and option ids
+    (`COMBINED_REFUSED_STATE_KEY`)."""
+    return {
+        (str(spec_id), tuple(str(o) for o in option_ids)): CombinedRefusal(str(code), str(reason))
+        for spec_id, option_ids, code, reason in state.get(COMBINED_REFUSED_STATE_KEY) or ()
+    }
+
+
+def record_combined_refused(
+    state: SessionState, *, spec_id: str, option_ids: Sequence[str], refusal: CombinedRefusal
+) -> None:
+    """Record that Search refused for good to compile `spec_id` on `option_ids`, so a
+    later proposal compiles the stated option alone (`planner.source_reads.compile_on_basis`)."""
+    held = {**combined_refused(state), (spec_id, tuple(option_ids)): refusal}
+    state[COMBINED_REFUSED_STATE_KEY] = [
+        [pin, list(options), held_refusal.code, held_refusal.reason]
+        for (pin, options), held_refusal in sorted(held.items())
+    ]
 
 
 def record_stated_uncompiled(

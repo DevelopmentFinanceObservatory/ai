@@ -31,8 +31,9 @@ carries its `code` and `constraint_id`.
 
 Every call returns the same answer on a repeat (a PUT of the same recipe, a
 refresh behind single-flight, a render that appends no revision), so transport
-failures and `retryable` 5xx, 408, 425 and 429 answers are retried up to `max_attempts`,
-each after the `Retry-After` the answer names, at most one attempt's read deadline.
+failures and `retryable` 5xx, 408, 425 and 429 answers are retried up to `max_attempts`
+after a jittered backoff. A 408, 425 or 429 naming a `Retry-After` waits that long
+instead, when it is at most `_MAX_RETRY_AFTER_S`; one naming longer is raised at once.
 `stream_render_data` sends one attempt, since a body already begun cannot be resent.
 
 `analysis_execution_identity` reads apis' capabilities document and keeps its answer
@@ -288,12 +289,16 @@ def _text(value: object) -> str | None:
 # for a call that can pass later: a request timeout, too early, and rate limited.
 _TRANSIENT_STATUSES = frozenset({408, 425, 429})
 
+# The longest `Retry-After` a call waits out in place (`LiveApisClient._send`). A
+# longer one is raised at once, still retryable, so the caller decides.
+_MAX_RETRY_AFTER_S = 2.0
+
 
 def _retry_after(response: httpx2.Response) -> float | None:
     """The seconds `response`'s `Retry-After` header names; `None` for no header or
     an HTTP date, which the client's backoff replaces."""
     value = response.headers.get("retry-after", "").strip()
-    return float(value) if value.isdigit() else None
+    return float(value) if value.isascii() and value.isdigit() else None
 
 
 def _error_from(response: httpx2.Response) -> LiveApisError:
@@ -478,7 +483,7 @@ class LiveApisClient:
             read_timeout_s: Read deadline of each attempt.
             max_attempts: Attempts of one call, retries included.
             backoff_base_s: The first retry waits up to this long, each later one twice as
-                long, where the answer names no `Retry-After`.
+                long, where a 408, 425 or 429 names no `Retry-After`.
             sleep: Backoff sleep, replaced in tests.
             clock: Monotonic seconds, which time the capabilities answer's `max-age`.
         """
@@ -487,7 +492,6 @@ class LiveApisClient:
         self._auth = auth
         self._max_attempts = max_attempts
         self._backoff_base_s = backoff_base_s
-        self._read_timeout_s = read_timeout_s
         self._sleep = sleep
         self._clock = clock
         # The last capabilities answer's execution identity and when it goes stale.
@@ -778,9 +782,9 @@ class LiveApisClient:
         """Issue one call, retrying a transport failure, a `retryable` 5xx, or a
         `retryable` 408, 425 or 429 (`_TRANSIENT_STATUSES`).
 
-        A retry waits the `Retry-After` the answer names, at most the read deadline
-        of one attempt, so the call takes no longer than its attempts may; else a
-        jittered backoff. Returns the 2xx response.
+        A retry waits a jittered backoff. A 408, 425 or 429 naming a `Retry-After`
+        waits that long instead, up to `_MAX_RETRY_AFTER_S`, and one naming longer is
+        raised at once. Returns the 2xx response.
         """
         headers = await self._with_auth(headers)
         attempt = 0
@@ -794,10 +798,14 @@ class LiveApisClient:
             )
             if not transient or attempt >= self._max_attempts:
                 raise error
-            if error.retry_after_s is not None:
-                await self._sleep(min(error.retry_after_s, self._read_timeout_s))
-            else:
-                await self._sleep(random.uniform(0, self._backoff_base_s * 2 ** (attempt - 1)))
+            wait = error.retry_after_s if error.status in _TRANSIENT_STATUSES else None
+            if wait is not None and wait > _MAX_RETRY_AFTER_S:
+                raise error
+            await self._sleep(
+                wait
+                if wait is not None
+                else random.uniform(0, self._backoff_base_s * 2 ** (attempt - 1))
+            )
 
     async def _with_auth(self, headers: Mapping[str, str] | None) -> dict[str, str]:
         """`headers` plus the auth hook's, minted after the principal check has passed.

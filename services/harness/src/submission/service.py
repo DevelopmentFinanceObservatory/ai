@@ -7531,9 +7531,9 @@ def _stated_declined(
     permit: Callable[[UnsupportedOperation], None],
     proposer: Proposer,
 ) -> dict[str, object]:
-    """The `STATED_PROVIDER_DROPPED` problem for `declined`, pins the user chose this
-    turn not to keep as published, answering the ask `_stated_unserved` carries. The
-    user has answered, so it carries no ask: the planner pins a dataset on record
+    """The `STATED_PROVIDER_DROPPED` problem for `declined`, pins the user did not keep
+    as published this turn, answering the ask `_stated_unserved` carries with anything
+    but `KEEP_PUBLISHED_OPTION`. The user has answered, so it carries no ask: the planner pins a dataset on record
     counting the option where one measures the figure (`_serving_stated`, as
     `_stated_unserved` lists them), or removes the figure and records the part of the
     question asking for it in `declined`, which `permit` allows as optional."""
@@ -7544,6 +7544,7 @@ def _stated_declined(
         for item in declined
     )
     listed = "; ".join(f"{spec_id} ({sentence})" for spec_id, sentence in serving)
+    pins = ", ".join(dict.fromkeys(item.pin for item in declined))
     instead = (
         f"These datasets on record count it: {listed}. Pin one where it measures what the "
         "requirement asks for; otherwise remove "
@@ -7552,7 +7553,7 @@ def _stated_declined(
     )
     return problem(
         ProblemCode.STATED_PROVIDER_DROPPED,
-        f"The user chose to count the data only the way their words ask, and {faults}. "
+        f"The user did not keep {pins} counted as published: {faults}. "
         f"Do not ask again. {instead}each such figure and record the part of the question "
         f"asking for it in `declined` with code {UnsupportedOperation.UNSUPPORTED_ASK.value!r}.",
         outcome=Outcome.INVALID_INPUT,

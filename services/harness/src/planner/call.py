@@ -820,6 +820,29 @@ def _refused_unserved(body: Mapping[str, Any]) -> frozenset[tuple[str, str]] | N
     return frozenset(pairs) if len(pairs) == len(unserved) else None
 
 
+def stated_scope_ask_owed(call: PlannerCall) -> bool:
+    """Whether the user is owed the ask the latest `stated_provider_dropped` refusal
+    carries (`submission.service._stated_unserved`): no ask offering
+    `STATED_SCOPE_OPTIONS` reached the user after it, and no later `propose_plan`
+    answer replaced it. The ask takes only those options, so while it is owed an ask
+    without them, which Studio shows as an open question (`allow_free_text`), is
+    refused (`planner.tools.ask_user`)."""
+    offered = [dict(option) for option in STATED_SCOPE_OPTIONS]
+    owed = False
+    for step in call.steps():
+        if step.kind == "call":
+            if (step.args or {}).get("options") == offered:
+                owed = False
+        elif step.kind == "response" and step.name == PROPOSE_PLAN_PROPOSER.call:
+            action = step.body.get("action")
+            owed = (
+                _refused_unserved(step.body) is not None
+                and isinstance(action, Mapping)
+                and action.get("call") == PLANNER_ASK
+            )
+    return owed
+
+
 def stated_scope_keeps(
     call: PlannerCall,
 ) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]]]:
@@ -832,8 +855,9 @@ def stated_scope_keeps(
     `options` are `STATED_SCOPE_OPTIONS` asks about the pins the latest such refusal
     before it names, read off that refusal's own response, so the model cannot point
     the ask at other pins, and a refusal binds the first ask after it that reached the
-    user. An answer of `KEEP_PUBLISHED_OPTION` keeps them and any other answer
-    (`COUNT_AS_ASKED_OPTION`, free text, a skip) releases them for the turn, so the
+    user. The ask takes no free text (`harness.studio_translate._planner_question`).
+    An answer of `KEEP_PUBLISHED_OPTION` keeps them and any other answer
+    (`COUNT_AS_ASKED_OPTION`, a skip, a dismissal) releases them for the turn, so the
     user is not asked again; the latest answer about a pair decides.
     """
     offered = [dict(option) for option in STATED_SCOPE_OPTIONS]

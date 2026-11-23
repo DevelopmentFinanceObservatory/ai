@@ -105,7 +105,12 @@ from planner.plan import (
 from planner.records import (
     OpenPeriodFault,
 )
-from planner.stated_scope import record_stated_uncompiled
+from planner.stated_scope import (
+    CombinedRefusal,
+    combined_refused,
+    record_combined_refused,
+    record_stated_uncompiled,
+)
 from planner.tool_results import Outcome, ProblemCode, problem
 
 logger = logging.getLogger(__name__)
@@ -292,11 +297,14 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     refused for a pin that cannot count the option, with the ask that keeps it.
 
     A compile moving a calculation's axis beside the stated option
-    (`Realignment.stated_option`) that Search refuses for good is posted a second
-    time, on the stated option alone, since Search may refuse either move. Where
-    Search refuses that one for good too, its code is recorded as above: the pin
-    cannot count what the user asked for. Where it compiles, or does not answer,
-    the first compile's refusal stands (`OPERATION_UNSUPPORTED`).
+    (`Realignment.stated_option`) that Search refuses for good is held for the turn
+    (`planner.stated_scope.record_combined_refused`), and the pin is compiled on the
+    stated option alone, since Search may refuse either move. A later proposal posts
+    only that second compile. Where Search refuses it for good too, its code is
+    recorded as above: the pin cannot count what the user asked for. Where Search
+    does not answer it, the proposal answers `stated_compile_unanswered`, to propose
+    again. Where it compiles, the first compile's refusal stands
+    (`OPERATION_UNSUPPORTED`).
 
     A declared whole (`Realignment.whole_axis`) is compiled by `compile_whole`.
     """
@@ -366,13 +374,16 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
                 scope_entries=[e.model_dump(mode="json", exclude_none=True) for e in switched],
             )
         except DefinitionNotResolvedError as exc:
+            code = exc.code or (
+                _UNANSWERED if exc.retryable else _REFUSED if exc.refused else _NO_ONE_DATASET
+            )
             return _Uncompiled(
                 cause=str(exc),
-                code=exc.code or (_UNANSWERED if exc.retryable else _REFUSED),
+                code=code,
                 retryable=exc.retryable,
                 reason=(
                     f"Search does not count {realignment.requirement_id!r}'s dataset the way "
-                    f"its calculation's other inputs share ({exc.code or _REFUSED})"
+                    f"its calculation's other inputs share ({code})"
                 ),
             )
         spec = part.get("spec") if part.get("status") == "definite" else None
@@ -388,22 +399,44 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
             )
         return _Compiled(part=part, spec_id=spec["spec_id"], resolved_at=resolved_at)
 
-    compiled = await attempt(realignment.option_ids)
+    stated_option = None if realignment.stated else realignment.stated_option
+    key = (realignment.spec_id, realignment.option_ids)
+    held = combined_refused(state).get(key) if stated_option is not None else None
+    compiled = (
+        await attempt(realignment.option_ids)
+        if held is None
+        else _Uncompiled(cause=held.code, code=held.code, retryable=False, reason=held.reason)
+    )
     if isinstance(compiled, _Uncompiled):
         if compiled.retryable and realignment.stated:
             return stated_uncompiled(compiled.code, retryable=True)
         if compiled.retryable:
             return _refusing(_basis_uncompiled(realignment, compiled.cause))
-        stated_option = realignment.stated_option
-        if stated_option is not None and not realignment.stated:
-            # The compile also carries a calculation's move: Search may refuse either.
-            # The stated option alone decides whether the pin can count what the user
-            # asked for; where it can, or Search did not answer, the calculation's
-            # refusal stands.
-            alone = await attempt((stated_option,))
-            if isinstance(alone, _Uncompiled) and not alone.retryable:
-                return _stated_refused(realignment.spec_id, stated_option, alone.code)
-        return unservable(compiled.reason, code=compiled.code)
+        if stated_option is None:
+            return unservable(compiled.reason, code=compiled.code)
+        # The compile also carries a calculation's move: Search may refuse either.
+        # The stated option alone decides whether the pin can count what the user
+        # asked for. The refused compile is held for the turn, so proposing again
+        # posts only the stated option's.
+        refusal = CombinedRefusal(code=compiled.code, reason=compiled.reason)
+        alone = await attempt((stated_option,))
+        if isinstance(alone, _Uncompiled) and alone.retryable:
+            answer = stated_uncompiled(alone.code, retryable=True)
+        elif isinstance(alone, _Uncompiled):
+            answer = _stated_refused(realignment.spec_id, stated_option, alone.code)
+        else:
+            answer = unservable(compiled.reason, code=compiled.code)
+
+        def holding_refused(into: SessionState) -> dict[str, object] | None:
+            record_combined_refused(
+                into,
+                spec_id=realignment.spec_id,
+                option_ids=realignment.option_ids,
+                refusal=refusal,
+            )
+            return answer(into)
+
+        return holding_refused
     part, spec_id, resolved_at = compiled.part, compiled.spec_id, compiled.resolved_at
     digest = resolver_digest({"parts": [dict(part)]})
     mark_planner_axes(digest, planner_axes(block) | set(axes))

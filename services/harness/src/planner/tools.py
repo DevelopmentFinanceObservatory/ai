@@ -39,6 +39,7 @@ from harness.turn_events import PLANNER_ASK
 from submission.prices_choice import PRICES_OPTIONS
 from submission.service import (
     COMBINATION_OPTIONS,
+    STATED_SCOPE_OPTIONS,
     Proposal,
     submit,
 )
@@ -57,6 +58,7 @@ from planner.call import (
     PlannerCall,
     answered_since_referral,
     candidate_ids,
+    stated_scope_ask_owed,
 )
 from planner.plan import (
     Plan,
@@ -234,8 +236,8 @@ def ask_refusal(args: Mapping[str, Any]) -> dict[str, object] | None:
     question (`harness.studio_translate._planner_question`).
     `message` is the question as text. Each of `candidates` is a
     mapping, read by its `spec_id` and `label`. `options` are
-    `COMBINATION_OPTIONS` or `PRICES_OPTIONS` exactly, as a refusal's action
-    carries them, offered without `candidates`. A `recommended_spec_id` names
+    `COMBINATION_OPTIONS`, `PRICES_OPTIONS` or `STATED_SCOPE_OPTIONS` exactly, as a
+    refusal's action carries them, offered without `candidates`. A `recommended_spec_id` names
     one of `candidates`.
     """
     if not isinstance(args.get("message"), str):
@@ -252,7 +254,11 @@ def ask_refusal(args: Mapping[str, Any]) -> dict[str, object] | None:
             outcome=Outcome.INVALID_INPUT,
         )
     options = args.get("options") or []
-    fixed = ([dict(o) for o in COMBINATION_OPTIONS], [dict(o) for o in PRICES_OPTIONS])
+    fixed = (
+        [dict(o) for o in COMBINATION_OPTIONS],
+        [dict(o) for o in PRICES_OPTIONS],
+        [dict(o) for o in STATED_SCOPE_OPTIONS],
+    )
     if options and (candidates or options not in fixed):
         return problem(
             ProblemCode.INVALID_ARGUMENTS,
@@ -339,6 +345,23 @@ def _ask_check(args: Mapping[str, Any], state: SessionState) -> dict[str, object
             authored_answer(referral.model_dump(mode="json"), split_of(plan))
         )
     return _entity_ask_unbound(referral, args.get("candidates"))
+
+
+def _stated_ask_open(call: PlannerCall, args: Mapping[str, Any]) -> dict[str, object] | None:
+    """The refusal for an ask without `STATED_SCOPE_OPTIONS` while the user is owed
+    the ask a `stated_provider_dropped` refusal carries (`stated_scope_keeps` reads
+    only that ask's answer), or `None`."""
+    if args.get("options") == [dict(o) for o in STATED_SCOPE_OPTIONS]:
+        return None
+    if not stated_scope_ask_owed(call):
+        return None
+    return problem(
+        ProblemCode.INVALID_ARGUMENTS,
+        "The last `propose_plan` refusal asks the user whether to keep a dataset counted "
+        "as published. Ask that with the `options` its action carries, unchanged, before "
+        "asking anything else.",
+        outcome=Outcome.INVALID_INPUT,
+    )
 
 
 def _ask_beside_ask(call: PlannerCall) -> dict[str, object] | None:
@@ -498,7 +521,7 @@ def ask_user(
         "rationale": rationale,
     }
     state = call.state
-    refusal = _ask_check(args, state) or _ask_beside_ask(call)
+    refusal = _ask_check(args, state) or _stated_ask_open(call, args) or _ask_beside_ask(call)
     if refusal is not None:
         return refusal
     call_id = call.call_id

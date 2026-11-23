@@ -49,6 +49,7 @@ from planner.plan import (
     save_pin_sources,
     windowed_pins,
 )
+from planner.source_reads import _NO_ONE_DATASET, _UNANSWERED
 from planner.specs import planner_tool_specs
 from planner.stated_scope import (
     STATED_SCOPE_KEPT_STATE_KEY,
@@ -59,6 +60,7 @@ from planner.stated_scope import (
     stated_uncompiled,
 )
 from planner.tool_results import Outcome, ProblemCode
+from planner.tools import ASK_ACCEPTED
 from planner.workflow import ToolId
 from submission.service import (
     COUNT_AS_ASKED_OPTION,
@@ -205,8 +207,9 @@ class _Search:
     provider option posted: a recorded DAC2a part on provider:inclusive as dev Search
     did (`_RECORDED_COMPILES`), any other as `_switched` makes it. With `refusal`, it
     refuses every compile, or, with `refusing` too, each compile posting that option.
-    With `then`, every compile after the first answers that refusal instead. Each
-    call's arguments are recorded in `calls`."""
+    With `then`, every compile after the first answers that refusal instead, and with
+    `empty`, every compile answers no part. Each call's arguments are recorded in
+    `calls`."""
 
     def __init__(
         self,
@@ -214,11 +217,13 @@ class _Search:
         refusal: Mapping[str, Any] | None = None,
         refusing: str | None = None,
         then: Mapping[str, Any] | None = None,
+        empty: bool = False,
     ):
         self.blocks = blocks
         self.refusal = refusal
         self.refusing = refusing
         self.then = then
+        self.empty = empty
         self.calls: list[Mapping[str, Any]] = []
 
     async def list_tools(self) -> list[Any]:
@@ -232,6 +237,8 @@ class _Search:
         self.calls.append(arguments)
         if self.then is not None and len(self.calls) > 1:
             return ToolCallResult(is_error=True, structured_content=dict(self.then))
+        if self.empty:
+            return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": []}})
         posted = {entry["option_id"] for entry in arguments["scope_entries"]}
         if self.refusal is not None and (self.refusing is None or self.refusing in posted):
             return ToolCallResult(is_error=True, structured_content=dict(self.refusal))
@@ -1279,7 +1286,24 @@ async def test_a_stated_compile_search_refuses_cannot_count_the_scope(
         ]
         assert result["detail"]["causes"] == {"aid": refusal["code"]}
     else:
-        assert result["detail"]["cause"] == "unanswered"
+        assert result["detail"]["cause"] == _UNANSWERED
+
+
+async def test_a_stated_compile_search_answers_with_no_part_records_no_one_dataset() -> None:
+    """G7 aid to Africa stating imputed multilateral aid, whose compile counted that
+    way Search answers with no part: no refusal of Search's, so the pin is recorded as
+    holding no one dataset counted that way, and refused with the ask."""
+    ctx = _Context()
+    africa = _block("africa_bilateral")
+    _show(ctx, africa)
+    surface = _Search(africa, empty=True)
+    requirement = _dataset("aid", africa["spec_id"], _STATED_INCLUSIVE, recipient="Africa")
+
+    result = await _propose(ctx, [requirement], words=_G7, surface=surface)
+
+    assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
+    assert result["detail"]["causes"] == {"aid": _NO_ONE_DATASET}
+    assert stated_uncompiled(ctx.state) == {(africa["spec_id"], _INCLUSIVE): _NO_ONE_DATASET}
 
 
 async def test_a_compile_held_from_an_earlier_proposal_is_reused() -> None:
@@ -1378,6 +1402,50 @@ async def test_bilateral_plus_multilateral_words_name_dac1s_own_total() -> None:
     assert surface.calls == []
 
 
+def _ask_tool(ctx: _Context, **arguments: Any) -> dict[str, Any]:
+    """The planner's ask with `arguments`, as its tool answers it on `ctx`."""
+    tools = {spec.name: spec for spec in planner_tool_specs(surface=_Search())}
+    return call_planner_tool(tools[PLANNER_ASK], tool_context=ctx, **arguments)
+
+
+async def test_an_ask_without_the_keep_options_is_refused_while_the_keep_ask_is_owed() -> None:
+    """DAC1 is refused for the G7 question with the ask that keeps it as published.
+    Studio shows an ask with no fixed `options` as an open question, which no answer
+    to the keep ask reads, so the planner asking without them is refused; the ask
+    with them is accepted. Once that ask reached the user, or a refusal carrying no ask
+    followed, an open ask is accepted."""
+    ctx = _Context()
+    _show(ctx, _block("dac1"))
+    refused = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
+    assert refused["action"]["call"] == PLANNER_ASK, refused
+    keep_options = [dict(option) for option in STATED_SCOPE_OPTIONS]
+    owed = [tool_answers(("propose-1", "propose_plan", refused))]
+
+    open_ask = _ask_tool(_Context(*owed), message="Which do you prefer?")
+    keep_ask = _ask_tool(_Context(*owed), message="Keep DAC1?", options=keep_options)
+    answered = [
+        *owed,
+        model_response(
+            tool_call("ask-1", PLANNER_ASK, {"message": "Keep DAC1?", "options": keep_options})
+        ),
+        user_answer("ask-1", one_answer({"spec_id": KEEP_PUBLISHED_OPTION})),
+    ]
+    later = _ask_tool(_Context(*answered), message="Which years?")
+    declined_ctx = _Context(*_released())
+    _show(declined_ctx, _block("dac1"))
+    declined = await _propose(declined_ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
+    assert declined["action"]["call"] == "propose_plan", declined
+    after_declined = _ask_tool(
+        _Context(*owed, tool_answers(("propose-2", "propose_plan", declined))),
+        message="Which years?",
+    )
+
+    assert open_ask["code"] == ProblemCode.INVALID_ARGUMENTS.value, open_ask
+    assert keep_ask == dict(ASK_ACCEPTED)
+    assert later == dict(ASK_ACCEPTED)
+    assert after_declined == dict(ASK_ACCEPTED)
+
+
 def _released() -> list[AgentRecord]:
     """The ask for DAC1 counting imputed multilateral aid, answered
     `COUNT_AS_ASKED_OPTION` (`_kept`)."""
@@ -1394,8 +1462,8 @@ def _released() -> list[AgentRecord]:
 )
 async def test_an_answer_not_to_keep_is_not_asked_again_in_the_turn(said: Any) -> None:
     """The user answered the ask for DAC1 with anything but keeping it as published:
-    counting it as asked, their own words, or a skip. The answer is final for the
-    turn: the planner proposing DAC1 again is refused with no ask, asking it to
+    counting it as asked or a skip, or free text, which Studio does not offer for
+    this ask but a resumed answer can carry. The answer is final for the turn: the planner proposing DAC1 again is refused with no ask, asking it to
     remove the figure or repin it to the DAC2a total on record that counts the
     option."""
     ctx = _Context(*_asked(said))
@@ -1405,6 +1473,7 @@ async def test_an_answer_not_to_keep_is_not_asked_again_in_the_turn(said: Any) -
 
     assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
     assert result["action"]["call"] == "propose_plan"
+    assert f"did not keep {DAC1} counted as published" in result["message"]
     assert result["detail"]["serving"] == [_spec("g7_bilateral")]
     assert result["detail"]["unserved"] == [
         {"requirement_id": "g7_total", "spec_id": DAC1, "option_id": _INCLUSIVE}
@@ -1503,7 +1572,8 @@ async def test_a_pin_switched_on_the_plan_card_offers_no_omitted_scope() -> None
     assert result["outcome"] == Outcome.OK.value, result
 
 
-_UNANSWERED = {"code": "upstream_unavailable", "retry_mode": "retry_after_delay"}
+_UNANSWERED_REFUSAL = {"code": "upstream_unavailable", "retry_mode": "retry_after_delay"}
+_REFUSED_FOR_GOOD = {"code": "requested_option_unavailable", "retry_mode": "do_not_retry"}
 
 
 @pytest.mark.parametrize(
@@ -1520,8 +1590,8 @@ _UNANSWERED = {"code": "upstream_unavailable", "retry_mode": "retry_after_delay"
         ),
         pytest.param(
             None,
-            _UNANSWERED,
-            ProblemCode.OPERATION_UNSUPPORTED,
+            _UNANSWERED_REFUSAL,
+            ProblemCode.SURFACE_UNAVAILABLE,
             id="the-stated-scope-unanswered",
         ),
     ],
@@ -1533,15 +1603,16 @@ async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_what_s
     counts it on: one compile moves it on both axes. Where Search refuses it, the
     pin is compiled on the stated scope alone to find which move Search refuses. That
     refused too, the pin cannot count what the user asked for and is refused with the
-    ask; served, or not answered, the combined refusal stands: it names the share
-    and records nothing against the stated scope."""
+    ask; served, the combined refusal stands, naming the share; not answered, the
+    planner is asked to propose again. Neither records anything against the stated
+    scope."""
     ctx = _Context()
     aid = provider_block(HEALTH, narrow=True, active=_BILATERAL)
     total = basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance="explicit")
     _show(ctx, aid, total)
     surface = _Search(
         aid,
-        refusal={"code": "requested_option_unavailable", "retry_mode": "do_not_retry"},
+        refusal=_REFUSED_FOR_GOOD,
         refusing=refusing,
         then=then,
     )
@@ -1572,6 +1643,42 @@ async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_what_s
             "share",
         )
         assert stated_uncompiled(ctx.state) == {}
+    if code is ProblemCode.SURFACE_UNAVAILABLE:
+        assert result["detail"]["cause"] == _UNANSWERED
+
+
+def _aid_over_net_total() -> tuple[_Context, list[dict[str, Any]], Mapping[str, Any]]:
+    """US aid to Kenya stating imputed multilateral aid as a share of a net total:
+    the context, the requirements and the aid block."""
+    ctx = _Context()
+    aid = provider_block(HEALTH, narrow=True, active=_BILATERAL)
+    total = basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance="explicit")
+    _show(ctx, aid, total)
+    requirements = [
+        _dataset("aid", HEALTH, _STATED_INCLUSIVE, donor="United States", recipient="Kenya"),
+        _dataset("total", TOTAL, "net ODA", donor="United States"),
+        _share("aid", "total"),
+    ]
+    return ctx, requirements, aid
+
+
+async def test_a_combined_compile_refused_for_good_is_not_posted_again_in_the_turn() -> None:
+    """Search refuses for good the compile moving the aid on the stated scope and the
+    net basis, and does not answer the stated scope's alone: the planner is asked to
+    propose again. Proposing again posts only the stated scope's compile, once."""
+    ctx, requirements, aid = _aid_over_net_total()
+    first_surface = _Search(aid, refusal=_REFUSED_FOR_GOOD, then=_UNANSWERED_REFUSAL)
+
+    first = await _propose(ctx, requirements, words=_G7, surface=first_surface)
+    again_surface = _Search(aid, refusal=_UNANSWERED_REFUSAL)
+    again = await _propose(ctx, requirements, words=_G7, surface=again_surface)
+
+    assert first["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, first
+    assert len(first_surface.calls) == 2
+    assert again["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, again
+    (alone,) = again_surface.calls
+    assert {e["option_id"] for e in alone["scope_entries"]} >= {_INCLUSIVE}
+    assert "measure_basis:net" not in {e["option_id"] for e in alone["scope_entries"]}
 
 
 async def test_a_sum_stating_the_scope_nowhere_is_refused_once_a_turn() -> None:
