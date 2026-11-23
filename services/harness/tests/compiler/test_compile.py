@@ -9005,66 +9005,127 @@ def test_a_share_divides_by_a_whole_that_holds_its_part(
 
 
 @pytest.mark.parametrize(
-    ("narrowed_to", "codes"),
+    ("narrowed_to", "by_filter", "whole_entity", "codes"),
     [
-        pytest.param("Kenya", [], id="kenya-inside"),
-        pytest.param("United States", [Code.SHARE_PART_OUTSIDE_WHOLE], id="united-states-outside"),
+        pytest.param("Kenya", False, None, [], id="kenya-inside"),
+        pytest.param(
+            "United States",
+            False,
+            None,
+            [Code.SHARE_PART_OUTSIDE_WHOLE],
+            id="united-states-outside",
+        ),
+        pytest.param("Kenya", True, None, [], id="filtered-to-kenya-inside"),
+        pytest.param(
+            "United States",
+            True,
+            None,
+            [Code.SHARE_PART_OUTSIDE_WHOLE],
+            id="filtered-to-united-states-outside",
+        ),
+        pytest.param(
+            "Kenya",
+            False,
+            "United States",
+            [Code.SHARE_PART_OUTSIDE_WHOLE],
+            id="kenya-over-united-states-selected",
+        ),
+        pytest.param("Kenya", False, "Kenya", [], id="kenya-over-kenya-selected"),
     ],
 )
-def test_a_share_checks_only_the_entity_its_numerator_narrows_to(
+def test_a_share_checks_only_the_entities_each_operand_keeps(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     source: SourceFactory,
     narrowed_to: str,
+    by_filter: bool,
+    whole_entity: str | None,
     codes: list[Code],
 ) -> None:
-    """G7 aid to Kenya and the United States, narrowed to one of them, over G7 aid
-    to Africa. Kenya is inside Africa, so the share holds its part even though the
-    numerator's source also binds the United States. Narrowed to the United
-    States, the part is outside the whole."""
+    """G7 aid to Kenya and the United States, narrowed to one of them by the share's
+    numerator entity or by a filter before it. Over G7 aid to Africa, Kenya is
+    inside Africa, so the share holds its part even though the numerator's source
+    also binds the United States; the United States is outside it. Over G7 aid to
+    Kenya and the United States with the denominator naming one of them, the whole
+    is that one recipient, so Kenya over the United States is refused even though
+    the denominator's source binds Kenya."""
     united_states = ResolvedEntity(role="destination", ref="country/USA", label="United States")
     g7 = Entity(name="G7", role="donor")
-    aid = requirement(
-        id="aid",
-        measure="official development assistance",
-        entities=[
-            g7,
-            Entity(name="Kenya", role="recipient"),
-            Entity(name="United States", role="recipient"),
-        ],
-    )
+    both = [
+        g7,
+        Entity(name="Kenya", role="recipient"),
+        Entity(name="United States", role="recipient"),
+    ]
+    aid = requirement(id="aid", measure="official development assistance", entities=both)
     total = requirement(
         id="total",
         measure="official development assistance",
-        entities=[g7, Entity(name="Africa", role="recipient")],
+        entities=both
+        if whole_entity is not None
+        else [g7, Entity(name="Africa", role="recipient")],
     )
-    summed = derived_requirement(id="summed", input_id="total")
+    numerator_entity = None if by_filter else narrowed_to
+    kept = FilterRequirement(
+        id="kept",
+        decision_ids=["measure"],
+        input_id="aid",
+        predicates=(EntityIn(names=(narrowed_to,)),),
+    )
+    numerator_input = "kept" if by_filter else "aid"
+    if whole_entity is None:
+        whole_requirements = [total, derived_requirement(id="summed", input_id="total")]
+        whole_operations: list[Operation] = [
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            _aggregate(id="summed", requirement_id="summed", input="fetch_total"),
+        ]
+        whole_input, whole_op = "summed", "summed"
+        whole_source = _flow_source(
+            source, SPEC_OTHER, recipients=[_AFRICA], groups=[_AFRICA_GROUP]
+        )
+    else:
+        whole_requirements = [total]
+        whole_operations = [
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER)
+        ]
+        whole_input, whole_op = "total", "fetch_total"
+        whole_source = _flow_source(source, SPEC_OTHER, recipients=[_KENYA, united_states])
     share = ShareOfRequirement(
         id="share",
         decision_ids=["measure"],
-        numerator=RequirementSide(input_id="aid", entity=narrowed_to),
-        denominator=RequirementSide(input_id="summed"),
+        numerator=RequirementSide(input_id=numerator_input, entity=numerator_entity),
+        denominator=RequirementSide(input_id=whole_input, entity=whole_entity),
     )
 
     result = build(
-        _draft([decision()], [aid, total, summed, share]),
+        _draft([decision()], [aid, *([kept] if by_filter else []), *whole_requirements, share]),
         _translation(
             RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
-            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
-            _aggregate(id="summed", requirement_id="summed", input="fetch_total"),
+            *(
+                [
+                    FilterOperation(
+                        id="kept",
+                        requirement_id="kept",
+                        input="fetch",
+                        predicates=(EntityIn(names=(narrowed_to,)),),
+                    )
+                ]
+                if by_filter
+                else []
+            ),
+            *whole_operations,
             ShareOfOperation(
                 id="share",
                 requirement_id="share",
-                numerator=Side(input="fetch", entity=narrowed_to),
-                denominator=Side(input="summed"),
+                numerator=Side(input="kept" if by_filter else "fetch", entity=numerator_entity),
+                denominator=Side(input=whole_op, entity=whole_entity),
             ),
             terminal=["share"],
         ),
         discovered={
             "aid": _flow_source(source, SPEC_KENYA, recipients=[_KENYA, united_states]),
-            "total": _flow_source(source, SPEC_OTHER, recipients=[_AFRICA], groups=[_AFRICA_GROUP]),
+            "total": whole_source,
         },
     )
 

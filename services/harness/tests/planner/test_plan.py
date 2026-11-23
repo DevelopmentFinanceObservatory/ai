@@ -15,6 +15,7 @@ import pytest
 from common.hashed_fields import revision_content
 from compiler.sources import source_from_spec_block
 from data_mcp.search_tool import SearchSource
+from harness.planner_adapter import _as_authored
 from planner.operations import (
     AggregateOperation,
     FilterOperation,
@@ -102,6 +103,7 @@ from planner.plan import (
     restated_translation,
     retrieves_period,
     rolls_from_its_start,
+    save_plan,
     scope_choice_slot,
     settle_decisions,
     split_of,
@@ -7514,7 +7516,7 @@ def test_a_whole_covers_its_parts_parties_with_the_side_it_opens_as_one_total(
     """G7 aid to Africa over G7 aid to every recipient. The whole states no
     entities and no `across`, and reads as its part's donor with the recipients
     one closed total, so the share divides by it directly. A whole a stored
-    session states coverage on loads without it and reads the same way."""
+    session states coverage on keeps it as stored and reads the same way."""
     plan = _plan(
         decision(),
         question="G7 aid to Africa as a share of its total aid since the earliest year",
@@ -7524,18 +7526,68 @@ def test_a_whole_covers_its_parts_parties_with_the_side_it_opens_as_one_total(
 
     loaded = plan.requirement(whole.id)
     assert isinstance(loaded, DatasetRequirement)
-    assert (loaded.entities, loaded.across) == ((), ())
+    assert (loaded.entities, loaded.across) == (whole.entities, whole.across)
     shape = frame_shapes(plan)[whole.id]
     assert [(role.role, role.open) for role in shape.roles] == [
         ("donor", False),
         ("recipient", False),
     ]
-    stored = json.loads(plan.model_dump_json())
-    stated = _G7_WHOLE_STATED.model_dump(mode="json", include={"entities", "across"})
-    for requirement in stored["evidence_requirements"]:
-        if requirement["id"] == whole.id:
-            requirement.update(stated)
-    assert Plan.model_validate_json(json.dumps(stored)) == plan
+    assert Plan.model_validate_json(plan.model_dump_json()) == plan
+
+
+def test_an_approved_plan_stored_with_a_whole_stating_coverage_runs_without_reapproval(
+    decision: DecisionFactory,
+) -> None:
+    """A plan approved while a whole could state its part's `entities` and `across`
+    runs as approved once stored and reloaded: those fields fed the revision the
+    user approved. The planner is shown the whole without them, so an amendment
+    restating it as shown is admitted."""
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=_g7_africa_share(whole=_G7_WHOLE),
+    )
+    # The plan as the release before the refusal held it: `model_copy` skips
+    # validation, as loading it then did not strip the stated fields.
+    legacy = plan.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                _G7_WHOLE_STATED if requirement.id == _G7_WHOLE.id else requirement
+                for requirement in plan.evidence_requirements
+            )
+        }
+    )
+    state: dict[str, Any] = {}
+    save_plan(state, legacy.approve(at=datetime.now(UTC)))
+    stored_whole = next(
+        requirement
+        for requirement in json.loads(state[PLAN_STATE_KEY])["evidence_requirements"]
+        if requirement["id"] == _G7_WHOLE.id
+    )
+    assert {"entities", "across"} <= stored_whole.keys()
+
+    loaded = load_plan(state)
+
+    assert loaded is not None
+    assert loaded.start_execution().status == PlanStatus.EXECUTING
+    shown = _as_authored(loaded)
+    assert shown is not None
+    (shown_whole,) = (r for r in shown["evidence_requirements"] if r["id"] == _G7_WHOLE.id)
+    assert not shown_whole.get("entities")
+    assert not shown_whole.get("across")
+    _Patch.model_validate(
+        {
+            "decisions": [],
+            "evidence_requirements": shown["evidence_requirements"],
+            "removed_decisions": [],
+            "removed_evidence_requirements": [],
+            "declined": [],
+            "answered": [],
+            "removed_asks": [],
+            "across_years": [],
+        }
+    )
 
 
 def test_a_summed_whole_reads_its_side_open_and_its_sum_closes_it(

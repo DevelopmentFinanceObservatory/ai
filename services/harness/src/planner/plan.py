@@ -2649,8 +2649,8 @@ def stated_coverage_fault(whole: DatasetRequirement) -> str | None:
 
     A whole covers what its part covers with one side left open (`whole_read`),
     so `entities` or `across` on it could only disagree with that. A proposal
-    stating either is refused (`submission.service._Patch`), and a plan stored
-    with them loads without them (`Plan._wholes_state_no_coverage`).
+    stating either is refused (`submission.service._Patch`). A plan stored with
+    them keeps them and reads them as derived (`without_stated_coverage`).
     """
     if whole.whole_of is None:
         return None
@@ -2664,18 +2664,25 @@ def stated_coverage_fault(whole: DatasetRequirement) -> str | None:
     )
 
 
-def _coverage_dropped(requirement: object) -> object:
-    """`requirement`, a requirement or its serialised form, without the `entities` and
-    `across` it states where it is a whole (`Plan._wholes_state_no_coverage`)."""
-    if isinstance(requirement, DatasetRequirement):
-        if requirement.whole_of is None or not (requirement.entities or requirement.across):
-            return requirement
-        return requirement.model_copy(update={"entities": (), "across": ()})
-    if isinstance(requirement, Mapping) and requirement.get("whole_of") is not None:
-        return {
-            key: value for key, value in requirement.items() if key not in {"entities", "across"}
-        }
-    return requirement
+def without_stated_coverage(requirement: EvidenceRequirement) -> EvidenceRequirement:
+    """`requirement` without the `entities` and `across` it states where it is a whole
+    (`stated_coverage_fault`).
+
+    A proposal stating them is refused (`submission.service._Patch`), so only a
+    plan stored before that refusal holds them. The stored plan keeps them, since
+    they fed the revision its user approved (`plan_revision`), and every reader
+    of the whole's coverage derives it from the part (`whole_read`). The
+    planner's view of the plan drops them
+    (`harness.planner_adapter._as_authored`), so an amendment repeating what it
+    was shown is not refused.
+    """
+    if (
+        not isinstance(requirement, DatasetRequirement)
+        or requirement.whole_of is None
+        or not (requirement.entities or requirement.across)
+    ):
+        return requirement
+    return requirement.model_copy(update={"entities": (), "across": ()})
 
 
 def whole_read(whole: DatasetRequirement, part: DatasetRequirement) -> DatasetRequirement:
@@ -4978,22 +4985,6 @@ class Plan(StrictModel):
     status: PlanStatus = PlanStatus.DRAFT
     approved_revision: str | None = None
     approved_at: Annotated[datetime | None, HASHED_WHEN_SET] = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _wholes_state_no_coverage(cls, data: Any) -> Any:
-        """Drop the `entities` and `across` a whole states, which its part settles
-        (`stated_coverage_fault`).
-
-        A proposal stating them is refused (`submission.service._Patch`), so only
-        a plan stored before that refusal holds them. It loads without them, so the
-        plan shown to the model for an amendment
-        (`harness.planner_adapter._as_authored`) never states them
-        and the amendment repeating what it was shown is not refused.
-        """
-        if not isinstance(data, Mapping) or not (requirements := data.get("evidence_requirements")):
-            return data
-        return {**data, "evidence_requirements": [_coverage_dropped(r) for r in requirements]}
 
     @field_validator("question")
     @classmethod

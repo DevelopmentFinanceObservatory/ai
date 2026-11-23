@@ -1538,8 +1538,7 @@ async def test_a_whole_pinned_to_its_compile_is_never_searched(
     the compile `propose_plan` made of it, which Search binds to the developing
     countries' total. The whole is settled, and translation compiles it from that pin
     with no search and no rewrite. A stored plan may hold a whole stating its part's
-    donor and the recipients in `across`, pooled by year, which loads without them
-    and reads the same way."""
+    donor and the recipients in `across`, pooled by year, which reads the same way."""
     g7 = Entity(name="Group of Seven", role="donor")
     period = Period(start=1960, end=2024)
     whole = requirement(
@@ -1591,7 +1590,7 @@ async def test_a_whole_pinned_to_its_compile_is_never_searched(
     assert "search" not in surface.calls
     assert "named_in_place_of_across" not in answer
     plan = _stored(context)
-    assert plan.requirement(whole.id) == whole.model_copy(update={"entities": (), "across": ()})
+    assert plan.requirement(whole.id) == whole
     assert plan.workflow is not None
     assert {source.spec_id for source in plan.workflow.sources} == {
         SPEC_G7_AFRICA,

@@ -103,6 +103,7 @@ from planner.plan import (
     truncate,
     warning_codes,
     windowed_origins,
+    without_stated_coverage,
     without_whole_sums,
 )
 from planner.pydantic_agent import (
@@ -1615,20 +1616,22 @@ def _as_authored(plan: Plan | None) -> dict[str, Any] | None:
     patch by name. The render shows the plan without them
     (`plan_display.shown_plan`, `planner.plan.without_whole_sums`), each
     reader of a sum reading its whole, and the stored plan is saved as it is.
+    A whole stored with the `entities` and `across` its part settles shows
+    without them (`without_stated_coverage`), since a proposal stating them is
+    refused.
     """
     if plan is None:
         return None
     shown = plan_display.shown_plan(plan)
-    if shown.whole_sums:
-        shown = shown.model_copy(
-            update={
-                "evidence_requirements": tuple(
-                    without_whole_sums(shown.evidence_requirements, shown.whole_sums)
-                ),
-                "whole_sums": (),
-            }
-        )
-    return shown.model_dump(mode="json")
+    return shown.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                without_stated_coverage(requirement)
+                for requirement in without_whole_sums(shown.evidence_requirements, shown.whole_sums)
+            ),
+            "whole_sums": (),
+        }
+    ).model_dump(mode="json")
 
 
 def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] = ()) -> str:
