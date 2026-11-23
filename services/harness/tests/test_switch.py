@@ -58,7 +58,9 @@ from harness.graph.state import (
     ORCHESTRATOR_UNIT_SERVED_KEY,
     ORCHESTRATOR_UNIT_SETTLED_KEY,
     PICK_REPLAN_KEY,
+    ServedUnit,
     unit_row_offers,
+    units_reread,
 )
 from harness.graph.switch import SCOPE_CHOICE_NOT_APPLIED, SWITCH_CANCELLED, SwitchFailedError
 from harness.mcp_client import McpResolver
@@ -109,6 +111,7 @@ from planner.specs import PROPOSE_PLAN
 from planner.workflow import ReadingSetBy, ToolId
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from submission.prices_choice import UNIT_ROWS_STATE_KEY
 from submission.service import (
     AlignedPin,
     SearchedPin,
@@ -2550,6 +2553,48 @@ async def test_a_unit_row_switch_one_part_cannot_be_read_in_leaves_every_part_as
     assert offered["revision"] == plan_revision(plan)
     assert planner.revisions == []
     assert {key: state.get(key) for key in before} == before
+
+
+@pytest.mark.parametrize("refused", [False, True], ids=["read", "refused"])
+async def test_a_unit_row_switch_reads_a_window_the_plan_left_out_in_the_unit(
+    refused: bool,
+) -> None:
+    """The unit question covered two windows, and the plan reads the recent
+    one alone, its row having absorbed only that window. A switch of the
+    row to constant 2015 US dollars asks Search for the early window's
+    series in that unit beside the recent pin, and records the early
+    window's read once the revision lands, so a later plan adding the
+    window is pinned to it. When Search refuses the early window, the
+    switch fails whole and records nothing."""
+    plan = _unit_plan()
+    plan = plan.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                r for r in plan.evidence_requirements if r.id == "recent"
+            )
+        }
+    )
+    state = _unit_state(plan)
+    state[UNIT_ROWS_STATE_KEY] = {_UNIT_SLOT: {_FK_GROSS: ["recent"]}}
+    search = _RefusingEarlyWindow() if refused else _UnitSearch()
+    unit = {**_USD_2023, "base_year": 2015}
+
+    offered, planner = await _switch_unit(
+        state, {"choice_id": _UNIT_ROW, "option_id": "USD-constant-2015", "unit": unit}, search
+    )
+
+    assert sorted(map(_is_early, search.posted)) == [False, True]
+    assert _requested_units(search) == [unit, unit]
+    if refused:
+        assert offered["switch_failed"]["code"] == "requested_option_unavailable"
+        assert planner.revisions == []
+        assert units_reread(state) == {}
+        return
+    assert "switch_failed" not in offered, offered.get("switch_failed")
+    early = next(posted["spec_id"] for posted in search.posted if _is_early(posted))
+    (revision,) = planner.revisions
+    assert [r["id"] for r in revision["evidence_requirements"]] == ["recent"]
+    assert units_reread(state) == {_OTHER: ServedUnit(spec_id=early, unit=Unit(**unit))}
 
 
 @pytest.mark.parametrize(

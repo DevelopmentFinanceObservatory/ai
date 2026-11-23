@@ -73,7 +73,7 @@ from compiler.sources import (
 )
 from data_mcp.scope import ChoiceOrigin, ScopeAxis
 from data_mcp.settings import Settings as DataMcpSettings
-from harness.graph.state import conversation_readings, units_served
+from harness.graph.state import conversation_readings, units_reread, units_served
 from harness.plan_display import plan_words
 from harness.scope_choices import (
     ANY_REPORTERS,
@@ -782,11 +782,12 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         )
     # The user's whole unit answer owns the unit of every requirement it
     # holds, so none of those cites a decision of the planner's fixing a unit.
+    stated_decisions = _decisions_after(previous, settled, removed=removed_decisions)
     held_units = _units_the_user_holds(
-        requirements_after,
-        _decisions_after(previous, settled, removed=removed_decisions),
-        whole_units=whole_unit_slots(chosen),
+        requirements_after, stated_decisions, whole_units=whole_unit_slots(chosen)
     )
+    if (refusal := _unit_fixed_with_more(held_units, stated_decisions, proposer)) is not None:
+        return refusal
     if held_units:
         evidence_requirements = _without_held_unit_citations(
             requirements_after, evidence_requirements, held=held_units
@@ -1032,8 +1033,10 @@ def _user_prices(
     card moved in the unit it picked (`SessionView.switched_units`).
 
     The unit question's answer seeds the plan that first states its row.
-    From then on every member of the row, each part the answer put on it
-    (`harness.graph.state.units_served`) and each pin citing it, holds the
+    From then on every member of the row with a series in the row's unit,
+    each part the answer put on it (`harness.graph.state.units_served`),
+    read in that unit by a switch of the row when the plan does not read it
+    (`harness.graph.state.units_reread`), and each pin citing it, holds the
     row's unit, whether or not the turn still holds the answer. The plan's
     pins stand for each part the row absorbed
     (`submission.prices_choice.absorbed_rows`), so a count or scope switch
@@ -1045,6 +1048,7 @@ def _user_prices(
     """
     chosen = answers.chosen
     units = view.switched_units()
+    reread = units_reread(view.state)
     if previous is None or (answers.released and not units):
         return chosen
     return plan_held_choices(
@@ -1052,7 +1056,12 @@ def _user_prices(
         previous,
         units=units,
         answered={
-            part: AnsweredPart(served.row, served.spec_id, served.unit)
+            part: AnsweredPart(
+                served.row,
+                served.spec_id,
+                served.unit,
+                (read.spec_id, read.unit) if (read := reread.get(part)) is not None else None,
+            )
             for part, served in units_served(view.state).items()
             if served.row is not None
         },
@@ -1084,10 +1093,11 @@ def _units_the_user_holds(
     (`whole_units`, `submission.prices_choice.whole_unit_slots`) states the
     unit that answer holds it to, which code writes and a switch of its plan
     card row moves. A decision the planner wrote
-    (`planner.plan.is_code_written`) fixing `unit` on such a requirement,
-    alone or with other fields, states that choice a second time, so the
-    requirement does not cite it. A requirement the user's answer does not
-    hold keeps citing it whole, so its fixes and wording stay true of every
+    (`planner.plan.is_code_written`) fixing `unit` on such a requirement
+    states that choice a second time: one fixing the unit alone is not cited
+    there, and one fixing other fields too is refused
+    (`_unit_fixed_with_more`). A requirement the user's answer does not hold
+    keeps citing it whole, so its fixes and wording stay true of every
     requirement citing it. The plan card shows the user's answer once, and a
     switch of it is not held back by the planner's copy. A bare prices
     answer, current or constant, holds no unit, so the planner's decision
@@ -1109,6 +1119,40 @@ def _units_the_user_holds(
         if slots:
             held[requirement.id] = slots
     return held
+
+
+def _unit_fixed_with_more(
+    held: Mapping[str, frozenset[str]], decisions: Sequence[Decision], proposer: Proposer
+) -> dict[str, object] | None:
+    """The `USER_DECISION_CONTRADICTED` refusal of the first planner decision
+    `held` names (`_units_the_user_holds`) that fixes more than the unit, or
+    `None`.
+
+    Admission takes a decision fixing the unit alone off each requirement
+    the user's whole unit holds. One fixing other fields too states them on
+    that requirement, which code cannot keep while dropping its `unit`, as
+    its wording names the unit, so the planner restates it without `unit`
+    or stops citing it there. `detail` names the decision's `slot`, the
+    `requirement_id` citing it and the other `fields` it fixes.
+    """
+    by_slot = {decision.slot: decision for decision in decisions}
+    for requirement_id, slots in held.items():
+        for slot in sorted(slots):
+            fixes = by_slot[slot].fixes
+            assert fixes is not None
+            fields = sorted(set(fixes.model_dump(exclude_none=True)) - {"unit", "prices"})
+            if not fields:
+                continue
+            return problem(
+                ProblemCode.USER_DECISION_CONTRADICTED,
+                f"{requirement_id!r} states the unit the user chose, and it cites "
+                f"{slot!r}, which fixes `unit` with {', '.join(fields)}. Restate "
+                f"{slot!r} without `unit`, or cite it on {requirement_id!r} no longer.",
+                outcome=Outcome.REFUSED,
+                action=Action(call=proposer.call, needs=("decisions", "evidence_requirements")),
+                detail={"slot": slot, "requirement_id": requirement_id, "fields": fields},
+            )
+    return None
 
 
 def _without_held_unit_citations(

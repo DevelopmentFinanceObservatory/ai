@@ -126,7 +126,12 @@ from planner.source_reads import run_together
 from planner.tool_results import ProblemCode
 from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
-from submission.prices_choice import PRICES_SLOT_PREFIX, UNIT_SLOT_PREFIX
+from submission.prices_choice import (
+    PRICES_SLOT_PREFIX,
+    UNIT_SLOT_PREFIX,
+    absorbed_rows,
+    unabsorbed_parts,
+)
 from submission.service import part_scope, statement
 from translator.discovery import (
     RESOLVED_AT_STATE_PREFIX,
@@ -152,11 +157,13 @@ from harness.graph.state import (
     own_block,
     pin_block,
     readable_plan,
+    record_units_reread,
     stated_unit,
     store_search,
     stored_mapping,
     unit_row_offers,
     unit_rows,
+    units_served,
 )
 from harness.plan_display import (
     DECISION_CHOICE_PREFIX,
@@ -498,10 +505,10 @@ async def _switched_plan(
         and priced is not None
         and not switchable_decision(priced)
     ):
-        # A part's prices row stating a whole unit: a part Search refused to
-        # read in the unit its question chose, or a card stored before unit
-        # rows had a slot of their own. A switchable prices row replans with
-        # the pick (`harness.decision_pick`).
+        # A part's prices row stating a whole unit, as for a part Search
+        # refused to read in the unit its question chose, offers no switch.
+        # A switchable prices row replans with the pick
+        # (`harness.decision_pick`).
         raise _unit_not_switchable()
     counted = chosen_count_decision(plan, choice_id)
     if counted is not None:
@@ -749,8 +756,12 @@ async def _switched_unit(
     already carry any count or scope switch of the card. The row's offer is
     the one the card showed, recomputed from those pins' blocks
     (`harness.graph.state.unit_row_offers`). Each pin is read in the unit
-    picked at once (`_reread_pin`), each series Search read is held as the
-    source of the pin it replaces (`_hold_read_sources`), and every
+    picked at once (`_reread_pin`), with the series the unit question's
+    answer fetched for each part of the row the plan has not absorbed
+    (`submission.prices_choice.unabsorbed_parts`), each series Search read
+    is held as the source of the series it replaces (`_hold_read_sources`),
+    and each such part's read is recorded for a later plan to pin
+    (`harness.graph.state.record_units_reread`) once the revision lands. Every
     requirement citing the row is re-pinned to its own pin's read
     (`planner.plan.repinned`) and states the unit. The plan is revised with
     no model call, the unit picked held for the row (`PlannerModel.revise`'s
@@ -762,8 +773,8 @@ async def _switched_unit(
             no requirement cites it, the row offers no unit, or the unit
             picked lies outside its offer or is the one it holds; as
             Search's refusal says (`harness.unit_switch.UnitRefused`) when
-            it cannot read a pin in the unit; and as the revision's refusal
-            when it is refused.
+            it cannot read a pin, or such a part, in the unit; and as the
+            revision's refusal when it is refused.
     """
     state = cast(SessionState, ctx.state)
     if not any(d.slot == slot for d in plan.decisions):
@@ -786,9 +797,21 @@ async def _switched_unit(
     if held is None:
         raise _unit_unavailable(picked, offer)
     pins = unit_rows(stated)[slot]
+    lead = slot.removeprefix(UNIT_SLOT_PREFIX)
+    served = units_served(state)
+    outside = {
+        part: served[part].spec_id
+        for part in unabsorbed_parts(
+            stated,
+            slot,
+            [part for part, one in served.items() if one.row == lead],
+            rows=absorbed_rows(state),
+        )
+    }
+    series = list(dict.fromkeys([*pins, *outside.values()]))
     readings = _readings(ctx)
     reads = await run_together(
-        _reread_pin(ctx, pin, picked, surface=surface, readings=readings) for pin in pins
+        _reread_pin(ctx, one, picked, surface=surface, readings=readings) for one in series
     )
     refused = next((read for read in reads if isinstance(read, UnitRefused)), None)
     if refused is not None:
@@ -798,11 +821,11 @@ async def _switched_unit(
             retryable=refused.retryable,
         )
     read_as = {
-        pin: read
-        for pin, read in zip(pins, reads, strict=True)
+        one: read
+        for one, read in zip(series, reads, strict=True)
         if isinstance(read, UnitResubmitted)
     }
-    moves = {pin: read.spec_id for pin, read in read_as.items()}
+    moves = {pin: read.spec_id for pin, read in read_as.items() if pin in pins}
     _hold_read_sources(ctx, read_as)
     blocks = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)
     requirements: list[dict[str, Any]] = []
@@ -833,6 +856,14 @@ async def _switched_unit(
         )
     revised_plan = PlannerPlan.model_validate(revised["plan"])
     ctx.state["plan"] = revised_plan.model_dump_json()
+    record_units_reread(
+        state,
+        {
+            part: (read_as[fetched].spec_id, held)
+            for part, fetched in outside.items()
+            if fetched in read_as
+        },
+    )
     logger.info(
         "plan unit switched: slot=%s unit=%s moves=%s version=%d",
         slot,

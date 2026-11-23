@@ -101,6 +101,13 @@ ORCHESTRATOR_UNIT_READ_KEY = "orchestrator:unit_read"
 # it (`planner.call.prices_chosen`), and the plan holds it from then on
 # (`submission.service._user_prices`).
 ORCHESTRATOR_UNIT_SERVED_KEY = "orchestrator:unit_served"
+# Each part a unit question put on a unit row that the plan does not read
+# -> the series Search read it as in the unit a switch of the row picked,
+# and that unit, as `ServedUnit` JSON (`units_reread`, `record_units_reread`).
+# Written only by a unit row's switch (`harness.graph.switch`), for those
+# parts alone, and read only for them (`submission.service._user_prices`):
+# a part a later plan adds is pinned in the row's unit to that series.
+ORCHESTRATOR_UNIT_REREAD_KEY = "orchestrator:unit_reread"
 # The search readings of the conversation's earlier turns, with the warnings
 # of the spec_ids they name and the spec_ids whose block an earlier turn
 # stored, seeded by `harness.studio` from `ConversationState.
@@ -366,6 +373,27 @@ def units_served(state: SessionState) -> dict[str, ServedUnit]:
         str(part): ServedUnit.model_validate(served)
         for part, served in stored_mapping(state, ORCHESTRATOR_UNIT_SERVED_KEY).items()
     }
+
+
+def units_reread(state: SessionState) -> dict[str, ServedUnit]:
+    """The series and unit a switch of each part's unit row read each part
+    the plan did not read as (`ORCHESTRATOR_UNIT_REREAD_KEY`), by the part."""
+    return {
+        str(part): ServedUnit.model_validate(read)
+        for part, read in stored_mapping(state, ORCHESTRATOR_UNIT_REREAD_KEY).items()
+    }
+
+
+def record_units_reread(state: SessionState, reads: Mapping[str, tuple[str, Unit]]) -> None:
+    """Record each part of `reads` as read as its series in its unit, by
+    the part, in place of what an earlier switch read it as. Nothing to
+    record writes nothing."""
+    if not reads:
+        return
+    stored = {part: read.model_dump(mode="json") for part, read in units_reread(state).items()}
+    for part, (spec_id, unit) in reads.items():
+        stored[part] = ServedUnit(spec_id=spec_id, unit=unit).model_dump(mode="json")
+    state[ORCHESTRATOR_UNIT_REREAD_KEY] = stored
 
 
 def stated_unit(unit: UnitChoice) -> Unit | None:
