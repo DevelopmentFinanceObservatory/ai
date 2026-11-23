@@ -250,10 +250,10 @@ RECORDED_BRIEF_CEILING = 9_460
 
 # The line the planner brief gains where the user's words state a provider option
 # (`submission.service.stated_scope_line`), measured as the `STATED_SCOPE` brief less
-# the realistic one: the user's phrase, the option, the datasets on record that
-# can be counted as it, and the instruction to carry the phrase. Measured 245 with
-# none on record; each one listed adds its spec_id. The margin is 25%.
-STATED_SCOPE_LINE_CEILING = 306
+# the realistic one: the user's phrase, the option's label, the datasets on record
+# that can be counted as it, and the instruction to carry the phrase. Measured 270
+# with none on record; each one listed adds its spec_id. The margin is 25%.
+STATED_SCOPE_LINE_CEILING = 338
 
 
 # The measured scenario ----------------------------------------------------------

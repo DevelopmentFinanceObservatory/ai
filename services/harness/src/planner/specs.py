@@ -293,7 +293,7 @@ def planner_tool_specs(
     """
 
     def propose_plan(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
-        return pause_on_keep_question(propose(call, arguments), call, end_run)
+        return pause_on_keep_question(propose(call, arguments), call, end_run, arguments=arguments)
 
     async def propose_plan_reading(
         call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]
@@ -304,7 +304,7 @@ def planner_tool_specs(
             surface=surface,
             stated_scope=stated_scope,
         )
-        return pause_on_keep_question(answer, call, end_run)
+        return pause_on_keep_question(answer, call, end_run, arguments=arguments)
 
     async def propose_plan_translating(
         call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]

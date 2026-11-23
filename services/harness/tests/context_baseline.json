@@ -310,7 +310,7 @@
       "agent": "planner",
       "scenario": "stated-scope",
       "call_index": 0,
-      "total_chars": 69542,
+      "total_chars": 69567,
       "system_instruction_chars": 20497,
       "declaration_total_chars": 41742,
       "declarations": [
@@ -332,12 +332,12 @@
         }
       ],
       "contents": {
-        "total_chars": 7902,
+        "total_chars": 7927,
         "buckets": [
           {
             "bucket": "text(planner-brief)",
             "count": 1,
-            "chars": 7897
+            "chars": 7922
           },
           {
             "bucket": "text",
@@ -351,7 +351,7 @@
       "agent": "planner",
       "scenario": "stated-scope",
       "call_index": 1,
-      "total_chars": 102425,
+      "total_chars": 102450,
       "system_instruction_chars": 20497,
       "declaration_total_chars": 41742,
       "declarations": [
@@ -373,7 +373,7 @@
         }
       ],
       "contents": {
-        "total_chars": 40623,
+        "total_chars": 40648,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
@@ -383,7 +383,7 @@
           {
             "bucket": "text(planner-brief)",
             "count": 1,
-            "chars": 7897
+            "chars": 7922
           },
           {
             "bucket": "functionCall:get_skill",
@@ -402,7 +402,7 @@
       "agent": "planner",
       "scenario": "stated-scope",
       "call_index": 2,
-      "total_chars": 103602,
+      "total_chars": 103627,
       "system_instruction_chars": 20497,
       "declaration_total_chars": 41742,
       "declarations": [
@@ -424,7 +424,7 @@
         }
       ],
       "contents": {
-        "total_chars": 41638,
+        "total_chars": 41663,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
@@ -434,7 +434,7 @@
           {
             "bucket": "text(planner-brief)",
             "count": 1,
-            "chars": 7897
+            "chars": 7922
           },
           {
             "bucket": "functionResponse:propose_plan",

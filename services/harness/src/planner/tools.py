@@ -479,15 +479,21 @@ def ready_and_end(
 
 
 def pause_on_keep_question(
-    answer: dict[str, object], call: PlannerCall, end_run: EndRun
+    answer: dict[str, object],
+    call: PlannerCall,
+    end_run: EndRun,
+    *,
+    arguments: Mapping[str, Any],
 ) -> dict[str, object]:
-    """`propose_plan`'s `answer`, pausing the run on the keep question it carries.
+    """`propose_plan`'s `answer` to `arguments`, pausing the run on the keep question
+    it carries.
 
     A `STATED_PROVIDER_DROPPED` refusal carrying `detail.ask`
     (`submission.service._stated_unserved`) holds the question whether to keep its
     pins counted as published, built in code. The propose call raises it itself:
     the ask waits under the call's own id (`PENDING_ASK_STATE_KEY`), the pairs it
-    asks about are recorded (`planner.stated_scope.record_keep_asked`), and the run
+    asks about and `arguments`, which the resumed entry shows as the plan to propose
+    again, are recorded (`planner.stated_scope.record_keep_asked`), and the run
     ends (`end_run`). The user's answer is recorded by the entry it resumes
     (`harness.planner_adapter.PlannerAdapter`). A response that also calls
     `PLANNER_ASK` would put two questions to the user, so the refusal asks the planner
@@ -512,6 +518,7 @@ def pause_on_keep_question(
         call.state,
         call_id=call_id,
         pairs=[(str(item["spec_id"]), str(item["option_id"])) for item in unserved],
+        proposal=arguments,
     )
     end_run()
     return answer
@@ -636,7 +643,7 @@ async def propose_and_translate(
         stated_scope=stated_scope,
     )
     if result.get("outcome") != Outcome.OK.value:
-        return pause_on_keep_question(result, call, end_run)
+        return pause_on_keep_question(result, call, end_run, arguments=arguments)
     return ready_and_end({**result, "translation": await translate(call)}, call, end_run)
 
 

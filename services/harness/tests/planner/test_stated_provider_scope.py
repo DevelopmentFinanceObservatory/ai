@@ -55,10 +55,12 @@ from planner.stated_scope import (
     ApisStatedScopeReader,
     KeepQuestion,
     StatedScopeReader,
+    combined_refused,
     keep_question,
     record_keep_answer,
     record_keep_asked,
     stated_uncompiled,
+    unattributed_refused,
 )
 from planner.tool_results import Outcome, ProblemCode
 from planner.tools import load_pending_ask
@@ -944,6 +946,56 @@ async def test_a_changed_plan_after_the_omission_refusal_is_judged_again() -> No
     assert third["outcome"] == Outcome.OK.value, third
 
 
+async def test_a_change_to_a_requirement_not_offering_the_option_draws_no_refusal_again() -> None:
+    """The plan first admitted for the G7 question is refused for stating imputed
+    multilateral aid nowhere, naming Africa's bilateral part, the one requirement whose
+    pin offers it. The planner proposes it again with the DAC1 total's `measure`
+    changed, a requirement no attribution rests on: the omission stands answered."""
+    ctx = _Context()
+    _show(ctx, *_g7_blocks(), _block("g7_imputed"), _block("dac1"))
+    requirements, decisions = _recorded()
+    first = await _propose(ctx, requirements, decisions, words=_G7, answer_mode="computed")
+    changed = copy.deepcopy(requirements)
+    (total,) = [r for r in changed if r["id"] == "g7_total_oda"]
+    total["measure"] = "total ODA"
+
+    again = await _propose(ctx, changed, decisions, words=_G7, answer_mode="computed")
+
+    assert first["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, first
+    assert again["outcome"] == Outcome.OK.value, again
+
+
+async def test_slots_an_earlier_release_wrote_in_another_shape_are_not_read() -> None:
+    """A paused turn's state outlives a deploy. The keep question, the omission
+    refusals and the refused combined compiles as earlier releases wrote them, each
+    under its own key, are neither misread nor fatal: the G7 proposal on DAC1 is asked
+    about, though the old keep slot holds DAC1 as kept."""
+    ctx = _Context()
+    ctx.state.update(
+        {
+            "planner:stated_scope_keep": {
+                "offered": [],
+                "asked_call_id": None,
+                "asked": [],
+                "kept": [[DAC1, _INCLUSIVE]],
+                "released": [],
+            },
+            "planner:stated_scope_unattributed": {_INCLUSIVE: [["g7_total", DAC1, "ODA"]]},
+            "planner:stated_scope_combined_refused": [
+                [DAC1, [_INCLUSIVE, "measure_basis:net"], "not_offered", "refused"]
+            ],
+        }
+    )
+    _show(ctx, _block("dac1"))
+
+    result = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
+
+    assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
+    assert _asked_now(ctx) == ((DAC1, _INCLUSIVE),)
+    assert unattributed_refused(ctx.state) == {}
+    assert combined_refused(ctx.state) == {}
+
+
 def _recorded() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The first plan admitted for the G7 question: Africa's bilateral part plus the
     imputed series, over DAC1 total ODA, accepting a provider difference."""
@@ -1065,7 +1117,7 @@ def _answered(
     """The keep question about `pairs` asked earlier in the turn, and the user's
     answer to it: kept as published when `keep`, else not
     (`planner.stated_scope.record_keep_answer`)."""
-    record_keep_asked(ctx.state, call_id="propose-keep", pairs=pairs)
+    record_keep_asked(ctx.state, call_id="propose-keep", pairs=pairs, proposal={})
     assert record_keep_answer(ctx.state, call_id="propose-keep", keep=keep)
 
 
@@ -1340,7 +1392,7 @@ async def test_a_stated_compile_with_no_part_records_no_one_dataset() -> None:
 async def test_a_stated_compile_that_cannot_reach_search_ends_the_entry() -> None:
     """G7 aid to Africa stating imputed multilateral aid, whose compile counted that
     way cannot reach Search for good: a fault of the system, no answer about the pin.
-    The entry ends (`STATED_SCOPE_UNREADABLE`, a terminal code) naming the compile,
+    The entry ends (`STATED_COMPILE_UNREACHABLE`, a terminal code) naming the compile,
     nothing is recorded against the option, and the user is asked nothing."""
     ctx = _Context()
     africa = _block("africa_bilateral")
@@ -1350,10 +1402,10 @@ async def test_a_stated_compile_that_cannot_reach_search_ends_the_entry() -> Non
 
     result = await _propose(ctx, [requirement], words=_G7, surface=surface)
 
-    assert result["code"] == ProblemCode.STATED_SCOPE_UNREADABLE.value, result
-    assert ProblemCode.STATED_SCOPE_UNREADABLE in TERMINAL_PROPOSE_CODES
+    assert result["code"] == ProblemCode.STATED_COMPILE_UNREACHABLE.value, result
+    assert ProblemCode.STATED_COMPILE_UNREACHABLE in TERMINAL_PROPOSE_CODES
     assert result["detail"] == {
-        "read": "stated_compile",
+        "compile": "stated_scope",
         "spec_id": africa["spec_id"],
         "option_ids": [_INCLUSIVE],
     }
@@ -1596,7 +1648,7 @@ _REFUSED_FOR_GOOD = {"code": "requested_option_unavailable", "retry_mode": "do_n
         pytest.param(
             None,
             "unreachable",
-            ProblemCode.STATED_SCOPE_UNREADABLE,
+            ProblemCode.STATED_COMPILE_UNREACHABLE,
             id="the-stated-scope-unreachable",
         ),
     ],
@@ -1634,9 +1686,9 @@ async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_what_s
     both, alone = surface.calls
     assert {e["option_id"] for e in both["scope_entries"]} >= {_INCLUSIVE, "measure_basis:net"}
     assert "measure_basis:net" not in {e["option_id"] for e in alone["scope_entries"]}
-    if code is ProblemCode.STATED_SCOPE_UNREADABLE:
+    if code is ProblemCode.STATED_COMPILE_UNREACHABLE:
         assert result["detail"] == {
-            "read": "stated_compile",
+            "compile": "stated_scope",
             "spec_id": HEALTH,
             "option_ids": [_INCLUSIVE],
         }

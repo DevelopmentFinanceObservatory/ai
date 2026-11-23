@@ -140,6 +140,10 @@ class ProblemCode(StrEnum):
     # reason no retry changes, so no plan can be admitted on a reading
     # (`planner.stated_scope.read_stated_scope`).
     STATED_SCOPE_UNREADABLE = "stated_scope_unreadable"
+    # A compile of a pin on the provider scope the user's words state cannot reach
+    # Search, and no retry changes that, so no plan counting it can be admitted
+    # (`planner.source_reads.compile_on_basis`).
+    STATED_COMPILE_UNREACHABLE = "stated_compile_unreachable"
     # A share or quotient whose two sides read one series over the same years and
     # entities, which divides a figure by itself
     # (`submission.service._share_of_itself`).

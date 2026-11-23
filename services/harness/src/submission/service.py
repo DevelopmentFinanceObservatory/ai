@@ -391,12 +391,10 @@ class SessionView(Protocol):
         """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
         ...
 
-    def record_scope_unattributed(
-        self, option_id: str, refused: Iterable[tuple[str, str | None, str]]
-    ) -> None:
+    def record_scope_unattributed(self, option_id: str, refused: Iterable[tuple[str, str]]) -> None:
         """Record a `STATED_SCOPE_UNATTRIBUTED` refusal given for `option_id` this turn
-        to a plan whose dataset requirements are `refused`, each its id, pin and
-        `measure`."""
+        naming `refused`, the dataset requirements pinned to a dataset offering it, each
+        its id and `measure`."""
         ...
 
     def record_keep_offered(self, pairs: Iterable[tuple[str, str]]) -> None:
@@ -7096,6 +7094,24 @@ STATED_SCOPE_OPTIONS: tuple[dict[str, str], ...] = (
 )
 
 
+# The words the keep question and the brief name each provider option in
+# (`_stated_label`). An option missing here is named by the label the pin's provider
+# choice gives it, else by the user's own words.
+_PROVIDER_OPTION_LABELS: Mapping[str, str] = {
+    "provider:bilateral": "bilateral aid only",
+    "provider:multilateral": "core contributions to multilateral agencies",
+    "provider:inclusive": "bilateral aid plus imputed multilateral aid",
+    "provider:contributions": "bilateral aid plus core contributions to multilateral agencies",
+}
+
+
+def _stated_label(option_id: str, *, words: str, offered: str | None = None) -> str:
+    """How text the user or the planner reads names the provider option `option_id`,
+    stated in the user's `words`: by `_PROVIDER_OPTION_LABELS`, else by `offered`, the
+    label a pin's provider choice gives it, else by the words. Never by the id."""
+    return _PROVIDER_OPTION_LABELS.get(option_id) or offered or words
+
+
 # The provider options counting part of a donor's total ODA, which a "total" in the
 # same words contrasts with (`_stated_reading`).
 _NARROWER_THAN_TOTAL = frozenset({"provider:bilateral", "provider:multilateral"})
@@ -7208,7 +7224,9 @@ def stated_scope_line(record: StatedScopeRecord | None, shown: Mapping[str, PinS
         named = summing or [o for o in available if o.option_id == stated.option_id]
         if named:
             offering[spec_id] = named[0].label
-    label = next(iter(offering.values()), stated.option_id)
+    label = _stated_label(
+        stated.option_id, words=stated.words, offered=next(iter(offering.values()), None)
+    )
     pins = (
         f"which {', '.join(offering)} on record can be counted as"
         if offering
@@ -7324,7 +7342,11 @@ def _stated_claims(
                 requirement_id=requirement_id,
                 pin=basis.pin,
                 option_id=option_id,
-                label=basis.label(option_id),
+                label=_stated_label(
+                    option_id,
+                    words=option.words,
+                    offered=offered.label if offered is not None else None,
+                ),
                 words=option.words,
                 cause=cause,
                 code=code,
@@ -7393,11 +7415,12 @@ def _stated_unattributed(
     multilateral lines are read on each pin as its own summing option (`_stated_option_of`).
     A pin the user switched on the plan card offers nothing here
     (`_switched_by_user`): the switch is their later word. The refusal asks the planner to carry
-    the user's words to the `measure` of each requirement they qualify; a plan it
-    proposes again unchanged, every dataset requirement's id, pin and `measure` as
-    the refused plan had them (`planner.stated_scope.unattributed_refused`), is the
-    planner's word that they qualify none, and is admitted. A changed plan is judged
-    again. A turn whose words state no one option and a plan no pin of which can
+    the user's words to the `measure` of each requirement they qualify. A plan whose
+    requirements pinned to a dataset offering the option are those the refusal named,
+    each with the `measure` it had (`planner.stated_scope.unattributed_refused`), is
+    the planner's word that the words qualify none of them, and is admitted, whatever
+    else it changed: a repin of another requirement carries no attribution. A plan
+    changing those requirements or their measures is judged again. A turn whose words state no one option and a plan no pin of which can
     count it, as a debt question about bilateral creditors, pass.
 
     Raises:
@@ -7408,13 +7431,6 @@ def _stated_unattributed(
     if sole is None:
         return
     option_id = sole.option_id
-    written = frozenset(
-        (requirement.id, requirement.source_spec_id, requirement.measure)
-        for requirement in requirements
-        if isinstance(requirement, DatasetRequirement)
-    )
-    if unattributed_refused(view.state).get(option_id) == written:
-        return
     if any(option.option_id == option_id for option in stated.options.values()):
         return
     if any(
@@ -7433,6 +7449,16 @@ def _stated_unattributed(
         )
     ]
     if not offering:
+        return
+    measures = {
+        requirement.id: requirement.measure
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement)
+    }
+    written = frozenset(
+        (basis.requirement_id, measures[basis.requirement_id]) for basis in offering
+    )
+    if unattributed_refused(view.state).get(option_id) == written:
         return
     view.record_scope_unattributed(option_id, written)
     label = offering[0].label(_stated_option_of(offering[0], sole))
@@ -7563,13 +7589,14 @@ def _stated_unserved(
     only the user keeps a dataset that cannot count the scope they asked for.
     `propose_plan` puts it to the user (`planner.tools.pause_on_keep_question`), and
     the entry their answer resumes records it (`planner.stated_scope.record_keep_answer`).
-    The question is built here, from each pin's sentence, the option's label and the
-    user's words; its options are `STATED_SCOPE_OPTIONS`, so it takes no free text.
+    The question is built here, from each pin's title (`_title`), the option's label
+    (`_stated_label`) and the user's words, none of them an id; its options are
+    `STATED_SCOPE_OPTIONS`, so it takes no free text.
     """
     asked = " ".join(
         f"You asked for {item.label}"
         + (f" (\u201c{item.words}\u201d)" if item.words else "")
-        + f", and {_sentence(item.pin, sources)} is not counted that way."
+        + f", and {_title(item.pin, sources)} is not counted that way."
         for item in unserved
     )
     pins = ", ".join(dict.fromkeys(item.pin for item in unserved))
@@ -7726,6 +7753,16 @@ def _provider_choice(scope: PartScope | None) -> ScopeChoice | None:
     if scope is None:
         return None
     return next((choice for choice in scope.choices if choice.axis == PROVIDER_AXIS), None)
+
+
+def _title(spec_id: str, sources: SourceReadings) -> str:
+    """`spec_id`'s dataset as the user reads it: its sentence as Search renders it,
+    else its dataset's name, else a phrase naming no id."""
+    block = sources.block(spec_id)
+    rendered = ((block or {}).get("resolved") or {}).get("rendered_sentence")
+    if isinstance(rendered, str) and rendered:
+        return rendered
+    return block_dataset(block).name or "the data chosen for it"
 
 
 def _sentence(spec_id: str, sources: SourceReadings) -> str:
