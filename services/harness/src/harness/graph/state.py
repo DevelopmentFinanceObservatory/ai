@@ -1,11 +1,10 @@
-"""The orchestrator workflow's session-state contract.
+"""The turn's state contract.
 
-The keys and statuses the workflow's nodes and the orchestrator's tools
-(`harness.orchestrator_tools`) read and write, the session-state schema
-(`GraphState`), the one pending action the agent leaves for `route`, the
+The keys and statuses the turn's nodes and the orchestrator's tools
+(`harness.orchestrator_tools`) read and write, the inputs a turn opens with
+(`TurnInput`), the one pending action the agent's hand-off records, the
 tools' budgets, and the helpers more than one node reads: the stored plan
-(`readable_plan`), a JSON slot (`state_json`), the interrupt event
-(`interrupt_event`), the answers to a clarify interrupt (`resume_answers`),
+(`readable_plan`), the answers to the agent's question (`resume_answers`),
 and the read-only reads of the large containers (`stored_mapping`,
 `stored_sequence`).
 """
@@ -14,57 +13,49 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import (
     Mapping,
     Sequence,
 )
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Annotated, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple
 
 from data_mcp.search_tool import MAX_PARTS
-from google.adk import Context, Event
-from google.adk.events import RequestInput
-from google.adk.sessions import State
-from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
-from planner.plan import AskBreakdown, SessionState, scope_unread, stored_plan, with_blocks
+from planner.plan import AskBreakdown, SessionState, Unit, scope_unread, stored_plan, with_blocks
 from planner.plan import Plan as PlannerPlan
-from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, ValidationError
+from submission.prices_choice import measure_key
 
 from harness.tool_contracts import (
     reading_facts,
 )
-from harness.turn_records import Origin, SearchReading, open_prices
+from harness.turn.store import SPECS_KEY, FrameKey, FrameKeys
+from harness.turn_records import Origin, PricesForm, SearchReading, open_prices, prices_form
+from harness.unit_offer import unit_offer
+from harness.wire import UnitChoice, UnitOffer
 
-# The ADK app name every stored conversation's sessions are keyed under.
-AGENT_NAME = "dfo_analyst_graph"
+logger = logging.getLogger(__name__)
 
-# Interrupt ids are stable strings: ADK matches a resuming function response
-# to its interrupt by id, and `ask` and `approve` reuse their id across rounds.
-CLARIFY_INTERRUPT = "clarify"
-APPROVE_INTERRUPT = "approve"
+if TYPE_CHECKING:
+    from harness.turn.node import NodeCtx
 
+# The kind of the pause the `approve` node puts the plan card to the user
+# under, read by `harness.studio_translate` to tell the plan card from a
+# question.
+APPROVE_PAUSE: Final = "approve"
 
-# The `custom_metadata` key a relayed step progress report travels under on
-# `execute`'s events (`_step_progress_event`), read by
-# `harness.studio_translate._Translator.translate`.
-STEP_PROGRESS_KEY = "step_progress"
-
-# The `custom_metadata` key the `planner` node's first event travels under,
-# as it starts a draft: `{"revising": bool}`, true when the draft revises a
-# plan already on record, with `"pick": True` added when it replans for a
-# pick on the plan card. Read by `harness.studio_translate._Translator`.
-PLANNER_STARTED_KEY = "planner_started"
-
-# The orchestrator's session state (`create_root_workflow`'s
-# `orchestrator`), written by its tools (`harness.orchestrator_tools`) and
-# read by the workflow's nodes. Prefixed, so `GraphState` never validates it.
+# The orchestrator's turn state, written by its tools
+# (`harness.orchestrator_tools`) and read by the turn's nodes.
 ORCHESTRATOR_FRAMES_KEY = "orchestrator:frames"  # frame id -> {"ref", "view", "store_ref"}
-ORCHESTRATOR_SPECS_KEY = "orchestrator:specs"  # spec_id -> its search spec block
-ORCHESTRATOR_PENDING_KEY = "orchestrator:pending"  # the turn's one pending action
+# spec_id -> its search spec block, kept by the turn store as rows of their own.
+ORCHESTRATOR_SPECS_KEY = SPECS_KEY
+# The action the agent's `plan` or `ask_user` call recorded, which the
+# `orchestrate` node takes once the run hands off (`pending_action`).
+ORCHESTRATOR_PENDING_KEY = "orchestrator:pending"
 ORCHESTRATOR_CALLS_KEY = "orchestrator:calls"  # tool name -> calls this turn
 ORCHESTRATOR_BRIEF_KEY = "orchestrator:brief"  # the question the planner drafts for
-ORCHESTRATOR_ASKED_KEY = "orchestrator:asked"  # the question `ask` is waiting on
 ORCHESTRATOR_READINGS_KEY = "orchestrator:readings"  # spec_id -> a plan step's stat_vars reading
 # Every search part this turn read, oldest first, as `SearchReading` JSON
 # (`harness.turn_records`), failed parts included; `fetch` adds its outcome
@@ -82,24 +73,45 @@ ORCHESTRATOR_ALIGNED_SERVED_KEY = "orchestrator:aligned_served"
 # spec_id -> the warnings of the search part that returned it, as `search`
 # stores its block under `ORCHESTRATOR_SPECS_KEY`.
 ORCHESTRATOR_SPEC_WARNINGS_KEY = "orchestrator:spec_warnings"
+# The spec_ids whose unit the user settled this turn: each part a unit
+# question covered and the count picked beside it, whether Search served,
+# re-read or refused the chosen unit, and each spec_id it re-read them as.
+# Their prices are closed (`unit_settled`, `settle_unit`).
+ORCHESTRATOR_UNIT_SETTLED_KEY = "orchestrator:unit_settled"
+# The spec_ids the `ask` node re-read each part in, by the part a unit question
+# covered (`unit_reads`, `record_unit_read`), so the prices the user chose
+# reach the re-read series (`planner.call.prices_chosen`).
+ORCHESTRATOR_UNIT_READ_KEY = "orchestrator:unit_read"
+# Each part a unit question covered -> the series the agent fetches for it
+# and the unit that series is served in after the answer, as `ServedUnit`
+# JSON (`units_served`, `record_unit_served`): the chosen unit when Search
+# serves or re-reads it, the served unit when Search refuses the re-read.
+# Plan admission holds the part to that unit (`planner.call.prices_chosen`).
+ORCHESTRATOR_UNIT_SERVED_KEY = "orchestrator:unit_served"
 # The search readings of the conversation's earlier turns, with the warnings
 # of the spec_ids they name and the spec_ids whose block an earlier turn
 # stored, seeded by `harness.studio` from `ConversationState.
 # prior_ledger_state`; unset when no earlier turn read any. The blocks
 # themselves resolve through `planner.plan.earlier_block`.
 ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
+# The orchestrator's conversation while its run waits on a hand-back, as
+# `orchestrator.run.StoredHistory` JSON, written and taken by the
+# `orchestrate` node.
+ORCHESTRATOR_HISTORY_KEY = "orchestrator:history"
 # spec_id -> the refusal message of a fetch or a plan step that read it and
 # was refused `capability_unavailable` this turn; `fetch` refuses it again
 # without a call.
 ORCHESTRATOR_UNAVAILABLE_KEY = "orchestrator:unavailable"
-# The chip a turn applies, as `{"choice_id", "option_id"}` JSON
-# (`harness.wire.ApplyChoice`), seeded by `harness.studio` for a turn
-# requested with `apply_choice`; `seed` applies it
-# (`harness.graph.switch.apply_stored_choice`) and `turn_budgets` reads it.
+# The chip a turn applies, `{"choice_id", "option_id", "spec_id"}`
+# (`harness.wire.ApplyChoice`), in the opening state of a turn requested
+# with `apply_choice`; `seed` applies it
+# (`harness.graph.switch.apply_stored_choice`) and `turn_budgets` reads it,
+# the orchestrator's tools included, so it is state rather than an input.
 APPLY_CHOICE_STATE_KEY = "apply_choice"
 # The chip `seed` applied this turn: `{"choice_id", "option_id",
 # "from_option_id", "spec_id"}`, the option it moved from and the spec_id
-# Search compiled. `harness.studio` keeps it with the turn's record
+# Search compiled. For a count chip, they are the spec_ids of the count it
+# moved from and of the count it moved to. `harness.studio` keeps it with the turn's record
 # (`ConversationState.turn_applied_choice`), where the next turn reads whether
 # the user kept it.
 ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
@@ -107,60 +119,90 @@ ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
 # computed that ask (`_kept_asks`), written by `execute` when a run stops and
 # read by `plan_done`; cleared by `plan_start` and `plan_done`.
 ORCHESTRATOR_KEPT_ASKS_KEY = "orchestrator:kept_asks"
+# The `failed_step` (`executor.outcomes.failed_step`) of the latest run of this
+# plan call that stopped and went back to the planner, written by `execute` on
+# its `"replan"` edge. `plan_done` reads its remedy when the planner then
+# refuses. `plan_start` and `plan_done` clear it.
+ORCHESTRATOR_REPLANNED_STOP_KEY = "orchestrator:replanned_stop"
+# The run the studio's interrupt route admitted with the approval of the
+# plan `approve` last approved (`harness.studio`), or None when it admitted
+# none: written by `approve.decide` on every approval and read by `execute`,
+# which then finds the run and its stored plan already there.
+APPROVED_RUN_KEY = "orchestrator:approved_run"
 # The user's words for each amendment of this plan call's plan that the
 # planner drafted, in order, each cut to `planner.plan.MAX_QUESTION_CHARS`.
 # Written by the `planner` node, cleared by `plan_start`, and handed to the
 # agent by `plan_done`, since the amendment reaches the planner alone.
 ORCHESTRATOR_AMENDMENTS_KEY = "orchestrator:amendments"
+# Why the turn's next plan card is a new attempt. It names the step the
+# approved plan stopped at and what happened there, with no advice, since the
+# new plan is the way past it. `plan_done` writes it when it gives the plan call
+# back, and the `planner` node takes it onto the next first draft as its
+# `refusal_note`, which Studio shows before the card.
+ORCHESTRATOR_RETRY_NOTE_KEY = "orchestrator:retry_note"
+# The asks of the plan that stopped when `plan_done` gave the plan call back,
+# as the `PendingPlan` fields `asks`, `ask_breakdowns` and `asks_across_years`.
+# The call given back may change the brief only, so the `plan` tool holds the
+# new plan to these, whatever asks it is sent. The user's answer to a later
+# question this turn (`harness.graph.orchestrate`) clears it, since the user
+# may then ask for other outputs.
+ORCHESTRATOR_GIVEN_BACK_ASKS_KEY = "orchestrator:given_back_asks"
+# The user's words typed on the plan card that the planner read as a new
+# question (`starts_new_plan`), written by the `planner` node as it ends the
+# turn on its `new_question` edge. The stream's `done` frame hands them to
+# the client to send as the next turn (`harness.studio_translate`).
+NEW_QUESTION_KEY = "orchestrator:new_question"
+# Set by the `planner` node as it ends the turn on its `new_question` edge
+# when the planner read the plan card's amendment as a new question that no
+# message of the user's states (`new_question_in` `none`). The turn closes
+# asking the user to send their question, and hands nothing back
+# (`harness.studio_translate`).
+ASK_FOR_QUESTION_KEY = "orchestrator:ask_for_question"
 # The state a planner entry replanning for a pick on the plan card puts back
 # when the replan does not land (`harness.graph.planning`), written when the
 # replan pauses on a planner-side ask and cleared when the entry ends, so it
 # is set only while such a replan is paused. Outside the drafting prefixes
 # the restore resets (`harness.graph.switch._DRAFTING_PREFIXES`).
 PICK_REPLAN_KEY = "switch:pick_replan"
-# The `custom_metadata` key an orchestrator node's own status line travels
-# under ("Reading your question"), read by `studio_translate._Translator`.
-ORCHESTRATOR_STATUS_KEY = "orchestrator_status"
 # The status a plan hand-back carries when the planner made no plan, and
 # when the approved plan ran; `studio_translate._Translator` shows the first as
 # a failed step and the second as nothing.
 ORCHESTRATOR_PLAN_FAILED_STATUS = "Reading why no plan was made"
-# The `custom_metadata` key under which the planner's refusal travels beside
-# that status. It holds `{"code"}`, which selects the failed step's sentence.
-ORCHESTRATOR_STATUS_FAILURE_KEY = "orchestrator_status_failure"
 ORCHESTRATOR_PLAN_RAN_STATUS = "Reading the plan's results"
 
 
-# The branch the approval and `ask` interrupts are stamped with. No agent runs
-# on it or under it, so ADK's branch filter keeps the interrupt's payload out
-# of every model request; the browser reads the interrupt off the event stream.
-_INTERRUPT_BRANCH = "dfo_interrupts"
+class TurnInput(BaseModel):
+    """What a turn opens with, fixed for the turn: the user's `message`, the
+    canvas and conversation digests, as the JSON text the conversation wrote
+    and the agent reads, and the seeds slot, the Search results a "... in
+    Studio" action handed over (each seed as `harness.seeds.seeds_slot`
+    keeps it, or the one reference `harness.wire.TurnRequest.seed_spec` also
+    takes). The rest of what a turn opens with, which the orchestrator's
+    tools also read, is opening state (`turn_budgets`)."""
 
-
-def interrupt_event(request: RequestInput) -> Event:
-    """`request` as its interrupt event, on `_INTERRUPT_BRANCH`."""
-    event = create_request_input_event(request)
-    event.branch = _INTERRUPT_BRANCH
-    return event
+    message: str
+    canvas_digest: str | None = None
+    conversation_digest: str | None = None
+    seeds: list[Any] | dict[str, Any] | None = None
 
 
 class AskOption(BaseModel):
-    """One answer `ask_user` offers: its wording and, for a count or prices, its spec_id."""
+    """One answer `ask_user` offers: its wording and, for a part's candidate, its spec_id."""
 
     label: str = Field(description="the answer as the user reads it")
     spec_id: str | None = Field(
         default=None,
         description=(
-            "for a count or prices the result names, the spec_id it gives that reading; "
+            "for one of a part's candidates, the spec_id the search result gives it; "
             "leave it out for any other answer"
         ),
     )
 
 
 def ask_options(options: list[Any]) -> list[dict[str, Any]]:
-    """Persisted `ask_user` options as `AskOption` dicts. A question paused
-    before options carried a spec_id stored each option as its bare label,
-    which reads here as an option without one."""
+    """The `ask_user` options the model sent as `AskOption` dicts. Gemini
+    does not hold a call's arguments to the declaration, so an option sent
+    as its bare label reads here as an option without a spec_id."""
     return [{"label": option} if isinstance(option, str) else option for option in options]
 
 
@@ -172,12 +214,26 @@ class AskQuestion(BaseModel):
         default_factory=list,
         description=(
             "the likely answers, at least one; the user may also write their own. Leave it "
-            "empty for a prices question, whose options are filled in for you"
+            "empty for a unit question, whose answers are filled in for you"
         ),
     )
-    prices_of: str | None = Field(
+    unit_of: str | None = Field(
         default=None,
-        description="for the prices question of a part that lists `open_prices`, that part's spec_id",
+        description="for the unit question of a part that lists `open_prices`, that part's spec_id",
+    )
+    prices: Literal["current", "constant"] | None = Field(
+        default=None,
+        description=(
+            "for a unit question, the prices a skill prefers the user starts on; leave it out "
+            "otherwise"
+        ),
+    )
+    multi_select: bool = Field(
+        default=False,
+        description=(
+            "true when several answers can hold together and the user may tick more than "
+            "one; the options are then plain labels, with no spec_id, and no `unit_of`"
+        ),
     )
 
 
@@ -186,18 +242,6 @@ class PendingAsk(BaseModel):
 
     kind: Literal["ask"] = "ask"
     questions: list[AskQuestion]
-
-    @model_validator(mode="before")
-    @classmethod
-    def _one_question(cls, data: Any) -> Any:
-        """A stored single-question action, `{kind, question, options}`, reads
-        as a call with that one question."""
-        if isinstance(data, dict) and "questions" not in data and "question" in data:
-            return {
-                "kind": data.get("kind", "ask"),
-                "questions": [{"question": data["question"], "options": data.get("options")}],
-            }
-        return data
 
 
 class PendingPlan(BaseModel):
@@ -213,37 +257,109 @@ class PendingPlan(BaseModel):
     asks_across_years: list[int] = []
 
 
-def _stored(state: SessionState, key: str) -> Any:
-    """What `state` holds under `key`, as `State.get` reads it (the pending
-    delta first, then the session's value), without the copy ADK's `State`
-    takes of a dict or list on its first read to find writes made into it
-    later. `State.to_dict` merges the two layers without that copy."""
-    if isinstance(state, State):
-        return state.to_dict().get(key)
-    return state.get(key)
-
-
 def stored_mapping(state: SessionState, key: str) -> Mapping[str, Any]:
     """The dict `state` holds under `key` as a read-only view, empty when
     the key is unset.
 
     For the large containers a turn reads many times (frames, spec blocks,
-    readings, the prior ledger): ADK's `State` deep-copies a dict on its
-    first read and compares it with that copy whenever the event's delta is
-    read, which costs milliseconds per read at their sizes. An assignment
-    through the view raises `TypeError`, as no write made through it would
-    reach the event's delta. Its entries are the stored objects, so a
-    change is built on a copy (`dict(view)`, `{**entry, ...}`) and assigned
-    to the key.
+    readings, the prior ledger). An assignment through the view raises
+    `TypeError`, so every change is an assignment to the key, which the
+    orchestrator's `harness.gemini_agent.RecordingState` records. Its
+    entries are the stored objects, so a change is built on a copy
+    (`dict(view)`, `{**entry, ...}`) and assigned to the key.
     """
-    return MappingProxyType(_stored(state, key) or {})
+    return MappingProxyType(state.get(key) or {})
 
 
 def stored_sequence(state: SessionState, key: str) -> tuple[Any, ...]:
     """The list `state` holds under `key` as a tuple, empty when the key is
-    unset. Read without ADK's copy, as `stored_mapping` reads a dict, and
-    a tuple has no method that changes it in place."""
-    return tuple(_stored(state, key) or ())
+    unset. A tuple has no method that changes it in place, as
+    `stored_mapping`'s view has none."""
+    return tuple(state.get(key) or ())
+
+
+def _turn_readings(state: SessionState) -> list[tuple[SearchReading, Mapping[str, Any]]]:
+    """Each reading of the turn with a spec_id, with its stored spec block, oldest first."""
+    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
+    found = []
+    for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY):
+        reading = SearchReading.model_validate(stored)
+        block = specs.get(reading.spec_id) if reading.spec_id is not None else None
+        if block is not None:
+            found.append((reading, block))
+    return found
+
+
+def unit_settled(state: SessionState) -> frozenset[str]:
+    """The spec_ids whose unit the user settled this turn (`ORCHESTRATOR_UNIT_SETTLED_KEY`)."""
+    return frozenset(stored_sequence(state, ORCHESTRATOR_UNIT_SETTLED_KEY))
+
+
+def settle_unit(state: SessionState, *spec_ids: str) -> None:
+    """Record `spec_ids` as settled in the unit the user chose: their prices are closed
+    from here, so no reading lists `open_prices` for them and a second unit question
+    on them is refused."""
+    state[ORCHESTRATOR_UNIT_SETTLED_KEY] = sorted({*unit_settled(state), *spec_ids})
+
+
+def unit_reads(state: SessionState) -> dict[str, list[str]]:
+    """The spec_ids each part a unit question covered was re-read in this turn
+    (`ORCHESTRATOR_UNIT_READ_KEY`), by the part."""
+    return {
+        str(part): [str(spec_id) for spec_id in spec_ids]
+        for part, spec_ids in stored_mapping(state, ORCHESTRATOR_UNIT_READ_KEY).items()
+        if isinstance(spec_ids, list)
+    }
+
+
+def record_unit_read(state: SessionState, part: str, spec_id: str) -> None:
+    """Record that `part`, which a unit question covered, was re-read as `spec_id`."""
+    reads = unit_reads(state)
+    reads[part] = list(dict.fromkeys([*reads.get(part, ()), spec_id]))
+    state[ORCHESTRATOR_UNIT_READ_KEY] = reads
+
+
+class ServedUnit(BaseModel):
+    """What a part a unit question covered is fetched as after the answer:
+    `spec_id`, the series the agent was told to fetch, and `unit`, the unit
+    that series is served in, `None` when its unit cannot be read as one a
+    plan states (`planner.plan.Unit`)."""
+
+    spec_id: str
+    unit: Unit | None
+
+
+def units_served(state: SessionState) -> dict[str, ServedUnit]:
+    """The series and unit each part a unit question covered this turn is
+    fetched as (`ORCHESTRATOR_UNIT_SERVED_KEY`), by the part."""
+    return {
+        str(part): ServedUnit.model_validate(served)
+        for part, served in stored_mapping(state, ORCHESTRATOR_UNIT_SERVED_KEY).items()
+    }
+
+
+def record_unit_served(
+    state: SessionState, part: str, spec_id: str, unit: UnitChoice | None
+) -> None:
+    """Record that `part`, which a unit question covered, is fetched as
+    `spec_id`, served in `unit`. A unit no plan can state is recorded as none."""
+    stated: Unit | None = None
+    if unit is not None:
+        try:
+            stated = Unit.model_validate(unit.model_dump(mode="json"))
+        except ValidationError:
+            logger.warning("served unit %r is no unit a plan states", unit)
+    served = {name: one.model_dump(mode="json") for name, one in units_served(state).items()}
+    served[part] = ServedUnit(spec_id=spec_id, unit=stated).model_dump(mode="json")
+    state[ORCHESTRATOR_UNIT_SERVED_KEY] = served
+
+
+def _reading_prices(reading: SearchReading) -> dict[str, Any]:
+    """The arguments `harness.turn_records.open_prices` and `prices_form` read off `reading`."""
+    return {
+        "window": reading.window.model_dump() if reading.window is not None else None,
+        "other_prices": [offer.model_dump() for offer in reading.other_prices],
+    }
 
 
 def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
@@ -255,19 +371,13 @@ def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
     `ORCHESTRATOR_SPECS_KEY`. Only code reads `prices`: the readings the model
     reads carry the entries without it (`store_search`).
     """
-    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
     parts: dict[str, list[dict[str, Any]]] = {}
-    for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY):
-        reading = SearchReading.model_validate(stored)
-        block = specs.get(reading.spec_id) if reading.spec_id is not None else None
-        if block is None or reading.spec_id is None:
+    settled = unit_settled(state)
+    for reading, block in _turn_readings(state):
+        assert reading.spec_id is not None
+        if reading.spec_id in settled:
             continue
-        entries = open_prices(
-            block,
-            window=reading.window.model_dump() if reading.window is not None else None,
-            other_prices=[offer.model_dump() for offer in reading.other_prices],
-        )
-        if entries:
+        if entries := open_prices(block, **_reading_prices(reading)):
             parts[reading.spec_id] = [
                 {**entry, "prices": "current" if index == 0 else "constant"}
                 for index, entry in enumerate(entries)
@@ -275,14 +385,35 @@ def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
     return parts
 
 
+def prices_forms(state: SessionState) -> dict[str, PricesForm]:
+    """How the prices question of each reading of the turn whose prices are open is
+    asked, by its spec_id (`harness.turn_records.prices_form`): "unit" or "options"."""
+    forms: dict[str, PricesForm] = {}
+    settled = unit_settled(state)
+    for reading, block in _turn_readings(state):
+        assert reading.spec_id is not None
+        if reading.spec_id in settled:
+            continue
+        if (form := prices_form(block, **_reading_prices(reading))) != "closed":
+            forms[reading.spec_id] = form
+    return forms
+
+
 def prices_question(
-    question: AskQuestion, parts: Mapping[str, list[dict[str, Any]]]
+    question: AskQuestion,
+    parts: Mapping[str, list[dict[str, Any]]],
+    forms: Mapping[str, PricesForm],
 ) -> AskQuestion:
-    """`question` with, when it prices a part of `parts` (`AskQuestion.prices_of`),
-    that part's `open_prices` entries as its options."""
-    entries = parts.get(question.prices_of) if question.prices_of is not None else None
-    if entries is None:
+    """`question` with the answers code gives it when it asks the unit of a part of
+    `parts` (`AskQuestion.unit_of`): none for a part asked in the "unit" form
+    (`forms`), whose answer is a unit, and the part's `open_prices` entries, each
+    naming its spec_id but the reading's own, for one asked in the "options" form."""
+    part = question.unit_of
+    entries = parts.get(part) if part is not None else None
+    if part is None or entries is None:
         return question
+    if forms.get(part) == "unit":
+        return question.model_copy(update={"options": []})
     return question.model_copy(
         update={
             "options": [
@@ -292,18 +423,64 @@ def prices_question(
     )
 
 
+class UnitAsk(NamedTuple):
+    """A unit question's reach: `parts`, the spec_ids of the readings it covers, the
+    one it names first leading, and `offer`, the units every one of them converts into."""
+
+    parts: tuple[str, ...]
+    offer: UnitOffer
+
+
+def unit_asks(questions: Sequence[AskQuestion], state: SessionState) -> list[UnitAsk | None]:
+    """For each of `questions`, the reach of a unit question, `None` for any other
+    question or for one whose parts share no unit both bases serve.
+
+    A unit question is one whose `unit_of` part is asked in the "unit" form
+    (`prices_forms`). It covers that part and every other part asked in that
+    form measuring the same thing (equal `submission.prices_choice.measure_key`),
+    and offers what all of them
+    convert into (`harness.unit_offer.unit_offer`), starting on the prices
+    the question prefers (`AskQuestion.prices`).
+    """
+    forms = prices_forms(state)
+    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
+    measures = {part: measure_key(specs[part]) for part in forms if part in specs}
+    asks: list[UnitAsk | None] = []
+    for question in questions:
+        part = question.unit_of
+        if part is None or forms.get(part) != "unit" or part not in specs:
+            asks.append(None)
+            continue
+        key = measures.get(part)
+        parts = (
+            part,
+            *(
+                other
+                for other, form in forms.items()
+                if other != part
+                and form == "unit"
+                and other in specs
+                and key is not None
+                and measures.get(other) == key
+            ),
+        )
+        offer = unit_offer([specs[p] for p in parts], prefer=question.prices)
+        asks.append(UnitAsk(parts, offer) if offer is not None else None)
+    return asks
+
+
 def priced_options(
     questions: list[AskQuestion], state: SessionState
 ) -> list[dict[int, PricedOption]]:
     """For each of `questions`, the place of each option offering prices, with
     the part it prices and the prices: each option of a question pricing a
-    part (`AskQuestion.prices_of`) that is one of the part's `open_prices`
+    part (`AskQuestion.unit_of`) that is one of the part's `open_prices`
     entries (`open_parts`), matched by spec_id, else by label among the
     entries carrying none. A question pricing no part has none."""
     parts = open_parts(state)
     priced: list[dict[int, PricedOption]] = []
     for question in questions:
-        entries = parts.get(question.prices_of) if question.prices_of is not None else None
+        entries = parts.get(question.unit_of) if question.unit_of is not None else None
         marks: dict[int, PricedOption] = {}
         for index, option in enumerate(question.options):
             entry = next(
@@ -315,8 +492,8 @@ def priced_options(
                 ),
                 None,
             )
-            if entry is not None and question.prices_of is not None:
-                marks[index] = PricedOption(question.prices_of, entry["prices"])
+            if entry is not None and question.unit_of is not None:
+                marks[index] = PricedOption(question.unit_of, entry["prices"])
         priced.append(marks)
     return priced
 
@@ -351,44 +528,52 @@ def ask_candidates(
 
 
 def ask_questions(
-    questions: list[AskQuestion], priced: Sequence[Mapping[int, PricedOption]] = ()
+    questions: list[AskQuestion],
+    priced: Sequence[Mapping[int, PricedOption]] = (),
+    units: Sequence[UnitAsk | None] = (),
 ) -> list[dict[str, Any]]:
     """`PendingAsk.questions` as the clarify interrupt's payload entries: each
     under `q{n}`, its place in the call, with its candidates (`ask_candidates`),
-    each question's priced options read from `priced` by place."""
-    return [
-        {
+    each question's priced options read from `priced` by place, and
+    `multi_select` when the user may tick several. A unit
+    question of `units`, by place, carries `unit`: the spec_ids it covers
+    (`parts`) and its `offer` as `harness.wire.UnitOffer` JSON."""
+    entries = []
+    for index, question in enumerate(questions):
+        entry: dict[str, Any] = {
             "id": f"q{index + 1}",
             "question": question.question,
             "candidates": ask_candidates(
                 question.options, priced[index] if index < len(priced) else None
             ),
         }
-        for index, question in enumerate(questions)
-    ]
+        if question.multi_select:
+            entry["multi_select"] = True
+        if (unit := units[index] if index < len(units) else None) is not None:
+            entry["unit"] = {
+                "parts": list(unit.parts),
+                "offer": unit.offer.model_dump(mode="json", exclude_none=True),
+            }
+        entries.append(entry)
+    return entries
 
 
 def resume_answers(result: Any) -> dict[str, dict[str, Any]] | None:
     """The clarify interrupt's resume value as one answer per question id, or
     None when the user dismissed the whole pause (`{"skip": True}`).
 
-    The value is `{"answers": {question id: answer}}`, each answer
-    `{"kind": "option", "spec_id"}`, `{"kind": "text", "text"}` or
-    `{"kind": "skipped"}`. A single-question reply is the answer for `q1`:
-    `{"spec_id"}` for a pick, `{"text"}` for the user's own words, or a bare
-    candidate id.
+    The value `harness.studio`'s `/interrupt` route resumes a clarify with
+    is `{"answers": {question id: answer}}`, each answer
+    `{"kind": "option", "spec_id"}`, `{"kind": "options", "spec_ids"}`,
+    `{"kind": "unit", "currency", "prices", "base_year"?}`,
+    `{"kind": "text", "text"}` or `{"kind": "skipped"}`. Any other value,
+    such as the plan card's answer, answers no question.
     """
     if not isinstance(result, dict):
-        return {"q1": {"kind": "option", "spec_id": str(result)}}
+        return {}
     if result.get("skip"):
         return None
-    if "answers" in result:
-        return dict(result["answers"] or {})
-    if result.get("text"):
-        return {"q1": {"kind": "text", "text": result["text"]}}
-    if result.get("spec_id"):
-        return {"q1": {"kind": "option", "spec_id": result["spec_id"]}}
-    return {"q1": {"kind": "skipped"}}
+    return dict(result.get("answers") or {})
 
 
 _PENDING_ACTION = TypeAdapter(Annotated[PendingAsk | PendingPlan, Field(discriminator="kind")])
@@ -434,8 +619,7 @@ def turn_budgets(state: Any) -> dict[str, int]:
     """The calls this turn may make of each orchestrator tool:
     `APPLY_CHOICE_BUDGETS` on a turn applying a chip
     (`APPLY_CHOICE_STATE_KEY`), `DOWNLOAD_BUDGETS` on the download surface,
-    `BUDGETS` otherwise. `state` is any mapping-like read of session state
-    (`Context.state`, a dict)."""
+    `BUDGETS` otherwise. `state` is the turn's state."""
     if state.get(APPLY_CHOICE_STATE_KEY):
         return APPLY_CHOICE_BUDGETS
     return DOWNLOAD_BUDGETS if state.get("surface") == "download" else BUDGETS
@@ -451,8 +635,8 @@ def count_call(state: Any, tool: str) -> None:
 
 
 def pending_action(state: Any) -> PendingAsk | PendingPlan | None:
-    """The one action the orchestrator asked the workflow for this turn, or None.
-    `state` is any mapping-like read of session state (`Context.state`, a dict)."""
+    """The one action the agent's run recorded (`ORCHESTRATOR_PENDING_KEY`),
+    or None. `state` is the turn's state."""
     raw = state.get(ORCHESTRATOR_PENDING_KEY)
     return _PENDING_ACTION.validate_python(raw) if raw else None
 
@@ -531,6 +715,30 @@ def frame_store_ref(entry: Mapping[str, Any]) -> dict[str, Any]:
     return entry["ref"]
 
 
+def frame_store_keys(state: Mapping[str, Any]) -> FrameKeys:
+    """The lineage store keys of the frames in `state`
+    (`ORCHESTRATOR_FRAMES_KEY`): each entry's `ref` and `store_ref`, in order
+    and each once, which the turn store keeps the lineage of
+    (`harness.turn.store.FrameLineage`). A pair with a member missing names
+    no key, and so does a frames value or entry that is not a mapping, which
+    `FrameKeys.skipped` describes for the caller to report."""
+    frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+    if not isinstance(frames, Mapping):
+        return FrameKeys(keys=[], skipped=[], container=type(frames).__name__)
+    keys: dict[FrameKey, None] = {}
+    skipped: list[str] = []
+    for frame_id, entry in frames.items():
+        if not isinstance(entry, Mapping):
+            skipped.append(f"{frame_id}:{type(entry).__name__}")
+            continue
+        for ref in (entry.get("ref"), entry.get("store_ref")):
+            if isinstance(ref, Mapping):
+                spec_id, content_version = ref.get("spec_id"), ref.get("content_version")
+                if isinstance(spec_id, str) and isinstance(content_version, str):
+                    keys[(spec_id, content_version)] = None
+    return FrameKeys(keys=list(keys), skipped=skipped)
+
+
 def store_search(
     state: SessionState,
     digest: Mapping[str, Any],
@@ -557,8 +765,8 @@ def store_search(
     `held_open` those it asked to hold open, and `share_sides` the sides
     its `share_of` operations run over; each is empty when no part's are
     known. A `definite` part whose prices are open over several years reads
-    with `open_prices`, the options of its prices question
-    (`harness.turn_records.open_prices`).
+    with `open_prices` (`harness.turn_records.open_prices`), which tells the
+    model to ask its unit.
 
     A spec_id a part holds as its own keeps that part's block and warnings
     against a later part offering it as a candidate, since a pin of it is
@@ -573,7 +781,7 @@ def store_search(
     skill_ids = [skill["id"] for skill in digest.get("skills") or []]
     observed_at = datetime.now(UTC)
     readings = []
-    found: dict[str, dict[str, Any]] = {}
+    found: dict[str, Mapping[str, Any]] = {}
     for index, part in enumerate(digest.get("part_digests") or []):
         reading = {
             key: value
@@ -590,10 +798,12 @@ def store_search(
             blocks[part["spec_id"]] = part["spec_block"]
             own.add(part["spec_id"])
             facts = reading_facts(part["spec_block"])
-            if prices := open_prices(
-                part["spec_block"],
-                window=part.get("window"),
-                other_prices=part.get("other_prices") or (),
+            if part["spec_id"] not in unit_settled(state) and (
+                prices := open_prices(
+                    part["spec_block"],
+                    window=part.get("window"),
+                    other_prices=part.get("other_prices") or (),
+                )
             ):
                 reading["open_prices"] = prices
         if mentions := reading.get("resolved_sources"):
@@ -630,30 +840,6 @@ def conversation_readings(state: SessionState) -> list[dict[str, Any]]:
     ]
 
 
-def state_json(ctx: Context, key: str, default: Any = None) -> Any:
-    """Decode a JSON blob out of session state, `default` when absent."""
-    raw = ctx.state.get(key)
-    return json.loads(raw) if raw else default
-
-
-class GraphState(BaseModel):
-    """Session-state schema for the workflow (validated on every delta)."""
-
-    surface: str | None = None
-    canvas_digest: str | None = None
-    conversation_digest: str | None = None
-    # The Search results a "... in Studio" action handed over, as JSON: each
-    # seed as `seeds_slot` keeps it, or the one reference `TurnRequest.seed_spec`
-    # also takes. Host-seeded fresh per turn under `planner.plan.SEEDS_STATE_KEY`;
-    # `seed` reads it once and clears it.
-    seeds: str | None = None
-    # The chip a turn applies, as JSON, under `APPLY_CHOICE_STATE_KEY`.
-    apply_choice: str | None = None
-    awaiting_approve: bool = False
-    plan: str | None = None
-    replans: int = 0
-
-
 # What the plan card opens with when the plan the user held was stored in a
 # shape this release does not read, and the question was planned again.
 UNREADABLE_PLAN_NOTE = (
@@ -671,7 +857,7 @@ UNREADABLE_PLAN_UNPLANNED_NOTE = (
 )
 
 
-def readable_plan(ctx: Context, raw: str | None) -> PlannerPlan | None:
+def readable_plan(ctx: NodeCtx[Any], raw: str | None) -> PlannerPlan | None:
     """The plan `raw` holds, `ctx.state["plan"]` as a node read it; `None` when it holds none.
 
     A plan stored in a shape `planner.plan.Plan` rejects is none

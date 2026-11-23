@@ -1,5 +1,6 @@
-"""Tests for `compiler.caller_clients`: one held client per caller, bounded
-by an LRU, and the transport that names the caller in its header."""
+"""Tests for `compiler.caller_clients`: one held client per caller and turn,
+bounded by an LRU, and the transport that names the caller and turn in its
+headers."""
 
 from __future__ import annotations
 
@@ -7,12 +8,13 @@ import asyncio
 from typing import Any
 
 import pytest
-from common.caller import CALLER_HEADER
+from common.caller import CALLER_HEADER, TURN_HEADER
 from common.telemetry import SESSION_META_KEY
 from compiler import caller_clients
 from compiler.caller_clients import (
     MAX_CALLERS,
     CallerClients,
+    CallerTurn,
     caller_transport,
     session_call_meta,
 )
@@ -20,8 +22,9 @@ from fastmcp import Client, FastMCP
 
 
 class _CountingClient:
-    def __init__(self, caller: str | None) -> None:
+    def __init__(self, caller: str | None, turn: str | None = None) -> None:
         self.caller = caller
+        self.turn = turn
         self.entered = 0
         self.exited = 0
 
@@ -50,7 +53,7 @@ class _GatedClient(_CountingClient):
 
 
 class _Registry:
-    """A `CallerClients` over `_CountingClient`s, with a caller the test sets.
+    """A `CallerClients` over `_CountingClient`s, with a caller and turn the test sets.
 
     A caller in `gates` connects only once its gate opens; a caller in
     `failing` fails its connect.
@@ -58,17 +61,22 @@ class _Registry:
 
     def __init__(self) -> None:
         self.caller: str | None = None
+        self.turn: str | None = None
+        self.surface: str | None = None
         self.built: list[_CountingClient] = []
         self.gates: dict[str | None, asyncio.Event] = {}
         self.failing: set[str | None] = set()
-        self.clients = CallerClients(self._build, caller=lambda: self.caller)
+        self.clients = CallerClients(
+            self._build, caller=lambda: CallerTurn(self.caller, self.turn, self.surface)
+        )
 
-    def _build(self, caller: str | None) -> Any:
+    def _build(self, who: CallerTurn) -> Any:
+        caller = who.caller
         gate = self.gates.get(caller)
         client = (
             _GatedClient(caller, gate=gate, fail=caller in self.failing)
             if gate is not None
-            else _CountingClient(caller)
+            else _CountingClient(caller, who.turn)
         )
         self.built.append(client)
         return client
@@ -107,6 +115,130 @@ async def test_each_caller_gets_its_own_client_built_for_it() -> None:
         "conversation:b",
         None,
     ]
+
+
+async def test_a_callers_next_turn_gets_a_client_built_for_it() -> None:
+    """A transport's headers are fixed when it is built, so a client kept into
+    the next turn would name the turn before it. The new turn's client retires
+    the old one, which disconnects once its in-flight call releases it."""
+    registry = _Registry()
+    registry.caller = "conversation:a"
+    registry.turn = "tr_" + "1" * 16
+    first = await registry.clients.get()  # still in flight below
+    again = await registry.clients.get()
+    await registry.clients.release(again)
+
+    registry.turn = "tr_" + "2" * 16
+    second = await registry.clients.get()
+
+    assert again is first
+    assert second is not first
+    assert [(client.caller, client.turn) for client in registry.built] == [
+        ("conversation:a", "tr_" + "1" * 16),
+        ("conversation:a", "tr_" + "2" * 16),
+    ]
+    assert registry.built[0].exited == 0
+    await registry.clients.release(first)
+    assert registry.built[0].exited == 1
+    assert registry.built[1].exited == 0
+
+
+async def test_caller_less_clients_of_two_surfaces_never_retire_each_other() -> None:
+    """A Studio replay's client and a caller-less client outside shared work
+    name no caller and no turn, and differ in their surface header alone. Each
+    is its own party's latest turn, so neither connect retires the other."""
+    registry = _Registry()
+    clients = []
+    for surface in ["studio", None, "studio", None]:
+        registry.surface = surface
+        clients.append(await registry.clients.get())
+        await registry.clients.release(clients[-1])
+
+    assert clients[0] is clients[2]
+    assert clients[1] is clients[3]
+    assert len(registry.built) == 2
+    assert [client.exited for client in registry.built] == [0, 0]
+
+
+class _StuckExitClient(_CountingClient):
+    """A client whose disconnect waits until the test opens `gate`."""
+
+    def __init__(self, caller: str | None, turn: str | None, *, gate: asyncio.Event) -> None:
+        super().__init__(caller, turn)
+        self._gate = gate
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self._gate.wait()
+        await super().__aexit__(*exc_info)
+
+
+class _FailingExitClient(_CountingClient):
+    async def __aexit__(self, *exc_info: object) -> None:
+        raise RuntimeError("session runner failed")
+
+
+async def test_retiring_the_turn_befores_client_neither_delays_nor_fails_the_new_turn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """fastmcp can wait seconds on a session's end, or raise from it. The new
+    turn's first call returns while the old client's disconnect still waits, and
+    a disconnect that raises is logged. `aclose` waits for the stuck one."""
+    gate = asyncio.Event()
+    built: list[_CountingClient] = []
+
+    def build(who: CallerTurn) -> Any:
+        if who.turn == "tr_" + "1" * 16:
+            client: _CountingClient = _StuckExitClient(who.caller, who.turn, gate=gate)
+        elif who.turn == "tr_" + "2" * 16:
+            client = _FailingExitClient(who.caller, who.turn)
+        else:
+            client = _CountingClient(who.caller, who.turn)
+        built.append(client)
+        return client
+
+    turn = ["tr_" + "1" * 16]
+    clients = CallerClients(build, caller=lambda: CallerTurn("conversation:a", turn[0]))
+    for digit in "123":
+        turn[0] = "tr_" + digit * 16
+        client = await asyncio.wait_for(clients.get(), timeout=1)
+        await clients.release(client)
+    await asyncio.sleep(0)
+
+    assert [client.turn for client in built] == ["tr_" + d * 16 for d in "123"]
+    assert built[0].exited == 0  # still disconnecting
+    assert "failed to disconnect" in caplog.text
+    closing = asyncio.create_task(clients.aclose())
+    await asyncio.sleep(0)
+    assert not closing.done()
+    gate.set()
+    await asyncio.wait_for(closing, timeout=1)
+    assert [built[0].exited, built[2].exited] == [1, 1]
+
+
+async def test_a_late_call_from_an_earlier_turn_leaves_the_latest_turns_client_held() -> None:
+    """An early mint turn 1 queued goes out after turn 2 began. It reconnects
+    under turn 1's id and retires nothing; turn 3 retires both."""
+    registry = _Registry()
+    registry.caller = "conversation:a"
+    turns = ["tr_" + digit * 16 for digit in "123"]
+
+    async def call_in(turn: str) -> Any:
+        registry.turn = turn
+        client = await registry.clients.get()
+        await registry.clients.release(client)
+        return client
+
+    first = await call_in(turns[0])
+    second = await call_in(turns[1])
+    late = await call_in(turns[0])
+    again = await call_in(turns[1])
+    third = await call_in(turns[2])
+
+    assert first.exited == 1  # retired by turn 2's connect
+    assert late is not first
+    assert late.turn == turns[0]
+    assert again is second
+    assert [late.exited, second.exited, third.exited] == [1, 1, 0]
 
 
 async def test_aclose_disconnects_and_forgets_every_client() -> None:
@@ -189,6 +321,14 @@ def test_the_transport_names_the_caller_in_its_header() -> None:
 
     assert transport.headers == {CALLER_HEADER: "conversation:a"}
     assert transport.auth is not None
+
+
+def test_the_transport_names_the_turn_beside_the_caller() -> None:
+    transport = caller_transport(
+        "http://mcp.internal/mcp", caller="conversation:a", turn="tr_" + "1" * 16, auth=None
+    )
+
+    assert transport.headers == {CALLER_HEADER: "conversation:a", TURN_HEADER: "tr_" + "1" * 16}
 
 
 def test_no_caller_sends_no_header() -> None:

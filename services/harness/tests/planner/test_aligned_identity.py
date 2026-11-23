@@ -458,7 +458,7 @@ def test_propose_plan_reads_a_carried_sum_s_earlier_datasets_off_the_plan_it_ame
     a pair the user was never asked about."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    ctx.session.events.extend(_combination_asked({"spec_id": COMBINE_OPTION}))
+    ctx.records.extend(_combination_asked({"spec_id": COMBINE_OPTION}))
     summed = _sum_of_two_sources(
         ctx,
         datasets=(DAC2A, IDS),
@@ -612,7 +612,7 @@ async def test_a_pending_source_choice_admits_its_offered_pin_alignment_moves(
             ),
         ),
     )
-    ctx.session.events.append(_referred_event(ReferralKind.SOURCE_AMBIGUOUS, "second"))
+    ctx.records.append(_referred_event(ReferralKind.SOURCE_AMBIGUOUS, "second"))
 
     result = await call_planner_tool(
         _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"],

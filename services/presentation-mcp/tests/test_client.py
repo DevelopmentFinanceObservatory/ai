@@ -24,7 +24,16 @@ import httpx2
 import pytest
 import rfc8785
 from common.apis_auth import ApisAuthError
-from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, supplied_caller
+from common.caller import (
+    CALLER_HEADER,
+    CALLER_PRINCIPAL_HEADER,
+    MCP_CLIENT_HEADER,
+    MCP_SURFACE,
+    SURFACE_HEADER,
+    TURN_HEADER,
+    USER_AGENT_HEADER,
+    supplied_caller,
+)
 from common.derived_replay import DEFAULT_RETRY_AFTER_S
 from common.materialisation import (
     KIND_COLUMNS,
@@ -46,6 +55,7 @@ from common.materialisation import (
 from common.recipe import build_recipe
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget, set_row_budget
 from dfo_frame_grammar import Frame
+from fastmcp.server.http import set_http_request
 from presentation_mcp import client as client_module
 from presentation_mcp import frame_publish
 from presentation_mcp.client import (
@@ -64,6 +74,7 @@ from presentation_mcp.platform_contract import (
     WriteReply,
 )
 from presentation_mcp.settings import Settings
+from starlette.requests import Request
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 
@@ -1223,6 +1234,7 @@ async def test_publish_call_carries_the_configured_principal_header(
 _CALLER_PRINCIPAL = "website-secret"
 _ADDRESS_CALLER = "ip:" + "0123456789abcdef" * 2
 _ACCOUNT_CALLER = "user:" + "fedcba9876543210" * 2
+_MCP_USER_AGENT = "claude-user/1.0"
 
 
 @pytest.mark.parametrize(
@@ -1244,7 +1256,12 @@ _ACCOUNT_CALLER = "user:" + "fedcba9876543210" * 2
             _PUBLISH_PRINCIPAL,
             _CALLER_PRINCIPAL,
             _ADDRESS_CALLER,
-            {CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL, CALLER_HEADER: _ADDRESS_CALLER},
+            {
+                CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL,
+                CALLER_HEADER: _ADDRESS_CALLER,
+                SURFACE_HEADER: MCP_SURFACE,
+                USER_AGENT_HEADER: _MCP_USER_AGENT,
+            },
             id="external-named-by-website",
         ),
         pytest.param(
@@ -1252,7 +1269,12 @@ _ACCOUNT_CALLER = "user:" + "fedcba9876543210" * 2
             _PUBLISH_PRINCIPAL,
             _CALLER_PRINCIPAL,
             _ACCOUNT_CALLER,
-            {CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL, CALLER_HEADER: _ACCOUNT_CALLER},
+            {
+                CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL,
+                CALLER_HEADER: _ACCOUNT_CALLER,
+                SURFACE_HEADER: MCP_SURFACE,
+                USER_AGENT_HEADER: _MCP_USER_AGENT,
+            },
             id="external-account-named-by-website",
         ),
         pytest.param(
@@ -1342,7 +1364,11 @@ async def test_a_component_write_names_whose_card_allowance_it_spends(
         datasets_first_party_principal=publish_principal, dfo_caller_principal=caller_principal
     )
 
-    with supplied_caller(named) if named is not None else contextlib.nullcontext():
+    mcp_request = Request({"type": "http", "headers": [(b"user-agent", _MCP_USER_AGENT.encode())]})
+    with (
+        set_http_request(mcp_request),
+        supplied_caller(named) if named is not None else contextlib.nullcontext(),
+    ):
         async with _assembler(handler, settings=settings) as assembler:
             if call == "create":
                 reply = await assembler.create_component(intent=INTENT, caller=caller)
@@ -1355,7 +1381,14 @@ async def test_a_component_write_names_whose_card_allowance_it_spends(
                 )
 
     assert isinstance(reply, WriteReply)
-    allowance_headers = (PRINCIPAL_HEADER, CALLER_PRINCIPAL_HEADER, CALLER_HEADER)
+    allowance_headers = (
+        PRINCIPAL_HEADER,
+        CALLER_PRINCIPAL_HEADER,
+        CALLER_HEADER,
+        SURFACE_HEADER,
+        USER_AGENT_HEADER,
+        MCP_CLIENT_HEADER,
+    )
     assert {
         name: requests[0].headers[name] for name in allowance_headers if name in requests[0].headers
     } == sent
@@ -2958,6 +2991,7 @@ async def test_a_moved_frame_is_named_apart_with_the_lost_frames_rendering(
             scope={"provider": "country/GBR"},
             stat_var_count=2,
             enrichment_stamp="stamp_of_the_old_file",
+            artifact_digest="sha256:" + "0" * 64,
         )
     )
 
@@ -3302,6 +3336,62 @@ async def _rebuilt_ops(
                 rebuild_lost_frames=True,
             )
     return reply, requests
+
+
+_STUDIO_CALLER = "conversation:" + "0" * 32
+_STUDIO_TURN = "tr_" + "0" * 16
+
+
+@pytest.mark.usefixtures("materialisation_store")
+@pytest.mark.parametrize(
+    ("headers", "sent"),
+    [
+        pytest.param(
+            [(CALLER_HEADER, _STUDIO_CALLER), (TURN_HEADER, _STUDIO_TURN)],
+            {
+                CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL,
+                CALLER_HEADER: _STUDIO_CALLER,
+                TURN_HEADER: _STUDIO_TURN,
+            },
+            id="studio",
+        ),
+        pytest.param(
+            [(CALLER_HEADER, _ADDRESS_CALLER), ("user-agent", _MCP_USER_AGENT)],
+            {
+                CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL,
+                CALLER_HEADER: _ADDRESS_CALLER,
+                SURFACE_HEADER: MCP_SURFACE,
+                USER_AGENT_HEADER: _MCP_USER_AGENT,
+            },
+            id="mcp-client",
+        ),
+    ],
+)
+async def test_a_frame_replay_names_the_caller_and_turn_to_the_analysis_door(
+    headers: list[tuple[str, str]], sent: dict[str, str]
+) -> None:
+    """The analysis door logs a delivery for the replay, so it names the caller and
+    turn as every other analysis call does, a Studio conversation's included."""
+    requests, handler = _replaying_handler(
+        _REPLAY_READY, httpx2.Response(404, content=_VERSION_LOST)
+    )
+    mcp_request = Request(
+        {"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers]}
+    )
+    identity = (CALLER_PRINCIPAL_HEADER, CALLER_HEADER, TURN_HEADER, SURFACE_HEADER)
+    identity += (USER_AGENT_HEADER, MCP_CLIENT_HEADER)
+
+    with set_http_request(mcp_request):
+        async with _assembler(
+            handler, settings=_settings(dfo_caller_principal=_CALLER_PRINCIPAL)
+        ) as assembler:
+            reply = await assembler.get_frame_view(
+                frame_ref=_LOST_OPS.model_dump(), rebuild_lost_frames=True
+            )
+
+    assert not isinstance(reply, Refusal)
+    (replay,) = [r for r in requests if r.url.path == "/api/datasets/analysis"]
+    assert {name: replay.headers[name] for name in identity if name in replay.headers} == sent
 
 
 @pytest.mark.usefixtures("materialisation_store")

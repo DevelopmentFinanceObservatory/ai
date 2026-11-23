@@ -107,7 +107,7 @@ class Replayer:
     `outcomes`, the last one repeating. A `Replayed` stores its own recipe on `apis`
     under its frame, as the real replayer's publish does; one that carries none stores
     `recipe_of(REPLAYED)`, which has the stored recipe's normal form. `gate`, when set,
-    holds every entry until it is released."""
+    holds every entry until it is released. `surfaces` keeps each entry's surface."""
 
     def __init__(self, apis: RecordedApis, *outcomes: Replayed | Pending | Refused | Exception):
         self.apis = apis
@@ -119,10 +119,14 @@ class Replayer:
             )
         ]
         self.entered = 0
+        self.surfaces: list[str] = []
         self.gate: asyncio.Event | None = None
 
-    async def __call__(self, recipe: Mapping[str, Any], **_: Any) -> Replayed | Pending | Refused:
+    async def __call__(
+        self, recipe: Mapping[str, Any], *, surface: str, **_: Any
+    ) -> Replayed | Pending | Refused:
         self.entered += 1
+        self.surfaces.append(surface)
         if self.gate is not None:
             await self.gate.wait()
         outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
@@ -244,23 +248,34 @@ async def test_an_unset_principal_refuses_every_caller(
 
 def test_a_server_without_the_principal_says_at_startup_that_the_route_is_closed(
     monkeypatch: pytest.MonkeyPatch,
+    pg_database_url: str,
 ) -> None:
     warnings: list[str] = []
     monkeypatch.setattr(
         server_module.logger, "warning", lambda msg, *args: warnings.append(msg % args)
     )
 
-    create_app(settings=Settings(studio_api_token=STUDIO_TOKEN))
+    create_app(settings=Settings(database_url=pg_database_url, studio_api_token=STUDIO_TOKEN))
     closed = [w for w in warnings if "LIVE REFRESH IS CLOSED" in w]
-    create_app(settings=Settings(studio_api_token=STUDIO_TOKEN, live_refresh_principal="set"))
+    create_app(
+        settings=Settings(
+            database_url=pg_database_url,
+            studio_api_token=STUDIO_TOKEN,
+            live_refresh_principal="set",
+        )
+    )
 
     assert len(closed) == 1
     assert len([w for w in warnings if "LIVE REFRESH IS CLOSED" in w]) == 1
 
 
-def test_the_studio_token_does_not_open_the_served_route() -> None:
+def test_the_studio_token_does_not_open_the_served_route(pg_database_url: str) -> None:
     app = create_app(
-        settings=Settings(studio_api_token=STUDIO_TOKEN, live_refresh_principal=LIVE_PRINCIPAL)
+        settings=Settings(
+            database_url=pg_database_url,
+            studio_api_token=STUDIO_TOKEN,
+            live_refresh_principal=LIVE_PRINCIPAL,
+        )
     )
     response = TestClient(app).post(
         "/api/studio/refresh",
@@ -272,8 +287,14 @@ def test_the_studio_token_does_not_open_the_served_route() -> None:
 
 
 @pytest.mark.parametrize("studio_api_token", [None, STUDIO_TOKEN])
-def test_the_live_principal_opens_no_other_studio_route(studio_api_token: str | None) -> None:
-    settings = Settings(studio_api_token=studio_api_token, live_refresh_principal=LIVE_PRINCIPAL)
+def test_the_live_principal_opens_no_other_studio_route(
+    studio_api_token: str | None, pg_database_url: str
+) -> None:
+    settings = Settings(
+        database_url=pg_database_url,
+        studio_api_token=studio_api_token,
+        live_refresh_principal=LIVE_PRINCIPAL,
+    )
 
     with pytest.raises(HTTPException) as refused:
         principal_for(f"Bearer {LIVE_PRINCIPAL}", settings=settings)
@@ -405,6 +426,21 @@ async def test_a_card_that_cannot_be_replayed_is_refused_before_any_root_is_aske
 
 
 # --- the roots ------------------------------------------------------------------
+
+
+async def test_a_card_whose_roots_carry_a_member_this_build_does_not_know_is_checked(
+    apis: RecordedApis,
+) -> None:
+    """A recipe published by a build whose mint record carries a later member is read
+    as `read_mint_record` reads a stored record."""
+    recipe = recipe_of(STORED)
+    recipe["roots"] = [{**root, "a_later_member": "x"} for root in recipe["roots"]]
+    apis.recipes[STORED] = recipe
+    apis.heads = {SPEC: FIRST}
+    async with client_of(service_over(apis, Replayer(apis))) as client:
+        response = await refresh(client)
+
+    assert (response.status_code, response.json()) == (200, {"status": "current"})
 
 
 async def test_a_card_whose_roots_are_all_current_stands_and_nothing_else_is_asked(
@@ -867,6 +903,7 @@ async def test_a_replay_published_under_another_key_is_logged(
 
 
 async def test_a_replayed_card_is_rendered_on_the_new_frame(apis: RecordedApis) -> None:
+    """The website shows the share, so the replay serves the website surface."""
     replayer = Replayer(apis)
     async with client_of(service_over(apis, replayer)) as client:
         response = await refresh(client)
@@ -876,7 +913,7 @@ async def test_a_replayed_card_is_rendered_on_the_new_frame(apis: RecordedApis) 
         {"status": "redrawn", "render": RECORDED_RENDER},
     )
     assert apis.rendered_on() == [REPLAYED]
-    assert replayer.entered == 1
+    assert replayer.surfaces == ["website"]
 
 
 @pytest.mark.parametrize("reason", ["mint_queued", "deadline", "row_budget", "busy"])
@@ -1163,6 +1200,6 @@ async def test_on_cloud_run_both_dfo_apis_clients_share_one_id_token_provider(
         await service.aclose()
 
 
-def test_a_refresh_row_budget_too_small_for_a_two_input_verb_fails_at_startup() -> None:
+def test_a_refresh_row_budget_too_small_for_one_full_frame_fails_at_startup() -> None:
     with pytest.raises(ValueError, match="LIVE_REFRESH_ROWS_IN_FLIGHT_MAX"):
-        build_live_refresh(settings=Settings(live_refresh_rows_in_flight_max=499_999))
+        build_live_refresh(settings=Settings(live_refresh_rows_in_flight_max=249_999))

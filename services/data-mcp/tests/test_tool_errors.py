@@ -10,6 +10,7 @@ from typing import Any
 import httpx2
 import jsonschema
 import pytest
+from common.refusal import SERVICE_FAILURE
 from data_mcp import server
 from data_mcp.errors import UpstreamError, UpstreamSurfaceUnavailable, UpstreamTransportError
 from data_mcp.tool_errors import (
@@ -1018,6 +1019,30 @@ async def test_unmapped_upstream_code_surfaces_verbatim() -> None:
     assert refusal.upstream_code == "something_never_seen"
 
 
+@pytest.mark.parametrize(
+    ("status", "code", "service_failure"),
+    [
+        (502, "bad_gateway", True),
+        (403, None, True),
+        (413, None, True),
+        (422, "resolution_ambiguous", False),
+    ],
+    ids=["5xx", "4xx-iam", "4xx-body-limit", "4xx-problem"],
+)
+def test_an_unmapped_upstream_failure_states_whether_the_service_failed(
+    status: int, code: str | None, service_failure: bool
+) -> None:
+    """A 5xx, or a 4xx with no problem document from a proxy, an IAM check or a
+    body limit, is the service failing of itself. A 4xx problem refuses the
+    request."""
+    refusal = from_upstream_error(
+        UpstreamError(status=status, code=code, detail="d"), tool="get_data"
+    )
+
+    assert refusal.code == ToolErrorCode.UPSTREAM_ERROR
+    assert (refusal.fix.get("kind") == SERVICE_FAILURE) is service_failure
+
+
 async def test_unmapped_non_retryable_code_does_not_claim_a_numeric_wait() -> None:
     # e.g. apis' real `resolution_ambiguous`, `retryable: false` per
     # `src/dfo_platform/codes.py`, so a repeated call won't succeed.
@@ -1593,9 +1618,34 @@ def test_each_factory_produces_its_exact_fix_key_set() -> None:
             ),
             {"role", "candidates", "candidate_count", "truncated"},
         ),
+        # An upstream failure states whose it is in `kind`, either the service's
+        # own or a definition the platform refused. A refusal of the request
+        # states none.
         (
-            ToolRefusal.upstream_error(upstream_code="x", detail="y", retry_after_s=1.0),
+            ToolRefusal.upstream_error(
+                upstream_code="x", detail="y", retry_after_s=None, service_failure=False
+            ),
             {"detail"},
+        ),
+        (
+            ToolRefusal.upstream_error(
+                upstream_code="x", detail="y", retry_after_s=1.0, service_failure=True
+            ),
+            {"detail", "kind"},
+        ),
+        (ToolRefusal.upstream_response_unusable(detail="not JSON"), {"detail", "kind"}),
+        (
+            ToolRefusal.spec_not_registered(
+                tool="get_data", spec_id="spec_" + "1" * 32, upstream_code="x", detail="y"
+            ),
+            {"kind", "tool", "problems"},
+        ),
+        # A minted frame that reads back wrong says so in `kind`.
+        (
+            ToolRefusal.frame_integrity_failed(
+                spec_id="spec_" + "1" * 32, content_version="cv_1", reason="r"
+            ),
+            {"kind", "spec_id", "content_version", "reason"},
         ),
         (
             ToolRefusal.service_unavailable(service="dfo-apis", retry_after_s=1.0),
@@ -1863,7 +1913,10 @@ _FIX_SAMPLES: dict[str, tuple[str, dict[str, Any]]] = {
             "candidates": [EntityCandidate(dcid="country/KEN", label="Kenya", type="Country")],
         },
     ),
-    "upstream_error": ("get_data", {"upstream_code": "x", "detail": "d", "retry_after_s": 1.0}),
+    "upstream_error": (
+        "get_data",
+        {"upstream_code": "x", "detail": "d", "retry_after_s": 1.0, "service_failure": True},
+    ),
     "upstream_response_unusable": ("search", {"detail": "d"}),
     "service_unavailable": ("get_data", {"service": "dfo-apis", "retry_after_s": 1.0}),
     "definition_not_held": ("get_data", {"definition_id": _SPEC}),

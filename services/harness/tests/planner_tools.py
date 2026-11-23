@@ -1,18 +1,29 @@
-"""Test helpers that reach a planner tool through its `ToolSpec`."""
+"""Test helpers that reach a planner tool through its `ToolSpec`.
+
+A tool call runs on a context holding the turn's `state`, its transcript
+`records`, the served call's `function_call_id` and `run_ended`, which the
+tool's `end_run` sets (`planner.tool_spec.EndRun`).
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from google.adk.tools.base_tool import BaseTool
 from google.genai import types
 from planner.session import SessionCall
-from planner.tool_spec import ToolSpec, function_declaration, run_tool, serve_tool
+from planner.tool_spec import EndRun, ToolSpec, function_declaration, run_tool, serve_tool
 
 
-def _end_run(tool_context: Any) -> Any:
+def session_call(tool_context: Any) -> SessionCall:
+    """The `SessionCall` of a tool call on `tool_context`."""
+    return SessionCall(tool_context.records, tool_context.state, tool_context.function_call_id)
+
+
+def end_run_on(tool_context: Any) -> EndRun:
+    """The `EndRun` of a tool call on `tool_context`: it sets `run_ended`."""
+
     def end_run() -> None:
-        tool_context.actions.skip_summarization = True
+        tool_context.run_ended = True
 
     return end_run
 
@@ -28,24 +39,18 @@ def call_planner_tool(spec: ToolSpec, /, *, tool_context: Any, **arguments: Any)
     unknown = set(arguments) - {parameter.name for parameter in spec.parameters}
     assert not unknown, f"{spec.name} has no parameter {sorted(unknown)}"
     return run_tool(
-        spec, arguments, call=SessionCall.of(tool_context), end_run=_end_run(tool_context)
+        spec, arguments, call=session_call(tool_context), end_run=end_run_on(tool_context)
     )
 
 
 async def serve_planner_tool(spec: ToolSpec, *, args: dict[str, Any], tool_context: Any) -> Any:
     """Return the awaited answer to a call with `args`, as `serve_tool` serves it."""
     return await serve_tool(
-        spec, args, call=SessionCall.of(tool_context), end_run=_end_run(tool_context)
+        spec, args, call=session_call(tool_context), end_run=end_run_on(tool_context)
     )
 
 
-def planner_tool_declaration(tool: ToolSpec | BaseTool) -> types.FunctionDeclaration | None:
-    """Return the function declaration the model is shown for the tool.
-
-    A spec is declared as the planner's request declares it, and every ADK
-    tool, the orchestrator's `FunctionTool`s included, through ADK's own
-    declaration.
-    """
-    if isinstance(tool, ToolSpec):
-        return function_declaration(tool)
-    return tool._get_declaration()
+def planner_tool_declaration(tool: ToolSpec) -> types.FunctionDeclaration:
+    """Return the function declaration the model is shown for the tool, as the
+    planner's request declares it."""
+    return function_declaration(tool)

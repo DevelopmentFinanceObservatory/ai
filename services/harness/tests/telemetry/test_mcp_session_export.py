@@ -23,10 +23,8 @@ from common.caller import CALLER_HEADER
 from common.mcp_telemetry import OBSERVATION_INPUT, OBSERVATION_OUTPUT
 from common.telemetry import (
     SESSION_META_KEY,
-    end_turn_span,
     flush_telemetry,
-    start_turn_span,
-    use_turn_span,
+    turn_segment,
 )
 from compiler.surface import McpSurface
 from fastapi import FastAPI
@@ -42,6 +40,7 @@ from harness.settings import (
     PRESENTATION_MCP_MOUNT_PATH,
     Settings,
 )
+from langfuse import Langfuse
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from opentelemetry.proto.trace.v1.trace_pb2 import Span
 from planner.workflow import ToolId
@@ -113,12 +112,20 @@ async def composed_app(
     fake_langfuse: FakeLangfuse,
     running_lifespan: Callable[[FastAPI], Any],
     monkeypatch: pytest.MonkeyPatch,
+    pg_database_url: str,
 ) -> AsyncIterator[FastAPI]:
     """The composed harness app with its lifespan running and the harness's
     own clients' transports pointed at it in process."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
-    def transport(url: str, *, caller: str | None, auth: str | None) -> StreamableHttpTransport:
+    def transport(
+        url: str,
+        *,
+        caller: str | None,
+        auth: str | None,
+        turn: str | None = None,
+        surface: str | None = None,
+    ) -> StreamableHttpTransport:
         parts = urllib.parse.urlparse(url)
         return _asgi_transport(app, parts.path, caller=caller, host=parts.hostname or "")
 
@@ -161,16 +168,14 @@ async def _call_through_the_harness_clients(app: FastAPI) -> None:
         await surface.aclose()
 
 
-async def test_a_turns_mcp_server_spans_carry_the_session_and_trace_name_its_turn_span_does(
+async def test_a_turns_mcp_server_spans_carry_the_session_and_trace_name_its_segment_does(
     composed_app: FastAPI, fake_langfuse: FakeLangfuse
 ) -> None:
-    handle = start_turn_span(TURN, session_id=CONVERSATION)
-    with use_turn_span(handle):
+    with turn_segment(TURN, session_id=CONVERSATION):
         await _call_through_the_harness_clients(composed_app)
-    end_turn_span(handle)
     await flush_telemetry()
 
-    (turn,) = [span for span in fake_langfuse.spans() if span.name == "turn"]
+    (turn,) = [span for span in fake_langfuse.spans() if span.name == "turn.segment"]
     turn_session = _attribute(turn, "session.id")
     assert turn_session is not None
     assert _attribute(turn, "langfuse.trace.name") == "turn"
@@ -181,6 +186,34 @@ async def test_a_turns_mcp_server_spans_carry_the_session_and_trace_name_its_tur
         span_session = _attribute(span, "session.id")
         assert span_session == turn_session, tool
         assert _attribute(span, "langfuse.trace.name") == _attribute(turn, "langfuse.trace.name")
+
+
+async def test_every_span_a_turns_mcp_calls_export_reaches_the_segment(
+    composed_app: FastAPI, fake_langfuse: FakeLangfuse
+) -> None:
+    """Each exported span's parent is on the wire, up to the `turn.segment`,
+    the one root. The server's `tools/call` span takes as its parent the `mcp`
+    SDK's `MCP send` span, whose id the request's `_meta` carries. That span is
+    exported too, since the server span would otherwise hang off a parent
+    Langfuse never receives. The test uses a trace of its own, so no span a
+    sibling test left behind on `TURN`'s trace is read."""
+    with turn_segment("tr_mcp_session_chain", session_id=CONVERSATION):
+        await _call_through_the_harness_clients(composed_app)
+    await flush_telemetry()
+
+    trace_id = bytes.fromhex(Langfuse.create_trace_id(seed="tr_mcp_session_chain"))
+    spans = [span for span in fake_langfuse.spans() if span.trace_id == trace_id]
+    by_id = {span.span_id: span for span in spans}
+    (segment,) = [span for span in spans if span.name == "turn.segment"]
+    # Control: every tool's server span is among them.
+    for tool in CALLED_TOOLS:
+        assert len(_tool_call_spans(fake_langfuse, tool)) == 1, tool
+    for span in spans:
+        chain, node = [span.name], span
+        while node.span_id != segment.span_id:
+            assert node.parent_span_id in by_id, chain
+            node = by_id[node.parent_span_id]
+            chain.append(node.name)
 
 
 async def test_an_mcp_call_outside_a_turn_has_no_session_on_its_server_span(
@@ -227,17 +260,15 @@ async def test_a_call_to_a_server_off_loopback_sends_no_session(
             )
         }
     )
-    handle = start_turn_span(TURN, session_id=CONVERSATION)
     try:
-        with use_turn_span(handle):
+        with turn_segment(TURN, session_id=CONVERSATION):
             await surface.call_tool(tool=ToolId(server="data-mcp", name="sources"), arguments={})
     finally:
         await surface.aclose()
-    end_turn_span(handle)
     await flush_telemetry()
 
     # Control: the call reached the server and its span is in the turn's trace.
-    (turn,) = [span for span in fake_langfuse.spans() if span.name == "turn"]
+    (turn,) = [span for span in fake_langfuse.spans() if span.name == "turn.segment"]
     (span,) = _tool_call_spans(fake_langfuse, "sources")
     assert span.trace_id == turn.trace_id
     assert _attribute(span, "session.id") is None

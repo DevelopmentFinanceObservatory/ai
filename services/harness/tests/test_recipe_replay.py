@@ -1,7 +1,8 @@
 """`harness.recipe_replay`: a stored recipe computed again on newer data.
 
-The verbs are analysis-mcp's own functions behind a double that counts each call,
-so the frames, traces and pairs are the ones a deployment stores. The mint is
+The verbs are analysis-mcp's in-process verbs, replayed from what they stored
+(`stored_verbs`), behind a double that counts each call, so the frames, traces and
+pairs are the ones those verbs stored. The mint is
 `Dataset`, which registers a dataset's current frame as data-mcp's mint does.
 apis is `FakeApis` behind `httpx2.MockTransport`, and the publisher is
 presentation-mcp's `PlatformAssembler.publish_frame` over it. The mounted
@@ -19,11 +20,16 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from analysis_mcp.execution_identity import current_execution_identity
-from analysis_mcp.filter_tool import filter_verb
-from analysis_mcp.growth_tool import growth
-from analysis_mcp.join_tool import join
-from analysis_mcp.rolling_tool import resolve_anchor
+from common.caller import (
+    CALLER_PRINCIPAL_HEADER,
+    SURFACE_HEADER,
+    conversation_caller,
+    current_caller,
+    current_turn,
+    set_supplied_caller,
+    set_supplied_turn,
+    vouched_caller_headers,
+)
 from common.live_apis import DatasetVersion
 from common.materialisation import (
     FrameRef,
@@ -35,6 +41,7 @@ from common.materialisation import (
 )
 from common.recipe import build_recipe, replay_key
 from common.row_budget import RowBudget
+from compiler.caller_clients import CallerTurn, caller_transport
 from data_mcp.deadline import CallDeadline
 from data_mcp.frame_materialisation import (
     KIND_COLUMNS,
@@ -47,6 +54,7 @@ from data_mcp.mint_recovery import recover_mint_record
 from data_mcp.operations import QueuedOperation
 from dfo_frame_grammar import Frame
 from fastmcp.tools import ToolResult
+from harness.conversation import current_caller_turn, current_conversation_id, current_turn_id
 from harness.recipe_replay import Pending, Refused, Replayed, replay_recipe
 
 from .replay_support import (
@@ -64,6 +72,7 @@ from .replay_support import (
     reporter_rows,
     yearly,
 )
+from .stored_verbs import EXECUTION_IDENTITY, filter_verb, growth, join, resolve_anchor
 
 _TOOLS = {"filter": filter_verb, "growth": growth, "join": join, "resolve_anchor": resolve_anchor}
 # A second dataset, minted from the same frame as `SPEC`.
@@ -225,7 +234,7 @@ class Scene:
         self.tools = Tools()
         self.apis = FakeApis()
         # The verbs are analysis-mcp's in-process functions, so apis names their engine.
-        self.apis.execution_identity = dataclasses.asdict(current_execution_identity())
+        self.apis.execution_identity = dataclasses.asdict(EXECUTION_IDENTITY)
         self.assembler = self.apis.assembler()
         self.budget = RowBudget(max_rows=100_000)
 
@@ -341,6 +350,7 @@ class Scene:
                     "publish": self.assembler.publish_frame,
                     "row_budget": self.budget,
                     "mint_root": self.dataset,
+                    "surface": "studio",
                     **arguments,
                 },
             )
@@ -409,6 +419,74 @@ async def test_a_replay_on_moved_data_publishes_the_new_frame_under_the_same_nor
     assert scene.tools.names == ["filter", "growth"]
 
 
+type Wire = tuple[frozenset[tuple[str, str]], ...]
+
+
+def shared_wire(surface: str) -> Wire:
+    """What shared work serving `surface` puts on the wire (`wire_identity`): the
+    surface alone to the MCP servers, the principal and the surface on an
+    in-process dfo-apis call, and nothing on one to a door that names the caller
+    an allowance counts against."""
+    return (
+        frozenset({(SURFACE_HEADER, surface)}),
+        frozenset({(CALLER_PRINCIPAL_HEADER, "p"), (SURFACE_HEADER, surface)}),
+        frozenset(),
+    )
+
+
+SHARED_WIRE: Wire = shared_wire("studio")
+
+
+def wire_identity() -> Wire:
+    """The identity headers the current context sends: on the harness's MCP
+    requests (`current_caller_turn` through `caller_transport`), then on an
+    in-process dfo-apis call of a process holding principal `p`, to a door that
+    only logs the caller and to one that names it."""
+    caller = current_caller_turn()
+    mcp = caller_transport(
+        "http://mcp.test/mcp",
+        caller=caller.caller,
+        turn=caller.turn,
+        surface=caller.surface,
+        auth=None,
+    )
+    return (
+        frozenset(mcp.headers.items()),
+        frozenset(vouched_caller_headers("p").items()),
+        frozenset(vouched_caller_headers("p", caller_required=True).items()),
+    )
+
+
+@pytest.mark.parametrize("surface", ["studio", "website"])
+async def test_a_replays_verbs_name_no_caller_or_turn_of_the_request_that_started_it(
+    scene: Scene, surface: str
+) -> None:
+    """Every slot reaching a node joins one task, so the verbs it calls carry no
+    caller or turn, supplied or from the conversation the MCP clients read:
+    neither belongs to the shared work. They name the surface the replay serves
+    on the MCP hop and to dfo-apis, `website` for a share the website refreshes,
+    and nothing to a door that names the caller."""
+    _, recipe = await scene.fixed()
+    scene.dataset.move(SECOND_VALUES)
+    seen: list[tuple[str, str | None, str | None, CallerTurn, Wire]] = []
+    scene.tools.after = lambda name: seen.append(
+        (name, current_caller(), current_turn(), current_caller_turn(), wire_identity())
+    )
+    set_supplied_caller(conversation_caller("user-1/conv-a"))
+    set_supplied_turn("tr_" + "1" * 16)
+    current_conversation_id.set("user-1/conv-a")
+    current_turn_id.set("tr_" + "1" * 16)
+    assert current_caller_turn().caller is not None  # the control: the request names it
+
+    replayed = await scene.replay(recipe, surface=surface)
+
+    assert isinstance(replayed, Replayed), replayed
+    assert seen == [
+        ("filter", None, None, CallerTurn(None, None, surface), shared_wire(surface)),
+        ("growth", None, None, CallerTurn(None, None, surface), shared_wire(surface)),
+    ]
+
+
 @pytest.mark.parametrize(
     "recorded",
     [
@@ -443,7 +521,7 @@ async def test_a_flow_root_minted_with_kinds_keeps_the_stored_normal_form(
     assert replayed.recipe["replay_key"] == replay_key(
         normal_form_hash=recipe["normal_form_hash"],
         root_datasets=[current.model_dump()],
-        execution_identities=[current_execution_identity().canonical_string()],
+        execution_identities=[EXECUTION_IDENTITY.canonical_string()],
     )
 
 
@@ -513,6 +591,18 @@ async def test_a_replay_of_unmoved_data_names_the_frame_already_published(scene:
     assert replayed.newly_published is False
     assert scene.tools.calls == []
     assert len(scene.apis.published()) == posts
+
+
+async def test_a_root_with_a_member_this_build_does_not_know_is_replayed(scene: Scene) -> None:
+    """A recipe published by a build whose mint record carries a later member replays:
+    the roots are read as `read_mint_record` reads a stored record."""
+    original, recipe = await scene.fixed()
+    recipe = {**recipe, "roots": [{**root, "a_later_member": "x"} for root in recipe["roots"]]}
+
+    replayed = await scene.replay(recipe)
+
+    assert isinstance(replayed, Replayed)
+    assert replayed.frame == original
 
 
 async def test_without_an_execution_identity_from_dfo_apis_every_verb_is_called(
@@ -595,40 +685,36 @@ async def test_a_refusal_that_names_a_wait_is_pending(scene: Scene) -> None:
     assert await scene.replay(recipe) == Pending(retry_after_s=4.0, reason="busy")
 
 
-async def test_rows_the_refresh_budget_has_no_room_for_are_pending_and_no_verb_is_called(
+async def test_rows_the_refresh_budget_has_no_room_for_are_pending_and_nothing_is_published(
     scene: Scene,
 ) -> None:
     _, recipe = await scene.fixed()
     scene.dataset.move(SECOND_VALUES)
+    posts = len(scene.apis.published())
 
     # Another replay holds the whole budget, and gives it back.
     with scene.budget.claim(scene.budget.max_rows):
         assert await scene.replay(recipe) == Pending(retry_after_s=2.0, reason="row_budget")
-        assert scene.tools.calls == []
+        assert len(scene.apis.published()) == posts
     assert isinstance(await scene.replay(recipe), Replayed)
 
 
-@pytest.mark.parametrize(
-    ("recipe_of", "stage"),
-    [
-        # A rolling recipe claims its roots' rows together for the anchor call.
-        pytest.param(Scene.rolling, "anchor", id="roots-of-a-rolling-recipe"),
-        pytest.param(Scene.fixed, "verb", id="inputs-of-a-verb"),
-    ],
-)
-async def test_rows_past_the_whole_refresh_budget_are_refused_for_good(
-    scene: Scene, recipe_of: Any, stage: str
+async def test_rows_past_the_whole_refresh_budget_are_refused_for_good_at_the_publish(
+    scene: Scene,
 ) -> None:
-    """No later call could claim them, so the replay must not answer `Pending`."""
-    _, recipe = await recipe_of(scene)
+    """No later call could claim them, so the replay must not answer `Pending`. The
+    verbs compute on dfo-apis' analysis runner and claim no rows, so they run."""
+    _, recipe = await scene.fixed()
     scene.dataset.move(SECOND_VALUES)
     scene.budget = RowBudget(max_rows=1)
+    posts = len(scene.apis.published())
 
     refused = await scene.replay(recipe)
 
     assert isinstance(refused, Refused), refused
-    assert (refused.code, refused.stage) == ("rows_over_refresh_budget", stage)
-    assert scene.tools.calls == []
+    assert (refused.code, refused.stage) == ("rows_over_refresh_budget", "publish")
+    assert scene.tools.calls != []
+    assert len(scene.apis.published()) == posts
 
 
 async def test_a_dataset_joined_beside_a_rolling_step_is_not_read_for_its_period(
@@ -714,6 +800,40 @@ async def test_a_kind_column_sum_registered_under_a_salted_pair_is_recognised_as
     assert isinstance(outcome, Refused)
     assert (outcome.stage == "mint") is (not stamp_kept)
     assert (outcome.code == "root_rendering_ambiguous") is (not stamp_kept)
+
+
+@pytest.mark.parametrize("digest_kept", [True, False], ids=["digest-kept", "digest-dropped"])
+async def test_a_sum_registered_under_a_pair_naming_its_files_digest_is_recognised_as_the_sum(
+    scene: Scene, digest_kept: bool
+) -> None:
+    """A root whose pair names the groupby and the digest of the file it was read from
+    must hand the digest back to `frame_ref_for` to be seen as the sum. Without it the
+    pair is not reproduced and the root reads as unsummed once a second StatVar
+    contributes."""
+    digest = "sha256:" + "d" * 64
+    _, recipe = await scene.fixed(OPTIONS | {"groupby": _GROUPBY})
+    (root,) = recipe["roots"]
+    root["frame"] = frame_ref_for(
+        spec_id=root["dataset"]["spec_id"],
+        content_version=root["dataset"]["content_version"],
+        groupby=_GROUPBY,
+        artifact_digest=digest,
+    ).model_dump()
+    if digest_kept:
+        root["artifact_digest"] = digest
+    scene.dataset.content_version = SECOND
+    scene.dataset.frame = Frame.build(
+        role_keys=["reporter"],
+        rows=reporter_rows(SECOND_VALUES) + reporter_rows(SECOND_VALUES, stat_var="dcid:Other"),
+    )
+    # A root past the mint stage reaches the verb, which answers busy.
+    scene.tools.answers["filter"] = _BUSY
+
+    outcome = await scene.replay(recipe)
+
+    ambiguous = isinstance(outcome, Refused) and outcome.code == "root_rendering_ambiguous"
+    assert ambiguous is (not digest_kept)
+    assert isinstance(outcome, Pending) is digest_kept
 
 
 async def test_a_recovered_one_stat_var_sum_that_now_holds_two_is_refused(scene: Scene) -> None:
@@ -991,7 +1111,7 @@ def test_the_replayer_imports_no_model_planner_or_session_code() -> None:
     probe = (
         "import sys, harness.recipe_replay\n"
         "roots = ('planner', 'compiler', 'executor', 'translator', 'orchestrator', "
-        "'google.adk', 'google.genai', 'sqlalchemy', 'asyncpg')\n"
+        "'pydantic_ai', 'google.genai', 'sqlalchemy', 'asyncpg')\n"
         "loaded = sorted(m for m in sys.modules if m.split('.')[0] == 'harness' "
         "or any(m == r or m.startswith(r + '.') for r in roots))\n"
         "print(loaded)"

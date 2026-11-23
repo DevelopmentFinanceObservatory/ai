@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from common.refusal import MINTED_FRAME, SPEC_NOT_REGISTERED
 from compiler.compile import CompileIssueCode
 from data_mcp.tool_errors import ToolErrorCode
 from executor.classify import ExecutorCode
@@ -148,6 +149,9 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
         "a calculation was asked of data in a shape it cannot read"
     ),
     CompileIssueCode.RANK_AXIS_REQUIRED: "a ranking needs to know what it ranks",
+    CompileIssueCode.RANK_REDUCTION_REQUIRED: (
+        "a ranking needs each entry's figures combined into one before it can order them"
+    ),
     CompileIssueCode.SHARE_AXIS_REQUIRED: "a share needs to know what it is a share of",
     CompileIssueCode.SHARE_KEY_UNKNOWN: "a share names a part the data does not hold",
     CompileIssueCode.QUOTIENT_AXIS_REQUIRED: "a division needs to know which values to pair",
@@ -736,6 +740,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
         {
             "over_ceiling",
             "frame_too_large",
+            "collection_probe_ceiling",
             "resource_exhausted",
             "payload_too_large",
         }
@@ -768,6 +773,10 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "facet_heterogeneous",
             "cross_frame_facet_mismatch",
             "quotient_of_no_key_matched",
+            "compare_no_key_matched",
+            "sum_of_no_key_matched",
+            "excluded_by_registry",
+            "rate_coverage_gap",
             "share_of_key_unmatched",
             "share_of_grain_mismatch",
             "rolling_anchor_unresolved",
@@ -791,6 +800,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "filter_unit_conversion_unsupported",
             "composed_unit_sum_unsupported",
             "quotient_of_side_unit_unsupported",
+            "recipe_not_declared",
         }
     ),
     FailureClass.CANNOT_CALCULATE: frozenset(
@@ -807,6 +817,8 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "rolling_reanchor_unavailable",
             "derived_input_unusable",
             "rendering_not_recorded",
+            "several_members",
+            "role_signature_incompatible",
             "join_output_collision",
             "grain_ambiguous",
             "spec_not_exportable",
@@ -835,6 +847,12 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "surface_changed",
             "source_drift",
             "stat_var_family_moved",
+            "artifact_expired",
+            "snapshot_not_found",
+            "snapshot_revoked",
+            "recipe_not_found",
+            "spec_not_found",
+            "definition_not_reproducible",
             "not_found",
             HarnessCode.REDISCOVERY_NEEDED,
             HarnessCode.RESOLVED_REVISION_UNAVAILABLE,
@@ -857,6 +875,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "scope_entities_wider",
             "stat_var_unresolved",
             "member_not_resolvable",
+            "members_not_held",
             "open_axis_unresolved",
             "statistics_unavailable",
             "authorisation_mismatch",
@@ -904,6 +923,9 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "place_levels_mixed",
             "frame_integrity_failed",
             "share_id_taken",
+            "rolling_populations_differ",
+            "identity_collision",
+            "identity_quarantined",
             ExecutorCode.MALFORMED_REFUSAL,
             HarnessCode.UNKNOWN_TOOL,
             HarnessCode.RUN_RECORD_UNREADABLE,
@@ -926,6 +948,8 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "skill_resource_not_found",
             "refresh_not_permitted",
             "share_import_not_permitted",
+            "facet_binding_unsupported",
+            "verify_not_permitted",
             HarnessCode.ROLLING_REPLAY_NOT_CONFIGURED,
             HarnessCode.TOOL_NOT_CONFIGURED,
             HarnessCode.PUBLISH_UNAVAILABLE,
@@ -1020,7 +1044,11 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
     ),
     ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN: FailureText(
         "Fewer than half of these series now report the year the plan counted from",
-        "so ask again to plan from the latest year they report",
+        "so ask again from the latest year",
+        filled=(
+            "The latest year at least half of these series report is {fill}, before the year "
+            "the plan counted from"
+        ),
     ),
     HarnessCode.EMPTY_RESULT: FailureText(
         "The data holds no figures for the places and period asked",
@@ -1118,6 +1146,7 @@ CEILING_SENTENCES: Mapping[str, FailureText] = {
 _FILL_KEYS: Mapping[str, str] = {
     "binding_invalid": "value",
     HarnessCode.TITLE_QUOTES_ROLLING_PERIOD: "period",
+    ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN: "anchor",
 }
 
 # A fill-in the Activity log would cut the sentence at, or an identifier (a
@@ -1164,15 +1193,10 @@ def failure_sentence(
     """
     known = isinstance(retry_mode, str) and retry_mode in set(RetryMode)
     mode = RetryMode(retry_mode) if known else None
-    failure_class = FAILURE_CLASS.get(code) if isinstance(code, str) else None
-    if failure_class is None:
+    text = _failure_text(code, fix)
+    if text is None:
         logger.warning("no failure sentence for code %r (retry_mode %r)", code, retry_mode)
         return RETRY_MODE_SENTENCES[mode] if mode else f"{_NO_CAUSE}."
-    text = (
-        CODE_SENTENCES.get(str(code))
-        or _ceiling_text(str(code), fix)
-        or FAILURE_SENTENCES[failure_class]
-    )
     advice = text.advice or (_RETRY_ADVICE[mode] if mode else None)
     tail = f", {advice}." if advice else "."
     fill = _fill(str(code), fix)
@@ -1181,6 +1205,67 @@ def failure_sentence(
         if len(filled) <= MAX_SENTENCE_CHARS:
             return filled
     return text.cause + tail
+
+
+def failure_cause(code: object, fix: Mapping[str, object] | None = None) -> str:
+    """What happened for a failure `code`, as one sentence without advice.
+
+    The cause `failure_sentence` opens with, for a caller that offers its own
+    way past the failure, such as a new plan. A code in no class reads
+    `_NO_CAUSE`.
+    """
+    text = _failure_text(code, fix)
+    if text is None:
+        return f"{_NO_CAUSE}."
+    fill = _fill(str(code), fix)
+    if text.filled and fill:
+        filled = text.filled.format(fill=fill) + "."
+        if len(filled) <= MAX_SENTENCE_CHARS:
+            return filled
+    return text.cause + "."
+
+
+def _failure_text(code: object, fix: Mapping[str, object] | None) -> FailureText | None:
+    """The text a failure `code` reads: its kind's, its own, its ceiling's, or
+    its class's. A code in no class has none, and the result is None."""
+    failure_class = FAILURE_CLASS.get(code) if isinstance(code, str) else None
+    if failure_class is None:
+        return None
+    return (
+        _kind_text(str(code), fix)
+        or CODE_SENTENCES.get(str(code))
+        or _ceiling_text(str(code), fix)
+        or FAILURE_SENTENCES[failure_class]
+    )
+
+
+# The text of a code by the `fix.kind` that says whose failure it is
+# (`common.refusal`), where the code's own class would misstate it.
+KIND_SENTENCES: Mapping[tuple[str, str], FailureText] = {
+    (ToolErrorCode.UPSTREAM_ERROR, SPEC_NOT_REGISTERED): FailureText(
+        "The platform refused this definition of the data", "so ask for it from another source"
+    ),
+    # The minted copy reads back wrong, and a narrower request mints another.
+    (ToolErrorCode.FRAME_INTEGRITY_FAILED, MINTED_FRAME): FailureText(
+        "The stored copy of this data failed a check",
+        "so ask about fewer places or a shorter period",
+    ),
+}
+
+
+def _kind_text(code: str, fix: Mapping[str, object] | None) -> FailureText | None:
+    """The text of `code` by the `fix.kind` its refusal names, when it names one."""
+    kind = (fix or {}).get("kind")
+    return KIND_SENTENCES.get((code, kind)) if isinstance(kind, str) else None
+
+
+def worded_fix(code: object, fix: Mapping[str, object]) -> dict[str, object]:
+    """The members of a refusal's `fix` the sentence for `code` reads: the
+    kind (`_kind_text`), the ceiling (`_ceiling_text`) and the fill-in
+    (`_FILL_KEYS`). A caller that keeps a refusal to word it later keeps only
+    these, and none of the payload written for the model."""
+    read = {"kind", "ceiling_kind", _FILL_KEYS.get(str(code), "kind")}
+    return {key: value for key, value in fix.items() if key in read}
 
 
 def _ceiling_text(code: str, fix: Mapping[str, object] | None) -> FailureText | None:

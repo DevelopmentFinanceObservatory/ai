@@ -1,5 +1,4 @@
-"""`common.place_type`: the levels of every place typed Country beside another type, and
-whether several places sit at one level.
+"""`common.place_type`: the levels of every place typed Country beside another type.
 
 The cells are the `typeOf` values the development mixer holds for the places GDP
 (`Amount_EconomicActivity_GrossDomesticProduction_Nominal`, 1,996 places) and female life
@@ -12,7 +11,6 @@ import pytest
 from common.place_type import (
     PARTY_KINDS,
     UNTYPED,
-    at_one_level,
     enrichment_columns,
     enrichment_role,
     levels_of,
@@ -64,31 +62,6 @@ def test_a_place_sits_at_each_of_its_other_types() -> None:
         "EurostatNUTS2",
     }
     assert levels_of(UNTYPED) == frozenset()
-
-
-def _uncounted() -> int:
-    raise AssertionError("the places need no counting")
-
-
-def test_several_places_sit_at_one_level_when_they_share_a_place_level() -> None:
-    assert at_one_level(["Country", *_TERRITORIES.values()], place_count=_uncounted)
-    assert at_one_level(["Country,Place"], place_count=_uncounted)
-    assert at_one_level([], place_count=_uncounted)
-    assert not at_one_level(["Place", "Country,Place"], place_count=_uncounted)
-    assert not at_one_level(
-        ["Country", "AdministrativeArea1,Country,EurostatNUTS1,Region"], place_count=_uncounted
-    )
-
-
-@pytest.mark.parametrize("cell", ["Place", "ProvisionalNode", "Region", UNTYPED])
-def test_one_place_sits_at_one_level_and_several_sharing_no_place_level_do_not(cell: str) -> None:
-    assert at_one_level([cell], place_count=lambda: 1)
-    assert not at_one_level([cell], place_count=lambda: 2)
-
-
-def test_places_of_a_type_whose_places_nest_do_not_sit_at_one_level() -> None:
-    # Data Commons types both Sub-Saharan Africa and the Eastern Africa it contains UNGeoRegion.
-    assert not at_one_level(["UNGeoRegion"], place_count=lambda: 2)
 
 
 @pytest.mark.parametrize(

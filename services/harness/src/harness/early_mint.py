@@ -2,7 +2,7 @@
 
 Approving a card starts its run, and the run's first wait is the mint behind
 each retrieval. `EarlyMints.offer` sends each retrieval's `get_data` when the
-`approve` node offers the card (`harness.graph.planning.approve`), so apis
+`approve` node offers the card (`harness.graph.approve.offer`), so apis
 has the frame, or is building it, by the time the run asks again with the
 same arguments. Every card passes through that offer: a first draft, an
 amendment's or a run's replan, a switch, and a re-offer after a refused
@@ -41,7 +41,7 @@ the revision already started starts nothing. A new revision replaces the
 record, and the replaced set's calls already sent run on. A call still
 waiting for one of its card's slots is withdrawn, unsent and logged
 `withdrawn`, when a newer revision is offered, the card is approved
-(`withdraw`, called from `harness.graph.planning.approve`), or its
+(`withdraw`, called from `harness.graph.approve.decide`), or its
 conversation is evicted past `MAX_CALLERS`: the run then asks for the frames
 itself. Nothing here touches the card,
 the plan or the run ledger. Each call logs one line with its spec_id, the
@@ -124,12 +124,18 @@ class EarlyMints:
         # Every call not yet finished, so none is collected mid-flight and
         # `aclose` can cancel them.
         self._tasks: set[asyncio.Task[None]] = set()
+        # Set by `aclose`, after which an offer starts nothing.
+        self._closed = False
 
     def offer(self, plan: Plan) -> None:
         """Start `plan`'s retrievals, unless its revision is the one this
         conversation last started. Returns at once. The calls run as tasks of
         their own, in the current context, so they name the conversation's
-        caller."""
+        caller. Once `aclose` has run, an offer, such as one a cut segment's
+        owed work makes at shutdown, is logged and starts nothing."""
+        if self._closed:
+            logger.warning("early mint: an offer after shutdown started nothing")
+            return
         if plan.workflow is None:
             return
         revision = plan_revision(plan)
@@ -215,7 +221,9 @@ class EarlyMints:
         )
 
     async def aclose(self) -> None:
-        """Cancel every call still running, at shutdown."""
+        """Cancel every call still running, at shutdown, and refuse every
+        later offer."""
+        self._closed = True
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()

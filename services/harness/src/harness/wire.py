@@ -5,13 +5,14 @@ prose doc explains the protocol; this module is what the server actually
 validates and emits, and the two ship together. Deltas the repo doc
 indexes that change a shape are marked on the field they touch.
 
-Four request kinds arrive over POST, discriminated on `kind`
+Five request kinds arrive over POST, discriminated on `kind`
 (`STUDIO_REQUEST_ADAPTER`): `turn.request`, `interrupt.response`,
-`composition.mutate`, `turn.cancel`. Twelve frame types leave over SSE, discriminated on
-`event` (`STUDIO_FRAME_ADAPTER`): message.delta, message.complete,
-plan.proposed, plan.versioned, activity.step, component.created,
-component.revised, composition.updated, elicitation.request, suggestions,
-error, done.
+`composition.mutate`, `turn.cancel`, `turn.resume`. `GET /api/studio/state`
+answers `ConversationRead`. Thirteen frame types leave over SSE,
+discriminated on `event` (`STUDIO_FRAME_ADAPTER`): message.delta,
+message.complete, plan.proposed, plan.versioned, plan.approved,
+activity.step, component.created, component.revised, composition.updated,
+elicitation.request, suggestions, error, done.
 
 Every model forbids unknown members, mirroring the schemas'
 `additionalProperties: false`, so a frame the contract doesn't describe
@@ -26,11 +27,9 @@ its own (`harness.seeds.seeds_slot`),
 so one bad seed fails its own step rather than the request.
 
 `conversation_id` is delta 5: the frontend client mints the conversation
-identifier and sends `Authorization: Bearer <token>` alongside it. The
-`session_id` is accepted as a deprecated parsing alias in v1
-(the fixtures still use it); serialisation always writes
-`conversation_id`. The bearer token itself travels in the header, never in
-these bodies -- see `harness.auth`.
+identifier and sends `Authorization: Bearer <token>` alongside it. The bearer
+token itself travels in the header, never in these bodies -- see
+`harness.auth`.
 """
 
 from __future__ import annotations
@@ -42,7 +41,6 @@ from typing import Annotated, Any, Literal, cast, get_args
 
 from common.place_type import PartyClass
 from pydantic import (
-    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -341,11 +339,6 @@ class CompositionManifest(_WireModel):
 # ---------------------------------------------------------------------------
 # Requests -- discriminated on `kind`
 # ---------------------------------------------------------------------------
-
-# Delta 5: the client mints `conversation_id`; `session_id` is
-# accepted as a deprecated parsing alias in v1. Serialisation always
-# writes `conversation_id`.
-_CONVERSATION_ID = Field(validation_alias=AliasChoices("conversation_id", "session_id"))
 
 
 class ComponentRefIntent(StrEnum):
@@ -812,18 +805,118 @@ class Seed(_WireModel):
     operations: list[SeedOperation] = Field(default_factory=list, max_length=MAX_SEED_OPERATIONS)
 
 
+class UnitPrices(StrEnum):
+    CURRENT = "current"
+    CONSTANT = "constant"
+
+
+def _base_year_goes_with_constant(prices: UnitPrices, base_year: int | None) -> None:
+    if (prices is UnitPrices.CONSTANT) != (base_year is not None):
+        raise ValueError("base_year is set when prices is constant, and only then")
+
+
+class UnitCurrency(_WireModel):
+    """One currency a unit offer lists. `name` is the noun Search uses
+    ("US dollars"); `prices` are the bases it serves; the base-year bounds
+    are set together, and only when `constant` is among `prices`."""
+
+    code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    prices: list[UnitPrices] = Field(min_length=1)
+    base_year_min: int | None = None
+    base_year_max: int | None = None
+
+    @model_validator(mode="after")
+    def _base_year_bounds_go_together(self) -> UnitCurrency:
+        if (self.base_year_min is None) != (self.base_year_max is None):
+            raise ValueError("base_year_min and base_year_max are set together")
+        if self.base_year_min is None or self.base_year_max is None:
+            return self
+        if UnitPrices.CONSTANT not in self.prices:
+            raise ValueError("base-year bounds need constant among prices")
+        if self.base_year_min > self.base_year_max:
+            raise ValueError("base_year_min exceeds base_year_max")
+        return self
+
+
+class UnitChoice(_WireModel):
+    """A chosen unit: currency code, price basis, and the base year when
+    the basis is constant (and only then)."""
+
+    currency: str = Field(min_length=1)
+    prices: UnitPrices
+    base_year: int | None = None
+
+    @model_validator(mode="after")
+    def _base_year_iff_constant(self) -> UnitChoice:
+        _base_year_goes_with_constant(self.prices, self.base_year)
+        return self
+
+
+class UnitOffer(_WireModel):
+    """The units a question or a card offers: every offered currency, the
+    codes listed before "Change to any currency" (`presets`), and the unit
+    the chips start on. Whether `start` and the presets lie inside
+    `currencies` is the route's check, not the wire's."""
+
+    currencies: list[UnitCurrency] = Field(min_length=1)
+    presets: list[str]
+    start: UnitChoice
+
+
+class UnitChange(_WireModel):
+    """Set on a `component.created` frame whose card reads from one
+    convertible spec: that spec and the offer the card's unit can move
+    within. `offer.start` is the card's current unit."""
+
+    spec_id: str = Field(min_length=1)
+    offer: UnitOffer
+
+
+class ApplyUnit(_WireModel):
+    """A card's unit change, with no message text: the conversation turn
+    that drew the card as the client counts it (`turn`, from 1), the card
+    (`component_id`), the spec its `unit_change` names (`spec_id`) and the
+    unit it moves to. The route refuses it 422 `scope_choice_stale` when the
+    card is off the canvas or its `provenance.inputs[0]` names another spec,
+    and 422 `unit_not_offered` for a unit outside the card's offer or the
+    one it already shows; each refusal's pointer starts `/apply_unit`.
+    `turn` decides nothing."""
+
+    component_id: str = Field(min_length=1)
+    spec_id: str = Field(min_length=1)
+    turn: int = Field(ge=1)
+    unit: UnitChoice
+
+
 class ApplyChoice(_WireModel):
     """A suggestion chip the user clicked (`ApplyChoiceSuggestion`), echoed
-    whole: the scope choice, the option it moves to, the conversation turn
+    whole: the choice, the option it moves to, the conversation turn
     whose answer offered the chip (`turn`, from 1), and the spec_id of the
     reading it switches (`spec_id`). The route refuses it 422
     `scope_choice_stale` when a later turn answered, or when the choice's
-    newest reading is no longer `spec_id`."""
+    newest reading is no longer `spec_id`, or for a count chip when the part
+    reads a count other than that of `spec_id`."""
 
     choice_id: str = Field(min_length=1)
     option_id: str = Field(min_length=1)
     turn: int = Field(ge=1)
     spec_id: str = Field(min_length=1)
+
+
+class ClientFeature(StrEnum):
+    """A question form a client declares it renders (`TurnRequest.client_features`,
+    `InterruptResponse.client_features`): `unit_question`, a question whose
+    `input` is `unit`; `multi_select`, one whose `input` is `multi_select`."""
+
+    UNIT_QUESTION = "unit_question"
+    MULTI_SELECT = "multi_select"
+
+
+def declared_features(values: list[str]) -> frozenset[ClientFeature]:
+    """The features among `values` this release knows; an unknown value is ignored."""
+    known = {feature.value for feature in ClientFeature}
+    return frozenset(ClientFeature(value) for value in values if value in known)
 
 
 class TurnRequest(_WireModel):
@@ -850,13 +943,30 @@ class TurnRequest(_WireModel):
     with no message text: the turn applies the option to the reading the
     answer used, with no
     search (`harness.graph.switch.apply_stored_choice`). It cannot come with
-    a message, seeds or a card reference. A request carries `message` or
-    `apply_choice`.
+    a message, seeds or a card reference. `apply_unit` is the same for a
+    card's unit change (`ApplyUnit`) and cannot come with `apply_choice`. A
+    request carries `message`, `apply_choice` or `apply_unit`.
+
+    `client_features` names the question forms the client renders
+    (`ClientFeature`); a value the harness does not know is ignored. The
+    conversation keeps the set the latest request carrying the field
+    declared, and every question the turn asks, before and after a resume,
+    takes the forms it holds. A request without the field leaves the set
+    as it was, empty on a new conversation. A unit question becomes a `single_select` over whole units when
+    `unit_question` is missing, a `multi_select` one a `single_select` when
+    `multi_select` is missing (`harness.studio_translate._asked_question`).
+
+    `after_turn` is a precondition: the index of the turn this request
+    follows, as a state read reports it (0 before the first turn). The
+    request is refused 409 `edit_conflict` with `constraint_id`
+    `turn_moved` when the conversation's latest turn is another, checked
+    under the row lock every turn's claim takes, so of two pages sending the
+    same follow-up after turn N at most one begins a turn.
     """
 
     kind: Literal["turn.request"]
     schema_version: Literal[1]
-    conversation_id: str = _CONVERSATION_ID
+    conversation_id: str
     message: str = ""
     surface: Surface = Surface.STUDIO
     component_ref: ComponentRef | None = None
@@ -868,15 +978,29 @@ class TurnRequest(_WireModel):
     # with a composition.mutate "add" op (the Auto-add toggle).
     auto_add: bool = True
     apply_choice: ApplyChoice | None = None
+    apply_unit: ApplyUnit | None = None
+    after_turn: int | None = Field(default=None, ge=0)
+    client_features: list[str] | None = None
 
     @model_validator(mode="after")
     def _a_chip_comes_alone(self) -> TurnRequest:
-        """Refuse a request with neither `message` nor `apply_choice`, and an
-        `apply_choice` beside message text, seeds or a card reference."""
-        if self.apply_choice is None:
+        """Refuse a request with none of `message`, `apply_choice` and
+        `apply_unit`, two chips together, and a chip beside message text,
+        seeds or a card reference."""
+        chips = [
+            name
+            for name, value in (
+                ("apply_choice", self.apply_choice),
+                ("apply_unit", self.apply_unit),
+            )
+            if value is not None
+        ]
+        if not chips:
             if "message" not in self.model_fields_set:
-                raise ValueError("turn.request requires message or apply_choice")
+                raise ValueError("turn.request requires message, apply_choice or apply_unit")
             return self
+        if len(chips) > 1:
+            raise ValueError("apply_choice and apply_unit do not come together")
         stated = [
             name
             for name, value in (
@@ -887,7 +1011,7 @@ class TurnRequest(_WireModel):
             if value
         ]
         if stated:
-            raise ValueError(f"apply_choice does not take {', '.join(stated)}")
+            raise ValueError(f"{chips[0]} does not take {', '.join(stated)}")
         return self
 
     @model_validator(mode="after")
@@ -937,8 +1061,36 @@ class SkippedAnswer(_WireModel):
     kind: Literal["skipped"]
 
 
+class OptionsAnswer(_WireModel):
+    """The user ticked one or more of a multi-select question's options."""
+
+    kind: Literal["options"]
+    option_ids: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _option_ids_are_unique(self) -> OptionsAnswer:
+        if len(set(self.option_ids)) != len(self.option_ids):
+            raise ValueError(f"option ids repeat: {self.option_ids}")
+        return self
+
+
+class UnitAnswer(_WireModel):
+    """The user's unit for a unit question: `UnitChoice` with a `kind`."""
+
+    kind: Literal["unit"]
+    currency: str = Field(min_length=1)
+    prices: UnitPrices
+    base_year: int | None = None
+
+    @model_validator(mode="after")
+    def _base_year_iff_constant(self) -> UnitAnswer:
+        _base_year_goes_with_constant(self.prices, self.base_year)
+        return self
+
+
 ElicitationAnswer = Annotated[
-    OptionAnswer | TextAnswer | SkippedAnswer, Field(discriminator="kind")
+    OptionAnswer | OptionsAnswer | UnitAnswer | TextAnswer | SkippedAnswer,
+    Field(discriminator="kind"),
 ]
 
 
@@ -955,13 +1107,15 @@ class InterruptResponse(_WireModel):
     `PlanProposed.revision` the user saw), all three. An `approve` may carry
     `plan_revision` alone, and is refused when it is not the paused plan's;
     without one it approves the paused plan, as older clients do. Every
-    other decision carries none of them. The response to this POST is a NEW SSE stream
-    continuing the same turn (delta 1).
+    other decision carries none of them. `client_features` is
+    `TurnRequest.client_features`: when present, it replaces the set the
+    conversation keeps for the questions the resumed turn asks next. The response to this
+    POST is a NEW SSE stream continuing the same turn (delta 1).
     """
 
     kind: Literal["interrupt.response"]
     schema_version: Literal[1]
-    conversation_id: str = _CONVERSATION_ID
+    conversation_id: str
     interrupt_id: str
     decision: InterruptDecision
     # The amendment text of a plan's `amend`. An elicitation opened before
@@ -976,6 +1130,7 @@ class InterruptResponse(_WireModel):
     choice_id: str | None = Field(default=None, min_length=1)
     option_id: str | None = Field(default=None, min_length=1)
     plan_revision: str | None = Field(default=None, min_length=1)
+    client_features: list[str] | None = None
 
     @model_validator(mode="after")
     def _switch_members_come_with_switch(self) -> InterruptResponse:
@@ -1075,7 +1230,7 @@ class CompositionMutation(_WireModel):
 
     kind: Literal["composition.mutate"]
     schema_version: Literal[1]
-    conversation_id: str = _CONVERSATION_ID
+    conversation_id: str
     # Optional (delta 11): omitted targets the conversation's current
     # composition -- and, for `add` ops, bootstraps an empty one when the
     # conversation has no canvas yet (auto_add=false's first component).
@@ -1092,11 +1247,23 @@ class CancelRequest(_WireModel):
 
     kind: Literal["turn.cancel"]
     schema_version: Literal[1]
-    conversation_id: str = _CONVERSATION_ID
+    conversation_id: str
+
+
+class ResumeRequest(_WireModel):
+    """POST /api/studio/resume -- carry on the conversation's open turn
+    `turn_index` when it is running and no segment holds it: one whose
+    client left while it ran. The response is a NEW SSE stream continuing
+    the turn from where it stopped."""
+
+    kind: Literal["turn.resume"]
+    schema_version: Literal[1]
+    conversation_id: str
+    turn_index: int = Field(ge=1)
 
 
 StudioRequest = Annotated[
-    TurnRequest | InterruptResponse | CompositionMutation | CancelRequest,
+    TurnRequest | InterruptResponse | CompositionMutation | CancelRequest | ResumeRequest,
     Field(discriminator="kind"),
 ]
 
@@ -1170,7 +1337,10 @@ class PlanDecision(_WireModel):
     fields (`harness.plan_display.switchable_decision`) has `choice_id`
     `"decision/<slot>"` and option ids derived from each option's label
     (`harness.plan_display.decision_option_id`), the same on every plan
-    that offers that label.
+    that offers that label. The decision stating how pinned sources' flows
+    are counted has `choice_id` `"<requirement id>:count"`
+    (`harness.plan_display.count_choice_id`), one row for every source
+    counted the same way, and its options' ids derived the same way.
     A decision without `choice_id` cannot be switched.
     """
 
@@ -1445,6 +1615,12 @@ class ComponentCreated(_WireModel):
     fact_summary: FactSummary
     provenance: Provenance
     created_from: CreatedFrom | None = None
+    # Set only when the card reads from one convertible spec.
+    unit_change: UnitChange | None = None
+    # The card this one took the canvas slot of (a unit change, or an Edit Card
+    # rebuild): the new card holds that card's block, pin, card meta and layout
+    # hint membership, and the old card leaves the canvas.
+    replaces: str | None = None
 
 
 def component_created(component: dict[str, Any], *, step_id: str) -> ComponentCreated:
@@ -1578,6 +1754,7 @@ class ElicitationInput(StrEnum):
     SINGLE_SELECT = "single_select"
     MULTI_SELECT = "multi_select"
     TEXT = "text"
+    UNIT = "unit"
 
 
 class ElicitationOption(_WireModel):
@@ -1607,6 +1784,17 @@ class ElicitationQuestion(_WireModel):
     # wrote it for the person settling the choice. `None` when no option is
     # recommended.
     rationale: str | None = None
+    # The unit question's offer: set when `input` is `unit`, and only then.
+    # Such a question has no `options` and takes no free text.
+    unit: UnitOffer | None = None
+
+    @model_validator(mode="after")
+    def _unit_goes_with_unit_input(self) -> ElicitationQuestion:
+        if (self.input is ElicitationInput.UNIT) != (self.unit is not None):
+            raise ValueError("unit is set when input is unit, and only then")
+        if self.unit is not None and (self.options is not None or self.allow_free_text):
+            raise ValueError("a unit question has no options and no free text")
+        return self
 
 
 class ElicitationRequest(_WireModel):
@@ -1637,11 +1825,20 @@ class SuggestionItem(_WireModel):
 
 
 class ApplyChoiceSuggestion(_WireModel):
-    """A chip that moves one scope choice of the answer's readings to another
+    """A chip that moves one choice of the answer's readings to another
     option: a click sends a `TurnRequest` with `apply_choice {choice_id,
-    option_id, turn, spec_id}` and no message. `label` is the option's label,
-    `turn` the conversation turn whose answer offers the chip, counted from 1,
-    and `spec_id` the reading the chip switches."""
+    option_id, turn, spec_id}` and no message. A scope chip moves a scope
+    choice (`choice_id` `"<spec_id>:<axis>"`). A count chip
+    (`harness.turn_records.count_choice_id`, `choice_id`
+    `"<spec_id>:count"`) switches the part to another count Search offered,
+    whose spec_id is `option_id`. `label` is the option's label, such as
+    "health, CRS 120 alone" on the sector axis, "including imputed
+    multilateral" on the provider axis or "net disbursements" for another
+    count, after the part's name (`harness.turn_records.part_name`) and a
+    colon when the answer's chips span several parts. The client builds the
+    chip's action text from it. `turn` is the conversation turn whose answer
+    offers the chip, counted from 1, and `spec_id` the reading the chip
+    switches."""
 
     kind: Literal["apply_choice"]
     label: str
@@ -1653,8 +1850,9 @@ class ApplyChoiceSuggestion(_WireModel):
 
 class Suggestions(_WireModel):
     """Follow-up chips. Empty unless the answer used readings with scope
-    choices, which give one `ApplyChoiceSuggestion` per other option it can
-    serve (`harness.turn_records.scope_chips`)."""
+    choices or other counts, which give one `ApplyChoiceSuggestion` per
+    other option or count Search can serve
+    (`harness.turn_records.scope_chips`)."""
 
     event: Literal["suggestions"]
     seq: int = Field(ge=0)
@@ -1675,12 +1873,18 @@ class Done(_WireModel):
     """Turn complete. `composition` is the conversation's current manifest,
     absent when the conversation has no canvas yet. Emitted exactly once per
     turn, on the segment that finishes it -- an interrupted segment ends
-    with its pausing frame instead."""
+    with its pausing frame instead.
+
+    `new_question` is set when the user's `amend` text on a plan card asked
+    a different question: the turn ends with the plan set aside unapproved,
+    and the client sends the text as the conversation's next
+    `turn.request`."""
 
     event: Literal["done"]
     seq: int = Field(ge=0)
     trace_id: str
     composition: CompositionManifest | None = None
+    new_question: str | None = None
 
 
 StudioFrame = Annotated[
@@ -1701,3 +1905,118 @@ StudioFrame = Annotated[
 ]
 
 STUDIO_FRAME_ADAPTER: TypeAdapter[StudioFrame] = TypeAdapter(StudioFrame)
+
+
+# ---------------------------------------------------------------------------
+# The conversation-state read -- GET /api/studio/state
+# ---------------------------------------------------------------------------
+
+
+class TurnStatusName(StrEnum):
+    """Where a turn stands. `running` and `paused` are open. The rest are
+    closed."""
+
+    RUNNING = "running"
+    PAUSED = "paused"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    ABANDONED = "abandoned"
+
+
+class TurnState(_WireModel):
+    """The conversation's latest turn. `user_message` is what the user asked
+    it, as `ClosedTurn.user_message` words it. `lease_live` says a segment
+    holds the turn now, on some instance; `retry_after_seconds` is then the
+    most the lease has left, and is absent otherwise. A `running` turn with
+    no live lease is carried on by `POST /api/studio/resume`. `approved`
+    holds the `plan.approved` frame of each plan the open turn approved,
+    one per plan revision, each with the `seq` it was first sent with. It
+    is absent when the open turn approved none, and on a closed turn, whose
+    `ClosedTurn.approved` holds them."""
+
+    index: int = Field(ge=1)
+    status: TurnStatusName
+    trace_id: str
+    user_message: str
+    approved: list[PlanApproved] | None = None
+    lease_live: bool
+    retry_after_seconds: int | None = Field(default=None, ge=0)
+
+
+class StoredCard(_WireModel):
+    """A card a closed turn made or changed, as the conversation stores it:
+    its type, title, revision and the `fact_summary` its
+    `component.created` or `component.revised` frame carried. The stored
+    card holds no `payload` or `provenance`. The component id reads the
+    resolved revision from the presentation platform."""
+
+    component_id: str
+    type: str
+    title: str
+    revision: int = Field(ge=1)
+    fact_summary: FactSummary | None = None
+
+
+class ClosedTurn(_WireModel):
+    """One closed turn: the user's message as the turn recorded it (an
+    amendment or an answer adds a `(then: ...)` line), the reply the turn
+    closed on (empty when it closed with none), the ids of the cards it
+    made or changed with each one's stored card (`cards`, in the same order,
+    leaving out an id the conversation holds no card for), the
+    `plan.approved` frame of each plan the turn approved, one per plan
+    revision (`approved`, absent when it approved none), and the code it closed on when it did not end
+    cleanly. `new_question` is set on a turn the user ended by typing a
+    different question on its plan card (`Done.new_question`): the client
+    sends it as the next turn when it holds no later one."""
+
+    turn_index: int = Field(ge=1)
+    user_message: str
+    reply: str
+    component_ids: list[str]
+    cards: list[StoredCard] = Field(default_factory=list)
+    approved: list[PlanApproved] | None = None
+    error: str | None = None
+    new_question: str | None = None
+
+
+class PendingPause(_WireModel):
+    """The open pause of a paused turn: the `interrupt_id` an
+    `interrupt.response` answers, its kind, and the frames the pause was sent
+    as, in order, its `plan.proposed` or `elicitation.request` last. Each
+    frame keeps the `seq` it went out with. A pause stored before its
+    frames were kept reads as a `running` turn with no pause, which
+    `POST /api/studio/resume` sends again."""
+
+    interrupt_id: str
+    kind: Literal["plan", "elicitation"]
+    frames: list[StudioFrame]
+
+
+class ConversationRead(_WireModel):
+    """GET /api/studio/state -- the conversation as stored. `turn` is absent
+    before the first turn. `closed_since` lists the closed turns after the
+    request's `since`, oldest first, at most `MAX_CLOSED_SINCE`, and
+    `closed_total` is how many closed turns the conversation holds, the
+    index of its last: a client reads again with `since` set to the last
+    turn it got until it holds `closed_total`. `pause` is the open pause
+    when the turn is paused, and absent otherwise. `manifest` is the
+    canvas, absent when the conversation has none."""
+
+    conversation_id: str
+    turn: TurnState | None = None
+    closed_since: list[ClosedTurn]
+    closed_total: int = Field(ge=0)
+    pause: PendingPause | None = None
+    manifest: CompositionManifest | None = None
+
+
+# The most closed turns one state read returns. A client that needs more
+# reads again from the last one it got, up to `ConversationRead.closed_total`.
+# Each closed turn carries its cards, so the cap bounds the body.
+MAX_CLOSED_SINCE = 3
+
+# The response header on every Studio stream (`/turn`, `/interrupt`,
+# `/resume`) naming the index of the turn the stream carries, the
+# `turn.index` a state read reports for it.
+TURN_INDEX_HEADER = "x-dfo-turn-index"

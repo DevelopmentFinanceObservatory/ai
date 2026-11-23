@@ -11,8 +11,10 @@ the bytes are the version's `CANONICAL_FRAME_RENDERING` artifact, which the
 snapshot route lists, and the frame is registered only when
 `mint_content_version(frame_sha256=frame_sha256(frame))` is that
 `content_version`. Every other mint registers the artifact of its own rendering
-under a pair `frame_ref_for` derives from its columns, groupby and cut, unchecked
-against the token, since a selection, a sum or a cut is a different frame. A mint
+under a pair `frame_ref_for` derives from its columns, groupby, cut and the digest of
+the artifact it is read from, unchecked against the token, since a selection, a sum or a
+cut is a different frame. apis keeps the `content_version` when it renders a rendering's
+cells another way and links a new artifact, so the digest makes that a new frame. A mint
 with `options.without_party_totals` names apis' version of the frame without group
 totals, so the pair it registers under holds the rows apis serves for it.
 
@@ -30,7 +32,7 @@ import hashlib
 import io
 import json
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
 from functools import partial
@@ -67,6 +69,7 @@ from common.place_type import (
     TYPED_ROLES,
     UNTYPED,
     enrichment_role,
+    kind_column,
     type_column,
 )
 from common.row_budget import RowBudgetExhausted, RowClaim, row_budget
@@ -92,11 +95,12 @@ from dfo_frame_grammar import (
     unit_codes,
 )
 from dfo_frame_grammar.grammar import validate_unit_request
+from dfo_spec_kit.registry import FLOW_ROLE_AXES
 from fastmcp.exceptions import ResourceError
 from pydantic import ValidationError
 
 from data_mcp.client_holder import get_client
-from data_mcp.deadline import CallDeadline
+from data_mcp.deadline import DEADLINE_RETRY_AFTER_S, CallDeadline
 from data_mcp.manifest import ArtifactEntry, Manifest
 from data_mcp.settings import Settings
 from data_mcp.tool_errors import ToolRefusal
@@ -179,22 +183,23 @@ FLOW_ENRICHMENT_COLUMNS: tuple[str, ...] = (
     *KIND_COLUMNS,
 )
 
+# Every role column apis reads as a party of a flow and gives a `{role}_party_kind` column when
+# asked for the kinds: each graph role with a flow axis and each axis label. The roles come from
+# dfo-spec-kit's `FLOW_ROLE_AXES`, so a role the kit adds is covered here with no edit. The tables
+# data-mcp serves today spell their sides `PARTY_ROLES`, a subset of these.
+FLOW_PARTY_ROLE_COLUMNS: frozenset[str] = frozenset(FLOW_ROLE_AXES) | frozenset(
+    FLOW_ROLE_AXES.values()
+)
+
 # The earlier token for a flow party kind that old recorded selections carry. Replays translate
 # it to the door's current `KIND_COLUMNS` while preserving the rest of the selection.
 _LEGACY_KIND_COLUMN = "kind"
 
-# The coverage dimension apis counts a frame's years under, beside one per role column.
-_YEARS_DIMENSION = "years"
 
-
-def coverage_roles(manifest: Manifest) -> tuple[str, ...]:
-    """The role columns of the frame `manifest` names: its coverage dimensions, one per
-    role the frame declares, less the years."""
-    return tuple(
-        dimension.label
-        for dimension in manifest.coverage.dimensions
-        if dimension.label != _YEARS_DIMENSION
-    )
+# apis marks the rendering of a file it rendered after a failed graph metadata read with
+# `metadata: "incomplete"` (apis' `render.incomplete_rendering`). No request sends it.
+METADATA_KEY = "metadata"
+METADATA_INCOMPLETE = "incomplete"
 
 
 def resolved_options(options: Mapping[str, Any], *, manifest: Manifest) -> Mapping[str, Any]:
@@ -202,21 +207,26 @@ def resolved_options(options: Mapping[str, Any], *, manifest: Manifest) -> Mappi
     is the `rendering` of the one data artifact the mint's manifest lists for it, which
     names the columns apis resolved the enrichment to. That artifact's rendering, its
     columns aside, is the request's, and its columns hold every requested one. A mint
-    response lists only the rendering it served and the series statistics. Any
-    other `options`, and a manifest listing no such artifact or more than one, are returned
-    as sent, so the frame read refuses for want of its rendering.
+    response lists only the rendering it served and the series statistics. An
+    incomplete artifact (`is_incomplete_rendering`) resolves to its `complete_rendering`,
+    the rendering a later request for a complete file sends. Any other `options`, and a
+    manifest listing no such rendering or more than one, are returned as sent, so the
+    frame read refuses for want of its rendering.
     """
     if options.get(ENRICHMENT) != DEFAULT_ENRICHMENT:
         return options
     base = {key: value for key, value in options.items() if key not in (ENRICHMENT, "columns")}
     requested = set(options.get("columns") or ())
-    served = [
-        artifact.rendering
-        for artifact in manifest.artifacts
-        if {key: value for key, value in artifact.rendering.items() if key != "columns"} == base
-        and isinstance(columns := artifact.rendering.get("columns", []), list)
-        and requested <= set(columns)
-    ]
+    served: list[dict[str, Any]] = []
+    for artifact in manifest.artifacts:
+        rendering = complete_rendering(artifact.rendering)
+        if (
+            {key: value for key, value in rendering.items() if key != "columns"} == base
+            and isinstance(columns := rendering.get("columns", []), list)
+            and requested <= set(columns)
+            and rendering not in served
+        ):
+            served.append(rendering)
     if len(served) != 1:
         return options
     return dict(served[0])
@@ -224,8 +234,8 @@ def resolved_options(options: Mapping[str, Any], *, manifest: Manifest) -> Mappi
 
 def names_flow_role(identity: Mapping[str, Any] | None) -> bool:
     """Whether `identity` names a flow axis, as an entity or an open role, by its role word
-    (`origin`) or its column (`financingRecipient`). `without_party_totals` cuts the group
-    totals from the open party roles of such a spec."""
+    (`origin`) or its column (`financingRecipient`). Its one use is `replayed_mint_options`,
+    which gives a replayed root of such an identity the flow enrichment."""
     roles = {*((identity or {}).get("entities") or {}), *((identity or {}).get("open_roles") or ())}
     return bool(roles & (FLOW_ROLE_COLUMNS.keys() | PARTY_ROLES))
 
@@ -322,6 +332,7 @@ async def materialise_and_register(
     scope: Mapping[str, Any] | None = None,
     transport: httpx2.AsyncBaseTransport | None = None,
     deadline: CallDeadline | None = None,
+    kinds_asked: bool = False,
 ) -> MaterialisationOutcome:
     """Fetch, parse, and register the frame `manifest` names, or report why it couldn't.
 
@@ -332,7 +343,11 @@ async def materialise_and_register(
     are the version's canonical frame, found on the snapshot route
     (`_locate_canonical_frame`) and checked against the pair's `content_version`
     before the write (`_parse_and_register`). Otherwise the bytes are the artifact
-    of the manifest whose `rendering` equals `options` (`_select_requested_artifact`).
+    of the manifest whose `rendering`, or whose incomplete twin's complete rendering,
+    equals `options` (`select_requested_artifact`),
+    and its `artifact_digest` names the reference too, so a frame held from a file apis
+    has since replaced is not the one this mint reads. A manifest that lists no such
+    artifact refuses before the store is read.
 
     `scope` is the mint request's `scope`, `None` for a mint that sent none. Every
     outcome that read or parsed the frame also writes its mint record
@@ -356,11 +371,21 @@ async def materialise_and_register(
     (before any row is parsed), parses it into a `Frame`, and registers it under
     its frame reference.
 
-    Returns a `"degraded"` outcome (never a refusal) when the artifact bytes could not be
-    fetched within budget: the mint itself succeeded and named a real, durable result, and
-    throwing that away would waste a call that can already run up to 125 seconds. A
-    genuinely unusable manifest or artifact refuses instead -- see each refusal branch
-    below for which.
+    A call that asks for the party kinds, by `kinds_asked` or a kind token in
+    `options.columns`, needs `{role}_party_kind` beside every flow party role column
+    the frame holds (`FLOW_PARTY_ROLE_COLUMNS`, `_kind_columns_refusal`), or it refuses
+    `upstream_response_unusable`. A fetched artifact is checked on its footer's columns,
+    after the row ceiling and before any row is claimed, stored or recorded. A held pair is
+    checked on the columns read back, whoever wrote it. This check covers `get_data` and
+    `mint_recorded_root`'s replays alike. A frame with no flow party role column passes.
+
+    Returns a `"degraded"` outcome when the artifact bytes could not be fetched within
+    budget: the mint itself succeeded and named a real, durable result, and throwing that
+    away would waste a call that can already run up to 125 seconds. A call that asks for
+    the kinds refuses `service_unavailable` with a wait instead whenever the frame's
+    columns were never read, a `"fetch"` or `"store_unchecked"` degrade, since the frame
+    its reference names could not be checked. A genuinely unusable manifest or artifact
+    refuses -- see each refusal branch below for which.
 
     `deadline` bounds each step. The store read must end with `_MIN_FETCH_BUDGET_S`
     plus `_STORE_WRITE_RESERVE_S` left, and one that runs out is followed by a fetch
@@ -375,6 +400,7 @@ async def materialise_and_register(
     ref = _ref_or_refusal(manifest, options=options, stamp=stamp)
     if isinstance(ref, MaterialisationOutcome):
         return ref
+    kinds_asked = kinds_asked or requests_kinds(options.get("columns") or ())
     outcome = await _register(
         ref,
         manifest=manifest,
@@ -384,9 +410,22 @@ async def materialise_and_register(
         writer=writer,
         transport=transport,
         deadline=deadline,
+        kinds_asked=kinds_asked,
     )
     if outcome.status == "refused":
         return outcome
+    if kinds_asked and outcome.status == "degraded" and outcome.role_keys is None:
+        return MaterialisationOutcome(
+            status="refused",
+            attempts=outcome.attempts,
+            refusal=ToolRefusal.service_unavailable(
+                service="the frame store",
+                detail=f"the frame of {ref.spec_id} could not be read inside this call's "
+                f"deadline ({outcome.degraded_reason}), so its party kind columns could not "
+                "be checked",
+                retry_after_s=DEADLINE_RETRY_AFTER_S,
+            ),
+        )
     if outcome.stat_var_count is not None:
         await _write_mint_record(
             MintRecord(
@@ -399,6 +438,7 @@ async def materialise_and_register(
                 scope=dict(scope or {}),
                 stat_var_count=outcome.stat_var_count,
                 enrichment_stamp=stamp,
+                artifact_digest=_named_digest(manifest, options=options, ref=ref),
             ),
             deadline=deadline,
         )
@@ -449,26 +489,28 @@ async def _register(
     writer: str,
     transport: httpx2.AsyncBaseTransport | None,
     deadline: CallDeadline | None,
+    kinds_asked: bool,
 ) -> MaterialisationOutcome:
     """`materialise_and_register` for the frame held under `ref`, named under `stamp`
-    (`_named_stamp`)."""
+    (`_named_stamp`) and the requested artifact's digest (`_requested_digest`)."""
+    # `frame_ref_for` keeps the mint's own pair exactly for the version's canonical
+    # frame, and names every other rendering by its options and its artifact's digest. A
+    # manifest without the requested rendering names no frame a held one could be, so it
+    # refuses before the store is read, whatever deadline is left.
+    canonical = ref == FrameRef(
+        spec_id=manifest.definition.spec_id, content_version=manifest.content_version
+    )
+    requested = None if canonical else select_requested_artifact(manifest, options=options)
+    if not canonical and requested is None:
+        return _no_artifact_refusal(listed_by="the mint's manifest", rendering=options)
+
     store = get_store()
     checked = await _check_store(
         store, ref, max_frame_rows=settings.max_frame_rows, deadline=deadline
     )
     if isinstance(checked, MaterialisationOutcome):
-        return checked
+        return _held_kinds_checked(checked, spec_id=ref.spec_id, kinds_asked=kinds_asked)
     fetch_failure_reason = checked
-
-    # `frame_ref_for` keeps the mint's own pair exactly for the version's canonical
-    # frame, and names every other rendering by its options. A manifest without the
-    # requested rendering refuses whatever deadline is left.
-    canonical = ref == FrameRef(
-        spec_id=manifest.definition.spec_id, content_version=manifest.content_version
-    )
-    requested = None if canonical else _select_requested_artifact(manifest, options=options)
-    if not canonical and requested is None:
-        return _no_artifact_refusal(listed_by="the mint's manifest", rendering=options)
 
     budget_s = settings.artifact_fetch_budget_s
     if deadline is not None:
@@ -524,8 +566,25 @@ async def _register(
         settings=settings,
         writer=writer,
         store=store,
+        kinds_asked=kinds_asked,
         write_deadline=deadline.reserving(_AFTER_WRITE_RESERVE_S) if deadline is not None else None,
     )
+
+
+def _held_kinds_checked(
+    checked: MaterialisationOutcome, *, spec_id: str, kinds_asked: bool
+) -> MaterialisationOutcome:
+    """`checked`, the outcome the store read settled on, or the refusal of a held frame of
+    `spec_id` that lacks a flow party role's kind column when the call asked for the kinds
+    (`_kind_columns_refusal`), read off the columns the frame was read back with."""
+    if not kinds_asked or checked.role_keys is None:
+        return checked
+    refusal = _kind_columns_refusal(
+        checked.role_keys, frame=f"the frame this service holds for {spec_id}"
+    )
+    if refusal is None:
+        return checked
+    return MaterialisationOutcome(status="refused", attempts=0, refusal=refusal)
 
 
 def _no_artifact_refusal(*, listed_by: str, rendering: Mapping[str, Any]) -> MaterialisationOutcome:
@@ -693,6 +752,7 @@ async def _verify_parse_and_register(
     settings: Settings,
     writer: str,
     store: MaterialisationStore,
+    kinds_asked: bool,
     write_deadline: CallDeadline | None,
 ) -> MaterialisationOutcome:
     """Verify `fetched` against `artifact_digest`, bound and parse it into a
@@ -703,7 +763,9 @@ async def _verify_parse_and_register(
     The artifact's rows are claimed from the process's frame row budget
     (`common.row_budget`) once its footer gives their count, and held through the parse
     and until the store write ends; a claim that does not fit refuses
-    `service_unavailable`.
+    `service_unavailable`. Before the claim, a call that asks for the party kinds
+    (`kinds_asked`) refuses when the footer's columns hold a flow party role without that
+    role's kind column (`_kind_columns_refusal`), so no such frame is stored or recorded.
     """
     computed_digest = f"sha256:{hashlib.sha256(fetched).hexdigest()}"
     if computed_digest != artifact_digest:
@@ -726,7 +788,7 @@ async def _verify_parse_and_register(
         )
 
     try:
-        row_count = _parquet_row_count(fetched)
+        row_count, columns = _parquet_footer(fetched)
     except pa.ArrowException as exc:
         return _unparseable(exc)
     if row_count > settings.max_frame_rows:
@@ -738,6 +800,10 @@ async def _verify_parse_and_register(
                 f"service's {settings.max_frame_rows}-row ceiling"
             ),
         )
+    if kinds_asked and (
+        refusal := _kind_columns_refusal(columns, frame=f"the frame apis served for {ref.spec_id}")
+    ):
+        return MaterialisationOutcome(status="refused", attempts=1, refusal=refusal)
     try:
         claim = row_budget().claim(row_count)
     except RowBudgetExhausted as exc:
@@ -800,9 +866,10 @@ async def _parse_and_register(
     is a rendering, validated cell by cell (`frame_from_parquet_bytes`) and
     registered under its derived pair unchecked.
 
-    The frame's trace keeps the mint's `options` and `stamp`, the stamp `ref` is named
-    under, so `data_mcp.mint_recovery` can rebuild a derived pair from the held frame
-    when its mint record is missing.
+    The frame's trace keeps the mint's `options`, `stamp`, the stamp `ref` is named
+    under, and the digest `ref` is named by (`_named_digest`), so
+    `data_mcp.mint_recovery` can rebuild a derived pair from the held frame when its
+    mint record is missing.
     """
     # `pyarrow.ArrowException` (a 2xx response whose body isn't a valid/complete Parquet
     # file) and `KeyError` (a Parquet file missing its `time_period` or `value` column,
@@ -841,6 +908,7 @@ async def _parse_and_register(
         content_version=ref.content_version,
         options=dict(options),
         enrichment_stamp=stamp,
+        artifact_digest=_named_digest(manifest, options=options, ref=ref),
     )
     try:
         async with asyncio.timeout(_seconds_left(write_deadline)):
@@ -920,8 +988,9 @@ def named_groupbys(groupby: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
 def _ref_or_refusal(
     manifest: Manifest, *, options: Mapping[str, Any], stamp: str | None
 ) -> FrameRef | MaterialisationOutcome:
-    """The reference this frame registers under (`frame_ref_for`, named under `stamp`),
-    or the refused outcome for a manifest whose `spec_id`/`content_version` combination
+    """The reference this frame registers under (`frame_ref_for`, named under `stamp` and
+    the digest of the requested artifact, `select_requested_artifact`), or the refused
+    outcome for a manifest whose `spec_id`/`content_version` combination
     doesn't match `FrameRef`'s own pair shape.
     """
     try:
@@ -932,6 +1001,7 @@ def _ref_or_refusal(
             groupby=options.get("groupby"),
             without_party_totals=options.get(WITHOUT_PARTY_TOTALS) is True,
             enrichment_stamp=stamp,
+            artifact_digest=_requested_digest(manifest, options=options),
         )
     except ValidationError as exc:
         return MaterialisationOutcome(
@@ -946,26 +1016,72 @@ def _ref_or_refusal(
 
 def _named_stamp(manifest: Manifest, *, options: Mapping[str, Any]) -> str | None:
     """The stamp a frame minted with `options` is named under (`frame_ref_for`): the
-    `enrichment_stamp` of the artifact it is read from (`_select_requested_artifact`),
+    `enrichment_stamp` of the artifact it is read from (`select_requested_artifact`),
     for a frame that asks for kinds (`recorded_stamp`). An artifact without one, such
     as a pinned file rendered under an earlier code index, names the frame unsalted.
     The canonical frame asks for no kinds."""
-    artifact = _select_requested_artifact(manifest, options=options)
+    artifact = select_requested_artifact(manifest, options=options)
     stamp = None if artifact is None else artifact.enrichment_stamp
     return recorded_stamp(options.get("columns") or (), stamp)
 
 
-def _select_requested_artifact(
+def _requested_digest(manifest: Manifest, *, options: Mapping[str, Any]) -> str | None:
+    """The `artifact_digest` of the artifact a frame minted with `options` is read from
+    (`select_requested_artifact`), or `None` when the manifest lists none."""
+    artifact = select_requested_artifact(manifest, options=options)
+    return None if artifact is None else artifact.artifact_digest
+
+
+def _named_digest(manifest: Manifest, *, options: Mapping[str, Any], ref: FrameRef) -> str | None:
+    """The digest `ref` is named by (`frame_ref_for`), which its mint record keeps: the
+    requested artifact's for a rendering, and `None` for the version's canonical frame,
+    which `ref` names by the manifest's own pair."""
+    if ref == FrameRef(
+        spec_id=manifest.definition.spec_id, content_version=manifest.content_version
+    ):
+        return None
+    return _requested_digest(manifest, options=options)
+
+
+def select_requested_artifact(
     manifest: Manifest, *, options: Mapping[str, Any]
 ) -> ArtifactEntry | None:
-    """The artifact whose `rendering` equals the mint request's `options`, or `None`.
+    """The artifact whose `rendering` equals the mint request's `options`, else its
+    incomplete twin (`is_incomplete_rendering`) whose `complete_rendering` does, or `None`.
 
     apis stores each artifact's `rendering` as the request's options with unset
     fields left out, and a manifest lists every rendering stored under its pair: other
     callers' groupby sums and column selections sit beside the requested one, in no
     set order. A manifest whose own artifact has expired lists none that matches.
+
+    apis links a file whose graph metadata read failed under its incomplete rendering,
+    and lists it alone when no complete file of that rendering is linked. That file is
+    read under its own digest (`frame_ref_for`), so its frame stays apart from a
+    complete one, and `get_data` warns that its labels or types are incomplete.
     """
-    return next((a for a in manifest.artifacts if a.rendering == options), None)
+    exact = next((a for a in manifest.artifacts if a.rendering == options), None)
+    if exact is not None:
+        return exact
+    return next(
+        (
+            a
+            for a in manifest.artifacts
+            if is_incomplete_rendering(a.rendering) and complete_rendering(a.rendering) == options
+        ),
+        None,
+    )
+
+
+def is_incomplete_rendering(rendering: Mapping[str, Any]) -> bool:
+    """Whether apis linked the file of `rendering` after a failed graph metadata read
+    (apis' `render.incomplete_rendering`): `rendering` carries `metadata: "incomplete"`."""
+    return rendering.get(METADATA_KEY) == METADATA_INCOMPLETE
+
+
+def complete_rendering(rendering: Mapping[str, Any]) -> dict[str, Any]:
+    """`rendering` without its `metadata` member: the rendering a request for its file
+    sends (apis' `render.complete_rendering`)."""
+    return {key: value for key, value in rendering.items() if key != METADATA_KEY}
 
 
 @dataclass
@@ -1117,13 +1233,32 @@ async def _fetch_artifact_bytes_uncapped(
     return None
 
 
-def _parquet_row_count(data: bytes) -> int:
-    """The artifact's row count, read from its own Parquet footer metadata only --
+def _parquet_footer(data: bytes) -> tuple[int, tuple[str, ...]]:
+    """The artifact's row count and column names, read from its own Parquet footer only --
     never materialising row data, so an oversized artifact is bounded before any row is
     actually parsed. Raises `pyarrow.ArrowException` for bytes that aren't a valid or
     complete Parquet file; the caller (`materialise_and_register`) maps that to a refusal
     rather than letting it escape."""
-    return pq.ParquetFile(io.BytesIO(data)).metadata.num_rows
+    parquet = pq.ParquetFile(io.BytesIO(data))
+    return parquet.metadata.num_rows, tuple(parquet.schema_arrow.names)
+
+
+def _kind_columns_refusal(columns: Sequence[str], *, frame: str) -> ToolRefusal | None:
+    """The `upstream_response_unusable` of `frame`, which names where the frame came from,
+    when its `columns` hold a flow party role (`FLOW_PARTY_ROLE_COLUMNS`) without its
+    `{role}_party_kind` column: a frame that would serve every group total beside its
+    parties. `None` when every flow party role column has its kinds."""
+    held = set(columns)
+    lacking = sorted(
+        role for role in FLOW_PARTY_ROLE_COLUMNS & held if kind_column(role) not in held
+    )
+    if not lacking:
+        return None
+    return ToolRefusal.upstream_response_unusable(
+        detail=f"{frame} lacks the party kind "
+        f"columns for {' and '.join(lacking)}, so it would serve every group total beside its "
+        "parties"
+    )
 
 
 _UTC_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -1296,8 +1431,8 @@ def observed_shape(frame: Frame) -> tuple[tuple[str, ...], int]:
 
     The role columns are every column outside `_RESERVED_COLUMNS`, in the order
     `grammar.derive_columns` gives them, which is `normalize_role_keys`' sorted order.
-    An analysis-mcp verb declares the same pair as its result's `role_keys` and
-    `stat_var_count` (`analysis_mcp.result.observed_shape`)."""
+    An analysis-mcp verb's result declares the same pair as `role_keys` and
+    `stat_var_count` (`analysis_mcp.result.VerbResult`)."""
     role_keys = tuple(column for column in frame.columns if column not in _RESERVED_COLUMNS)
     return role_keys, len(frame.table.column(STAT_VAR_COLUMN).unique())
 

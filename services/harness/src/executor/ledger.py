@@ -49,7 +49,7 @@ run is carried on no more.
 `RunLedger` is the storage interface. `InMemoryRunLedger` serves tests and the
 standalone harness, keeping each conversation's runs apart by the scope its
 caller names; `harness.run_ledger.StudioRunLedger` keeps runs in the
-conversation's ledger session.
+conversation's `runs` table.
 """
 
 from __future__ import annotations
@@ -82,6 +82,9 @@ class RunStatus(StrEnum):
 
 
 TERMINAL_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.FAILED})
+# The statuses of a run whose computation is unfinished: never started, or
+# started and not yet come to an outcome.
+UNFINISHED_STATUSES = frozenset({RunStatus.ADMITTED, RunStatus.RUNNING})
 
 # How many times an unfinished run is resumed, and how long after its
 # admission, before the run fails (`Resume`).
@@ -220,7 +223,9 @@ class RunRecord(StrictModel):
     `submission_digest()` of the submission and source policy the run
     executes. `outcome` is what its computation came to, as the executor
     states it, recorded once with `Publishing` or `Fail`. `resumes` counts
-    how often the unfinished run was carried on (`Resume`). `delivered` says
+    the times a started run was carried on (`Resume`): by a later turn
+    (`executor.run.resume_run`, which counts an `admitted` run as started),
+    or by a caller taking over a `running` run. `delivered` says
     no later turn carries a completed run on: the conversation recorded the
     hand-back of its result, or `undelivered` reached the delivery bound
     (`Undelivered`). `undelivered` counts the turns that carried a completed
@@ -427,16 +432,23 @@ class LedgerUnavailableError(Exception):
         self.run_id = run_id
 
 
+class NonFiniteJsonError(ValueError):
+    """A NaN or infinity reached a JSON column write (`harness.db.jsonb`). A
+    defect in whatever built the value, not a store fault, so retrying cannot
+    help."""
+
+
 @asynccontextmanager
 async def store_faults(run_id: str | None) -> AsyncIterator[None]:
     """Classify what a read or write of run `run_id`, `None` for an
     admission, raises: a
     `RunLedgerError` is the ledger refusing a change and propagates as it
-    is; any other exception is the ledger's store failing, raised as
+    is, as is a `NonFiniteJsonError` (a code defect, which retrying cannot
+    fix); any other exception is the ledger's store failing, raised as
     `LedgerUnavailableError`, since it says nothing about the run."""
     try:
         yield
-    except RunLedgerError:
+    except (RunLedgerError, NonFiniteJsonError):
         raise
     except Exception as exc:
         raise LedgerUnavailableError(run_id) from exc

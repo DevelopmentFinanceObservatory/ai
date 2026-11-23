@@ -1,218 +1,147 @@
-"""The root workflow: builds each node and wires the edges between them."""
+"""The turn's edges (`EDGES`), the graph built over its nodes (`turn_graph`),
+and the Studio turn's graph with every node built (`studio_graph`).
+
+`harness.graph` describes the turn the edges make and what they guarantee.
+"""
 
 from __future__ import annotations
 
-import inspect
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from typing import Any, cast
+from collections.abc import Callable, Mapping, Sequence
+from types import FunctionType, MappingProxyType
 
 from compiler.surface import ToolSurface
 from executor.completion import ResultPublisher
-from executor.ledger import InMemoryRunLedger, RunLedger
+from executor.ledger import RunLedger
 from executor.run import (
     FetchSeriesStats,
     LabelRefs,
     default_fetch_series_stats,
     default_label_refs,
 )
-from google.adk.agents import LlmAgent
-from google.adk.tools import FunctionTool
-from google.adk.workflow import START, BaseNode, Edge, Workflow, node
+from orchestrator.agent import Orchestrator
+from pydantic_ai.models import Model
 
-from harness.conversation import current_conversation_id
 from harness.early_mint import EarlyMints
+from harness.graph import planning
+from harness.graph.approve import approve_node
+from harness.graph.events import GraphEvent
 from harness.graph.execute import execute_node
-from harness.graph.interfaces import (
-    Executor,
-    PlannerModel,
-)
-from harness.graph.orchestrate import ask, orchestrate_node, route
+from harness.graph.interfaces import Executor, PlannerModel
+from harness.graph.orchestrate import ask_node, orchestrate_node
 from harness.graph.plan_done import plan_done_node
-from harness.graph.planning import approve_node, plan_start, planner_node
 from harness.graph.resume import run_resumer
-from harness.graph.seed import seed_node
-from harness.graph.state import (
-    AGENT_NAME,
-    GraphState,
-)
+from harness.graph.seed import chip_fetch, seed_node
 from harness.graph.switch import switch_node
+from harness.turn.loop import END, Graph
+from harness.turn.node import Node
+
+# The node every turn opens at.
+START = "seed"
+
+# The node each edge `(node, label)` reaches. A node with one way on leaves
+# along `next`.
+EDGES: Mapping[tuple[str, str], str] = MappingProxyType(
+    {
+        ("seed", "next"): "orchestrate",
+        ("orchestrate", "plan"): "plan_start",
+        ("orchestrate", "ask"): "ask",
+        ("orchestrate", "answered"): END,
+        ("ask", "next"): "orchestrate",
+        ("plan_start", "next"): "planner",
+        ("planner", "ok"): "approve",
+        ("planner", "pending_refusal"): "approve",
+        ("planner", "refused"): "plan_done",
+        ("planner", "new_question"): END,
+        ("approve", "approved"): "execute",
+        ("approve", "amend"): "planner",
+        ("approve", "switch"): "switch",
+        ("switch", "offer"): "approve",
+        ("execute", "replan"): "planner",
+        ("execute", "ok"): "plan_done",
+        ("plan_done", "next"): "orchestrate",
+    }
+)
 
 
-@dataclass(frozen=True)
-class PlannerEntry:
-    """The nodes from the orchestrator's action to the planner, and the edges between
-    them: `route` takes a `plan` action to `plan_start`, which hands the brief to
-    `planner`. `create_root_workflow` wires the rest of the turn around them, and
-    `evals/planner_entry` runs them alone."""
+def turn_graph(nodes: Mapping[str, Node[GraphEvent]]) -> Graph[GraphEvent]:
+    """The turn's graph over `nodes`, by name, with `EDGES` between them.
 
-    route: BaseNode
-    planner: BaseNode
-    edges: tuple[Edge, ...]
-
-
-def planner_entry(planner: PlannerModel) -> PlannerEntry:
-    """The `route`, `plan_start` and `planner` nodes, the `planner` node drafting
-    with the `planner` argument."""
-    route_n = node(route, name="route")
-    plan_start_n = node(plan_start, name="plan_start")
-    # `rerun_on_resume=True`: a real `PlannerModel`
-    # (`harness.planner_adapter.PlannerAdapter`) calls `ctx.run_node` from inside
-    # this node, and ADK raises `ValueError` at that call unless the
-    # *calling* node itself carries this flag (`agents/context.py`'s
-    # `_run_node_internal`).
-    planner_n = node(planner_node(planner=planner), name="planner", rerun_on_resume=True)
-    return PlannerEntry(
-        route=route_n,
-        planner=planner_n,
-        edges=(
-            Edge(from_node=route_n, to_node=plan_start_n, route="plan"),
-            Edge(from_node=plan_start_n, to_node=planner_n),
-        ),
-    )
-
-
-def _fetch_tool(orchestrator: LlmAgent) -> Callable[..., Awaitable[dict[str, Any]]] | None:
-    """The `fetch` tool among `orchestrator`'s tools (`harness.orchestrator_tools`),
-    called as the agent calls it; `None` without one.
-
-    An exception the tool raises is answered by the agent's own
-    `on_tool_error_callback`s (`orchestrator.tool_failures.answering_tool_failures`),
-    so a fetch that breaks inside DFO reads as the agent's own fetch would, and
-    one no callback answers is raised.
+    Raises:
+        ValueError: An edge joins a node `nodes` lacks.
     """
-    tool = next(
-        (
-            tool
-            for tool in orchestrator.tools
-            if isinstance(tool, FunctionTool) and tool.name == "fetch"
-        ),
-        None,
+    return Graph(
+        start=START,
+        nodes=nodes,
+        edges=EDGES,
     )
-    if tool is None:
-        return None
-    func = cast(Callable[..., Awaitable[dict[str, Any]]], tool.func)
-
-    async def fetch(*, tool_context: Any, **args: Any) -> dict[str, Any]:
-        try:
-            return await func(tool_context=tool_context, **args)
-        except Exception as error:
-            for callback in orchestrator.canonical_on_tool_error_callbacks:
-                answered = callback(tool, args, tool_context, error)
-                if inspect.isawaitable(answered):
-                    answered = await answered
-                if isinstance(answered, dict):
-                    return cast(dict[str, Any], answered)
-            raise
-
-    return fetch
 
 
-def create_root_workflow(
+def studio_graph(
     *,
     planner: PlannerModel,
-    orchestrator: LlmAgent,
+    orchestrator: Orchestrator,
+    model: Callable[[], Model],
+    tools: Sequence[FunctionType],
     executor: Executor,
     tool_surface: ToolSurface | None,
     definition_surface: ToolSurface,
     publisher: ResultPublisher | None,
-    run_ledger: RunLedger | None = None,
+    run_ledger: RunLedger,
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
     label_refs: LabelRefs = default_label_refs,
     early_mints: EarlyMints | None = None,
-) -> Workflow:
-    """Build the root workflow with its external dependencies injected.
+) -> Graph[GraphEvent]:
+    """The Studio turn's graph (`turn_graph`) with every node built.
 
-    The turn opens with `orchestrator`, the agent (`orchestrator.agent`, with
-    `harness.orchestrator_tools`), after `seed` hands it any datasets the user
-    brought from Search. Its `plan` tool reaches the `planner`, `approve` and
-    `execute` nodes through `plan_start` and `plan_done`, and its `ask_user`
-    tool reaches `ask`. `planner` is the model the `planner` node drafts plans
-    with, for approval. `executor` is the recorder the nodes' own calls run
-    through. `tool_surface` is the servers the `execute` node runs an approved
-    workflow against; it carries no default, so a caller states its absence
-    (`None`, refused loudly at `execute`) rather than falling into it
-    unnoticed. `run_ledger` keeps every run the `execute` node starts, by
-    default an `InMemoryRunLedger` of the workflow's own that keeps each
-    studio conversation's runs apart. `publisher` publishes each run's
-    derived results with their replay recipes before it completes
-    (`executor.completion`); it also carries no default, and with `None` a
-    run with a derived result never completes. The `seed` node carries on the
-    runs an earlier turn left unfinished (`harness.graph.resume`), and applies
-    a chip the user clicked, fetching its data with the orchestrator's own
-    `fetch` tool (`harness.graph.switch.apply_stored_choice`).
-    `definition_surface` reaches the data-mcp the `seed` node resolves each seed's identity again through
-    (`translator.discovery.resolve_definition`), a call the Activity feed
-    does not show, and the `switch` node and the `seed` node's chip post a
-    switched scope choice through (`harness.graph.switch`). `max_concurrent_steps` bounds how many of one plan's
-    wave's tool calls the `execute` node's run may hold in flight against
-    `tool_surface` at once (`executor.run.execute_approved_plan`'s own
-    keyword of the same name). `fetch_series_stats` and `label_refs` are
-    that same call's own keywords: the real signed-URL fetch and graph name
-    lookup by default, injectable for a caller whose `tool_surface` is
-    itself fully virtualised. `early_mints` starts each card's retrievals
-    when the `approve` node offers it (`harness.early_mint`); with `None`
-    nothing is fetched before approval.
+    `orchestrate` runs `orchestrator` on the model `model` builds for each
+    run, with `tools`, the functions the agent was built on, among which
+    `seed` finds the `fetch` a chip's data comes through (`chip_fetch`).
+    `planner` drafts plans at `planner` and revises them at `switch`.
+    `executor` is the recorder the nodes' own calls run through.
+    `tool_surface` is the servers `execute` runs an approved workflow
+    against; with `None`, `execute` refuses and `seed` carries no run on.
+    `run_ledger` keeps every run `execute` starts, and `seed` carries on the
+    unfinished ones (`harness.graph.resume`). `publisher` publishes each
+    run's derived results with their replay recipes before it completes
+    (`executor.completion`); with `None`, a run with a derived result never
+    completes. `definition_surface` reaches the data-mcp `seed` resolves
+    each seed's identity again through, and that `switch` and the chip post
+    a switched scope choice through. `max_concurrent_steps`,
+    `fetch_series_stats` and `label_refs` are
+    `executor.run.execute_approved_plan`'s keywords of those names.
+    `early_mints` starts each card's retrievals when `approve` offers it
+    (`harness.early_mint`); with `None` nothing is fetched before approval.
     """
-    ledger = (
-        run_ledger
-        if run_ledger is not None
-        else InMemoryRunLedger(scope=current_conversation_id.get)
-    )
-    receive_seeds = seed_node(
-        executor=executor,
-        definition_surface=definition_surface,
-        fetch=_fetch_tool(orchestrator),
-        resume=run_resumer(
-            run_ledger=ledger,
-            publisher=publisher,
+    nodes: dict[str, Node[GraphEvent]] = {
+        "seed": seed_node(
             executor=executor,
+            definition_surface=definition_surface,
+            fetch=chip_fetch(list(tools)),
+            resume=run_resumer(
+                run_ledger=run_ledger,
+                publisher=publisher,
+                executor=executor,
+                tool_surface=tool_surface,
+                max_concurrent_steps=max_concurrent_steps,
+                fetch_series_stats=fetch_series_stats,
+                label_refs=label_refs,
+            ),
+        ),
+        "orchestrate": orchestrate_node(orchestrator=orchestrator, model=model),
+        "ask": ask_node(definition_surface=definition_surface),
+        "plan_start": planning.plan_start,
+        "planner": planning.planner_node(planner=planner),
+        "approve": approve_node(early_mints=early_mints),
+        "switch": switch_node(planner=planner, definition_surface=definition_surface),
+        "execute": execute_node(
             tool_surface=tool_surface,
+            run_ledger=run_ledger,
+            publisher=publisher,
             max_concurrent_steps=max_concurrent_steps,
             fetch_series_stats=fetch_series_stats,
             label_refs=label_refs,
         ),
-    )
-    orchestrate = orchestrate_node(orchestrator=orchestrator)
-    entry = planner_entry(planner)
-    execute = execute_node(
-        tool_surface=tool_surface,
-        run_ledger=ledger,
-        publisher=publisher,
-        max_concurrent_steps=max_concurrent_steps,
-        fetch_series_stats=fetch_series_stats,
-        label_refs=label_refs,
-    )
-    plan_done = plan_done_node(executor=executor, run_ledger=ledger)
-
-    seed_n = node(receive_seeds, name="seed")
-    orchestrate_n = node(orchestrate, name="orchestrate", rerun_on_resume=True)
-    ask_n = node(ask, name="ask", rerun_on_resume=True)
-    approve_n = node(approve_node(early_mints=early_mints), name="approve", rerun_on_resume=True)
-    execute_n = node(execute, name="execute")
-    plan_done_n = node(plan_done, name="plan_done")
-    switch_n = node(
-        switch_node(planner=planner, definition_surface=definition_surface), name="switch"
-    )
-    return Workflow(
-        name=AGENT_NAME,
-        state_schema=GraphState,
-        edges=[
-            (START, seed_n),
-            (seed_n, orchestrate_n),
-            (orchestrate_n, entry.route),
-            Edge(from_node=entry.route, to_node=ask_n, route="ask"),
-            (ask_n, orchestrate_n),
-            *entry.edges,
-            Edge(from_node=entry.planner, to_node=approve_n, route=["ok", "pending_refusal"]),
-            Edge(from_node=entry.planner, to_node=plan_done_n, route="refused"),
-            Edge(from_node=approve_n, to_node=execute_n, route="approved"),
-            Edge(from_node=approve_n, to_node=entry.planner, route="amend"),
-            Edge(from_node=approve_n, to_node=switch_n, route="switch"),
-            Edge(from_node=switch_n, to_node=approve_n, route="offer"),
-            Edge(from_node=execute_n, to_node=entry.planner, route="replan"),
-            Edge(from_node=execute_n, to_node=plan_done_n, route="ok"),
-            (plan_done_n, orchestrate_n),
-        ],
-    )
+        "plan_done": plan_done_node(executor=executor, run_ledger=run_ledger),
+    }
+    return turn_graph(nodes)

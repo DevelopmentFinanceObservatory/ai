@@ -31,7 +31,7 @@ from typing import Any, Self
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
-from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, WEBSITE_CALLER, current_caller
+from common.caller import WEBSITE_CALLER, current_caller, vouched_caller_headers
 from common.derived_replay import (
     DEFAULT_RETRY_AFTER_S,
     ReplayBusy,
@@ -473,8 +473,9 @@ async def _record_moved_pair(lost: MintRecord, frame: FramePair) -> tuple[str, s
 
     `frame` alone may be the raw head, the pair of the plain frame, when the rendering leaves
     the frame unchanged, so the frame is named as `get_data` names it (`frame_ref_for`) and
-    `frame` is the record's `dataset`. The stamp and the StatVar count described the old
-    frame, so neither is kept. A value that does not fit `FrameRef` writes nothing and names itself.
+    `frame` is the record's `dataset`. The stamp, the artifact digest and the StatVar count
+    described the old frame, so none is kept. A value that does not fit `FrameRef` writes
+    nothing and names itself.
     """
     try:
         dataset = FrameRef(spec_id=frame.spec_id, content_version=frame.content_version)
@@ -493,6 +494,7 @@ async def _record_moved_pair(lost: MintRecord, frame: FramePair) -> tuple[str, s
             "dataset": dataset,
             "stat_var_count": None,
             "enrichment_stamp": None,
+            "artifact_digest": None,
         }
     )
     await write_mint_record(moved, logger=logger)
@@ -969,14 +971,16 @@ class PlatformAssembler:
     async def _post_analysis(self, path: str, body: Mapping[str, Any]) -> httpx2.Response | Refusal:
         """POST `body` to apis' analysis `path` once, for `common.derived_replay`.
         Returns the response whatever its status, or `transient_unavailable` for a
-        call that got none. It names the caller as an external create does
-        (`_card_write_headers`), since only a public call replays, and waits as
-        long as a whole presentation call may."""
+        call that got none. It names the caller and turn as analysis-mcp's own
+        analysis calls do (`vouched_caller_headers`): an `ip:` or `user:` caller with its
+        surface, user agent and MCP client name, a Studio `conversation:` caller with its turn,
+        or the surface shared work serves. It waits as long as a whole
+        presentation call may."""
         try:
             headers = dict(await self._auth()) if self._auth else {}
         except ApisAuthError as exc:
             return self._refusal(PlatformTransportError(detail=f"no dfo-apis ID token: {exc}"))
-        headers.update(self._card_write_headers(Caller.EXTERNAL))
+        headers.update(vouched_caller_headers(self._caller_principal))
         timeout = self._attempt_timeout(max(self._retry_budget_s, self._read_timeout_s))
         try:
             return await self._client.post(path, json=dict(body), headers=headers, timeout=timeout)
@@ -1036,17 +1040,18 @@ class PlatformAssembler:
         A first-party write, Studio's, carries the publish principal, which
         dfo-apis exempts. An external write carries the caller principal and
         the caller the website named, when this process holds the principal
-        and the request's `x-dfo-caller` is an `ip:` or `user:` digest, so
-        dfo-apis counts that client or account. Any other external write carries neither, and
+        and the request's `x-dfo-caller` is an `ip:` or `user:` digest
+        (`vouched_caller_headers`, with the surface, user agent and MCP client name), so dfo-apis
+        counts that client or account. Any other external write carries neither, and
         dfo-apis counts it against the address it sees for this service.
         """
         if caller is Caller.FIRST_PARTY:
             principal = self._publish_principal
             return {} if principal is None else {PRINCIPAL_HEADER: principal}
         named = current_caller()
-        if self._caller_principal is None or named is None or not WEBSITE_CALLER.fullmatch(named):
+        if named is None or not WEBSITE_CALLER.fullmatch(named):
             return {}
-        return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: named}
+        return vouched_caller_headers(self._caller_principal, caller_required=True)
 
     async def get_frame_view(
         self,

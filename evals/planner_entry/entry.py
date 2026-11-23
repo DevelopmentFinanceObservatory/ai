@@ -11,13 +11,16 @@ each of the task's payloads makes. `run_entry` replays them through production c
   recorded envelope through `resolver_digest` and stores the readings, spec blocks and
   warnings as a served turn does (`harness.graph.state.store_search`);
 - its `plan` tool checks the asks and records the hand-off;
-- the graph's `route`, `plan_start` and `planner` nodes, wired as the served workflow
-  wires them (`harness.graph.workflow.planner_entry`), run inside a conversation that
-  holds those spec blocks as `harness.studio` holds a turn's
-  (`planner.plan.current_recorded_identity`), and hand the brief to the real
+- the graph's `plan_start` and `planner` nodes, with the turn's spec blocks in their
+  state, take the action the `plan` call recorded, as the `orchestrate` node hands it
+  on. They run as the turn loop runs them (`harness.turn.loop`), each node's state and
+  input passed on as the turn store hands them back. The planner's ask pauses the
+  entry, and the user's answer, recorded in the turn's transcript, resumes it. They
+  run inside a conversation that holds those spec blocks as `harness.studio` holds a
+  turn's (`planner.plan.current_recorded_identity`), and hand the brief to the real
   `PlannerAdapter`, which renders the planner's first message from that state and runs
-  the planner, with production's instruction and tools, each request
-  under the `TurnBudget` a served request gets (`harness.turn_budget`).
+  the planner, with production's instruction and tools, each request under the
+  `TurnBudget` a served request gets (`harness.turn_budget`).
 
 Two edges are replaced. The planner's `get_skill` reads the recording through
 `RecordedSurface`. The adapter's translate step is the eval's own,
@@ -55,7 +58,6 @@ from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Self, cast
 
 from compiler.surface import ToolCallResult, ToolId, ToolSchema, ToolSurfaceUnavailableError
@@ -65,20 +67,20 @@ from data_mcp.graph_wire import NodesResponse
 from data_mcp.node_lookup import NodeOutcome
 from data_mcp.search_tool import SearchContext
 from data_mcp.skills_client import name_get_skill_in_call_lines
-from google.adk import Event
-from google.adk.agents.run_config import RunConfig, StreamingMode
-from google.adk.events import EventActions
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService, Session
-from google.adk.workflow import START, Workflow
-from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import Client, types
 from google.genai.client import AsyncClient
+from harness.gemini_agent import RecordingState
+from harness.gemini_wire import model_retry_options
 from harness.graph.interfaces import PlannerModel
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY, GraphState
-from harness.graph.workflow import planner_entry
+from harness.graph.planning import plan_start, planner_node
+from harness.graph.state import (
+    ASK_FOR_QUESTION_KEY,
+    NEW_QUESTION_KEY,
+    ORCHESTRATOR_PENDING_KEY,
+    ORCHESTRATOR_SPECS_KEY,
+    pending_action,
+)
 from harness.orchestrator_tools import (
-    HANDED_OFF,
     AskedOutput,
     Resolver,
     build_orchestrator_tools,
@@ -89,9 +91,13 @@ from harness.scripted import instruction_text
 from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import resolver_digest
+from harness.turn import transcript
+from harness.turn.node import Next, NodeCtx, Pause, StopScope, TurnKey
+from harness.turn.store import AgentRecord
+from harness.turn.transcript import Transcript
 from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.wiring import handing_back_planner_failures
-from orchestrator.agent import model_retry_options
+from orchestrator.call import HANDED_OFF, OrchestratorCall
 from planner.call import PlannerCall
 from planner.plan import (
     Plan,
@@ -100,7 +106,7 @@ from planner.plan import (
     load_plan,
     unstated_period_reductions,
 )
-from planner.settings import AGENT_NAME as PLANNER_AGENT
+from planner.session import function_calls, function_responses
 from planner.source_reads import read_full_history
 from planner.tool_results import ProblemCode
 from planner.tools import load_pending_ask
@@ -111,6 +117,7 @@ from translator.tool import Translate, build_translate
 
 EVAL_DIR = Path(__file__).resolve().parent
 TASKS_DIR = EVAL_DIR / "tasks"
+AMENDMENTS_DIR = EVAL_DIR / "amendments"
 RECORDINGS_DIR = EVAL_DIR / "recordings"
 RECORDING_SCHEMA = 2
 
@@ -132,8 +139,8 @@ KINDS = (
 # `across_years`.
 PERIOD_REFUSAL = ProblemCode.PERIOD_REDUCTION_UNSTATED.value
 
-_APP = "planner_entry_eval"
-_USER = "eval"
+# The principal an entry's turn runs as.
+_PRINCIPAL = "eval"
 
 
 # --- Tasks ---------------------------------------------------------------------------
@@ -187,6 +194,48 @@ class Alternative(_Strict):
     period_reduction: PeriodReduction | None = None
 
 
+class Amendment(_Strict):
+    """What makes a task an amendment of a plan card: the user's `text` typed on the
+    card of `prior_plan`, the plan the planner drafted for task `base` (a `Plan` dump,
+    as a run's record keeps it), and `answer`, the user's own words in reply to a
+    question the planner asks about it, when the task scripts one. A task asking a
+    new question states in `new_question_in` the value, or the list of values, a
+    `starts_new_plan` call may name: `amendment` or `answer`, whose text the turn
+    hands back (`handed_back`), or `none`, which hands back nothing and asks the user
+    for their question. A task that amends the plan states none."""
+
+    base: str
+    prior_plan: dict[str, Any]
+    text: str
+    answer: str | None = None
+    new_question_in: str | list[str] | None = None
+
+    @property
+    def accepted(self) -> frozenset[str]:
+        """The values of `new_question_in` a run may name, empty on a task that
+        amends the plan."""
+        stated = self.new_question_in
+        return frozenset([stated] if isinstance(stated, str) else stated or ())
+
+    def handed_back(self, source: str) -> str | None:
+        """The words a turn hands back when the planner names `source`: the text of
+        the message it names, `None` for `none`."""
+        return {"amendment": self.text, "answer": self.answer}.get(source)
+
+    @model_validator(mode="after")
+    def _each_named_message_exists(self) -> Self:
+        Plan.model_validate(self.prior_plan)
+        if isinstance(self.new_question_in, list) and (
+            not self.new_question_in or len(self.accepted) < len(self.new_question_in)
+        ):
+            raise ValueError("a `new_question_in` list names each value once, and one at least")
+        if unknown := self.accepted - {"amendment", "answer", "none"}:
+            raise ValueError(f"`new_question_in` names {sorted(unknown)}, not a message")
+        if "answer" in self.accepted and self.answer is None:
+            raise ValueError("`new_question_in` names `answer` and the task scripts none")
+        return self
+
+
 class Task(_Strict):
     """One question, as the orchestrator hands it to the planner.
 
@@ -202,7 +251,8 @@ class Task(_Strict):
     several years taken together (`across_years`). A task whose search holds a party
     open names it in one. `period_reduction` is what the reference plan does with the
     years of its data, `none` or `across_years`, and what a run's accepted plan is
-    held to.
+    held to. A task with an `amendment` opens the planner on the user's amendment of
+    a plan card instead of a first draft (`load_amendment_tasks`).
     """
 
     id: str
@@ -221,6 +271,13 @@ class Task(_Strict):
     period_reduction: PeriodReduction
     reference_payload: dict[str, Any]
     alternative_payloads: list[Alternative] = []
+    amendment: Amendment | None = None
+
+    @property
+    def recording_id(self) -> str:
+        """The task whose recording a run replays: the base task of an amendment
+        task, which shares its searches and skills, else this one."""
+        return self.amendment.base if self.amendment is not None else self.id
 
     @property
     def across_years_numbers(self) -> tuple[int, ...]:
@@ -257,6 +314,30 @@ def load_tasks(directory: Path = TASKS_DIR) -> list[Task]:
     ]
     order = {kind: index for index, kind in enumerate(KINDS)}
     return sorted(tasks, key=lambda task: (order.get(task.kind, len(KINDS)), task.id))
+
+
+def load_amendment_tasks(
+    directory: Path = AMENDMENTS_DIR, tasks: Sequence[Task] | None = None
+) -> list[Task]:
+    """Every amendment task in `directory`, by id. A file holds `id` and the
+    `amendment`; the rest of the task is its base task's (`Amendment.base`), whose
+    searches, brief and asks the turn ran before the user amended the card."""
+    by_id = {task.id: task for task in (tasks if tasks is not None else load_tasks())}
+    loaded = []
+    for path in sorted(directory.glob("*.json")):
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        amendment = Amendment.model_validate(raw["amendment"])
+        base = by_id[amendment.base]
+        loaded.append(
+            base.model_copy(update={"id": raw["id"], "kind": "amendment", "amendment": amendment})
+        )
+    return loaded
+
+
+def load_every_task() -> list[Task]:
+    """Every first-turn task (`load_tasks`), then every amendment task."""
+    first_turns = load_tasks()
+    return [*first_turns, *load_amendment_tasks(tasks=first_turns)]
 
 
 # --- Recordings ----------------------------------------------------------------------
@@ -654,19 +735,17 @@ async def orchestrator_state(task: Task, resolver: Resolver) -> dict[str, Any]:
         tool.__name__: tool
         for tool in build_orchestrator_tools(resolver=resolver, executor=_NoExecutor())
     }
-    context = SimpleNamespace(state={}, actions=EventActions())
+    state: dict[str, Any] = {}
+    call = OrchestratorCall(state=RecordingState(state), turn_id=task.id)
     for search in task.searches:
-        found = await tools["search"](
-            tool_context=context, parts=search.parts or None, text=search.text
-        )
+        found = await tools["search"](call=call, parts=search.parts or None, text=search.text)
         if "error" in found:
             raise TaskStateError(
                 f"{task.id}: search {search.parts or search.text!r}: {found['error']}"
             )
-    handed = tools["plan"](brief=task.brief, asks=list(task.asks), tool_context=context)
+    handed = tools["plan"](brief=task.brief, asks=list(task.asks), call=call)
     if handed.get(HANDED_OFF) != "plan":
         raise TaskStateError(f"{task.id}: plan answered {handed}")
-    state: dict[str, Any] = context.state
     return state
 
 
@@ -684,21 +763,19 @@ class PlanRecorded(Exception):  # noqa: N818 -- a stop signal, not a fault
 
 class _DropPlanRecorded(logging.Filter):
     """Drops the planner's error log for the eval's own stop, which it reads as a tool
-    failure. The node logs it."""
+    failure. The adapter logs it."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         return not (record.exc_info and isinstance(record.exc_info[1], PlanRecorded))
 
 
-for _logger in ("harness.planner_adapter", "harness.planner_node"):
-    logging.getLogger(_logger).addFilter(_DropPlanRecorded())
+logging.getLogger("harness.planner_adapter").addFilter(_DropPlanRecorded())
 
 
 def quiet_logs() -> None:
-    """Silence what a run's record already holds: ADK's traceback for a failed node and
-    the wiring's line for an entry the adapter gave up on."""
-    for name in ("google_adk", "harness.wiring"):
-        logging.getLogger(name).setLevel(logging.CRITICAL)
+    """Silence what a run's record already holds: the wiring's line for an entry the
+    adapter gave up on."""
+    logging.getLogger("harness.wiring").setLevel(logging.CRITICAL)
 
 
 # The stop reason of an entry the adapter gave up on (`PlannerAdapterError`): the planner
@@ -711,9 +788,9 @@ class ModelRequest:
     """One request the planner's model client is sent, in google-genai's types.
 
     The planner sends the system instruction as a string and every declaration in
-    one `Tool` (`harness.planner_model`). `system_text` and `declarations` read
-    any shape google-genai takes, so an edit reads a request the same way
-    whichever form it arrives in.
+    one `Tool` (`harness.gemini_wire.in_canonical_form`). `system_text` and
+    `declarations` read any shape google-genai takes, so an edit reads a request
+    the same way whichever form it arrives in.
     """
 
     model: str
@@ -761,7 +838,7 @@ _UNFINISHED_CALL: dict[str, Any] = {
 
 @dataclass
 class Probe:
-    """What one entry did that its session's events do not carry: the plan the first
+    """What one entry did that its transcript does not carry: the plan the first
     accepted proposal recorded and the id of the `propose_plan` call that recorded it,
     the code of the refusal an entry with no plan ended on, each request the planner's
     model client was sent, each model call, with its tokens and latency once the whole
@@ -947,7 +1024,7 @@ class _ProbedAsyncClient:
 class _ProbedClient(Client):
     """`client` with `_ProbedAsyncClient` as its `aio`.
 
-    A `Client`, since ADK's `Gemini` takes nothing else, built without
+    A `Client`, as `PlannerAdapter` types its `client`, built without
     `Client.__init__`. Every other attribute is `client`'s own, and the wrapped client
     stays open when this one is collected.
     """
@@ -984,7 +1061,7 @@ class _Watched:
 def live_client() -> Client:
     """The google-genai client a live entry's planner calls go through, built from the
     environment with the HTTP retries the served planner's model makes
-    (`orchestrator.agent.model_retry_options`)."""
+    (`harness.gemini_wire.model_retry_options`)."""
     return Client(http_options=types.HttpOptions(retry_options=model_retry_options()))
 
 
@@ -994,8 +1071,7 @@ def build_adapter(
     """The adapter `harness.wiring.build_planner` builds, with the probe's translate
     step and the planner's model calls going through `client`.
 
-    The planner, its instruction, its tools and the planner node the adapter runs it in
-    (`harness.planner_node`) are production's own.
+    The planner, its instruction and its tools are production's own.
     """
     return PlannerAdapter(
         settings=Settings(),
@@ -1006,21 +1082,13 @@ def build_adapter(
     )
 
 
-def entry_workflow(planner: PlannerModel) -> Workflow:
-    """The served graph from the orchestrator's `plan` call to the end of the planner's
-    entry (`harness.graph.workflow.planner_entry`), drafting with `planner`."""
-    entry = planner_entry(planner)
-    return Workflow(
-        name="planner_entry", state_schema=GraphState, edges=[(START, entry.route), *entry.edges]
-    )
-
-
 @dataclass(frozen=True)
 class EntryRun:
-    """One finished entry: the planner's events and the user's answers to its asks, what
-    the probe saw, and how it ended."""
+    """One finished entry: its turn's transcript (the user's message, the planner's
+    records, each pause and the user's answer to it), what the probe saw, and how it
+    ended."""
 
-    events: list[Event]
+    records: list[AgentRecord]
     state: dict[str, Any]
     probe: Probe
     inputs: str
@@ -1043,7 +1111,7 @@ async def run_entry(
     answers: Sequence[Mapping[str, Any]] = (),
     translation: TranslationCalls | None = None,
 ) -> EntryRun:
-    """Run `task`'s planner entry once on a fresh session.
+    """Run `task`'s planner entry once on a fresh turn.
 
     The planner's model calls go through `client`, a live client (`live_client`) when
     None. `edits` change each request it is sent (`RequestEdit`), and the probe notes
@@ -1053,9 +1121,18 @@ async def run_entry(
     planner streams, as a studio turn runs it. `answers` are the user's replies to
     the entry's asks, in order. Each resumes the paused entry, as the studio's
     interrupt route does, in a request of its own with a fresh budget. A live run
-    passes none, so an ask ends it. With `translation`, production's translation
-    runs on the recorded plan over those calls, and `probe.translation` holds its
-    answer.
+    passes none, so an ask ends it. Each answer is the reply the studio's interrupt
+    route reads, the user's answer under `result`. With `translation`,
+    production's translation runs on the recorded plan over those calls, and
+    `probe.translation` holds its answer.
+
+    A task with an `amendment` opens the planner as the `approve` node's `amend` edge
+    does, on the task's prior plan and the user's text, after `plan_start` took the
+    hand-off; its scripted `answer`, when it has one and `answers` is empty, replies to
+    the planner's first question. The entry also ends when the planner reads the text
+    as a new question, the `new_question` edge, which leaves the words it hands back
+    under `NEW_QUESTION_KEY`, or sets `ASK_FOR_QUESTION_KEY` when the planner names
+    no message.
     """
     probe = Probe()
     if translation is not None:
@@ -1076,18 +1153,32 @@ async def run_entry(
         prefix_cache=prefix_cache,
         client=probe.client(client if client is not None else live_client(), edits=edits),
     )
-    sessions = InMemorySessionService()
-    session = await sessions.create_session(app_name=_APP, user_id=_USER, state=state)
+    # The action `plan` recorded, which `orchestrate` takes from the state as the
+    # `plan_start` node's input.
+    action = pending_action(state)
+    state.pop(ORCHESTRATOR_PENDING_KEY, None)
+    if action is None or action.kind != "plan":
+        raise TaskStateError(f"{task.id}: plan recorded {action}")
     # The adapter wrapped as `harness.server.create_app` wraps it.
     planner = handing_back_planner_failures(probe.watch(adapter))
-    runner = Runner(node=entry_workflow(planner), app_name=_APP, session_service=sessions)
-    message = types.Content(role="user", parts=[types.Part.from_text(text=task.question)])
+    ctx = NodeCtx[Any](
+        key=TurnKey(_PRINCIPAL, f"eval-{task.id}", 1),
+        inputs={"message": task.question},
+        state={},
+        transcript=Transcript([transcript.user_message(task.question)]),
+        emit=lambda event: None,
+        stop=StopScope(),
+    )
+    ctx.state.update(state)
     # The conversation a studio turn runs in, holding the spec blocks the orchestrator's
     # searches returned, as `harness.studio` keeps them, so `propose_plan` and the
     # translation read a pin's identity on record (`planner.plan.recorded_identity`).
-    conversation = ConversationState(conversation_id=session.id)
-    conversation.turn_specs = dict(state.get(ORCHESTRATOR_SPECS_KEY) or {})
+    conversation = ConversationState(conversation_id=ctx.key.conversation_id)
+    conversation.turn_specs = dict(ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {})
     pending = list(answers)
+    amendment = task.amendment
+    if amendment is not None and amendment.answer is not None and not pending:
+        pending = [{"result": {"answers": {"q1": {"kind": "text", "text": amendment.answer}}}}]
     error: str | None = None
     timed_out = False
     started = time.perf_counter()
@@ -1095,34 +1186,60 @@ async def run_entry(
     settings = Settings()
     budgets: list[TurnBudget] = []
 
+    async def segment(step: Awaitable[Next | Pause]) -> Next | Pause:
+        """One request of the entry: `step` awaited under a fresh budget, then the state
+        stored as the turn loop stores it at the node's boundary (`_stored`). A step that
+        raises leaves the state as it was."""
+        budgets.append(TurnBudget.from_settings(settings))
+        probe.next_request()
+        token = current_turn_budget.set(budgets[-1])
+        identities = current_recorded_identity.set(conversation.recorded_identity)
+        try:
+            result = await step
+        finally:
+            current_recorded_identity.reset(identities)
+            current_turn_budget.reset(token)
+        ctx.state = _stored(ctx.state)
+        return result
+
     async def drive() -> None:
-        content: types.Content | None = message
-        while content is not None:
-            budgets.append(TurnBudget.from_settings(settings))
-            probe.next_request()
-            token = current_turn_budget.set(budgets[-1])
-            identities = current_recorded_identity.set(conversation.recorded_identity)
-            try:
-                async for _event in runner.run_async(
-                    user_id=_USER,
-                    session_id=session.id,
-                    new_message=content,
-                    run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-                ):
-                    pass
-            finally:
-                current_recorded_identity.reset(identities)
-                current_turn_budget.reset(token)
-            content = None
-            if probe.plan is None and pending:
-                # The ask the entry paused on, under its call id
-                # (`harness.graph.planning`).
-                ask = load_pending_ask((await _session(sessions, session.id)).state)
-                if ask is not None:
-                    content = types.Content(
-                        role="user",
-                        parts=[create_request_input_response(ask.call_id, dict(pending.pop(0)))],
-                    )
+        drafting = planner_node(planner=planner)
+        opened = await plan_start.run(ctx, action.model_dump(mode="json"))
+        assert isinstance(opened, Next)
+        # The planner node runs on its input as the loop stored it with the cursor.
+        ctx.state = _stored(ctx.state)
+        node_input = _stored(opened.output)
+        if amendment is not None:
+            # The card the user amended holds the prior plan, which the `approve`
+            # node hands the planner with the answer on its `amend` edge.
+            prior = Plan.model_validate(amendment.prior_plan)
+            ctx.state["plan"] = prior.model_dump_json()
+            node_input = _stored(
+                {
+                    "plan": prior.model_dump(mode="json"),
+                    "answer": {"approved": None, "amendment": amendment.text},
+                }
+            )
+        result = await segment(drafting.run(ctx, node_input))
+        rounds = 0
+        while isinstance(result, Pause) and probe.plan is None and pending:
+            rounds += 1
+            interrupt_id = f"int_{rounds}"
+            answer = dict(pending.pop(0)["result"])
+            ctx.transcript.append(
+                transcript.pause(
+                    kind=result.kind,
+                    interrupt_id=interrupt_id,
+                    round=rounds,
+                    payload=result.payload,
+                    message=result.message,
+                )
+            )
+            ctx.transcript.append(
+                transcript.answer(interrupt_id=interrupt_id, round=rounds, value=answer)
+            )
+            assert drafting.resume is not None
+            result = await segment(drafting.resume(ctx, node_input, answer))
 
     # Only this scope's expiry is the eval's timeout: a `TimeoutError` raised inside the
     # entry, such as the model client's own, is an error and is retried.
@@ -1135,10 +1252,9 @@ async def run_entry(
         if not timed_out:
             error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=8)}"[:3000]
     wall_s = time.perf_counter() - started
-    ended = await _session(sessions, session.id)
     return EntryRun(
-        events=_entry_events(ended),
-        state=dict(ended.state),
+        records=list(ctx.transcript.records),
+        state=dict(ctx.state),
         probe=probe,
         inputs=inputs_digest(task, recording),
         budget_closed=next(
@@ -1149,6 +1265,13 @@ async def run_entry(
         timed_out=timed_out,
         wall_s=wall_s,
     )
+
+
+def _stored(value: Any) -> Any:
+    """`value` as the turn store hands it back: through JSON that holds no NaN or
+    infinity (`harness.turn.store`), raising `ValueError` or `TypeError` where the
+    store's write would."""
+    return json.loads(json.dumps(value, allow_nan=False))
 
 
 def inputs_digest(task: Task, recording: Mapping[str, Any]) -> str:
@@ -1169,6 +1292,11 @@ def inputs_digest(task: Task, recording: Mapping[str, Any]) -> str:
         "searches": [search.model_dump(mode="json") for search in task.searches],
         "brief": task.brief,
         "asks": asks,
+        **(
+            {"amendment": task.amendment.model_dump(mode="json")}
+            if task.amendment is not None
+            else {}
+        ),
         "recorded_searches": recording["searches"],
         "recorded_answers": recording["tools"],
     }
@@ -1187,22 +1315,6 @@ async def first_year_gaps(state: Mapping[str, Any], recording: Mapping[str, Any]
     return surface.misses
 
 
-async def _session(sessions: InMemorySessionService, session_id: str) -> Session:
-    session = await sessions.get_session(app_name=_APP, user_id=_USER, session_id=session_id)
-    assert session is not None
-    return session
-
-
-def _entry_events(session: Session) -> list[Event]:
-    """The planner's events, and the user's answers to its asks, which the user authors."""
-    return [
-        event
-        for event in session.events
-        if event.author == PLANNER_AGENT
-        or (event.author == "user" and event.get_function_responses())
-    ]
-
-
 # --- The record of one run -----------------------------------------------------------
 
 # The value of the record field and fingerprint key `planner_runner`, which stored
@@ -1211,25 +1323,27 @@ PLANNER_RUNNER = "pydantic_ai"
 RECORD_SCHEMA = 4
 
 
-def tool_calls(events: Sequence[Event]) -> list[dict[str, Any]]:
-    """Every tool call the planner made, in order, with the response its tool gave. A
-    call with no response is one the entry ended before it answered."""
+def tool_calls(records: Sequence[AgentRecord]) -> list[dict[str, Any]]:
+    """Every tool call the planner made, in order, with the response its tool gave, read
+    off the planner's records in the turn's transcript by `planner.session`'s own
+    readers. A call with no response is one the entry ended before it answered."""
     calls: list[dict[str, Any]] = []
     by_id: dict[str, dict[str, Any]] = {}
-    for event in events:
-        for call in event.get_function_calls():
+    for record in records:
+        for call in function_calls(record):
             entry = {
-                "id": call.id,
-                "name": call.name,
-                "args": dict(call.args or {}),
+                "id": call.get("id"),
+                "name": call["name"],
+                "args": dict(call.get("args") or {}),
                 "response": None,
             }
             calls.append(entry)
-            if call.id is not None:
-                by_id[call.id] = entry
-        for response in event.get_function_responses():
-            if response.id in by_id and by_id[response.id]["response"] is None:
-                by_id[response.id]["response"] = response.response
+            if entry["id"] is not None:
+                by_id[entry["id"]] = entry
+        for response in function_responses(record):
+            answered = by_id.get(response.get("id"))
+            if answered is not None and answered["response"] is None:
+                answered["response"] = response.get("response")
     return calls
 
 
@@ -1326,16 +1440,27 @@ def record_period_reduction(record: Mapping[str, Any], task: Task) -> PeriodRedu
 
 
 def stop_reason(run: EntryRun) -> str:
-    """How the entry ended: `accepted`, `timeout` (the eval's own limit), `error`, the
-    adapter's refusal code, or `asked_user` (an ask the tool took, which the entry paused
-    on, still awaiting the user's answer). A refusal wins over an ask, since the entry
-    it ends pauses on nothing."""
+    """How the entry ended: `error`, `accepted`, `timeout` (the eval's own limit), the
+    adapter's refusal code, `new_question` (the planner read an amendment as a new
+    question, which the turn hands back), or `asked_user` (an ask the tool took, which
+    the entry paused on, awaiting the user's answer). An error wins over a recorded
+    plan: a step that raised, or a state the turn store refused at the node's
+    boundary, fails the served turn, so the plan never reaches the user. A refusal
+    wins over an ask, since the entry it ends pauses on nothing."""
+    if run.error is not None:
+        return "error"
     if run.probe.plan is not None:
         return "accepted"
     if run.timed_out:
         return "timeout"
-    if run.error is not None:
-        return "error"
+    return _unplanned_ending(run)
+
+
+def _unplanned_ending(run: EntryRun) -> str:
+    """How an entry that recorded no plan, raised nothing and did not time out ended
+    (`stop_reason`)."""
+    if run.state.get(NEW_QUESTION_KEY) or run.state.get(ASK_FOR_QUESTION_KEY):
+        return "new_question"
     if run.probe.refused_code is not None:
         return run.probe.refused_code
     if load_pending_ask(run.state) is not None:
@@ -1360,7 +1485,7 @@ def entry_record(
     `period_reductions` and `period_reduction` say what the accepted plan does with
     its years.
     """
-    calls = tool_calls(run.events)
+    calls = tool_calls(run.records)
     proposed = proposals(calls, recorded=run.probe.plan_call)
     plan = run.probe.plan
     reductions = period_reductions(plan) if plan else None
@@ -1393,10 +1518,25 @@ def entry_record(
         "budget_closed": run.budget_closed,
         "surface_misses": run.surface_misses,
         "wall_s": round(run.wall_s, 3),
+        "new_question_in": named_new_question(calls),
+        "new_question": run.state.get(NEW_QUESTION_KEY),
+        "asked_for_question": run.state.get(ASK_FOR_QUESTION_KEY) is True,
     }
 
 
+def named_new_question(calls: Sequence[Mapping[str, Any]]) -> str | None:
+    """The message the run's last `starts_new_plan` call named in `new_question_in`,
+    `None` when none named one."""
+    named = [
+        call["args"].get("new_question_in")
+        for call in calls
+        if call["name"] == "propose_plan" and call["args"].get("starts_new_plan")
+    ]
+    return next((value for value in reversed(named) if value), None)
+
+
 __all__ = [
+    "AMENDMENTS_DIR",
     "KINDS",
     "PERIOD_REFUSAL",
     "EntryRun",
@@ -1415,6 +1555,8 @@ __all__ = [
     "first_year_gaps",
     "inputs_digest",
     "live_client",
+    "load_amendment_tasks",
+    "load_every_task",
     "load_recording",
     "load_tasks",
     "orchestrator_state",

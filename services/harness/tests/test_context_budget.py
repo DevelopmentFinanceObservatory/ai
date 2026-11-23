@@ -14,10 +14,10 @@ declaration on its own, and the text the planner's `contents` carries. Each real
 file with the reason it sits where it does.
 
 The fenced foreign-agent relay is the exception to every other ceiling's
-rounding: no relayed text may reach the planner at all. ADK relays another
-agent's turn into a request as fenced user text
-(`google.adk.flows.llm_flows.context._fencing._present_other_agent_message`), and no
-other agent runs inside a planner run, so any relayed part is a regression.
+rounding: no relayed text may reach the planner at all. An agent framework
+relays another agent's turn into a request as fenced user text, as the
+earlier framework did, and no other agent runs inside a planner run, so any relayed part is a
+regression.
 
 Every realistic-input ceiling is proved live by `test_every_ceiling_fails_when_its_segment_grows`.
 The relay guard's own proof is `test_no_relayed_foreign_agent_text_reaches_the_planner`
@@ -86,7 +86,6 @@ from typing import Any
 import pytest
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp.skills_client import PAGE_CHARS, continuation_line, page_of, with_closing_line
-from google.adk.models.llm_request import LlmRequest
 from google.genai import types
 from harness import planner_adapter, studio_state
 from harness.planner_adapter import (
@@ -102,7 +101,8 @@ from harness.planner_adapter import (
 from harness.prefix_cache import prefix_key
 from harness.settings import Settings
 from harness.studio_state import (
-    CANVAS_DIGEST_MAX_BYTES,
+    CANVAS_LISTING_MAX_BYTES,
+    CANVAS_SUMMARY_MAX_BYTES,
     CONVERSATION_DIGEST_MAX_BYTES,
     ConversationState,
 )
@@ -150,6 +150,7 @@ from .context_probe import (
     BRIEF_BUCKET,
     BRIEF_MARKER,
     RELAY_MARKER,
+    ModelRequest,
     bucket_chars,
     compose,
     contents_leading,
@@ -161,8 +162,9 @@ from .context_probe import (
 from .context_probe import (
     record_chars as _record_chars,
 )
+from .planner_host import PlannerHarness
 from .scripted_genai import Reply, Request, ScriptedGenai, call_part, reply, text_part
-from .test_planner_adapter import _NO_DATA_SEARCH_RESPONSE, _AdapterHarness, _gdp_plan
+from .test_planner_adapter import _NO_DATA_SEARCH_RESPONSE, _gdp_plan
 
 # The root conftest.py chdirs every test into a tmp_path, so this must be absolute.
 _BASELINE_PATH = Path(__file__).resolve().parent / "context_baseline.json"
@@ -176,23 +178,23 @@ _REGENERATE = "just context-baseline"
 
 # The planner's system instruction: the role, the tool protocol, the closing
 # rules, the skills paragraph and the translating paragraph, assembled by
-# `planner.instruction.planner_instruction`. Measured 19,875 with the skill tools and
-# translation attached. The margin is 1.4% and covers a hand edit of
+# `planner.instruction.planner_instruction`. Measured 20,156 with the skill tools and
+# translation attached. The margin is 1.7% and covers a hand edit of
 # model-facing wording, since these paragraphs are rewritten for model
 # behaviour a sentence at a time.
-PLANNER_SYSTEM_INSTRUCTION_CEILING = 20_150
+PLANNER_SYSTEM_INSTRUCTION_CEILING = 20_500
 
-# Every planner tool declaration together measures 41,324 (`propose_plan` 37,293 and
-# 4,031 across the smaller ones). The margin is 1.6%.
+# Every planner tool declaration together measures 41,507 (`propose_plan` 38,513 and
+# 2,994 across the smaller ones). The margin is 1.2%.
 PLANNER_DECLARATIONS_TOTAL_CEILING = 42_000
 
 # `propose_plan`'s own declaration: the `DecisionDraft` and `EvidenceRequirement`
 # schemas with their `$defs` tree, and the patch, decline, answer and intent
-# arguments. Measured 37,293, with every field that refers to a definition holding a
+# arguments. Measured 38,513, with every field that refers to a definition holding a
 # copy of it under the field's own description. It sits in the static prefix every planner call
 # repeats, which Gemini's implicit cache can serve. Its field descriptions are what
-# the planner writes a plan from. The margin is 1.1%.
-PROPOSE_PLAN_DECLARATION_CEILING = 37_700
+# the planner writes a plan from. The margin is 1.0%.
+PROPOSE_PLAN_DECLARATION_CEILING = 38_900
 
 # The smaller planner declarations at once: `ask_user_question`, `get_skill` and
 # `reject_plan`, measured 2,994 together. The margin is 25.9%, the margin the
@@ -264,10 +266,10 @@ def _adapter(scripted: ScriptedGenai) -> PlannerAdapter:
     )
 
 
-def _as_llm_request(request: Request) -> LlmRequest:
-    """`request`, as the planner sent it to Gemini, in the `LlmRequest` shape
+def _as_model_request(request: Request) -> ModelRequest:
+    """`request`, as the planner sent it to Gemini, in the shape
     `context_probe.compose` measures."""
-    return LlmRequest(
+    return ModelRequest(
         model=request.model, contents=request.content_list, config=request.generate_config
     )
 
@@ -345,7 +347,7 @@ async def _recorded_round(
     `state` is what the session holds before the round, such as the asks.
 
     Returns `{"planner": (records, requests)}`: the `context_probe.compose`
-    records in call order, and the requests as `LlmRequest` objects, which the
+    records in call order, and the requests as `ModelRequest` objects, which the
     stability assertions compare byte for byte.
     """
     draft = _gdp_plan(decision, requirement, derived_requirement)
@@ -353,12 +355,12 @@ async def _recorded_round(
     adapter = _adapter(scripted)
 
     arguments: dict[str, Any] = {"question": draft.question, **context}
-    output = await _AdapterHarness(state).run(
+    output = await PlannerHarness(state).run(
         adapter, prior_plan=draft.model_dump(mode="json"), **arguments
     )
     assert output is not None and "refused" in output, output
 
-    requests = [_as_llm_request(request) for request in scripted.requests]
+    requests = [_as_model_request(request) for request in scripted.requests]
     records = [
         compose(request, agent="planner", scenario=scenario, call_index=index)
         for index, request in enumerate(requests)
@@ -422,7 +424,7 @@ async def _declaration_digests() -> dict[str, str]:
         specs=planner_specs(translate=build_translate(surface=surface), surface=surface),
         client=scripted.client,
     )
-    await _AdapterHarness().run(adapter, question="go", readings=[])
+    await PlannerHarness().run(adapter, question="go", readings=[])
     return {"served": _declarations_digest(scripted.requests[0])}
 
 
@@ -652,9 +654,9 @@ def test_no_relayed_foreign_agent_text_reaches_the_planner(
 ) -> None:
     """No relayed text reaches the planner, tagged with an author or not.
 
-    Translation runs inside the planner's own `propose_plan` call, and
-    `harness.planner_adapter._PLANNER_BRANCH` keeps another agent's turns off the
-    planner's branch, so no fenced relay belongs in a planner request.
+    Translation runs inside the planner's own `propose_plan` call, and no
+    other agent's turn is written into a planner request, so no fenced relay
+    belongs in one.
     """
     planner_records = [
         record
@@ -666,7 +668,7 @@ def test_no_relayed_foreign_agent_text_reaches_the_planner(
         found = relay_buckets(record)
         assert not found, (
             f"{_baseline_key(record)}: the planner is carrying relayed foreign-agent "
-            f"text: {found}. ADK is relaying another agent's turn into this request."
+            f"text: {found}. Another agent's turn is relayed into this request."
         )
 
 
@@ -675,8 +677,8 @@ def test_the_relay_check_measures_a_relay_that_is_there() -> None:
 
     The control for `test_no_relayed_foreign_agent_text_reaches_the_planner`: a
     bucket that always read empty, or a marker match that had drifted from
-    what `_fencing` emits, would pass that test for the wrong reason. The
-    relay built here is ADK's own framing: one tagged part naming the author,
+    the relay's framing, would pass that test for the wrong reason. The
+    relay built here is the earlier framework's framing: one tagged part naming the author,
     then the fenced payload.
     """
     request = _request(
@@ -794,12 +796,11 @@ def _request(
     brief: int | None = None,
     skill: int | None = None,
 ) -> Any:
-    """A `LlmRequest` carrying the named declarations and text parts, oversized.
+    """A `ModelRequest` carrying the named declarations and text parts, oversized.
 
-    `relay`, when given, prepends an ADK-shaped fenced relay of
-    `(author, chars)`: the framing `_fencing._present_other_agent_message`
-    emits, so the relay bucket is exercised against the real shape, not
-    one this test invented. `brief`, when given, prepends a planner-brief part of
+    `relay`, when given, prepends a fenced relay of `(author, chars)` in the
+    framing the earlier framework emitted, so the relay bucket is exercised against a
+    shape a framework used, not one this test invented. `brief`, when given, prepends a planner-brief part of
     that many chars, `harness.planner_adapter._READINGS_CONTEXT`'s own opening
     words, which is what `context_probe` buckets on, so the brief ceiling is
     exercised against a part that really is one. `skill`, when given, appends
@@ -844,7 +845,7 @@ def _request(
                 ],
             ),
         )
-    return LlmRequest(
+    return ModelRequest(
         model="probe",
         contents=contents,
         config=types.GenerateContentConfig(
@@ -1354,20 +1355,34 @@ _BIG = 100_000
 
 
 def _canvas_state(*, title: str, fact_summary: Any) -> ConversationState:
-    """A conversation whose composition holds three times the block cap of components,
-    each naming three times the show cap of 100,000-character entities."""
+    """A conversation that fills every group a canvas view names past its caps:
+    the open turn drew the full places and the compact ones and more, an
+    earlier turn drew as many pinned cards, and more earlier turns than the
+    digest counts apart drew one card each. Each card names three times the
+    show cap of 100,000-character entities."""
     state = ConversationState(conversation_id=_CONVERSATION)
-    entries = {
-        f"cmp_{index:016x}": {
-            "type": "line_chart",
-            "title": title,
-            "revision": 999_999_999,
-            "fact_summary": fact_summary,
-            "entities": [_ASTRAL * _BIG] * (3 * studio_state._DIGEST_SHOW_CAP),
-            "time": _ASTRAL * _BIG,
-        }
-        for index in range(3 * studio_state._DIGEST_BLOCK_CAP)
-    }
+    group = studio_state._DIGEST_BLOCK_CAP + studio_state._LISTING_COMPACT_CAP + 2
+    # Oldest first: the pinned cards' turn, the one-card turns, the open turn.
+    sizes = [group, *[1] * (studio_state._EARLIER_TURN_CAP + 2), group]
+    entries: dict[str, dict[str, Any]] = {}
+    turns: list[list[dict[str, Any]]] = []
+    for turn, size in enumerate(sizes):
+        cards = []
+        for index in range(size):
+            component_id = f"cmp_{turn:04x}{index:012x}"
+            entries[component_id] = {
+                "type": "line_chart",
+                "title": title,
+                "revision": 999_999_999,
+                "fact_summary": fact_summary,
+                "entities": [_ASTRAL * _BIG] * (3 * studio_state._DIGEST_SHOW_CAP),
+                "time": _ASTRAL * _BIG,
+            }
+            cards.append({"component_id": component_id, "action": "created"})
+        turns.append(cards)
+    *closed, state.turn_components = turns
+    state.turns = [{"user": "u", "assistant": "a", "cards": cards} for cards in closed]
+    pinned = {card["component_id"] for card in closed[0]}
     state.components.update(entries)
     state.composition = studio_state._next_manifest(
         None,
@@ -1377,6 +1392,7 @@ def _canvas_state(*, title: str, fact_summary: Any) -> ConversationState:
                 revision=entry["revision"],
                 type=ComponentType(entry["type"]),
                 title="block",
+                pinned=component_id in pinned,
             )
             for component_id, entry in entries.items()
         ],
@@ -1385,21 +1401,24 @@ def _canvas_state(*, title: str, fact_summary: Any) -> ConversationState:
     return state
 
 
-def _canvas_digest(*, title: str, fact_summary: Any, focus: str | None = None) -> dict[str, Any]:
-    digest = _canvas_state(title=title, fact_summary=fact_summary).canvas_digest_state(focus=focus)
-    assert digest is not None
-    return digest
+def _canvas_summary(*, title: str, fact_summary: Any, focus: str | None = None) -> dict[str, Any]:
+    """The canvas summary a turn opens with, for a follow-up from `focus`
+    (the open turn's first card when None)."""
+    state = _canvas_state(title=title, fact_summary=fact_summary)
+    summary = state.canvas_summary_state(focus=focus or state.turn_components[0]["component_id"])
+    assert summary is not None
+    return summary
 
 
-def _largest_canvas_digest() -> dict[str, Any]:
-    """The largest digest: every block's fact summary just inside its cap.
+def _largest_canvas_summary() -> dict[str, Any]:
+    """The largest summary: its focus card's fact summary just inside its cap.
 
-    The titles are 100,000 characters, so they come out cut to their cap. A
+    The title is 100,000 characters, so it comes out cut to its cap. A
     summary any longer than the cap is replaced by a short stub, so the largest
-    digest is the one whose summaries fit.
+    is the one whose fact summary fits.
     """
     summary = "s" * (studio_state._FACT_SUMMARY_BYTE_CAP - 2)
-    return _canvas_digest(title="t" * _BIG, fact_summary=summary)
+    return _canvas_summary(title="t" * _BIG, fact_summary=summary)
 
 
 def _conversation_digest() -> dict[str, Any]:
@@ -1433,31 +1452,43 @@ def _section_ceiling(title: str, body_bytes: int) -> int:
     return len(f"\n{title}:\n\n") + body_bytes
 
 
-CANVAS_SECTION_CEILING = _section_ceiling(_CANVAS_TITLE, CANVAS_DIGEST_MAX_BYTES)
+CANVAS_SECTION_CEILING = _section_ceiling(_CANVAS_TITLE, CANVAS_SUMMARY_MAX_BYTES)
 CONVERSATION_SECTION_CEILING = _section_ceiling(_CONVERSATION_TITLE, CONVERSATION_DIGEST_MAX_BYTES)
 
 
 @pytest.mark.parametrize(
-    "digest",
+    "summary",
     [
         pytest.param(
-            lambda: _canvas_digest(title="t" * _BIG, fact_summary={"series": ["x" * _BIG]}),
+            lambda: _canvas_summary(title="t" * _BIG, fact_summary={"series": ["x" * _BIG]}),
             id="canvas-inputs-100kb",
         ),
-        pytest.param(_largest_canvas_digest, id="canvas-largest-digest"),
-        pytest.param(
-            lambda: _canvas_digest(title="t", fact_summary="s", focus="F" * 1_000_000),
-            id="canvas-focus-names-no-component",
-        ),
+        pytest.param(_largest_canvas_summary, id="canvas-largest-summary"),
     ],
 )
-def test_the_canvas_digest_holds_its_maximum_however_large_its_inputs(
-    digest: Callable[[], dict[str, Any]],
+def test_the_canvas_summary_holds_its_maximum_however_large_its_inputs(
+    summary: Callable[[], dict[str, Any]],
 ) -> None:
-    built = digest()
+    built = summary()
 
-    assert len(built["blocks"]) == studio_state._DIGEST_BLOCK_CAP
-    assert len(json.dumps(built)) <= CANVAS_DIGEST_MAX_BYTES
+    assert len(built["blocks"]) == 1
+    assert len(json.dumps(built)) <= CANVAS_SUMMARY_MAX_BYTES
+
+
+def test_a_summary_whose_focus_names_no_card_carries_only_counts() -> None:
+    built = _canvas_summary(title="t", fact_summary="s", focus="F" * 1_000_000)
+
+    assert "blocks" not in built
+    assert len(json.dumps(built)) <= CANVAS_SUMMARY_MAX_BYTES
+
+
+def test_the_canvas_listing_holds_its_maximum_however_large_its_inputs() -> None:
+    """`recall(part="canvas")`'s listing, which the orchestrator reads, at its caps."""
+    summary = "s" * (studio_state._FACT_SUMMARY_BYTE_CAP - 2)
+    listing = _canvas_state(title="t" * _BIG, fact_summary=summary).canvas_listing_state()
+
+    assert len(listing["blocks"]) == studio_state._DIGEST_BLOCK_CAP
+    assert len(json.dumps({"part": "canvas", **listing})) <= CANVAS_LISTING_MAX_BYTES
 
 
 def test_the_conversation_digest_holds_its_maximum_however_large_its_inputs() -> None:
@@ -1469,20 +1500,21 @@ def test_the_conversation_digest_holds_its_maximum_however_large_its_inputs() ->
 
 
 def test_the_digest_maxima_fail_when_the_digest_is_not_bounded() -> None:
-    """The control: a digest as the state stored it, uncut, is past both maxima.
+    """The control: the views as the state stored them, uncut, are past their maxima.
 
-    The canvas digest is what `canvas_digest_state` returns for a state whose
-    block fields are each 100,000 characters, but without `_digest_block`'s
-    cut. This is the unbounded digest, and it has to exceed the maxima the
-    bounded one is held to.
+    The canvas summary and listing are what `canvas_summary_state` and
+    `canvas_listing_state` return for a state whose card fields are each
+    100,000 characters, but without `_digest_block`'s cut. These are the
+    unbounded views, and they have to exceed the maxima the bounded ones are
+    held to.
     """
     state = _canvas_state(title="t" * _BIG, fact_summary="s" * _BIG)
-    uncut = {
-        "blocks": [{"component_id": cid, **entry} for cid, entry in state.components.items()][
-            : studio_state._DIGEST_BLOCK_CAP
-        ]
-    }
-    assert len(json.dumps(uncut)) > CANVAS_DIGEST_MAX_BYTES
+    uncut = [{"component_id": cid, **entry} for cid, entry in state.components.items()]
+    assert len(json.dumps({"blocks": uncut[:1]})) > CANVAS_SUMMARY_MAX_BYTES
+    assert (
+        len(json.dumps({"blocks": uncut[: studio_state._DIGEST_BLOCK_CAP]}))
+        > CANVAS_LISTING_MAX_BYTES
+    )
 
     turns = [{"user": "u" * _BIG, "assistant": "a" * _BIG}]
     assert len(json.dumps({"turns": turns, "total_turns": 1})) > CONVERSATION_DIGEST_MAX_BYTES
@@ -1581,7 +1613,7 @@ def _maximal_brief_parts(ask: str) -> dict[str, str]:
     cut_question = _BRIEF_QUESTION[: MAX_QUESTION_CHARS - len(CUT_MARKER)] + CUT_MARKER
     return {
         "readings": _readings_section(_maximal_readings()),
-        "canvas digest": _section(_CANVAS_TITLE, _largest_canvas_digest()),
+        "canvas summary": _section(_CANVAS_TITLE, _largest_canvas_summary()),
         "conversation digest": _section(_CONVERSATION_TITLE, _conversation_digest()),
         "plan": _plan_context(_legal_maximum_plan_record()),
         "question": f"\nQuestion: {cut_question}\n",
@@ -1639,7 +1671,7 @@ def _maximal_brief_ceilings(ask: str) -> dict[str, int]:
         )
     return {
         "readings": READINGS_SECTION_CEILING,
-        "canvas digest": CANVAS_SECTION_CEILING,
+        "canvas summary": CANVAS_SECTION_CEILING,
         "conversation digest": CONVERSATION_SECTION_CEILING,
         "plan": LEGAL_MAXIMUM_PLAN_SECTION_CEILING,
         "question": len("\nQuestion: \n") + MAX_QUESTION_CHARS,
@@ -1665,7 +1697,7 @@ def test_the_largest_legal_brief_is_within_the_sum_of_its_parts_maxima(ask: str)
     brief = _planner_brief(
         readings=_maximal_readings(),
         prior_plan=_legal_maximum_plan_record(),
-        canvas_digest=_largest_canvas_digest(),
+        canvas_digest=_largest_canvas_summary(),
         conversation_digest=_conversation_digest(),
         question=_BRIEF_QUESTION,
         **_ask_kwargs(ask),
@@ -1729,7 +1761,7 @@ def _bounded_context() -> dict[str, Any]:
     """What `PlannerAdapter.__call__` is handed besides the plan and the question."""
     return {
         "readings": _maximal_readings(),
-        "canvas_digest": _largest_canvas_digest(),
+        "canvas_digest": _largest_canvas_summary(),
         "conversation_digest": _conversation_digest(),
     }
 
@@ -1764,9 +1796,12 @@ def test_the_bounded_production_context_stays_under_its_derived_ceilings(
     brief = bucket_chars(planner, BRIEF_BUCKET)
     contents = planner["contents"]["total_chars"]
 
-    assert brief > CANVAS_DIGEST_MAX_BYTES * 0.9, (
-        f"the bounded-context brief is {brief:,} chars, less than the canvas digest alone "
-        f"({CANVAS_DIGEST_MAX_BYTES:,} max): the scenario is not carrying its digests"
+    carried = len(_section(_CANVAS_TITLE, _largest_canvas_summary())) + len(
+        _section(_CONVERSATION_TITLE, _conversation_digest())
+    )
+    assert brief > carried, (
+        f"the bounded-context brief is {brief:,} chars, less than its two digest sections "
+        f"({carried:,}): the scenario is not carrying its digests"
     )
     assert brief <= BOUNDED_CONTEXT_BRIEF_CEILING, (
         f"the bounded-context planner brief is {brief:,} chars, past {BOUNDED_CONTEXT_BRIEF_CEILING:,} "

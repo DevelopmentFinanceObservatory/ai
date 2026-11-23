@@ -12,7 +12,8 @@ fail here.
 from __future__ import annotations
 
 import pytest
-from common.caller import CALLER_HEADER
+from common.caller import CALLER_HEADER, TURN_HEADER
+from compiler.caller_clients import CallerTurn
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from harness.mcp_deadlines import McpTimeoutPolicy
@@ -32,7 +33,9 @@ def _call_deadline_s(client: Client) -> float | None:
 def test_get_data_carries_its_180s_capability_row() -> None:
     policy = McpTimeoutPolicy(settings=Settings())
 
-    client = policy.client("http://data-mcp.internal/mcp", auth=None, caller=None, tool="get_data")
+    client = policy.client(
+        "http://data-mcp.internal/mcp", auth=None, caller=CallerTurn(None), tool="get_data"
+    )
 
     assert _call_deadline_s(client) == 180.0
 
@@ -41,7 +44,9 @@ def test_search_and_describe_carry_their_capability_rows() -> None:
     policy = McpTimeoutPolicy(settings=Settings())
 
     for tool, deadline_s in (("search", 60.0), ("describe", 30.0)):
-        client = policy.client("http://data-mcp.internal/mcp", auth=None, caller=None, tool=tool)
+        client = policy.client(
+            "http://data-mcp.internal/mcp", auth=None, caller=CallerTurn(None), tool=tool
+        )
         assert _call_deadline_s(client) == deadline_s, tool
 
 
@@ -53,7 +58,9 @@ def test_a_tool_with_no_capability_row_gets_the_general_default() -> None:
     policy = McpTimeoutPolicy(settings=settings)
 
     for tool in ("aggregate", "growth", "describe_frame", "write_component"):
-        client = policy.client("http://x.internal/mcp", auth=None, caller=None, tool=tool)
+        client = policy.client(
+            "http://x.internal/mcp", auth=None, caller=CallerTurn(None), tool=tool
+        )
         assert _call_deadline_s(client) == 42.0, tool
 
 
@@ -63,7 +70,9 @@ def test_no_tool_named_gets_the_general_default() -> None:
     settings = Settings(mcp_call_timeout_s=42.0)
     policy = McpTimeoutPolicy(settings=settings)
 
-    client = policy.client("http://presentation-mcp.internal/mcp", auth=None, caller=None)
+    client = policy.client(
+        "http://presentation-mcp.internal/mcp", auth=None, caller=CallerTurn(None)
+    )
 
     assert _call_deadline_s(client) == 42.0
 
@@ -72,7 +81,9 @@ def test_every_client_carries_the_configured_init_deadline() -> None:
     settings = Settings(mcp_init_timeout_s=3.5)
     policy = McpTimeoutPolicy(settings=settings)
 
-    client = policy.client("http://x.internal/mcp", auth=None, caller=None, tool="search")
+    client = policy.client(
+        "http://x.internal/mcp", auth=None, caller=CallerTurn(None), tool="search"
+    )
 
     assert client._init_timeout == 3.5
 
@@ -84,13 +95,23 @@ def test_call_timeout_s_reads_the_same_mapping_client_construction_uses() -> Non
     assert policy.call_timeout_s("aggregate") == policy.default_call_timeout_s
 
 
-def test_every_client_names_its_caller_in_the_header() -> None:
+def test_every_client_names_its_caller_and_turn_in_the_headers() -> None:
     policy = McpTimeoutPolicy(settings=Settings())
 
-    named = policy.client("http://x.internal/mcp", auth="t", caller="conversation:a", tool="search")
-    anonymous = policy.client("http://x.internal/mcp", auth="t", caller=None, tool="search")
+    named = policy.client(
+        "http://x.internal/mcp",
+        auth="t",
+        caller=CallerTurn("conversation:a", "tr_" + "1" * 16),
+        tool="search",
+    )
+    anonymous = policy.client(
+        "http://x.internal/mcp", auth="t", caller=CallerTurn(None), tool="search"
+    )
 
     assert isinstance(named.transport, StreamableHttpTransport)
     assert isinstance(anonymous.transport, StreamableHttpTransport)
-    assert named.transport.headers == {CALLER_HEADER: "conversation:a"}
+    assert named.transport.headers == {
+        CALLER_HEADER: "conversation:a",
+        TURN_HEADER: "tr_" + "1" * 16,
+    }
     assert anonymous.transport.headers == {}

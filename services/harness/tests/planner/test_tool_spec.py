@@ -1,27 +1,25 @@
-"""Planner tool specs reach the model and their bodies as ADK's `FunctionTool` would.
+"""Planner tool specs reach the model and their bodies as ADK's `FunctionTool` did.
 
 `planner.tool_spec` builds each declaration and converts each call's
-arguments itself. These tests hold both to what ADK's `FunctionTool` makes
-from an equivalent Python signature. The declaration is compared as JSON in the
-order the model receives it. The conversion is checked over every `propose_plan`
-call the `planner_entry` eval records, plus hand cases for each rule.
+arguments itself. These tests hold both to what ADK 2.13's
+`FunctionTool` made from an equivalent Python signature, recorded in
+`fixtures/function_tool_oracle.json`. The declaration is compared as JSON in
+the order the model receives it. The conversion is checked over the
+`propose_plan` calls the `planner_entry` eval recorded, as sent and as a proto
+`Struct` hands them back, plus hand cases for each rule.
 """
 
 from __future__ import annotations
 
-import inspect
 import itertools
 import json
-from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated, Any
+from typing import Any
 
 import pytest
-from google.adk.tools.function_tool import FunctionTool
-from harness.planner_model import refuse_vertex_ai
 from harness.scripted import use_compiled_proposals
-from planner.declaration import compact_schema
+from planner.model import refuse_vertex_ai
 from planner.plan import AskAnswer, Decline
 from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
 from planner.tool_spec import (
@@ -32,9 +30,16 @@ from planner.tool_spec import (
     missing_arguments,
     run_tool,
 )
-from pydantic import Field
 
-_TASKS = Path(__file__).parents[4] / "evals" / "planner_entry" / "tasks"
+# What ADK 2.13's `FunctionTool` made of each spec's equivalent Python
+# signature: each declaration as the model receives it, by variant and tool
+# name, and the arguments each call was converted to, as `repr`, or the refusal
+# it was given.
+_ORACLE = json.loads(
+    (Path(__file__).parents[1] / "fixtures" / "function_tool_oracle.json").read_text(
+        encoding="utf-8"
+    )
+)
 
 _VARIANTS = list(itertools.product([False, True], repeat=2))
 
@@ -57,64 +62,6 @@ def _specs(*, translate: bool, surface: bool) -> list[ToolSpec]:
     ]
 
 
-def _equivalent_function(spec: ToolSpec, recorded: list[dict[str, Any]]) -> Callable[..., Any]:
-    """A function `FunctionTool` reads as `spec`. It has the same name, docstring
-    and signature.
-
-    A non-compact spec's descriptions ride on `Annotated[..., Field(...)]`, as a
-    hand-written tool's would. Calling it records the keyword arguments ADK
-    passes in `recorded`.
-    """
-
-    def annotation(parameter: Parameter) -> Any:
-        if parameter.description is None or spec.compact:
-            return parameter.annotation
-        return Annotated[parameter.annotation, Field(description=parameter.description)]
-
-    def tool(**arguments: Any) -> dict[str, object]:
-        recorded.append(arguments)
-        return {"ran": True}
-
-    tool.__name__ = tool.__qualname__ = spec.name
-    tool.__doc__ = spec.description or None
-    tool.__annotations__ = {p.name: annotation(p) for p in spec.parameters} | {
-        "return": dict[str, object]
-    }
-    tool.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
-        [
-            inspect.Parameter(
-                p.name,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                default=p.default,
-                annotation=annotation(p),
-            )
-            for p in spec.parameters
-        ],
-        return_annotation=dict[str, object],
-    )
-    return tool
-
-
-def _adk_declaration(spec: ToolSpec) -> str:
-    """ADK's declaration of `spec`'s equivalent function, as the model receives it.
-
-    A compact spec is then given its descriptions over each parameter's
-    schema and compacted (`compact_schema`).
-    """
-    declaration = FunctionTool(_equivalent_function(spec, []))._get_declaration()
-    assert declaration is not None
-    if spec.compact:
-        schema = declaration.parameters_json_schema
-        assert isinstance(schema, dict)
-        descriptions = {p.name: p.description for p in spec.parameters}
-        described = {
-            name: {**argument, "description": descriptions[name]}
-            for name, argument in schema["properties"].items()
-        }
-        declaration.parameters_json_schema = compact_schema(schema | {"properties": described})
-    return declaration.model_dump_json(exclude_none=True)
-
-
 def _compiled_proposal_spec() -> ToolSpec:
     specs = use_compiled_proposals(_specs(translate=False, surface=False))
     (spec,) = [spec for spec in specs if spec.name == PROPOSE_PLAN]
@@ -127,15 +74,18 @@ def test_every_declaration_is_the_one_adk_builds_from_the_same_signature(
 ) -> None:
     specs = _specs(translate=translate, surface=surface)
 
+    oracle = _ORACLE["declarations"][f"translate={translate},surface={surface}"]
+    assert [spec.name for spec in specs] == list(oracle)
     for spec in specs:
         built = function_declaration(spec).model_dump_json(exclude_none=True)
-        assert built == _adk_declaration(spec), spec.name
+        assert built == oracle[spec.name], spec.name
 
 
 def test_the_scripted_proposal_declares_what_adk_builds_from_the_same_signature() -> None:
     spec = _compiled_proposal_spec()
 
-    assert function_declaration(spec).model_dump_json(exclude_none=True) == _adk_declaration(spec)
+    built = function_declaration(spec).model_dump_json(exclude_none=True)
+    assert built == _ORACLE["compiled_proposal"]
 
 
 @pytest.mark.parametrize(
@@ -176,17 +126,6 @@ def test_the_planner_runs_on_the_developer_api_and_refuses_vertex_ai(
 # --- Conversion ----------------------------------------------------------------------
 
 
-async def _adk_call(spec: ToolSpec, raw: dict[str, Any]) -> tuple[str, Any]:
-    """The arguments ADK's `FunctionTool.run_async` calls `spec`'s equivalent function
-    with, or the refusal it gives `raw` instead."""
-    recorded: list[dict[str, Any]] = []
-    tool = FunctionTool(_equivalent_function(spec, recorded))
-    answer = await tool.run_async(args=raw, tool_context=SimpleNamespace(function_call_id="c"))
-    if recorded:
-        return "called", recorded[0]
-    return "refused", answer
-
-
 def _ours(spec: ToolSpec, raw: dict[str, Any]) -> tuple[str, Any]:
     refusal = missing_arguments(spec, convert_arguments(spec, raw))
     if refusal is not None:
@@ -203,14 +142,10 @@ def _typed(value: Any) -> str:
 
 
 def _recorded_proposals() -> list[dict[str, Any]]:
-    """Every `propose_plan` call the `planner_entry` tasks record. That is each
-    task's reference payload and its alternatives."""
-    payloads: list[dict[str, Any]] = []
-    for path in sorted(_TASKS.glob("*.json")):
-        task = json.loads(path.read_text(encoding="utf-8"))
-        payloads.append(task["reference_payload"])
-        payloads += [alternative["payload"] for alternative in task.get("alternative_payloads", [])]
-    return payloads
+    """The `propose_plan` calls the oracle holds: each `planner_entry` task's
+    reference payload and its alternatives, with what `FunctionTool` made of
+    each as sent and as a `Struct` hands it back."""
+    return _ORACLE["proposals"]
 
 
 def _as_struct(value: Any) -> Any:
@@ -235,11 +170,14 @@ def test_the_recorded_proposals_cover_the_task_set() -> None:
 async def test_every_recorded_proposal_converts_as_adk_converts_it() -> None:
     (propose,) = [spec for spec in planner_tool_specs() if spec.name == PROPOSE_PLAN]
 
-    for payload in _recorded_proposals():
-        for raw in (payload, _as_struct(payload)):
-            adk_kind, adk_value = await _adk_call(propose, raw)
+    for recorded in _recorded_proposals():
+        payload = recorded["payload"]
+        for raw, adk in (
+            (payload, recorded["as_sent"]),
+            (_as_struct(payload), recorded["as_struct"]),
+        ):
             kind, value = _ours(propose, raw)
-            assert (kind, _typed(value)) == (adk_kind, _typed(adk_value))
+            assert (kind, _typed(value)) == (adk["kind"], adk["typed"])
 
 
 _HAND = ToolSpec(
@@ -282,11 +220,13 @@ _ANSWER = {"ask": 0, "outputs": ["a"]}
         pytest.param({}, id="nothing"),
     ],
 )
-async def test_a_hand_call_converts_as_adk_converts_it(raw: dict[str, Any]) -> None:
-    adk_kind, adk_value = await _adk_call(_HAND, raw)
+async def test_a_hand_call_converts_as_adk_converts_it(
+    request: pytest.FixtureRequest, raw: dict[str, Any]
+) -> None:
+    adk = _ORACLE["hand"][request.node.callspec.id]
     kind, value = _ours(_HAND, raw)
 
-    assert (kind, _typed(value)) == (adk_kind, _typed(adk_value))
+    assert (kind, _typed(value)) == (adk["kind"], adk["typed"])
 
 
 async def test_a_call_missing_an_argument_runs_nothing_and_answers_as_adk_does() -> None:
@@ -302,7 +242,8 @@ async def test_a_call_missing_an_argument_runs_nothing_and_answers_as_adk_does()
     answer = run_tool(recording, {"options": []}, call=SimpleNamespace(), end_run=lambda: None)  # type: ignore[arg-type]
 
     assert ran == []
-    assert ("refused", answer) == await _adk_call(ask, {"options": []})
+    adk = _ORACLE["missing_ask"]
+    assert ("refused", answer) == (adk["kind"], adk["answer"])
 
 
 def test_a_body_receives_every_omitted_parameter_at_its_default() -> None:

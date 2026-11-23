@@ -22,6 +22,7 @@ from pydantic import (
     GetJsonSchemaHandler,
     JsonValue,
     ValidationError,
+    field_validator,
     model_validator,
 )
 from pydantic.json_schema import JsonSchemaValue
@@ -67,6 +68,9 @@ MAX_ENTITIES = 50
 
 # A calendar year, as a requirement states its period.
 Year = Annotated[int, Field(ge=1900, le=2100)]
+
+# How many years a `PeriodIn` lists: as many as `EntityIn` lists names.
+MAX_LISTED_YEARS = MAX_ENTITIES
 
 # How many places a rank keeps, as a rank requirement and its operation state
 # it. A component draws at most 24 series (the apis service's `MAX_SERIES_PER_COMPONENT`),
@@ -499,6 +503,25 @@ class PeriodThreshold(TaggedModel):
         return self
 
 
+class PeriodIn(TaggedModel):
+    """Keep rows whose year is one of `years`, held sorted and once each."""
+
+    kind: Literal["period_in"] = Field(
+        default="period_in", description="Tags this predicate as a set of years."
+    )
+    years: tuple[Year, ...] = Field(
+        min_length=1,
+        max_length=MAX_LISTED_YEARS,
+        description="The years a row's year has to be one of, to survive.",
+    )
+
+    @field_validator("years")
+    @classmethod
+    def _sorted_once(cls, years: tuple[int, ...]) -> tuple[int, ...]:
+        """The years in order, each once, so one set states one predicate."""
+        return tuple(sorted(set(years)))
+
+
 class EntityIn(TaggedModel):
     """Keep rows whose entity name is one of `names`."""
 
@@ -576,7 +599,8 @@ class PlaceLevel(TaggedModel):
 
 
 Predicate = Annotated[
-    ValueThreshold | PeriodThreshold | EntityIn | PlaceLevel, Field(discriminator="kind")
+    ValueThreshold | PeriodThreshold | PeriodIn | EntityIn | PlaceLevel,
+    Field(discriminator="kind"),
 ]
 
 

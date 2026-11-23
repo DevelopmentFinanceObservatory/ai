@@ -19,8 +19,9 @@ from typing import Any
 
 import httpx2
 import pytest
+from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, SURFACE_HEADER, TURN_HEADER
 from common.materialisation import FrameRef
-from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget
+from common.row_budget import RowBudget, row_budget
 from compiler.surface import McpSurface, ToolCallResult
 from data_mcp import client_holder, frame_materialisation
 from fastapi import FastAPI
@@ -35,6 +36,8 @@ from .replay_support import FIRST, SECOND, SECOND_VALUES, SPEC, Upstream, data_m
 from .runner_frames import result_table
 
 _KEPT = ["dcid:FRA", "dcid:GBR"]
+# The headers that name a dfo-apis call's caller.
+_IDENTITY = (CALLER_PRINCIPAL_HEADER, SURFACE_HEADER, CALLER_HEADER, TURN_HEADER)
 _REDRAWN = {"status": "redrawn", "render": RECORDED_RENDER}
 
 
@@ -161,12 +164,17 @@ async def harness(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., Any],
     runner: Any,
+    pg_database_url: str,
 ) -> AsyncIterator[Harness]:
     upstream = Upstream()
     monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", upstream.fetch)
     client_holder.set_client(data_mcp_client(upstream.handler))
     app = create_app(
-        settings=Settings(mcp_api_token="test-token", live_refresh_principal=LIVE_PRINCIPAL)
+        settings=Settings(
+            database_url=pg_database_url,
+            mcp_api_token="test-token",
+            live_refresh_principal=LIVE_PRINCIPAL,
+        )
     )
     async with running_lifespan(app):
         surface = McpSurface(
@@ -237,6 +245,31 @@ async def test_a_moved_card_is_replayed_once_and_later_requests_render_the_store
     assert publishes == 0
 
 
+async def test_a_refresh_names_the_website_on_its_root_mint(harness: Harness) -> None:
+    """A refresh's run is shared by every request for the card, so its root mint
+    names no caller and reaches dfo-apis under the website, where the share is
+    viewed. The mint door only logs the caller, so it takes the principal with
+    no caller."""
+    await harness.draw_card()
+    harness.move_dataset()
+    seen: list[httpx2.Request] = []
+
+    def recording(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return harness.upstream.handler(request)
+
+    client_holder.set_client(data_mcp_client(recording, caller_principal="caller-principal"))
+
+    response = await harness.refresh(harness.service())
+
+    assert response.json() == _REDRAWN
+    mints = [request for request in seen if request.method == "POST"]
+    assert mints
+    assert {tuple(request.headers.get(name) for name in _IDENTITY) for request in mints} == {
+        ("caller-principal", "website", None, None)
+    }
+
+
 async def test_concurrent_requests_for_a_moved_card_replay_it_once(harness: Harness) -> None:
     await harness.draw_card()
     harness.move_dataset()
@@ -265,38 +298,21 @@ async def test_a_deadline_too_short_to_mint_waits_and_the_next_call_redraws(
     assert (await harness.refresh(harness.service())).json() == _REDRAWN
 
 
-async def test_a_full_refresh_row_budget_waits_and_leaves_the_shared_budget_alone(
+async def test_a_refresh_the_runner_computes_claims_no_refresh_rows(
     harness: Harness,
 ) -> None:
+    """The runner computes every step and apis already holds its frame, so nothing
+    is published and the refresh row budget is never claimed."""
     await harness.draw_card()
     harness.move_dataset()
-    publishes = len(harness.apis.published())
 
     # Another replay holds every row of the refresh budget.
     budget = RowBudget(max_rows=1_000)
     with budget.claim(budget.max_rows):
         response = await harness.refresh(harness.service(row_budget=budget))
 
-    assert (response.status_code, response.json()) == (
-        200,
-        {"status": "pending", "retry_after_s": ROW_BUDGET_RETRY_AFTER_S},
-    )
-    assert harness.verbs == []
-    assert len(harness.apis.published()) == publishes
-    assert row_budget().in_flight == 0
-
-
-async def test_a_step_larger_than_the_whole_refresh_row_budget_is_refused_for_good(
-    harness: Harness,
-) -> None:
-    """No later request could claim the rows, so the route must not answer `pending`."""
-    await harness.draw_card()
-    harness.move_dataset()
-
-    response = await harness.refresh(harness.service(row_budget=RowBudget(max_rows=1)))
-
-    assert (response.status_code, response.json()["code"]) == (422, "rows_over_refresh_budget")
-    assert harness.verbs == []
+    assert (response.status_code, response.json()["status"]) == (200, "redrawn")
+    assert harness.verbs != []
     assert row_budget().in_flight == 0
 
 

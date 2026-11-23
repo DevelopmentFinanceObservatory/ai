@@ -59,12 +59,12 @@ class Settings(BaseServiceSettings):
     / `PRESENTATION_MCP_URL` always wins over that default -- that env
     override is what lets a service split back out replace its loopback mount
     (point it at the split-out service's URL instead of the loopback path).
-    `database_url` and the `session_store_*` fields together select ADK's
-    session backend (`harness.session_store.build_session_service`):
-    in-memory when none of them is set, `DatabaseSessionService` over a
-    plain SQLAlchemy URL when `database_url` is set, or
-    `DatabaseSessionService` over an async engine built on the Cloud SQL
-    Python Connector (PSC, IAM auth) when
+    `database_url` and the `session_store_*` fields together select the
+    harness's Postgres database (`harness.db.engine.build_database`), which
+    holds the studio's conversations: no database when none of them is set
+    (`harness.server.create_app` refuses to build the app then), an asyncpg
+    SQLAlchemy URL when `database_url` is set, or an async engine built on
+    the Cloud SQL Python Connector (PSC, IAM auth) when
     `session_store_instance_connection_name` is set. Setting both
     `database_url` and `session_store_instance_connection_name` is a
     validation error, and so is setting any one or two of
@@ -73,10 +73,11 @@ class Settings(BaseServiceSettings):
     needs all three or none. `session_store_pool_size` and
     `session_store_max_overflow` size the pooled connections
     `create_async_engine` opens for that engine. The defaults (2 and 0) sum
-    to two per instance. A rollout can leave an old revision still draining
-    SSE streams running alongside the new one, so up to four instances hold
-    connections at once, and four times two stays within the ten
-    connections the infra repository's platform Postgres instance reserves for it.
+    to two per instance, and the lineage engine adds a fixed three. A rollout
+    can leave an old revision still draining SSE streams running alongside
+    the new one, so up to four instances hold connections at once, and four
+    times (2 + 3) is 20, the number the infra repository's platform Postgres
+    instance reserves for it.
     `session_store_connect_timeout_s` bounds one connector dial attempt,
     matching apis' `DATASET_STORE_CONNECT_TIMEOUT` default. Every one of
     these five `session_store_*` fields, and `database_url` itself,
@@ -173,28 +174,28 @@ class Settings(BaseServiceSettings):
     holds its slot for up to 53 s against a tool call's 45.
 
     `live_refresh_rows_in_flight_max` sizes a second `common.row_budget.RowBudget`
-    that `harness.recipe_replay.replay_recipe` claims from: the input rows of
-    each verb call, the root rows of an anchor call, and the published frame's
-    rows. It caps the rows all replays in this process put through the tools at
-    once. The tools and the publish also claim the same rows from the
-    process-wide budget (`frame_rows_in_flight_max`), and a root mint claims
-    there only. The default of 500,000 is one two-input verb on two full frames,
-    the largest single claim, and leaves 600,000 of the process-wide 1,100,000
-    to Studio conversations and outside MCP callers. A claim the rows in flight
-    leave no room for, in either budget, answers `pending`. A replay step whose
+    that `harness.recipe_replay.replay_recipe` claims from: the rows of a frame
+    the replay publishes. The verbs and anchor calls compute on dfo-apis'
+    analysis runner and claim none. It caps the rows all replays in this process
+    publish at once. The publish also claims the same rows from the process-wide
+    budget (`frame_rows_in_flight_max`), and a root mint claims there only. The
+    default of 500,000 is two full frames, and leaves 600,000 of the process-wide
+    1,100,000 to Studio conversations and outside MCP callers. A claim the rows in
+    flight leave no room for, in either budget, answers `pending`. A publish whose
     rows exceed this whole budget is refused `rows_over_refresh_budget`.
 
     The `turn_*` and `model_first_chunk_s` fields bound one request (one POST
     to `/api/studio/turn` or `/api/studio/interrupt`) through
     `harness.turn_budget.TurnBudget`, which every orchestrator and planner
-    model call reads (`harness.turn_budget.BoundedGemini`):
+    model call reads (`harness.turn_budget.bounded_by`):
 
     - `turn_model_time_s` (90) meters model time: the seconds the request's
       model calls spend waiting on their streams, from the moment each request
       is sent, genai's own HTTP retries included, to each chunk in turn. The
-      prefix cache's create does not count, and neither do the tools ADK runs
-      while a call waits at a response it has delivered. It ends 1 of 187 simple and 3 of 182 plan requests
-      measured on dev. It cuts a call that is still streaming.
+      prefix cache's create does not count, and neither do the tools that
+      run while a call waits at a response it has delivered. It ends 1 of 187
+      simple and 3 of 182 plan requests measured on dev. It cuts a call that is
+      still streaming.
     - `turn_model_calls_max` (30) counts model calls, a first-chunk retry not
       included. Dev's most in one request was 61, local runs' 29.
     - `turn_wall_s` (600) meters wall-clock time from the request's start, tool
@@ -256,7 +257,7 @@ class Settings(BaseServiceSettings):
     studio_prefix_cache: bool = True
     # How many of one plan's wave's tool calls `executor.run._Run` may hold
     # in flight against the MCP servers at once (`harness.graph.workflow.
-    # create_root_workflow(max_concurrent_steps=...)`); a wave wider than
+    # studio_graph(max_concurrent_steps=...)`); a wave wider than
     # this queues at the point of call rather than opening every call at once.
     executor_max_concurrent_steps: int = Field(default=4, ge=1)
     # Whether each card's retrievals are sent before the user approves it
@@ -420,13 +421,13 @@ class Settings(BaseServiceSettings):
         ):
             raise ValueError(
                 "DATABASE_URL and SESSION_STORE_INSTANCE_CONNECTION_NAME are both set. "
-                "They select two different session backends "
-                "(harness.session_store.build_session_service) -- unset one of them."
+                "They select two different databases "
+                "(harness.db.engine.build_database) -- unset one of them."
             )
         # All three fields select the connector path or none of them do. A
         # partial combination (e.g. the database and user set without the
-        # connection name) boots the in-memory backend silently instead of
-        # the connector the caller meant to configure.
+        # connection name) would leave `build_database` with no database and
+        # `create_app` refusing, so it is refused here, naming the missing field.
         connector_fields = (
             (
                 "SESSION_STORE_INSTANCE_CONNECTION_NAME",

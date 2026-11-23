@@ -1,0 +1,55 @@
+{
+  "event": "elicitation.request",
+  "seq": 5,
+  "interrupt_id": "elc_9b2d4f61a8c34e07",
+  "questions": [
+    {
+      "id": "q1",
+      "question": "Which unit should Kenya's debt service be shown in?",
+      "input": "unit",
+      "skippable": true,
+      "unit": {
+        "currencies": [
+          {
+            "code": "USD",
+            "name": "US dollars",
+            "prices": [
+              "current",
+              "constant"
+            ],
+            "base_year_min": 1970,
+            "base_year_max": 2024
+          },
+          {
+            "code": "EUR",
+            "name": "Euros",
+            "prices": [
+              "current",
+              "constant"
+            ],
+            "base_year_min": 1970,
+            "base_year_max": 2024
+          },
+          {
+            "code": "KES",
+            "name": "Kenyan shillings",
+            "prices": [
+              "current"
+            ]
+          }
+        ],
+        "presets": [
+          "USD",
+          "EUR",
+          "KES"
+        ],
+        "start": {
+          "currency": "USD",
+          "prices": "constant",
+          "base_year": 2023
+        }
+      }
+    }
+  ],
+  "skippable": true
+}

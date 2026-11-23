@@ -916,27 +916,19 @@ def _bytes_by_digest(count: int) -> dict[str, bytes]:
 
 
 @pytest.mark.parametrize(
-    ("listed", "options", "requested_at", "ref_content_version"),
+    ("listed", "options", "requested_at", "named_by"),
     [
         (
             [_OPTIONS, _SUM_SIBLING_RENDERING, _STATISTICS_RENDERING],
             _SUM_SIBLING_RENDERING,
             1,
-            frame_ref_for(
-                spec_id=_SPEC_ID,
-                content_version=_CONTENT_VERSION,
-                groupby=_SUM_GROUPBY,
-            ).content_version,
+            {"groupby": _SUM_GROUPBY},
         ),
         (
             [_OPTIONS, _TYPED_OPTIONS],
             _TYPED_OPTIONS,
             1,
-            frame_ref_for(
-                spec_id=_SPEC_ID,
-                content_version=_CONTENT_VERSION,
-                columns=("observationAbout_type",),
-            ).content_version,
+            {"columns": ("observationAbout_type",)},
         ),
     ],
     ids=["sum-listed-after-the-plain-rendering", "place-types-listed-after-the-plain-rendering"],
@@ -946,7 +938,7 @@ async def test_the_fetched_artifact_is_the_one_whose_rendering_the_mint_requeste
     listed: list[dict[str, object]],
     options: dict[str, object],
     requested_at: int,
-    ref_content_version: str,
+    named_by: dict[str, Any],
 ) -> None:
     blobs = _bytes_by_digest(len(listed))
     digests = list(blobs)
@@ -967,11 +959,20 @@ async def test_the_fetched_artifact_is_the_one_whose_rendering_the_mint_requeste
 
     assert outcome.status == "registered"
     assert fetched == [digests[requested_at]]
-    ref = FrameRef(spec_id=_SPEC_ID, content_version=ref_content_version)
+    ref = frame_ref_for(
+        spec_id=_SPEC_ID,
+        content_version=_CONTENT_VERSION,
+        artifact_digest=digests[requested_at],
+        **named_by,
+    )
     assert outcome.frame_ref == ref
     # The mint record sits under the frame's pair and names apis' own.
     assert await get_frame_store().get_mint_record(ref) == MintRecord(
-        frame=ref, dataset=_FRAME_REF, options=_as_recorded(options), stat_var_count=1
+        frame=ref,
+        dataset=_FRAME_REF,
+        options=_as_recorded(options),
+        stat_var_count=1,
+        artifact_digest=digests[requested_at],
     )
 
 
@@ -2764,6 +2765,7 @@ async def test_two_manifests_differing_in_the_enrichment_stamp_register_two_fram
             content_version=_CONTENT_VERSION,
             columns=("party_kind",),
             enrichment_stamp=stamp,
+            artifact_digest=_digest_for(blob),
         )
         record = await store.get_mint_record(ref)
         assert record is not None
@@ -2792,7 +2794,10 @@ async def test_a_manifest_without_a_stamp_keeps_todays_ref_and_a_record_without_
     )
 
     assert outcome.frame_ref == frame_ref_for(
-        spec_id=_SPEC_ID, content_version=_CONTENT_VERSION, columns=("party_kind",)
+        spec_id=_SPEC_ID,
+        content_version=_CONTENT_VERSION,
+        columns=("party_kind",),
+        artifact_digest=_digest_for(blob),
     )
     assert outcome.frame_ref is not None
     record = await store.get_mint_record(outcome.frame_ref)
@@ -2821,7 +2826,7 @@ async def test_a_frame_is_named_under_the_stamp_of_the_artifact_it_is_read_from(
         renderings={pinned: _KIND_OPTIONS, current: summed}, stamps={current: "stamp-a"}
     )
 
-    for options, stamp in ((_KIND_OPTIONS, None), (summed, "stamp-a")):
+    for options, stamp, digest in ((_KIND_OPTIONS, None, pinned), (summed, "stamp-a", current)):
         outcome = await materialise_and_register(
             options=options, manifest=manifest, settings=_settings(), writer="tester"
         )
@@ -2832,6 +2837,7 @@ async def test_a_frame_is_named_under_the_stamp_of_the_artifact_it_is_read_from(
             columns=("party_kind",),
             groupby=options.get("groupby"),
             enrichment_stamp=stamp,
+            artifact_digest=digest,
         )
         record = await store.get_mint_record(outcome.frame_ref)
         assert record is not None
@@ -2870,10 +2876,48 @@ def test_a_stamped_manifest_selects_the_artifact_whose_rendering_equals_the_opti
         stamps={digests[1]: "stamp-a"},
     )
 
-    selected = frame_materialisation._select_requested_artifact(manifest, options=_KIND_OPTIONS)
+    selected = frame_materialisation.select_requested_artifact(manifest, options=_KIND_OPTIONS)
 
     assert selected is not None
     assert selected.artifact_digest == digests[1]
+
+
+_INCOMPLETE_TYPED: dict[str, object] = _TYPED_OPTIONS | {"metadata": "incomplete"}
+
+
+@pytest.mark.parametrize(
+    ("listed", "selected_index"),
+    [
+        pytest.param([_INCOMPLETE_TYPED], 0, id="the-incomplete-twin-alone"),
+        pytest.param([_INCOMPLETE_TYPED, _TYPED_OPTIONS], 1, id="the-complete-file-first"),
+    ],
+)
+def test_a_request_reads_an_incomplete_twin_when_apis_lists_no_complete_file(
+    listed: list[dict[str, object]], selected_index: int
+) -> None:
+    """apis lists a file rendered after a failed graph read under its rendering plus
+    `metadata: "incomplete"`. A request selects it only when no complete file of the
+    rendering is listed."""
+    digests = list(_bytes_by_digest(len(listed)))
+    manifest = _manifest(renderings=dict(zip(digests, listed, strict=True)))
+
+    selected = frame_materialisation.select_requested_artifact(manifest, options=_TYPED_OPTIONS)
+
+    assert selected is not None
+    assert selected.artifact_digest == digests[selected_index]
+
+
+def test_a_default_enrichment_resolves_an_incomplete_twin_to_its_complete_rendering() -> None:
+    """A `place_types` request's `enrichment: "default"` resolves to the rendering of the
+    one file apis served, without the `metadata` member a failed graph read added."""
+    manifest = _manifest(renderings={_ARTIFACT_DIGEST: _INCOMPLETE_TYPED})
+
+    resolved = frame_materialisation.resolved_options(
+        _OPTIONS | {frame_materialisation.ENRICHMENT: frame_materialisation.DEFAULT_ENRICHMENT},
+        manifest=manifest,
+    )
+
+    assert resolved == _TYPED_OPTIONS
 
 
 # A mint response lists the requested rendering and its statistics. The snapshot of
@@ -3122,7 +3166,10 @@ async def test_a_groupby_mint_registers_its_rendering_under_the_pair_naming_it(
     )
 
     expected = frame_ref_for(
-        spec_id=_SPEC_ID, content_version=_CONTENT_VERSION, groupby=_SUM_GROUPBY
+        spec_id=_SPEC_ID,
+        content_version=_CONTENT_VERSION,
+        groupby=_SUM_GROUPBY,
+        artifact_digest=_digest_for(summed),
     )
     assert outcome.status == "registered"
     assert outcome.frame_ref == expected
@@ -3137,4 +3184,68 @@ async def test_a_groupby_mint_registers_its_rendering_under_the_pair_naming_it(
         dataset=_FRAME_REF,
         options=_as_recorded(_SUM_SIBLING_RENDERING),
         stat_var_count=1,
+        artifact_digest=_digest_for(summed),
     )
+
+
+def _flow_artifact(role: str, *, kinds: bool) -> bytes:
+    """A two-row flow frame whose one party role column is `role`, with that role's
+    `{role}_party_kind` column when `kinds`."""
+    columns: dict[str, pa.Array] = {
+        "stat_var": pa.array(["dcid:Test"] * 2),
+        role: pa.array(["country/FRA", "DACCountriesTotal"]),
+        "time_period": pa.array(["2020"] * 2),
+        "value": pa.array([1.0, 2.0]),
+    }
+    if kinds:
+        columns[f"{role}_party_kind"] = pa.array(["party", "total"])
+    buf = io.BytesIO()
+    pq.write_table(pa.table(columns), buf)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("role", "kinds", "max_frame_rows", "outcome"),
+    [
+        ("creditor", False, 50_000, "upstream_error"),
+        ("creditor", True, 50_000, "registered"),
+        ("financingProvider", False, 1, "over_ceiling"),
+    ],
+    ids=["creditor-without-kinds", "creditor-with-kinds", "over-ceiling-without-kinds"],
+)
+async def test_a_kinds_request_needs_the_kinds_of_every_flow_party_role_within_the_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    kinds: bool,
+    max_frame_rows: int,
+    outcome: str,
+) -> None:
+    """apis gives every flow-axis role column its kinds, so a frame naming its party side
+    `creditor` needs `creditor_party_kind` as a CRS frame needs `financingProvider_party_kind`.
+    A frame over the row ceiling refuses `over_ceiling` whatever its columns, since only a
+    narrower scope gets past it."""
+    blob = _flow_artifact(role, kinds=kinds)
+
+    async def fake_fetch(**_: Any) -> bytes:
+        return blob
+
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    store = InMemoryMaterialisationStore()
+    set_frame_store(store)
+
+    result = await materialise_and_register(
+        options=_KIND_OPTIONS,
+        manifest=_manifest(renderings={_digest_for(blob): _KIND_OPTIONS}),
+        settings=_settings(max_frame_rows=max_frame_rows),
+        writer="tester",
+    )
+
+    if outcome == "registered":
+        assert result.status == "registered"
+        assert result.frame_ref is not None
+        assert await store.get(result.frame_ref) is not None
+        return
+    assert result.status == "refused"
+    assert result.refusal is not None
+    assert result.refusal.code.value == outcome
+    assert await store.list_frames() == []

@@ -39,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE, counts_sentence, read_catalogue_counts
 from data_mcp.client_holder import get_client
-from data_mcp.describe_tool import DCID_PATTERN
+from data_mcp.dcid import DCID_MAX_LENGTH, has_dot_segment, is_dcid
 from data_mcp.errors import UpstreamError
 from data_mcp.tool_errors import ToolRefusal, from_upstream_error, to_tool_result
 
@@ -216,15 +216,15 @@ class _Documentation(BaseModel):
 
 def _ref_refusal(ref: str) -> ToolResult | None:
     """A refusal for a ref the documentation door could never serve, or `None`."""
-    if not DCID_PATTERN.fullmatch(ref) or any(segment in (".", "..") for segment in ref.split("/")):
+    if not is_dcid(ref) or has_dot_segment(ref):
         return to_tool_result(
             ToolRefusal.request_invalid(
                 tool="sources",
                 pointer="/ref",
                 detail=(
                     f"{ref!r} is not a well-formed dataset ref; expected one or more "
-                    "'/'-separated segments of letters, digits, '_', '.', or '-', as the "
-                    "catalogue names them"
+                    "'/'-separated segments of letters, digits, '_', '.', or '-', in at "
+                    f"most {DCID_MAX_LENGTH} characters, as the catalogue names them"
                 ),
             )
         )

@@ -1,44 +1,39 @@
-"""Tests for `harness.planner_model`, the planner's Gemini model.
+"""Tests for `planner.model`, the planner's Gemini model.
 
-The budget and cache behaviours run on the same script through the planner's
-model and through the orchestrator's model stack (`BoundedGemini` or
-`PrefixCachedGemini` over the scripted client), and both must end the same
-way. Bounds are fractions of a second, so a cut fires at once.
+Bounds are fractions of a second, so a cut fires at once.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Sequence
 from typing import Any, cast
 
 import pytest
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_request import LlmRequest
-from google.adk.models.llm_response import LlmResponse
 from google.genai import Client, _api_client, errors, types
-from harness.planner_model import (
+from harness.gemini_agent import without_unsigned_thoughts
+from harness.gemini_wire import (
+    CLIENT_CALL_ID_PREFIX,
     UnexpectedRequestFormError,
     Usage,
-    _in_canonical_form,
-    planner_model,
+    in_canonical_form,
+    model_retry_options,
 )
-from harness.prefix_cache import PrefixCache, PrefixCachedGemini
+from harness.prefix_cache import PrefixCache
 from harness.sentences import StopCode, refusal_sentence
-from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
+from harness.turn_budget import TurnBudget
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from orchestrator.agent import _retrying, model_retry_options
-from planner.pydantic_agent import _without_unsigned_thoughts
-from planner.settings import without_unsigned_thoughts
+from orchestrator.model import orchestrator_model
+from planner.model import planner_model
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextPart,
     ThinkingPart,
     ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models import Model, ModelRequestParameters
@@ -60,6 +55,9 @@ MODEL = "gemini-3.8-flash"
 INSTRUCTION = "Plan the user's question."
 SCHEMA: dict[str, Any] = {"type": "object", "properties": {"key": {"type": "string"}}}
 CACHE_NAME = "cachedContents/c1"
+_PARAMETERS = ModelRequestParameters(
+    function_tools=[ToolDefinition(name="lookup", parameters_json_schema=SCHEMA, strict=False)]
+)
 
 
 class _HangingGenai(ScriptedGenai):
@@ -119,64 +117,19 @@ def _budget(**overrides: Any) -> TurnBudget:
     return TurnBudget(**{**bounds, **overrides})
 
 
-@contextmanager
-def _current(budget: TurnBudget | None) -> Iterator[None]:
-    token = current_turn_budget.set(budget)
-    try:
-        yield
-    finally:
-        current_turn_budget.reset(token)
-
-
 async def _pai(model: Model) -> ModelResponse:
     """The planner model's response to one request with one tool."""
     messages = [
         ModelRequest(parts=[UserPromptPart("Total ODA to Ghana?")], instructions=INSTRUCTION)
     ]
-    parameters = ModelRequestParameters(
-        function_tools=[ToolDefinition(name="lookup", parameters_json_schema=SCHEMA, strict=False)]
-    )
-    async with model.request_stream(messages, None, parameters) as stream:
+    async with model.request_stream(messages, None, _PARAMETERS) as stream:
         async for _ in stream:
             pass
     return stream.get()
 
 
-async def _orchestrator_run(model: BaseLlm, budget: TurnBudget | None) -> list[LlmResponse]:
-    """The orchestrator's model's responses, partial and final, to the same request."""
-    request = LlmRequest(
-        model=MODEL,
-        contents=[types.Content(role="user", parts=[text_part("Total ODA to Ghana?")])],
-        config=types.GenerateContentConfig(
-            system_instruction=INSTRUCTION,
-            tools=[
-                types.Tool(
-                    function_declarations=[
-                        types.FunctionDeclaration(name="lookup", parameters_json_schema=SCHEMA)
-                    ]
-                )
-            ],
-        ),
-    )
-    with _current(budget):
-        return [response async for response in model.generate_content_async(request, stream=True)]
-
-
-def _final(responses: list[LlmResponse]) -> list[types.Part]:
-    """The parts of the orchestrator's model's last final response, the one its
-    agent reads."""
-    final = [response for response in responses if not response.partial]
-    content = final[-1].content
-    assert content is not None
-    return list(content.parts or [])
-
-
 def _pai_text(response: ModelResponse) -> str:
     return "".join(part.content for part in response.parts if isinstance(part, TextPart))
-
-
-def _text(parts: list[types.Part]) -> str:
-    return "".join(part.text or "" for part in parts if not part.thought)
 
 
 class _After:
@@ -194,28 +147,16 @@ class _After:
 async def test_a_cut_after_a_function_call_chunk_delivers_only_the_closing_sentence() -> None:
     script = [Reply(chunks=[[call_part("lookup", {"key": "gh"})], [text_part("late")]])]
     pai_scripted = _HangingGenai(script, hang_after=1)
-    orchestrator_scripted = _HangingGenai(script, hang_after=1)
     pai_budget = _budget(model_time_s=0.05)
-    orchestrator_budget = _budget(model_time_s=0.05)
     after = _After()
 
     response = await _pai(
         planner_model(MODEL, client=pai_scripted.client, budget=pai_budget, after_response=after)
     )
-    orchestrator = await _orchestrator_run(
-        BoundedGemini(model=MODEL, client=orchestrator_scripted.client), orchestrator_budget
-    )
 
     sentence = refusal_sentence({"code": StopCode.TURN_MODEL_TIME_SPENT})
     assert not any(isinstance(part, ToolCallPart) for part in response.parts)
-    assert not any(
-        part.function_call
-        for r in orchestrator
-        if not r.partial and r.content
-        for part in r.content.parts or []
-    )
-    assert _pai_text(response) == _text(_final(orchestrator)) == sentence
-    assert pai_budget.closed == orchestrator_budget.closed
+    assert _pai_text(response) == sentence
     assert pai_budget.closed is not None
     assert pai_budget.closed["code"] == StopCode.TURN_MODEL_TIME_SPENT
     assert after.calls == [(StopCode.TURN_MODEL_TIME_SPENT, None)]
@@ -226,17 +167,14 @@ async def test_a_first_chunk_stall_is_resent_once_and_the_second_answer_delivere
         Reply(chunks=[[text_part("stalled")]], stall_s=5.0),
         reply(text_part("Accra")),
     ]
-    pai_scripted, orchestrator_scripted = ScriptedGenai(script), ScriptedGenai(script)
+    pai_scripted = ScriptedGenai(script)
 
     response = await _pai(
         planner_model(MODEL, client=pai_scripted.client, budget=_budget(first_chunk_s=0.05))
     )
-    orchestrator = await _orchestrator_run(
-        BoundedGemini(model=MODEL, client=orchestrator_scripted.client), _budget(first_chunk_s=0.05)
-    )
 
-    assert len(pai_scripted.requests) == len(orchestrator_scripted.requests) == 2
-    assert _pai_text(response) == _text(_final(orchestrator)) == "Accra"
+    assert len(pai_scripted.requests) == 2
+    assert _pai_text(response) == "Accra"
 
 
 @pytest.mark.parametrize(
@@ -252,22 +190,19 @@ async def test_a_first_chunk_stall_is_resent_once_and_the_second_answer_delivere
         ),
     ],
 )
-async def test_each_bound_closes_the_call_with_the_same_code_on_both_models(
+async def test_each_bound_closes_the_call_with_its_code(
     budget: dict[str, Any], code: StopCode, sent: int
 ) -> None:
     # Each stream stalls past every bound. The first stall spends the resend.
     script = [Reply(chunks=[[text_part("x")]], stall_s=5.0)] * 2
-    pai_scripted, orchestrator_scripted = ScriptedGenai(script), ScriptedGenai(script)
-    pai_budget, orchestrator_budget = _budget(**budget), _budget(**budget)
+    pai_scripted = ScriptedGenai(script)
+    pai_budget = _budget(**budget)
 
     response = await _pai(planner_model(MODEL, client=pai_scripted.client, budget=pai_budget))
-    orchestrator = await _orchestrator_run(
-        BoundedGemini(model=MODEL, client=orchestrator_scripted.client), orchestrator_budget
-    )
 
-    assert len(pai_scripted.requests) == len(orchestrator_scripted.requests) == sent
-    assert pai_budget.closed == orchestrator_budget.closed == {"code": code, "detail": {}}
-    assert _pai_text(response) == _text(_final(orchestrator)) == refusal_sentence({"code": code})
+    assert len(pai_scripted.requests) == sent
+    assert pai_budget.closed == {"code": code, "detail": {}}
+    assert _pai_text(response) == refusal_sentence({"code": code})
 
 
 def _cache_fields(config: types.GenerateContentConfig) -> tuple[Any, ...]:
@@ -280,38 +215,23 @@ def _cache_fields(config: types.GenerateContentConfig) -> tuple[Any, ...]:
 
 
 async def test_a_cached_request_names_the_cache_and_omits_what_it_holds() -> None:
-    pai_caches, orchestrator_caches = _Caches(), _Caches()
+    pai_caches = _Caches()
     pai_scripted = _with_caches(ScriptedGenai([reply(text_part("Accra"))]), pai_caches)
-    orchestrator_scripted = _with_caches(
-        ScriptedGenai([reply(text_part("Accra"))]), orchestrator_caches
-    )
 
     await _pai(
         planner_model(
             MODEL, client=pai_scripted.client, budget=_budget(), prefix_cache=PrefixCache()
         )
     )
-    await _orchestrator_run(
-        PrefixCachedGemini(
-            model=MODEL, client=orchestrator_scripted.client, prefix_cache=PrefixCache()
-        ),
-        _budget(),
-    )
 
     pai_config = pai_scripted.requests[0].generate_config
-    orchestrator_config = orchestrator_scripted.requests[0].generate_config
-    assert (
-        _cache_fields(pai_config)
-        == _cache_fields(orchestrator_config)
-        == (CACHE_NAME, True, True, True)
-    )
+    assert _cache_fields(pai_config) == (CACHE_NAME, True, True, True)
     # The cache holds the instruction and the tool the request leaves out.
-    for caches in (pai_caches, orchestrator_caches):
-        (created,) = caches.created
-        assert created.system_instruction is not None
-        assert [
-            d.name for tool in created.tools or [] for d in tool.function_declarations or []
-        ] == ["lookup"]
+    (created,) = pai_caches.created
+    assert created.system_instruction is not None
+    assert [d.name for tool in created.tools or [] for d in tool.function_declarations or []] == [
+        "lookup"
+    ]
 
 
 @pytest.mark.parametrize("status", [403, 404])
@@ -324,31 +244,23 @@ async def test_a_cache_refused_at_open_is_forgotten_and_the_request_resent_whole
     ]
     # The cache cannot be made again, so the resend goes uncached.
     failure = errors.ServerError(503, {"error": {"code": 503, "message": "unavailable"}})
-    pai_caches, orchestrator_caches = _Caches([failure]), _Caches([failure])
+    pai_caches = _Caches([failure])
     pai_scripted = _with_caches(ScriptedGenai(script), pai_caches)
-    orchestrator_scripted = _with_caches(ScriptedGenai(script), orchestrator_caches)
 
     response = await _pai(
         planner_model(
             MODEL, client=pai_scripted.client, budget=_budget(), prefix_cache=PrefixCache()
         )
     )
-    orchestrator = await _orchestrator_run(
-        PrefixCachedGemini(
-            model=MODEL, client=orchestrator_scripted.client, prefix_cache=PrefixCache()
-        ),
-        _budget(),
-    )
 
-    for scripted in (pai_scripted, orchestrator_scripted):
-        first, resent = (request.generate_config for request in scripted.requests)
-        assert first.cached_content == CACHE_NAME
-        assert resent.cached_content is None
-        assert resent.system_instruction is not None
-        assert resent.tools is not None
+    first, resent = (request.generate_config for request in pai_scripted.requests)
+    assert first.cached_content == CACHE_NAME
+    assert resent.cached_content is None
+    assert resent.system_instruction is not None
+    assert resent.tools is not None
     # Forgetting the entry is what sent the lookup back to `create`.
-    assert pai_caches._failures == orchestrator_caches._failures == []
-    assert _pai_text(response) == _text(_final(orchestrator)) == "Accra"
+    assert pai_caches._failures == []
+    assert _pai_text(response) == "Accra"
 
 
 async def test_before_request_answers_with_no_request_and_no_budget_spent() -> None:
@@ -400,6 +312,59 @@ async def test_a_turn_put_in_place_of_a_resend_keeps_the_span_a_generation(
     }
 
 
+# How each call ended, on the call's span, for both agents' models: Gemini's
+# finish reason, `none` when the stream carried none, and the exception's class
+# when the call raised. A row's replies are the call's attempts.
+_ENDINGS = [
+    pytest.param([reply(text_part("Accra"))], "STOP", None, id="stop-without-usage"),
+    pytest.param(
+        [reply(text_part("Accra"), finish_reason=None)], "none", None, id="no-finish-reason"
+    ),
+    pytest.param(
+        [malformed_call_reply(), reply(text_part("Accra"))], "STOP", None, id="malformed-resent"
+    ),
+    pytest.param(
+        [reply(text_part("Accra"), finish_reason=types.FinishReason.MAX_TOKENS)],
+        "MAX_TOKENS",
+        None,
+        id="max-tokens",
+    ),
+    pytest.param([Reply(open_error=client_error(400))], None, "ClientError", id="refused-at-open"),
+    pytest.param(
+        [Reply(chunks=[[text_part("Ac")], [text_part("cra")]], cut_after=1)],
+        None,
+        "StreamCutError",
+        id="cut-mid-stream",
+    ),
+]
+
+
+@pytest.mark.parametrize("build", [planner_model, orchestrator_model])
+@pytest.mark.parametrize(("replies", "finish", "error"), _ENDINGS)
+async def test_each_call_records_how_it_ended_on_its_span(
+    build: Any,
+    replies: list[Reply],
+    finish: str | None,
+    error: str | None,
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    scripted = ScriptedGenai(replies)
+    model = build(MODEL, client=scripted.client, budget=_budget())
+
+    with trace.get_tracer(__name__).start_as_current_span("chat"):
+        if error is None:
+            await _pai(model)
+        else:
+            with pytest.raises(Exception):  # noqa: B017 -- Pydantic AI maps the error
+                await _pai(model)
+
+    (span,) = exported_spans.get_finished_spans()
+    attributes = span.attributes or {}
+    assert attributes.get("dfo.model.finish_reason") == finish
+    assert attributes.get("dfo.model.error") == error
+    assert len(scripted.requests) == len(replies)
+
+
 async def test_after_response_sees_the_reported_usage_and_its_turn_replaces_the_response() -> None:
     usage = usage_metadata(prompt=40, cached=30, candidates=5)
     scripted = ScriptedGenai([reply(call_part("lookup", {"key": "gh"}), usage=usage)])
@@ -416,16 +381,14 @@ async def test_after_response_sees_the_reported_usage_and_its_turn_replaces_the_
     assert response.usage.input_tokens == 40
 
 
-async def test_every_request_carries_the_orchestrators_retries() -> None:
+async def test_every_request_carries_the_model_retries() -> None:
     scripted = ScriptedGenai([reply(text_part("Accra"))])
 
     await _pai(planner_model(MODEL, client=scripted.client, budget=_budget()))
 
     http_options = scripted.requests[0].generate_config.http_options
     assert http_options is not None
-    orchestrator_model = _retrying(MODEL)
-    assert isinstance(orchestrator_model, BoundedGemini)
-    assert http_options.retry_options == orchestrator_model.retry_options == model_retry_options()
+    assert http_options.retry_options == model_retry_options()
 
 
 _UNAVAILABLE = {"error": {"code": 503, "status": "UNAVAILABLE"}}
@@ -485,30 +448,53 @@ async def test_a_non_streamed_request_refuses() -> None:
     assert scripted.requests == []
 
 
+async def test_a_call_sent_without_an_id_is_stored_under_a_client_id_and_replayed_without_it() -> (
+    None
+):
+    scripted = ScriptedGenai(
+        [reply(call_part("lookup", {"key": "gh"}), call_part("lookup", id="sent")), reply()]
+    )
+    model = planner_model(MODEL, client=scripted.client, budget=None)
+
+    response = await _pai(model)
+    calls = [part for part in response.parts if isinstance(part, ToolCallPart)]
+    messages = [
+        ModelRequest(parts=[UserPromptPart("Total ODA to Ghana?")], instructions=INSTRUCTION),
+        response,
+        ModelRequest(
+            parts=[
+                ToolReturnPart(tool_name="lookup", content="ok", tool_call_id=call.tool_call_id)
+                for call in calls
+            ]
+        ),
+    ]
+    async with model.request_stream(messages, None, _PARAMETERS) as stream:
+        async for _ in stream:
+            pass
+
+    given = calls[0].tool_call_id
+    assert given.startswith(CLIENT_CALL_ID_PREFIX)
+    assert calls[1].tool_call_id == "sent"
+    replayed = scripted.requests[1].content_list
+    assert [part.function_call.id for part in replayed[1].parts or [] if part.function_call] == [
+        None,
+        "sent",
+    ]
+    assert [
+        part.function_response.id for part in replayed[2].parts or [] if part.function_response
+    ] == [None, "sent"]
+    # Only the contents that held a client id were copied to strip it; the
+    # user's message goes on as `GoogleModel` built it.
+    assert [type(content) for content in scripted.requests[1].contents] == [
+        dict,
+        types.Content,
+        types.Content,
+    ]
+
+
 _SIGNED = thought_part("weighed the sources", signature=b"sig")
 _UNSIGNED = thought_part("thinking aloud", signature=None)
 _ANSWER = text_part("Accra")
-
-
-@pytest.mark.parametrize(
-    ("parts", "kept"),
-    [
-        pytest.param([_SIGNED, _UNSIGNED, _ANSWER], [_SIGNED, _ANSWER], id="signed-and-unsigned"),
-        pytest.param([_UNSIGNED, _ANSWER], [_ANSWER], id="unsigned"),
-        pytest.param([_UNSIGNED], [_UNSIGNED], id="only-unsigned"),
-        pytest.param([_SIGNED, _ANSWER], [_SIGNED, _ANSWER], id="none-to-drop"),
-    ],
-)
-def test_the_thought_rule_keeps_the_signed_parts_and_the_answer(
-    parts: list[types.Part], kept: list[types.Part]
-) -> None:
-    """Every unsigned thought summary is dropped, a signed thought kept, and a
-    response made only of unsigned thoughts kept whole."""
-    ruled = without_unsigned_thoughts(parts)
-
-    assert (parts if ruled is None else ruled) == kept
-
-
 _MORE = thought_part("and more", signature=None)
 
 
@@ -561,7 +547,7 @@ async def test_a_response_reaches_the_agent_with_the_thoughts_the_rule_keeps(
     signed), `text` and `calls`."""
     scripted = ScriptedGenai([Reply(chunks=chunks)])
 
-    response = _without_unsigned_thoughts(
+    response = without_unsigned_thoughts(
         await _pai(planner_model(MODEL, client=scripted.client, budget=_budget()))
     )
 
@@ -586,7 +572,7 @@ def _declared(schema: dict[str, Any] | None) -> types.Tool:
 
 
 def _expected_config(**overrides: Any) -> types.GenerateContentConfig:
-    """The config Pydantic AI builds on `PLANNER_PROFILE`, less `overrides`."""
+    """The config Pydantic AI builds on `GEMINI_PROFILE`, less `overrides`."""
     fields: dict[str, Any] = {
         "system_instruction": types.Content(role="user", parts=[types.Part(text="Plan.")]),
         "tools": [_declared({"type": "object", "properties": {}})],
@@ -613,7 +599,7 @@ def _expected_config(**overrides: Any) -> types.GenerateContentConfig:
 def test_the_canonical_form_keeps_a_parameters_schema_that_is_not_the_empty_object(
     schema: dict[str, Any],
 ) -> None:
-    rewritten = _in_canonical_form(_expected_config(tools=[_declared(schema)]))
+    rewritten = in_canonical_form(_expected_config(tools=[_declared(schema)]))
 
     assert rewritten.tools == [_declared(schema)]
 
@@ -672,4 +658,4 @@ def test_the_canonical_form_refuses_any_value_it_does_not_expect(field: str, val
     config = _expected_config(**{field: value})
 
     with pytest.raises(UnexpectedRequestFormError):
-        _in_canonical_form(config)
+        in_canonical_form(config)

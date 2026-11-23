@@ -107,11 +107,11 @@ def op_spec_errors(
 ) -> list[str]:
     """Why analysis-mcp's `tool` refuses `arguments` as `op_spec_invalid`, one message per error.
 
-    Builds the verb's op-spec and mints its `op_spec_hash` as every verb
-    tool does before it runs (`analysis_mcp.tool_pipeline.
-    build_op_spec_or_refusal`, `analysis_mcp.frame_ref_resolution.
-    op_spec_hash_or_refusal`): the model's validators, then the identity
-    step, which refuses an array member stated twice. A verb's parameters
+    Builds the verb's op-spec as every verb tool does before it calls the
+    analysis runner (`analysis_mcp.tool_pipeline.build_op_spec_or_refusal`),
+    and mints its `op_spec_hash` (`analysis_mcp.identity.op_spec_hash_for`):
+    the model's validators, then the identity step, which refuses an array
+    member stated twice. A verb's parameters
     are its op-spec's fields, with `anchor_key` beside them, which the
     compiler never writes. Each `bound` argument is a frame a binding fills
     at run time. Empty for a tool that is no verb.

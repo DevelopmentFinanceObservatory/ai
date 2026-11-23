@@ -32,30 +32,43 @@ self-isolating regardless of how it is invoked.
 `source` builds the `SelectedSource` a discovered dataset resolves to, for the
 compiler, translator and executor suites alike.
 
-`scripted_llm` and `run_to_completion` drive an agent through a real ADK
-`Runner` with a stand-in model, so a test can assert on what ADK itself does --
-the root-agent mode check, or the contents a second turn would carry -- rather
-than restating ADK's rules and hoping they hold. `running_lifespan` and
-`mounted_mcp_transport` drive the composed FastAPI app's lifespan by hand and
-reach a mounted MCP server through it, for tests that cross the boundary between
-services. All are fixtures rather than importable helpers because a test module
-importing its own conftest by name is ambiguous when the workspace root has one
-too.
+`running_lifespan` and `mounted_mcp_transport` drive the composed FastAPI
+app's lifespan by hand and reach a mounted MCP server through it, for tests
+that cross the boundary between services. Both are fixtures rather than
+importable helpers because a test module importing its own conftest by name is
+ambiguous when the workspace root has one too.
 
 The autouse `runner` fixture answers every call the analysis verbs make to
 dfo-apis' analysis runner, and every read of a frame it stored, from the replies
 recorded in `fixtures/runner_replies.json`, through analysis-mcp's own replay
 (`services/analysis-mcp/tests/runner_replay.py`, which says how to record more).
+
+`pg_empty_engine` and `pg_engine` give a test its own Postgres schema on a
+database each xdist worker (or the one process) gets for the run, on the
+server `HARNESS_TEST_DATABASE_URL` names (an asyncpg SQLAlchemy URL, see
+`just pg-up`): `pg_empty_engine` has no tables, `pg_engine` has the harness
+tables applied. A database per worker, because the migrations' advisory lock
+covers a whole database, and workers sharing one would wait on and time out
+against each other's migrations. Every connection of the engine resolves
+unqualified names in that schema, which is dropped when the test ends.
+`pg_database_url` is a fresh database on the same server, copied from a
+template with the harness tables applied, for a test that builds the app
+with `Settings(database_url=...)`. The variable is separate from
+`DATABASE_URL` because `Settings` reads that one and would route every test's
+app to Postgres. Without the variable a test using any of these fixtures
+fails, so no run passes by skipping them.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
+import os
+import sys
+import uuid
 from collections.abc import (
-    AsyncGenerator,
     AsyncIterator,
-    Awaitable,
     Callable,
     Iterator,
     Mapping,
@@ -71,21 +84,19 @@ import httpx2
 import pytest
 from analysis_mcp.runner_client import runner_holder
 from common import auth as mcp_auth
+from common.caller import set_supplied_caller, set_supplied_turn
 from compiler.sources import member_digest
 from data_mcp import node_lookup, resolution
 from data_mcp.graph_wire import NotHeldEntry
 from fastapi import FastAPI
 from fastmcp.client.transports import StreamableHttpTransport
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_response import LlmResponse
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
 from harness.conversation import (
     NO_CONVERSATION,
     current_conversation_id,
     current_conversation_key,
+    current_turn_id,
 )
+from harness.db.migrate import apply_pending
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from planner.plan import (
     AggregateRequirement,
@@ -102,7 +113,9 @@ from planner.plan import (
     Unit,
 )
 from planner.workflow import ResolvedEntity, SelectedSource
-from pydantic import Field
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 SPEC_KENYA = "spec_" + "a" * 32
 
@@ -210,8 +223,26 @@ def _reset_mcp_auth_gate() -> Any:
 
 
 @pytest.fixture(autouse=True)
+def _no_owed_work_left() -> Iterator[None]:
+    """Leave no owed work of a cut segment held after a test
+    (`harness.turn.loop.pending_owed_work`). Each test runs on a loop of its
+    own, so a task one test left behind could never finish under the next,
+    and the shutdown wait (`harness.studio_stream.LiveOwners.wait`) would
+    see it. A test run that never imported the loop has none."""
+    yield
+    turn_loop = sys.modules.get("harness.turn.loop")
+    if turn_loop is None:
+        return
+    for task in turn_loop.pending_owed_work():
+        # The test's loop may be closed by now; the task then never runs on.
+        with contextlib.suppress(RuntimeError):
+            task.cancel()
+    turn_loop._OWED_WORK.clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_conversation_identity() -> Any:
-    """Leave no conversation set after a test.
+    """Leave no conversation, turn, or supplied caller or turn set after a test.
 
     A test function that is not a coroutine runs in the session's own context,
     so a `current_conversation_id.set(...)` it makes would name that
@@ -220,6 +251,9 @@ def _reset_conversation_identity() -> Any:
     yield
     current_conversation_id.set(NO_CONVERSATION)
     current_conversation_key.set(None)
+    current_turn_id.set(None)
+    set_supplied_caller(None)
+    set_supplied_turn(None)
 
 
 @pytest.fixture
@@ -302,69 +336,6 @@ def requirements(
 ) -> tuple[EvidenceRequirement, ...]:
     """Return a minimal, valid pair: a dataset requirement and one that reads it."""
     return (requirement(), derived_requirement())
-
-
-class ScriptedLlm(BaseLlm):
-    """Answers with a scripted function call, then with a final text response.
-
-    Leaving `tool_name` unset answers with the text straight away, for a run
-    that needs no tool call to reach the end. Every `LlmRequest` lands in
-    `captured_requests`, so a test can inspect exactly what the model would see
-    on its next turn.
-    """
-
-    model: str = "scripted-llm"
-    tool_name: str | None = None
-    tool_args: dict[str, Any] = Field(default_factory=dict)
-    captured_requests: list[Any] = Field(default_factory=list)
-
-    async def generate_content_async(
-        self, llm_request: Any, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse]:
-        self.captured_requests.append(llm_request)
-        if self.tool_name is not None and len(self.captured_requests) == 1:
-            yield LlmResponse(
-                content=types.Content(
-                    role="model",
-                    parts=[types.Part.from_function_call(name=self.tool_name, args=self.tool_args)],
-                )
-            )
-        else:
-            yield LlmResponse(
-                content=types.Content(role="model", parts=[types.Part.from_text(text="done")])
-            )
-
-
-@pytest.fixture
-def scripted_llm() -> type[ScriptedLlm]:
-    """Return the stand-in model class, constructed per test with its own script."""
-    return ScriptedLlm
-
-
-@pytest.fixture
-def run_to_completion() -> Callable[..., Awaitable[list[Any]]]:
-    """Return a callable driving `agent` through a real `Runner` to the end.
-
-    Hands back every event the run produced, so a caller can assert the run
-    happened at all: ADK enforces its root-agent rules inside `run_async`
-    rather than at construction, so only a real run exercises them.
-    """
-
-    async def _run(
-        *, agent: Any, session_service: InMemorySessionService, app_name: str
-    ) -> list[Any]:
-        await session_service.create_session(app_name=app_name, user_id="user-1", session_id="s-1")
-        runner = Runner(agent=agent, app_name=app_name, session_service=session_service)
-        return [
-            event
-            async for event in runner.run_async(
-                user_id="user-1",
-                session_id="s-1",
-                new_message=types.Content(role="user", parts=[types.Part.from_text(text="go")]),
-            )
-        ]
-
-    return _run
 
 
 KENYA = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
@@ -523,3 +494,120 @@ def mounted_mcp_transport() -> Callable[..., StreamableHttpTransport]:
         )
 
     return _transport
+
+
+TEST_DATABASE_URL_VAR = "HARNESS_TEST_DATABASE_URL"
+
+
+def _test_database_url() -> str:
+    url = os.environ.get(TEST_DATABASE_URL_VAR)
+    if url:
+        return url
+    pytest.fail(f"{TEST_DATABASE_URL_VAR} is not set; run `just pg-up` and use its URL")
+
+
+@pytest.fixture(scope="session")
+def _pg_worker_database(testrun_uid: str, worker_id: str) -> Iterator[str]:
+    """The URL of this worker's own database, created for the session and
+    dropped at its end. xdist's `testrun_uid` is in the name as well as its
+    `worker_id` (`gw0`, ... or `master`), so two runs against one server, from
+    two checkouts sharing `just pg-up`'s container, never meet."""
+    base = make_url(_test_database_url())
+    name = f"w_{testrun_uid[:12]}_{worker_id}"
+
+    async def admin(statement: str) -> None:
+        engine = create_async_engine(base, isolation_level="AUTOCOMMIT")
+        async with engine.connect() as conn:
+            await conn.execute(text(statement))
+        await engine.dispose()
+
+    asyncio.run(admin(f"CREATE DATABASE {name}"))
+    try:
+        yield base.set(database=name).render_as_string(hide_password=False)
+    finally:
+        asyncio.run(admin(f"DROP DATABASE {name} WITH (FORCE)"))
+
+
+@pytest.fixture
+async def pg_empty_engine(_pg_worker_database: str) -> AsyncIterator[AsyncEngine]:
+    """An engine on a fresh, empty Postgres schema of this worker's database,
+    dropped after the test. Its pool of two connections without overflow
+    matches the deployed session-store pool."""
+    url = _pg_worker_database
+    schema = f"t_{uuid.uuid4().hex[:12]}"
+    admin = create_async_engine(url)
+    async with admin.begin() as conn:
+        await conn.execute(text(f"CREATE SCHEMA {schema}"))
+    engine = create_async_engine(
+        url,
+        pool_size=2,
+        max_overflow=0,
+        connect_args={"server_settings": {"search_path": schema}},
+    )
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+        async with admin.begin() as conn:
+            await conn.execute(text(f"DROP SCHEMA {schema} CASCADE"))
+        await admin.dispose()
+
+
+@pytest.fixture
+async def pg_engine(pg_empty_engine: AsyncEngine) -> AsyncEngine:
+    """`pg_empty_engine` with the harness migrations applied."""
+    await apply_pending(pg_empty_engine)
+    return pg_empty_engine
+
+
+@pytest.fixture(scope="session")
+def _pg_template_database() -> Iterator[str]:
+    """The name of a database holding the harness migrations, built once per
+    session and dropped at its end, which every `pg_database_url` database is
+    copied from. Copying a template takes tens of milliseconds where applying
+    the migrations takes seconds."""
+    base = make_url(_test_database_url())
+    name = f"tmpl_{uuid.uuid4().hex[:12]}"
+
+    async def build() -> None:
+        admin = create_async_engine(base, isolation_level="AUTOCOMMIT")
+        async with admin.connect() as conn:
+            await conn.execute(text(f"CREATE DATABASE {name}"))
+        await admin.dispose()
+        engine = create_async_engine(base.set(database=name))
+        try:
+            await apply_pending(engine)
+        finally:
+            await engine.dispose()
+
+    async def drop() -> None:
+        admin = create_async_engine(base, isolation_level="AUTOCOMMIT")
+        async with admin.connect() as conn:
+            await conn.execute(text(f"DROP DATABASE {name} WITH (FORCE)"))
+        await admin.dispose()
+
+    asyncio.run(build())
+    try:
+        yield name
+    finally:
+        asyncio.run(drop())
+
+
+@pytest.fixture
+async def pg_database_url(_pg_template_database: str) -> AsyncIterator[str]:
+    """The URL of a fresh Postgres database, dropped after the test, for a test
+    that builds the app through `Settings(database_url=...)`. A whole database
+    rather than a schema, because the app's own startup applies its migrations
+    to the URL's default schema. It is a copy of a template that already has
+    them, so that startup finds nothing left to apply."""
+    base = make_url(_test_database_url())
+    name = f"t_{uuid.uuid4().hex[:12]}"
+    admin = create_async_engine(base, isolation_level="AUTOCOMMIT")
+    async with admin.connect() as conn:
+        await conn.execute(text(f"CREATE DATABASE {name} TEMPLATE {_pg_template_database}"))
+    try:
+        yield base.set(database=name).render_as_string(hide_password=False)
+    finally:
+        async with admin.connect() as conn:
+            await conn.execute(text(f"DROP DATABASE {name} WITH (FORCE)"))
+        await admin.dispose()

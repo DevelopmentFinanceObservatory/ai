@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 from google.genai import types
+from harness.gemini_agent import tool_not_found
 from harness.turn_events import PLANNER_ASK
-from planner.pydantic_agent import tool_not_found
 from planner.specs import PROPOSE_PLAN
 from planner.tools import ASK_ACCEPTED
 

@@ -200,9 +200,8 @@ _PLANNING = (
     "when nothing can. Decide the methodology and leave the mechanics "
     "alone. Which data and which operations carry your decisions out is "
     "worked out separately, after you propose, so name no tool.\n\n"
-    "A rank's `among='population'` is a claim over entities nobody named, "
-    "so cite a `Decision` whose `fixes` names `among`, as a `share_of` "
-    "stating `denominator_scope='pooled'` cites one whose `fixes` names "
+    "A `share_of` stating `denominator_scope='pooled'` divides by a total "
+    "over entities nobody named, so cite a `Decision` whose `fixes` names "
     "`denominator_scope`.\n\n"
     "State a rank's `limit` when the question asks for a top or bottom N, "
     'or for the members that hold the most, as "top donors" or "which '
@@ -235,6 +234,7 @@ _VERSIONING = (
     "patching it through `amends_version`, whenever the user asks for a "
     "change. This turn's question is fixed, so when the user's reply asks "
     "a different question, call `propose_plan` with `starts_new_plan=true` "
+    "and, in `new_question_in`, the user's message that states it or `none`, "
     "and stop there.\n\n"
 )
 

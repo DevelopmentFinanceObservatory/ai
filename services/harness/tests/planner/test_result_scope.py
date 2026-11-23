@@ -15,7 +15,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from google.adk.events import EventActions
 from harness.plan_display import answer_scopes, step_rows
 from planner.plan import (
     ASKS_ACROSS_YEARS_STATE_KEY,
@@ -108,15 +107,14 @@ POPULATION = Decision(
     chosen="every donor",
     resolved_by="planner_default",
     rationale="The question asks for the top donors among all of them.",
-    fixes=DecisionFixes(among=RankAmong.POPULATION),
 )
 
 
 POOLED = Decision(
     slot="pooled",
     description="Whether each donor's share is of its own total or of all donors' total.",
-    options=["of all donors' total", "of its own total"],
-    chosen="of all donors' total",
+    options=["pooled", "per_axis"],
+    chosen="pooled",
     resolved_by="planner_default",
     rationale="The question asks how aid to Ghana splits between donors.",
     fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED),
@@ -182,10 +180,8 @@ def _decisions(variant: str, decision: Callable[..., Decision]) -> list[Decision
 
 
 def _context() -> Any:
-    """The part of ADK's `ToolContext` `propose_plan` reads: state, events and actions."""
-    return SimpleNamespace(
-        state={}, function_call_id=None, actions=EventActions(), session=SimpleNamespace(events=[])
-    )
+    """The part of a tool call's context `propose_plan` reads: state, events and actions."""
+    return SimpleNamespace(state={}, function_call_id=None, run_ended=False, records=[])
 
 
 COMPUTED = AnswerMode.COMPUTED

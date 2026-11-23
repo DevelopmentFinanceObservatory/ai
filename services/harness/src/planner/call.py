@@ -14,14 +14,21 @@ tool with.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, NamedTuple, Protocol
 
 from compiler.evidence import PriceBasis
 from harness.graph.orchestrate import counts_chosen
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers, stored_mapping
+from harness.graph.state import (
+    ORCHESTRATOR_SPECS_KEY,
+    ServedUnit,
+    resume_answers,
+    stored_mapping,
+    unit_reads,
+    units_served,
+)
 from harness.plan_display import DECISION_CHOICE_PREFIX, decision_option_id
 from harness.turn_events import PLANNER_ASK
 from submission.prices_choice import (
@@ -69,10 +76,10 @@ class Step(NamedTuple):
 
     `message` is a message the user typed into the session, which the
     planner adapter's own messages are not (`planner.session._user_message`).
-    `call` is an ask, the planner's own (`PLANNER_ASK`) or a workflow
-    interrupt's `adk_request_input`, with its id and `args`. `answer` is a
-    response to one, with its id, the `args` of the nearest preceding call
-    sharing that id (`None` when none precedes it) and the response body.
+    `call` is an ask, the planner's own (`PLANNER_ASK`) or a pause the turn
+    put to the user, with its id and `args`. `answer` is a response to one,
+    with its id, the `args` of the nearest preceding call sharing that id
+    (`None` when none precedes it) and the response body.
     `response` is any other tool's response, with its `name` and body.
     """
 
@@ -123,37 +130,6 @@ class PlannerCall(Protocol):
         ...
 
 
-class RecordingState:
-    """A view over a state mapping that reads and writes through to it and
-    records each key written through the view, in first-write order.
-
-    The view is a `planner.plan.SessionState`. Writes made to the mapping by
-    anything but the view are unrecorded.
-    """
-
-    def __init__(self, state: MutableMapping[str, Any]) -> None:
-        self._state = state
-        self._written: dict[str, None] = {}
-
-    @property
-    def written(self) -> tuple[str, ...]:
-        """Every key written through the view, in first-write order."""
-        return tuple(self._written)
-
-    def get(self, key: str, default: Any = None, /) -> Any:
-        return self._state.get(key, default)
-
-    def __getitem__(self, key: str) -> Any:
-        return self._state[key]
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        self._state[key] = value
-        self._written[key] = None
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._state
-
-
 def candidate_ids(candidates: Any) -> frozenset[str]:
     """The spec_ids of a list of `{"spec_id", "label"}` candidates."""
     return frozenset(
@@ -169,12 +145,12 @@ def _offered_candidates(args: dict[str, Any]) -> dict[str, frozenset[str]]:
 
     - the planner's own `PLANNER_ASK` call: `args` is exactly the kwargs the
       model supplied, flat -- `args["candidates"]`, the one question `q1`.
-    - the graph's `ask` node, under `harness.graph`'s `CLARIFY_INTERRUPT`:
-      its `args` hold the whole interrupt request, so the caller's own
-      `payload` nests under `args["payload"]` (`planner.session.session_steps`
-      says how the session records it). Its `questions` each carry their own `id` and
-      `candidates`, whose ids are scoped to that question. A `payload` with
-      `candidates` and no `questions` holds the one question `q1`.
+    - the pause the graph's `ask` node puts to the user: its `args` hold the
+      pause's message and its `payload`, which nests under `args["payload"]`
+      (`planner.session.session_steps` says how the transcript records it).
+      Its `questions` each carry their own `id` and `candidates`, whose ids
+      are scoped to that question. A `payload` with `candidates` and no
+      `questions` holds the one question `q1`.
     """
     return {
         question_id: candidate_ids(candidates)
@@ -220,8 +196,9 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
     the part's choice, as they do on the orchestrator's question, and a skip
     keeps it, marking a constant choice `asked`. A switch of the part's
     prices row on the plan card (`_prices_switched`) is a new answer for the
-    part, marked `asked` too, while its replan is under way or once the plan
-    on record states it (`_switch_stands`). Any other `propose_plan`
+    part, marked `asked` too, keeping the currency a whole unit chosen for
+    the part held (`_switched_choice`), while its replan is under way or once
+    the plan on record states it (`_switch_stands`). Any other `propose_plan`
     response, the plan landing included, clears the refusal, so no later ask
     of another kind is read as that one. A message the user typed
     (a `message` step) releases every choice and clears the refusal, and an
@@ -234,6 +211,8 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
         for spec_id, source in pin_sources(call.state).items()
         if (block := source.spec_block(spec_id)) is not None
     }
+    reads = unit_reads(call.state)
+    served = units_served(call.state)
     chosen: dict[str, PricesChoice] = {}
     refused: str | None = None
     asked: dict[str, str] = {}
@@ -253,8 +232,16 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
         elif (switched := _prices_switched(step.body)) is not None:
             part, basis = switched
             if _switch_stands(call.state, part, basis):
-                _release_measure(chosen, part, measures)
-                chosen[part] = PricesChoice(basis, asked=True)
+                held = chosen.get(part)
+                # A whole unit is chosen for the part and the series fetched
+                # for it alike, and the switch moves both.
+                keys = dict.fromkeys(
+                    (part, *(p for p, c in chosen.items() if held is not None and c == held))
+                )
+                for priced in keys:
+                    _release_measure(chosen, priced, measures)
+                for priced in keys:
+                    chosen[priced] = _switched_choice(held, basis)
         elif step.call_id in asked:
             part = asked.pop(step.call_id)
             answer = _answers(step.body.get("result")).get("q1") or {}
@@ -267,7 +254,9 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
             elif part in chosen and chosen[part].prices == "constant":
                 chosen[part] = chosen[part]._replace(asked=True)
         else:
-            _priced_answers(step.args or {}, step.body, chosen, measures)
+            _priced_answers(
+                step.args or {}, step.body, chosen, measures, reads=reads, served=served
+            )
     return chosen
 
 
@@ -293,6 +282,17 @@ def _prices_switched(body: Mapping[str, Any]) -> tuple[str, PriceBasis] | None:
     return (slot.removeprefix(PRICES_SLOT_PREFIX), basis) if basis is not None else None
 
 
+def _switched_choice(held: PricesChoice | None, basis: PriceBasis) -> PricesChoice:
+    """The choice a switch of a part's prices row to `basis` makes over `held`,
+    the part's choice before it: `held` itself when it already names a whole
+    unit in `basis`, else `basis`, keeping the currency `held` holds the part
+    to (`PricesChoice.held_currency`)."""
+    if held is not None and held.unit is not None and held.prices == basis:
+        return held._replace(asked=True)
+    currency = held.held_currency if held is not None else None
+    return PricesChoice(basis, asked=True, currency=currency)
+
+
 def _switch_stands(state: Any, part: str, basis: PriceBasis) -> bool:
     """Whether a switch of `part`'s prices row to `basis` holds: its replan is
     under way (`planner.plan.decision_pick` names the row), or the plan on
@@ -303,8 +303,9 @@ def _switch_stands(state: Any, part: str, basis: PriceBasis) -> bool:
     if pick is not None and pick.slot == slot:
         return True
     plan = load_plan(state)
-    label = PricesChoice(basis).label
-    return plan is not None and any(d.slot == slot and d.chosen == label for d in plan.decisions)
+    return plan is not None and any(
+        d.slot == slot and d.fixes is not None and d.fixes.prices == basis for d in plan.decisions
+    )
 
 
 def _release_measure(
@@ -338,10 +339,42 @@ def _priced_answers(
     body: Mapping[str, Any],
     chosen: dict[str, PricesChoice],
     measures: Mapping[str, str | None],
+    *,
+    reads: Mapping[str, Sequence[str]],
+    served: Mapping[str, ServedUnit],
 ) -> None:
     """Record in `chosen` what one clarify response says of each part its call
-    priced, each answer replacing the choices of its part's measure (`prices_chosen`)."""
-    answers = _answers(body.get("result"))
+    priced, each answer replacing the choices of its part's measure (`prices_chosen`).
+
+    A unit question (`harness.graph.state.ask_questions`, `unit`) sets the
+    unit of every part it covers to the one the series the agent fetches for
+    it is served in (`served`, `harness.graph.state.units_served`), and of
+    that series, whose currency may differ from the part's: the unit the
+    user chose, or the one its chips started on for a skip, unless Search
+    refused it, when the part keeps the unit it is served in. A part whose
+    served unit cannot be stated takes no choice. A part with no served unit
+    recorded, answered in a turn paused before the `ask` node recorded one,
+    takes the prices of the answer, as does each series the part was re-read
+    as (`reads`, `harness.graph.state.unit_reads`). A skip or dismissal of a
+    whole pause of several questions sets none, as the `ask` node hands it
+    back unanswered; of a lone unit question it is that question's skip."""
+    result = body.get("result")
+    answers = _answers(result)
+    units = _unit_questions(args)
+    lone = len(_question_candidates(args)) == 1
+    answered = result is not None and (resume_answers(result) is not None or lone)
+    for question_id, unit in units.items() if answered else ():
+        prices = _unit_prices(unit, answers.get(question_id))
+        for part in map(str, unit.get("parts") or ()):
+            _release_measure(chosen, part, measures)
+            if (fetched := served.get(part)) is not None:
+                if fetched.unit is not None:
+                    choice = PricesChoice(fetched.unit.prices, fetched.spec_id, unit=fetched.unit)
+                    for priced in dict.fromkeys((part, fetched.spec_id)):
+                        chosen[priced] = choice
+            elif prices is not None:
+                for priced in (part, *reads.get(part, ())):
+                    chosen[priced] = PricesChoice(prices)
     for question_id, candidates in _question_candidates(args).items():
         marked = [c for c in candidates or () if isinstance(c, dict) and c.get("part")]
         answer = answers.get(question_id)
@@ -361,6 +394,34 @@ def _priced_answers(
         _release_measure(chosen, part, measures)
         if picked is not None:
             chosen[part] = picked
+
+
+def _unit_questions(args: dict[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """The `unit` entry of each unit question an ask's `args` put, by question id."""
+    payload = args.get("payload")
+    questions = payload.get("questions") if isinstance(payload, dict) else None
+    return {
+        str(question["id"]): question["unit"]
+        for question in questions or ()
+        if isinstance(question, dict)
+        and question.get("id")
+        and isinstance(question.get("unit"), dict)
+    }
+
+
+def _unit_prices(unit: Mapping[str, Any], answer: object) -> PriceBasis | None:
+    """The prices a unit question's `answer` settles: a unit answer's, else, as
+    for a skip, the prices its offer's chips started on."""
+    if isinstance(answer, dict) and answer.get("kind") == "unit":
+        prices = answer.get("prices")
+    else:
+        prices = ((unit.get("offer") or {}).get("start") or {}).get("prices")
+    match prices:
+        case "current":
+            return "current"
+        case "constant":
+            return "constant"
+    return None
 
 
 def _answers(result: object) -> dict[str, dict[str, Any]]:
@@ -416,27 +477,15 @@ def elected_spec_ids(call: PlannerCall) -> frozenset[str]:
     prices elects the listed reading measuring both, the one the `ask`
     node tells the agent to fetch.
 
-    Every `adk_request_input` call the workflow itself raises (the `ask`
-    node of `harness.graph`, under `CLARIFY_INTERRUPT`) shares the one fixed
-    id `"clarify"` across every question in a session. The planner's own
-    `PLANNER_ASK` calls each get their own id. Pairing by id alone
-    would let a round-2 offer, re-raised under the same id, retroactively
-    read a round-1 answer as electing whatever round 2 happens to also
-    offer. The steps walk the session once, in order, and pair each
-    response with the call whose offer was seen most recently at that
-    point -- the nearest preceding call sharing its id -- rather than
-    building a dict of every call keyed by id first and reading it back
-    after the fact.
+    The steps walk the turn's transcript once, in order, and pair each
+    answer with the call whose offer was seen most recently at that point (the
+    nearest preceding call sharing its id), so an answer resolves against the
+    offer it answered, whatever a later offer under the same id holds.
 
-    The record is read, not kept in a state key: the call carrying its
-    offered candidates, and the answer once it arrives, are both in the
-    session's history (`planner.session.session_steps` says how ADK writes
-    them).
-
-    Read across the whole session, not scoped to one invocation: the ask
-    pauses the run, and the answer that resumes it can arrive on a later
-    invocation than the one that asked, so there is no single "this turn"
-    an invocation id could scope this to.
+    The call carrying its offered candidates, and the answer once it arrives,
+    are both in the turn's transcript (`planner.session.session_steps` says
+    how it holds them). The transcript is read whole, since the ask pauses the
+    turn and the answer resumes it in a later segment.
     """
     specs = stored_mapping(call.state, ORCHESTRATOR_SPECS_KEY)
     elected: set[str] = set()
@@ -457,12 +506,12 @@ def _said(answer: object) -> str:
 def _is_answer(body: Mapping[str, Any]) -> bool:
     """Whether an ask's response body carries something the user said.
 
-    A user's answer is `{"result": ...}` (`harness.studio`'s `/interrupt` route wraps
-    it, as ADK wraps any non-dict value), read as `harness.graph.state.resume_answers`
-    reads it: a pick of a candidate, or free text for a reply outside the offered
-    options. A body with no `result` is a call the tool or ADK rejected. A dismissal of
-    the pause and a question left to the planner are the user declining to choose, and
-    blank text says nothing.
+    A user's answer is `{"result": ...}` (`planner.session.session_steps` wraps
+    it), read as `harness.graph.state.resume_answers` reads it: a pick of a
+    candidate, or free text for a reply outside the offered options. A body
+    with no `result` is a call the tool rejected. A dismissal of the pause and
+    a question left to the planner are the user declining to choose, and blank
+    text says nothing.
     """
     return any(_said(answer) for answer in _answers(body.get("result")).values())
 
@@ -471,7 +520,7 @@ def _is_amendment(body: Mapping[str, Any]) -> bool:
     """Whether an ask's response body is the user amending the approval card.
 
     `harness.studio`'s `/interrupt` route answers the approval card
-    (`harness.graph.APPROVE_INTERRUPT`) with `{"result": {"amendment": ...}}`
+    (`harness.graph.state.APPROVE_PAUSE`) with `{"result": {"amendment": ...}}`
     when the user types a change there.
     """
     result = body.get("result")
@@ -490,12 +539,11 @@ def user_spoke_since_recorded(call: PlannerCall, version: int) -> bool:
     (a `message` step). A
     refusal, a skip, a referral and the planner adapter's own messages are not.
 
-    `harness.studio_state.ConversationState.session_id` opens a new ADK
-    session for every Studio turn, and every turn starts with the user's
-    message. A plan this session holds no recording response for was
-    recorded before that message, so this answers `True`. The planner adapter
-    seeds such a plan from the graph's record
-    (`harness.planner_adapter.PlannerAdapter`).
+    Every Studio turn has a transcript of its own (`planner.session`), and
+    every turn starts with the user's message. A plan this transcript holds
+    no recording response for was recorded before that message, so this
+    answers `True`. The planner adapter seeds such a plan from the graph's
+    record (`harness.planner_adapter.PlannerAdapter`).
     """
     last: object = None
     recorded = False
@@ -534,7 +582,7 @@ def answers_since_referral(call: PlannerCall) -> ReferralAnswers:
     once, in order. An ask after that response is one the
     model raised knowing the referral, and its `id` is remembered. A response counts as the
     user's answer when it pairs by `id` with one of those asks and `_is_answer` holds. An ask
-    issued before the referral, a call the tool or ADK rejected, and a skip do not count. A skip
+    issued before the referral, a call the tool rejected, and a skip do not count. A skip
     is the user declining to choose, which the planner may not substitute for, so the planner
     ends the turn by telling them what cannot be done.
 
@@ -553,8 +601,8 @@ def answers_since_referral(call: PlannerCall) -> ReferralAnswers:
     pairs them. A pick made before the referral is not counted. Picks keep the
     order the answers came in. An ask with no answer, a skip included, leaves
     every id it offered unanswered. An ask whose response has no `result`,
-    one the tool or ADK refused, never reached the user, so it offered
-    nothing. A pending ask has no response and stays unanswered.
+    one the tool refused, never reached the user, so it offered nothing. A
+    pending ask has no response and stays unanswered.
 
     `picked_ever` holds the user's standing picks since the first referral,
     which a later translation does not clear. An answered ask, picked or in
@@ -646,7 +694,7 @@ def combination_picks(
     It asks about the combination the latest `combination_unasked` refusal before it names, read
     off that refusal's own response, so the model cannot point an ask at another sum. A
     refusal binds the first ask after it that reached the user and no other, so an ask
-    with no refusal of its own before it asks about nothing. An ask the tool or ADK refused
+    with no refusal of its own before it asks about nothing. An ask the tool refused
     leaves no step (`planner.session.session_steps`), so it binds nothing and leaves the
     refusal for the next ask. Each response pairs with the nearest preceding call sharing
     its `id`, as `elected_spec_ids` pairs them. The combination ask is one question, `q1`

@@ -146,8 +146,8 @@ def _spec(
 
 
 # Every graph identifier this stub can ever put in an answer. `describe` holds ids to
-# this rather than to what the current run happened to search for: `adk eval`
-# runs a whole set in one process, so a closure over past answers would let a
+# this rather than to what the current run happened to search for: the tests
+# run every case in one process, so a closure over past answers would let a
 # later case describe an id an earlier one named and make the refusal depend on
 # case order. The point of the refusal is that an id the stub never emits
 # cannot be confirmed, and that holds run to run.

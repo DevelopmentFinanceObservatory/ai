@@ -11,9 +11,12 @@ otherwise.
 
 The mode decides the transient and refresh cases; the code decides the rest.
 Every code either server can answer with sits in exactly one of the five sets
-below, and `tests/executor/test_classify.py` reads both servers' enums and
-fails when one is missing here -- so adding a server code means picking a
-side, not landing in the stop bucket by omission:
+below, and `tests/executor/test_classify.py` reads both servers' enums, and
+every code the code registry (`dfo_spec_kit.registry`) maps to dfo-apis'
+analysis route, which analysis-mcp passes through as the runner wrote it
+(`analysis_mcp.runner_client.RUNNER_CODES`), and fails when one is missing
+here, so adding a code means picking a side. A code left out would reach the
+stop bucket by omission:
 
 - `METHOD_CHOICE_CODES`: the refusal's `fix` is a set of alternatives -- which
   entity, unit, facet, window, coverage or denominator -- and choosing one
@@ -26,7 +29,8 @@ side, not landing in the stop bucket by omission:
   missing keys or years is a data-dependent choice, not something the
   compiler could have ruled out.
   `quotient_of_zero_denominator` and `quotient_of_no_key_matched` sit beside
-  them for the same reason: `quotient_of` refuses only when every matched
+  them for the same reason, as do `compare_no_key_matched` and
+  `sum_of_no_key_matched`, the same refusal of a keyed `compare` or `sum_of`: `quotient_of` refuses only when every matched
   cell divides by zero, or when no numerator key pairs with a denominator
   key at all, and which denominator, window or `denominator_axis` gives the
   division something to divide by is the planner's to choose.
@@ -115,6 +119,7 @@ from collections.abc import Callable, Mapping
 from enum import StrEnum
 from typing import cast
 
+from common.refusal import MINTED_FRAME, REPOST_RECOVERS_CODES, SERVICE_FAILURE
 from planner.records import StrictModel
 from pydantic import Field, JsonValue, ValidationError
 
@@ -134,6 +139,8 @@ METHOD_CHOICE_CODES = frozenset(
         "share_of_key_unmatched",
         "quotient_of_zero_denominator",
         "quotient_of_no_key_matched",
+        "compare_no_key_matched",
+        "sum_of_no_key_matched",
     }
 )
 
@@ -171,6 +178,8 @@ TRANSIENT_CODES = frozenset(
         # coverage is unchanged, or starts a fresh one if coverage has been published
         # since.
         "operation_still_processing",
+        # dfo-apis: the request did not complete before its deadline.
+        "timeout",
     }
 )
 
@@ -187,6 +196,9 @@ COMPILER_PROVABLE_CODES = frozenset(
         "share_of_key_unknown",
         "place_levels_mixed",
         "composed_unit_sum_unsupported",
+        # The executor resolves one anchor record over one set of populations
+        # and states it on every rolling step of a run.
+        "rolling_populations_differ",
     }
 )
 
@@ -254,6 +266,27 @@ STOP_CODES = frozenset(
         "rolling_anchor_unresolved",
         "rolling_grain_unsupported",
         "internal_error",
+        # dfo-apis' analysis runner, past what analysis-mcp writes again in its
+        # own words. A root it cannot read stands for frames that are gone, as
+        # `frame_not_held` and `frame_expired` do, and a Spec root's mint refuses
+        # with the mint's own codes. Each reproduces on the same plan.
+        "artifact_expired",
+        "snapshot_not_found",
+        "snapshot_revoked",
+        "recipe_not_found",
+        "spec_not_found",
+        "several_members",
+        "verify_not_permitted",
+        "collection_probe_ceiling",
+        "definition_not_reproducible",
+        "excluded_by_registry",
+        "facet_binding_unsupported",
+        "identity_collision",
+        "identity_quarantined",
+        "members_not_held",
+        "rate_coverage_gap",
+        "recipe_not_declared",
+        "role_signature_incompatible",
     }
 )
 
@@ -361,6 +394,9 @@ HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
     ExecutorCode.INTERNAL_ERROR,
 }
 
+# The code whose `fix.kind` says whose failure it is (`common.refusal`).
+FRAME_INTEGRITY_FAILED = "frame_integrity_failed"
+
 
 def internal_fault(detail: str | None = None) -> dict[str, JsonValue]:
     """The refusal of a fault of the system itself, such as a bug: `internal_error`,
@@ -457,9 +493,43 @@ def is_anchor_fault(failure: ToolFailure) -> bool:
     )
 
 
+def is_upstream_fault(failure: ToolFailure) -> bool:
+    """Whether `failure` says an upstream service failed of itself: a refusal
+    under any code its server marks `SERVICE_FAILURE` that names no recovery
+    of its own (`classify_refusal` calls it `Disposition.STOP`). data-mcp and
+    analysis-mcp mark an `upstream_error` for a 5xx, an answer with no problem
+    document, a call that got no answer, or a response they could not use,
+    and analysis-mcp marks a runner refusal it passes through under the
+    runner's code when the runner answered it with a 5xx. A definition the
+    platform refused and a refusal of the request under a code the server
+    does not map carry no such mark, and another spec or request may avoid
+    them. A marked refusal whose code or retry mode names a recovery keeps it:
+    one that names a wait is transient before it is anyone's fault
+    (`executor.outcomes.stop_cause`), and `upstream_version_changed` is
+    discovered again.
+    """
+    return (
+        failure.fix.get("kind") == SERVICE_FAILURE and classify_refusal(failure) is Disposition.STOP
+    )
+
+
+def is_store_fault(failure: ToolFailure) -> bool:
+    """Whether `failure` is a stored frame that failed its integrity check in
+    the store itself. Only the frame data-mcp minted (`MINTED_FRAME`) is one a
+    narrower scope mints anew. analysis-mcp's and any other read the same
+    corrupted object for every plan."""
+    return failure.code == FRAME_INTEGRITY_FAILED and failure.fix.get("kind") != MINTED_FRAME
+
+
 def is_harness_fault(failure: ToolFailure) -> bool:
-    """Whether `failure` is the harness's own fault (`HARNESS_FAULT_CODES`, `is_anchor_fault`)."""
-    return failure.code in HARNESS_FAULT_CODES or is_anchor_fault(failure)
+    """Whether `failure` is the harness's own fault (`HARNESS_FAULT_CODES`,
+    `is_anchor_fault`, `is_upstream_fault`, `is_store_fault`)."""
+    return (
+        failure.code in HARNESS_FAULT_CODES
+        or is_anchor_fault(failure)
+        or is_upstream_fault(failure)
+        or is_store_fault(failure)
+    )
 
 
 def retry_delay(payload: Mapping[str, object], attempt: int) -> float:
@@ -504,6 +574,21 @@ def delay_before_retry(
     if classify_refusal(parse_tool_failure(payload)) is not Disposition.RETRY_LATER:
         return None
     return jittered_retry_delay(payload, attempt, jitter=jitter)
+
+
+def repost_recovers(payload: Mapping[str, object]) -> bool:
+    """Whether calling again at once with the same arguments can get past the
+    refusal `payload` carries: a `REDISCOVER` refusal in
+    `common.refusal.REPOST_RECOVERS_CODES`.
+
+    The executor's step loop makes that call once, for a step bound to no
+    evidence, which has nothing to rediscover.
+    """
+    failure = parse_tool_failure(payload)
+    return (
+        failure.code in REPOST_RECOVERS_CODES
+        and classify_refusal(failure) is Disposition.REDISCOVER
+    )
 
 
 def _named_delay(value: object) -> float | None:

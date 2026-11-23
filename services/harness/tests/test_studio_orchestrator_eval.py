@@ -1,10 +1,10 @@
 """CI's share of the studio eval set (`evals/studio`, `--mode scripted`).
 
-The cases run the real workflow and planner adapter under a real ADK runner, with
-every model scripted, and check what each model was shown. Three things are
-held here: the cases report as marked (a pass, or an expected failure that
-still fails), each check and each stream invariant fails when the property it
-states is broken, and the case file can fail.
+The cases run the real turn graph, orchestrator agent and planner adapter on
+the turn loop, with every model scripted, and check what each model was shown.
+Three things are held here: the cases report as marked (a pass, or an expected
+failure that still fails), each check and each stream invariant fails when the
+property it states is broken, and the case file can fail.
 
 `evals/` sits outside the workspace, so its modules are loaded by file path.
 """
@@ -23,28 +23,26 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-from google.adk.events import Event
-from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from harness.planner_run import failed_tool_answer
 from harness.reply_figures import card_result
-from harness.studio_state import ConversationState, StudioStore
+from harness.studio_state import ConversationState
 from harness.studio_translate import _RecordingExecutor, _Translator
+from orchestrator.run import ModelResponded, ToolsAnswered
 from planner.skills import GET_SKILL
+from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .orchestrator_fakes import (
+from .scripted_tools import (
     CannedSearch,
     chart,
     definite_envelope,
     fetch_call,
-    frame_for,
     make_charts_call,
-    orchestrator_app,
     search_call,
-    stream,
-    studio_client,
-    turn_body,
 )
+from .studio_routes import frame_for, orchestrator_app, stream, studio_client, turn_body
+from .translating import translated
+from .turn_driver import unconnected_store
 
 STUDIO_EVAL_DIR = Path(__file__).resolve().parents[3] / "evals" / "studio"
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -67,11 +65,11 @@ def _suite() -> dict[str, Any]:
     return json.loads(CASES_PATH.read_text())
 
 
-async def test_scripted_cases_report_as_marked() -> None:
+async def test_scripted_cases_report_as_marked(pg_engine: AsyncEngine) -> None:
     _load("orchestrator_scripted")
     run = _load("run")
 
-    results, passed = await run.run_suite(mode="scripted", url="", judge=False)
+    results, passed = await run.run_suite(mode="scripted", url="", judge=False, engine=pg_engine)
 
     assert results, "no scripted case ran"
     assert [r["id"] for r in results] == [c["id"] for c in run.load_cases("scripted")]
@@ -89,7 +87,7 @@ class _SkillReadFailedError(RuntimeError):
 
 
 async def test_a_planner_tool_that_raises_is_logged_as_the_answer_the_model_receives(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, pg_engine: AsyncEngine
 ) -> None:
     """A planner tool whose body raises is logged with the answer the adapter gives
     the model for it (`failed_tool_answer`)."""
@@ -109,7 +107,7 @@ async def test_a_planner_tool_that_raises_is_logged_as_the_answer_the_model_rece
 
     monkeypatch.setattr(scripted.CannedDataSurface, "call_tool", failing_skill_reads)
 
-    async with scripted.orchestrator_client(case["scenario"]) as (client, log):
+    async with scripted.orchestrator_client(case["scenario"], engine=pg_engine) as (client, log):
         await run.run_case(client, case, on_turn=log.mark_turn)
 
     planner_calls = [
@@ -205,8 +203,10 @@ DECLINED = {"ask": "B", "declined": "the data found cannot answer this as asked"
 RAN = {"ask": "A", "answered_by": [{"step": "s1", "status": "data"}]}
 SPEC = "spec_" + "1" * 32
 READING = {"spec_id": SPEC, "window": {"start": 1990, "end": 2020}, "warnings": [{"code": "w_one"}]}
-FENCED = f"[dfo_analyst_graph] said:\n{checks.RELAY_MARKER}\nbody"
 CLOSING = 'The series rose. Would you like "Uganda" too?'
+REVISION = "f" * 64
+APPROVED = [[{"event": "plan.approved", "revision": REVISION}]]
+REFUSED = {**_step(SPEC), "outcome": "refused", "code": "facet_not_available"}
 TURN_ONE = [{"kind": "turn", "index": 1}, _request("orchestrator", "first")]
 
 
@@ -215,30 +215,60 @@ TURN_ONE = [{"kind": "turn", "index": 1}, _request("orchestrator", "first")]
     [
         (
             "approval_payload_absent_after_approval",
-            [],
-            [_step(), _request("orchestrator", "ok")],
+            APPROVED,
+            [_step(), _request("orchestrator", f"Plan {REVISION[:12]} (approved)")],
             False,
         ),
         (
             "approval_payload_absent_after_approval",
-            [],
-            [_step(), _request("orchestrator", f"called tool `{checks.REQUEST_INPUT_NAME}`")],
+            APPROVED,
+            [_step(), _request("planner", json.dumps({"approved": REVISION}))],
             True,
         ),
-        # A pause before the first step is the approval itself, and is not held against it.
         (
             "approval_payload_absent_after_approval",
-            [],
-            [_request("planner", checks.REQUEST_INPUT_NAME), _step()],
+            APPROVED,
+            [_step(), _request("orchestrator", "ok", system=REVISION)],
+            True,
+        ),
+        # The plan the planner proposes, before the approval, is not held against it.
+        (
+            "approval_payload_absent_after_approval",
+            APPROVED,
+            [_request("planner", REVISION), _step()],
             False,
         ),
-        # No step ran, so nothing was approved: a case that proves nothing fails.
-        ("approval_payload_absent_after_approval", [], [_request("orchestrator", "ok")], True),
-        ("no_relay_marker", [], [_request("orchestrator", "plain")], False),
-        ("no_relay_marker", [], [_request("orchestrator", FENCED)], True),
-        ("no_relay_marker", [], [_request("planner", "x", system=checks.RELAY_MARKER)], False),
-        ("planner_sees_no_relay_marker", [], [_request("orchestrator", FENCED)], False),
-        ("planner_sees_no_relay_marker", [], [_request("planner", FENCED)], True),
+        # No step ran, or nothing was approved: a case that proves nothing fails.
+        ("approval_payload_absent_after_approval", APPROVED, [_request("planner", "ok")], True),
+        ("approval_payload_absent_after_approval", [], [_step(), _request("planner", "ok")], True),
+        (
+            "refused_step_reaches_the_next_plan",
+            [],
+            [
+                REFUSED,
+                _request("orchestrator", "failed_step facet_not_available"),
+                _request("planner"),
+            ],
+            False,
+        ),
+        (
+            "refused_step_reaches_the_next_plan",
+            [],
+            [REFUSED, _request("orchestrator", "the plan ran"), _request("planner")],
+            True,
+        ),
+        (
+            "refused_step_reaches_the_next_plan",
+            [],
+            [_request("planner"), REFUSED, _request("orchestrator", "facet_not_available")],
+            True,
+        ),
+        (
+            "refused_step_reaches_the_next_plan",
+            [],
+            [_step(), _request("orchestrator", "facet_not_available"), _request("planner")],
+            True,
+        ),
         (
             "planner_first_message_carries_search_evidence",
             [],
@@ -403,7 +433,8 @@ def test_every_case_can_fail() -> None:
     for case in cases:
         label = case["id"]
         assert len(case.get("xfail", "x" * 21)) > 20, f"{label}: xfail without a reason"
-        assert not checks.check_names(case.get("checks", ["no_relay_marker"]), label=label)
+        if "checks" in case:
+            assert not checks.check_names(case["checks"], label=label)
         assert (
             case.get("rubrics") or case.get("checks") or any(t.get("expect") for t in case["turns"])
         )
@@ -645,7 +676,7 @@ async def test_a_judge_error_that_is_not_transient_still_stops_the_suite(
 _REFERENCE: list[dict[str, Any]] = []
 
 
-async def _reference_frames() -> list[dict[str, Any]]:
+async def _reference_frames(engine: AsyncEngine) -> list[dict[str, Any]]:
     """One studio turn's frames, conformant: a search, a fetch and a card,
     then an answer citing the card's figures. Built once per test run."""
     if not _REFERENCE:
@@ -655,6 +686,7 @@ async def _reference_frames() -> list[dict[str, Any]]:
             make_charts_call(chart(frame_for())),
             types.Part.from_text(text="Life expectancy in Kenya rose from 48.5 to 63.6."),
             resolver=CannedSearch(definite_envelope()),
+            engine=engine,
         )
         async with studio_client(app) as client:
             _REFERENCE.extend(await stream(client, "/api/studio/turn", turn_body("q")))
@@ -731,16 +763,20 @@ def _mutated(name: str, frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ("done-older-than-last-update", "older than the last composition.updated"),
     ],
 )
-async def test_each_invariant_rejects_a_stream_that_breaks_it(name: str, fragment: str) -> None:
-    violations = checks.check_transcript(_mutated(name, await _reference_frames()))
+async def test_each_invariant_rejects_a_stream_that_breaks_it(
+    name: str, fragment: str, pg_engine: AsyncEngine
+) -> None:
+    violations = checks.check_transcript(_mutated(name, await _reference_frames(pg_engine)))
 
     assert any(fragment in violation for violation in violations), violations
 
 
-async def test_a_revision_of_a_component_this_conversation_never_created_is_rejected() -> None:
+async def test_a_revision_of_a_component_this_conversation_never_created_is_rejected(
+    pg_engine: AsyncEngine,
+) -> None:
     # Only sound over a complete conversation: a recording may hold a later
     # slice, so the runner opts in.
-    frames = await _reference_frames()
+    frames = await _reference_frames(pg_engine)
     created = _index(frames, "component.created")
     orphan = {
         "event": "component.revised",
@@ -757,8 +793,8 @@ async def test_a_revision_of_a_component_this_conversation_never_created_is_reje
     assert not any("never streamed" in v for v in checks.check_transcript(revised))
 
 
-async def test_a_segment_must_end_on_a_terminal_frame() -> None:
-    frames = await _reference_frames()
+async def test_a_segment_must_end_on_a_terminal_frame(pg_engine: AsyncEngine) -> None:
+    frames = await _reference_frames(pg_engine)
 
     assert any("not a terminal frame" in v for v in checks.check_segment(frames[:-1]))
     pause = {"event": "plan.proposed", "seq": 2}
@@ -891,13 +927,13 @@ async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, objec
     raise AssertionError(f"no tool call expected, got {tool}")
 
 
-def test_a_count_explain_dfo_read_grounds_the_reply_that_quotes_it() -> None:
+async def test_a_count_explain_dfo_read_grounds_the_reply_that_quotes_it() -> None:
     """The counts reach the reply only through the model, so the translator's
     `explain_dfo` step carries them for the grounding check to read."""
     counts = "DFO holds 108,905 indicators in 92 datasets from 42 publishers."
     translator = _Translator(
         conversation=ConversationState(conversation_id="c1"),
-        recorder=_RecordingExecutor(_no_executor, store=StudioStore(InMemorySessionService())),
+        recorder=_RecordingExecutor(_no_executor, store=unconnected_store()),
     )
     call = types.FunctionCall(id="call_1", name="explain_dfo", args={})
     read = types.FunctionResponse(
@@ -905,10 +941,11 @@ def test_a_count_explain_dfo_read_grounds_the_reply_that_quotes_it() -> None:
     )
     frames = [
         frame.model_dump(mode="json")
-        for part in (types.Part(function_call=call), types.Part(function_response=read))
-        for frame in translator.translate(
-            Event(author="dfo_orchestrator", content=types.Content(parts=[part]))
+        for event in (
+            ModelResponded(parts=(types.Part(function_call=call),)),
+            ToolsAnswered(answers=(read,), state={}),
         )
+        for frame in await translated(translator, event)
     ]
 
     assert _ungrounded(frames, "DFO holds 108,905 indicators in 92 datasets.") == []
@@ -997,6 +1034,13 @@ async def test_a_question_with_no_options_and_no_answer_text_is_a_miss(
             ["t: elicitation question 1 allow_free_text=False, expected True"],
         ),
         ({"skippable": True}, ["t: elicitation skippable=False, expected True"]),
+        (
+            {"input": "unit"},
+            [
+                "t: elicitation question 1 input=single_select, expected unit",
+                "t: elicitation question 2 input=single_select, expected unit",
+            ],
+        ),
     ],
 )
 def test_an_elicitation_expectation_reads_every_question(
@@ -1009,13 +1053,64 @@ def test_an_elicitation_expectation_reads_every_question(
         "interrupt_id": "int_1",
         "skippable": False,
         "questions": [
-            {"id": "q1", "question": "a", "options": [option] * 3, "allow_free_text": False},
-            {"id": "q2", "question": "b", "options": [option] * 2, "allow_free_text": True},
+            {
+                "id": "q1",
+                "question": "a",
+                "input": "single_select",
+                "options": [option] * 3,
+                "allow_free_text": False,
+            },
+            {
+                "id": "q2",
+                "question": "b",
+                "input": "single_select",
+                "options": [option] * 2,
+                "allow_free_text": True,
+            },
         ],
     }
     turn = {"message": "q", "expect": {"elicitation": rules}}
 
     assert run._check_turn_expectations(turn, [pause], label="t") == violations
+
+
+_UNIT_OFFER = {
+    "currencies": [
+        {
+            "code": "USD",
+            "name": "US dollars",
+            "prices": ["current", "constant"],
+            "base_year_min": 2000,
+            "base_year_max": 2023,
+        }
+    ],
+    "presets": ["USD"],
+    "start": {"currency": "USD", "prices": "current"},
+}
+
+
+@pytest.mark.parametrize(
+    ("scripted", "sent"),
+    [
+        ([], {"kind": "unit", "currency": "USD", "prices": "current"}),
+        (
+            [{"unit": {"prices": "constant"}}],
+            {"kind": "unit", "currency": "USD", "prices": "constant", "base_year": 2023},
+        ),
+    ],
+    ids=["start", "changed"],
+)
+def test_a_unit_question_is_answered_with_its_start_changed_by_the_script(
+    scripted: list[dict[str, Any]], sent: dict[str, Any]
+) -> None:
+    run = _load("run")
+    pause = {
+        "questions": [
+            {"id": "q1", "question": "In which prices?", "input": "unit", "unit": _UNIT_OFFER}
+        ]
+    }
+
+    assert run._elicitation_reply(pause, scripted) == ({"q1": sent}, None)
 
 
 def test_a_figure_in_a_later_question_grounds_the_answer() -> None:

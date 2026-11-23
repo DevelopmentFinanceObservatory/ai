@@ -1,7 +1,7 @@
 [project]
 name = "harness"
 version = "0.1.0"
-description = "Agentic loop for the DFO site's chat+canvas: Google ADK + FastAPI, SSE event stream. Also ships planner (the plan record and the Planner Agent), compiler, translator, executor, orchestrator and submission (see tool.uv.build-backend below)."
+description = "Agentic loop for the DFO site's chat+canvas: Pydantic AI agents on Gemini + FastAPI, SSE event stream. Also ships planner (the plan record and the Planner Agent), compiler, translator, executor, orchestrator and submission (see tool.uv.build-backend below)."
 requires-python = ">=3.13"
 dependencies = [
     # harness.studio_translate classifies the Gemini SDK's aiohttp transport
@@ -17,7 +17,6 @@ dependencies = [
     "dfo-spec-kit-frame-grammar",
     "fastapi>=0.139.1",
     "fastmcp>=4.1.2,<5",
-    "google-adk[db]==2.13.0",
     # The planner's Pydantic AI runner.
     "pydantic-ai-slim[google]==2.66.0",
     # harness.langfuse_export loads observation rows into BigQuery.
@@ -28,9 +27,8 @@ dependencies = [
     # Validates a compiled step's arguments against the tool's own JSON
     # Schema, in compiler.arguments.
     "jsonschema>=4.26.0",
-    # fastmcp and google-adk both constrain this; pinned explicitly rather
-    # than trusting transitive resolution, since ADK 2.10.0 is the release
-    # that widened its own bound to admit mcp 2.x.
+    # fastmcp constrains this too; pinned explicitly, since the harness's
+    # own MCP clients use the mcp 2.x API.
     "mcp>=2.2.0",
     "presentation_mcp",
     # `compiler.evidence` and `executor.run` hold the series-statistics table.
@@ -40,7 +38,7 @@ dependencies = [
     # Canonical JSON for `planner.plan.plan_revision`, the hash that identifies
     # what a user approved.
     "rfc8785>=0.1.4",
-    # harness.session_store builds its own async engine; the asyncio extra
+    # harness.db.engine builds the async engine; the asyncio extra
     # carries greenlet on every platform, which the bare package omits on
     # arm64 macOS.
     "sqlalchemy[asyncio]>=2",
@@ -95,5 +93,5 @@ dev = [
 analysis_mcp = { workspace = true }
 common = { workspace = true }
 data_mcp = { workspace = true }
-dfo-spec-kit-frame-grammar = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "5589a728308902adf9a32ef8f3ed2c3d2b1e92de", subdirectory = "python/frame-grammar" }
+dfo-spec-kit-frame-grammar = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "6d0ab227bf0703637b8df1963cc3410078fb3ab0", subdirectory = "python/frame-grammar" }
 presentation_mcp = { workspace = true }

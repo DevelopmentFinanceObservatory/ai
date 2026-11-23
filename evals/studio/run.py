@@ -16,6 +16,8 @@ Modes:
   --mode scripted    the studio in-process, its models scripted
                      (`orchestrator_scripted`): every model request is recorded
                      and the case's `checks` read them. No server, key or network.
+                     Conversations are stored in a throwaway schema of the
+                     Postgres `HARNESS_TEST_DATABASE_URL` names (`just pg-up`).
   --mode live        against a running server (--url), real agent + data.
 
     uv run --package harness python evals/studio/run.py --mode scripted
@@ -45,10 +47,13 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import checks
 import httpx2
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 _HERE = Path(__file__).resolve().parent
 _CASES_PATH = _HERE / "harness-studio-orchestrator-v1.cases.json"
@@ -78,6 +83,11 @@ class CaseError(Exception):
 
 class JudgeError(Exception):
     """The judge model stayed unavailable through its retries; the case is unscored."""
+
+
+# The question forms the Studio website declares it renders
+# (`harness.wire.TurnRequest.client_features`).
+_CLIENT_FEATURES = ["unit_question", "multi_select"]
 
 
 def _request(kind: str, conversation_id: str, **members: Any) -> dict[str, Any]:
@@ -137,6 +147,7 @@ async def _run_message_turn(
             component_ref=component_ref,
             auto_add=turn.get("auto_add"),
             seed_spec=turn.get("seed_spec"),
+            client_features=_CLIENT_FEATURES,
         ),
     )
     violations += checks.check_segment(segment, label="turn stream")
@@ -190,6 +201,7 @@ async def _run_message_turn(
                 conversation_id,
                 interrupt_id=pause["interrupt_id"],
                 decision=decision,
+                client_features=_CLIENT_FEATURES,
                 **reply,
             ),
         )
@@ -205,16 +217,32 @@ def _elicitation_reply(
     stops it when it cannot answer. `scripted` is the turn's
     `elicitation_answers`, one entry per question by position: `{"option": n}`
     picks the question's nth option (from 1), `{"text": ...}` answers in the
-    user's words, `{"skipped": true}` leaves the question to the agent. A
-    question past the list gets its first option."""
+    user's words, `{"skipped": true}` leaves the question to the agent, and
+    `{"options": [n, ...]}` ticks the nth options (from 1) of a multi-select
+    question, `{"unit": {...}}` answers a unit question with the unit its chips start
+    on, changed by the keys given (`_unit_answer`). A question past the list
+    gets its first option, or, for a unit question, its starting unit."""
     reply: dict[str, dict[str, Any]] = {}
     for position, question in enumerate(pause["questions"]):
-        entry = scripted[position] if position < len(scripted) else {"option": 1}
+        offer = question.get("unit")
+        default: dict[str, Any] = {"unit": {}} if offer else {"option": 1}
+        entry = scripted[position] if position < len(scripted) else default
         options = question.get("options") or []
         if "text" in entry:
             reply[question["id"]] = {"kind": "text", "text": entry["text"]}
         elif entry.get("skipped"):
             reply[question["id"]] = {"kind": "skipped"}
+        elif offer and "unit" in entry:
+            reply[question["id"]] = _unit_answer(offer, entry["unit"])
+        elif (
+            question.get("input") == "multi_select"
+            and entry.get("options")
+            and all(0 < n <= len(options) for n in entry["options"])
+        ):
+            reply[question["id"]] = {
+                "kind": "options",
+                "option_ids": [options[n - 1]["id"] for n in entry["options"]],
+            }
         elif 0 < entry.get("option", 0) <= len(options):
             reply[question["id"]] = {
                 "kind": "option",
@@ -226,6 +254,19 @@ def _elicitation_reply(
                 f"and the turn answers it with {entry!r}"
             )
     return reply, None
+
+
+def _unit_answer(offer: dict[str, Any], change: dict[str, Any]) -> dict[str, Any]:
+    """A unit answer: `offer`'s start with `change` applied. A constant unit
+    with no base year takes the latest its currency offers; a current one
+    drops it."""
+    unit = {**offer["start"], **change}
+    if unit["prices"] == "current":
+        unit.pop("base_year", None)
+    elif unit.get("base_year") is None:
+        currency = next(c for c in offer["currencies"] if c["code"] == unit["currency"])
+        unit["base_year"] = currency["base_year_max"]
+    return {"kind": "unit", **unit}
 
 
 async def _run_mutate_turn(
@@ -458,7 +499,9 @@ TURN_EXPECT_KEYS: dict[str, frozenset[str] | None] = {
     "blocks": None,
     "activity_steps": None,
     "step_tools": None,
-    "elicitation": frozenset({"min_questions", "min_options", "allow_free_text", "skippable"}),
+    "elicitation": frozenset(
+        {"min_questions", "min_options", "allow_free_text", "skippable", "input"}
+    ),
     "plan": frozenset({"min_steps", "min_version", "max_version", "operations_contain"}),
     "no_plan": None,
     "card_title_contains": None,
@@ -491,11 +534,11 @@ def check_expect_keys(turn: dict[str, Any], *, label: str) -> list[str]:
     for key, rules in turn.get("expect", {}).items():
         if key not in known:
             violations.append(f"{label}: expect key {key!r} is not one the runner checks")
-        elif known[key] is not None and isinstance(rules, dict):
+        elif (subkeys := known[key]) is not None and isinstance(rules, dict):
             violations.extend(
                 f"{label}: expect.{key} key {sub!r} is not one the runner checks"
                 for sub in rules
-                if sub not in known[key]
+                if sub not in subkeys
             )
     expect = turn.get("expect", {})
     if "reply" in expect:
@@ -645,6 +688,11 @@ def _check_turn_expectations(
                     f"expected >= {rules['min_questions']}"
                 )
             for position, question in enumerate(questions, start=1):
+                if "input" in rules and question.get("input") != rules["input"]:
+                    violations.append(
+                        f"{label}: elicitation question {position} input="
+                        f"{question.get('input')}, expected {rules['input']}"
+                    )
                 offered = len(question.get("options") or [])
                 if rules.get("min_options") and offered < rules["min_options"]:
                     violations.append(
@@ -806,8 +854,14 @@ def _elicitation_digest(frame: dict[str, Any], reply: dict[str, Any] | None) -> 
             shown = None
         elif answer["kind"] == "option":
             shown = labels.get(answer["option_id"], answer["option_id"])
+        elif answer["kind"] == "options":
+            shown = "; ".join(labels.get(i, i) for i in answer["option_ids"])
         elif answer["kind"] == "text":
             shown = answer["text"]
+        elif answer["kind"] == "unit":
+            shown = " ".join(
+                str(answer[key]) for key in ("prices", "base_year", "currency") if key in answer
+            )
         else:
             shown = "left to the agent"
         asked.append(
@@ -991,14 +1045,17 @@ async def judge_case(
 # ---------------------------------------------------------------------------
 
 
-async def _run_scripted_case(case: dict[str, Any]) -> dict[str, Any]:
+async def _run_scripted_case(case: dict[str, Any], *, engine: AsyncEngine) -> dict[str, Any]:
     """One case on its own scripted studio (its scripts are
-    consumed as it runs), then the case's `checks` over what the models were
-    shown. A model script that ran dry is a contract failure, since the case
-    drove less than it says."""
+    consumed as it runs), its conversations stored on `engine`, then the case's
+    `checks` over what the models were shown. A model script that ran dry is a
+    contract failure, since the case drove less than it says."""
     import orchestrator_scripted  # noqa: PLC0415 -- the harness import chain is slow
 
-    async with orchestrator_scripted.orchestrator_client(case["scenario"]) as (client, log):
+    async with orchestrator_scripted.orchestrator_client(case["scenario"], engine=engine) as (
+        client,
+        log,
+    ):
         outcome = await run_case(client, case, on_turn=log.mark_turn)
     outcome["contract"] += [
         f"the {agent} model's script ran out: the case drove fewer model calls than it needs"
@@ -1039,8 +1096,19 @@ def load_cases(mode: str, only: list[str] | None = None) -> list[dict[str, Any]]
 
 
 async def run_suite(
-    *, mode: str, url: str, judge: bool, only: list[str] | None = None
+    *,
+    mode: str,
+    url: str,
+    judge: bool,
+    only: list[str] | None = None,
+    engine: AsyncEngine | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
+    """Run the cases of `mode` and return their records and whether the suite
+    passed. Scripted mode stores its conversations on `engine` (an
+    `AsyncEngine` with the harness tables applied); each case's conversation
+    id is fresh, so one engine serves a whole run."""
+    if mode == "scripted" and engine is None:
+        raise ValueError("scripted mode needs the engine its studios store conversations on")
     config = json.loads(_CONFIG_PATH.read_text())
     cases = load_cases(mode, only)
     # A scripted case builds its own studio, so it needs no shared client.
@@ -1058,7 +1126,8 @@ async def run_suite(
             }
             try:
                 if mode == "scripted":
-                    outcome = await _run_scripted_case(case)
+                    assert engine is not None  # checked on entry
+                    outcome = await _run_scripted_case(case, engine=engine)
                 else:
                     assert client is not None  # only the scripted mode has none
                     outcome = await run_case(client, case)
@@ -1150,6 +1219,42 @@ def _print_record(record: dict[str, Any]) -> None:
             print(f"       - {violation}")
 
 
+@asynccontextmanager
+async def _scratch_database() -> AsyncIterator[AsyncEngine]:
+    """An engine on a fresh schema of the Postgres database
+    `HARNESS_TEST_DATABASE_URL` names, with the harness tables applied. The
+    schema is dropped on exit."""
+    from harness.db.migrate import apply_pending  # noqa: PLC0415 -- scripted mode only
+    from sqlalchemy import text  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import create_async_engine  # noqa: PLC0415
+
+    url = os.environ.get("HARNESS_TEST_DATABASE_URL")
+    if not url:
+        raise SystemExit("scripted mode needs HARNESS_TEST_DATABASE_URL; run `just pg-up`")
+    schema = f"eval_{uuid.uuid4().hex[:12]}"
+    admin = create_async_engine(url)
+    async with admin.begin() as conn:
+        await conn.execute(text(f"CREATE SCHEMA {schema}"))
+    engine = create_async_engine(url, connect_args={"server_settings": {"search_path": schema}})
+    try:
+        await apply_pending(engine)
+        yield engine
+    finally:
+        await engine.dispose()
+        async with admin.begin() as conn:
+            await conn.execute(text(f"DROP SCHEMA {schema} CASCADE"))
+        await admin.dispose()
+
+
+async def _main_suite(args: argparse.Namespace) -> tuple[list[dict[str, Any]], bool]:
+    if args.mode != "scripted":
+        return await run_suite(mode=args.mode, url=args.url, judge=args.judge, only=args.case)
+    async with _scratch_database() as engine:
+        return await run_suite(
+            mode=args.mode, url=args.url, judge=args.judge, only=args.case, engine=engine
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=_MODES, required=True)
@@ -1161,9 +1266,7 @@ def main() -> int:
     if args.mode == "live" and args.judge is False:
         print("note: live mode without --judge runs the contract layer only\n")
 
-    results, passed = asyncio.run(
-        run_suite(mode=args.mode, url=args.url, judge=args.judge, only=args.case)
-    )
+    results, passed = asyncio.run(_main_suite(args))
     counts: dict[str, int] = {}
     for record in results:
         counts[record["status"]] = counts.get(record["status"], 0) + 1

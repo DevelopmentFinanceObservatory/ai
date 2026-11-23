@@ -1,58 +1,76 @@
+"""The orchestrator agent (`orchestrator.agent`): its instruction, thinking and
+the request it opens a turn with, through a scripted google-genai client."""
+
+from __future__ import annotations
+
 import hashlib
 import json
 from datetime import date
 from typing import Any
 
 import pytest
-from google.adk.apps import App
-from google.adk.events import Event
-from google.adk.models.llm_request import LlmRequest
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
 from google.genai import types
-from harness.graph.workflow import create_root_workflow
-from harness.orchestrator_tools import build_orchestrator_tools
-from harness.prefix_cache import PrefixCache, PrefixCachedGemini
-from harness.scripted_plan import scripted_fetch_series_stats
-from harness.turn_budget import BoundedGemini
-from orchestrator.agent import (
-    AGENT_NAME,
-    INSTRUCTION,
-    create_orchestrator_agent,
-    name_get_skill_in_history,
-)
+from harness import turn_records
+from harness.gemini_wire import model_retry_options
+from harness.orchestrator_tools import MAX_ASK_QUESTIONS, build_orchestrator_tools
+from harness.prefix_cache import PrefixCache
+from orchestrator.agent import INSTRUCTION, orchestrator_agent
+from orchestrator.model import orchestrator_model
+from orchestrator.run import Opening, run_orchestrator
 
-from ..data_mcp_definitions import DataMcpDefinitions
-from ..orchestrator_fakes import (
-    RefusingPlanner,
-    ScriptLlm,
-    no_executor,
-    no_resolver,
-    open_session,
-    orchestrator_runner,
-    run_turn,
-)
+from ..scripted_genai import ScriptedGenai, reply, text_part
 
 
-@pytest.mark.parametrize("model_name", ["gemini-test", "Gemini:gemini-test"])
-def test_the_orchestrator_runs_on_the_model_it_is_given_with_retries(model_name):
-    agent = create_orchestrator_agent(model_name=model_name)
-
-    assert agent.name == AGENT_NAME
-    # Every call keeps to the request's budget.
-    assert isinstance(agent.model, BoundedGemini)
-    assert agent.model.model == "gemini-test"
-    assert agent.model.retry_options.attempts == 3
-    assert agent.include_contents == "default"
+async def _unused(**kwargs: Any) -> Any:
+    raise AssertionError("no call expected")
 
 
-@pytest.mark.parametrize("model_name", ["gemini-test", "Gemini:gemini-test"])
-def test_on_a_prefix_cache_the_orchestrator_keeps_its_retries(model_name):
-    agent = create_orchestrator_agent(model_name=model_name, prefix_cache=PrefixCache())
+async def _first_request(
+    *,
+    thinking_level: Any = None,
+    canvas_digest: str | None = None,
+    conversation_digest: str | None = None,
+    prefix_cache: PrefixCache | None = None,
+) -> Any:
+    scripted = ScriptedGenai([reply(text_part("done"))])
 
-    assert isinstance(agent.model, PrefixCachedGemini)
-    assert agent.model.model == "gemini-test"
-    assert agent.model.retry_options.attempts == 3
+    async def create(*, model: str, config: Any) -> Any:
+        return types.CachedContent(name="cachedContents/c1")
+
+    scripted.client.aio.caches.create = create  # type: ignore[method-assign]
+    tools = build_orchestrator_tools(resolver=_unused, executor=_unused)
+    orchestrator = (
+        orchestrator_agent(tools)
+        if thinking_level is None
+        else orchestrator_agent(tools, thinking_level=thinking_level)
+    )
+    async for _ in run_orchestrator(
+        orchestrator,
+        history=None,
+        state={"surface": "studio"},
+        turn_id="t",
+        model=orchestrator_model(
+            "gemini-test", client=scripted.client, budget=None, prefix_cache=prefix_cache
+        ),
+        opening=Opening(
+            question="and Ghana?",
+            today=date(2026, 10, 5),
+            canvas_digest=canvas_digest,
+            conversation_digest=conversation_digest,
+        ),
+    ):
+        pass
+    return scripted.requests[0]
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["whole", "cached"])
+async def test_every_request_carries_the_model_retries(cached: bool) -> None:
+    request = await _first_request(prefix_cache=PrefixCache() if cached else None)
+
+    assert (request.generate_config.cached_content is not None) == cached
+    http_options = request.generate_config.http_options
+    assert http_options is not None
+    assert http_options.retry_options == model_retry_options()
 
 
 @pytest.mark.parametrize(
@@ -63,44 +81,21 @@ def test_on_a_prefix_cache_the_orchestrator_keeps_its_retries(model_name):
         ("HIGH", types.ThinkingLevel.HIGH),
     ],
 )
-def test_the_thinking_level_reaches_the_generate_content_config(level, expected):
-    agent = create_orchestrator_agent(model_name="gemini-test", thinking_level=level)
+async def test_the_thinking_level_reaches_the_request(level: str, expected: Any) -> None:
+    thinking = (await _first_request(thinking_level=level)).generate_config.thinking_config
 
-    config = agent.generate_content_config
-    assert config is not None
-    thinking = config.thinking_config
-    assert thinking is not None
     assert thinking.thinking_level == expected
     assert thinking.include_thoughts is True
 
 
-def test_an_agent_built_without_a_thinking_level_runs_at_low():
-    agent = create_orchestrator_agent(model_name="gemini-test")
+async def test_an_agent_built_without_a_thinking_level_runs_at_low() -> None:
+    thinking = (await _first_request()).generate_config.thinking_config
 
-    assert agent.generate_content_config is not None
-    assert agent.generate_content_config.thinking_config is not None
-    assert agent.generate_content_config.thinking_config.thinking_level == types.ThinkingLevel.LOW
-
-
-async def _first_request(scripted_llm: Any, **state: Any) -> Any:
-    model = scripted_llm()
-    agent = create_orchestrator_agent(
-        model_name="unused", today=lambda: date(2026, 10, 5)
-    ).model_copy(update={"model": model})
-    sessions = InMemorySessionService()
-    await sessions.create_session(app_name="t", user_id="u", session_id="s", state=state)
-    runner = Runner(agent=agent, app_name="t", session_service=sessions)
-    async for _ in runner.run_async(
-        user_id="u",
-        session_id="s",
-        new_message=types.Content(role="user", parts=[types.Part(text="and Ghana?")]),
-    ):
-        pass
-    return model.captured_requests[0]
+    assert thinking.thinking_level == types.ThinkingLevel.LOW
 
 
 def _prefix_hash(request: Any) -> str:
-    config = request.config
+    config = request.generate_config
     prefix = [
         config.system_instruction,
         [tool.model_dump(mode="json") for tool in config.tools or []],
@@ -108,58 +103,38 @@ def _prefix_hash(request: Any) -> str:
     return hashlib.sha256(json.dumps(prefix, sort_keys=True).encode()).hexdigest()
 
 
-async def test_the_static_prefix_is_the_same_whatever_the_canvas(scripted_llm: Any):
+async def test_the_static_prefix_is_the_same_whatever_the_canvas() -> None:
     kenya = json.dumps({"blocks": [{"title": "Debt service, Kenya"}]})
     ghana = json.dumps({"blocks": [{"title": "Debt service, Ghana"}]})
     history = json.dumps({"turns": [{"user": "Kenya's debt service"}]})
 
-    first = await _first_request(scripted_llm, canvas_digest=kenya)
-    second = await _first_request(scripted_llm, canvas_digest=ghana, conversation_digest=history)
+    first = await _first_request(canvas_digest=kenya)
+    second = await _first_request(canvas_digest=ghana, conversation_digest=history)
 
     assert _prefix_hash(first) == _prefix_hash(second)
-    assert first.config.automatic_continuation is True
-    assert first.contents[0].parts[0].text == (
+    assert first.generate_config.automatic_continuation is True
+    assert first.content_list[0].parts[0].text == (
         f"Today's date (UTC): 2026-10-05\n\nThe user's canvas: {kenya}"
     )
-    assert second.contents[0].parts[0].text == (
+    assert second.content_list[0].parts[0].text == (
         f"Today's date (UTC): 2026-10-05\n\nThe user's canvas: {ghana}"
         f"\n\nEarlier turns in this conversation: {history}"
     )
-    assert [content.parts[0].text for content in first.contents[1:]] == ["and Ghana?"]
+    assert [content.parts[0].text for content in first.content_list[1:]] == ["and Ghana?"]
 
 
-async def test_the_model_reads_the_instruction_without_the_identity_line_adk_appends(
-    scripted_llm: Any,
-):
-    # Fails when ADK stops appending its identity line or rewords it. The
-    # orchestrator's removal of that line then needs revisiting.
-    model = scripted_llm()
-    built: list[Any] = []
-    agent = create_orchestrator_agent(model_name="unused").model_copy(update={"model": model})
-    agent.before_model_callback = [
-        lambda callback_context, llm_request: built.append(llm_request.config.system_instruction),
-        *agent.before_model_callback,
-    ]
-    sessions = InMemorySessionService()
-    await sessions.create_session(app_name="t", user_id="u", session_id="s")
-    runner = Runner(agent=agent, app_name="t", session_service=sessions)
-    async for _ in runner.run_async(
-        user_id="u",
-        session_id="s",
-        new_message=types.Content(role="user", parts=[types.Part(text="and Ghana?")]),
-    ):
-        pass
+async def test_the_model_reads_the_instruction_as_written() -> None:
+    """No identity line or other text is added to the instruction; Pydantic AI
+    strips its trailing newline."""
+    request = await _first_request()
 
-    assert (
-        built[0] == INSTRUCTION + '\n\nYou are an agent. Your internal name is "dfo_orchestrator".'
-    )
-    assert model.captured_requests[0].config.system_instruction == INSTRUCTION
+    assert request.generate_config.system_instruction == INSTRUCTION.rstrip("\n")
 
 
-async def test_a_turn_with_no_digest_opens_on_the_date_and_the_question(scripted_llm: Any):
-    request = await _first_request(scripted_llm)
+async def test_a_turn_with_no_digest_opens_on_the_date_and_the_question() -> None:
+    request = await _first_request()
 
-    assert [content.parts[0].text for content in request.contents] == [
+    assert [content.parts[0].text for content in request.content_list] == [
         "Today's date (UTC): 2026-10-05",
         "and Ghana?",
     ]
@@ -169,6 +144,26 @@ def test_the_instruction_says_what_the_canvas_digests_focus_card_is():
     """`focus_component_id` is how a card's "Ask follow up" reaches the
     model; unexplained, the model may answer about every card."""
     assert "focus_component_id" in INSTRUCTION
+
+
+def test_the_instruction_says_when_cards_come_off_and_that_pinned_ones_stay():
+    """Cards accumulate across turns. The model takes them off when the user
+    asks or the conversation changes subject, and pinned cards stay."""
+    text = " ".join(INSTRUCTION.split())
+    assert "each turn's cards join the ones already on the canvas" in text
+    assert "when the conversation turns to another subject" in text
+    assert "remove_cards leaves pinned cards on the canvas and names them as kept_pinned" in text
+    assert "A pinned card comes off once the user unpins it from the card's menu" in text
+    # The ids of the earlier subject's cards come from the canvas listing.
+    assert (
+        "or turns to another subject so the earlier subject's cards come off, call recall "
+        "with part canvas first to see them and their ids" in text
+    )
+
+
+def test_the_instruction_keeps_a_measures_creditor_scope_in_the_reply():
+    text = " ".join(INSTRUCTION.split())
+    assert 'debt service "owed to all creditors" is reported in those words' in text
 
 
 def test_the_instruction_lets_a_reply_about_dfo_state_the_figures_explain_dfo_gives():
@@ -198,157 +193,56 @@ def test_the_instruction_tells_the_agent_to_state_the_years_an_event_period_read
     text = " ".join(INSTRUCTION.split())
     assert "names a period by an event or an administration" in text
     assert "say the data ends earlier and answer with what it holds" in text
-    assert "ask a count or prices still open in one more ask_user call" in text
+    assert "ask about candidates or prices search left open in one more ask_user call" in text
     assert "the reading search chose" not in text
 
 
-def test_the_instruction_has_search_elect_the_measure_and_asks_with_its_alternatives():
+_NUMBER_WORDS = {2: "two", 3: "three", 4: "four"}
+
+
+def test_the_instruction_has_search_elect_the_measure_and_asks_only_what_search_left_open():
     text = " ".join(INSTRUCTION.split())
     assert (
         "Put a word for how a flow is counted into `variable` only when the user said it, "
         "and let search elect the rest" in text
     )
-    assert "ask about each with ask_user, one question per choice, all in one call" in text
     assert (
-        "The count search chose is the first option of the count question, and the other counts "
-        "the result names follow" in text
+        "A count search chose (`counted_as`) is settled too, even when it lists other counts "
+        "under `alternatives`: go on with it and do not ask about the count" in text
     )
+    # The harness states the count basis after the reply (`turn_records.basis_line`)
+    # and offers the other options and the other counts as chips
+    # (`turn_records.scope_chips`).
+    assert f'"{turn_records._BASIS_LEAD}...", naming the sector, region, provider' in text
     assert (
-        "A part that lists `open_prices` leaves its prices open, so prices get a question of "
-        "their own, with `prices_of` set to the part's spec_id. Its options are then the "
-        "`open_prices` entries" in text
+        "and the other counts a part lists under `alternatives`, as buttons the user can "
+        "switch with, so leave those out of the reply" in text
     )
+    assert "No button offers" not in text
+    assert "name the source with that count" not in text
+    assert "with the count search chose" not in text
+    assert "switch to another count" not in text
+    assert "Search leaves a count open only when a part lists `candidates`" in text
+    assert (
+        "ask the unit with ask_user in one call: one question per measure, with `unit_of` "
+        "set to a part's spec_id, and `prices` set when a skill prefers current or constant. "
+        "Parts that measure one thing over other years share one unit question, and one call "
+        f"holds at most {_NUMBER_WORDS[MAX_ASK_QUESTIONS]} questions" in text
+    )
+    assert "one question per part" not in text
+    assert "count question" not in text
+    assert "a count or prices still open" not in text
     assert "even when the result lists no `other_prices`" not in text
-    assert (
-        "When they pick prices the result does not name, search again with that unit on the "
-        "part, and put the count they chose, if any, in `variable`" in text
-    )
+    assert "The answer to a unit question names the spec_id to fetch" in text
+    assert "search again with that unit on the part" not in text
     assert (
         "A request that adds or combines measures from different sources, such as aid and debt, "
         "goes to plan straight after search, without ask_user. The planner asks how to combine "
         "them" in text
     )
-    assert "in the user's words, except a count or prices, whose options are set out below" in text
+    assert (
+        "in the user's words, except a part's candidates or open prices, whose options are set "
+        "out in their own paragraphs" in text
+    )
     assert "takes one question a turn" not in text
     assert "gross or net" not in text
-
-
-async def test_every_run_of_the_agent_in_the_workflow_reads_the_clocks_utc_date():
-    model = ScriptLlm(script=[types.Part.from_text(text="Done.")])
-    agent = create_orchestrator_agent(
-        model_name="unused",
-        tools=build_orchestrator_tools(resolver=no_resolver, executor=no_executor),
-        today=lambda: date(2026, 10, 5),
-    ).model_copy(update={"model": model})
-    workflow = create_root_workflow(
-        planner=RefusingPlanner(),
-        orchestrator=agent,
-        executor=no_executor,
-        tool_surface=None,
-        definition_surface=DataMcpDefinitions(),
-        publisher=None,
-        fetch_series_stats=scripted_fetch_series_stats,
-    )
-    runner = Runner(
-        app=App(name="t", root_agent=workflow), session_service=InMemorySessionService()
-    )
-    await runner.session_service.create_session(
-        app_name="t", user_id="u", session_id="s", state={"surface": "studio"}
-    )
-
-    events = [
-        event
-        async for event in runner.run_async(
-            user_id="u", session_id="s", new_message=types.UserContent("Aid since the election?")
-        )
-    ]
-
-    assert not [e for e in events if e.error_code]
-    assert model.requests[0].contents[0].parts[0].text.startswith("Today's date (UTC): 2026-10-05")
-    assert "2026-10-05" not in model.requests[0].config.system_instruction
-
-
-async def test_a_stored_submit_analysis_call_replays_to_a_model_that_is_not_offered_the_tool():
-    """A stored conversation can hold calls and answers of `submit_analysis`, a tool
-    the orchestrator does not declare. ADK replays them into the request, and the
-    turn runs on."""
-    runner, model = orchestrator_runner(types.Part.from_text(text="Kenya's figure stands."))
-    await open_session(runner)
-    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    stored_call = types.Part(
-        function_call=types.FunctionCall(
-            id="adk-stored-call",
-            name="submit_analysis",
-            args={"recipe": "growth", "spec_id": "spec_" + "2" * 32, "start_year": 2015},
-        )
-    )
-    stored_answer = types.Part(
-        function_response=types.FunctionResponse(
-            id="adk-stored-call",
-            name="submit_analysis",
-            response={"outcome": "completed", "run": {"run_id": "run_01stored"}},
-        )
-    )
-    stored = [
-        ("user", "user", types.Part.from_text(text="Growth of life expectancy, 2015 to 2022")),
-        (AGENT_NAME, "model", stored_call),
-        (AGENT_NAME, "user", stored_answer),
-        (AGENT_NAME, "model", types.Part.from_text(text="It grew by 3 per cent.")),
-    ]
-    for author, role, part in stored:
-        await runner.session_service.append_event(
-            session,
-            Event(
-                author=author,
-                invocation_id="e-stored",
-                branch=None if author == "user" else AGENT_NAME,
-                content=types.Content(role=role, parts=[part]),
-            ),
-        )
-
-    events = await run_turn(runner, types.UserContent("And Ghana?"))
-
-    assert not [e for e in events if e.error_code]
-    (request,) = model.requests
-    replayed = [part for content in request.contents for part in content.parts or []]
-    assert [p.function_call.name for p in replayed if p.function_call] == ["submit_analysis"]
-    assert [p.function_response.name for p in replayed if p.function_response] == [
-        "submit_analysis"
-    ]
-    declared = {
-        declaration.name
-        for tool in request.config.tools or []
-        for declaration in tool.function_declarations or []
-    }
-    assert "plan" in declared
-    assert "submit_analysis" not in declared
-    answers = [e.content.parts[0].text for e in events if e.author == AGENT_NAME and e.content]
-    assert answers[-1] == "Kenya's figure stands."
-
-
-def test_a_skill_answer_the_turn_stored_with_the_old_call_lines_is_shown_naming_get_skill():
-    """A turn paused before a deploy and resumed after it replays its stored answers."""
-    stored = (
-        "# FAQ\nSee get_skill_file in prose.\n\nRead the rest with "
-        'get_skill_file(skill_id="dfo-faq", path="SKILL.md", offset=9, digest="d").'
-    )
-    answer = types.Part(
-        function_response=types.FunctionResponse(
-            id="1", name="get_skill_file", response={"skill": stored}
-        )
-    )
-    other = types.Part(
-        function_response=types.FunctionResponse(
-            id="2", name="search", response={"note": 'get_skill_file(skill_id="x")'}
-        )
-    )
-    request = LlmRequest(contents=[types.Content(role="user", parts=[answer, other])])
-
-    name_get_skill_in_history(None, request)  # ty: ignore[invalid-argument-type]
-
-    parts = request.contents[0].parts
-    assert parts[0].function_response.response == {
-        "skill": stored.replace('get_skill_file(skill_id="dfo-faq"', 'get_skill(skill_id="dfo-faq"')
-    }
-    assert "See get_skill_file in prose." in parts[0].function_response.response["skill"]
-    assert parts[1].function_response.response == {"note": 'get_skill_file(skill_id="x")'}

@@ -90,6 +90,7 @@ from typing import Any, Final, Protocol
 
 import rfc8785
 from analysis_mcp.runner_client import DerivedUnread
+from common.caller import STUDIO_SURFACE
 from common.live_apis import LiveApisError, LiveApisNotConfigured
 from common.materialisation import (
     FrameExpired,
@@ -112,6 +113,7 @@ from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.deadline import CallDeadline
 from pydantic import ValidationError
 
+from harness.conversation import shared_work_context
 from harness.derived_frames import derived_recipe
 from harness.recipe_replay import Pending, Refused, Replayed
 from harness.tool_contracts import HarnessCode, harness_refusal
@@ -361,7 +363,7 @@ def card_selection(
 
 
 class CardReplay(Protocol):
-    """Replays a rolling recipe over other populations, as
+    """Replays a rolling recipe over other populations for `surface`, as
     `harness.recipe_replay.replay_recipe` does with `populations` given.
     `harness.live_refresh.LiveRefresh.replay` is one."""
 
@@ -370,6 +372,7 @@ class CardReplay(Protocol):
         recipe: Mapping[str, Any],
         *,
         deadline: CallDeadline,
+        surface: str,
         populations: Sequence[Mapping[str, Any]],
     ) -> Replayed | Pending | Refused: ...
 
@@ -723,7 +726,10 @@ class RollingCards:
             del self._withheld[key]
         running = self._running.get(key)
         if running is None:
-            running = asyncio.create_task(self._replay_once(frame, populations))
+            # Other conversations may join this replay, so it names none.
+            running = asyncio.create_task(
+                self._replay_once(frame, populations), context=shared_work_context()
+            )
             self._running[key] = running
             running.add_done_callback(lambda _: self._running.pop(key, None))
         try:
@@ -819,6 +825,7 @@ class RollingCards:
                 outcome = await self._replay(
                     frame.recipe,
                     deadline=CallDeadline.after(self._deadline_s),
+                    surface=STUDIO_SURFACE,
                     populations=populations,
                 )
         except TimeoutError as exc:

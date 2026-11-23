@@ -44,7 +44,7 @@ from harness.conversation import current_conversation_id
 from harness.graph import answer as answer_module
 from harness.graph.answer import answer_frames, link_evidence_to_terminal_frames
 from harness.graph.execute import _failed_step, _mark_masked_step_failed
-from harness.mcp_client import McpExecutor, _wire_provenance
+from harness.mcp_client import McpExecutor, _envelope_partial_period, _wire_provenance
 from harness.provenance import ProvenanceInput, ProvenanceStore
 from harness.scripted import SCRIPTED_SPEC
 from harness.scripted import ScriptedSurface as ScriptedToolSurface
@@ -79,6 +79,12 @@ from .conftest import (
 
 ManifestFactory = Callable[..., dict[str, Any]]
 PlanFactory = Callable[..., Plan]
+
+
+async def _assembled_component(executor: Any, **kwargs: Any) -> dict[str, Any] | None:
+    """The wire component `_assemble_component` built, or None when it withheld the card."""
+    assembled = await executor._assemble_component(**kwargs)
+    return None if assembled is None else assembled.component
 
 
 def _today_utc() -> str:
@@ -130,7 +136,8 @@ async def test_a_component_from_a_planned_run_carries_its_retrievals_real_proven
     # what `create_app` wires `McpExecutor` and `_RecordingSurface` to share
     # (`provenance=provenance` on both).
     executor = McpExecutor(settings=Settings(), provenance=store)
-    component = await executor._assemble_component(
+    component = await _assembled_component(
+        executor,
         reply={"component_id": "cmp_1", "revision": 1},
         envelope=resolved_revision("stat_card", frame_ref=frame_ref.model_dump()),
     )
@@ -223,14 +230,16 @@ async def test_a_retrieval_whose_result_left_out_its_stat_var_list_is_recorded_w
     assert reads == [f"/api/datasets/{SPEC_KENYA}/{CONTENT_VERSION}"]
 
 
-def test_create_app_shares_one_provenance_store_between_executor_and_surface_recorder() -> None:
+def test_create_app_shares_one_provenance_store_between_executor_and_surface_recorder(
+    pg_database_url: str,
+) -> None:
     """`harness.server.create_app` must build ONE `ProvenanceStore` and hand
     it to both `McpExecutor` and `_RecordingSurface` -- two independent
     stores would leave a planned run's manifests unreadable to component
     assembly even with both writers wired."""
     from harness.server import create_app  # noqa: PLC0415 -- isolate this suite's own import cost
 
-    app = create_app(settings=Settings())
+    app = create_app(settings=Settings(database_url=pg_database_url))
 
     executor = app.state.studio.recorder._executor
     assert isinstance(executor, McpExecutor)
@@ -329,11 +338,13 @@ async def test_two_independent_retrievals_each_attribute_to_their_own_frame(
     executor = McpExecutor(settings=Settings(), provenance=store)
     debt_ref = outcome.results["totals"].model_dump()
     population_ref = outcome.results["population_totals_op"].model_dump()
-    debt_component = await executor._assemble_component(
+    debt_component = await _assembled_component(
+        executor,
         reply={"component_id": "cmp_debt", "revision": 1},
         envelope=resolved_revision("stat_card", frame_ref=debt_ref),
     )
-    population_component = await executor._assemble_component(
+    population_component = await _assembled_component(
+        executor,
         reply={"component_id": "cmp_population", "revision": 1},
         envelope=resolved_revision("stat_card", frame_ref=population_ref),
     )
@@ -399,15 +410,16 @@ async def test_a_stopped_runs_derived_frame_is_withheld_unlinked(
 
 
 async def test_a_frame_with_no_linked_manifest_is_withheld_not_fabricated() -> None:
-    """`_assemble_component` withholds the component when the frame has no
-    lineage in the store, the state of a frame nothing was linked to (a
-    retrieval it rests on has no recorded manifest, or the store evicted it).
-    An empty `ProvenanceStore` reproduces that "no lineage found" state
+    """`McpExecutor._assemble_component` withholds the component when the
+    frame has no lineage in the store, the state of a frame nothing was linked
+    to (a retrieval it rests on has no recorded manifest, or the store evicted
+    it). An empty `ProvenanceStore` reproduces that "no lineage found" state
     directly."""
     frame_ref = {"spec_id": "ops_" + "f" * 32, "content_version": "ocv_" + "f" * 32}
     executor = McpExecutor(settings=Settings(), provenance=ProvenanceStore())
 
-    component = await executor._assemble_component(
+    component = await _assembled_component(
+        executor,
         reply={"component_id": "cmp_1", "revision": 1},
         envelope=resolved_revision("stat_card", frame_ref=frame_ref),
     )
@@ -667,7 +679,8 @@ async def _assemble(
     store: ProvenanceStore, frame_ref: dict[str, str], *, facts: dict[str, Any] | None = None
 ) -> dict[str, Any] | None:
     executor = McpExecutor(settings=Settings(), provenance=store)
-    return await executor._assemble_component(
+    return await _assembled_component(
+        executor,
         reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts or {}},
         envelope=resolved_revision("stat_card", frame_ref=frame_ref),
     )
@@ -1363,7 +1376,7 @@ async def test_a_step_refused_after_its_own_call_succeeded_is_amended_to_failed(
 
     # Before the amendment: the raw call succeeded, and that is all
     # `_RecordingSurface` knows -- the exact defect.
-    assert [record.result["outcome"] for record in surface._records] == ["ok"]
+    assert [record.result["outcome"] for record in surface._records.items] == ["ok"]
 
     _mark_masked_step_failed(surface, outcome, tools={"debt": "get_data"})
 
@@ -1406,3 +1419,38 @@ def test_a_sources_licence_is_what_the_citation_states_when_it_states_one(
     )
 
     assert provenance["sources"] == [{"id": "a", "name": "A", "licence": wire}]
+
+
+@pytest.mark.parametrize(
+    ("envelope", "partial"),
+    [
+        ({"provenance": {"freshness": {"partial_period": True}}}, True),
+        ({"provenance": {"freshness": {"partial_period": False}}}, False),
+        ({"provenance": {}}, False),
+        (
+            {
+                "description": {
+                    "freshness": {"partial_periods": [{"source": "s", "period": "2025"}]}
+                }
+            },
+            True,
+        ),
+        ({"description": {"freshness": {"partial_periods": []}}}, False),
+    ],
+)
+def test_the_wire_freshness_states_the_partial_period_the_card_states(
+    envelope: dict[str, Any], partial: bool
+) -> None:
+    assert _envelope_partial_period(envelope) is partial
+    manifest = {"citation": {"text": "T", "sources": [{"ref": "a", "label": "A"}]}}
+    lineage = (ProvenanceInput("spec_a", "v1", manifest),)
+
+    provenance = _wire_provenance(
+        frame_ref={"spec_id": "spec_a", "content_version": "v1"},
+        lineage=lineage,
+        manifest=manifest,
+        platform_facts={},
+        partial_period=_envelope_partial_period(envelope),
+    )
+
+    assert provenance["freshness"]["partial_period"] is partial

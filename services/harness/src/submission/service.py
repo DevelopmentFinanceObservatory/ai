@@ -4,10 +4,10 @@
 it states (`_Patch`), which plan it means (`_resolve_intent`) and that plan
 as the model wrote it (`planner.plan.authored`), the pins it
 moves back from their windowed copies (`_unwindowed_pins`), requirements that
-read one another in a cycle (`planner.plan.check_acyclic`), the rules that
-read no pin and so refuse before any Search read (`across_years` the planner
-may not name, a referral the user has not answered, and drafts and
-requirements that do not name each other once each: `_across_years_unread`,
+read one another in a cycle (`planner.plan.check_acyclic`), the `across_years`
+it ignores outside an amendment entry (`_across_years_read`), the rules that
+read no pin and so refuse before any Search read (a referral the user has not
+answered, and drafts and requirements that do not name each other once each:
 `_referral_unanswered`, `_draft_unreferenced`), the inputs of each
 calculation put on one measure basis and provider scope (`_aligned_bases`), the decisions it
 settles (`planner.plan.settle_decisions`), the measure decisions and then the
@@ -143,6 +143,7 @@ from planner.plan import (
     FirstYear,
     FixDisagreement,
     FullHistory,
+    NewQuestionSource,
     OneYearRead,
     PinSource,
     PinVerdict,
@@ -166,6 +167,8 @@ from planner.plan import (
     aligned_pins,
     alignments,
     amendment_entry,
+    answer_mode_of,
+    answered_in_words,
     authored,
     bound_fixes,
     check_acyclic,
@@ -189,7 +192,6 @@ from planner.plan import (
     is_scope_choice,
     is_search_pin,
     keep_years_admits,
-    licences_restated,
     load_ask_breakdowns,
     load_asks,
     load_asks_across_years,
@@ -206,6 +208,8 @@ from planner.plan import (
     pin_slot_moves,
     pin_sources,
     predicate_key,
+    rank_single_roles,
+    ranks_among_settled,
     reached,
     read_fixes,
     repinned,
@@ -282,7 +286,7 @@ class ReferralAnswers(NamedTuple):
     candidate ids the answers picked, in the order they were given, so a later
     answer about the same choice comes after the one it replaces. `unanswered`
     holds every candidate id an ask offered that has no answer, skipped or
-    dismissed included; an ask the tool or ADK refused offered nothing.
+    dismissed included; an ask the tool refused offered nothing.
     `picked_ever` holds the user's standing picks from asks raised under any
     referral of the session, which a later referral does not clear: a later
     answer to an ask offering the same ids replaces them, and a message the
@@ -375,6 +379,7 @@ class Proposal:
     across_years: Sequence[Any] = ()
     amends_version: int | None = None
     starts_new_plan: bool = False
+    new_question_in: NewQuestionSource | str | None = None
 
 
 # The most failing fields one `propose_plan` refusal names. A plan can fail on
@@ -466,17 +471,18 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     """Run the chain over `proposal`, answering the plan to record or the refusal that stops it.
 
     The planner reads the user's own words only in an entry the user's
-    amendment opened (`planner.plan.amendment_entry`). Only there may
-    `proposal.across_years` name a step, and each step it names takes a
-    licence to combine its years (`planner.plan.period_licences_held`).
+    amendment opened (`planner.plan.amendment_entry`). Only there does
+    `proposal.across_years` count: each step it names takes a licence to
+    combine its years (`planner.plan.period_licences_held`). Elsewhere it is
+    ignored (`_across_years_read`).
     `proposer` is the tool every refusal's `action` names. Writes nothing
     but an `unsupported` answer (`SessionView.record_unsupported`) and the
     asks a `PERIOD_REDUCTION_UNSTATED` refusal names
     (`SessionView.record_reduction_refused`).
     """
     try:
-        # ADK's arg preprocessing silently falls back to raw dicts for the
-        # *whole* list if any single item fails validation (e.g. a
+        # `planner.tool_spec.convert_arguments` silently falls back to raw
+        # dicts for the *whole* list if any single item fails validation (e.g. a
         # Decision's `chosen` not in `options`), and skips conversion
         # entirely for a value that isn't a list at all. Re-validating here
         # turns either case into a retryable tool problem, keeping
@@ -525,8 +531,11 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         existing,
         amends_version=proposal.amends_version,
         starts_new_plan=proposal.starts_new_plan,
+        amendment_entry=in_amendment_entry,
         rounds_so_far=load_plan_rounds(view.state),
         question=question,
+        new_question_in=_new_question_source(proposal.new_question_in),
+        answered_in_words=answered_in_words(view.state),
     )
     if isinstance(resolved, dict):
         return resolved
@@ -561,6 +570,17 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         check_acyclic({requirement.id: requirement for requirement in written})
     except ValueError as exc:
         return _invalid_data(exc, proposer)
+    # A rank stating no `among` takes the one its input admits, before any
+    # decision reads its value off it, each whole-history read from its first
+    # year on record as the plan will read it.
+    evidence_requirements = ranks_among_settled(
+        evidence_requirements,
+        graph=written,
+        first_years=_first_years_on_record(
+            written, shown=on_record, read=full_histories(view.state)
+        ),
+    )
+    written = _requirements_after(previous, evidence_requirements, removed_evidence_requirements)
     # The refusals that hold whatever the requirements pin come before the
     # Search reads alignment asks for, so a plan they refuse costs none, and
     # everything after alignment reads the pins the reads settle. Alignment
@@ -583,14 +603,9 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         )
     user_spoke = pick is None and (previous is None or view.user_spoke_since(previous.version))
     refused = refused_in_force(view.state, conversation_readings(view.state))
+    patch = _across_years_read(patch, in_amendment_entry=in_amendment_entry)
     blocked = (
-        _across_years_unread(
-            patch.across_years,
-            requirements=written,
-            previous=previous,
-            in_amendment_entry=in_amendment_entry,
-        )
-        or _removed_asks_refused(patch, previous, view)
+        _removed_asks_refused(patch, previous, view)
         or _refused_spec_pinned(written, refused)
         or _referral_unanswered(existing, referral, view)
         or _draft_unreferenced(
@@ -805,20 +820,13 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 first_years=_first_years_on_record(requirements_after, shown=on_record, read=read),
                 dropped=sorted(set(patch.removed_asks)),
             )
-        elif question is None or answer_mode is None:
-            missing = " and ".join(
-                clause
-                for clause, absent in (
-                    ("the `question` it answers", question is None),
-                    ("the `answer_mode` it answers under", answer_mode is None),
-                )
-                if absent
-            )
-            raise ValueError(f"a first draft states {missing}")
+        elif question is None:
+            raise ValueError("a first draft states the `question` it answers")
         else:
+            # A first draft stating no mode takes the one its requirements define.
             plan = Plan(
                 question=question,
-                answer_mode=answer_mode,
+                answer_mode=answer_mode or answer_mode_of(evidence_requirements),
                 decisions=settled,
                 evidence_requirements=evidence_requirements,
                 declined=patch.declined,
@@ -872,8 +880,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         # a decision, every decision cited, the length and count limits on
         # each field, a non-blank question, and the size limit on the whole. A removal naming an item
         # the plan does not state is a `ValueError` from `Plan.amend` itself,
-        # and a first draft with no `question`/`answer_mode` is one raised
-        # above.
+        # and a first draft with no `question` is one raised above.
         cause = _unsupported_cause(exc)
         if cause is not None:
             view.record_unsupported(cause.operation)
@@ -1039,9 +1046,10 @@ def _slot_code_writes(slot: str) -> bool:
 class _Patch(BaseModel):
     """The lists one `propose_plan` call states, checked before they reach a `Plan`.
 
-    ADK hands `propose_plan` raw values wherever it could not convert them, and
-    builds the tool's declaration from the signature with every `Annotated`
-    limit stripped, so the count and shape of each list is enforced here. A
+    `planner.tool_spec.convert_arguments` hands `propose_plan` raw values
+    wherever it could not convert them, and the tool's declaration is built
+    from the signature with every `Annotated` limit stripped, so the count
+    and shape of each list is enforced here. A
     removal names a slot or an id, so it is held to `Identifier`; each list
     holds no more items than a plan does.
     """
@@ -1871,11 +1879,13 @@ _BUDGET_APPROVABLE = (
 )
 _BUDGET_FRESH = "The user's next message opens a fresh budget."
 
-# The refusal for a `starts_new_plan` call while a plan is recorded. The call is
-# how the model tells the harness the user's reply asks a different question,
-# so the message says what happened and that nothing further is needed from
-# it. `harness.planner_adapter` ends the turn on this code as it does on
-# `BUDGET_EXHAUSTED`.
+# The refusal for a `starts_new_plan` call while a plan is recorded, with or
+# without `amends_version`. The call is how the model tells the harness the
+# user's reply asks a different question, so the message says what happened
+# and that nothing further is needed from it. `harness.planner_adapter` ends
+# the planner's run on this code as it does on `BUDGET_EXHAUSTED`, and the
+# graph's `planner` node ends the turn, handing the reply on as the next
+# turn's question.
 _QUESTION_FIXED_RESTART = (
     "This turn's question is fixed, so `starts_new_plan` cannot open a plan for a "
     "different one; nothing is recorded, and the plan already on record stands "
@@ -1892,6 +1902,9 @@ def _resolve_intent(
     starts_new_plan: bool,
     rounds_so_far: int,
     question: str | None = None,
+    amendment_entry: bool = False,
+    new_question_in: NewQuestionSource | None = None,
+    answered_in_words: bool = False,
 ) -> tuple[Plan | None, int] | dict[str, object]:
     """Which plan a `propose_plan` call means, from what the call states.
 
@@ -1904,12 +1917,15 @@ def _resolve_intent(
     read as starting a fresh plan and drop every item it did not restate.
 
     With nothing recorded, the call is a first draft. With a plan recorded,
-    an `amends_version` naming that same version patches it. Anything else is
-    refused, naming the version to pass so the next call is correct.
-
-    `amends_version` and `starts_new_plan` are read in that order, so a call
-    stating both is treated as an amendment, since a payload shaped as a
-    patch is read as one. `rounds_so_far` counts the proposals made in this
+    a call stating `starts_new_plan` alone reports a different question. On
+    an entry the user's amendment opened (`amendment_entry`), so does a call
+    stating it beside `amends_version`: the user's words are what the call
+    classifies, and reading the pair as a patch would record an empty
+    amendment and drop the user's question. On any other entry (a replan
+    after a run, a pick's replan) there are no words of the user's to hand
+    on, so the pair is read as the patch its payload is. Otherwise an
+    `amends_version` naming the recorded version patches it. Anything else
+    is refused, naming the version to pass so the next call is correct. `rounds_so_far` counts the proposals made in this
     entry into the planner. `PlannerAdapter` zeroes it on every entry that is not
     a mid-turn resume. An amendment increments it, since every version opens a
     fresh discovery budget, and past `MAX_PLAN_ROUNDS` the call is refused
@@ -1920,7 +1936,7 @@ def _resolve_intent(
     held to `existing.question` rather than the call's own wording of the
     question it is answering:
 
-    - A restart (`starts_new_plan` with no `amends_version`) is refused with
+    - A restart, as above, is refused with
       `QUESTION_FIXED` before the round cap is even checked, ahead of
       `BUDGET_EXHAUSTED`. Both refusals record nothing, so nothing is lost
       by checking this one first, and a restart can never succeed under a
@@ -1937,8 +1953,13 @@ def _resolve_intent(
     """
     if existing is None:
         return None, 1
+    restart = starts_new_plan and (amends_version is None or amendment_entry)
     blocked = _restart_blocked(
-        existing, amends_version=amends_version, starts_new_plan=starts_new_plan
+        existing,
+        restart=restart,
+        new_question_in=new_question_in if amendment_entry else None,
+        amendment_entry=amendment_entry,
+        answered_in_words=answered_in_words,
     ) or _round_cap_blocked(existing, rounds_so_far=rounds_so_far)
     if blocked is not None:
         return blocked
@@ -1951,21 +1972,66 @@ def _resolve_intent(
 
 
 def _restart_blocked(
-    existing: Plan, *, amends_version: int | None, starts_new_plan: bool
+    existing: Plan,
+    *,
+    restart: bool,
+    new_question_in: NewQuestionSource | None,
+    amendment_entry: bool,
+    answered_in_words: bool,
 ) -> dict[str, object] | None:
-    """Return the `QUESTION_FIXED` refusal for a restart, or `None`.
+    """Return the refusal for a restart, or `None`: `QUESTION_FIXED`, whose
+    detail carries the call's `new_question_in` on an entry the user's
+    amendment opened: which of the user's messages asks the new question,
+    whose stored text the harness hands back as the next turn, or `none`
+    (`harness.graph.planning`). There, a restart that names no message, or
+    names `answer` while the run reads no own-words answer
+    (`answered_in_words`), is refused `INVALID_PLAN` first, correctable
+    within the round, since the harness would have no message to hand back.
 
     Split out of `_resolve_intent` to keep its own branch count within this
     project's `PLR0911` budget.
     """
-    if not (amends_version is None and starts_new_plan):
+    if not restart:
         return None
+    if amendment_entry and (
+        new_question_in is None
+        or (new_question_in is NewQuestionSource.ANSWER and not answered_in_words)
+    ):
+        stated = (
+            "names none"
+            if new_question_in is None
+            else "names `answer`, and the user answered no question of yours in their own words"
+        )
+        return problem(
+            ProblemCode.INVALID_PLAN,
+            "`starts_new_plan` names in `new_question_in` the user's message that states the "
+            f"new question, and this call {stated}. Name `amendment`, `answer` or `none` and "
+            "call again.",
+            outcome=Outcome.INVALID_INPUT,
+            action=Action(
+                call=PROPOSE_PLAN.call,
+                arguments={"starts_new_plan": True},
+                needs=("new_question_in",),
+            ),
+        )
     return problem(
         ProblemCode.QUESTION_FIXED,
         _QUESTION_FIXED_RESTART,
         outcome=Outcome.REFUSED,
-        detail={"version": existing.version},
+        detail={
+            "version": existing.version,
+            **({"new_question_in": new_question_in.value} if new_question_in else {}),
+        },
     )
+
+
+def _new_question_source(value: object) -> NewQuestionSource | None:
+    """`value`, a call's `new_question_in` as it arrived, as the message it
+    names, or `None` for no value or one that names no message."""
+    try:
+        return NewQuestionSource(value) if value is not None else None
+    except ValueError:
+        return None
 
 
 def _round_cap_blocked(existing: Plan, *, rounds_so_far: int) -> dict[str, object] | None:
@@ -2762,7 +2828,9 @@ def _unrecordable(
     turn holds open (`_breakdown_decline_unearned`, against `statement`), for a decline every `unsupported`
     answer this turn requires (`_decline_missing`), for a result given
     per member of a party nobody named that no decision states
-    (`_result_scope_unstated`), and for a step reducing across years for a
+    (`_result_scope_unstated`), for a rank with no reduction whose other role
+    binds several parties or whose source leaves another axis open
+    (`_rank_roles_expand`, against `stated`), and for a step reducing across years for a
     result no ask across years asks for (`_period_reduction_unstated`,
     against `stated`).
     """
@@ -2787,8 +2855,63 @@ def _unrecordable(
         or _breakdown_decline_unearned(statement, view)
         or _decline_missing(plan, view, proposer)
         or _result_scope_unstated(plan)
+        or _rank_roles_expand(stated, sources)
         or _period_reduction_unstated(stated, view)
     )
+
+
+def _rank_roles_expand(plan: Plan, sources: SourceReadings) -> dict[str, object] | None:
+    """Return the refusal of a rank with no reduction whose other role holds several values, or `None`.
+
+    Plan validation admits a rank with no `reduction` over an input of
+    several roles where each other role names one entity
+    (`planner.plan.rank_single_roles`). Each such name has to bind one party
+    alone on its column of the requirement's pinned source
+    (`compiler.evidence.named_members`), and the source has to leave open no
+    axis the requirement's `across` does not cover (`compiler.evidence.open_axes_for`).
+    A group read as its members, a source binding other parties beside the
+    one named, an open axis left over, or a pin whose source cannot be read
+    gives each ranked entity several rows, so the rank needs a reduction.
+    """
+    by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    for rank, role in rank_single_roles(plan):
+        requirement = by_id.get(role.requirement_id)
+        if not isinstance(requirement, DatasetRequirement):
+            continue
+        entity = next(entity for entity in requirement.entities if entity.role == role.role)
+        spec_id = requirement.source_spec_id
+        source = sources.get(spec_id) if spec_id is not None else None
+        reason = _role_expansion(entity, requirement, source)
+        if reason is not None:
+            return _invalid_plan(
+                f"{rank.id!r} ranks by axis {rank.axis!r} with no reduction over "
+                f"{requirement.id!r}, which reads one value per {rank.axis!r} only while "
+                f"{entity.name!r} is one party and no other axis is open, but {reason}; state "
+                "the reduction that collapses each entity's rows to one value"
+            )
+    return None
+
+
+def _role_expansion(
+    entity: Entity, requirement: DatasetRequirement, source: SelectedSource | None
+) -> str | None:
+    """Why `entity` of `requirement` holds several values on `source`, or `None` when it holds one."""
+    if source is None:
+        return "its pinned source cannot be read"
+    members = named_members(entity, source)
+    if len(members) != 1:
+        return f"the source binds {len(members)} parties to that name"
+    bound = {one.ref for one in source.entities if one.role == members[0].role}
+    if len(bound) != 1:
+        return f"the source binds {len(bound)} parties on its column"
+    covered = (
+        open_axes_for(requirement.across, source.open_entity_axes) if requirement.across else ()
+    )
+    if source.open_entity_axes is None or isinstance(covered, str):
+        return "the source's open axes cannot be matched to `across`"
+    if any(axis not in covered and axis.member_count != 1 for axis in source.open_entity_axes):
+        return "the source also leaves an axis open that `across` does not cover"
+    return None
 
 
 def _result_scope_unstated(plan: Plan) -> dict[str, object] | None:
@@ -3034,33 +3157,17 @@ def _period_reduction_unstated(plan: Plan, view: SessionView) -> dict[str, objec
     )
 
 
-def _across_years_unread(
-    across_years: Sequence[str],
-    *,
-    requirements: Sequence[EvidenceRequirement],
-    previous: Plan | None,
-    in_amendment_entry: bool,
-) -> dict[str, object] | None:
-    """Return the `INVALID_PLAN` refusal of an `across_years` naming steps where the planner reads none of the user's own words, or `None`.
+def _across_years_read(patch: _Patch, *, in_amendment_entry: bool) -> _Patch:
+    """`patch` with its `across_years` emptied where the planner reads none of the user's own words.
 
     There the orchestrator holds them, and its (across years) mark on an ask
     is the only statement that the user asked for one figure over the years.
-    A step whose licence `previous` holds as `requirements` state it is a
-    restatement, which grants nothing (`planner.plan.licences_restated`).
+    A step that combines its years with no licence from such an ask, or from
+    the plan on record, is refused `PERIOD_REDUCTION_UNSTATED`.
     """
-    if in_amendment_entry:
-        return None
-    restated = licences_restated(across_years, requirements=requirements, previous=previous)
-    unread = [name for name in across_years if name not in restated]
-    if not unread:
-        return None
-    return _invalid_plan(
-        "`across_years` names the steps whose years the user's own words ask to combine, "
-        "and in this entry you read the orchestrator's brief, not the user's words. Take "
-        f"{', '.join(map(repr, unread))} out of `across_years`. A step the plan already "
-        "licenses keeps its licence without being named, and any other figure or ranking "
-        "over several years answers only an ask the brief marks (across years)."
-    )
+    if in_amendment_entry or not patch.across_years:
+        return patch
+    return patch.model_copy(update={"across_years": []})
 
 
 def _years_kept(aggregate: AggregateRequirement) -> tuple[GroupBy, ...]:

@@ -23,9 +23,12 @@ sentence what the answer counts, for whom, when and from which source;
 decision's words, and `FIXED_VALUE_WORDS` the words for an option the
 planner wrote as a value a decision fixes, and `place_level_words` the same
 words for the level of place a filter keeps on a role; `choice_id` gives a scope
-choice's row the id every switch keeps; and `switchable_decision`,
-`decision_choice_id` and `decision_option_id` give a planner decision the
-card offers to switch its row's id and its options' ids.
+choice's row the id every switch keeps; `count_choice_id` gives the row of
+how pinned sources' flows are counted its id, `count_options` the counts
+it offers, and `chosen_count_decision` finds that row again; and
+`switchable_decision`, `decision_choice_id` and `decision_option_id` give a
+planner decision the card offers to switch its row's id and its options'
+ids, the last a count row's options' ids too.
 
 In `step_rows`, which the plan record and the planner read, a step's `label`
 names the work a workflow step does and the entity it does
@@ -114,6 +117,7 @@ from planner.records import (
     GroupBy,
     GrowthChange,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -313,7 +317,14 @@ def card_rows(plan: Plan) -> list[dict[str, object]]:
         rows.append(
             {
                 "id": step.id,
-                "label": _card_label(requirement, shown, concepts=concepts, shapes=shapes),
+                # The shape's roles can name a copy the split added, which
+                # `shown` leaves out, so what it keeps apart is read off `plan`.
+                "label": _card_label(
+                    requirement,
+                    shown,
+                    concepts=concepts,
+                    kept=_kept_words(shapes[requirement.id], plan),
+                ),
                 "description": _with_result(description, result),
                 "args": dict(step.args),
                 "gives_answer": step.id == answer,
@@ -1438,10 +1449,11 @@ def _card_label(
     plan: Plan,
     *,
     concepts: Mapping[str, str],
-    shapes: Mapping[str, FrameShape],
+    kept: Sequence[str],
 ) -> str:
     """`requirement`'s short card label (`card_rows`). `concepts` names each
-    retrieval (`_concepts`) and `shapes` holds each result's shape."""
+    retrieval (`_concepts`) and `kept` is what its result keeps one figure
+    per (`_kept_words`)."""
 
     def of(requirement_id: str) -> str:
         return _concept_of(plan.requirement(requirement_id), plan, concepts)
@@ -1449,7 +1461,6 @@ def _card_label(
     def side(read: RequirementSide) -> str:
         return _side_named(read, of(read.input_id))
 
-    kept = _kept_words(shapes[requirement.id], plan)
     by = f" by {' and '.join(kept)}" if kept else ""
     match requirement:
         case DatasetRequirement():
@@ -1510,6 +1521,9 @@ def _card_filter_label(requirement: FilterRequirement, concept: str) -> str:
     levels = [p.level for p in requirement.predicates if isinstance(p, PlaceLevel)]
     if levels:
         return f"Keep {pluralize(level_noun(levels[0]))}"
+    listed = [p for p in requirement.predicates if isinstance(p, PeriodIn)]
+    if listed:
+        return f"Keep {_listed_years(listed[0], 'and')}"
     return f"Filter {concept}"
 
 
@@ -1699,6 +1713,66 @@ def pinned_choice_id(plan: Plan, pinned: Collection[str], axis: str) -> str | No
         None,
     )
     return f"{first.id}:{axis}" if first is not None else None
+
+
+# The axis a count row's id names (`count_choice_id`). No scope axis takes this
+# name, so a count row's id cannot equal a scope choice's.
+COUNT_AXIS = "count"
+
+
+def count_choice_id(plan: Plan, decision: Decision) -> str | None:
+    """The id the plan card gives the row of `decision` when it states how a
+    pinned source's flow is counted (`planner.plan.is_search_pin`) among at
+    least two counts every source of the row offers (`count_options`):
+    `"<requirement id>:count"`, the requirement the first of `plan` citing a
+    decision the row stands for (`_row_slots`). `None` for any other
+    decision, and for one no requirement cites.
+
+    The row stands for every pin counted the same way (`listed_together`),
+    so each of its decisions has the row's id, and a switch of the row
+    re-pins them all. Admission writes the decision on the pin each
+    requirement states (`submission.service._measure_decisions`) and a
+    switch re-pins those requirements and keeps their ids, so the row keeps
+    its id through every switch of its count. Its options take
+    `decision_option_id`.
+    """
+    if not is_search_pin(decision) or len(count_options(plan, decision)) < 2:
+        return None
+    row = _row_slots(plan, decision)
+    first = next(
+        (
+            requirement
+            for requirement in plan.evidence_requirements
+            if isinstance(requirement, DatasetRequirement)
+            and not row.isdisjoint(requirement.decision_ids)
+        ),
+        None,
+    )
+    return f"{first.id}:{COUNT_AXIS}" if first is not None else None
+
+
+def count_options(plan: Plan, decision: Decision) -> tuple[str, ...]:
+    """The counts the card's row for search pin `decision` offers: those of
+    the decision the row lists (`listed_together`) that every decision of
+    the row offers too, in its order. Pins counted alike can offer
+    different other counts, and a count one of them lacks cannot be
+    switched to for all of them."""
+    members = listed_together(plan, decision.slot) or (decision,)
+    listed = _listed_slots(plan).get(decision.slot, decision.slot)
+    shown = next((member for member in members if member.slot == listed), decision)
+    return tuple(
+        option for option in shown.options if all(option in member.options for member in members)
+    )
+
+
+def chosen_count_decision(plan: Plan, choice: str) -> Decision | None:
+    """The decision of `plan` whose count row has id `choice` (`count_choice_id`), if any."""
+    if not choice.endswith(f":{COUNT_AXIS}"):
+        return None
+    return next(
+        (decision for decision in plan.decisions if count_choice_id(plan, decision) == choice),
+        None,
+    )
 
 
 def chosen_scope_decision(plan: Plan, choice: str) -> Decision | None:
@@ -2112,7 +2186,10 @@ def _reads_whole(
     if isinstance(requirement, DatasetRequirement):
         return (requirement,)
     if isinstance(requirement, FilterRequirement):
-        if not all(isinstance(predicate, PeriodThreshold) for predicate in requirement.predicates):
+        if not all(
+            isinstance(predicate, PeriodThreshold | PeriodIn)
+            for predicate in requirement.predicates
+        ):
             return None
     elif isinstance(requirement, RankRequirement | AggregateRequirement):
         if requirement.reduction not in (None, Reduction.SUM):
@@ -2238,6 +2315,12 @@ def _following(rolling: RollingWindow | None) -> str:
     return f", the {end} following the newest year"
 
 
+def _listed_years(listed: PeriodIn, conjunction: str) -> str:
+    """`listed`'s years in words: "2019", "2019 and 2023", "2000, 2010 and 2020"."""
+    *first, last = map(str, listed.years)
+    return f"{', '.join(first)} {conjunction} {last}" if first else last
+
+
 def _predicate_phrase(predicate: Predicate) -> str:
     if isinstance(predicate, EntityIn):
         subject = predicate.role or "the entity"
@@ -2245,6 +2328,8 @@ def _predicate_phrase(predicate: Predicate) -> str:
     if isinstance(predicate, PeriodThreshold):
         following = _FOLLOWING if predicate.rolling is not None else ""
         return f"the year is {_THRESHOLD_WORDS[predicate.op]} {predicate.year}{following}"
+    if isinstance(predicate, PeriodIn):
+        return f"the year is {_listed_years(predicate, 'or')}"
     if isinstance(predicate, ValueThreshold):
         return f"the value is {_THRESHOLD_WORDS[predicate.op]} {predicate.value}"
     if isinstance(predicate, PlaceLevel):
@@ -2540,6 +2625,9 @@ def _label_filter(requirement: FilterRequirement, plan: Plan) -> str:
     levels = [p.level for p in requirement.predicates if isinstance(p, PlaceLevel)]
     if levels:
         return f"Keep {pluralize(level_noun(levels[0]))}"
+    listed = [p for p in requirement.predicates if isinstance(p, PeriodIn)]
+    if listed:
+        return f"Keep {_listed_years(listed[0], 'and')}"
     upstream = plan.requirement(requirement.input_id)
     return f"Filter {_measure_of(upstream, plan)}"
 
@@ -2789,6 +2877,8 @@ def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
     # The source counts every place on a place axis, so a level kept from it
     # is named without a count.
     level = _place_level_word(requirement, plan)
+    # `Plan` validation refuses a rank stating no `among` (`planner.plan._rank_shape`).
+    assert requirement.among is not None
     among_text = among_phrase(
         requirement.among,
         across=(level or role) if covering is not None or by_breakdown else None,
@@ -2838,7 +2928,9 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
     narrowing = narrowing_step(denominator, plan)
     if narrowing is not None and not (
         isinstance(narrowing, FilterRequirement)
-        and all(isinstance(p, PeriodThreshold | PlaceLevel) for p in narrowing.predicates)
+        and all(
+            isinstance(p, PeriodThreshold | PeriodIn | PlaceLevel) for p in narrowing.predicates
+        )
     ):
         return (
             f"Share of {measure} as one figure overall, divided by one total of {divisor} "

@@ -13,8 +13,9 @@ from __future__ import annotations
 import asyncio
 import random
 import ssl
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 import httpx2
@@ -30,6 +31,7 @@ from compiler.surface import (
     ToolCallResult,
     ToolSchema,
     ToolSurfaceUnavailableError,
+    current_spec_uses,
 )
 from data_mcp import stat_var_list
 from data_mcp.client import UpstreamClient
@@ -85,7 +87,15 @@ from planner.plan import (
 from planner.workflow import SelectedSource, ToolId
 
 from ..unreachable_surface import unreachable_surface
-from .conftest import RESULT_FRAME, SPEC_KENYA, SPEC_POPULATION, ScriptedSurface, ok, refusal
+from .conftest import (
+    RESULT_FRAME,
+    SPEC_KENYA,
+    SPEC_POPULATION,
+    ScriptedSurface,
+    ok,
+    refusal,
+    runner_refused,
+)
 
 PlanFactory = Callable[..., Plan]
 ManifestFactory = Callable[..., dict[str, Any]]
@@ -706,18 +716,25 @@ async def test_a_slow_attempt_record_spends_none_of_the_step_budget(
     real_schemas: list[ToolSchema],
     short_budget: tuple[ToolCapability, ...],
 ) -> None:
-    outcome = await asyncio.wait_for(
-        _run(
-            approved_plan(),
-            surface=_surface(real_schemas, manifest()),
-            sleep=_Sleeps(),
-            capabilities=short_budget,
-            ledger=_SlowAttempts(),
-        ),
-        timeout=5,
-    )
+    """The step is accepted, and the turn hears its `get_data` spec fetched."""
+    uses: list[tuple[str, str]] = []
+    token = current_spec_uses.set(lambda use, spec_id: uses.append((use, spec_id)))
+    try:
+        outcome = await asyncio.wait_for(
+            _run(
+                approved_plan(),
+                surface=_surface(real_schemas, manifest()),
+                sleep=_Sleeps(),
+                capabilities=short_budget,
+                ledger=_SlowAttempts(),
+            ),
+            timeout=5,
+        )
+    finally:
+        current_spec_uses.reset(token)
 
     assert isinstance(outcome, Accepted), outcome
+    assert uses == [("fetched", manifest()["definition"]["spec_id"])]
 
 
 async def test_a_statistics_fetch_that_never_answers_stops_at_its_step_budget(
@@ -729,21 +746,29 @@ async def test_a_statistics_fetch_that_never_answers_stops_at_its_step_budget(
     async def never_answers(_manifest: Any) -> None:
         await asyncio.Event().wait()
 
-    outcome = await asyncio.wait_for(
-        _run(
-            approved_plan(),
-            surface=_surface(real_schemas, manifest()),
-            sleep=_Sleeps(),
-            capabilities=short_budget,
-            fetch_series_stats=never_answers,
-        ),
-        timeout=5,
-    )
+    uses: list[tuple[str, str]] = []
+    token = current_spec_uses.set(lambda use, spec_id: uses.append((use, spec_id)))
+    try:
+        outcome = await asyncio.wait_for(
+            _run(
+                approved_plan(),
+                surface=_surface(real_schemas, manifest()),
+                sleep=_Sleeps(),
+                capabilities=short_budget,
+                fetch_series_stats=never_answers,
+            ),
+            timeout=5,
+        )
+    finally:
+        current_spec_uses.reset(token)
 
     assert isinstance(outcome, Refused), outcome
     assert outcome.refusal is RefusalKind.TRANSPORT_FAILED
     assert outcome.step_id == "debt"
     assert outcome.completed == ()
+    # The budget ran out in the evidence check, so the step's result was
+    # never accepted and the turn hears no fetched spec.
+    assert uses == []
 
 
 async def test_a_slow_statistics_fetch_stops_the_step_as_transient_before_its_budget_runs_out(
@@ -834,27 +859,73 @@ async def test_a_definition_no_longer_held_sends_the_requirement_back_to_discove
     assert len(surface.calls) == 1
 
 
-async def test_a_rediscovery_on_a_step_bound_to_no_evidence_is_a_plain_refusal(
+async def test_a_runner_upstream_version_change_on_an_analysis_step_is_posted_once_more(
     approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
 ) -> None:
-    # No analysis verb answers `refresh_then_retry` today; the executor
-    # classifies by mode, so one that did would reach the aggregate step,
-    # which no `EvidenceBinding` names. There is nothing to rediscover, so
-    # the run stops on the step rather than instructing a rediscovery of
-    # nothing in particular.
-    surface = _surface(
-        real_schemas,
-        manifest(),
-        aggregate=[refusal("upstream_version_changed", "refresh_then_retry")],
+    """The runner answers `upstream_version_changed` when a root read at its newest
+    version met an upstream refresh mid-load. No `EvidenceBinding` names the aggregate
+    step, so there is nothing to rediscover; the same tree posted again reads the
+    refreshed version, so the step is called once more, at once."""
+    refused = await runner_refused(
+        status=503, code="upstream_version_changed", title="Upstream Version Changed"
     )
+    surface = _surface(real_schemas, manifest(), aggregate=[refused, ok(RESULT_FRAME)])
+    sleeps = _Sleeps()
+
+    outcome = await _run(approved_plan(), surface=surface, sleep=sleeps)
+
+    assert isinstance(outcome, Accepted), outcome
+    first, second = [arguments for tool, arguments in surface.calls if tool == "aggregate"]
+    assert first == second
+    assert sleeps.delays == [0.0]
+
+
+async def _definition_not_held() -> ToolCallResult:
+    return refusal(
+        "definition_not_held",
+        "correct_and_retry",
+        message="Definition Not Held: the run could not finish.",
+        fix={"definition_id": SPEC_KENYA, "next_step": "search"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "calls"),
+    [
+        pytest.param(
+            partial(
+                runner_refused,
+                status=503,
+                code="upstream_version_changed",
+                title="Upstream Version Changed",
+            ),
+            2,
+            id="upstream-version-changed-twice",
+        ),
+        # A code a second call cannot get past stops at the first refusal.
+        pytest.param(_definition_not_held, 1, id="definition-not-held"),
+    ],
+)
+async def test_a_rediscovery_on_a_step_bound_to_no_evidence_stops_with_the_refusals_message(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    answer: Callable[[], Awaitable[ToolCallResult]],
+    calls: int,
+) -> None:
+    result = await answer()
+    surface = _surface(real_schemas, manifest(), aggregate=[result])
 
     outcome = await _run(approved_plan(), surface=surface, sleep=_Sleeps())
 
     assert isinstance(outcome, Refused), outcome
     assert outcome.refusal is RefusalKind.STEP_REFUSED
     assert outcome.step_id == "totals"
-    assert outcome.payload is not None and outcome.payload.code == "upstream_version_changed"
+    assert outcome.payload is not None
+    assert outcome.payload.code == (result.structured_content or {})["code"]
+    assert outcome.detail.endswith("the run could not finish.")
     assert [step.step_id for step in outcome.completed] == ["debt"]
+    assert [tool for tool, _ in surface.calls].count("aggregate") == calls
 
 
 async def test_a_refused_steps_detail_carries_the_message_without_the_envelope_line(
@@ -1372,6 +1443,42 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
         labels[:2],
         [labels[0], labels[2]],
     ]
+
+
+async def test_a_series_entity_that_is_a_name_is_not_looked_up_and_keeps_its_ref(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    requirement: RequirementFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A breakdown's entity ref is its name, which the nodes route refuses as a dcid; the
+    donor in the same findings is still named by the graph."""
+    sparse = manifest()
+    (row,) = sparse["statistics"]
+    row["observations"] = 7
+    sparse["statistics"][:] = [
+        {**row, "entities": [*row["entities"], {"role": role, "ref": ref}]}
+        for role, ref in (("donor", "donor/DEU"), ("stat_var_crsPurpose", "humanitarian aid"))
+    ]
+    sparse["series_count"] = 2
+    asked: list[list[str]] = []
+
+    async def describe(dcids: list[str]) -> dict[str, Any]:
+        asked.append(list(dcids))
+        return {"donor/DEU": OrganisationNode.model_construct(ref="donor/DEU", label="Germany")}
+
+    monkeypatch.setattr("executor.run.describe_nodes", describe)
+    plan = approved_plan(requirement=requirement(coverage=Coverage(on_missing="report_gaps")))
+
+    outcome = await _run(plan, surface=_surface(real_schemas, sparse), sleep=_Sleeps())
+
+    assert isinstance(outcome, Accepted), outcome
+    assert asked == [["donor/DEU"]]
+    gaps = [gap for gap in outcome.evidence[0].gaps if gap.code.value == "coverage_gaps"]
+    named = {e.ref: e.label for gap in gaps for e in gap.entities}
+    assert named["donor/DEU"] == "Germany"
+    assert named["humanitarian aid"] is None
 
 
 async def test_a_name_lookup_needs_more_step_budget_left_than_its_margin() -> None:

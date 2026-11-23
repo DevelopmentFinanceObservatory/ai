@@ -1,48 +1,64 @@
-"""Builds the orchestrator `LlmAgent`."""
+"""The orchestrator: a Pydantic AI agent on the harness's orchestrator tools.
+
+`orchestrator_agent` builds the agent once per process; each run names its
+model (`orchestrator.model.orchestrator_model`) and is driven by
+`orchestrator.run.run_orchestrator`. Each tool is a function from
+`harness.orchestrator_tools.build_orchestrator_tools`, declared as
+`orchestrator.declarations.tool_declaration` states it, and run over the
+call's `orchestrator.call.OrchestratorCall` with the model's arguments as sent
+(`_tool_function`). A tool that raises is answered with `raised` and the run
+goes on. A `plan` or `ask_user` call that records its hand-off
+(`orchestrator.call.HANDED_OFF`) is deferred. The run ends on it, and the
+planner's result or the user's answer is the call's result when the run
+resumes.
+
+Every request replays the run's messages less unsigned thought summaries, with
+a call to a tool the agent lacks answered as
+`harness.gemini_agent.tool_not_found` (`harness.gemini_agent.replayed_history`).
+The instruction is the same on every request, so its prefix, with the tools,
+is served from the shared cache (`harness.prefix_cache`). What changes from
+turn to turn opens the contents (`orchestrator.run.Opening`).
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime
+import inspect
+import logging
+from collections.abc import Awaitable, Callable, MutableMapping, Sequence
+from dataclasses import dataclass, field
+from types import FunctionType
 from typing import TYPE_CHECKING, Any
 
-from data_mcp.skills_client import name_get_skill_in_call_lines
-from google.adk.agents import LlmAgent
-from google.adk.agents.callback_context import CallbackContext
-from google.adk.models.google_llm import Gemini
-from google.adk.models.llm_request import LlmRequest
+from common.telemetry import current_trace_id
 from google.genai import types
-from harness.orchestrator_tools import OrchestratorTool
-from harness.prefix_cache import gemini_model_name
+from harness.gemini_agent import (
+    UNLIMITED_RETRIES,
+    RecordingState,
+    as_function_response,
+    declared_tool,
+    replayed_history,
+)
+from harness.orchestrator_tools import raised_answer
 from harness.settings import DEFAULT_ORCHESTRATOR_THINKING_LEVEL
-from harness.turn_budget import BoundedGemini
-from harness.turn_events import after_turn_question
+from pydantic_ai import (
+    Agent,
+    CallDeferred,
+    DeferredToolRequests,
+    InstrumentationSettings,
+    RunContext,
+    Tool,
+)
+from pydantic_ai.capabilities import Instrumentation, ProcessHistory
+from pydantic_ai.models.google import GoogleModelSettings
 
-from orchestrator.tool_failures import answering_tool_failures
+from orchestrator import AGENT_NAME
+from orchestrator.call import HANDED_OFF, OrchestratorCall
+from orchestrator.declarations import CALL_PARAMETER, tool_declaration
 
 if TYPE_CHECKING:
-    from harness.prefix_cache import PrefixCache
     from harness.settings import ThinkingLevelName
 
-AGENT_NAME = "dfo_orchestrator"
-
-# The state key `_stamp_today` writes the UTC date to. The `temp:` prefix
-# keeps it out of persisted session state and past `harness.graph.state.GraphState`,
-# which validates unprefixed keys only.
-TODAY_STATE_KEY = "temp:today"
-# The hand-back the `seed` node gave the turn (`harness.graph.orchestrate`),
-# which answers none of the agent's calls: `prepend_digests` shows it after
-# the user's message on every request of the turn.
-SEEDED_STATE_KEY = "orchestrator:seeded"
-
-# The session-state keys the content `prepend_digests` adds is built from, and
-# the label each line opens with: the date `_stamp_today` writes, then the
-# digests `harness.studio` seeds each turn with, as JSON.
-_DIGESTS = (
-    (TODAY_STATE_KEY, "Today's date (UTC)"),
-    ("canvas_digest", "The user's canvas"),
-    ("conversation_digest", "Earlier turns in this conversation"),
-)
+logger = logging.getLogger(__name__)
 
 INSTRUCTION = """\
 You are the analyst behind DFO Studio, the Development Finance Observatory's
@@ -124,11 +140,11 @@ Load a skill a result names when its description bears on the question.
 Ask the user with ask_user whenever one short question would keep you from
 showing the wrong thing. That happens when the question could mean more than
 one thing and the data would differ, when a placeholder stands in for a real
-name ("country X", "a donor"), or when a counting choice below is left open.
-Offer the readings as options, in the user's words, except a count or
-prices, whose options are set out below. A question costs the user one
-click, and a wrong chart costs them the turn. When the question already settles the reading, go
-on without asking.
+name ("country X", "a donor"), or when search leaves a choice open below.
+Offer the readings as options, in the user's words, except a part's candidates
+or open prices, whose options are set out in their own paragraphs. A question
+costs the user one click, and a wrong chart costs them the turn. When the
+question already settles the reading, go on without asking.
 
 Before any fetch or plan, check how each part is counted. A definite reading
 settles choices the user may not have made: how a flow is counted, current
@@ -138,35 +154,40 @@ comparison within one year reads the same in current or constant prices.
 
 Put a word for how a flow is counted into `variable` only when the user said
 it, and let search elect the rest. When the user's words, the canvas or an
-earlier turn settle these choices, go on. When some are left open and another
-reading would give different figures, ask about each with ask_user, one
-question per choice, all in one call. Do not pick one yourself.
-
-The count search chose is the first option of the count question, and the
-other counts the result names follow. Label each as the result labels it,
-with the spec_id the result gives it. A part that lists `open_prices` leaves
-its prices open, so prices get a question of their own, with `prices_of` set
-to the part's spec_id. Its options are then the `open_prices` entries.
+earlier turn settle these choices, go on. A count search chose (`counted_as`)
+is settled too, even when it lists other counts under `alternatives`: go on
+with it and do not ask about the count. After your reply the harness adds a
+line, "Counted as: ...", naming the sector, region, provider and count basis
+each part was counted on, and offers other options of those choices, and
+the other counts a part lists under `alternatives`, as buttons the user can
+switch with, so leave those out of the reply.
+Search leaves a count open only when a part lists `candidates`, which you settle as set out above, and leaves prices
+open when a part lists `open_prices`. When
+prices are open and another reading would give different figures, ask the
+unit with ask_user in one call: one question per measure, with `unit_of` set
+to a part's spec_id, and `prices` set when a skill prefers current or constant.
+Parts that measure one thing over other years share one unit question, and
+one call holds at most three questions. Do not pick one yourself. Set `multi_select` on a
+question whose answers can hold together, such as which of several sectors to
+include; its options are plain labels.
 
 When the user picks a reading the result names, fetch its spec_id or name it
-in the plan brief. When they pick prices the result does not name, search
-again with that unit on the part, and put the count they chose, if any, in
-`variable`.
+in the plan brief. The answer to a unit question names the spec_id to fetch.
 
 A request that adds or combines measures from different sources, such as aid
 and debt, goes to plan straight after search, without ask_user. The planner
-asks how to combine them. Name each counting choice still open in the brief,
-for the planner to ask.
+asks how to combine them. Name each part's candidates or open prices in the
+brief, for the planner to ask.
 
-When the question names a period by an event or an administration ("since
-the election", "under the last government") and not by years, call search
-and ask_user in the same response. Search for every part, and ask which
-years the user means, with year ranges as the options ("2021 to the
-latest"). State nothing about the event itself, no dates, names or results.
-Then end your turn. When the answer comes back, use the years it gives, and
-ask a count or prices still open in one more ask_user call. When the years
-fall after the windows search reported, say the data ends earlier and answer
-with what it holds.
+When the question names a period by an event or an administration ("since the
+election", "under the last government") and not by years, call search and
+ask_user in the same response. Search for every part, and ask which years the
+user means, with year ranges as the options ("2021 to the latest"). State
+nothing about the event itself, no dates, names or results. Then end your
+turn. When the answer comes back, use the years it gives, and ask about
+candidates or prices search left open in one more ask_user call. When the
+years fall after the windows search reported, say the data ends earlier and
+answer with what it holds.
 
 When a published series states what the user asked for, fetch every definite
 part the question needs, so the answer covers everything asked.
@@ -205,15 +226,25 @@ second card for a frame only when it shows something the first cannot, such
 as the latest value beside a long trend. Cards show data. Do not use a card
 to stand in for a calculation the question needs.
 
-make_charts only adds cards. remove_cards takes off the cards the user names
-or, for a request to clear the canvas, all of them. When you redraw a card
-in another form ("make it a bar chart"), take the old card off and say in
-the reply that the new card replaces it. No tool pins, moves, resizes or
-renames a card. When the user asks for one of those, say in one sentence
-that you cannot do it here and where they can do it. A card's menu has Pin
-and Edit title (Edit card on a text card), a card moves by dragging its
-handle, and a data card resizes from its corner grip. Do not say you did
-something that no tool result this turn shows you did.
+make_charts only adds cards, and each turn's cards join the ones already on
+the canvas. A follow-up on the same subject keeps the earlier cards beside the
+new ones. remove_cards takes cards off in three cases: the cards the user
+names; every card, with all_cards, when the user asks to clear the canvas; and
+the earlier subject's cards when the conversation turns to another subject,
+which you say in the reply.
+remove_cards leaves pinned cards on the canvas and names them as kept_pinned,
+so say which stayed. When you redraw a card in another form ("make it a bar
+chart"), draw the new card first, then take the old card off, and say in the
+reply that the new card replaces it. When the old card is pinned and stays as
+kept_pinned, say that both cards are on the canvas. No tool pins, moves,
+resizes or renames a card. When the user asks for one of those, or asks to
+remove a card that stays as kept_pinned, say in one sentence that you cannot
+do it here and where they can do it. A card's menu has Pin to Canvas (Unpin
+from Canvas on a pinned card) and Edit title (Edit card on a text card), a
+card moves by dragging its handle, and a data card resizes from its corner
+grip. A pinned card comes off once the user unpins it from the card's menu
+and asks again. Do not say you did something that no tool result this turn
+shows you did.
 
 A period the user counts back from now ("the last five years", "over the
 past decade") has to keep moving as newer data arrives. Fetch such data with
@@ -224,15 +255,17 @@ the error says why, so draw it again corrected.
 
 The canvas and conversation digests that open the conversation summarise
 earlier turns in a line each. When a question needs an earlier turn's plan,
-readings or canvas card word for word, call recall, and do not answer from
-the summary or search again. The canvas digest only counts the cards on the
-user's canvas and the hidden ones. When the question refers to cards on the
-canvas ("that chart", "compare these", "make it a bar chart", "what's on my
-canvas", "clear the table"), call recall with part canvas first to see them,
-unless the digest's focus card is all the question needs. A new data
-question does not need it. Hidden cards are this conversation's others,
-which the user can put back with Add in the chat. You may talk about one,
-but it is not on the canvas and no tool shows it again.
+readings or canvas card word for word, call recall, and do not answer from the
+summary or search again. The canvas digest only counts the cards on the user's
+canvas, the pinned ones among them, and the hidden ones. When the question
+refers to cards on the canvas ("that chart", "compare these", "make it a bar
+chart", "what's on my canvas", "clear the table"), or turns to another
+subject so the earlier subject's cards come off, call recall with part canvas
+first to see them and their ids, unless the digest's focus card is all the
+question needs. A new data question on the subject already on the canvas
+does not need it. Hidden cards are the conversation's cards not on the
+canvas, which the user can put back with Add in the chat. You may talk about
+one, but it is not on the canvas and no tool puts it back.
 
 When the canvas digest names a focus_component_id, the user asked this
 question from that card, and "this", "it" or "here" mean that card. Answer
@@ -276,12 +309,14 @@ of a loose match. Prefer prose, and use a list only when the user asked for
 one that no drawn card holds. After a plan, answer every ask its result
 lists.
 
-Name each source once, with the measure the search result or plan record
-gives it, and not a narrower one the user asked for. When the user asked for
-more than that measure covers ("every kind of finance" answered from an ODA
-series), say what it covers and that the rest is not included. For a loose
-match the harness adds a sentence after your answer saying what the series
-covers and lacks, so leave that out.
+Name each source once, with the measure the search result or plan record gives
+it, and not a narrower one the user asked for. Keep the words of its label
+that say whose flows or which creditors it covers: debt service "owed to all
+creditors" is reported in those words, and not as "external debt service"
+alone. When the user asked for more than that measure covers ("every kind of
+finance" answered from an ODA series), say what it covers and that the rest is
+not included. For a loose match the harness adds a sentence after your answer
+saying what the series covers and lacks, so leave that out.
 
 When what you show reads the question otherwise than the user wrote it, such
 as a place read as another or a period without data replaced by the years
@@ -309,174 +344,131 @@ the plan chose as a choice made, with its reason.
 """
 
 
-def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
-    """Open the request's contents with today's UTC date and the turn's
-    canvas and conversation digests, as one user content, and show the
-    turn's seed hand-back (`SEEDED_STATE_KEY`) as its own user content after
-    the user's message (`harness.turn_events.after_turn_question`), or first when the request holds
-    no such message.
+@dataclass
+class OrchestratorDeps:
+    """One run's dependencies, which every tool call of the run reads.
 
-    They change from turn to turn, so they travel in the contents and the
-    system instruction stays the same on every call, served from a shared
-    cache (`harness.prefix_cache`). Adds nothing when state holds none of
-    them.
+    `state` is the turn's state. The calls of one model response write it
+    through one `RecordingState` (`view`), which `run_orchestrator` replaces
+    before each model request, so the keys each response's calls wrote are
+    known. `turn_id` is the turn's id (`OrchestratorCall.turn_id`).
     """
-    if seeded := callback_context.state.get(SEEDED_STATE_KEY):
-        llm_request.contents.insert(
-            after_turn_question(callback_context, llm_request.contents),
-            types.Content(role="user", parts=[types.Part(text=seeded)]),
-        )
-    lines = [
-        f"{label}: {digest}"
-        for key, label in _DIGESTS
-        if (digest := callback_context.state.get(key))
-    ]
-    if lines:
-        llm_request.contents.insert(
-            0, types.Content(role="user", parts=[types.Part(text="\n\n".join(lines))])
-        )
+
+    state: MutableMapping[str, Any]
+    turn_id: str
+    view: RecordingState = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.view = RecordingState(self.state)
 
 
-def name_get_skill_in_history(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
-    """Render the call lines of a skill page the turn's events already hold as
-    `get_skill` calls.
+@dataclass(frozen=True)
+class Orchestrator:
+    """The orchestrator's agent and its tools' names, in declared order."""
 
-    A turn paused on an `ask_user` or an approval and resumed after a deploy
-    replays its own earlier `get_skill` and `get_skill_file` answers, whose
-    printed `get_skill_file(` call lines name a tool the agent no longer holds
-    (`data_mcp.skills_client.name_get_skill_in_call_lines`).
-    """
-    del callback_context
-    for content in llm_request.contents:
-        for part in content.parts or ():
-            response = part.function_response
-            if response is None or not isinstance(response.response, dict):
-                continue
-            text = response.response.get("skill")
-            if isinstance(text, str) and (renamed := name_get_skill_in_call_lines(text)) != text:
-                part.function_response = response.model_copy(
-                    update={"response": {**response.response, "skill": renamed}}
-                )
+    agent: Agent[OrchestratorDeps, str | DeferredToolRequests]
+    tools: tuple[str, ...]
 
 
-def _without_adk_identity(name: str) -> Callable[[CallbackContext, LlmRequest], None]:
-    """A before-model callback that takes out of the system instruction the
-    line ADK appends to a chat-mode agent's
-    (`google.adk.flows.llm_flows.prompt._identity`, built here from the same
-    f-string for an agent with no description), so the model reads
-    `INSTRUCTION` as it is. ADK has no setting to leave the line out.
-
-    On gemini-3.8-flash the line alone switches the orchestrator's first call
-    into thinking: 98 to 703 reasoning tokens and 7 to 12 s a call with it, 0
-    tokens and about 2.5 s a call without.
-
-    It runs before the model is called, so the shared prefix cache
-    (`harness.prefix_cache`) holds the instruction without it."""
-    appended = f'\n\nYou are an agent. Your internal name is "{name}".'
-
-    def drop(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
-        instruction = llm_request.config.system_instruction
-        if isinstance(instruction, str):
-            llm_request.config.system_instruction = instruction.replace(appended, "", 1)
-
-    return drop
-
-
-def model_retry_options(*, attempts: int = 3, max_delay: float = 2.0) -> types.HttpRetryOptions:
-    """The HTTP retries a Gemini model call makes: up to `attempts` attempts on a
-    transient error (408, 429, 5xx), the first wait one second, no wait longer
-    than `max_delay` seconds."""
-    return types.HttpRetryOptions(attempts=attempts, initial_delay=1.0, max_delay=max_delay)
-
-
-def _retrying(
-    model_name: str,
+def orchestrator_agent(
+    tools: Sequence[FunctionType],
     *,
-    prefix_cache: PrefixCache | None = None,
-    attempts: int = 3,
-    max_delay: float = 2.0,
-) -> str | Gemini:
-    """`model_name` with retries (`model_retry_options`) when ADK resolves it
-    to Gemini: ADK's Gemini makes one attempt unless told otherwise, so a
-    transient 503 or 429 would fail the turn. Every call keeps to the
-    request's budget (`harness.turn_budget.BoundedGemini`). On `prefix_cache`,
-    each call reads the system instruction and tools from the shared cache.
-    Any other model name is returned as it is, for ADK to resolve."""
-    retry_options = model_retry_options(attempts=attempts, max_delay=max_delay)
-    if prefix_cache is not None:
-        return prefix_cache.model_for(model_name, retry_options=retry_options)
-    gemini = gemini_model_name(model_name)
-    if gemini is None:
-        return model_name
-    return BoundedGemini(model=gemini, retry_options=retry_options)
-
-
-def _utc_today() -> date:
-    return datetime.now(UTC).date()
-
-
-def _stamp_today(today: Callable[[], date]) -> Callable[[CallbackContext], None]:
-    """A before-agent callback that puts `today()` in state as an ISO date.
-
-    `prepend_digests` reads it from state, so every runner that builds the
-    agent through `create_orchestrator_agent` shows the model the date."""
-
-    def stamp(callback_context: CallbackContext) -> None:
-        callback_context.state[TODAY_STATE_KEY] = today().isoformat()
-
-    return stamp
-
-
-def create_orchestrator_agent(
-    *,
-    model_name: str,
-    tools: Sequence[Callable[..., Any]] = (),
-    today: Callable[[], date] = _utc_today,
-    prefix_cache: PrefixCache | None = None,
     thinking_level: ThinkingLevelName = DEFAULT_ORCHESTRATOR_THINKING_LEVEL,
-) -> LlmAgent:
-    """Build the orchestrator on `model_name` with `tools`, reading its
-    static prefix from `prefix_cache` when one is given. `today` is the clock
-    whose UTC date opens each request's contents. `thinking_level` caps the
-    model's reasoning effort. A tool that raises answers the model with an
-    error (`answering_tool_failures`) and the turn goes on. Each tool runs as
-    an `OrchestratorTool`, which answers a call missing a required argument as
-    one to correct."""
-    agent_tools = [OrchestratorTool(tool) for tool in tools]
-    return LlmAgent(
-        name=AGENT_NAME,
-        model=_retrying(model_name, prefix_cache=prefix_cache),
-        instruction=INSTRUCTION,
-        before_agent_callback=_stamp_today(today),
-        tools=agent_tools,
-        on_tool_error_callback=answering_tool_failures({tool.name for tool in agent_tools}),
-        # A workflow node defaults to "none", which shows each run only its
-        # own input: after a question or a plan the model would lose the
-        # user's message and its earlier results. The workflow runs this
-        # agent on its own branch, so "default" is the turn so far without
-        # the planner's internal events.
-        include_contents="default",
-        # Chat mode: each run of the agent reads its branch's earlier runs,
-        # its own calls and their results included, which in Studio are the
-        # turn's alone, since each turn has a session of its own. A
-        # single_turn node run reads only the events on its own node path,
-        # which leaves out every hand-back (`harness.graph.orchestrate`).
-        mode="chat",
-        before_model_callback=[
-            _without_adk_identity(AGENT_NAME),
-            name_get_skill_in_history,
-            prepend_digests,
-        ],
-        # Thought summaries are requested for the traces. The studio stream
-        # does not carry them. A stream cut off mid-response resumes from a
-        # continuation token, one extra hop instead of a full retry.
-        # google-genai defaults this to true; it is set so a change of that
-        # default cannot turn the resume off.
-        generate_content_config=types.GenerateContentConfig(
-            automatic_continuation=True,
-            thinking_config=types.ThinkingConfig(
-                thinking_level=types.ThinkingLevel(thinking_level),
-                include_thoughts=True,
-            ),
+    include_content: bool = True,
+) -> Orchestrator:
+    """The orchestrator as a Pydantic AI agent with `INSTRUCTION` and `tools`.
+
+    With no model of its own, each run names its model
+    (`orchestrator.model.orchestrator_model`), so one agent serves concurrent
+    runs. Thinking runs at `thinking_level`, with thought summaries requested
+    for the traces; Studio does not show them. Each tool is declared not
+    strict, which keeps the request's function calling mode `AUTO`. A run ends
+    on a response with no tool call, or on a call that handed off.
+
+    The agent traces through the global tracer provider (`invoke_agent`,
+    `chat` and `execute_tool` spans). With `include_content` the spans carry
+    the messages. The request parameters are left off, since the tool
+    declarations are on each model call's span.
+    """
+    names = tuple(tool.__name__ for tool in tools)
+    agent: Agent[OrchestratorDeps, str | DeferredToolRequests] = Agent(
+        None,
+        instructions=INSTRUCTION,
+        tools=[_tool(tool) for tool in tools],
+        deps_type=OrchestratorDeps,
+        output_type=[str, DeferredToolRequests],
+        model_settings=GoogleModelSettings(
+            google_thinking_config=types.ThinkingConfig(
+                thinking_level=types.ThinkingLevel(thinking_level), include_thoughts=True
+            ).model_dump(mode="json", exclude_none=True)
         ),
+        retries={"tools": UNLIMITED_RETRIES},
+        capabilities=[
+            ProcessHistory(replayed_history(names)),
+            Instrumentation(
+                InstrumentationSettings(
+                    include_content=include_content, include_model_request_parameters=False
+                )
+            ),
+        ],
+        name=AGENT_NAME,
     )
+    return Orchestrator(agent=agent, tools=names)
+
+
+def _tool(function: FunctionType) -> Tool[OrchestratorDeps]:
+    return declared_tool(
+        _tool_function(function), name=function.__name__, declaration=tool_declaration(function)
+    )
+
+
+def _tool_function(function: FunctionType) -> Callable[..., Awaitable[dict[str, Any]]]:
+    """The function Pydantic AI calls for `function`, taking the arguments as sent.
+
+    Arguments the function does not take are dropped. A function that takes
+    `call` runs over an `OrchestratorCall` on the response's state view. An
+    answer that is not a dict is wrapped under `result`. A body that raises an
+    `Exception` is answered with `harness.orchestrator_tools.raised_answer`
+    and logged at ERROR with its traceback. A cancellation propagates and logs
+    nothing. An answer that records a hand-off (`HANDED_OFF`) defers the call,
+    with the answer as the deferral's `record`.
+    """
+    parameters = set(inspect.signature(function).parameters)
+    takes_call = CALL_PARAMETER in parameters
+    accepted = parameters - {CALL_PARAMETER}
+    is_async = inspect.iscoroutinefunction(function)
+
+    async def run(ctx: RunContext[OrchestratorDeps], **raw: Any) -> dict[str, Any]:
+        deps = ctx.deps
+        arguments = {name: value for name, value in raw.items() if name in accepted}
+        if takes_call:
+            arguments[CALL_PARAMETER] = OrchestratorCall(state=deps.view, turn_id=deps.turn_id)
+        try:
+            answer = function(**arguments)
+            if is_async:
+                answer = await answer
+        except Exception as error:
+            logger.error(
+                "orchestrator tool %s raised %s turn_id=%s trace_id=%s",
+                function.__name__,
+                type(error).__name__,
+                deps.turn_id,
+                current_trace_id(),
+                exc_info=error,
+            )
+            answer = raised_answer(function.__name__, error)
+        response = as_function_response(answer)
+        if response.get(HANDED_OFF):
+            raise CallDeferred(metadata={"record": response})
+        return response
+
+    run.__name__ = function.__name__
+    return run
+
+
+__all__ = [
+    "INSTRUCTION",
+    "Orchestrator",
+    "OrchestratorDeps",
+    "orchestrator_agent",
+]

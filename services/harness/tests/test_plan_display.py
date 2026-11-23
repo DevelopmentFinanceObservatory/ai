@@ -25,6 +25,7 @@ from harness.decision_pick import DecisionPick, decision_pick
 from harness.plan_display import (
     _card_label,
     _concepts,
+    _kept_words,
     _label,
     card_choice_text,
     card_decision_text,
@@ -33,7 +34,10 @@ from harness.plan_display import (
     card_summary,
     card_title,
     choice_id,
+    chosen_count_decision,
     chosen_scope_decision,
+    count_choice_id,
+    count_options,
     decision_choice_id,
     decision_option_id,
     listed_together,
@@ -100,6 +104,7 @@ from planner.records import (
     EvidenceIssueCode,
     GroupBy,
     GrowthChange,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -2982,6 +2987,9 @@ def test_a_period_that_follows_the_newest_data_says_so_beside_its_years(
                 input_id="debt",
                 predicates=(PeriodThreshold(op="eq", year=2024, rolling=latest),),
             ),
+            FilterRequirement(
+                id="apart", input_id="debt", predicates=(PeriodIn(years=(2015, 2020)),)
+            ),
         ],
         # The dataset starts where the plan does, so reading it whole splits nothing.
         first_years=[FirstYear(requirement_id="debt", year=2015)],
@@ -3002,11 +3010,13 @@ def test_a_period_that_follows_the_newest_data_says_so_beside_its_years(
         ),
         "fixed": f"The change in {measure} from 2015 to 2020, read as a percentage change.",
         "newest": "Keeps rows where the year is exactly 2024, following the newest year.",
+        "apart": "Keeps rows where the year is 2015 or 2020.",
     }
     assert (
         _label(plan.requirement("last_five"), plan)
         == f"Growth in {measure}, 2019-2024, following the newest year"
     )
+    assert _label(plan.requirement("apart"), plan) == "Keep 2015 and 2020"
 
 
 # --- A plan whose dataset is read from its first year -------------------------------
@@ -3019,10 +3029,12 @@ def test_the_card_shows_one_row_per_step_the_model_wrote(decision: DecisionFacto
 
     steps = step_rows(plan)
 
+    cards = card_rows(plan)
     assert [row["id"] for row in steps] == ["debt", "total", "last_five"]
+    assert [row["id"] for row in cards] == ["debt", "total", "last_five"]
     assert [row["id"] for row in requirement_rows(plan)] == ["debt", "total", "last_five"]
     assert [row["id"] for row in operation_rows(plan)] == ["debt", "total", "last_five"]
-    assert "debt_history" not in repr([steps, requirement_rows(plan), operation_rows(plan)])
+    assert "debt_history" not in repr([steps, cards, requirement_rows(plan), operation_rows(plan)])
 
 
 def test_the_card_states_a_series_answer_over_the_years_the_plan_states(
@@ -4070,7 +4082,8 @@ def test_a_comparison_of_two_entities_of_one_retrieval_names_each_sides_entity(
     gap = plan.requirement("gap")
     us, uk = "grant equivalents for United States", "grant equivalents for United Kingdom"
 
-    card = _card_label(gap, plan, concepts=_concepts(plan).names, shapes=frame_shapes(plan))
+    kept = _kept_words(frame_shapes(plan)["gap"], plan)
+    card = _card_label(gap, plan, concepts=_concepts(plan).names, kept=kept)
 
     assert card == f"Compare {us} to {uk}"
     assert _label(gap, plan) == f"Compare {us} to {uk}"
@@ -4125,7 +4138,9 @@ def test_retrievals_named_alike_name_their_parties_once(
     concepts, shapes = _concepts(plan).names, frame_shapes(plan)
 
     shown = [
-        _card_label(requirement, plan, concepts=concepts, shapes=shapes)
+        _card_label(
+            requirement, plan, concepts=concepts, kept=_kept_words(shapes[requirement.id], plan)
+        )
         for requirement in plan.evidence_requirements
     ]
 
@@ -5153,3 +5168,42 @@ def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it()
         )
         is None
     )
+
+
+def test_a_count_row_offers_only_the_counts_every_source_of_it_offers() -> None:
+    """Germany's share of ODA to Ethiopia as admission wrote it, both pins
+    counted as gross disbursements beside net. Germany's pin is given the
+    counts the recorded block for health ODA to Kenya offers, gross beside
+    net disbursements and commitments, so the two pins still share one row,
+    which lists Germany's decision. That row offers gross and net only, the
+    counts both sources have, under one id that names both decisions."""
+    root = Path(__file__).parents[3]
+    recorded = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures/planner_runs/test_recorded_requests"
+            / "test_each_request_equals_its_stored_expectation"
+            / "share-germany-of-oda-ethiopia_reference.json"
+        ).read_text()
+    )
+    (search,) = json.loads(
+        (root / "evals/planner_entry/recordings/share-health-oda-kenya.json").read_text()
+    )["searches"][:1]
+    elected = source_from_spec_block(search["envelope"]["parts"][0]["spec"]).elected_measure
+    assert elected is not None
+    offered = (elected.label, *(other.label for other in elected.other_counts()))
+    assert set(offered) == {"gross disbursements", "net disbursements", "commitments"}
+    plan = Plan.model_validate(recorded["plan"])
+    germany, all_oda = (d for d in plan.decisions if d.slot.startswith("source_"))
+    assert all_oda.options == ("gross disbursements", "net disbursements")
+    widened = germany.model_copy(update={"options": offered})
+    plan = plan.model_copy(
+        update={"decisions": [widened if d.slot == germany.slot else d for d in plan.decisions]}
+    )
+
+    assert [d.slot for d in listed_together(plan, all_oda.slot)] == [germany.slot, all_oda.slot]
+    assert count_options(plan, widened) == ("gross disbursements", "net disbursements")
+    assert count_options(plan, all_oda) == ("gross disbursements", "net disbursements")
+    row = count_choice_id(plan, widened)
+    assert row == count_choice_id(plan, all_oda) == "germany:count"
+    assert chosen_count_decision(plan, row) is not None

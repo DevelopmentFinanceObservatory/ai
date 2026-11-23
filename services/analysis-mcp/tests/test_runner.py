@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx2
 import pytest
-from analysis_mcp import verbs
+from analysis_mcp import digest, verbs
 from analysis_mcp.digest import render_summary_digest
 from analysis_mcp.runner_client import (
     DEFAULT_RETRY_AFTER_S,
@@ -23,7 +23,7 @@ from analysis_mcp.runner_client import (
 )
 from analysis_mcp.summary import LIST_CAP, VerbSummary
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
-from common.caller import supplied_caller
+from common.breakdown_labels import NODES_READ_TIMEOUT_S
 from common.materialisation import (
     DEFAULT_MINT_OPTIONS,
     AnchorRecord,
@@ -35,7 +35,10 @@ from common.materialisation import (
     rendering,
     set_store,
 )
+from common.refusal import SERVICE_FAILURE
+from fastmcp.server.http import set_http_request
 from runner_replay import REPLIES_PATH
+from starlette.requests import Request
 
 _SPEC = "spec_" + "1" * 32
 _CV = "cv_" + "2" * 32
@@ -311,6 +314,46 @@ async def test_a_rolling_call_that_read_data_outside_its_anchor_record_refuses(
     }
 
 
+# A version the runner rendered from `_FRAME`'s dataset: a sum over its StatVars,
+# or a party-totals cut.
+_SUMMED = {"spec_id": _SPEC, "content_version": "cv_" + "a" * 32}
+
+
+@pytest.mark.parametrize(
+    ("base", "covered"),
+    [(_CV, True), ("cv_" + "b" * 32, False), (None, False)],
+    ids=[
+        "sum-of-the-anchored-version",
+        "sum-of-another-version",
+        # dfo-apis names no base for a cut, which can drop periods (C121f).
+        "cut-of-the-anchored-version",
+    ],
+)
+async def test_a_rolling_call_that_read_a_rendering_is_checked_by_its_base_version(
+    store: InMemoryMaterialisationStore, base: str | None, covered: bool
+) -> None:
+    # The record holds `_FRAME`'s dataset version; the runner read a version of its
+    # own rendered from it, and names the version a sum derives from.
+    record = await _anchor_over_both(store)
+    ready = _reading(_recorded_ready("growth"), _SUMMED, _OTHER_DATASET)
+    derived = [] if base is None else [{**_SUMMED, "base_content_version": base}]
+    _install(httpx2.Response(200, json={**ready, "derived_roots": derived}))
+
+    result = await _rolling_growth(_FRAME, record.anchor_key)
+
+    structured = result.structured_content
+    assert structured is not None
+    if covered:
+        assert result.is_error is False, result.content
+        return
+    assert structured["code"] == "rolling_anchor_unresolved"
+    assert structured["fix"] == {
+        "detail": "root_not_in_record",
+        "anchor_key": record.anchor_key,
+        "root": _SUMMED,
+    }
+
+
 async def test_a_rolling_call_over_other_populations_than_its_record_refuses_before_any_call(
     store: InMemoryMaterialisationStore,
 ) -> None:
@@ -456,7 +499,8 @@ def _record(options: dict[str, Any]) -> MintRecord:
         ),
         (
             # data-mcp's flow enrichment order: the type columns, then party_kind,
-            # party_class and party_whole. dfo-apis keeps a root's columns sorted.
+            # party_class and party_whole. The root sends them as the record lists
+            # them, and dfo-apis sorts and dedupes them.
             _record(
                 {
                     "format": "parquet",
@@ -479,8 +523,8 @@ def _record(options: dict[str, Any]) -> MintRecord:
                     "columns": [
                         "financingProvider_type",
                         "financingRecipient_type",
-                        "party_class",
                         "party_kind",
+                        "party_class",
                         "party_whole",
                     ],
                 },
@@ -492,7 +536,7 @@ def _record(options: dict[str, Any]) -> MintRecord:
         "mint-record",
         "stat-vars-sum",
         "breakdown-with-columns",
-        "flow-columns-sorted",
+        "flow-columns-in-order-once",
     ],
 )
 async def test_a_get_data_frame_is_sent_as_the_dataset_version_its_mint_record_names(
@@ -574,6 +618,191 @@ async def test_a_ready_answer_replies_with_its_summarys_verb_result_and_digest(
     assert f"spec_id={summary.spec_id}, content_version={summary.content_version}" in text
 
 
+async def test_the_statvars_a_summed_read_added_up_reach_the_result_and_the_digest(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    summed = [{"spec_id": _SPEC, "content_version": _DATASET_CV, "count": 1598}]
+    _install(
+        httpx2.Response(200, json={**_recorded_ready("aggregate"), "stat_vars_summed": summed})
+    )
+
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    assert result.is_error is False, result.content
+    assert result.structured_content is not None
+    assert result.structured_content["stat_vars_summed"] == summed
+    head, _, identity = result.content[0].text.rpartition("\n\n")
+    assert head.endswith(f"summed: {_SPEC}, {_DATASET_CV} added up over 1,598 StatVars.")
+    assert identity.startswith("frame reference:")
+
+
+# A CRS purpose code as dfo-apis' `POST /api/graph/nodes` answers it.
+_PURPOSE_NODE = {
+    "ref": "CRSPurposeCode15220",
+    "kind": "code",
+    "label": "civilian peace-building, conflict prevention and resolution (CRS Purpose)",
+    "code": {
+        "code": "15220",
+        "property": "crsPurpose",
+        "code_system": {"ref": "CRSPurposeCodeEnum", "label": "CRS Purpose"},
+    },
+}
+
+
+_PEACE = "civilian peace-building, conflict prevention and resolution"
+_BREAKDOWN = "stat_var_crsPurpose"
+_CELLS = ["CRSPurposeCode15220", "agriculture"]
+
+
+def _aggregate_by_purpose() -> dict[str, Any]:
+    """A recorded aggregate answer grouped by the two `_CELLS`."""
+    body = _recorded_ready("aggregate")
+    summary = body["summary"]
+    groups = summary["result"]["group_summaries"]
+    keyed = [
+        {**group, "group_key": [[_BREAKDOWN, cell]]}
+        for group, cell in zip(groups, _CELLS, strict=True)
+    ]
+    parameters = {**summary["parameters"], "group_by": [_BREAKDOWN]}
+    result = {**summary["result"], "group_summaries": keyed}
+    return {**body, "summary": {**summary, "parameters": parameters, "result": result}}
+
+
+def _rank_excluding_purposes() -> dict[str, Any]:
+    """A recorded rank answer whose exclusion names the two `_CELLS`."""
+    body = _recorded_ready("rank")
+    summary = body["summary"]
+    (exclusion, *_) = summary["exclusions"]
+    excluded = {**exclusion, "entities": {_BREAKDOWN: _CELLS}}
+    return {**body, "summary": {**summary, "exclusions": [excluded]}}
+
+
+def _compare_of_purposes() -> dict[str, Any]:
+    """A recorded compare answer of one StatVar across the two `_CELLS`, `agriculture`
+    on the left."""
+    replies = json.loads(REPLIES_PATH.read_text())
+    body = next(
+        reply["body"]
+        for key, reply in replies.items()
+        if reply["status"] == 200
+        and key.startswith("/api/datasets/analysis {")
+        and reply["body"]["summary"]["verb"] == "compare"
+        and reply["body"]["summary"]["result"]["left_entities"].keys() == {"donor"}
+        and reply["body"]["summary"]["result"]["right_entities"].keys() == {"donor"}
+    )
+    summary = body["summary"]
+    result = {
+        **summary["result"],
+        "left_entities": {_BREAKDOWN: _CELLS[1]},
+        "right_entities": {_BREAKDOWN: _CELLS[0]},
+    }
+    return {**body, "summary": {**summary, "exclusions": [], "result": result}}
+
+
+@pytest.mark.parametrize(
+    ("answer", "call", "shown"),
+    [
+        pytest.param(
+            _aggregate_by_purpose,
+            lambda: verbs.aggregate(frame_ref=_FRAME, aggregation="sum"),
+            [
+                f"{_BREAKDOWN}={_PEACE} (CRSPurposeCode15220)",
+                f"{_BREAKDOWN}=agriculture",
+            ],
+            id="group key",
+        ),
+        pytest.param(
+            _rank_excluding_purposes,
+            lambda: verbs.rank(frame_ref=_FRAME, rank_by=["donor"]),
+            [f"{_BREAKDOWN}={_PEACE} (CRSPurposeCode15220), {_BREAKDOWN}=agriculture"],
+            id="exclusion",
+        ),
+        pytest.param(
+            _compare_of_purposes,
+            lambda: verbs.compare(frame_ref=_FRAME, right_frame_ref=_DERIVED),
+            [f", {_PEACE} (CRSPurposeCode15220) minus agriculture"],
+            id="compare difference",
+        ),
+    ],
+)
+async def test_a_digest_names_a_breakdown_code_cell_by_its_label_and_value(
+    store: InMemoryMaterialisationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: Callable[[], dict[str, Any]],
+    call: Callable[[], Awaitable[Any]],
+    shown: list[str],
+) -> None:
+    """A dcid cell of a breakdown column reads as its label with the dcid after it,
+    which a filter or a select still binds, and a label cell as it is. The digest is
+    rendered once with no labels and once with them, and the nodes read is bounded by
+    its own short timeout."""
+    stated = answer()
+    renders = _count_renders(monkeypatch)
+
+    def reply(request: dict[str, Any]) -> httpx2.Response:
+        if "dcids" in request:
+            held = [
+                _PURPOSE_NODE
+                if dcid == _PURPOSE_NODE["ref"]
+                else {"ref": dcid, "status": "not_held"}
+                for dcid in request["dcids"]
+            ]
+            return httpx2.Response(200, json={"nodes": held})
+        return httpx2.Response(200, json=stated)
+
+    runner = _install(reply)
+
+    result = await call()
+
+    assert result.is_error is False, result.content
+    text = result.content[0].text
+    for line in shown:
+        assert line in text
+    reads = [request for request in runner.requests if request.url.path == "/api/graph/nodes"]
+    assert [json.loads(request.content) for request in reads] == [{"dcids": _CELLS}]
+    assert reads[0].extensions["timeout"]["read"] == NODES_READ_TIMEOUT_S
+    assert renders == [None, None]
+
+
+async def test_a_digest_with_no_cell_labelled_is_rendered_once(
+    store: InMemoryMaterialisationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    renders = _count_renders(monkeypatch)
+    _install(httpx2.Response(200, json=_recorded_ready("aggregate")))
+
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    assert result.is_error is False, result.content
+    assert renders == [None]
+
+
+def _count_renders(monkeypatch: pytest.MonkeyPatch) -> list[None]:
+    """A list that grows by one each time a digest is rendered."""
+    renders: list[None] = []
+    render = digest._render_summary_digest
+
+    def counted(summary: VerbSummary, *, heading: str | None) -> str:
+        renders.append(None)
+        return render(summary, heading=heading)
+
+    monkeypatch.setattr(digest, "_render_summary_digest", counted)
+    return renders
+
+
+async def test_an_answer_whose_summed_reads_do_not_fit_refuses_as_outside_the_contract(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    summed = [{"spec_id": _SPEC, "count": 0}]
+    _install(
+        httpx2.Response(200, json={**_recorded_ready("aggregate"), "stat_vars_summed": summed})
+    )
+
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "upstream_error"
+
+
 async def test_a_summary_tolerates_fields_dfo_apis_adds_to_its_exclusions_and_time(
     store: InMemoryMaterialisationStore,
 ) -> None:
@@ -592,6 +821,24 @@ async def test_a_summary_tolerates_fields_dfo_apis_adds_to_its_exclusions_and_ti
     assert result.is_error is False, result.content
     assert result.structured_content is not None
     assert result.structured_content["exclusions"] == summary["exclusions"]
+
+
+async def test_an_exclusion_reason_the_tools_do_not_declare_is_named_in_the_digest_only(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    body = _recorded_ready("rank")
+    summary = body["summary"]
+    (declared, *_) = summary["exclusions"]
+    added = {**declared, "reason": "a_reason_dfo_apis_added", "side": "a_side_it_added"}
+    stated = {**summary, "exclusions": [*summary["exclusions"], added]}
+    _install(httpx2.Response(200, json={**body, "summary": stated}))
+
+    result = await verbs.rank(frame_ref=_FRAME, rank_by=["donor"])
+
+    assert result.is_error is False, result.content
+    assert result.structured_content is not None
+    assert result.structured_content["exclusions"] == summary["exclusions"]
+    assert "a_reason_dfo_apis_added, a_side_it_added" in result.content[0].text
 
 
 @pytest.mark.parametrize(
@@ -654,16 +901,34 @@ def test_a_summary_holds_only_the_entries_its_digest_shows(
         (
             _ADDRESS_CALLER,
             "secret",
-            {"x-dfo-caller-principal": "secret", "x-dfo-caller": _ADDRESS_CALLER},
+            {
+                "x-dfo-caller-principal": "secret",
+                "x-dfo-caller": _ADDRESS_CALLER,
+                "x-dfo-surface": "mcp",
+                "x-dfo-user-agent": "claude-user/1.0 (+https://claude.ai)",
+            },
         ),
         (
             _ACCOUNT_CALLER,
             "secret",
-            {"x-dfo-caller-principal": "secret", "x-dfo-caller": _ACCOUNT_CALLER},
+            {
+                "x-dfo-caller-principal": "secret",
+                "x-dfo-caller": _ACCOUNT_CALLER,
+                "x-dfo-surface": "mcp",
+                "x-dfo-user-agent": "claude-user/1.0 (+https://claude.ai)",
+            },
         ),
         (_ADDRESS_CALLER, None, {}),
         (_ACCOUNT_CALLER, None, {}),
-        ("conversation:" + "b" * 32, "secret", {}),
+        (
+            "conversation:" + "b" * 32,
+            "secret",
+            {
+                "x-dfo-caller-principal": "secret",
+                "x-dfo-caller": "conversation:" + "b" * 32,
+            },
+        ),
+        ("conversation:" + "b" * 32, None, {}),
         ("ip:" + "a" * 31, "secret", {}),
         ("user:" + "b" * 31, "secret", {}),
         ("user:" + "b" * 33, "secret", {}),
@@ -676,6 +941,7 @@ def test_a_summary_holds_only_the_entries_its_digest_shows(
         "no-principal",
         "no-principal-account",
         "harness-conversation",
+        "harness-no-principal",
         "malformed-ip-short",
         "malformed-user-short",
         "malformed-user-long",
@@ -683,20 +949,29 @@ def test_a_summary_holds_only_the_entries_its_digest_shows(
         "malformed-user-uppercase",
     ],
 )
-async def test_a_website_caller_is_named_beside_the_principal(
+async def test_the_caller_is_named_beside_the_principal(
     store: InMemoryMaterialisationStore,
     caller: str,
     principal: str | None,
     sent: dict[str, str],
 ) -> None:
     runner = _install(_problem(422, "op_spec_invalid"), principal=principal)
-    with supplied_caller(caller):
+    inbound = [("x-dfo-caller", caller), ("user-agent", "claude-user/1.0 (+https://claude.ai)")]
+    scope = {"type": "http", "headers": [(k.encode(), v.encode()) for k, v in inbound]}
+    with set_http_request(Request(scope)):
         await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
 
     headers = runner.requests[-1].headers
     named = {
         name: headers[name]
-        for name in ("x-dfo-caller-principal", "x-dfo-caller")
+        for name in (
+            "x-dfo-caller-principal",
+            "x-dfo-caller",
+            "x-dfo-surface",
+            "x-dfo-user-agent",
+            "x-dfo-mcp-client",
+            "x-dfo-client",
+        )
         if name in headers
     }
     assert named == sent
@@ -752,21 +1027,73 @@ async def test_a_website_caller_is_named_beside_the_principal(
         ),
         (
             _problem(404, "spec_not_found"),
-            "upstream_error",
+            "spec_not_found",
             "do_not_retry",
-            {"detail": "spec_not_found detail"},
+            {},
         ),
         (
             httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
-            "upstream_error",
+            "timeout",
             "retry_after_delay",
-            {"detail": "slow"},
+            # A refusal passed through that the runner answered with a 5xx is
+            # its own failure.
+            {"kind": SERVICE_FAILURE},
+        ),
+        (
+            _problem(
+                422,
+                "compare_no_key_matched",
+                fix={"on": {"donor": "donor"}},
+                retry_mode="correct_and_retry",
+            ),
+            "compare_no_key_matched",
+            "correct_and_retry",
+            {"on": {"donor": "donor"}},
+        ),
+        (
+            _problem(422, "a_code_no_registry_holds", fix={"x": 1}, retry_mode="correct_and_retry"),
+            "a_code_no_registry_holds",
+            "correct_and_retry",
+            {"x": 1},
+        ),
+        (
+            _problem(500, "a_code_no_registry_holds", fix={"x": 1}),
+            "a_code_no_registry_holds",
+            "do_not_retry",
+            {"x": 1, "kind": SERVICE_FAILURE},
+        ),
+        (
+            _problem(422, "unit_heterogeneous", fix={"x": 1}, retry_mode="retry_whenever"),
+            "unit_heterogeneous",
+            "correct_and_retry",
+            {"x": 1},
+        ),
+        (
+            _problem(422, "a_code_no_registry_holds", fix={"x": 1}, retry_mode=["correct"]),
+            "a_code_no_registry_holds",
+            "do_not_retry",
+            {"x": 1},
+        ),
+        (
+            _problem(500, "internal_error"),
+            "upstream_error",
+            "do_not_retry",
+            # A problem the runner answered with a 5xx is its own failure.
+            {"detail": "internal_error detail", "kind": SERVICE_FAILURE},
         ),
         (
             httpx2.Response(502, text="bad gateway"),
             "upstream_error",
             "retry_after_delay",
-            {"detail": "dfo-apis answered 502 with no problem document"},
+            {"detail": "dfo-apis answered 502 with no problem document", "kind": SERVICE_FAILURE},
+        ),
+        # A 4xx with no problem document comes from a proxy or an IAM check in
+        # front of the runner, which failed of itself.
+        (
+            httpx2.Response(403, text="forbidden"),
+            "upstream_error",
+            "do_not_retry",
+            {"detail": "dfo-apis answered 403 with no problem document", "kind": SERVICE_FAILURE},
         ),
         (
             httpx2.Response(200, json={"status": "ready", "summary": {"verb": "aggregate"}}),
@@ -782,9 +1109,16 @@ async def test_a_website_caller_is_named_beside_the_principal(
         "over-ceiling",
         "busy",
         "pending",
-        "unmapped-code",
-        "retryable-unmapped-code",
+        "registry-code",
+        "retryable-registry-code",
+        "code-this-service-defines-no-factory-for",
+        "code-no-registry-holds",
+        "code-no-registry-holds-5xx",
+        "unheld-retry-mode",
+        "malformed-retry-mode",
+        "this-services-own-code",
         "no-problem-document",
+        "no-problem-document-4xx",
         "summary-unreadable",
     ],
 )
@@ -1478,15 +1812,18 @@ async def test_a_rebuilt_input_the_tree_recomputed_is_named_by_its_replayed_pair
 
 
 @pytest.mark.parametrize(
-    "resent",
+    ("resent", "code"),
     [
-        httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
-        httpx2.Response(502, text="bad gateway"),
+        (
+            httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
+            "timeout",
+        ),
+        (httpx2.Response(502, text="bad gateway"), "upstream_error"),
     ],
     ids=["timeout", "no-problem-document"],
 )
 async def test_a_transient_failure_of_the_call_sent_again_stays_retryable(
-    store: InMemoryMaterialisationStore, resent: httpx2.Response
+    store: InMemoryMaterialisationStore, resent: httpx2.Response, code: str
 ) -> None:
     await store.put_mint_record(_record({"format": "parquet"}))
     lost = {"spec_id": _SPEC, "content_version": _DATASET_CV}
@@ -1501,10 +1838,7 @@ async def test_a_transient_failure_of_the_call_sent_again_stays_retryable(
 
     structured = result.structured_content
     assert structured is not None
-    assert (structured["code"], structured["retry_mode"]) == (
-        "upstream_error",
-        "retry_after_delay",
-    )
+    assert (structured["code"], structured["retry_mode"]) == (code, "retry_after_delay")
     assert structured["retry_after_s"] is not None
 
 
@@ -1631,7 +1965,7 @@ async def test_a_lost_frame_on_a_call_that_does_not_rebuild_returns_the_runners_
         ),
         (
             httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
-            "upstream_error",
+            "timeout",
             DEFAULT_RETRY_AFTER_S,
             True,
         ),
@@ -1667,6 +2001,55 @@ async def test_a_derived_input_whose_replay_cannot_run_yet_refuses_with_its_dela
     assert structured is not None
     assert (structured["code"], structured.get("retry_after_s")) == (code, retry_after_s)
     assert any(_OPS in record.getMessage() for record in caplog.records) is logged
+
+
+@pytest.mark.parametrize(
+    ("replays", "code", "retry_mode"),
+    [
+        (
+            [
+                _problem(503, "upstream_version_changed", retryable=True),
+                httpx2.Response(200, json=_ready_as(_REPLAYED)),
+            ],
+            None,
+            None,
+        ),
+        (
+            [_problem(503, "upstream_version_changed", retryable=True)] * 2,
+            "upstream_version_changed",
+            "refresh_then_retry",
+        ),
+    ],
+    ids=["settles", "persists"],
+)
+async def test_a_replay_the_upstream_refreshed_under_is_run_once_more(
+    store: InMemoryMaterialisationStore,
+    replays: list[httpx2.Response],
+    code: str | None,
+    retry_mode: str | None,
+) -> None:
+    """A replay reads its roots at their newest versions, so a second replay reads
+    the refreshed data; one that refuses again answers with the runner's refusal."""
+    lost_root = {"spec_id": _SPEC, "content_version": _DATASET_CV}
+    answers = iter(replays)
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if body["latest"]:
+            return next(answers)
+        if body["tree"]["inputs"]["data"] == _DERIVED:
+            return _problem(404, "snapshot_not_found", fix=lost_root)
+        return httpx2.Response(200, json=_recorded_ready("aggregate"))
+
+    runner = _install(answer)
+    result = await verbs.aggregate(frame_ref=_DERIVED, aggregation="sum", rebuild_lost_frames=True)
+
+    assert sum(json.loads(request.content)["latest"] for request in runner.requests) == 2
+    structured = result.structured_content
+    assert structured is not None
+    if code is None:
+        assert result.is_error is False, _text(result)
+    else:
+        assert (structured["code"], structured["retry_mode"]) == (code, retry_mode)
 
 
 def _level_column(node: dict[str, Any]) -> str:

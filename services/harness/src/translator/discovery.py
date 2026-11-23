@@ -49,10 +49,10 @@ one quietly from several, nor borrow a source discovered for a different
 requirement -- the log keeps each requirement's own view of a source, even one
 two requirements both found.
 
-ADK dispatches several function calls from one turn with `asyncio.gather` over
-one shared `session.state` dict, so two concurrent `discover_source` calls can
-each want to spend the same slice of `DISCOVERY_CALL_BUDGET` before either has
-written a record for it. `discovery_lock` serialises only the budget check,
+Pydantic AI runs several function calls from one model response concurrently
+over one shared session state mapping, so two concurrent `discover_source`
+calls can each want to spend the same slice of `DISCOVERY_CALL_BUDGET` before
+either has written a record for it. `discovery_lock` serialises only the budget check,
 the reservation it makes, and the log's own read-modify-write; the `search`
 call to data-mcp, and `fetch_definitions`'s own `describe` round trip, both
 run with the lock released, so several calls reach the server at once. A
@@ -132,6 +132,7 @@ from compiler.sources import (
 )
 from compiler.surface import ToolCallResult, ToolSurface, ToolSurfaceUnavailableError
 from data_mcp import node_lookup, resolution
+from data_mcp.dcid import bare_dcid
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition
 from data_mcp.errors import UpstreamError
@@ -881,8 +882,8 @@ def load_log(state: SessionState) -> DiscoveryLog:
     """Return the session's discovery log, empty when none has been written.
 
     Rebuilds `records` sorted by `DiscoveryRecord.sequence`: the persisted
-    dict (see `save_log`) is a union of several calls' own snapshots once ADK
-    has merged their state deltas, and a dict has no order of its own, so
+    dict (see `save_log`) is a union of several calls' own snapshots once
+    they have merged into one state, and a dict has no order of its own, so
     `sequence` is what recovers "call order, latest last" for `_select_definite`
     and every other scan that relies on it.
 
@@ -956,14 +957,7 @@ def save_log(state: SessionState, log: DiscoveryLog) -> None:
     """Record `log` as the session's discovery log.
 
     Persisted as a dict keyed by each record's own `id`, with `sources`
-    keyed the same way `DiscoveryLog.sources` already is -- never as one JSON
-    string. ADK merges two concurrent tool calls' state deltas with
-    `deep_merge_dicts` (`google.adk.flows.llm_flows.tools._batch_executor`),
-    which recurses into a dict shared by both deltas but replaces a string
-    leaf outright with whichever delta is listed last. A record keyed by its
-    own `id` under a shared `"records"` dict is exactly such a shared dict,
-    so the merge unions the two calls' records instead of one replacing the
-    other's.
+    keyed the same way `DiscoveryLog.sources` already is.
     """
     state[DISCOVERY_STATE_KEY] = {
         "records": {record.id: record.model_dump(mode="json") for record in log.records},
@@ -1519,11 +1513,6 @@ def _dataset_requirement(plan: Plan, requirement_id: str) -> DatasetRequirement 
     return requirement
 
 
-def _bare_dcid(ref: str) -> str:
-    """`ref` with a `dcid:` prefix stripped, so a reference compares the same with or without it."""
-    return ref.removeprefix("dcid:")
-
-
 def _tried_source_ids(
     log: DiscoveryLog,
     requirement_key: str,
@@ -1599,8 +1588,8 @@ async def _describe_ids(
         fix = structured.get("fix")
         raw_dcids = fix.get("dcids") if isinstance(fix, Mapping) else None
         named = raw_dcids if isinstance(raw_dcids, Sequence) else ()
-        offenders = {_bare_dcid(str(dcid)) for dcid in named}
-        retry = [dcid for dcid in remaining if _bare_dcid(dcid) not in offenders]
+        offenders = {bare_dcid(str(dcid)) for dcid in named}
+        retry = [dcid for dcid in remaining if bare_dcid(dcid) not in offenders]
         if len(retry) == len(remaining):
             return (), True
         remaining = retry
@@ -1614,9 +1603,9 @@ def _definition_of(nodes: Sequence[Mapping[str, object]], dcid: str) -> str | No
     (`data_mcp.node_lookup.variable_text`). Reads by `ref`, `dcid:`-stripped, rather than by
     position: `describe` may answer fewer ids than asked, or in a different order.
     """
-    target = _bare_dcid(dcid)
+    target = bare_dcid(dcid)
     for node in nodes:
-        if _bare_dcid(str(node.get("ref", ""))) == target:
+        if bare_dcid(str(node.get("ref", ""))) == target:
             return described_variable_text(node)
     return None
 
@@ -2220,9 +2209,9 @@ def _cut_off(tool: ToolId, time_left: float) -> ToolSurfaceUnavailableError:
 
 # The prefix of the key each part Search answered a `resolve_definition` call
 # of the turn with is stored under, followed by the sha256 of the call's
-# arguments (`resolving_once`). A Studio turn is one ADK session
-# (`harness.studio`), so the parts last the turn: every invocation of it (the
-# first message, each plan card switch, the approval) is served what an
+# arguments (`resolving_once`). A Studio turn runs on one conversation's
+# state (`harness.studio`), so the parts last the turn: every invocation of it
+# (the first message, each plan card switch, the approval) is served what an
 # earlier one was answered, on any instance, and the next turn starts empty.
 # A part is written once, when it is resolved. A switch that fails or is
 # stopped keeps them: `harness.graph.switch._restore` puts back the drafting

@@ -14,20 +14,23 @@ import asyncio
 import json
 import logging
 import random
-from collections.abc import Callable
-from contextlib import suppress
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import compiler.surface as surface_module
+import harness.mcp_client as mcp_client_module
 import httpx2
 import pytest
 from analysis_mcp.runner_client import DerivedUnread
 from common.auth import apply_gate
 from common.caller import conversation_caller
 from common.period_note import period_note
-from compiler.caller_clients import CallerClients
-from compiler.surface import ProgressReport, ToolSurfaceUnavailableError
+from compiler.caller_clients import CallerClients, CallerTurn
+from compiler.surface import ProgressReport, ToolSurfaceUnavailableError, current_spec_uses
 from data_mcp import client_holder, mint_admission, stat_var_list
 from data_mcp.client import UpstreamClient
 from data_mcp.digest import render_answer
@@ -40,7 +43,8 @@ from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.classify import MAX_ATTEMPTS_PER_STEP
 from fastmcp import Client, Context, FastMCP
 from fastmcp.tools import ToolResult
-from harness.conversation import current_conversation_id
+from harness import mcp_client
+from harness.conversation import current_conversation_id, current_conversation_key, current_turn_id
 from harness.mcp_client import (
     McpExecutor,
     McpResolver,
@@ -53,9 +57,17 @@ from harness.mcp_client import (
     _withheld_card,
 )
 from harness.mcp_deadlines import McpTimeoutPolicy
-from harness.provenance import ProvenanceStore
+from harness.provenance import (
+    CARD_FRAME_KEY,
+    CARD_LINEAGE_KEY,
+    CardLineage,
+    CardLineageDecodeError,
+    ProvenanceStore,
+)
+from harness.rolling_cards import AdmittedWrite, RollingCards
 from harness.settings import Settings
-from harness.tool_contracts import ResolverError, graph_envelope
+from harness.studio_state import DatabaseUnavailable
+from harness.tool_contracts import HarnessCode, ResolverError, graph_envelope
 from harness.wire import FactSummary, component_fault
 from mcp import MCPError
 from mcp.types import INVALID_PARAMS, REQUEST_TIMEOUT, ErrorData
@@ -666,7 +678,8 @@ async def test_a_card_on_a_fetched_place_types_retrieval_is_drawn_on_the_pair_df
 ) -> None:
     """`get_data` names a retrieval read with place types by its manifest's own pair,
     beside the pair the store holds it under, and a card drawn on the manifest's
-    pair finds the retrieval's lineage."""
+    pair finds the retrieval's lineage. The turn hears the spec fetched, then
+    drawn."""
     minted = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}
     typed = {"spec_id": minted["spec_id"], "content_version": "cv_" + "2" * 32}
     manifest = {
@@ -679,10 +692,16 @@ async def test_a_card_on_a_fetched_place_types_retrieval_is_drawn_on_the_pair_df
     scripted_presentation_client([_tool_result(manifest), _write_result(envelope)])
     store = ProvenanceStore()
     executor = McpExecutor(settings=Settings(), provenance=store)
+    uses: list[tuple[str, str]] = []
+    token = current_spec_uses.set(lambda use, spec_id: uses.append((use, spec_id)))
 
-    fetched = await executor(tool="get_data", args={"spec_id": minted["spec_id"]})
-    drawn = await executor(tool="write_component", args={"component_id": "cmp_1", "intent": {}})
+    try:
+        fetched = await executor(tool="get_data", args={"spec_id": minted["spec_id"]})
+        drawn = await executor(tool="write_component", args={"component_id": "cmp_1", "intent": {}})
+    finally:
+        current_spec_uses.reset(token)
 
+    assert uses == [("fetched", minted["spec_id"]), ("drawn", minted["spec_id"])]
     assert fetched["frame_refs"] == [minted]
     assert fetched["store_refs"] == [typed]
     assert drawn["outcome"] == "ok", drawn
@@ -971,6 +990,547 @@ async def test_the_executor_withholds_a_card_with_no_linked_lineage_as_a_harness
     assert refusal["retry_mode"] == "do_not_retry"
 
 
+class _CardLineages:
+    """The lineages a conversation's card writes commit, read back as
+    `StudioStore.card_lineage` reads them: card `component_id`'s own row, else
+    one drawn from `frame`, else one whose write named it, latest first."""
+
+    def __init__(self) -> None:
+        self.committed: list[CardLineage] = []
+        self.reads: list[dict[str, Any]] = []
+        # Raised by every read when set: a row that does not decode, a fault.
+        self.raises: Exception | None = None
+        # How long each read takes.
+        self.delay_s = 0.0
+
+    def commit(self, card: CardLineage) -> None:
+        """A card write's commit: the first row for a card stands."""
+        if all(row.component_id != card.component_id for row in self.committed):
+            self.committed.append(card)
+
+    async def card_lineage(
+        self,
+        principal: str,
+        conversation_id: str,
+        *,
+        component_id: str | None = None,
+        frame: tuple[str | None, str | None] | None = None,
+    ) -> CardLineage | None:
+        del principal, conversation_id
+        self.reads.append({"component_id": component_id, "frame": frame})
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
+        if self.raises is not None:
+            raise self.raises
+        latest = list(reversed(self.committed))
+        for matches in (
+            lambda card: component_id is not None and card.component_id == component_id,
+            lambda card: frame is not None and card.frame == frame,
+            lambda card: frame is not None and card.requested == frame,
+        ):
+            found = next((card for card in latest if matches(card)), None)
+            if found is not None:
+                return found
+        return None
+
+
+_FRAME_F = {"spec_id": "ops_" + "6" * 32, "content_version": "ocv_" + "6" * 32}
+_KEY_F = (_FRAME_F["spec_id"], _FRAME_F["content_version"])
+# A frame no card was drawn from.
+_FRAME_G = {"spec_id": "ops_" + "b" * 32, "content_version": "ocv_" + "b" * 32}
+
+
+def _drawn_on_f() -> ProvenanceStore:
+    """A store holding frame F, resting on two retrievals whose step declared one StatVar."""
+    conversation = current_conversation_id.get()
+    store = ProvenanceStore()
+    sources = []
+    for n in (7, 8):
+        ref = {"spec_id": "spec_" + str(n) * 32, "content_version": "cv_" + str(n) * 32}
+        citation = {"text": f"src:{n}", "sources": [{"ref": f"src:{n}", "label": f"src:{n}"}]}
+        store.put(conversation=conversation, manifest={"citation": citation}, **ref)
+        sources.append((ref["spec_id"], ref["content_version"]))
+    assert store.alias(conversation=conversation, **_FRAME_F, sources=sources, stat_var_count=1)
+    return store
+
+
+def _written_on_f(component_id: str, *, revision: int = 1) -> SimpleNamespace:
+    return _tool_result(
+        {"component_id": component_id, "revision": revision, "fact_summary": {}},
+        meta={
+            RESOLVED_PAYLOAD_META_KEY: resolved_revision(
+                "line_chart", component_id=component_id, revision=revision, frame_ref=_FRAME_F
+            )
+        },
+    )
+
+
+async def test_a_revise_of_a_card_with_no_lineage_row_borrows_the_row_of_a_card_on_its_frame(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """Card X was drawn on frame F before lineages were stored, and card Y
+    later drawn on F stored F's. A fresh executor revises X, naming F as Edit
+    Card does: one read finds no row of X's and Y's row for F, and X is drawn
+    with Y's sources and count. A revise of Y on the instance that drew it,
+    which holds F, reads nothing and carries no lineage. X's revise, whose
+    read found no row of X's own, carries X's for its write to commit."""
+    client = scripted_presentation_client(
+        [
+            _written_on_f("cmp_y"),
+            _written_on_f("cmp_x", revision=2),
+            _written_on_f("cmp_y", revision=2),
+        ]
+    )
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    lineages = _CardLineages()
+    drawing = McpExecutor(settings=Settings(), provenance=_drawn_on_f(), card_lineages=lineages)
+    drawn_y = await drawing(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}},
+    )
+    lineages.commit(drawn_y.pop(CARD_LINEAGE_KEY))
+    fresh = McpExecutor(settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages)
+    revise = {"intent": {"title": "New"}, CARD_FRAME_KEY: _FRAME_F}
+
+    revised_x = await fresh(tool="write_component", args={"component_id": "cmp_x", **revise})
+    revised_y = await drawing(tool="write_component", args={"component_id": "cmp_y", **revise})
+
+    # The frame the caller read rides no call to the platform.
+    assert client.calls == ["write_component"] * 3
+    assert all(CARD_FRAME_KEY not in arguments for arguments in client.arguments)
+    assert lineages.reads == [{"component_id": "cmp_x", "frame": _KEY_F}]
+    assert revised_x["outcome"] == "ok", revised_x
+    drawn, revised = drawn_y["component"], revised_x["component"]
+    assert [source["id"] for source in drawn["provenance"]["sources"]] == ["src:7", "src:8"]
+    assert revised["provenance"]["sources"] == drawn["provenance"]["sources"]
+    assert revised["fact_summary"]["attribution"] == drawn["fact_summary"]["attribution"]
+    assert revised_x[CARD_LINEAGE_KEY].component_id == "cmp_x"
+    assert revised_x[CARD_LINEAGE_KEY].lineage == lineages.committed[0].lineage
+    assert revised_y["outcome"] == "ok", revised_y
+    assert CARD_LINEAGE_KEY not in revised_y
+
+
+async def test_a_card_on_a_bare_spec_id_the_platform_resolves_to_a_held_frame_draws(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """An intent naming a bare `spec_` id names no pair the executor can look
+    up, so nothing is read and the write goes on. The platform resolves it to
+    a frame the store holds, and the card draws."""
+    scripted_presentation_client([_written_on_f("cmp_1")])
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    lineages = _CardLineages()
+    executor = McpExecutor(settings=Settings(), provenance=_drawn_on_f(), card_lineages=lineages)
+
+    drawn = await executor(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": {"spec_id": "spec_1"}}},
+    )
+
+    assert drawn["outcome"] == "ok", drawn
+    assert lineages.reads == []
+    assert drawn[CARD_LINEAGE_KEY].frame == _KEY_F
+
+
+@pytest.mark.parametrize(
+    ("args", "fault"),
+    [
+        pytest.param(
+            {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
+            None,
+            id="create-on-a-frame-no-card-holds",
+        ),
+        pytest.param(
+            {"component_id": "cmp_x", "intent": {"title": "New"}, CARD_FRAME_KEY: _FRAME_G},
+            None,
+            id="revise-on-a-frame-no-card-holds",
+        ),
+        pytest.param(
+            {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
+            CardLineageDecodeError("members do not decode"),
+            id="row-that-does-not-decode",
+        ),
+        pytest.param(
+            {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
+            DatabaseUnavailable("unreachable"),
+            id="store-unreachable",
+        ),
+        pytest.param(
+            {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
+            LookupError("not loaded"),
+            id="not-loaded",
+        ),
+        pytest.param(
+            {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
+            "hangs",
+            id="past-the-budget",
+        ),
+    ],
+)
+async def test_a_write_whose_lineage_cannot_be_restored_goes_on_as_with_no_lineage_store(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+    args: dict[str, Any],
+    fault: Exception | str | None,
+) -> None:
+    """Restoring is best effort. Whether no card on the frame has a row or the
+    read fails, however it fails, the write is sent and comes back exactly as
+    it does from an executor with no lineage store: here, a card withheld
+    for a frame with no lineage."""
+    monkeypatch.setattr(mcp_client, "_LINEAGE_READ_BUDGET_S", 0.05)
+    client = scripted_presentation_client([_written_on_f("cmp_1"), _written_on_f("cmp_1")])
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    lineages = _CardLineages()
+    if fault == "hangs":
+        lineages.delay_s = 60.0
+    elif isinstance(fault, Exception):
+        lineages.raises = fault
+    with_store = McpExecutor(
+        settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages
+    )
+    without = McpExecutor(settings=Settings(), provenance=ProvenanceStore())
+
+    async with asyncio.timeout(5):
+        written = await with_store(tool="write_component", args=dict(args))
+    expected = await without(tool="write_component", args=dict(args))
+
+    assert client.calls == ["write_component", "write_component"]
+    assert written == expected
+    assert written["refusal"]["code"] == HarnessCode.PROVENANCE_UNAVAILABLE
+    assert len(lineages.reads) == 2
+
+
+async def test_a_card_whose_resolved_frame_the_store_lacks_reads_it_once_after_the_write(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """The write names frame N, which the store holds, and the platform draws
+    the card from F, which it lacks (evicted, or never held here). Once the
+    write returns, one read by F restores the stored lineage and the card
+    draws with it."""
+    scripted_presentation_client([_written_on_f("cmp_2")])
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    conversation = current_conversation_id.get()
+    lineages = _CardLineages()
+    on_f = _drawn_on_f()
+    lineage_f = on_f.get(conversation=conversation, **_FRAME_F)
+    assert lineage_f is not None
+    lineages.commit(
+        CardLineage(component_id="cmp_1", frame=_KEY_F, lineage=lineage_f, stat_var_count=1)
+    )
+    store = ProvenanceStore()
+    store.put(conversation=conversation, manifest={}, **_FRAME_G)
+    executor = McpExecutor(settings=Settings(), provenance=store, card_lineages=lineages)
+
+    drawn = await executor(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
+    )
+
+    assert drawn["outcome"] == "ok", drawn
+    assert lineages.reads == [{"component_id": None, "frame": _KEY_F}]
+    assert [source["id"] for source in drawn["component"]["provenance"]["sources"]] == [
+        "src:7",
+        "src:8",
+    ]
+    assert drawn["component"]["fact_summary"]["attribution"]["indicator_count"] == 1
+
+
+async def test_a_write_reads_a_frame_it_already_read_and_missed_only_once(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """The write names F, which neither the store nor any card holds, and the
+    platform draws the card from F: the read before the write found nothing,
+    so none follows it."""
+    scripted_presentation_client([_written_on_f("cmp_2")])
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    lineages = _CardLineages()
+    executor = McpExecutor(
+        settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages
+    )
+
+    written = await executor(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}},
+    )
+
+    assert written["refusal"]["code"] == HarnessCode.PROVENANCE_UNAVAILABLE
+    assert lineages.reads == [{"component_id": None, "frame": _KEY_F}]
+
+
+class _StalledLineages(_CardLineages):
+    """A store whose connection stalls: the read hangs, and so does its
+    cleanup once the read is cancelled."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleaned_up = asyncio.Event()
+
+    async def card_lineage(self, *args: Any, **kwargs: Any) -> CardLineage | None:
+        try:
+            await asyncio.sleep(60)
+        finally:
+            await asyncio.sleep(0.5)
+            self.cleaned_up.set()
+        return None  # pragma: no cover -- the read is always cancelled
+
+
+async def test_a_lineage_read_on_a_stalled_connection_returns_at_its_budget(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The write waits for the read at most its budget, however long the
+    cancelled read takes to clean up; the cleanup runs on in the
+    background."""
+    monkeypatch.setattr(mcp_client, "_LINEAGE_READ_BUDGET_S", 0.05)
+    scripted_presentation_client([_written_on_f("cmp_2")])
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    lineages = _StalledLineages()
+    executor = McpExecutor(
+        settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages
+    )
+
+    started = time.monotonic()
+    written = await executor(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}},
+    )
+
+    assert time.monotonic() - started < 0.4
+    assert written["refusal"]["code"] == HarnessCode.PROVENANCE_UNAVAILABLE
+    assert not lineages.cleaned_up.is_set()
+    await asyncio.wait_for(lineages.cleaned_up.wait(), timeout=5)
+    await asyncio.sleep(0)
+    assert executor._abandoned_reads == set()
+
+
+async def test_the_resolved_frames_read_runs_outside_the_write_retrys_deadline(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retried write the platform stored with 0.05 s of its call deadline
+    left draws its card even when the read of its resolved frame takes
+    longer: the read runs once the retried call has returned."""
+    monkeypatch.setattr(mcp_client, "_LINEAGE_READ_BUDGET_S", 2.0)
+    scripted_presentation_client(
+        [
+            _presentation_refusal("retry_after_delay", fix={"rows_requested": 250_000}),
+            _written_on_f("cmp_2"),
+        ]
+    )
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    conversation = current_conversation_id.get()
+    lineages = _CardLineages()
+    lineage_f = _drawn_on_f().get(conversation=conversation, **_FRAME_F)
+    assert lineage_f is not None
+    lineages.commit(
+        CardLineage(component_id="cmp_1", frame=_KEY_F, lineage=lineage_f, stat_var_count=1)
+    )
+    lineages.delay_s = 0.3
+    store = ProvenanceStore()
+    store.put(conversation=conversation, manifest={}, **_FRAME_G)
+    clock = _Clock()
+    deadline_s = McpTimeoutPolicy(settings=Settings()).call_timeout_s("write_component")
+
+    async def wait(seconds: float) -> None:
+        clock.now = deadline_s - 0.05
+
+    executor = McpExecutor(
+        settings=Settings(),
+        provenance=store,
+        card_lineages=lineages,
+        sleep=wait,
+        jitter=random.Random(7).uniform,
+        clock=clock,
+    )
+
+    drawn = await executor(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
+    )
+
+    assert drawn["outcome"] == "ok", drawn
+    assert lineages.reads == [{"component_id": None, "frame": _KEY_F}]
+
+
+async def test_a_revise_that_read_its_cards_own_row_commits_no_lineage(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """The restore read found card X's own row, so X's lineage is stored and
+    its write carries none. A card whose read found another card's row
+    carries its own (`test_a_revise_of_a_card_with_no_lineage_row_...`)."""
+    scripted_presentation_client([_written_on_f("cmp_x", revision=2)])
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    lineage_f = _drawn_on_f().get(conversation=current_conversation_id.get(), **_FRAME_F)
+    assert lineage_f is not None
+    lineages = _CardLineages()
+    lineages.commit(
+        CardLineage(component_id="cmp_x", frame=_KEY_F, lineage=lineage_f, stat_var_count=1)
+    )
+    executor = McpExecutor(
+        settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages
+    )
+
+    revised = await executor(
+        tool="write_component",
+        args={"component_id": "cmp_x", "intent": {"title": "New"}, CARD_FRAME_KEY: _FRAME_F},
+    )
+
+    assert revised["outcome"] == "ok", revised
+    assert lineages.reads == [{"component_id": "cmp_x", "frame": _KEY_F}]
+    assert CARD_LINEAGE_KEY not in revised
+
+
+async def test_a_card_on_a_retrieval_served_under_another_pair_restores_by_either_pair(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """A retrieval minted with extra columns is named by its `frame_ref` and
+    served under the manifest's own pair, which the platform draws the card
+    from. The card's row keeps both, so a fresh executor writing on either
+    pair restores the card's lineage."""
+    served = {"spec_id": "spec_" + "9" * 32, "content_version": "cv_" + "9" * 32}
+    named = {"spec_id": served["spec_id"], "content_version": "cv_" + "a" * 32}
+    citation = {"text": "src:9", "sources": [{"ref": "src:9", "label": "src:9"}]}
+    manifest = {
+        "definition": {"spec_id": served["spec_id"]},
+        "content_version": served["content_version"],
+        "frame_ref": named,
+        "citation": citation,
+    }
+
+    def written(component_id: str) -> SimpleNamespace:
+        return _tool_result(
+            {"component_id": component_id, "revision": 1, "fact_summary": {}},
+            meta={
+                RESOLVED_PAYLOAD_META_KEY: resolved_revision(
+                    "line_chart", component_id=component_id, revision=1, frame_ref=served
+                )
+            },
+        )
+
+    scripted_presentation_client([written("cmp_1"), written("cmp_2"), written("cmp_3")])
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    drawn = ProvenanceStore()
+    drawn.put_retrieval(conversation=current_conversation_id.get(), manifest=manifest)
+    lineages = _CardLineages()
+    first = McpExecutor(settings=Settings(), provenance=drawn, card_lineages=lineages)
+    card = await first(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": named}},
+    )
+    stored = card.pop(CARD_LINEAGE_KEY)
+    lineages.commit(stored)
+
+    redrawn = []
+    for frame_ref in (named, served):
+        fresh = McpExecutor(
+            settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages
+        )
+        redrawn.append(
+            await fresh(
+                tool="write_component",
+                args={"intent": {"type": "line_chart", "title": "t", "frame_ref": frame_ref}},
+            )
+        )
+
+    assert stored.frame == (served["spec_id"], served["content_version"])
+    assert stored.requested == (named["spec_id"], named["content_version"])
+    assert [outcome["outcome"] for outcome in redrawn] == ["ok", "ok"], redrawn
+    for outcome in redrawn:
+        assert (
+            outcome["component"]["provenance"]["sources"]
+            == (card["component"]["provenance"]["sources"])
+        )
+
+
+@pytest.mark.parametrize(
+    "asked",
+    [
+        pytest.param("replayed", id="recreate-on-the-stored-intents-frame"),
+        pytest.param("named", id="redraw-on-the-frame-the-first-create-named"),
+    ],
+)
+async def test_a_rolling_recreate_on_a_fresh_executor_states_the_first_draws_sources_and_count(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+    asked: str,
+) -> None:
+    """A rolling card asked for on frame N is drawn on N's replay R from a
+    frame resting on two retrievals whose step declared one StatVar. A second
+    executor, its provenance store empty, writes a card asking for R (an Edit
+    Card recreate from the stored intent), which the rolling rules replay onto
+    R2, or for N (a redraw from the canvas), replayed onto R again. It reads the first card's stored
+    lineage before the write, so the new card states the same sources and
+    indicator count."""
+    named = {"spec_id": "ops_" + "1" * 32, "content_version": "ocv_" + "1" * 32}
+    replayed = {"spec_id": "ops_" + "2" * 32, "content_version": "ocv_" + "2" * 32}
+    replayed_again = {"spec_id": "ops_" + "3" * 32, "content_version": "ocv_" + "3" * 32}
+    moves = {
+        (named["spec_id"], named["content_version"]): replayed,
+        (replayed["spec_id"], replayed["content_version"]): replayed_again,
+    }
+
+    async def admit(self: RollingCards, args: dict[str, Any], **_: Any) -> AdmittedWrite:
+        intent = args["intent"]
+        frame = intent["frame_ref"]
+        target = moves[(frame["spec_id"], frame["content_version"])]
+        return AdmittedWrite(
+            args={**args, "intent": {**intent, "frame_ref": target}}, replayed_from=dict(frame)
+        )
+
+    monkeypatch.setattr(RollingCards, "admit", admit)
+    redraw_frame = replayed if asked == "replayed" else named
+    written_on = moves[(redraw_frame["spec_id"], redraw_frame["content_version"])]
+    scripted_presentation_client(
+        [
+            _tool_result(
+                {"component_id": component_id, "revision": 1, "fact_summary": {}},
+                meta={
+                    RESOLVED_PAYLOAD_META_KEY: resolved_revision(
+                        "line_chart", component_id=component_id, revision=1, frame_ref=frame_ref
+                    )
+                },
+            )
+            for component_id, frame_ref in (("cmp_1", replayed), ("cmp_2", written_on))
+        ]
+    )
+    conversation = current_conversation_id.get()
+    current_conversation_key.set(("principal", conversation))
+    drawn = ProvenanceStore()
+    sources = []
+    for n in (4, 5):
+        ref = {"spec_id": "spec_" + str(n) * 32, "content_version": "cv_" + str(n) * 32}
+        citation = {"text": f"src:{n}", "sources": [{"ref": f"src:{n}", "label": f"src:{n}"}]}
+        drawn.put(conversation=conversation, manifest={"citation": citation}, **ref)
+        sources.append((ref["spec_id"], ref["content_version"]))
+    assert drawn.alias(conversation=conversation, **named, sources=sources, stat_var_count=1)
+    lineages = _CardLineages()
+    first = McpExecutor(settings=Settings(), provenance=drawn, card_lineages=lineages)
+    drawn_card = await first(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": named}},
+    )
+    lineages.commit(drawn_card.pop(CARD_LINEAGE_KEY))
+
+    second = McpExecutor(settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages)
+    redrawn = await second(
+        tool="write_component",
+        args={
+            "intent": {
+                "type": "line_chart",
+                "title": "t",
+                "frame_ref": redraw_frame,
+            }
+        },
+    )
+
+    assert redrawn["outcome"] == "ok", redrawn
+    first_card, new_card = drawn_card["component"], redrawn["component"]
+    assert [source["id"] for source in first_card["provenance"]["sources"]] == ["src:4", "src:5"]
+    assert new_card["provenance"]["sources"] == first_card["provenance"]["sources"]
+    assert first_card["fact_summary"]["attribution"]["indicator_count"] == 1
+    assert new_card["fact_summary"]["attribution"] == first_card["fact_summary"]["attribution"]
+    assert new_card["provenance"]["inputs"][0] == written_on
+
+
 async def test_the_executor_relays_a_platform_write_refusal_as_a_service_refusal(
     scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
 ) -> None:
@@ -1140,7 +1700,7 @@ def fake_policy_clients(monkeypatch: pytest.MonkeyPatch) -> list[_FakeMcpClient]
         url: str,
         *,
         auth: str | None,
-        caller: str | None,
+        caller: CallerTurn,
         tool: str | None = None,
     ) -> Any:
         client = _FakeMcpClient(caller)
@@ -1181,33 +1741,40 @@ async def test_the_executor_reuses_one_get_data_client_across_calls(
 async def test_two_conversations_get_two_separate_get_data_clients(
     fake_policy_clients: list[_FakeMcpClient],
 ) -> None:
-    """Client reuse is per conversation, not process-wide: two conversations
-    calling `get_data` must not share one client, and each client names its
-    own conversation as the caller."""
+    """Client reuse is per conversation turn, not process-wide: two
+    conversations calling `get_data` must not share one client, nor two turns
+    of one conversation, and each client names its own conversation as the
+    caller and its own turn."""
     executor = McpExecutor(settings=Settings())
+    first, second = "tr_" + "1" * 16, "tr_" + "2" * 16
 
     current_conversation_id.set("conv-a")
+    current_turn_id.set(first)
     await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
     current_conversation_id.set("conv-b")
     await executor(tool="get_data", args={"spec_id": "spec_" + "2" * 32})
+    current_conversation_id.set("conv-a")
+    current_turn_id.set(second)
+    await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
 
-    assert len(fake_policy_clients) == 2
-    assert fake_policy_clients[0] is not fake_policy_clients[1]
-    assert fake_policy_clients[0].calls == ["get_data"]
-    assert fake_policy_clients[1].calls == ["get_data"]
+    assert len(fake_policy_clients) == 3
+    assert [client.calls for client in fake_policy_clients] == [["get_data"]] * 3
     assert [client.caller for client in fake_policy_clients] == [
-        conversation_caller("conv-a"),
-        conversation_caller("conv-b"),
+        CallerTurn(conversation_caller("conv-a"), first),
+        CallerTurn(conversation_caller("conv-b"), first),
+        CallerTurn(conversation_caller("conv-a"), second),
     ]
 
 
 async def test_a_call_outside_any_conversation_names_no_caller(
     fake_policy_clients: list[_FakeMcpClient],
 ) -> None:
+    """Nor a turn: a turn id names nothing without its conversation."""
+    current_turn_id.set("tr_" + "1" * 16)
     await McpExecutor(settings=Settings())(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
 
     (client,) = fake_policy_clients
-    assert client.caller is None
+    assert client.caller == CallerTurn(None, None)
 
 
 # --- `_call_held`: a broken session is discarded, a slow call is not -------
@@ -1251,7 +1818,7 @@ class _ScriptedMcpClient:
 
 def _held_clients(factory: Callable[[], Any]) -> CallerClients:
     """A registry over `factory`'s stand-in clients, for a caller that never changes."""
-    return CallerClients(lambda _caller: factory(), caller=lambda: None)
+    return CallerClients(lambda _caller: factory(), caller=lambda: CallerTurn(None))
 
 
 async def test_call_held_keeps_a_timed_out_client_cached() -> None:
@@ -1298,6 +1865,131 @@ async def test_call_held_discards_a_client_that_failed_for_another_reason() -> N
     assert len(built) == 2
 
 
+@pytest.mark.parametrize("background", [False, True], ids=["foreground", "background"])
+@pytest.mark.parametrize(
+    ("raised", "on_connect", "outcome"),
+    [
+        (MCPError(code=REQUEST_TIMEOUT, message="slow"), False, "timeout"),
+        (RuntimeError("transport closed"), False, "transport_failed"),
+        (RuntimeError("connection refused"), True, "transport_failed"),
+        (asyncio.CancelledError(), False, "cancelled"),
+    ],
+    ids=["timeout", "transport", "connect", "cancelled"],
+)
+async def test_a_get_data_call_with_no_result_still_leaves_one_tool_result(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+    raised: BaseException,
+    on_connect: bool,
+    outcome: str,
+    background: bool,
+) -> None:
+    """A `get_data` that times out, whose transport fails, or that is
+    cancelled raises and adds one `dfo.tool_result` observation naming how it
+    ended. That holds for a run's call and an early mint's
+    (`get_data_in_background`, marked background) alike, and for one that
+    cannot connect at all (`transport_failed`). An early mint whose segment
+    has ended starts a flush of its root and does not wait for it."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
+    flushes: list[str] = []
+
+    @contextmanager
+    def rooted(_name: str) -> Iterator[bool]:
+        yield True
+
+    monkeypatch.setattr(mcp_client_module, "root_if_span_ended", rooted)
+    monkeypatch.setattr(
+        mcp_client_module, "start_telemetry_flush", lambda: flushes.append("started")
+    )
+    scripted_presentation_client([] if on_connect else [raised])
+    executor = McpExecutor(settings=Settings())
+    if on_connect:
+
+        async def refuse() -> None:
+            raise raised
+
+        monkeypatch.setattr(executor._get_data_clients, "get", refuse)
+
+    call = executor.get_data_in_background if background else executor._get_data
+    with pytest.raises((_McpTimeoutError, RuntimeError, asyncio.CancelledError)):
+        await call({"spec_id": "spec_" + "1" * 32})
+
+    marked = {"mint": "background"} if background else {}
+    assert events == [("dfo.tool_result", {"tool": "get_data", "outcome": outcome, **marked})]
+    flushed = ["started"] if background else []
+    assert flushes == flushed
+
+
+async def test_a_get_data_whose_release_is_cancelled_has_recorded_its_result(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The result is recorded before the held client is released, so a
+    cancel that lands in the release still leaves the answered call's
+    `dfo.tool_result`."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
+    scripted_presentation_client([_tool_result({"spec_id": "spec_" + "1" * 32})])
+    executor = McpExecutor(settings=Settings())
+    real_release = executor._get_data_clients.release
+
+    async def cancelled_release(client: Any) -> None:
+        await real_release(client)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(executor._get_data_clients, "release", cancelled_release)
+
+    with pytest.raises(asyncio.CancelledError):
+        await executor.get_data_in_background({"spec_id": "spec_" + "1" * 32})
+
+    assert [metadata["outcome"] for _, metadata in events] == ["ok"]
+
+
+async def test_an_early_mint_answer_leaves_one_tool_result_and_no_fetched_spec(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An early mint's answer adds one `dfo.tool_result` marked background,
+    naming its spec, and the turn hears no fetched spec from it. The call
+    only warms the frame its run fetches later."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
+    spec_id = "spec_" + "1" * 32
+    scripted_presentation_client(
+        [_tool_result({"spec_id": spec_id, mint_admission.BACKGROUND_OUTCOME_KEY: "posted"})]
+    )
+    uses: list[tuple[str, str]] = []
+    token = current_spec_uses.set(lambda use, spec: uses.append((use, spec)))
+    try:
+        outcome = await McpExecutor(settings=Settings()).get_data_in_background(
+            {"spec_id": spec_id}
+        )
+    finally:
+        current_spec_uses.reset(token)
+
+    assert outcome == "posted"
+    assert events == [
+        (
+            "dfo.tool_result",
+            {"tool": "get_data", "outcome": "ok", "spec_id": spec_id, "mint": "background"},
+        )
+    ]
+    assert uses == []
+
+
 async def test_a_non_timeout_failure_does_not_tear_down_a_concurrent_call_on_the_same_client() -> (
     None
 ):
@@ -1305,7 +1997,7 @@ async def test_a_non_timeout_failure_does_not_tear_down_a_concurrent_call_on_the
     `describe` fails for a reason other than its own timeout while `search`
     is still awaiting its own `call_tool`. `_call_held`'s eviction of the
     broken client (`CallerClients.discard`) must not disconnect it
-    until `search` has released its own hold -- ADK can dispatch a turn's
+    until `search` has released its own hold -- Pydantic AI dispatches a response's
     tool calls concurrently, so one call failing must not break a sibling
     still using the same conversation's client. Asserts `exited` itself,
     not just that `search` still gets an answer: a `discard` that tore the
@@ -1490,12 +2182,23 @@ def _assembled_summary(
     return store, envelope, facts
 
 
+async def _assembled_component(
+    executor: McpExecutor, *, reply: dict[str, Any], envelope: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The wire component `_assemble_component` builds, or `None` when it
+    refuses."""
+    assembled = await executor._assemble_component(reply=reply, envelope=envelope)
+    return assembled.component if assembled is not None else None
+
+
 async def test_a_cut_series_list_leaves_the_attribution_counting_every_stat_var() -> None:
     store, envelope, facts = _assembled_summary(drawn=20, resolved=3000, series_cut=40)
     executor = McpExecutor(settings=Settings(), provenance=store)
 
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    component = await _assembled_component(
+        executor,
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts},
+        envelope=envelope,
     )
 
     assert component is not None
@@ -1510,14 +2213,50 @@ async def test_a_cut_series_list_states_how_many_of_the_series_it_shows() -> Non
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
-    cut = await executor._assemble_component(reply=reply, envelope=envelope)
+    cut = await _assembled_component(executor, reply=reply, envelope=envelope)
     facts["series_cut"] = 0
-    whole = await executor._assemble_component(reply=reply, envelope=envelope)
+    whole = await _assembled_component(executor, reply=reply, envelope=envelope)
 
     assert cut is not None and whole is not None
     assert cut["fact_summary"]["series_truncated"] == {"showing": 20, "total": 60}
     FactSummary.model_validate(cut["fact_summary"])
     assert "series_truncated" not in whole["fact_summary"]
+
+
+async def test_a_card_drawn_from_a_derived_frame_names_the_retrieval_behind_it(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """A card over a frame an analysis verb derived from one retrieval tells
+    the turn it drew the retrieval's spec, the one the datasets door serves,
+    and not the derived frame's own."""
+    retrieval = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}
+    derived = {"spec_id": "ops_" + "2" * 32, "content_version": "ocv_" + "2" * 32}
+    store = ProvenanceStore()
+    conversation = current_conversation_id.get()
+    store.put(
+        conversation=conversation,
+        manifest={"definition": {"spec_id": retrieval["spec_id"]}, **retrieval},
+        **retrieval,
+    )
+    assert store.alias(
+        conversation=conversation,
+        sources=[(retrieval["spec_id"], retrieval["content_version"])],
+        stat_var_count=1,
+        **derived,
+    )
+    envelope = resolved_revision("line_chart", component_id="cmp_1", revision=1, frame_ref=derived)
+    scripted_presentation_client([_write_result(envelope)])
+    executor = McpExecutor(settings=Settings(), provenance=store)
+    uses: list[tuple[str, str]] = []
+    token = current_spec_uses.set(lambda use, spec_id: uses.append((use, spec_id)))
+
+    try:
+        drawn = await executor(tool="write_component", args={"component_id": "cmp_1", "intent": {}})
+    finally:
+        current_spec_uses.reset(token)
+
+    assert drawn["outcome"] == "ok", drawn
+    assert uses == [("drawn", retrieval["spec_id"])]
 
 
 async def test_a_card_over_a_derived_frame_counts_that_frames_stat_vars() -> None:
@@ -1537,13 +2276,14 @@ async def test_a_card_over_a_derived_frame_counts_that_frames_stat_vars() -> Non
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
-    over_derived = await executor._assemble_component(
+    over_derived = await _assembled_component(
+        executor,
         reply=reply,
         envelope=resolved_revision(
             "line_chart", component_id="cmp_1", revision=1, frame_ref=derived
         ),
     )
-    over_root = await executor._assemble_component(reply=reply, envelope=root_envelope)
+    over_root = await _assembled_component(executor, reply=reply, envelope=root_envelope)
 
     assert over_derived is not None
     assert over_root is not None
@@ -1575,13 +2315,14 @@ async def test_a_card_over_a_summed_family_counts_the_stat_vars_the_sum_added() 
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
-    over_derived = await executor._assemble_component(
+    over_derived = await _assembled_component(
+        executor,
         reply=reply,
         envelope=resolved_revision(
             "line_chart", component_id="cmp_1", revision=1, frame_ref=derived
         ),
     )
-    over_root = await executor._assemble_component(reply=reply, envelope=root_envelope)
+    over_root = await _assembled_component(executor, reply=reply, envelope=root_envelope)
 
     assert over_derived is not None
     assert over_root is not None
@@ -1594,10 +2335,10 @@ async def test_the_platform_defaults_reach_the_wire_fact_summary() -> None:
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
-    without = await executor._assemble_component(reply=reply, envelope=envelope)
+    without = await _assembled_component(executor, reply=reply, envelope=envelope)
     facts["defaults"] = [{"pointer": "/intent/select", "detail": "Drew every recipient."}]
     facts["a_member_the_platform_adds_later"] = {"x": 1}
-    with_defaults = await executor._assemble_component(reply=reply, envelope=envelope)
+    with_defaults = await _assembled_component(executor, reply=reply, envelope=envelope)
 
     assert without is not None
     assert "defaults" not in without["fact_summary"]
@@ -1628,8 +2369,10 @@ async def test_the_platform_unit_reaches_the_wire_fact_summary_as_it_is(unit: ob
     executor = McpExecutor(settings=Settings(), provenance=store)
     facts["unit"] = unit
 
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    component = await _assembled_component(
+        executor,
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts},
+        envelope=envelope,
     )
 
     assert component is not None
@@ -1672,8 +2415,10 @@ async def test_a_stored_card_the_frame_cannot_be_built_from_is_refused_naming_th
     ERROR without the stored values."""
     store, envelope, facts = _assembled_summary(drawn=1, resolved=1, series_cut=0)
     executor = McpExecutor(settings=Settings(), provenance=store)
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    component = await _assembled_component(
+        executor,
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts},
+        envelope=envelope,
     )
     assert component is not None
     component = {**component, **fault}
@@ -1722,8 +2467,10 @@ async def test_each_series_states_the_periods_of_its_first_and_last_values() -> 
     ]
     executor = McpExecutor(settings=Settings(), provenance=store)
 
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    component = await _assembled_component(
+        executor,
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts},
+        envelope=envelope,
     )
 
     assert component is not None
@@ -2336,6 +3083,14 @@ class _HangingRetryClient(_ScriptedMcpClient):
 async def test_a_retry_still_running_at_the_call_deadline_is_cut_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The cut-off attempt leaves a `timeout` `dfo.tool_result` beside the
+    first attempt's refusal, so every `get_data` attempt is recorded."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
     clock = _Clock()
     client = _HangingRetryClient([_data_refusal("retry_after_delay")])
     monkeypatch.setattr(
@@ -2357,6 +3112,56 @@ async def test_a_retry_still_running_at_the_call_deadline_is_cut_off(
     assert client.calls == ["get_data", "get_data"]
     assert result["outcome"] == "refusal"
     assert result["refusal"]["code"] == "service_unavailable"
+    assert [metadata["outcome"] for _, metadata in events] == ["refusal", "timeout"]
+    assert events[-1] == ("dfo.tool_result", {"tool": "get_data", "outcome": "timeout"})
+
+
+async def test_a_retry_cut_off_after_its_result_is_recorded_adds_no_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry's `ok` is recorded when its result arrives. A deadline that
+    expires while the manifest is still being read discards the outcome but
+    leaves that one observation, so the call adds no `timeout` and the turn
+    hears no fetched spec from it."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
+
+    async def hang(_content: Any) -> Any:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(mcp_client_module, "manifest_with_stat_vars", hang)
+    clock = _Clock()
+    spec_id = "spec_" + "1" * 32
+    ok = SimpleNamespace(
+        is_error=False, structured_content={"spec_id": spec_id}, content=[], meta=None
+    )
+    client = _ScriptedMcpClient([_data_refusal("retry_after_delay"), ok])
+    monkeypatch.setattr(
+        McpTimeoutPolicy, "client", lambda self, url, *, auth, caller, tool=None: client
+    )
+
+    async def wait(seconds: float) -> None:
+        clock.now = 180.0 - 0.05
+
+    executor = McpExecutor(
+        settings=Settings(), sleep=wait, jitter=random.Random(7).uniform, clock=clock
+    )
+    uses: list[tuple[str, str]] = []
+    token = current_spec_uses.set(lambda use, spec: uses.append((use, spec)))
+    try:
+        result = await asyncio.wait_for(
+            executor(tool="get_data", args={"spec_id": spec_id}), timeout=5
+        )
+    finally:
+        current_spec_uses.reset(token)
+
+    assert result["outcome"] == "refusal"
+    assert [metadata["outcome"] for _, metadata in events] == ["refusal", "ok"]
+    assert uses == []
 
 
 async def test_a_write_retry_cut_off_at_the_call_deadline_raises_the_timeout_not_the_refusal(

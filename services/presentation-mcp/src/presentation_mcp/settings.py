@@ -60,13 +60,12 @@ class Settings(FrameServiceSettings):
     `dfo_apis_url` is the base URL of apis, which mounts
     `/api/presentation/*` alongside its other surfaces on the same host.
 
-    `max_frame_rows` (`common.FrameServiceSettings`, shared with data-mcp and
-    analysis-mcp) bounds a frame this service reads back from the store to
+    `max_frame_rows` (`common.FrameServiceSettings`, shared with data-mcp) bounds a frame this service reads back from the store to
     publish (`frame_publish.publish_body_for`).
 
     The `upstream_*` fields bound `PlatformAssembler`'s retry loop, mirroring
     data-mcp's own `UpstreamClient` settings (see `data_mcp.settings.Settings`
-    for the ADK call-budget rationale behind these defaults).
+    for the call-budget rationale behind these defaults).
 
     `max_schema_version` is the admission bound `server.py`'s startup lifespan
     compares the platform's `release()` `schema_version` against.

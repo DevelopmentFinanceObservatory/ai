@@ -33,7 +33,7 @@ nothing and records nothing. The approval gate is the harness workflow's
 `approve` node.
 
 An unreadable surface comes back as a typed problem the planner can act on.
-These run inside ADK tool calls, where a raise ends the planner entry on a
+These run inside planner tool calls, where a raise ends the planner entry on a
 final `planner_tool_failed` refusal, set in `harness.planner_adapter`.
 `DuplicateToolNameError` propagates, since a tool name served twice is a
 misconfiguration retrying cannot resolve.
@@ -61,7 +61,6 @@ from executor.outcomes import (
     Refused,
     StopCause,
     failed_step,
-    stop_cause,
 )
 from executor.run import AnchorRead, HeldAnchor, read_anchors
 from planner.operations import Translation
@@ -312,6 +311,7 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
         case (
             CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
             | CompileIssueCode.RANK_AXIS_REQUIRED
+            | CompileIssueCode.RANK_REDUCTION_REQUIRED
             | CompileIssueCode.SHARE_AXIS_REQUIRED
             | CompileIssueCode.SHARE_KEY_UNKNOWN
             | CompileIssueCode.QUOTIENT_AXIS_REQUIRED
@@ -372,6 +372,11 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "calculation takes"
     ),
     CompileIssueCode.RANK_AXIS_REQUIRED: "set the rank's `axis` to the role it ranks on",
+    CompileIssueCode.RANK_REDUCTION_REQUIRED: (
+        "state the rank's `reduction`, 'sum' for an amount, to collapse each entity's rows "
+        "over that party to one value, or name the members of the party the answer needs "
+        "in the dataset requirement's `entities`"
+    ),
     CompileIssueCode.SHARE_AXIS_REQUIRED: (
         "set the share's `axis` to the role it is taken per, or name the numerator's "
         f"`entity`, or {pooling_remedy(one_figure=True, each_side=True)}"
@@ -757,11 +762,12 @@ def _run_would_stop(
     """The `RUN_WOULD_STOP` problem for a read of the newest year that stopped where the run would.
 
     `detail` holds the step the run's caller would be told it failed at
-    (`executor.outcomes.failed_step`): its `step_id`, the run's own `code`
-    and `message`, and the requirement that step carries out. Its `action`
-    refers the plan back with that code as `stop_code`, by whose stop it is
-    (`executor.outcomes.stop_cause`): as `surface_unavailable` when a later
-    try can get past it, as an internal failure when it is the harness's,
+    (`executor.outcomes.failed_step`, the stop of the wave that decides it):
+    its `step_id`, the run's own `code` and `message`, and the requirement
+    that step carries out. Its `action` refers the plan back with that code
+    as `stop_code`, by whose stop it is (its `cause`, `executor.outcomes.stop_cause`).
+    That is `surface_unavailable` when a later try can get past it, an
+    internal failure when it is the harness's,
     and as `requirement_unmeetable` on that requirement when it is the
     data's, for the user to decide otherwise. A data stop that names no
     requirement is an internal failure too. The stop is logged with its
@@ -769,12 +775,14 @@ def _run_would_stop(
     """
     failed = failed_step(stop)
     code, step_id = str(failed["code"]), failed["step_id"]
-    requirement_id = stop.requirement_id
+    # The stop of the wave that `failed_step` names.
+    named = next((each for each in (stop, *stop.also_stopped) if each.step_id == step_id), stop)
+    requirement_id = getattr(named, "requirement_id", None)
     if requirement_id is None and step_id is not None:
         requirement_of = {op.id: op.requirement_id for op in translation.operations}
         operation_of = {step.id: step.operation_id for step in workflow.steps}
         requirement_id = requirement_of.get(operation_of.get(step_id, ""))
-    cause = stop_cause(stop)
+    cause = StopCause(failed["cause"])
     logger.warning(
         "translation: the newest-year read stopped code=%s step_id=%s requirement_id=%s cause=%s",
         code,

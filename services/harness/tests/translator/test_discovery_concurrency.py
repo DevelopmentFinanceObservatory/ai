@@ -1,7 +1,7 @@
-"""Regression tests: discovery's concurrency invariants under ADK's concurrent tool dispatch.
+"""Regression tests: discovery's concurrency invariants under concurrent tool calls.
 
-ADK dispatches a turn's several function calls with `asyncio.gather` over one
-shared `session.state` dict (see `translator.discovery`'s module docstring).
+The planner's agent runs a model response's several function calls
+concurrently over one shared session state dict.
 `discovery_lock` serialises only the budget check, the reservation it makes,
 and the log's own read-modify-write; the `search` call itself, and
 `fetch_definitions`'s own `describe` round trip, both run with the lock
@@ -10,8 +10,8 @@ they draw on stays exact and no sibling's record is lost to another's write.
 
 `_slow_server` stands in for the `data_server` fixture with a `search` that
 sleeps, so every concurrent call is in flight before any of them return --
-the same race window a model's several `discover_source` calls in one turn
-open on a real ADK turn.
+the same race window a model's several `discover_source` calls in one
+response open on a real turn.
 """
 
 from __future__ import annotations
@@ -439,81 +439,6 @@ async def test_a_reservation_is_released_when_the_search_raises(
     result = await discover_source(requirement_id="annual_debt_service", state=context.state)
 
     assert result["outcome"] == "ok"
-
-
-def _reordering_server() -> FastMCP:
-    """A `data-mcp` stand-in whose first `search` call finishes after its second.
-
-    Sleeps on its first call only, so two calls launched in list order
-    finish in the reverse order: the same divergence between list order and
-    completion order `merge_parallel_function_response_events` merges by.
-    """
-    server = FastMCP(name="data-mcp")
-    calls_made = {"n": 0}
-
-    @server.tool(name="search")
-    async def search(parts: list[dict[str, Any]], raw_query: str | None = None) -> ToolResult:
-        calls_made["n"] += 1
-        if calls_made["n"] == 1:
-            await asyncio.sleep(0.05)
-        envelope = {
-            "schema_version": 1,
-            "status": "definite",
-            "parts": [
-                {"status": "definite", "variable_text": "asked", "warnings": [], "spec": _spec()}
-            ],
-        }
-        return ToolResult(content="digest", **search_result_parts(envelope))
-
-    return server
-
-
-class _FakeContext:
-    """A minimal stand-in for ADK's `ToolContext`, wrapping a real `google.adk.sessions.state.State`."""
-
-    def __init__(self, state: Any) -> None:
-        self.state = state
-
-
-async def test_the_adk_merge_of_two_concurrent_calls_keeps_both_records() -> None:
-    """Reproduces ADK's own merge, with ADK's own `State` and `deep_merge_dicts`.
-
-    Two `discover_source` calls share one session's underlying state dict but
-    each get their own `State.delta`, exactly as `Context.__init__` builds
-    one `ToolContext` per concurrent call over `invocation_context.session.state`
-    (`google.adk.agents.context`). `req_b`'s call finishes before `req_a`'s,
-    the reverse of the order they are listed in below --
-    `merge_parallel_function_response_events` merges `state_delta`s in list
-    order, not completion order, so this is the case where the two diverge.
-    `load_log` on the merged, committed result has to see both records for
-    `save_log`'s dict shape to be doing its job here: keying the persisted
-    log by one JSON string instead of by record id would lose `req_a`'s own
-    record, since a plain string leaf is replaced outright by whichever
-    delta is merged last rather than unioned with it.
-    """
-    from google.adk.flows.llm_flows.tools._batch_executor import deep_merge_dicts  # noqa: PLC0415
-    from google.adk.sessions.state import State  # noqa: PLC0415
-    from planner.plan import PLAN_STATE_KEY  # noqa: PLC0415
-
-    plan = _plan(["req_a", "req_b"])
-    shared_value: dict[str, Any] = {PLAN_STATE_KEY: plan.model_dump_json()}
-    delta_a: dict[str, Any] = {}
-    delta_b: dict[str, Any] = {}
-    context_a = _FakeContext(State(value=shared_value, delta=delta_a))
-    context_b = _FakeContext(State(value=shared_value, delta=delta_b))
-    surface = McpSurface(sources={"data-mcp": _reordering_server()})
-    discover_source = _discover_source(surface)
-
-    await asyncio.gather(
-        discover_source(requirement_id="req_a", state=context_a.state),
-        discover_source(requirement_id="req_b", state=context_b.state),
-    )
-
-    merged: dict[str, Any] = deep_merge_dicts(deep_merge_dicts({}, delta_a), delta_b)
-    committed = _State(merged)
-
-    log = load_log(committed)
-    assert {record.requirement_id for record in log.records} == {"req_a", "req_b"}
 
 
 def test_discovery_lock_is_synchronous() -> None:

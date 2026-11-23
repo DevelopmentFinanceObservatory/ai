@@ -35,6 +35,7 @@ import pytest
 import rfc8785
 from analysis_mcp import runner_client
 from analysis_mcp.runner_client import RunnerClient, runner_holder
+from common.breakdown_labels import NODES_PATH
 from common.materialisation import FrameRef, get_store
 from common.materialisation.frame_codec import frame_to_parquet_bytes
 from dfo_frame_grammar import Frame, canonical_frame_bytes
@@ -77,15 +78,15 @@ async def _held_root(ref: FrameRef, columns: list[str] | None) -> Frame | None:
     """The frame the store holds for the root `ref` read with `columns`: under the
     frame pair of a mint record naming `ref` as its dataset with those columns, as
     `get_data` holds a frame of enrichment columns, else under `ref` itself. A root
-    sends its columns sorted (`runner_tree.root_node`), so the record's are compared
-    sorted. One dataset version read with and without columns is two frames."""
+    sends its columns as the record lists them (`runner_tree.root_node`), so both
+    are compared sorted. One dataset version read with and without columns is two frames."""
     store = get_store()
     for listing in await store.list_frames():
         record = await store.get_mint_record(listing.ref)
         if (
             record is not None
             and record.dataset == ref
-            and sorted(set(record.options.get("columns") or [])) == (columns or [])
+            and sorted(set(record.options.get("columns") or [])) == sorted(set(columns or []))
             and (held := await store.get(listing.ref)) is not None
         ):
             return held[0]
@@ -134,20 +135,30 @@ async def _record(key: str, entry: dict[str, Any]) -> None:
 
 class ReplayedRunner:
     """A transport answering each request from the recorded replies at
-    `replies_path`. `requests` keeps every POST body, in order, and `stored` the
-    pair of each frame an answer named, by its recipe's replay key, so a fake of
-    dfo-apis can hold what the runner stored for this test alone.
+    `replies_path`. `requests` keeps every POST body but a graph nodes read, in
+    order, and `stored` the pair of each frame an answer named, by its recipe's
+    replay key, so a fake of dfo-apis can hold what the runner stored for this
+    test alone.
 
-    An unrecorded request answers 409 with the problem code `unrecorded`, which
-    the tools refuse at once and no caller retries."""
+    A graph nodes read (`common.breakdown_labels.NODES_PATH`), which labels a
+    digest's breakdown cells, answers every dcid as not held, so each cell keeps
+    its value, and is kept in `node_reads`. An unrecorded request answers 409
+    with the problem code `unrecorded`, which the tools refuse at once and no
+    caller retries."""
 
     def __init__(self, replies_path: Path = REPLIES_PATH) -> None:
         self.replies = _replies(replies_path)
         self.requests: list[dict[str, Any]] = []
+        self.node_reads: list[list[str]] = []
         self.stored: dict[str, tuple[str, str]] = {}
 
     async def handle(self, request: httpx2.Request) -> httpx2.Response:
         path = request.url.path
+        if path == NODES_PATH:
+            dcids = json.loads(request.content)["dcids"]
+            self.node_reads.append(dcids)
+            held = [{"ref": dcid, "status": "not_held"} for dcid in dcids]
+            return httpx2.Response(200, json={"nodes": held})
         if request.method == "GET":
             query = request.url.query.decode()
             key = read_key(path, query)

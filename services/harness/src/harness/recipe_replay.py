@@ -87,6 +87,7 @@ from analysis_mcp.identity import (
     op_spec_hash_for,
 )
 from analysis_mcp.op_spec import OpSpecAdapter
+from common.caller import shared_work_context
 from common.live_apis import FramePair, LiveApisClient, LiveApisError
 from common.materialisation import (
     FrameExpired,
@@ -95,6 +96,7 @@ from common.materialisation import (
     FrameTooLarge,
     MaterialisationStore,
     MintRecord,
+    read_mint_record,
 )
 from common.recipe import (
     RECIPE_SCHEMA_VERSION,
@@ -386,6 +388,7 @@ class _Replay:
         apis: LiveApisClient,
         row_budget: RowBudget,
         execution_identity: ExecutionIdentity | None,
+        surface: str,
     ) -> None:
         self.tree = tree
         self.roots = roots
@@ -395,6 +398,7 @@ class _Replay:
         self.apis = apis
         self.row_budget = row_budget
         self.execution_identity = execution_identity
+        self.surface = surface
         self.root_frames: list[_Frame] = []
         # By each root's new pair: the options its mint sent, and the options the
         # stored recipe recorded for it.
@@ -584,9 +588,7 @@ class _Replay:
         ]
         reached = [self.root_frames[node["root"]] for node in anchors or rolling_roots(self.tree)]
         roots = {(frame.ref.spec_id, frame.ref.content_version): frame for frame in reached}
-        answer = await self._claimed(
-            sum(frame.rows for frame in roots.values()),
-            stage="anchor",
+        answer = await self.call_tool(
             name=RESOLVE_ANCHOR_TOOL,
             arguments={
                 "populations": populations,
@@ -600,16 +602,6 @@ class _Replay:
         self.period = resolved["period"]
         self.anchor_key = resolved["anchor_key"]
 
-    async def _claimed(
-        self, rows: int, *, stage: Stage, name: str, arguments: Mapping[str, object]
-    ) -> ToolAnswer:
-        """Call `name` while `rows` are held from the refresh row budget."""
-        try:
-            with self.row_budget.claim(rows):
-                return await self.call_tool(name=name, arguments=arguments)
-        except RowBudgetExhausted as exc:
-            raise _rows_stop(exc, stage=stage) from exc
-
     # The tree
 
     async def frame_of(self, node: Mapping[str, Any]) -> _Frame:
@@ -622,7 +614,13 @@ class _Replay:
             return self.root_frames[node["root"]]
         key = rfc8785.dumps(node).decode()
         if key not in self._nodes:
-            self._nodes[key] = asyncio.create_task(self._derived(node))
+            # Every slot reaching the node joins this task, so it names no
+            # caller or turn, only the replay's surface: neither its in-process
+            # dfo-apis calls nor its MCP calls, whose clients read the shared
+            # surface through `harness.conversation.current_caller_turn`.
+            self._nodes[key] = asyncio.create_task(
+                self._derived(node), context=shared_work_context(surface=self.surface)
+            )
         return await self._nodes[key]
 
     async def _derived(self, node: Mapping[str, Any]) -> _Frame:
@@ -652,9 +650,7 @@ class _Replay:
                 return _Frame(ref=expected, rows=rows, frame_content_version=None)
             if rolling:
                 arguments["anchor_key"] = self.anchor_key
-            answer = await self._claimed(
-                sum(frame.rows for frame in frames.values()),
-                stage="verb",
+            answer = await self.call_tool(
                 name=op_spec["verb"],
                 arguments=arguments,
             )
@@ -786,7 +782,7 @@ def _parsed(recipe: Mapping[str, Any]) -> tuple[Mapping[str, Any], list[MintReco
             )
         )
     try:
-        return tree, [MintRecord.model_validate(root) for root in roots]
+        return tree, [read_mint_record(root) for root in roots]
     except ValidationError as exc:
         raise _Stopped(
             Refused(
@@ -884,6 +880,7 @@ async def replay_recipe(
     apis: LiveApisClient,
     publish: PublishFrame,
     row_budget: RowBudget,
+    surface: str,
     populations: Sequence[Mapping[str, Any]] | None = None,
     mint_root: MintRoot = mint_recorded_root,
     mint_budget: CallBudget = EXTERNAL_CALL_BUDGET,
@@ -905,12 +902,17 @@ async def replay_recipe(
             the datasets principal, and `list_versions` and
             `analysis_execution_identity`, which need none.
         publish: Publishes the final frame with its recipe.
-        row_budget: The rows replays may hold at once. Each verb call claims its
-            inputs' rows, `resolve_anchor` the roots', and the publish the final
-            frame's. A claim the rows in flight leave no room for returns
-            `Pending`, and one larger than the whole budget is refused
-            `rows_over_refresh_budget`. The tools claim from the process-wide
-            budget as well.
+        row_budget: The rows replays may hold at once. The publish claims the final
+            frame's rows. The verbs and `resolve_anchor` compute on dfo-apis'
+            analysis runner and claim none. A claim the rows in flight leave no
+            room for returns `Pending`, and one larger than the whole budget is
+            refused `rows_over_refresh_budget`. The publish claims from the
+            process-wide budget as well.
+        surface: The surface the replay serves, one of
+            `common.caller.SHARED_SURFACES`, which its derived nodes' dfo-apis
+            calls name with no caller (`common.caller.shared_work_context`):
+            `studio` for a Studio card, `website` for a share the website
+            refreshes.
         populations: Replaces the populations every rolling op-spec carries, for a
             card whose selection counts other series. The replayed recipe then has
             another `normal_form_hash`. Refused for a recipe with no rolling period.
@@ -941,6 +943,7 @@ async def replay_recipe(
             apis=apis,
             row_budget=row_budget,
             execution_identity=await runner_execution_identity(apis),
+            surface=surface,
         )
         return await _replayed(
             recipe,
@@ -975,10 +978,10 @@ async def runner_execution_identity(apis: LiveApisClient) -> ExecutionIdentity |
 def _names_its_groupby(record: MintRecord) -> bool:
     """Whether `record` is a groupby root whose frame is held under the pair
     `frame_ref_for` derives from its dataset, columns, groupby, cut and the enrichment
-    stamp the record keeps. The groupby is tried with its `by` in each order
-    `named_groupbys` lists, since a record written before `frame_ref_for` sorted `by`
-    names its frame with the order get_data sent. `MintRecord` has checked the
-    groupby's shape."""
+    stamp and artifact digest the record keeps. The groupby is tried with its `by` in
+    each order `named_groupbys` lists, since a record written before `frame_ref_for`
+    sorted `by` names its frame with the order get_data sent. `MintRecord` has checked
+    the groupby's shape."""
     groupby = record.options.get("groupby")
     return groupby is not None and any(
         record.frame
@@ -989,6 +992,7 @@ def _names_its_groupby(record: MintRecord) -> bool:
             groupby=named,
             without_party_totals=record.options.get(WITHOUT_PARTY_TOTALS) is True,
             enrichment_stamp=record.enrichment_stamp,
+            artifact_digest=record.artifact_digest,
             keep_by_order=True,
         )
         for named in named_groupbys(groupby)

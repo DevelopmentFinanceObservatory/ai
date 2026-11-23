@@ -1598,6 +1598,49 @@ def test_no_single_measure_verb_refuses_an_uncounted_reading(
     assert rejects(verb, shape, **options) is None
 
 
+@_SINGLE_MEASURE_VERBS
+def test_a_summable_family_no_step_has_read_reaches_every_single_measure_verb(
+    verb: ShapeVerb, options: dict[str, object]
+):
+    # dfo-apis' analysis runner sums such a retrieval when a verb reads it.
+    fetched = retrieved(
+        requirement_id="req_a", roles=(_role(),), period=_PERIOD, measures=3, unsummable_axes=()
+    )
+    assert rejects(verb, fetched, **options) is None
+
+
+@pytest.mark.parametrize(
+    "unsummable_axes", [("gender",), None], ids=["unsummable-axis", "no-axis-stated"]
+)
+def test_a_family_apis_cannot_sum_is_refused_straight_from_its_retrieval(
+    unsummable_axes: tuple[str, ...] | None,
+):
+    fetched = retrieved(
+        requirement_id="req_a",
+        roles=(_role(),),
+        period=_PERIOD,
+        measures=3,
+        unsummable_axes=unsummable_axes,
+    )
+    assert rejects(ShapeVerb.AGGREGATE, fetched, by_entity=False, by_period=True) is not None
+
+
+def test_a_summed_read_leaves_one_measure_and_a_filter_keeps_it_unsummed():
+    fetched = retrieved(
+        requirement_id="req_a", roles=(_role(),), period=_PERIOD, measures=3, unsummable_axes=()
+    )
+    total = aggregated(
+        fetched, reduction=Reduction.SUM, by_entity=False, by_period=True, step_id=None
+    )
+    kept = filtered(
+        fetched, narrowed_roles=(), years=YearFilter(period=_PERIOD, leaves_one_year=False)
+    )
+
+    assert total.measures == 1
+    assert kept.measures == 3
+    assert rejects(ShapeVerb.AGGREGATE, kept, by_entity=False, by_period=True) is not None
+
+
 def test_a_family_summable_over_every_axis_is_told_to_read_it_summed():
     shape = _shape(roles=(_role(),), measures=3, unsummable_axes=())
     reason = rejects(ShapeVerb.AGGREGATE, shape, by_entity=False, by_period=True)

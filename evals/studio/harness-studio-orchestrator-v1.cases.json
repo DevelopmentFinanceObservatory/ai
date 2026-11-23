@@ -930,32 +930,14 @@
       ]
     },
     {
-      "id": "orchestrator-hand-back-reaches-the-agent-unfenced",
-      "modes": [
-        "scripted"
-      ],
-      "scenario": "approved-plan",
-      "checks": [
-        "no_relay_marker"
-      ],
-      "turns": [
-        {
-          "message": "How fast did life expectancy grow in Kenya since 2000?",
-          "plan_decision": "approve",
-          "expect": {
-            "terminal": "done"
-          }
-        }
-      ]
-    },
-    {
-      "id": "orchestrator-second-plan-entry-sees-no-fenced-hand-back",
+      "id": "orchestrator-refused-step-reaches-the-second-plan",
       "modes": [
         "scripted"
       ],
       "scenario": "refused-step-then-second-plan",
       "checks": [
-        "planner_sees_no_relay_marker"
+        "refused_step_reaches_the_next_plan",
+        "approval_payload_absent_after_approval"
       ],
       "turns": [
         {
@@ -963,25 +945,6 @@
           "plan_decision": "approve",
           "expect": {
             "terminal": "done"
-          }
-        }
-      ]
-    },
-    {
-      "id": "orchestrator-an-answered-turn-holds-no-fenced-block",
-      "modes": [
-        "scripted"
-      ],
-      "scenario": "answer-only",
-      "checks": [
-        "no_relay_marker"
-      ],
-      "turns": [
-        {
-          "message": "Life expectancy in Kenya?",
-          "expect": {
-            "terminal": "done",
-            "no_plan": true
           }
         }
       ]
@@ -1598,7 +1561,9 @@
           "message": "How much aid did France give to Africa between 2015 and 2023?",
           "elicitation_answers": [
             {
-              "option": 2
+              "unit": {
+                "prices": "constant"
+              }
             }
           ],
           "expect": {
@@ -1606,7 +1571,7 @@
             "min_components": 1,
             "elicitation": {
               "min_questions": 1,
-              "min_options": 2
+              "input": "unit"
             }
           }
         }
@@ -1623,6 +1588,61 @@
         {
           "id": "the-fetch-follows-the-price-answer",
           "property": "The figures shown after the answer are in the prices the answer names, as the closing message, a component title or a component source states. A figure in other prices, with no sentence saying the chosen reading was unavailable, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "several-sectors-are-asked-as-a-multi-select",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Chart France's aid to Kenya for the sectors I want. Ask me which ones: health, education, agriculture and water.",
+          "elicitation_answers": [
+            {
+              "options": [
+                1,
+                2
+              ]
+            }
+          ],
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "elicitation": {
+              "min_questions": 1,
+              "min_options": 4,
+              "input": "multi_select"
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "ticked-sectors-are-drawn",
+          "property": "The turn asked which sectors to include as one question the user could tick several answers to, and the component that was drawn covers health and education, the two the user ticked, and no other sector. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "remittances-ask-no-prices",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Compare remittances to Nigeria, Ethiopia and South Africa since 2015",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "no-prices-question",
+          "property": "The turn never asks the user whether the amounts are in current or constant prices, and offers no choice of currency or base year: World Bank remittances are published in current US dollars only. The turn runs to a figure without pausing on a prices question. A question about current against constant prices is a no. This property always applies and is never inapplicable."
         }
       ]
     },

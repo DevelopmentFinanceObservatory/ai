@@ -23,9 +23,10 @@ or name another project; a push reads Langfuse back until every task and score i
 shows, and a pull checks each task's records against the digest pushed with them.
 Pushing a run directory again sends only the tasks and scores Langfuse lacks.
 
-An item run's trace holds the task's records and nothing else. The eval exports no ADK
-spans, so no planner entry trace exists to link to, and the client sends on a tracer
-provider of its own, so a push from `run.py` exports none either.
+An item run's trace holds the task's records and nothing else. The eval sets up no
+telemetry, so its planner spans are exported nowhere and no planner entry trace exists
+to link to, and the client sends on a tracer provider of its own, so a push from
+`run.py` exports none either.
 
     uv run --env-file .env --package harness python evals/planner_entry/langfuse_store.py \\
         push evals/planner_entry/.results/<run>
@@ -46,7 +47,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
-from entry import RECORD_SCHEMA, Task, inputs_digest, load_recording, load_tasks
+from entry import RECORD_SCHEMA, Task, inputs_digest, load_every_task, load_recording
 from langfuse import Evaluation, Langfuse
 from langfuse.api import DatasetItem, NotFoundError
 from opentelemetry.sdk.trace import TracerProvider
@@ -78,7 +79,8 @@ def connect() -> Langfuse:
     """A client for `PROJECT_ID` from the `LANGFUSE_*` keys, refused when a key is missing
     or names another project.
 
-    It sends on a tracer provider of its own, so ADK spans in the same process stay unsent.
+    It sends on a tracer provider of its own, so the planner's spans in the same process
+    stay unsent.
     """
     settings = AgentSettings()
     keys = {
@@ -175,7 +177,7 @@ def task_item(task: Task) -> dict[str, Any]:
         "metadata": {
             "task": task.id,
             "kind": task.kind,
-            "inputs_digest": inputs_digest(task, load_recording(task.id)),
+            "inputs_digest": inputs_digest(task, load_recording(task.recording_id)),
         },
     }
 
@@ -433,7 +435,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     client = connect()
     if args.command == "push":
-        for name in push(client, args.run, tasks=load_tasks()):
+        for name in push(client, args.run, tasks=load_every_task()):
             print(name)
     else:
         write_records(args.out, pull(client, args.name))

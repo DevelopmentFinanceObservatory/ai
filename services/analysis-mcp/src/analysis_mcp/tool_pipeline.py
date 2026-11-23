@@ -1,27 +1,23 @@
-"""The shared tail of every verb tool's own body: turning a verb's own
-already-parsed parameters into a validated op-spec, minting a toolkit
-result's identity, and storing the computed frame under its own pair before
-rendering its digest.
-
-`frame_ref_resolution.py` already owns the frame_ref/array-parameter/
-derived-marker half of the nine verbs' shared shape -- the half with a
-`frame_ref` to resolve. This module owns the rest: constructing an op-spec,
-and the mint-identity/store/render/return sequence every verb's own body
-ends with, once its own engine call (and any coverage-floor check) has
-already succeeded. What sits between those two halves -- the engine call
-itself, and mapping its own typed exceptions to a refusal -- stays inline in
-each verb tool: that mapping is genuinely each verb's own.
+"""The shared tail of every registered verb tool: turning a verb's own
+already-parsed parameters into a validated op-spec (`build_op_spec_or_refusal`),
+and computing it on dfo-apis' analysis runner (`run_on_runner`).
 
 The registered tools (`verbs`) compute in dfo-apis' analysis runner.
 `run_on_runner` sends a validated op-spec as a one-node tree
 (`runner_tree.verb_tree`) and turns the runner's summary into the reply, its
-`VerbResult` and its digest (`digest.render_summary_digest`).
+`VerbResult` and its digest (`digest.render_summary_digest`), whose breakdown
+cells read as their labels (`common.breakdown_labels`), read from the graph
+nodes of the cells the digest names (`digest.digest_cells`). A digest with no
+cell labelled is rendered once.
 
 On a public call (`rebuild_lost_frames`), a frame the runner no longer holds
 (`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_` frame
 as the Spec root that fetches it at its newest version in its recorded rendering
 (`runner_tree.spec_root`), an `ops_` frame as the pair the runner computes from its
-stored recipe on current data (`runner_client.replay_derived`). The runner names one
+stored recipe on current data (`runner_client.replay_derived`). A replay refused with a
+code the same request can get past (`common.refusal.REPOST_RECOVERS_CODES`, the upstream
+refreshing under the read) runs once more, and a second such refusal answers the call as
+the runner wrote it. The runner names one
 lost dataset per refusal, so a call over two lost datasets is sent again once per
 side, at most once per distinct frame argument. A `spec_` frame whose rendering
 cannot be established refuses as `spec_root` says. A replay the runner cannot run
@@ -33,9 +29,6 @@ The frame each bare `spec_id` and each fetched-again `spec_` frame was read as i
 recorded as its mint record (`runner_tree.record_spec_reads`), and the digest
 opens with a sentence naming that frame's pair, and one naming the pair each rebuilt
 frame was read as when it moved, since a replay can mint a new `ops_` id.
-
-The rest of this module serves the in-process tools, which no registered tool
-calls.
 """
 
 from __future__ import annotations
@@ -43,32 +36,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from common.caller import current_writer
-from common.materialisation import FrameRef, FrameTooLarge, get_store
+from common.breakdown_labels import label_cells
+from common.materialisation import FrameRef
+from common.refusal import REPOST_RECOVERS_CODES
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, ValidationError
 
-from analysis_mcp.artifact import Exclusion
-from analysis_mcp.digest import render_summary_digest
-from analysis_mcp.execution_identity import ExecutionIdentity, current_execution_identity
-from analysis_mcp.frame_ref_resolution import call_row_claim, op_spec_hash_or_refusal
-from analysis_mcp.identity import mint_toolkit_content_version
-from analysis_mcp.result import VerbResult, observed_shape
-from analysis_mcp.runner_client import Pair, replay_derived, run_tree
+from analysis_mcp.digest import digest_cells, render_summary_digest
+from analysis_mcp.runner_client import Pair, read_graph_nodes, replay_derived, run_tree
 from analysis_mcp.runner_tree import Tree, newest_ref, record_spec_reads, spec_root, verb_tree
 from analysis_mcp.summary import VerbSummary
 from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal, to_tool_result
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping, Sequence
+    from collections.abc import Callable, Collection, Mapping
 
     from common.place_type import PlaceLevel
-    from dfo_frame_grammar import Frame
 
-    from analysis_mcp.engine.common import Exclusions
     from analysis_mcp.identity import OpSpecVariant
-    from analysis_mcp.steps import Step
-    from analysis_mcp.trace import Trace
 
 
 def build_op_spec_or_refusal[T: BaseModel](build: Callable[[], T]) -> T | ToolResult:
@@ -108,132 +93,6 @@ def _render_validation_errors(exc: ValidationError) -> str:
     return "\n".join(lines)
 
 
-def mint_identity_or_refusal(
-    op_spec: OpSpecVariant, *, input_content_versions: Sequence[str]
-) -> tuple[str, ExecutionIdentity, str] | ToolResult:
-    """`(op_spec_hash, execution_identity, content_version)` for `op_spec`,
-    minted over `input_content_versions`, or the `op_spec_invalid` refusal
-    minting `op_spec_hash` can hit (see `op_spec_hash_or_refusal`'s own
-    docstring for the two failure modes it catches). Every verb calls this
-    once, right after its own engine call (and any coverage-floor check) has
-    already succeeded.
-
-    Callers compute their own `input_content_versions` before calling this,
-    so `op_spec_hash_or_refusal` runs after that work rather than before it.
-    That ordering is only safe while both of its failure modes are already
-    ruled out by the time a verb gets here: a duplicate in an array-shaped
-    field is refused earlier by `canonical_columns_or_refusal`/
-    `canonical_predicates_or_refusal`, which run the same normalisation
-    functions, and every numeric operand an op-spec carries
-    (`OrderedThresholdPredicate.value` included) refuses a non-finite value
-    at its own field validator. An array-shaped field that skips those
-    canonicalisers, or a numeric field admitting a non-finite value, would
-    reopen a path where this refuses too late to be the refusal a caller
-    sees.
-    """
-    op_spec_hash = op_spec_hash_or_refusal(op_spec)
-    if isinstance(op_spec_hash, ToolResult):
-        return op_spec_hash
-    execution_identity = current_execution_identity()
-    content_version = mint_toolkit_content_version(
-        op_spec_hash=op_spec_hash,
-        input_content_versions=input_content_versions,
-        execution_identity=execution_identity,
-    )
-    return op_spec_hash, execution_identity, content_version
-
-
-def exclusions_for_trace(exclusions: Exclusions) -> tuple[Exclusion, ...]:
-    """`exclusions` (an engine result's `analysis_mcp.engine.common.
-    Exclusions` accumulator), wrapped into the pydantic `Exclusion` models
-    `Trace.exclusions` carries. Every verb tool calls this once when building
-    its output `Trace`.
-    """
-    return tuple(
-        Exclusion(
-            reason=record.reason,
-            rows=record.row_count,
-            entities=record.entities,
-            entities_truncated=record.entities_truncated,
-            side=record.side,
-        )
-        for record in exclusions.records
-    )
-
-
-async def store_result_and_render(
-    *,
-    frame: Frame,
-    trace: Trace,
-    digest: Callable[[], str],
-    step: Step | None = None,
-    dropped_key_count: int = 0,
-    right_dropped_key_count: int = 0,
-    ranked_before_limit: int | None = None,
-) -> ToolResult:
-    """Store `frame`/`trace` under the pair identity `trace` already carries
-    (`trace.op_spec_hash`, `trace.content_version`), and render `digest` --
-    a verb's own `render_x_digest` bound to every argument it already has in
-    scope, taking none from here -- into the returned `ToolResult`. The
-    lines every verb's own body ends with, once its own output `Trace` is
-    built.
-
-    The stored trace is `trace` with its `steps` set to `step`, the record of
-    the verb's own operation, or empty when the caller passes none.
-
-    A durable store's `put` can raise `FrameTooLarge` for a result over its
-    own row ceiling -- a two-sided verb (`join`'s own doubled output rows
-    are the reproduced case) can legitimately compute a result larger than
-    either of its own already-admitted inputs. That's caught here and
-    returned as the `frame_too_large` refusal rather than a success: no
-    object was written, so there is no reference to hand back.
-
-    Runs inside a `holds_input_rows` verb call, whose row claim covers the
-    write until its worker thread finishes, even when the call is cancelled
-    first; outside one it raises `RuntimeError`.
-
-    The returned `structured_content` is built from a real `VerbResult(...)`
-    -- `role_keys`/`stat_var_count` read off `frame` itself via
-    `observed_shape`, so the payload matches `result.VERB_OUTPUT_SCHEMA`,
-    the schema `server._register` declares at each verb's registration site.
-    `dropped_key_count` and `right_dropped_key_count` are the numbers of
-    the first and second inputs' keys the verb left out of `frame`, which
-    `frame` cannot state. A keyed `quotient_of` or `share_of` passes the
-    first, a `join` both.
-    `ranked_before_limit` is how many entries a limited `rank` ranked before
-    its limit cut them, which `frame` cannot state. Only `rank` passes one.
-    """
-    trace = trace.model_copy(update={"steps": () if step is None else (step,)})
-    ref = FrameRef(spec_id=trace.op_spec_hash, content_version=trace.content_version)
-    try:
-        # A durable store's `put` encodes and uploads in a worker thread that a
-        # cancelled call leaves running, so the call's row claim lasts until it ends.
-        await call_row_claim().hold_through(
-            get_store().put(ref, frame=frame, trace=trace, writer=current_writer())
-        )
-    except FrameTooLarge as exc:
-        return to_tool_result(ToolRefusal.frame_too_large_on_write(reason=exc.reason))
-    role_keys, stat_var_count = observed_shape(frame)
-    result = VerbResult(
-        spec_id=ref.spec_id,
-        content_version=ref.content_version,
-        frame_content_version=trace.frame_content_version,
-        rows=frame.num_rows,
-        role_keys=role_keys,
-        stat_var_count=stat_var_count,
-        dropped_key_count=dropped_key_count,
-        right_dropped_key_count=right_dropped_key_count,
-        ranked_before_limit=ranked_before_limit,
-        exclusions=trace.exclusions,
-        time=trace.time,
-    )
-    return ToolResult(
-        content=digest(),
-        structured_content=result.model_dump(mode="json"),
-        is_error=False,
-    )
-
-
 @dataclass(frozen=True, kw_only=True)
 class _Rebuilt:
     """A lost frame `ref` and the root `node` that stands for it."""
@@ -255,6 +114,10 @@ async def _rebuilt(
     call answers when no root can."""
     if ref.spec_id.startswith("ops_"):
         replayed = await replay_derived(ref)
+        if isinstance(replayed, ToolRefusal) and replayed.code in REPOST_RECOVERS_CODES:
+            replayed = await replay_derived(ref)
+            if isinstance(replayed, ToolRefusal) and replayed.code in REPOST_RECOVERS_CODES:
+                return replayed
         if isinstance(replayed, ToolRefusal):
             return replayed if _transient(replayed) else lost.not_rebuilt()
         return _Rebuilt(ref=ref, node=replayed.model_dump())
@@ -396,30 +259,12 @@ async def run_on_runner(
         )
         if sentence is not None
     ]
-    digest = render_summary_digest(answer, heading=heading)
+    digest, cells = digest_cells(answer, heading=heading)
+    labels = await label_cells(cells, read_nodes=read_graph_nodes)
+    if labels.labels:
+        digest = render_summary_digest(answer, heading=heading, labels=labels)
     return ToolResult(
         content="\n\n".join([" ".join(sentences), digest]) if sentences else digest,
         structured_content=answer.verb_result().model_dump(mode="json"),
         is_error=False,
     )
-
-
-def dedupe_input_content_versions(first: str, second: str) -> list[str]:
-    """`[first]` when `second` names the identical content_version,
-    otherwise `[first, second]` -- the two-sided verbs' own (`compare`,
-    `join`, `share_of`, `sum_of`, `quotient_of`) rule for listing each distinct input
-    content_version once in `Trace.input_content_versions`, whether or not
-    their own second side turned out to share the first side's
-    content_version.
-    """
-    return [first] if second == first else [first, second]
-
-
-def entity_label(entity_key: tuple[tuple[str, str], ...]) -> str:
-    """A JSON-object-key-safe label for an entity key tuple, for a trace's
-    own `applied_policy.detail["per_entity_coverage"]` mapping (`growth`,
-    `rank`).
-    """
-    if not entity_key:
-        return "(all rows)"
-    return ", ".join(f"{column}={value}" for column, value in entity_key)

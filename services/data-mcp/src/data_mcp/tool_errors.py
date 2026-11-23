@@ -46,10 +46,17 @@ from enum import StrEnum
 from typing import Any, Literal, Self, cast
 
 from common.echoed_text import truncate_value
-from common.refusal import refusal_meta, refusal_text
+from common.refusal import (
+    MINTED_FRAME,
+    SERVICE_FAILURE,
+    SPEC_NOT_REGISTERED,
+    refusal_meta,
+    refusal_text,
+)
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from fastmcp.tools import ToolResult
 
+from data_mcp.dcid import ENTITY_DCID_MARKER
 from data_mcp.errors import UpstreamError, UpstreamSurfaceUnavailable, UpstreamTransportError
 
 logger = logging.getLogger(__name__)
@@ -153,10 +160,6 @@ TOOL_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
 # Five keeps `entity_ambiguous` payloads bounded without starving the model
 # of real choices.
 ENTITY_CANDIDATE_CAP = 5
-
-# The marker `entity_ambiguous` puts before each candidate's dcid, and that `get_data`
-# reads as "a dcid, not a name to resolve" in `scope.entities`.
-ENTITY_DCID_MARKER = "dcid:"
 
 # The ceilings `over_ceiling`'s `fix.ceiling_kind` can name, each by the unit
 # its `count` and `cap` measure. `_UPSTREAM_CEILING_KINDS` maps apis' own
@@ -546,9 +549,12 @@ class ToolRefusal:
         upstream_code: str | None,
         detail: str | None,
         retry_after_s: float | None,
+        service_failure: bool,
         trace_id: str | None = None,
         capability_version: str | None = None,
     ) -> Self:
+        """An upstream call that failed. `service_failure` is true when the service
+        itself failed, and `fix.kind` then says so (`SERVICE_FAILURE`)."""
         message = (
             f"Upstream call failed ({upstream_code or 'unclassified'}): {detail}. "
             f"Retry after {retry_after_s:.1f}s."
@@ -559,7 +565,7 @@ class ToolRefusal:
         return cls(
             code=ToolErrorCode.UPSTREAM_ERROR,
             message=message,
-            fix={"detail": detail},
+            fix={"detail": detail, **({"kind": SERVICE_FAILURE} if service_failure else {})},
             upstream_code=upstream_code,
             retry_after_s=retry_after_s,
             trace_id=trace_id,
@@ -603,7 +609,7 @@ class ToolRefusal:
                 "Retrying the same call would reach the same response, and no argument "
                 "here was wrong either."
             ),
-            fix={"detail": detail},
+            fix={"detail": detail, "kind": SERVICE_FAILURE},
             retry_after_s=None,
             trace_id=trace_id,
             capability_version=capability_version,
@@ -731,7 +737,9 @@ class ToolRefusal:
         """dfo-apis refused to register the definition of `spec_id`, which `tool` was
         passed alone (`definition_registration`). Its message names `tool`, whose
         caller never asked for a registration. The same id reaches the same refusal, so
-        it names no delay."""
+        it names no delay. It shares `upstream_error` with an upstream service's own
+        failures, and `fix.kind` (`SPEC_NOT_REGISTERED`) tells it apart. Another
+        definition gets past it, and waiting on the service does not."""
         return cls(
             code=ToolErrorCode.UPSTREAM_ERROR,
             message=(
@@ -739,7 +747,7 @@ class ToolRefusal:
                 f"({upstream_code or 'unclassified'}): {detail}. This spec_id cannot be read, "
                 "and repeating the call reaches the same refusal."
             ),
-            fix={"tool": tool, "problems": [f"{spec_id}: {detail}"]},
+            fix={"kind": SPEC_NOT_REGISTERED, "tool": tool, "problems": [f"{spec_id}: {detail}"]},
             upstream_code=upstream_code,
         )
 
@@ -785,7 +793,12 @@ class ToolRefusal:
                 "get_data again with a narrower scope.entities or scope.window instead, "
                 "which mints a different content_version."
             ),
-            fix={"spec_id": spec_id, "content_version": content_version, "reason": reason},
+            fix={
+                "kind": MINTED_FRAME,
+                "spec_id": spec_id,
+                "content_version": content_version,
+                "reason": reason,
+            },
         )
 
     @classmethod
@@ -1831,10 +1844,19 @@ def from_upstream_error(exc: UpstreamError, *, tool: str) -> ToolRefusal:
     # a refusal whose own flag is false (apis `operations/worker.py`), so
     # a mapped cause keeps it too.
     retry_after_s = _derive_retry_after_s(exc) if exc.retryable or retried_in_place else None
+    # A failure with no status, no problem document or a 5xx is the service's
+    # own. A 4xx with no problem document comes from a proxy, an IAM check or a
+    # body limit in front of apis, and is the service's too. A failed operation
+    # retried in place names a source revision that moved, and a 4xx problem is
+    # a refusal of the request under a code this service does not map.
+    service_failure = not retried_in_place and (
+        exc.status is None or exc.status >= 500 or exc.code is None
+    )
     return ToolRefusal.upstream_error(
         upstream_code=code,
         detail=exc.detail,
         retry_after_s=retry_after_s,
+        service_failure=service_failure,
         trace_id=exc.trace_id,
         capability_version=exc.capability_version,
     )

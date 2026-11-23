@@ -34,8 +34,11 @@ import pytest
 from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.genai import Client, errors, types
+from harness.graph import planning
+from harness.turn.store import AgentRecord
 from harness.turn_events import PLANNER_ASK
 from langfuse.api import DatasetItem, NotFoundError
+from planner import session
 from planner.plan import EvidenceRequirement
 from planner.skills import GET_SKILL
 from planner.tools import PENDING_ASK_STATE_KEY
@@ -71,6 +74,46 @@ async def test_every_task_validates_and_the_set_covers_every_kind() -> None:
     faults = await validate.check_all(entry.load_tasks())
 
     assert faults == {}
+
+
+@pytest.mark.parametrize("moved", [False, True], ids=["as-served", "hand-back-moved"])
+async def test_each_amendment_task_hands_back_the_message_it_names(
+    moved: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scripted planner names each value an amendment task accepts in
+    `new_question_in`, and the turn hands back that message's words, or nothing and
+    asks the user for their question for `none`. A planner node that leaves the hand-back
+    under other keys is reported on every task."""
+    entry.quiet_logs()
+    tasks = entry.load_amendment_tasks()
+    assert any(len(task.amendment.accepted) > 1 for task in tasks)
+    if moved:
+        monkeypatch.setattr(planning, "NEW_QUESTION_KEY", "moved:new_question")
+        monkeypatch.setattr(planning, "ASK_FOR_QUESTION_KEY", "moved:ask_for_question")
+
+    faults = {}
+    for task in tasks:
+        if found := await validate.check_amendment(task):
+            faults[task.id] = found
+
+    assert sorted(faults) == (sorted(task.id for task in tasks) if moved else []), faults
+
+
+@pytest.mark.parametrize(
+    "stated",
+    [
+        pytest.param([], id="an-empty-list"),
+        pytest.param(["amendment", "amendment"], id="a-value-twice"),
+        pytest.param("the brief", id="no-message"),
+        pytest.param(["answer", "none"], id="an-answer-the-task-scripts-not"),
+    ],
+)
+def test_an_amendment_names_only_messages_the_task_holds(stated: Any) -> None:
+    task = next(task for task in entry.load_amendment_tasks() if task.amendment.answer is None)
+    stored = task.amendment.model_dump()
+
+    with pytest.raises(ValidationError):
+        entry.Amendment.model_validate({**stored, "new_question_in": stated})
 
 
 def _search_reworded(task: Any) -> dict[str, Any]:
@@ -251,17 +294,20 @@ async def _stalled() -> Any:
     await asyncio.sleep(30)
 
 
+# The wall bounds the whole entry, so only the stalled answer meets a short one.
+# The others refuse at once, and a wall they could reach on a loaded machine
+# would report the wall instead of their refusal.
 @pytest.mark.parametrize(
-    ("answer", "refusal"),
+    ("answer", "wall_s", "refusal"),
     [
-        (_refused_for_now, "refused for now"),
-        (_cut, "ToolSurfaceUnavailableError: search timed out"),
-        (_broken, "RuntimeError: connection reset"),
-        (_stalled, "ran past 0.5 s"),
+        (_refused_for_now, 60.0, "refused for now"),
+        (_cut, 60.0, "ToolSurfaceUnavailableError: search timed out"),
+        (_broken, 60.0, "RuntimeError: connection reset"),
+        (_stalled, 0.5, "ran past 0.5 s"),
     ],
 )
 async def test_a_live_translation_that_cannot_be_replayed_is_not_recorded(
-    answer: Callable[[], Any], refusal: str
+    answer: Callable[[], Any], wall_s: float, refusal: str
 ) -> None:
     entry.quiet_logs()
     task = _task("growth-gdp-kenya")
@@ -270,7 +316,7 @@ async def test_a_live_translation_that_cannot_be_replayed_is_not_recorded(
     client = _LiveClient(answer)
 
     with pytest.raises(recorder.TranslationRecordError) as raised:
-        await recorder._translation_calls(client, task, recording, wall_s=0.5)
+        await recorder._translation_calls(client, task, recording, wall_s=wall_s)
 
     assert raised.value.args[0].startswith("reference: ")
     assert refusal in raised.value.args[0]
@@ -510,7 +556,7 @@ def test_a_refusal_the_entry_ended_on_wins_over_an_ask_left_on_record(
     probe = entry.Probe()
     probe.refused_code = refused_code
     run = entry.EntryRun(
-        events=[],
+        records=[],
         state={PENDING_ASK_STATE_KEY: {"call_id": "c1", "args": {"message": "Which years?"}}},
         probe=probe,
         inputs="",
@@ -587,6 +633,63 @@ async def test_a_record_says_what_the_accepted_plan_does_with_its_years(
     assert entry.record_period_reduction(_before_the_mark(record), task) == reduction
 
 
+def test_the_record_counts_the_calls_the_planner_reads_back_and_no_others() -> None:
+    call = {"function_call": {"id": "c1", "name": "propose_plan", "args": {}}}
+    answer = {"function_response": {"id": "c1", "name": "propose_plan", "response": {"ok": 1}}}
+    records = [
+        session.response_record([types.Part.model_validate(call)]),
+        session.answers_record(
+            [types.FunctionResponse.model_validate(answer["function_response"])]
+        ),
+        # A planner record of no kind the planner reads calls from.
+        AgentRecord(agent="planner", kind="note", body={"parts": [call]}),
+        AgentRecord(agent="loop", kind="response", body={"parts": [call]}),
+    ]
+
+    assert entry.tool_calls(records) == [
+        {"id": "c1", "name": "propose_plan", "args": {}, "response": {"ok": 1}}
+    ]
+
+
+# The planner node writes a value into the state that the turn store cannot hold, before
+# its step runs or in place of it.
+@pytest.mark.parametrize(
+    ("value", "raises", "fault"),
+    [
+        (float("nan"), False, "ValueError"),
+        (object(), True, "RuntimeError: the step's own fault"),
+    ],
+    ids=["nan", "step_raises"],
+)
+async def test_a_state_the_turn_store_refuses_ends_the_entry_with_the_steps_own_fault(
+    monkeypatch: pytest.MonkeyPatch, value: object, raises: bool, fault: str
+) -> None:
+    entry.quiet_logs()
+    task = _task(_PLAIN)
+    real = entry.planner_node
+
+    def planner_node(*, planner: Any) -> Any:
+        node = real(planner=planner)
+
+        async def run(ctx: Any, node_input: Any) -> Any:
+            ctx.state["unstorable"] = value
+            if raises:
+                raise RuntimeError("the step's own fault")
+            return await node.run(ctx, node_input)
+
+        return dataclasses.replace(node, run=run)
+
+    monkeypatch.setattr(entry, "planner_node", planner_node)
+    model = validate.ScriptedModel([[("propose_plan", dict(task.reference_payload))]])
+
+    run = await entry.run_entry(
+        task, entry.load_recording(task.id), prefix_cache=None, client=model.client, timeout_s=60.0
+    )
+
+    assert run.error is not None and run.error.startswith(fault), run.error
+    assert entry.stop_reason(run) == "error"
+
+
 # A plain task, accepted on its first proposal, and a refusal task, refused first, then
 # asking the user and accepted once they answer.
 @pytest.mark.parametrize("task_id", [_PLAIN, _REFUSAL])
@@ -620,7 +723,7 @@ async def test_a_request_sends_the_instruction_as_a_string_and_every_declaration
 ):
     """The planner's request reaches the eval's probe with the instruction as a
     string and every declaration in one `Tool`
-    (`harness.planner_model._in_canonical_form`), so `ModelRequest` reads the
+    (`harness.gemini_wire.in_canonical_form`), so `ModelRequest` reads the
     instruction and every declaration from it."""
     entry.quiet_logs()
     task = _task(_PLAIN)

@@ -6,6 +6,13 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 import httpx2
 import pytest
 from common.apis_auth import TOKEN_HEADER, ApisAuthError, AuthProvider
+from common.caller import (
+    CALLER_HEADER,
+    CALLER_PRINCIPAL_HEADER,
+    MCP_CLIENT_HEADER,
+    SURFACE_HEADER,
+    USER_AGENT_HEADER,
+)
 from data_mcp.client import (
     _PROBE_TIMEOUT_S,
     DATASETS_PREFIX,
@@ -19,8 +26,10 @@ from data_mcp.deadline import CallDeadline
 from data_mcp.errors import UpstreamError, UpstreamSurfaceUnavailable, UpstreamTransportError
 from data_mcp.settings import Settings
 from fastmcp.client.client import CallToolResult
+from fastmcp.server.http import set_http_request
 from mcp.types import TextContent
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from starlette.requests import Request
 
 Handler = (
     Callable[[httpx2.Request], httpx2.Response]
@@ -1122,3 +1131,93 @@ async def test_waiting_on_another_callers_probe_ends_with_the_deadline() -> None
     assert bounded_error.code == "not_found"
     assert bounded_elapsed < 0.3
     assert probe_calls == 1
+
+
+# The caller ------------------------------------------------------------------------
+
+_PRINCIPAL = "caller-principal-secret"
+_ADDRESS = "ip:" + "0123456789abcdef" * 2
+_CONVERSATION = "conversation:" + "fedcba9876543210" * 2
+_USER_AGENT = "claude-user/1.0 (+https://claude.ai)"
+_IDENTITY_HEADERS = (
+    CALLER_PRINCIPAL_HEADER,
+    CALLER_HEADER,
+    SURFACE_HEADER,
+    USER_AGENT_HEADER,
+    MCP_CLIENT_HEADER,
+    "x-dfo-client",
+)
+
+
+def _inbound(caller: str) -> Request:
+    """The MCP request a tool call arrived on, from `caller` with `_USER_AGENT`."""
+    headers = [(CALLER_HEADER, caller), ("user-agent", _USER_AGENT)]
+    return Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers]})
+
+
+def _identity(request: httpx2.Request) -> dict[str, str]:
+    return {name: request.headers[name] for name in _IDENTITY_HEADERS if name in request.headers}
+
+
+_EXTERNAL = {
+    CALLER_PRINCIPAL_HEADER: _PRINCIPAL,
+    CALLER_HEADER: _ADDRESS,
+    SURFACE_HEADER: "mcp",
+    USER_AGENT_HEADER: _USER_AGENT,
+}
+# dfo-apis reads Studio from the caller's prefix, so a conversation sends no surface.
+_STUDIO = {
+    CALLER_PRINCIPAL_HEADER: _PRINCIPAL,
+    CALLER_HEADER: _CONVERSATION,
+}
+
+
+@pytest.mark.parametrize(
+    ("caller", "principal", "sent"),
+    [
+        (_ADDRESS, _PRINCIPAL, _EXTERNAL),
+        (_CONVERSATION, _PRINCIPAL, _STUDIO),
+        (_ADDRESS, None, {}),
+        ("user:edge", _PRINCIPAL, {}),
+    ],
+    ids=["mcp-client", "studio", "mcp-client-unset", "other-caller"],
+)
+async def test_a_dfo_apis_call_names_its_caller_beside_the_principal(
+    caller: str, principal: str | None, sent: dict[str, str]
+) -> None:
+    """`request` attaches `caller_headers`. The caller-form table is in
+    `common`'s `test_caller`."""
+    requests, handler = _counting_handler(httpx2.Response(200, json={"ok": True}))
+
+    async with _client(handler, settings=_settings(dfo_caller_principal=principal)) as client:
+        with set_http_request(_inbound(caller)):
+            await client.request("GET", "/api/datasets/spec_1", route="/api/datasets/{id}")
+
+    assert [_identity(request) for request in requests] == [sent]
+
+
+@pytest.mark.parametrize(
+    ("caller", "principal", "sent"),
+    [(_ADDRESS, _PRINCIPAL, _EXTERNAL), (_CONVERSATION, _PRINCIPAL, _STUDIO), (_ADDRESS, None, {})],
+    ids=["mcp-client", "studio", "unset"],
+)
+async def test_stream_link_names_the_caller_to_dfo_apis_and_not_to_the_signed_url_host(
+    caller: str, principal: str | None, sent: dict[str, str]
+) -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if request.url.host == "storage.test":
+            return httpx2.Response(200)
+        return httpx2.Response(302, headers={"Location": "https://storage.test/signed"})
+
+    async with _client(handler, settings=_settings(dfo_caller_principal=principal)) as client:
+        with set_http_request(_inbound(caller)):
+            async with client.stream_link(
+                "/api/artifacts/a1", timeout_s=1.0, transport=httpx2.MockTransport(handler)
+            ):
+                pass
+
+    assert seen[-1].url.host == "storage.test"
+    assert [_identity(request) for request in seen] == [sent, {}]

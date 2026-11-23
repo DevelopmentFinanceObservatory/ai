@@ -98,6 +98,7 @@ from harness.settings import (
 from mcp import MCPError
 from mcp import types as mt
 from mcp.client import advertise
+from mcp.server import _streamable_http_modern as streamable_http_modern
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from mcp_types import INTERNAL_ERROR, INVALID_PARAMS
 from opentelemetry import trace as otel_trace
@@ -117,6 +118,7 @@ from presentation_mcp.platform_contract import (
 from presentation_mcp.projection import ROWLESS_NOTICE, UNKNOWN_HOST_ROWLESS_NOTICE
 from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic import ValidationError as PydanticValidationError
+from sse_starlette import EventSourceResponse
 from starlette.applications import Starlette
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -289,8 +291,9 @@ async def test_the_combined_server_lists_what_the_direct_mounts_list(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with running_lifespan(app):
         direct_tools: list[mt.Tool] = []
@@ -353,9 +356,10 @@ async def test_the_combined_server_refuses_as_the_direct_mounts_do(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """One refusal from each child, neither of which reaches an upstream."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
     calls = (
         (DIRECT[0], "get_data", CONTRADICTORY_GET_DATA),
         (DIRECT[1], "aggregate", {"frame_ref": {"spec_id": _BARE_OPS}, "aggregation": "sum"}),
@@ -390,8 +394,9 @@ async def test_a_success_through_the_combined_server_carries_only_the_digest(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with running_lifespan(app):
         handles = await seed_fixture_store(get_frame_store())
@@ -416,6 +421,7 @@ async def test_a_success_through_the_combined_server_carries_only_the_digest(
 async def test_a_tool_a_child_adds_is_shaped_without_being_named(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """Every tool the parent serves is shaped, so a new data-mcp tool loses
     its output schema and structured content with no change here."""
@@ -425,7 +431,7 @@ async def test_a_tool_a_child_adds_is_shaped_without_being_named(
 
     data_server.mcp.tool(tally)
     try:
-        app = create_app(settings=Settings(mcp_api_token=TOKEN))
+        app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
         async with (
             running_lifespan(app),
             Client(mounted_mcp_transport(app, COMBINED, token=TOKEN)) as client,
@@ -444,6 +450,7 @@ async def test_a_tool_a_child_adds_is_shaped_without_being_named(
 async def test_the_search_envelope_in_meta_stays_behind_the_combined_server(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """The harness reads `search`'s envelope from the direct mount; an
     outside client gets the digest and the rest of `_meta`."""
@@ -456,7 +463,7 @@ async def test_the_search_envelope_in_meta_stays_behind_the_combined_server(
 
     data_server.mcp.tool(enveloped)
     try:
-        app = create_app(settings=Settings(mcp_api_token=TOKEN))
+        app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
         results = []
         async with running_lifespan(app):
             for path in (DIRECT[0], COMBINED):
@@ -483,8 +490,9 @@ async def test_the_presentation_tools_are_listed_with_their_view(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with (
         running_lifespan(app),
@@ -507,8 +515,9 @@ async def test_every_listed_tool_has_a_title_and_explicit_annotations(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with (
         running_lifespan(app),
@@ -541,8 +550,9 @@ async def test_the_combined_server_announces_its_instructions_and_the_harness_ve
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with (
         running_lifespan(app),
@@ -605,6 +615,7 @@ async def test_a_view_passes_the_combined_server_whole_within_its_call_limit(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """write_component's result keeps the view's layout in `structuredContent`
     and the values it binds in `_meta`, and finishes inside the
@@ -614,7 +625,7 @@ async def test_a_view_passes_the_combined_server_whole_within_its_call_limit(
     answers that revision's requests without a session, so presentation-mcp
     cannot see the host's capabilities and says so in its rowless notice.
     """
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with running_lifespan(app):
         started = time.monotonic()
@@ -646,9 +657,10 @@ async def test_a_view_tools_refusal_passes_the_combined_server_whole(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """The refusal's notice view stays in `structuredContent` for the host to draw."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
     arguments = {"intent": {"title": "Aid"}, "component_id": "cmp_9"}
 
     async with running_lifespan(app):
@@ -674,9 +686,10 @@ async def test_the_renderer_page_reads_through_the_combined_server(
     caplog: pytest.LogCaptureFixture,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """The listed URI and any other version's, each through the request log."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
     uris = (presentation_server._RENDERER_URI, "ui://presentation-mcp/renderer-0.html")
 
     async with running_lifespan(app):
@@ -704,7 +717,7 @@ async def test_the_renderer_page_reads_through_the_combined_server(
         *["combined mcp call resource outcome=ok"] * 2,
     ]
     assert " uri=" not in logged[0]
-    assert [message.split(" uri=")[1] for message in logged[1:]] == [
+    assert [message.split(" uri=")[1].rsplit(" user_agent=", 1)[0] for message in logged[1:]] == [
         json.dumps(uri) for uri in uris
     ]
 
@@ -717,10 +730,11 @@ async def test_a_resource_reads_query_and_fragment_stay_out_of_the_request_log(
     caplog: pytest.LogCaptureFixture,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """The client parses the URI, which gives an `https` host an empty path (`/`) before
     the query; a `dfo` host keeps its query and fragment against the bare host."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with (
         running_lifespan(app),
@@ -737,7 +751,7 @@ async def test_a_resource_reads_query_and_fragment_stay_out_of_the_request_log(
         for r in caplog.records
         if r.name == "harness.combined_mcp" and r.getMessage().startswith("combined mcp call")
     ]
-    assert logged.endswith(" uri=" + json.dumps("dfo://artifact"))
+    assert logged.rsplit(" user_agent=", 1)[0].endswith(" uri=" + json.dumps("dfo://artifact"))
     assert "secret" not in logged
 
 
@@ -747,12 +761,16 @@ async def test_the_rate_limit_counts_tool_calls_alone(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """A bucket of one admits one tool call after any number of other requests.
     A session DELETE never reaches middleware."""
     app = create_app(
         settings=Settings(
-            mcp_api_token=TOKEN, combined_mcp_requests_per_s=0.001, combined_mcp_burst=1
+            database_url=pg_database_url,
+            mcp_api_token=TOKEN,
+            combined_mcp_requests_per_s=0.001,
+            combined_mcp_burst=1,
         )
     )
     arguments = {"frame_ref": UNHELD_FRAME, "aggregation": "sum"}
@@ -781,10 +799,11 @@ async def test_an_unknown_tool_refuses_with_the_tools_the_server_serves(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """No child sees a call the parent cannot route, so analysis-mcp's own
     unknown-verb message never runs."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with (
         running_lifespan(app),
@@ -811,11 +830,12 @@ async def test_an_outside_client_cannot_call_a_harness_only_tool(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """data-mcp's own mount serves `resolve_definition`, refusing an identity that
     does not hash to its spec_id before it asks Search; the combined server refuses
     the same call as a tool it does not serve."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
     arguments = {
         "spec_id": "spec_" + "0" * 32,
         "identity": {"identity_version": "spec1", "seed": "outside"},
@@ -842,9 +862,10 @@ async def test_arguments_that_fail_the_input_schema_refuse_in_the_envelope(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """The direct mount keeps fastmcp's bare validation text."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
     arguments = {"frame_ref": UNHELD_FRAME}  # `aggregation` is required
 
     async with running_lifespan(app):
@@ -879,9 +900,10 @@ async def test_an_operation_outside_the_enum_names_the_values_it_takes(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """`accepted` is the listed schema's: `growth` without `rolling` and `anchor_key`."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with (
         running_lifespan(app),
@@ -926,9 +948,10 @@ async def test_a_merged_name_refuses_naming_the_listed_call(
     fix: dict[str, str],
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """A client holding a list from before the merge recovers in one call."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with (
         running_lifespan(app),
@@ -954,9 +977,9 @@ _RECORDED_RELEASE = Path(__file__).resolve().parents[2] / (
 
 # The most o200k tokens the public tool list may cost as a client hands it to its
 # model (the compact JSON of each tool's name, description and input schema). Every
-# client pays it on every turn. The bound is the measured count, 18,018, rounded up
+# client pays it on every turn. The bound is the measured count, 18,707, rounded up
 # to the next 500. The list must stay within 20,000. Lower the bound as it shrinks.
-_PUBLIC_LIST_TOKEN_BOUND = 18_500
+_PUBLIC_LIST_TOKEN_BOUND = 19_000
 
 
 async def _public_list(monkeypatch: pytest.MonkeyPatch) -> list[mt.Tool]:
@@ -1623,6 +1646,7 @@ async def test_a_tool_that_raises_refuses_with_no_trace_id_and_none_of_its_text(
     caplog: pytest.LogCaptureFixture,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """The exception's text can name a bucket or a service account, so the
     refusal carries neither, and the log line carries the trace id and the
@@ -1635,7 +1659,7 @@ async def test_a_tool_that_raises_refuses_with_no_trace_id_and_none_of_its_text(
     data_server.mcp.tool(explode)
     monkeypatch.setattr(refusal_module, "current_trace_id", lambda: _KNOWN_TRACE_ID)
     try:
-        app = create_app(settings=Settings(mcp_api_token=TOKEN))
+        app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
         async with running_lifespan(app):
             results = []
             with caplog.at_level(logging.ERROR, logger="harness.combined_mcp"):
@@ -1671,6 +1695,7 @@ async def test_a_resource_read_that_raises_fails_with_no_trace_id_and_none_of_it
     caplog: pytest.LogCaptureFixture,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """An unexpected exception inside the artifact resource fails with fixed
     text, logged by data-mcp with its trace id, while the resource's
@@ -1681,7 +1706,7 @@ async def test_a_resource_read_that_raises_fails_with_no_trace_id_and_none_of_it
 
     monkeypatch.setattr(artifact_resource, "get_client", unreachable)
     monkeypatch.setattr(refusal_module, "current_trace_id", lambda: _KNOWN_TRACE_ID)
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with (
         running_lifespan(app),
@@ -1743,6 +1768,7 @@ async def test_get_data_through_the_combined_server_runs_under_the_external_budg
     monkeypatch: pytest.MonkeyPatch,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     read: dict[str, list[CallBudget]] = {}
     current_call_budget = get_data_tool.current_call_budget
@@ -1754,7 +1780,7 @@ async def test_get_data_through_the_combined_server_runs_under_the_external_budg
         return budget
 
     monkeypatch.setattr(get_data_tool, "current_call_budget", recording)
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with running_lifespan(app):
         for path_now in (COMBINED, DIRECT[0]):
@@ -1775,12 +1801,16 @@ async def test_a_tool_call_over_the_rate_limit_refuses_in_the_envelope(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """A bucket of two that refills once in 1000 s admits two tool calls. The
     direct mount is not limited."""
     app = create_app(
         settings=Settings(
-            mcp_api_token=TOKEN, combined_mcp_requests_per_s=0.001, combined_mcp_burst=2
+            database_url=pg_database_url,
+            mcp_api_token=TOKEN,
+            combined_mcp_requests_per_s=0.001,
+            combined_mcp_burst=2,
         )
     )
     arguments = {"frame_ref": UNHELD_FRAME, "aggregation": "sum"}
@@ -1820,9 +1850,8 @@ LIMIT_S = 0.5
 _CLIENT_TIMEOUT_S = 10
 
 _ARTIFACT_URI = f"dfo://artifact/spec_{'5' * 32}/cv_1/sha256:{'1' * 64}"
-# A spec the definition store does not hold, and apis' registry answer for it
-# (`GET /api/datasets/{id}/options`), which a public `get_data` reads to choose the
-# type columns it always asks for.
+# A spec the definition store does not hold, which a public `get_data` mints on the
+# registry-fallback path.
 _UNSTORED_IDENTITY = {
     "identity_version": "spec1",
     "shape": {"id": "LimitTestShape", "kind": "stat_var"},
@@ -1832,23 +1861,17 @@ _UNSTORED_IDENTITY = {
     "slots": [],
 }
 _UNSTORED_SPEC = spec_id_for(canonicalize(_UNSTORED_IDENTITY))
-_REGISTRY_DEFINITION = {
-    "definition": {"schema_version": 1, "spec_id": _UNSTORED_SPEC, "identity": _UNSTORED_IDENTITY}
-}
 
 
 class _StalledUpstream:
-    """apis holding every request but a registry read until `release` is set,
-    recording the path of each request whose wait was cancelled. Once released,
-    it answers 400."""
+    """apis holding every request until `release` is set, recording the path of each
+    request whose wait was cancelled. Once released, it answers 400."""
 
     def __init__(self) -> None:
         self.release = asyncio.Event()
         self.cancelled: list[str] = []
 
     async def handler(self, request: httpx2.Request) -> httpx2.Response:
-        if request.url.path.endswith("/options"):
-            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         try:
             await self.release.wait()
         except asyncio.CancelledError:
@@ -2051,8 +2074,6 @@ async def test_get_data_refuses_on_its_own_deadline_before_the_limit_stops_it(
                 - poll_time_left_s
             )
             return httpx2.Response(202, json={"operation": operation})
-        if request.url.path.endswith("/options"):
-            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         assert request.url.path == operation["poll"]
         return httpx2.Response(200, json={"operation": operation})
 
@@ -2081,6 +2102,62 @@ async def test_get_data_refuses_on_its_own_deadline_before_the_limit_stops_it(
     else:
         assert _envelope(result)["code"] == "operation_still_processing"
         assert answered_after < limit_s
+
+
+@REVISIONS
+async def test_an_address_caller_reaches_dfo_apis_with_its_surface_and_user_agent(
+    mode: str, revision: str, running_lifespan: Callable[..., Any]
+) -> None:
+    """The caller, surface and User-Agent a client sends to `/mcp/` arrive at
+    dfo-apis beside the principal, with its `clientInfo` name where the revision
+    delivers it on a call. A 2025-11-25 client names itself on initialize alone,
+    which this stateless server does not keep for the call."""
+    caller = "ip:" + "ab" * 16
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(400)
+
+    client_holder.set_client(
+        UpstreamClient(
+            settings=DataMcpSettings(dfo_caller_principal="principal-secret"),
+            transport=httpx2.MockTransport(handler),
+        )
+    )
+    app = _limited_app()
+    transport = StreamableHttpTransport(
+        url="http://testserver/",
+        auth=TOKEN,
+        headers={"x-dfo-caller": caller, "user-agent": "claude-user/1.0"},
+        httpx_client_factory=cast(
+            McpHttpClientFactory,
+            lambda **kwargs: httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=app), base_url="http://testserver", **kwargs
+            ),
+        ),
+    )
+    try:
+        async with (
+            running_lifespan(app),
+            Client(
+                transport,
+                timeout=_CLIENT_TIMEOUT_S,
+                mode=mode,
+                client_info=mt.Implementation(name="Anthropic/ClaudeAI", version="1.0"),
+            ) as client,
+        ):
+            await client.call_tool("get_data", {"spec_id": _UNSTORED_SPEC}, raise_on_error=False)
+    finally:
+        client_holder.set_client(None)
+
+    mcp_client = "Anthropic/ClaudeAI" if revision == "2026-07-28" else None
+    assert seen
+    for request in seen:
+        assert request.headers["x-dfo-caller"] == caller
+        assert request.headers["x-dfo-surface"] == "mcp"
+        assert request.headers["x-dfo-user-agent"] == "claude-user/1.0"
+        assert request.headers.get("x-dfo-mcp-client") == mcp_client
 
 
 async def _until(condition: Callable[[], bool]) -> None:
@@ -2504,13 +2581,14 @@ async def test_a_presentation_refusal_records_its_code_with_or_without_a_view(
     caplog: pytest.LogCaptureFixture,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """presentation-mcp names its code `code` in `structuredContent`, and an MCP
     Apps host gets a notice view there instead. The span and the log line name
     the code either way: the platform's `not_found` is the caller's to correct,
     and `transient_unavailable`, a platform the assembler could not reach, is
     the server's failure."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
     transport = mounted_mcp_transport(app, COMBINED, token=TOKEN)
 
     async with (
@@ -2587,12 +2665,13 @@ async def test_each_call_through_the_combined_server_is_logged(
     logging_configured: None,
     caplog: pytest.LogCaptureFixture,
     running_lifespan: Callable[..., Any],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
     transport = StreamableHttpTransport(
         url=f"http://testserver{COMBINED}",
         auth=TOKEN,
-        headers={"x-dfo-caller": "ip:test"},
+        headers={"x-dfo-caller": "ip:test", "user-agent": "claude-user/1.0 (+https://claude.ai)"},
         httpx_client_factory=cast(
             McpHttpClientFactory,
             lambda **kwargs: httpx2.AsyncClient(
@@ -2620,14 +2699,19 @@ async def test_each_call_through_the_combined_server_is_logged(
     # fastmcp's own client names itself `mcp` and declares no MCP Apps extension.
     # A 2025-11-25 client says so on initialize alone.
     host = 'client="mcp" client_version="0.1.0" views=undeclared view_mime_types=None'
-    initialize = [f"combined mcp initialize outcome=ok revision={revision} caller=ip:test {host}"]
+    # Every request carries the user agent, so a 2025-11-25 client's calls, which
+    # log no client, still name it by its whole User-Agent.
+    user_agent = 'user_agent="claude-user/1.0 (+https://claude.ai)"'
+    initialize = [
+        f"combined mcp initialize outcome=ok revision={revision} caller=ip:test {host} {user_agent}"
+    ]
     unseen = "client=None client_version=None views=unknown view_mime_types=None"
     call_host = unseen if revision == "2025-11-25" else host
     assert [re.sub(r"trace_id=[0-9a-f]{32}", "trace_id=<id>", message) for message in messages] == [
         *(initialize if revision == "2025-11-25" else []),
         *(
             f"combined mcp call tool=aggregate outcome={outcome} revision={revision} "
-            f"caller=ip:test trace_id=<id> {call_host}"
+            f"caller=ip:test trace_id=<id> {call_host} {user_agent}"
             for outcome in ("ok", "rendering_not_recorded")
         ),
     ]
@@ -2648,6 +2732,7 @@ async def test_the_request_log_names_the_host_and_what_it_declared_about_views(
     logging_configured: None,
     caplog: pytest.LogCaptureFixture,
     running_lifespan: Callable[..., Any],
+    pg_database_url: str,
 ) -> None:
     """Each line carries the client's name and version and its MCP Apps
     declaration where the revision delivers them, a resource read's URI with an
@@ -2657,12 +2742,16 @@ async def test_the_request_log_names_the_host_and_what_it_declared_about_views(
     this stateless server log `views=unknown`, the reading presentation-mcp
     answers them by. A client name is capped and written as a JSON string.
     """
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
     name = 'host" views=declared\n' + "n" * 300
     transport = StreamableHttpTransport(
         url=f"http://testserver{COMBINED}",
         auth=TOKEN,
-        headers={"x-dfo-caller": "ip:test", WRITE_TOKEN_HEADER: _HEADER_WRITE_TOKEN},
+        headers={
+            "x-dfo-caller": "ip:test",
+            WRITE_TOKEN_HEADER: _HEADER_WRITE_TOKEN,
+            "user-agent": "Host/2.5",
+        },
         httpx_client_factory=cast(
             McpHttpClientFactory,
             lambda **kwargs: httpx2.AsyncClient(
@@ -2701,18 +2790,28 @@ async def test_the_request_log_names_the_host_and_what_it_declared_about_views(
     )
     unseen = "client=None client_version=None views=unknown view_mime_types=None"
     initialize = [
-        f"combined mcp initialize outcome=ok revision={revision} caller=ip:test {declared}"
+        f"combined mcp initialize outcome=ok revision={revision} caller=ip:test "
+        f'{declared} user_agent="Host/2.5"'
     ]
     call_host = unseen if revision == "2025-11-25" else declared
+    user_agent = 'user_agent="Host/2.5"'
     assert [re.sub(r" trace_id=[0-9a-f]{32}", "", message) for message in messages] == [
         *(initialize if revision == "2025-11-25" else []),
         f"combined mcp call tool=write_component outcome=not_found revision={revision} "
-        f"caller=ip:test {call_host}",
+        f"caller=ip:test {call_host} {user_agent}",
         f"combined mcp call resource outcome=ok revision={revision} caller=ip:test {call_host} "
-        f"uri={json.dumps(presentation_server._RENDERER_URI)}",
+        f"uri={json.dumps(presentation_server._RENDERER_URI)} {user_agent}",
         f"combined mcp call resource outcome=ArtifactRefusalError revision={revision} caller=ip:test "
-        f'{call_host} uri="dfo://artifact"',
+        f'{call_host} uri="dfo://artifact" {user_agent}',
     ]
+    # The dfo-infra log parser (infra/stacks/telemetry/sql/parse_mcp_line.sql, `mcp_line`)
+    # reads these lines into mcp_daily. A line it does not match counts as `unparsed`.
+    # The pattern is copied from that file, with BigQuery's `r'...'` quoting removed.
+    mcp_line = re.compile(
+        r'(?s)^combined mcp (?:call (tool=(?:[A-Za-z0-9_.-]+|"(?:[^"\\]|\\.)*")|resource|resource_list) outcome=(.*?) revision=\S* caller=(.*?) trace_id=\S*|(initialize) outcome=(.*?) revision=\S* caller=(.*?)) client=(None|"(?:[^"\\]|\\.)*") client_version=.*$'
+    )
+    assert messages
+    assert all(mcp_line.match(message) for message in messages)
     logged = "\n".join(
         f"{record.getMessage()} {record.args!r} {record.exc_text or ''}"
         for record in caplog.records
@@ -2730,10 +2829,11 @@ async def test_a_client_supplied_tool_name_cannot_forge_a_log_field(
     caplog: pytest.LogCaptureFixture,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
     """A plain tool name is logged bare, and any other name, which the server
     may not know, as a capped JSON string."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
     odd = "x y=z\nw"
 
     async with running_lifespan(app):
@@ -2772,11 +2872,12 @@ async def test_a_malformed_resource_uri_is_logged_and_the_read_fails_as_usual(
     logging_configured: None,
     caplog: pytest.LogCaptureFixture,
     running_lifespan: Callable[..., Any],
+    pg_database_url: str,
 ) -> None:
     """The line names the URI's scheme and host without any userinfo, and the
     read fails with the error it would have without the log. The request is
     raw, since the MCP client refuses a malformed URI before sending it."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
     request = {"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": uri}}
 
     async with (
@@ -2802,7 +2903,7 @@ async def test_a_malformed_resource_uri_is_logged_and_the_read_fails_as_usual(
         if r.name == "harness.combined_mcp" and r.getMessage().startswith("combined mcp call")
     ]
     assert line.startswith("combined mcp call resource outcome=ResourceError ")
-    assert line.endswith(f" uri={logged}")
+    assert line.rsplit(" user_agent=", 1)[0].endswith(f" uri={logged}")
     assert "pw" not in line
 
 
@@ -2935,6 +3036,7 @@ async def test_an_artifact_uri_reaches_no_log_record_or_failure_text(
     snapshot_upstream: None,
     monkeypatch: pytest.MonkeyPatch,
     running_lifespan: Callable[..., Any],
+    pg_database_url: str,
 ) -> None:
     """A `dfo://artifact` URI is a bearer credential. fastmcp logs a failed
     read's whole URI with its traceback, from its own logger, in both the
@@ -2942,7 +3044,7 @@ async def test_an_artifact_uri_reaches_no_log_record_or_failure_text(
     data-mcp logs each failure without the URI, and no record at INFO or above,
     nor any failure text, holds an artifact's path."""
     del revision
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with running_lifespan(app):
         failures = await _read_artifacts(app, mode=mode, monkeypatch=monkeypatch)
@@ -2975,10 +3077,11 @@ async def test_an_artifact_uri_reaches_no_exported_span(
     snapshot_upstream: None,
     monkeypatch: pytest.MonkeyPatch,
     running_lifespan: Callable[..., Any],
+    pg_database_url: str,
 ) -> None:
     """fastmcp names a read's whole URI on its spans; `UriRedactingExporter`,
     which the OTLP backend exports through, cuts each to `dfo://artifact`."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with running_lifespan(app):
         await _read_artifacts(app, mode="2026-07-28", monkeypatch=monkeypatch)
@@ -3012,20 +3115,49 @@ def _timing_bodies(app: ASGIApp, sent: list[tuple[float, bytes]]) -> ASGIApp:
     return timed
 
 
+# The ping test's clock runs at this fraction of real time, so a 21 s call
+# takes 5.25 s. The 5 s between the 15 s ping interval and the 20 s deadline
+# scales to 1.25 s, which absorbs scheduler delay under parallel workers.
+_PING_TIME_SCALE = 0.25
+
+
 @REVISIONS
 async def test_a_slow_call_is_kept_alive_with_pings_under_20s_apart(
     mode: str,
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A proxy on the way cuts a response after 100 s without a byte. Both
-    revisions send an SSE ping comment every 15 s while a call runs."""
+    revisions send an SSE ping comment every 15 s while a call runs.
+
+    The deadline, the call and both revisions' ping intervals run at
+    `_PING_TIME_SCALE`: the 2025-11-25 revision's, which each sse-starlette
+    `EventSourceResponse` sets, and the 2026-07-28 revision's, which the SDK's
+    modern transport reads from its module. Each interval is recorded before it
+    is scaled and must sit under the unscaled 20 s. A ping that came from an
+    unscaled interval would arrive long after the scaled call ends."""
+    chosen = [streamable_http_modern._SSE_PING_INTERVAL]
+    monkeypatch.setattr(
+        streamable_http_modern,
+        "_SSE_PING_INTERVAL",
+        streamable_http_modern._SSE_PING_INTERVAL * _PING_TIME_SCALE,
+    )
+    init = EventSourceResponse.__init__
+
+    def scaled_init(self: EventSourceResponse, *args: Any, **kwargs: Any) -> None:
+        init(self, *args, **kwargs)
+        chosen.append(self.ping_interval)
+        self.ping_interval = self.ping_interval * _PING_TIME_SCALE
+
+    monkeypatch.setattr(EventSourceResponse, "__init__", scaled_init)
+    deadline = 20 * _PING_TIME_SCALE
     probe = FastMCP(name="probe")
 
     @probe.tool
     async def slow() -> str:
-        await asyncio.sleep(21)
+        await asyncio.sleep(21 * _PING_TIME_SCALE)
         return "done"
 
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
@@ -3046,16 +3178,18 @@ async def test_a_slow_call_is_kept_alive_with_pings_under_20s_apart(
     pings = [at for at, body in sent if body.startswith(b": ping")]
     marks = [started, *pings, ended]
     assert result.content[0].text == "done"  # shaped: the text alone
-    assert ended - started > 20
+    assert max(chosen) < 20
+    assert ended - started > deadline
     assert pings
-    assert max(later - earlier for earlier, later in pairwise(marks)) < 20
+    assert max(later - earlier for earlier, later in pairwise(marks)) < deadline
 
 
 async def test_the_combined_server_refuses_an_unauthenticated_request(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with running_lifespan(app):
         statuses: list[int] = []
@@ -3067,8 +3201,10 @@ async def test_the_combined_server_refuses_an_unauthenticated_request(
     assert set(statuses) == {401}
 
 
-async def test_healthz_reports_each_mounted_server(running_lifespan: Callable[..., Any]) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+async def test_healthz_reports_each_mounted_server(
+    running_lifespan: Callable[..., Any], pg_database_url: str
+) -> None:
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with (
         running_lifespan(app),
@@ -3139,15 +3275,17 @@ class _Alternating(httpx2.AsyncBaseTransport):
 
 
 async def test_a_2025_client_is_served_by_any_instance_without_a_session(
-    running_lifespan: Callable[..., Any], runner: Any
+    running_lifespan: Callable[..., Any],
+    runner: Any,
+    pg_database_url: str,
 ) -> None:
     """Two app instances share the process's frame store, as Cloud Run
     instances share one bucket. A 2025-11-25 client initializes against
     one and chains a call to the other, and neither issues a session. The
     chained public call over a derived input lets its rolling years follow the
     call's tree."""
-    first = create_app(settings=Settings(mcp_api_token=TOKEN))
-    second = create_app(settings=Settings(mcp_api_token=TOKEN))
+    first = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
+    second = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
     alternating = _Alternating({"first": first, "second": second})
     response_headers: list[httpx2.Headers] = []
 
@@ -3390,8 +3528,9 @@ async def test_the_combined_server_lists_the_skills_search_can_name(
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     with _skills_upstream(_skills_api):
         async with (
@@ -3446,8 +3585,9 @@ async def test_each_skills_api_refusal_reaches_an_outside_client_as_written(
     message: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     with _skills_upstream(handler):
         async with (
@@ -3464,8 +3604,9 @@ async def test_each_skills_api_refusal_reaches_an_outside_client_as_written(
 async def test_a_2025_11_25_client_sees_resources_and_no_extensions(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with (
         running_lifespan(app),
@@ -3482,8 +3623,9 @@ async def test_a_2025_11_25_client_sees_resources_and_no_extensions(
 async def test_a_2026_07_28_clients_discovery_declares_the_skills_extension(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     async with (
         running_lifespan(app),
@@ -3499,8 +3641,9 @@ async def test_a_2026_07_28_clients_discovery_declares_the_skills_extension(
 async def test_skills_list_and_skills_get_answer_through_the_combined_server(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
     entry = {
         "uri": "skill://oda-concepts/SKILL.md",
         "frontmatter": {"name": "oda-concepts", "description": "Core ODA concepts."},
@@ -3571,8 +3714,9 @@ async def test_the_extension_fails_with_the_json_rpc_code_sep_2640_names(
     message: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    pg_database_url: str,
 ) -> None:
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     with _skills_upstream(handler):
         async with (

@@ -57,7 +57,7 @@ def _tools(surface: _RecordingSurface, state: dict[str, Any] | None = None) -> d
     """Each tool's function, called with a tool context over `state`."""
     tool_context = SimpleNamespace(
         state={} if state is None else state,
-        session=SimpleNamespace(events=[]),
+        records=[],
         function_call_id=None,
     )
     return {

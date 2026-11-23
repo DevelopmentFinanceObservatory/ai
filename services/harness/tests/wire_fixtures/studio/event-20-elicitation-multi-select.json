@@ -1,0 +1,28 @@
+{
+  "event": "elicitation.request",
+  "seq": 5,
+  "interrupt_id": "elc_5e8a1c73d2b64f90",
+  "questions": [
+    {
+      "id": "q1",
+      "question": "Which parts of Kenya's debt service should the chart cover?",
+      "input": "multi_select",
+      "options": [
+        {
+          "id": "o1",
+          "label": "Principal repayments"
+        },
+        {
+          "id": "o2",
+          "label": "Interest payments"
+        },
+        {
+          "id": "o3",
+          "label": "Charges and fees"
+        }
+      ],
+      "allow_free_text": true,
+      "skippable": true
+    }
+  ]
+}

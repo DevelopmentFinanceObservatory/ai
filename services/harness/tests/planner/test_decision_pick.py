@@ -26,12 +26,10 @@ from compiler.compile import compile_plan
 from compiler.sources import source_from_spec_block
 from compiler.surface import McpSurface
 from data_mcp.server import mcp as data_mcp
-from google.adk.events import Event, EventActions
-from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
-from google.genai import types
 from harness.decision_pick import decision_pick
 from harness.plan_display import decision_option_id
 from harness.studio_state import _turn_identities
+from harness.turn.store import AgentRecord
 from planner.plan import (
     ASKS_STATE_KEY,
     DECISION_PICK_STATE_KEY,
@@ -60,9 +58,11 @@ from translator.mechanical import build_translation
 from ..basis_alignment import HEALTH, TOTAL, provider_block
 from ..decision_drafts import drafts
 from ..planner_tools import call_planner_tool
-from ..session_events import response_event
+from ..session_events import response_event, user_answer
 from .test_agent import (
     _CONSTANT_GROSS,
+    _EUR,
+    _EUR_READ,
     _FRANCE_KENYA,
     _GROSS,
     _US_MULTILATERAL,
@@ -72,10 +72,12 @@ from .test_agent import (
     _FakeToolContext,
     _offering_constant,
     _prices_ask_events,
+    _read_in,
     _share,
     _show_block,
     _show_blocks,
     _tools_by_name,
+    _unit_answered,
 )
 
 DAC_TOTAL = "spec_" + "d" * 32
@@ -111,7 +113,7 @@ USER_YEAR = Decision(
 TOP_TEN = DONOR_SCOPE.model_copy(
     update={
         "chosen": "the top 10 donors",
-        "fixes": DecisionFixes(limit=10, among=RankAmong.POPULATION),
+        "fixes": DecisionFixes(limit=10),
     }
 )
 # The DAC total's decision under the picked label, listing the period beside
@@ -181,12 +183,12 @@ def _ranked_donors() -> list[Any]:
 
 
 def _context() -> Any:
-    """The part of ADK's `ToolContext` `propose_plan` reads, holding no asks."""
+    """The part of a tool call's context `propose_plan` reads, holding no asks."""
     return SimpleNamespace(
         state={ASKS_STATE_KEY: []},
         function_call_id=None,
-        actions=EventActions(),
-        session=SimpleNamespace(events=[]),
+        run_ended=False,
+        records=[],
     )
 
 
@@ -206,7 +208,7 @@ def _recorded_dac_total(ctx: Any, decision: Callable[..., Decision]) -> dict[str
         evidence_requirements=[_dac_total()],
     )
     assert first["outcome"] == Outcome.OK.value, first
-    ctx.session.events = [response_event("propose_plan", first)]
+    ctx.records = [response_event("propose_plan", first)]
     return first
 
 
@@ -232,7 +234,7 @@ def test_a_pick_that_changes_the_plans_shape_is_admitted_as_the_users(
     assert plan is not None
     picked = next(d for d in plan.decisions if d.slot == "donor_scope")
     assert (picked.chosen, picked.resolved_by) == ("the top 10 donors", ResolvedBy.USER)
-    assert picked.fixes == DecisionFixes(limit=10, among=RankAmong.POPULATION)
+    assert picked.fixes == DecisionFixes(limit=10)
     assert next(d for d in plan.decisions if d.slot == "year") == USER_YEAR
     assert [r.id for r in plan.evidence_requirements] == ["aid", "top"]
 
@@ -330,7 +332,7 @@ def test_a_restated_pick_its_requirements_fix_nothing_of_is_refused_saying_so(
     decision: Callable[..., Decision],
 ) -> None:
     """The plan states the picked option, cited only by the donors to Kenya,
-    which state neither a rank's limit nor what it ranks among: the decision
+    which state no rank's limit: the decision
     fixes nothing, and the refusal says the requirements citing it fix none
     of what it names."""
     ctx = _context()
@@ -425,7 +427,7 @@ def test_a_pick_releases_no_user_decision_of_a_requirement_it_did_not_change(
         ],
     )
     assert first["outcome"] == Outcome.OK.value, first
-    ctx.session.events = [response_event("propose_plan", first)]
+    ctx.records = [response_event("propose_plan", first)]
     _pick_top_ten(ctx)
 
     result = _propose_plan(
@@ -450,11 +452,7 @@ def test_a_pick_releases_no_user_decision_of_a_requirement_it_did_not_change(
         pytest.param(TOP_TEN, id="fixing-the-rank"),
         pytest.param(
             TOP_TEN.model_copy(
-                update={
-                    "fixes": DecisionFixes(
-                        limit=10, among=RankAmong.POPULATION, period=Period(start=2022, end=2022)
-                    )
-                }
+                update={"fixes": DecisionFixes(limit=10, period=Period(start=2022, end=2022))}
             ),
             id="listing-the-period",
         ),
@@ -522,7 +520,7 @@ def test_a_pick_listing_entities_releases_no_user_decision_fixing_the_recipient(
         ],
     )
     assert first["outcome"] == Outcome.OK.value, first
-    ctx.session.events = [response_event("propose_plan", first)]
+    ctx.records = [response_event("propose_plan", first)]
     _pick_top_ten(ctx)
     aid, top = _ranked_donors()
     ghana = (Entity(name="Ghana", role="recipient"),)
@@ -530,13 +528,7 @@ def test_a_pick_listing_entities_releases_no_user_decision_fixing_the_recipient(
     result = _propose_plan(
         ctx,
         decisions=drafts(
-            [
-                TOP_TEN.model_copy(
-                    update={
-                        "fixes": DecisionFixes(limit=10, among=RankAmong.POPULATION, entities=ghana)
-                    }
-                )
-            ]
+            [TOP_TEN.model_copy(update={"fixes": DecisionFixes(limit=10, entities=ghana)})]
         ),
         evidence_requirements=[
             aid.model_copy(update={"entities": ghana, "decision_ids": ("measure", "donor_scope")}),
@@ -582,7 +574,7 @@ def test_a_later_proposal_of_the_pick_replan_holds_the_pick_against_the_plan_pic
         amends_version=first["version"],
     )
     assert held["outcome"] == Outcome.OK.value, held
-    ctx.session.events = [*ctx.session.events, response_event("propose_plan", held)]
+    ctx.records = [*ctx.records, response_event("propose_plan", held)]
 
     result = _propose_plan(
         ctx,
@@ -621,7 +613,7 @@ def test_a_pick_holds_the_users_decisions_whatever_the_session_records(
     the same: the pick is no word of the user's."""
     ctx = _context()
     first = _recorded_dac_total(ctx, decision)
-    ctx.session.events = recorded(first)
+    ctx.records = recorded(first)
     _pick_top_ten(ctx)
     aid, top = _ranked_donors()
 
@@ -1288,7 +1280,7 @@ RANKING = Decision(
     chosen="the top 10 donors",
     resolved_by=ResolvedBy.PLANNER_DEFAULT,
     rationale="Ten donors cover most of the aid.",
-    fixes=DecisionFixes(limit=10, among=RankAmong.POPULATION),
+    fixes=DecisionFixes(limit=10),
 )
 
 
@@ -1327,7 +1319,7 @@ def test_a_pick_keeping_part_of_what_it_replaces_unchanged_is_admitted(
                 RANKING.model_copy(
                     update={
                         "chosen": "the top 5 donors",
-                        "fixes": DecisionFixes(limit=5, among=RankAmong.POPULATION),
+                        "fixes": DecisionFixes(limit=5),
                     }
                 )
             ]
@@ -1342,7 +1334,7 @@ def test_a_pick_keeping_part_of_what_it_replaces_unchanged_is_admitted(
     picked = next(d for d in plan.decisions if d.slot == "donor_scope")
     assert (picked.chosen, picked.fixes) == (
         "the top 5 donors",
-        DecisionFixes(limit=5, among=RankAmong.POPULATION),
+        DecisionFixes(limit=5),
     )
     assert next(r for r in plan.evidence_requirements if r.id == "aid") == aid
 
@@ -1358,8 +1350,8 @@ async def test_a_pick_over_a_windowed_pin_cites_the_users_year_and_still_compile
     shape = Decision(
         slot="shape",
         description="How to combine each year's flows.",
-        options=["the yearly sum", "the yearly average"],
-        chosen="the yearly sum",
+        options=["sum", "mean"],
+        chosen="sum",
         resolved_by=ResolvedBy.PLANNER_DEFAULT,
         rationale="A sum is the usual reading.",
         fixes=DecisionFixes(reduction=Reduction.SUM),
@@ -1407,7 +1399,7 @@ async def test_a_pick_over_a_windowed_pin_cites_the_users_year_and_still_compile
         pick = decision_pick(
             shown,
             choice_id="decision/shape",
-            option_id=decision_option_id("the yearly average"),
+            option_id=decision_option_id("mean"),
             to_origin={copy.spec_id: copy.windowed_from},
             alignments={},
         )
@@ -1421,7 +1413,7 @@ async def test_a_pick_over_a_windowed_pin_cites_the_users_year_and_still_compile
                 [
                     shape.model_copy(
                         update={
-                            "chosen": "the yearly average",
+                            "chosen": "mean",
                             "fixes": DecisionFixes(reduction=Reduction.MEAN),
                         }
                     )
@@ -1589,7 +1581,7 @@ def test_a_pick_whose_decision_settles_to_the_cards_value_is_refused(
                 RANKING.model_copy(
                     update={
                         "chosen": "the top 5 donors",
-                        "fixes": DecisionFixes(limit=5, among=RankAmong.POPULATION, **listed),
+                        "fixes": DecisionFixes(limit=5, **listed),
                     }
                 )
             ]
@@ -1933,7 +1925,7 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
     earlier = aid("earlier", 2010, decision_ids=("measure",), period=Period(start=2010, end=2014))
     ctx = _FakeToolContext()
     _show_blocks(ctx, _offering_constant(), _constant_block())
-    ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
+    ctx.records = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
     propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     card = propose(
         question="q",
@@ -1998,12 +1990,9 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
     assert [d for d in plan.decisions if d.slot == priced] == [decided]
 
 
-def _switch_event(choice_id: str, option_id: str) -> Any:
+def _switch_event(choice_id: str, option_id: str) -> AgentRecord:
     """The approval card's answer switching row `choice_id` to option `option_id`."""
-    part = create_request_input_response(
-        "approve", {"result": {"switch": {"choice_id": choice_id, "option_id": option_id}}}
-    )
-    return Event(content=types.Content(role="user", parts=[part]))
+    return user_answer("int_approve", {"switch": {"choice_id": choice_id, "option_id": option_id}})
 
 
 @pytest.mark.parametrize(
@@ -2069,7 +2058,7 @@ def test_a_switch_of_the_prices_row_is_the_users_new_prices(
     else:
         _show_blocks(ctx, _FRANCE_KENYA)
     constant = answered == "constant"
-    ctx.session.events = _prices_ask_events(
+    ctx.records = _prices_ask_events(
         constant_spec_id=_CONSTANT_GROSS if constant else None, pick=None if constant else "o1"
     )
     first = (
@@ -2099,8 +2088,8 @@ def test_a_switch_of_the_prices_row_is_the_users_new_prices(
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
-    ctx.session.events = [
-        *ctx.session.events,
+    ctx.records = [
+        *ctx.records,
         response_event("propose_plan", card),
         _switch_event(f"decision/{slot}", option),
     ]
@@ -2213,7 +2202,7 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
 
     ctx = _FakeToolContext()
     _show_blocks(ctx, _FRANCE_KENYA)
-    ctx.session.events = _prices_ask_events(pick="o1")
+    ctx.records = _prices_ask_events(pick="o1")
     propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     card = propose(
         question="q",
@@ -2232,8 +2221,8 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
-    ctx.session.events = [
-        *ctx.session.events,
+    ctx.records = [
+        *ctx.records,
         response_event("propose_plan", card),
         _switch_event(f"decision/{slot}", constant),
     ]
@@ -2250,8 +2239,8 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
-    ctx.session.events = [
-        *ctx.session.events,
+    ctx.records = [
+        *ctx.records,
         response_event("propose_plan", switched),
         _switch_event("decision/years", later),
     ]
@@ -2274,3 +2263,79 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
     )
 
     assert result["outcome"] == Outcome.OK.value, result
+
+
+def test_a_prices_switch_after_a_whole_unit_keeps_its_currency() -> None:
+    """The user chose current euros for the gross part, and the plan on the
+    series Search re-read in them records that choice in words. A switch of
+    the card's prices row to constant prices keeps the euros: a replan in
+    constant US dollars is refused and told the unit in euros."""
+    measure = Decision(
+        slot="measure",
+        description="What to measure.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+
+    def aid(requirement_id: str, **update: Any) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=("measure",),
+            measure="French aid to Kenya",
+            entities=(Entity(name="France", role="donor"), Entity(name="Kenya", role="recipient")),
+            period=Period(start=2015, end=2022),
+            source_spec_id=_EUR_READ,
+            unit=Unit(currency="EUR", prices="current"),
+        ).model_copy(update=update)
+
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _offering_constant(), _constant_block(), _read_in(_EUR_READ, _EUR))
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([measure]),
+        evidence_requirements=[aid("first")],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    slot = f"user_prices_{_EUR_READ}"
+    decided = next(d for d in plan.decisions if d.slot == slot)
+    assert (decided.chosen, decided.options) == (
+        "current prices in EUR",
+        ("current prices in EUR", "constant prices"),
+    )
+    assert decided.rationale == "The user chose current prices in EUR."
+    option = decision_option_id("constant prices")
+    pick = decision_pick(
+        plan, choice_id=f"decision/{slot}", option_id=option, to_origin={}, alignments={}
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+    ctx.records = [
+        *ctx.records,
+        response_event("propose_plan", card),
+        _switch_event(f"decision/{slot}", option),
+    ]
+
+    result = propose(
+        amends_version=card["version"],
+        evidence_requirements=[
+            aid(
+                "second",
+                source_spec_id=_CONSTANT_GROSS,
+                unit=Unit(currency="USD", prices="constant", base_year=2023),
+            )
+        ],
+        removed_evidence_requirements=["first"],
+        tool_context=ctx,
+    )
+
+    assert result["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, result
+    in_euros = Unit(currency="EUR", prices="constant", base_year=2023)
+    assert result["detail"]["unit"] == in_euros.model_dump(mode="json")

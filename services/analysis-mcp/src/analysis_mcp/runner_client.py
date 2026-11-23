@@ -7,11 +7,13 @@ populations to `POST /api/datasets/analysis/anchor`. Each returns the runner's
 answer, or the `ToolRefusal` its reply maps to:
 
 - 200 from the analysis route is the stored frame's ref and the `summary` of
-  the call (`summary.VerbSummary`). From the anchor route it is `AnchorAnswer`.
+  the call (`summary.VerbSummary`), with each dataset version the runner read
+  summed over its StatVars (`stat_vars_summed`). From the anchor route it is
+  `AnchorAnswer`.
 - 202 is a root dataset still building, `ToolRefusal.analysis_pending` with the
   runner's `retry_after_s`.
-- A problem document keeps the runner's `code`, `detail` and `fix` where this
-  service defines the code, which holds for every engine code, except that
+- A problem document keeps the runner's `code`, `detail`, `fix` and
+  `retry_mode`, a code this service defines no factory for included, except that
   `place_levels_mixed` is written again from its `fix`
   (`ToolRefusal.place_levels_mixed`), so its message names this service's calls. Under
   `rolling: "tree"`, a derived input with no stored recipe (`recipe_not_found`)
@@ -27,8 +29,12 @@ answer, or the `ToolRefusal` its reply maps to:
   `derived_input_unrecoverable`. The refusal names only the derived inputs
   whose manifest lists the root, and every one when a manifest cannot be read.
   `over_ceiling` is `frame_too_large`, and a busy runner's retryable
-  `service_unavailable` keeps its code with a delay. Any other code is
-  `upstream_error` naming it.
+  `service_unavailable` keeps its code with a delay. A code this service
+  defines for its own failures (`_LOCAL_CODES`) is `upstream_error` naming it.
+  `RUNNER_CODES` is every code the code registry (`dfo_spec_kit.registry`) maps
+  to the analysis route. A code outside it passes through too, and is logged.
+  A code passed through that the runner answered with a 5xx is the runner's own
+  failure, and its `fix.kind` says so (`common.refusal.SERVICE_FAILURE`).
 - An answer outside that contract, an unreachable dfo-apis, a timeout and a
   failed credential are `upstream_error`, the last three retryable.
 
@@ -39,7 +45,13 @@ takes the latest period over the anchor roots and checks the literals against
 it, so a call over data the record never saw would otherwise compute a window
 that ends at another dataset's latest period. The ref's roots are the roots
 the runner read, those behind a derived input and the anchor roots included,
-so the check covers a derived input as it covers a fetched frame.
+so the check covers a derived input as it covers a fetched frame. A root the
+runner read as a rendering of its own version, such as the sum of a dataset of
+several StatVars, names that rendering, and the answer's `derived_roots` names
+the dataset version the sum read: the root is covered when that version is one
+the record was resolved over, and a sum of another version refuses as other
+data does. dfo-apis names no base for a party-totals cut, which can drop
+periods, so a cut root is covered only by its own pair.
 
 `replay_derived` asks the runner to compute a derived frame again from its stored
 recipe with `latest: true`, which reads its roots at their datasets' current
@@ -54,6 +66,9 @@ the latest year of the call's whole tree and answers each with its literal
 so the input's own rolling years follow that one latest year too, and the
 summary names each input that took another year alone (`run_tree`).
 
+`read_graph_nodes` reads one batch of graph nodes from `POST /api/graph/nodes`,
+which names a digest's breakdown cells (`common.breakdown_labels`).
+
 `read_derived_manifest` and `read_derived_file` read a frame the runner stored,
 by its `ops_` pair, from `GET /api/datasets/derived/{spec_id}/{content_version}`
 and its `/file`, for a caller that needs its recipe or its rows. Each raises
@@ -61,11 +76,17 @@ and its `/file`, for a caller that needs its recipe or its rows. Each raises
 `derived_read_timeout_s`, far less than a compute call's
 `analysis_runner_timeout_s`, so a stalled dfo-apis fails a read in seconds.
 
-Every call carries the Cloud Run ID token (`common.apis_auth`) and, for a caller
-the website named (`x-dfo-caller: ip:<digest>`), the caller principal beside it,
-so dfo-apis resolves the website's client as it does on the website's own
-calls (`dfo_platform.caller.resolve_caller`). A `conversation:` caller from the
-harness names no client address, so it is not sent.
+Every call carries the Cloud Run ID token (`common.apis_auth`) and the headers
+that name its caller (`common.caller.vouched_caller_headers`), which hold when
+this process has the caller principal. For an `ip:` or `user:` caller the website named,
+they are `x-dfo-caller-principal`, `x-dfo-caller`, `x-dfo-surface: mcp`, and
+`x-dfo-user-agent`, the whole User-Agent clipped to 256 characters, and
+`x-dfo-mcp-client`, the name in the client's `clientInfo` when the call carries
+one. For a harness `conversation:` caller they are the principal, the caller, and the
+Studio turn's id as `x-dfo-turn` when the harness names one. For shared work
+they are the principal and `x-dfo-surface` as the surface the work serves.
+dfo-apis resolves them as it does the website's own calls
+(`dfo_platform.caller.resolve_caller`).
 """
 
 from __future__ import annotations
@@ -78,7 +99,8 @@ from typing import Annotated, Any
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider, apis_auth_provider
-from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, WEBSITE_CALLER, current_caller
+from common.breakdown_labels import NODES_PATH, NODES_READ_TIMEOUT_S
+from common.caller import vouched_caller_headers
 from common.derived_replay import (
     ANALYSIS_PATH,
     DEFAULT_RETRY_AFTER_S,
@@ -93,12 +115,15 @@ from common.derived_replay import replay_derived as _replay
 from common.derived_replay import retry_after_s as _retry_after_s
 from common.holder import Holder
 from common.materialisation import FrameRef, LeftOutSeries
+from common.refusal import SERVICE_FAILURE
 from dfo_frame_grammar import shift_period
+from dfo_spec_kit.registry import REGISTRY
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from analysis_mcp.result import StatVarsSummed
 from analysis_mcp.settings import Settings
 from analysis_mcp.summary import RecomputedInput, ResolvedPeriod, Rolling, VerbSummary
-from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal
+from analysis_mcp.tool_errors import RetryMode, ToolErrorCode, ToolRefusal
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +133,8 @@ DERIVED_FILE_PATH = f"{DERIVED_PATH}/file"
 # The derived file query that answers the frame's rows as one Parquet file.
 DERIVED_FILE_QUERY: Mapping[str, str] = {"format": "parquet", "bundle": "false"}
 
-# Codes this service defines for its own failures.
+# Codes this service defines for its own failures. A runner reply that carries one
+# is `upstream_error` naming it.
 _LOCAL_CODES = frozenset(
     {
         ToolErrorCode.FRAME_NOT_HELD,
@@ -121,8 +147,26 @@ _LOCAL_CODES = frozenset(
         ToolErrorCode.INTERNAL_ERROR,
     }
 )
-# Codes the runner's engine refuses a computation with.
-RUNNER_CODES = frozenset(code.value for code in ToolErrorCode if code not in _LOCAL_CODES)
+# The mode of each runner code whose meaning `retryable` does not carry, as data-mcp
+# gives the same code. dfo-apis renders it through its problem envelope, with
+# `retryable` and no `retry_mode`: `upstream_version_changed` (503, retryable), the
+# source refreshed while the run read it. Waiting reads the same moved data; the same
+# request sent again at once reads the refreshed version. `member_not_resolvable` keeps
+# the mode `retryable` gives it: dfo-apis marks it retryable when a second member walk
+# can settle members the first left unsettled (`retry_after_delay`), and not otherwise
+# (`do_not_retry`).
+_FIXED_MODES: Mapping[str, RetryMode] = {
+    "upstream_version_changed": RetryMode.REFRESH_THEN_RETRY,
+}
+# The endpoint the code registry maps the analysis route's refusals to.
+ANALYSIS_ENDPOINT = "datasets.analysis"
+# Every code the analysis route may refuse with (`dfo_spec_kit.registry`).
+RUNNER_CODES = frozenset(
+    entry.code
+    for entry in REGISTRY
+    if any(mapping.endpoint == ANALYSIS_ENDPOINT for mapping in entry.mappings)
+)
+_TOOL_CODES = frozenset(ToolErrorCode)
 _UNHELD_ROOT_CODES = frozenset({"snapshot_not_found", "recipe_not_found"})
 _EXPIRED_ROOT_CODE = "artifact_expired"
 _ROOT_CODES = _UNHELD_ROOT_CODES | {_EXPIRED_ROOT_CODE}
@@ -132,6 +176,8 @@ _SPEC_ROOT_CODES = _ROOT_CODES | {"spec_not_found"}
 _OVER_CEILING_CODE = "over_ceiling"
 _RESPONSE_INVALID = "response_invalid"
 
+# An answer's `stat_vars_summed`, one entry per dataset version read summed.
+_STAT_VARS_SUMMED: TypeAdapter[tuple[StatVarsSummed, ...]] = TypeAdapter(tuple[StatVarsSummed, ...])
 # An answer's `resolved_periods`, one entry per relative period of the recipe.
 _RESOLVED_PERIODS: TypeAdapter[tuple[ResolvedPeriod, ...]] = TypeAdapter(
     Annotated[tuple[ResolvedPeriod, ...], Field(min_length=1)]
@@ -183,16 +229,13 @@ class RunnerClient:
         self._caller_principal = caller_principal
         self._auth = auth
 
-    def _caller_headers(self) -> dict[str, str]:
-        caller = current_caller()
-        if self._caller_principal is None or caller is None:
-            return {}
-        if not WEBSITE_CALLER.fullmatch(caller):
-            return {}
-        return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: caller}
-
-    async def post(self, path: str, body: Mapping[str, Any]) -> httpx2.Response | ToolRefusal:
-        """POST `body` to `path`, or the retryable refusal for a call that got no answer."""
+    async def post(
+        self, path: str, body: Mapping[str, Any], *, timeout_s: float | None = None
+    ) -> httpx2.Response | ToolRefusal:
+        """POST `body` to `path`, or the retryable refusal for a call that got no answer.
+        A `timeout_s` bounds this call in place of the compute call's timeout."""
+        if timeout_s is not None:
+            return await self._send("POST", path, json=body, timeout=timeout_s)
         return await self._send("POST", path, json=body)
 
     async def get(
@@ -204,7 +247,7 @@ class RunnerClient:
 
     async def _send(self, method: str, path: str, **request: Any) -> httpx2.Response | ToolRefusal:
         try:
-            headers = {**(await self._auth()), **self._caller_headers()}
+            headers = {**vouched_caller_headers(self._caller_principal), **(await self._auth())}
             return await self._client.request(method, path, headers=headers, **request)
         except ApisAuthError as exc:
             detail = f"no dfo-apis credential: {exc}"
@@ -214,7 +257,10 @@ class RunnerClient:
             detail = f"dfo-apis is unreachable: {type(exc).__name__}"
         logger.warning("dfo-apis call to %s failed: %s", path, detail)
         return ToolRefusal.upstream_error(
-            upstream_code=None, detail=detail, retry_after_s=DEFAULT_RETRY_AFTER_S
+            upstream_code=None,
+            detail=detail,
+            retry_after_s=DEFAULT_RETRY_AFTER_S,
+            service_failure=True,
         )
 
     async def aclose(self) -> None:
@@ -243,7 +289,7 @@ runner_holder: Holder[RunnerClient] = Holder(default_factory=_build)
 
 def _unusable(detail: str) -> ToolRefusal:
     return ToolRefusal.upstream_error(
-        upstream_code=_RESPONSE_INVALID, detail=detail, retry_after_s=None
+        upstream_code=_RESPONSE_INVALID, detail=detail, retry_after_s=None, service_failure=True
     )
 
 
@@ -328,6 +374,7 @@ async def refusal_for(
             upstream_code=None,
             detail=f"dfo-apis answered {response.status_code} with no problem document",
             retry_after_s=_retry_after_s(response) if response.status_code >= 500 else None,
+            service_failure=True,
         )
     code: str = problem["code"]
     detail = str(problem.get("detail") or problem.get("title") or code)
@@ -337,8 +384,6 @@ async def refusal_for(
     root: Pair = (str(fix.get("spec_id")), str(fix.get("content_version")))
     if code == ToolErrorCode.PLACE_LEVELS_MIXED and isinstance(fix.get("column"), str):
         refusal = _place_levels_mixed(fix)
-    elif code in RUNNER_CODES:
-        refusal = ToolRefusal(code=ToolErrorCode(code), message=detail, fix=fix)
     elif (
         tree_rolling
         and code == _RECIPE_MISSING_CODE
@@ -368,14 +413,67 @@ async def refusal_for(
         refusal = ToolRefusal(code=ToolErrorCode.FRAME_TOO_LARGE, message=detail, fix=fix)
     elif (refused := busy(response)) is not None:
         refusal = _busy(refused)
-    else:
+    elif code in _LOCAL_CODES:
         refusal = ToolRefusal.upstream_error(
             upstream_code=code,
             detail=detail,
             retry_after_s=_retry_after_s(response) if retryable else None,
+            # A problem the runner answered with a 5xx is its own failure.
+            service_failure=response.status_code >= 500,
             fix=fix,
         )
+    else:
+        refusal = _passed_through(problem, code=code, detail=detail, fix=fix, response=response)
     return refusal
+
+
+def _stated_mode(stated: object, *, code: str) -> RetryMode | None:
+    """The `RetryMode` a runner refusal states, or `None` when it states none or
+    one this service does not hold, which is logged."""
+    if stated is None:
+        return None
+    if isinstance(stated, str):
+        try:
+            return RetryMode(stated)
+        except ValueError:
+            pass
+    logger.warning(
+        "dfo-apis refused %s with retry_mode %r, which this service does not hold", code, stated
+    )
+    return None
+
+
+def _passed_through(
+    problem: Mapping[str, Any],
+    *,
+    code: str,
+    detail: str,
+    fix: dict[str, Any],
+    response: httpx2.Response,
+) -> ToolRefusal:
+    """The runner's refusal as it wrote it: its `code`, `detail`, `fix` and the
+    `retry_mode` its problem document states. A code missing from `RUNNER_CODES` is
+    logged, since the registry the client pins does not know it. A document with no
+    `retry_mode`, or one stating a mode `RetryMode` does not hold, which is logged,
+    takes the mode `_FIXED_MODES` gives its code, else `retry_after_delay` when it is
+    `retryable`, else the mode this service gives a code it defines. Only a
+    `retry_after_delay` refusal carries `retry_after_s`. A refusal the runner
+    answered with a 5xx is its own failure, and its `fix.kind` is
+    `SERVICE_FAILURE`, which a harness reads on any code."""
+    if code not in RUNNER_CODES:
+        logger.warning("dfo-apis refused with %s, a code the code registry does not hold", code)
+    retryable = problem.get("retryable") is True
+    mode = _stated_mode(problem.get("retry_mode"), code=code) or _FIXED_MODES.get(code)
+    if mode is None and retryable:
+        mode = RetryMode.RETRY_AFTER_DELAY
+    delayed = mode is RetryMode.RETRY_AFTER_DELAY
+    return ToolRefusal(
+        code=ToolErrorCode(code) if code in _TOOL_CODES else code,
+        message=detail,
+        fix={**fix, "kind": SERVICE_FAILURE} if response.status_code >= 500 else fix,
+        retry_after_s=_retry_after_s(response) if delayed else None,
+        runner_retry_mode=mode,
+    )
 
 
 def _place_levels_mixed(fix: Mapping[str, Any]) -> ToolRefusal:
@@ -429,13 +527,42 @@ def _ref_roots(body: Mapping[str, Any]) -> frozenset[Pair] | None:
     return frozenset(pairs)
 
 
+def _derived_bases(body: Mapping[str, Any]) -> dict[Pair, str] | None:
+    """The dataset version each root of the ready answer `body` read as a rendering of
+    its own derives from, by the pair the root names (`derived_roots`), or `None` when
+    the answer states them outside the contract. An answer with none states an empty
+    list or, from a dfo-apis that predates it, no field."""
+    derived = body.get("derived_roots", [])
+    if not isinstance(derived, list):
+        return None
+    bases: dict[Pair, str] = {}
+    for root in derived:
+        if not isinstance(root, Mapping):
+            return None
+        fields = (root.get(key) for key in ("spec_id", "content_version", "base_content_version"))
+        spec_id, content_version, base = fields
+        if not all(isinstance(field, str) for field in (spec_id, content_version, base)):
+            return None
+        bases[spec_id, content_version] = base
+    return bases
+
+
 def _uncovered(body: Mapping[str, Any], anchor: Anchor) -> ToolRefusal | None:
     """The refusal for a ready answer `body` that read a root `anchor`'s record was
-    not resolved over. See the module docstring."""
+    not resolved over. A root read as a rendering of its own version, a groupby sum
+    or a party-totals cut, is covered when the version it derives from is one the
+    record was resolved over. See the module docstring."""
     roots = _ref_roots(body)
     if roots is None:
         return _unusable("the analysis answer names no roots")
-    uncovered = sorted(roots - anchor.pairs)
+    bases = _derived_bases(body)
+    if bases is None:
+        return _unusable("the analysis answer's derived_roots do not fit this service")
+    uncovered = sorted(
+        (spec_id, content_version)
+        for spec_id, content_version in roots - anchor.pairs
+        if (spec_id, bases.get((spec_id, content_version))) not in anchor.pairs
+    )
     if not uncovered:
         return None
     spec_id, content_version = uncovered[0]
@@ -601,10 +728,16 @@ def _ready_summary(
     if anchor is not None and (refusal := _uncovered(body, anchor)) is not None:
         return refusal
     try:
-        return VerbSummary.parse(body["summary"])
+        summary = VerbSummary.parse(body["summary"])
     except (ValidationError, KeyError) as exc:
         logger.warning("analysis runner summary unreadable: %s", exc)
         return _unusable(f"the analysis summary does not fit this service: {_unread_summary(exc)}")
+    try:
+        summed = _STAT_VARS_SUMMED.validate_python(body.get("stat_vars_summed") or ())
+    except ValidationError as exc:
+        logger.warning("analysis runner stat_vars_summed unreadable: %s", exc)
+        return _unusable("the analysis answer's stat_vars_summed do not fit this service")
+    return summary.model_copy(update={"stat_vars_summed": summed}) if summed else summary
 
 
 async def replay_derived(ref: FrameRef) -> FrameRef | ToolRefusal:
@@ -677,6 +810,25 @@ def _derived_unread(answer: httpx2.Response | ToolRefusal) -> DerivedUnread:
         else answer.status_code >= 500,
         detail=str(problem.get("detail") or f"dfo-apis answered {answer.status_code}"),
     )
+
+
+async def read_graph_nodes(dcids: list[str]) -> Sequence[Mapping[str, Any]]:
+    """The entries `POST /api/graph/nodes` answers for one batch of `dcids`
+    (`common.breakdown_labels.ReadNodes`) within `NODES_READ_TIMEOUT_S`, or none when
+    the read failed, which is logged. A digest then names the cells by their values."""
+    answer = await runner_holder.get().post(
+        NODES_PATH, {"dcids": dcids}, timeout_s=NODES_READ_TIMEOUT_S
+    )
+    if isinstance(answer, ToolRefusal) or not answer.is_success:
+        status = "no answer" if isinstance(answer, ToolRefusal) else answer.status_code
+        logger.warning("dfo-apis graph nodes read of %d dcids failed: %s", len(dcids), status)
+        return []
+    body = _json(answer)
+    nodes = None if body is None else body.get("nodes")
+    if not isinstance(nodes, list):
+        logger.warning("dfo-apis graph nodes answer holds no nodes list")
+        return []
+    return [node for node in nodes if isinstance(node, Mapping)]
 
 
 def _derived_path(path: str, ref: FrameRef) -> str:

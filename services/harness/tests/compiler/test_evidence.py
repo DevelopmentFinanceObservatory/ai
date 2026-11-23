@@ -1601,20 +1601,26 @@ def test_a_series_and_the_estimates_continuing_it_are_held_to_the_period_as_one(
 
 
 @pytest.mark.parametrize(
-    ("approved", "kenya"),
+    ("approved", "kenya", "kenya_ref"),
     [
-        pytest.param(True, "Kenya", id="labelled-by-the-approved-source"),
-        pytest.param(False, None, id="unlabelled-with-no-approved-source"),
+        pytest.param(True, "Kenya", "country/KEN", id="labelled-by-the-approved-source"),
+        # A frame cell carries the `dcid:` marker; the approved entity is the bare dcid.
+        pytest.param(True, "Kenya", "dcid:country/KEN", id="labelled-behind-the-dcid-marker"),
+        pytest.param(False, None, "country/KEN", id="unlabelled-with-no-approved-source"),
     ],
 )
 def test_a_short_series_finding_names_its_entities(
-    requirement: RequirementFactory, source: SourceFactory, approved: bool, kenya: str | None
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    approved: bool,
+    kenya: str | None,
+    kenya_ref: str,
 ) -> None:
     """A series ending in 2021 with a year missing is short of 2015-2024 on
     both counts; each finding carries its entities, with the label the
     approved source gives a ref and none where it labels none."""
     named = (
-        SeriesEntity(role="recipient", ref="country/KEN", label=kenya),
+        SeriesEntity(role="recipient", ref=kenya_ref, label=kenya),
         SeriesEntity(role="donor", ref="donor/X"),
     )
     evidence = evidence_from_manifest(
@@ -1623,7 +1629,7 @@ def test_a_short_series_finding_names_its_entities(
             _stat(
                 "DebtServicePaid",
                 entities=[
-                    {"role": "recipient", "ref": "country/KEN"},
+                    {"role": "recipient", "ref": kenya_ref},
                     {"role": "donor", "ref": "donor/X"},
                 ],
                 observations=6,
@@ -1641,7 +1647,9 @@ def test_a_short_series_finding_names_its_entities(
     ] == [(EvidenceIssueCode.WINDOW_SHORT, named), (EvidenceIssueCode.COVERAGE_GAPS, named)]
 
 
-def _short_of(*refs: str, size: float | None, labelled: str | None = None) -> EvidenceIssue:
+def _short_of(
+    *refs: str, size: float | None, labelled: str | None = None, breakdown: tuple[str, ...] = ()
+) -> EvidenceIssue:
     """A `window_short` finding on the series of `refs`, of largest absolute value `size`,
     the ref `labelled` labelled by itself and the rest unlabelled."""
     return EvidenceIssue(
@@ -1650,7 +1658,8 @@ def _short_of(*refs: str, size: float | None, labelled: str | None = None) -> Ev
         requirement_id="debt",
         detail="",
         stat_var="Aid",
-        entities=tuple(
+        entities=tuple(SeriesEntity(role="stat_var_crsPurpose", ref=ref) for ref in breakdown)
+        + tuple(
             SeriesEntity(role="donor", ref=ref, label=ref if ref == labelled else None)
             for ref in refs
         ),
@@ -1684,6 +1693,62 @@ def test_the_refs_a_short_series_lookup_names_are_the_largest_series_unlabelled_
     ]
 
     assert unlabelled_series_refs(findings, limit=limit) == refs
+
+
+def test_a_series_lookup_asks_only_for_dcids_before_its_cap_and_strips_the_marker() -> None:
+    """Names ("humanitarian aid") are their own labels and take no slot; a `dcid:`
+    ref is asked for bare, and its answer labels the entity that carries the marker."""
+    # One of the labels is a held dcid, which only its role keeps out of the lookup.
+    text = ("CRSPurposeCode110", *(f"Sector{i}" for i in range(150)))
+    findings = [_short_of("dcid:donor/B", "donor/A", size=1.0, breakdown=text)]
+
+    refs = unlabelled_series_refs(findings, limit=100)
+    (labelled,) = with_series_labels(findings, {"donor/B": "Beta"})
+
+    assert refs == ["donor/B", "donor/A"]
+    assert [entity.label for entity in labelled.entities if entity.ref.endswith("B")] == ["Beta"]
+
+
+def test_a_fetched_label_does_not_reach_a_sector_that_shares_its_bare_id() -> None:
+    """A recipient `dcid:110` is looked up and labelled; the sector `110` is its own label."""
+    findings = [_short_of("dcid:110", size=1.0, breakdown=("110",))]
+
+    (labelled,) = with_series_labels(findings, {"110": "Recipient"})
+
+    assert [(entity.role, entity.label) for entity in labelled.entities] == [
+        ("stat_var_crsPurpose", None),
+        ("donor", "Recipient"),
+    ]
+
+
+def test_an_approved_label_does_not_reach_a_sector_that_shares_its_bare_id(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    """The approved recipient `dcid:110` is labelled "Recipient"; a series' sector `110`
+    names itself and keeps no label."""
+    evidence = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            _stat(
+                "DebtServicePaid",
+                entities=[
+                    {"role": "stat_var_crsPurpose", "ref": "110"},
+                    {"role": "recipient", "ref": "dcid:110"},
+                ],
+                observations=6,
+                latest={"value": 2.0, "period": "2021"},
+            )
+        ),
+    )
+    approved = source(entities=(ResolvedEntity(role="recipient", ref="110", label="Recipient"),))
+
+    issues = check_evidence(requirement(), evidence, approved=approved)
+
+    (short,) = (issue for issue in issues if issue.code is EvidenceIssueCode.WINDOW_SHORT)
+    assert [(entity.role, entity.label) for entity in short.entities] == [
+        ("stat_var_crsPurpose", None),
+        ("recipient", "Recipient"),
+    ]
 
 
 def test_a_short_series_lookup_labels_only_the_entities_it_named() -> None:

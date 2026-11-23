@@ -3,19 +3,17 @@
 An agent's system instruction, tool declarations and tool config are the
 same on every call it makes, across turns and conversations, and they are
 most of its prompt. `PrefixCache` keeps one Gemini `CachedContent` per
-distinct prefix, keyed by `prefix_key`, and `PrefixCachedGemini` sends each
-request against it: the request carries `cached_content` and none of the
+distinct prefix, keyed by `prefix_key`. A model's stream looks the request's
+prefix up (`lookup`) and sends the request against the cache it names
+(`against_cache`): the request carries `cached_content` and none of the
 three fields, which the API refuses alongside a cache (400
 INVALID_ARGUMENT). The contents, thought signatures included, travel on the
-request as before.
+request as before. `harness.gemini_wire.GeminiStream` is that stream.
 
 `harness.server.create_app` builds one `PrefixCache` per process and hands it
-to the planner and the orchestrator model constructors
-(`harness.planner_model.planner_model`,
-`orchestrator.agent.create_orchestrator_agent`).
-Each Cloud Run instance creates its own cache per prefix, once per
-`CACHE_TTL_S`. A changed prompt or model is a new key, and the old cache
-expires on its TTL.
+to the model constructors. Each Cloud Run instance creates its own cache per
+prefix, once per `CACHE_TTL_S`. A changed prompt or model is a new key, and
+the old cache expires on its TTL.
 
 The cache is an optimisation, so any failure to find or create one sends the
 request uncached, and only cancellation propagates. A create the API refuses
@@ -24,10 +22,9 @@ for gemini-3.8-flash) is remembered for that key, since the same prefix is
 refused every time. Any other create failure, whichever transport raised it,
 or a create that takes longer than `CREATE_TIMEOUT_S`, sends that key's calls
 uncached without a new create for `CREATE_COOLDOWN_S`, then is retried.
-Concurrent calls on one key share a single create. A request whose cache has
-gone (Gemini answers 403 "CachedContent not found") drops the entry, creates
-the cache again and resends once, provided no response chunk has reached the
-caller yet. An error from the model itself always reaches the caller.
+Concurrent calls on one key share a single create. A stream whose cache has
+gone (Gemini answers 403 "CachedContent not found", `CACHE_GONE_CODES`) drops
+the entry (`forget`), looks it up again and resends once.
 """
 
 from __future__ import annotations
@@ -36,20 +33,13 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
-from collections.abc import AsyncGenerator, Callable
-from contextlib import aclosing
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, override
+from typing import Any
 
-from google.adk.models.google_llm import Gemini
-from google.adk.models.llm_request import LlmRequest
-from google.adk.models.llm_response import LlmResponse
-from google.adk.models.registry import LLMRegistry
 from google.genai import Client, errors, types
-from pydantic import ConfigDict, Field
-
-from harness.turn_budget import BoundedGemini
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +64,17 @@ CREATE_COOLDOWN_S = 60.0
 # denied)". 404 covers the same on the Vertex backend.
 CACHE_GONE_CODES = frozenset({403, 404})
 
+# The names Gemini serves: its own models, Gemma 4 and later, the model
+# optimizer, a fine-tuned Vertex AI endpoint and a Vertex AI Gemini resource
+# path.
+_GEMINI_NAMES = re.compile(
+    r"gemini-.*"
+    r"|gemma-4.*"
+    r"|model-optimizer-.*"
+    r"|projects/.+/locations/.+/endpoints/.+"
+    r"|projects/.+/locations/.+/publishers/google/models/gemini.+"
+)
+
 
 def prefix_key(model: str, config: types.GenerateContentConfig) -> str | None:
     """The sha256 of `model` and `config`'s system instruction, tools and tool
@@ -96,13 +97,17 @@ def _jsonable(value: Any) -> Any:
 
 
 def gemini_model_name(model_name: str) -> str | None:
-    """The model name ADK's registry builds `model_name` into when it resolves
-    to `Gemini`, with any `Gemini:` class prefix dropped, else None."""
-    try:
-        llm = LLMRegistry.new_llm(model_name)
-    except (ValueError, ImportError):
-        return None
-    return llm.model if type(llm) is Gemini else None
+    """`model_name` as sent to Gemini when Gemini serves it, else None.
+
+    A name with a `Gemini:` class prefix, in any case, names Gemini whatever
+    follows, and is sent without the prefix. A name with any other prefix
+    names another provider's model. An unprefixed name is Gemini's when it
+    matches one of `_GEMINI_NAMES` whole.
+    """
+    prefix, colon, named = model_name.partition(":")
+    if colon:
+        return named if prefix.lower() == "gemini" else None
+    return model_name if _GEMINI_NAMES.fullmatch(model_name) else None
 
 
 @dataclass
@@ -130,18 +135,6 @@ class PrefixCache:
         self._creating: dict[str, asyncio.Task[_Entry | None]] = {}
         self._cooling_until: dict[str, float] = {}
         self._refused: set[str] = set()
-
-    def model_for(
-        self, model_name: str, *, retry_options: types.HttpRetryOptions | None = None
-    ) -> str | Gemini:
-        """`model_name` as a `PrefixCachedGemini` on this cache when ADK
-        resolves it to Gemini, else `model_name` unchanged, for ADK to
-        resolve to whatever model class serves it when the agent first runs
-        (`PLANNER_MODEL_NAME` can name another provider's model for an eval)."""
-        gemini = gemini_model_name(model_name)
-        if gemini is None:
-            return model_name
-        return PrefixCachedGemini(model=gemini, retry_options=retry_options, prefix_cache=self)
 
     async def cache_name(
         self, key: str, *, client: Client, model: str, config: types.GenerateContentConfig
@@ -241,69 +234,6 @@ def against_cache(config: types.GenerateContentConfig, name: str) -> types.Gener
     )
 
 
-def _against_cache(llm_request: LlmRequest, name: str) -> LlmRequest:
-    """A copy of `llm_request` sent against cache `name`. ADK traces the
-    original after the call, so the trace keeps the system instruction and
-    tool declarations the model was given."""
-    return llm_request.model_copy(update={"config": against_cache(llm_request.config, name)})
-
-
-class PrefixCachedGemini(BoundedGemini):
-    """`BoundedGemini` that sends each request against its prefix's shared cache.
-
-    The request budget (`harness.turn_budget`) bounds each request sent, a
-    resend after a gone cache included, and leaves the cache's lookup and
-    create outside its clock.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    prefix_cache: PrefixCache = Field(exclude=True)
-
-    async def _cached(self, llm_request: LlmRequest) -> tuple[str, str] | None:
-        """The prefix key and cache name `llm_request` is sent against, or
-        None when it has no prefix, or finding or creating its cache fails
-        in any way short of cancellation."""
-        return await self.prefix_cache.lookup(
-            client=self.api_client, model=llm_request.model or self.model, config=llm_request.config
-        )
-
-    @override
-    async def generate_content_async(
-        self, llm_request: LlmRequest, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse]:
-        cached = await self._cached(llm_request)
-        if cached is None:
-            async with aclosing(super().generate_content_async(llm_request, stream)) as responses:
-                async for response in responses:
-                    yield response
-            return
-
-        key, name = cached
-        delivered = False
-        try:
-            async with aclosing(
-                super().generate_content_async(_against_cache(llm_request, name), stream)
-            ) as responses:
-                async for response in responses:
-                    delivered = True
-                    yield response
-            return
-        except errors.ClientError as exc:
-            # Streamed output that already reached the caller would repeat on
-            # a resend.
-            if delivered or exc.code not in CACHE_GONE_CODES:
-                raise
-            logger.warning("prefix cache %s: %s gone (%s), recreating", key[:16], name, exc.code)
-
-        self.prefix_cache.forget(key, name)
-        cached = await self._cached(llm_request)
-        request = llm_request if cached is None else _against_cache(llm_request, cached[1])
-        async with aclosing(super().generate_content_async(request, stream)) as responses:
-            async for response in responses:
-                yield response
-
-
 __all__ = [
     "CACHE_GONE_CODES",
     "CACHE_TTL_S",
@@ -311,7 +241,6 @@ __all__ = [
     "CREATE_TIMEOUT_S",
     "REFRESH_MARGIN_S",
     "PrefixCache",
-    "PrefixCachedGemini",
     "against_cache",
     "gemini_model_name",
     "prefix_key",

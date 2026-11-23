@@ -100,7 +100,7 @@ from translator.referral import ReferralKind
 MAX_ROUNDS = 4
 
 # The translator's core: the functions this loop drives directly, bypassing
-# ADK's model-turn dispatch. `discover_source`, `propose_operations` and
+# any model turn. `discover_source`, `propose_operations` and
 # `list_tools` are async (they call the tool surface); `return_to_planner`
 # is not.
 DiscoverSource = Callable[..., Awaitable[dict[str, object]]]

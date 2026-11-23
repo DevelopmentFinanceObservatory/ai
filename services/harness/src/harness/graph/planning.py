@@ -1,367 +1,377 @@
-"""The `planner`, `approve` and `plan_start` nodes: the agent's brief handed to
-the planner, the plan it drafts, and the approval gate.
+"""The `plan_start` and `planner` nodes: the agent's brief handed to the
+planner, and the plan it drafts.
 """
 
 from __future__ import annotations
 
-import asyncio
+import json
 import logging
-from collections.abc import (
-    AsyncIterator,
-    Callable,
-    Iterator,
-    Mapping,
-)
-from datetime import datetime
+from collections.abc import Mapping
 from typing import Any, cast
 
-from common.telemetry import record_span
-from google.adk import Context, Event
-from google.adk.events import RequestInput
 from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
     MAX_QUESTION_CHARS,
+    NewQuestionSource,
     PlanStatus,
     SessionState,
     UnreadablePickError,
-    alignments,
     cut_user_text,
     pick_of,
     plan_revision,
     save_decision_pick,
-    stored_plan,
-    windowed_origins,
 )
 from planner.plan import Plan as PlannerPlan
+from planner.session import ASKED_CALL_ID, PLANNER_ASK_PAUSE
+from planner.tool_results import ProblemCode
 
-from harness.decision_pick import DecisionPick, decision_pick
-from harness.early_mint import EarlyMints
+from harness.decision_pick import DecisionPick
 from harness.graph import switch as switch_module
-from harness.graph.interfaces import (
-    PlannerModel,
-)
+from harness.graph.events import GraphEvent, PlannerStarted
+from harness.graph.interfaces import PlannerModel
 from harness.graph.state import (
-    APPROVE_INTERRUPT,
+    ASK_FOR_QUESTION_KEY,
+    NEW_QUESTION_KEY,
     ORCHESTRATOR_AMENDMENTS_KEY,
     ORCHESTRATOR_BRIEF_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
+    ORCHESTRATOR_REPLANNED_STOP_KEY,
+    ORCHESTRATOR_RETRY_NOTE_KEY,
     PICK_REPLAN_KEY,
-    PLANNER_STARTED_KEY,
     UNREADABLE_PLAN_NOTE,
     UNREADABLE_PLAN_UNPLANNED_NOTE,
     conversation_readings,
-    interrupt_event,
     readable_plan,
-    state_json,
+    resume_answers,
 )
 from harness.graph.switch import SwitchFailedError
 from harness.sentences import StopCode
+from harness.turn.node import Next, Node, NodeCtx, Pause
 
 logger = logging.getLogger(__name__)
 
 
-def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIterator[Any]]:
-    """The `planner` node, drafting with `planner`."""
+def planner_node(*, planner: PlannerModel) -> Node[GraphEvent]:
+    """The `planner` node, drafting with `planner`. `run` opens an entry;
+    `resume` takes the user's answer to the ask the entry's planner ended
+    on and runs the planner again with it."""
 
-    async def draft_plan(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
-        """The planner node.
+    async def run(ctx: NodeCtx[GraphEvent], node_input: Any) -> Next | Pause:
+        return await _draft(ctx, node_input, planner=planner, answer=None)
 
-        A `PlannerModel` drafts a compiled `planner.plan.Plan` from the
-        conversation's search readings and this node only validates it
-        (`PlannerModel`'s contract): versioning, `previous_version` lineage and the
-        DRAFT/PENDING_APPROVAL transitions are enforced by `planner.plan.Plan`
-        itself, inside the planner, never here.
+    async def resume(
+        ctx: NodeCtx[GraphEvent], node_input: Any, answer: dict[str, Any]
+    ) -> Next | Pause:
+        return await _draft(ctx, node_input, planner=planner, answer=answer)
 
-        A draft can run long (the planner loads skills, proposes,
-        translates, and corrects) with nothing to show for it until
-        this returns. So this node queues each `on_progress` report as it
-        arrives and relays the queued reports as their own `Event`s once the
-        await settles (see the direct-await discussion below). The `execute`
-        node relays its reports live instead, because its run never calls
-        `ctx.run_node` and so can run as a task of its own. Carried on
-        `custom_metadata`, never `output`: `ctx.output` (set
-        by any yielded event whose `output` is not `None`,
-        `_node_runner.py`'s `_track_event_in_context`) accepts exactly one
-        write per node run and raises on a second, so only the final yield,
-        the drafted plan (or the refusal, below), may use it.
-        `custom_metadata` is untouched by that rule, so every progress event
-        passes straight through as a plain activity update and
-        `studio_translate._Translator.translate` reads
-        `event.custom_metadata["progress"]` instead of `event.output` to
-        tell the two apart.
+    # A pick's replan the user stops offers the unchanged plan, whose pause
+    # records the Stop.
+    return Node(run=run, resume=resume, stop_edges=frozenset({"pending_refusal"}))
 
-        Three routes out, all explicit on the final yield: `"ok"`, to
-        the `approve` node, for a drafted plan; `"pending_refusal"`, also to
-        the `approve` node, for a planner that refuses to draft one at all -- either
-        `PlannerAdapter`'s own `MAX_PLAN_ROUNDS` cap, or `starts_new_plan`
-        refused as `QUESTION_FIXED` because the turn's question is fixed
-        (`submission.service._resolve_intent`) --
-        surfaced as `{"refused": {"text": ...}}` rather than a raised
-        `PlannerAdapterError` -- while `ctx.state["plan"]` still holds a plan
-        `PENDING_APPROVAL`; and `"refused"`, to `plan_done`, for the same
-        two refusals when it does not. Raising `PlannerAdapterError` here
-        instead would end the turn through `_stream_fatal`'s own
-        `close_turn(error=...)`, which `studio_state.begin_turn` documents
-        as abandoning the paused session and its plan -- exactly the plan
-        a refusal that still has one pending needs the user to be able to
-        act on. `ctx.state["plan"]` is never written on either refusal
-        route, so it is unchanged either way; what differs is only whether
-        that unchanged record is worth routing back to the `approve` node for.
-        `"refused"` covers a refusal on a first draft (nothing was ever
-        submitted this turn) and on a replan (the record on file is already
-        `APPROVED`, not something a fresh approval interrupt could act on).
-        A planner that raises fails the turn. A planner that answers `"asked"`,
-        for a planner run that ended on a question for the user
-        (`ask_user_question`, `planner.specs`), pauses the entry on that
-        question; the resume reruns this node and the planner with the answer.
-        On the `"refused"` route `plan_done` lists the asks an earlier run
-        of the plan call computed (`ORCHESTRATOR_KEPT_ASKS_KEY`).
 
-        An amendment or a replan of a plan stored in a shape this release
-        does not read (`readable_plan`) is drafted as a first draft, and
-        the `"ok"` route's plan carries `UNREADABLE_PLAN_NOTE` as
-        `refusal_note`, which `harness.studio_translate` shows before the
-        plan card, and `"restarted": True`, since its version counts from 1
-        again. The `"refused"` route's text opens with
-        `UNREADABLE_PLAN_UNPLANNED_NOTE`.
+async def _draft(
+    ctx: NodeCtx[GraphEvent],
+    node_input: Any,
+    *,
+    planner: PlannerModel,
+    answer: dict[str, Any] | None,
+) -> Next | Pause:
+    """One planner entry, or its resume by the user's `answer`.
 
-        A first draft's plan also carries `"new_plan": True`
-        (`harness.studio_translate`), which starts a new plan card lineage in
-        the turn. A re-offer of the plan on record does not carry it.
+    A `PlannerModel` drafts a compiled `planner.plan.Plan` from the
+    conversation's search readings and this node only validates it
+    (`PlannerModel`'s contract): versioning, `previous_version` lineage and the
+    DRAFT/PENDING_APPROVAL transitions are enforced by `planner.plan.Plan`
+    itself, inside the planner.
 
-        An `"amend"` entry carrying `pick` (`approve` routes a switch of a
-        planner decision's row so) replans with the user's pick held: the
-        planner is passed it, and admission refuses a plan that does not state
-        it. The run can be stopped as a switch is (`harness.graph.switch.
-        SWITCH_STOP`), so it runs under the switch node's `_unless_stopped`.
-        A stop or a refusal routes `"pending_refusal"` with the unchanged
-        plan and the `switch_failed` the switch node offers
-        (`switch_failed_offer`). It puts back the state from before the pick
-        (`_pick_snapshot`), as it does when the run raises. Every end of the
-        entry but a planner-side ask clears the pick, so no later entry or
-        revision of the plan holds it. An ask keeps the replan's state for
-        its resume and records the snapshot under `PICK_REPLAN_KEY`, which
-        the resume restores from. The start event says the entry is a pick's
-        (`PLANNER_STARTED_KEY`), so the studio arms the switch's Stop on the
-        stream answering an ask the replan raises.
+    Four edges leave the node. `"ok"` goes to the `approve` node with a
+    drafted plan. `"new_question"` ends the turn when the planner read the
+    user's amendment as a different question (`starts_new_plan`, refused as
+    `QUESTION_FIXED` because the turn's question is fixed,
+    `submission.service._resolve_intent`): the stored words of the user's
+    message the call names go under `NEW_QUESTION_KEY` for the client to
+    send as the next turn, or, for a call naming `none`, `ASK_FOR_QUESTION_KEY`
+    is set so the turn closes asking the user to send their question
+    (`_refused_entry`), and the plan card is set aside unanswered. `"pending_refusal"` also goes to
+    `approve`, for a planner that refuses to draft a plan at all
+    (`PlannerAdapter`'s own `MAX_PLAN_ROUNDS` cap, or `QUESTION_FIXED` with
+    no amendment's words to hand on) while `ctx.state["plan"]` still holds a
+    plan `PENDING_APPROVAL`. The refusal arrives as
+    `{"refused": {"text": ...}}` rather than a raised `PlannerAdapterError`,
+    which would fail the turn and abandon the plan the user still needs to
+    act on. `"refused"` goes to `plan_done` for the same two refusals when
+    no such plan is on record. `ctx.state["plan"]` is never written on
+    either refusal edge, so it is unchanged either way. The edges differ in
+    whether that unchanged record is worth offering again. `"refused"`
+    covers a refusal on a first draft (nothing was ever submitted this turn)
+    and on a replan (the record on file is already `APPROVED`, so a fresh
+    approval cannot act on it). A planner that raises fails the
+    turn. A planner that answers `"asked"`, for a planner run that ended on a
+    question for the user (`ask_user_question`, `planner.specs`), pauses the
+    entry on that question (`planner_ask_pause`); the resume runs the planner
+    again with the answer. On the `"refused"` edge `plan_done` lists the asks
+    an earlier run of the plan call computed (`ORCHESTRATOR_KEPT_ASKS_KEY`).
 
-        `planner(...)` is awaited directly here, with no
-        `asyncio.ensure_future` wrapper of its own: ADK's own docstring
-        warns against wrapping a `ctx.run_node`-calling call in a task like
-        that, and this node has two reasons that matters. A real
-        `PlannerModel` (`harness.planner_adapter.PlannerAdapter`) calls
-        `ctx.run_node` from inside it, and the direct await closes a real
-        turn simply:
-        `studio.py`'s `_sse_stream` -> `_unwind` cancels the event stream on
-        a stop or a disconnect, throwing into whichever call is suspended --
-        with no separate `Task` to orphan, the throw propagates straight
-        through `ctx.run_node` on its own, with no explicit `.cancel()`
-        needed here. The cost is `on_progress`: a report queues rather than
-        relaying as its own `Event` the instant it arrives, since yielding
-        one while a nested plain `await` is still pending would need a
-        second concurrent task to rendezvous with, which this design
-        avoids creating. Reports queue as they happen and relay the moment
-        the `await` returns, a pause on the planner's ask included, which
-        this node yields after them. A pick's replan is the one exception:
-        Stop has to reach it while it runs, so `_unless_stopped` runs it as
-        a task. A task copies the context it starts in, so the planner reads the
-        same `harness.turn_budget.current_turn_budget` there, and the
-        `planner.plan.current_discovery_time_left` it sets stays within the run.
-        """
-        raw = ctx.state.get("plan")
-        question = ctx.state.get(ORCHESTRATOR_BRIEF_KEY, "")
-        payload = node_input if isinstance(node_input, dict) else {}
-        refusal = payload.get("refusal")
-        amendment_answer = payload.get("answer")
-        amendment = (
-            amendment_answer.get("amendment") if isinstance(amendment_answer, dict) else None
-        )
-        # A first-draft entry -- `plan_start`'s, the only one of the three
-        # that lands here with neither a `"plan"` key (`approve`'s
-        # own "amend" route, whether the answer carries amendment text or
-        # merely names a stale revision -- `_resume`d with an
-        # unrecognised one, say) nor a `"refusal"` key (`execute`'s own
-        # "replan" route) -- passes no `prior_plan`, even when
-        # `ctx.state["plan"]` already holds one. Keyed on which of those the
-        # payload carries, not on whether `refusal`/`amendment` themselves
-        # are `None`: a stale-revision "amend" carries no amendment text
-        # either, and reading that shape as a first draft would wipe out a
-        # plan still `PENDING_APPROVAL` right before the `approve` node re-offers
-        # it. A later `plan` call in the same turn finds the earlier call's
-        # plan on record -- withholding it here is what lets
-        # `harness.planner_adapter.PlannerAdapter.__call__` tell this is a genuine
-        # first draft and clear its own `planner:plan` and briefed-flag
-        # state for it (see that module's docstring), rather than reading
-        # as a continuing call on an already-briefed session that would
-        # need `starts_new_plan` (refused, the turn's question being
-        # fixed) to draft anything but an amendment to
-        # that stale plan.
-        existing = readable_plan(ctx, raw)
-        is_first_draft = "plan" not in payload and "refusal" not in payload
-        # The plan this entry amends or replans could not be read: found so
-        # by `approve` or `execute`, which cleared it, or here, on the resume
-        # of a question asked while amending it. Nothing is left to amend or
-        # to replan from, so the question is drafted from the start and the
-        # card says why. A first draft never read the plan on record, and
-        # says nothing of one it cannot read.
-        unreadable = bool(payload.get("unreadable_plan")) or bool(
-            not is_first_draft and raw and existing is None
-        )
-        if unreadable:
-            refusal = amendment = None
-            is_first_draft = True
-        try:
-            pick = _pick(payload) if existing is not None else None
-        except SwitchFailedError as exc:
-            # No replan runs for a pick this release cannot read: the state
-            # goes back as it stood before the pick, and the card offers
-            # the plan unchanged.
-            assert existing is not None
-            _end_pick_entry(ctx, before=_pick_snapshot(ctx))
-            switch = payload.get("switch") or {}
-            yield Event(
-                output=switch_module.switch_failed_offer(
-                    existing,
-                    choice_id=str(switch.get("choice_id")),
-                    option_id=str(switch.get("option_id")),
-                    error=exc,
-                ),
-                route="pending_refusal",
-            )
-            return
-        yield Event(
-            custom_metadata={
-                PLANNER_STARTED_KEY: {
-                    "revising": not is_first_draft,
-                    **({"pick": True} if pick is not None else {}),
-                }
-            }
-        )
+    An amendment or a replan of a plan stored in a shape this release does
+    not read (`readable_plan`) is drafted as a first draft, and the `"ok"`
+    edge's plan carries `UNREADABLE_PLAN_NOTE` as `refusal_note`, which Studio
+    shows before the plan card, and `"restarted": True`, since its version
+    counts from 1 again. The `"refused"` edge's text opens with
+    `UNREADABLE_PLAN_UNPLANNED_NOTE`.
 
-        # The state before the pick, which a pick's replan that is stopped,
-        # refused or raises puts back.
-        before = _pick_snapshot(ctx) if pick is not None else None
-        progress: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        drafting = planner(
-            ctx=ctx,
-            question=question,
-            readings=conversation_readings(ctx.state),
-            prior_plan=(
-                None if is_first_draft else (existing.model_dump(mode="json") if existing else None)
+    The first draft after `plan_done` gave the plan call back carries the
+    note it left (`ORCHESTRATOR_RETRY_NOTE_KEY`) as `refusal_note`, naming the
+    step the approved plan stopped at, after `UNREADABLE_PLAN_NOTE` where both
+    apply.
+
+    A first draft's plan also carries `"new_plan": True`, which starts a new
+    plan card lineage in the turn. A re-offer of the plan on record does not
+    carry it.
+
+    An `"amend"` entry carrying `pick` (`approve` routes a switch of a
+    planner decision's row so) replans with the user's pick held: the
+    planner is passed it, and admission refuses a plan that does not state
+    it. The run can be stopped as a switch is, so it runs under the switch
+    node's `_unless_stopped`. A stop or a refusal ends on
+    `"pending_refusal"` with the unchanged plan and the `switch_failed` the
+    switch node offers (`switch_failed_offer`). It puts back the state from
+    before the pick (`_pick_snapshot`), as it does when the run raises.
+    Every end of the entry but a planner-side ask clears the pick, so no
+    later entry or revision of the plan holds it. An ask keeps the replan's
+    state for its resume and records the snapshot under `PICK_REPLAN_KEY`,
+    which the resume restores from, and the resumed replan runs under
+    `_unless_stopped` again. The entry's `PlannerStarted` says it is a
+    pick's.
+
+    The planner runs in this node's task, so a Stop that cancels the node
+    cancels the run, and the turn's budget
+    (`harness.turn_budget.current_turn_budget`) and the
+    `planner.plan.current_discovery_time_left` the run sets stay within it.
+    A pick's replan runs as a task of its own under `_unless_stopped`, which
+    copies the context it starts in.
+    """
+    raw = ctx.state.get("plan")
+    question = ctx.state.get(ORCHESTRATOR_BRIEF_KEY, "")
+    payload = node_input if isinstance(node_input, dict) else {}
+    refusal = payload.get("refusal")
+    amendment_answer = payload.get("answer")
+    amendment = amendment_answer.get("amendment") if isinstance(amendment_answer, dict) else None
+    # A first-draft entry passes no `prior_plan`, even when
+    # `ctx.state["plan"]` already holds one. It is `plan_start`'s, the only
+    # entry of the three that carries neither a `"plan"` key (`approve`'s
+    # "amend" edge, whether the answer carries amendment text or merely
+    # names a stale revision) nor a `"refusal"` key (`execute`'s "replan"
+    # edge). The test is which keys the payload carries, because a
+    # stale-revision "amend" carries no amendment text either, and reading
+    # that shape as a first draft would wipe out a plan still
+    # `PENDING_APPROVAL` right before the `approve` node offers it again.
+    # A later `plan` call in the same turn finds the earlier call's plan on
+    # record. Withholding it here lets
+    # `harness.planner_adapter.PlannerAdapter.__call__` see a genuine first
+    # draft and clear its own `planner:plan` drafting state. Otherwise it
+    # would read a continuing call on a plan already drafted this turn,
+    # which needs `starts_new_plan` (refused, the turn's question being
+    # fixed) to draft anything but an amendment to that stale plan.
+    existing = readable_plan(ctx, raw)
+    is_first_draft = "plan" not in payload and "refusal" not in payload
+    # The plan this entry amends or replans could not be read: found so
+    # by `approve` or `execute`, which cleared it, or here, on the resume
+    # of a question asked while amending it. Nothing is left to amend or
+    # to replan from, so the question is drafted from the start and the
+    # card says why. A first draft never read the plan on record, and
+    # says nothing of one it cannot read.
+    unreadable = bool(payload.get("unreadable_plan")) or bool(
+        not is_first_draft and raw and existing is None
+    )
+    if unreadable:
+        refusal = amendment = None
+        is_first_draft = True
+    resuming = answer is not None
+    try:
+        pick = _pick(payload) if existing is not None else None
+    except SwitchFailedError as exc:
+        # No replan runs for a pick this release cannot read: the state
+        # goes back as it stood before the pick, and the card offers
+        # the plan unchanged.
+        assert existing is not None
+        _end_pick_entry(ctx, before=_pick_snapshot(ctx, resuming=resuming))
+        switch = payload.get("switch") or {}
+        return Next(
+            "pending_refusal",
+            switch_module.switch_failed_offer(
+                existing,
+                choice_id=str(switch.get("choice_id")),
+                option_id=str(switch.get("option_id")),
+                error=exc,
             ),
-            refusal=refusal,
-            amendment=amendment,
-            canvas_digest=state_json(ctx, "canvas_digest"),
-            conversation_digest=state_json(ctx, "conversation_digest"),
-            on_progress=progress.put_nowait,
-            pick=pick,
         )
-        failed: SwitchFailedError | None = None
-        try:
-            drafted = await (
-                drafting if pick is None else switch_module._unless_stopped(ctx, drafting)
-            )
-        except SwitchFailedError as exc:
-            # Only a pick's replan, stopped by the user (`SWITCH_STOP`).
-            failed, drafted = exc, {}
-        except BaseException:
-            if before is not None:
-                _end_pick_entry(ctx, before=before)
-            raise
-        while not progress.empty():
-            yield Event(custom_metadata={"progress": progress.get_nowait()})
-        asked = drafted.get("asked") if isinstance(drafted, dict) else None
-        if asked is not None:
-            # The planner's run ended on an ask it put to the user, so the
-            # entry pauses on it, under the ask's call id, after every call
-            # the run made has reported. The resume reruns this node, and the
-            # adapter re-enters the planner with the answer. A pick's replan
-            # keeps its state for the resume, and records what to put back
-            # should the resumed replan not land.
-            if before is not None:
-                ctx.state[PICK_REPLAN_KEY] = before
-            yield planner_ask_interrupt(asked)
-            return
-        refused = drafted.get("refused") if isinstance(drafted, dict) else None
-        if pick is not None and (failed is not None or refused is not None):
-            assert existing is not None and before is not None
-            _end_pick_entry(ctx, before=before)
-            switch = payload.get("switch") or {}
-            yield Event(
-                output=switch_module.switch_failed_offer(
-                    existing,
-                    choice_id=str(switch.get("choice_id")),
-                    option_id=str(switch.get("option_id")),
-                    error=failed or _pick_refused(refused or {}, pick),
-                ),
-                route="pending_refusal",
-            )
-            return
-        if refused is not None:
-            text = str(refused.get("text", ""))
-            if existing is not None and existing.status is PlanStatus.PENDING_APPROVAL:
-                # The plan the user was already looking at is untouched
-                # (see the docstring: this refusal never writes
-                # `ctx.state["plan"]`) and still `PENDING_APPROVAL`, so it
-                # is a real thing to re-offer, not a stale claim -- route
-                # back to the `approve` node with that same plan, carrying the
-                # refusal's own sentence so the user reads why their
-                # change did not land before seeing the unchanged plan
-                # again.
-                note = (
-                    f"{text} Version {existing.version} is still there to "
-                    "approve; anything past that needs a new question."
-                )
-                yield Event(
-                    output={
-                        **existing.model_dump(mode="json"),
-                        "summary": note,
-                        "revision": plan_revision(existing),
-                        "refusal_note": note,
-                    },
-                    route="pending_refusal",
-                )
-                return
-            if unreadable:
-                text = f"{UNREADABLE_PLAN_UNPLANNED_NOTE} {text}".rstrip()
-            yield Event(
-                output={
-                    "text": text,
-                    "final": bool(refused.get("final")),
-                    "code": refused.get("code"),
-                },
-                route="refused",
-            )
-            return
-        planner_plan = PlannerPlan.model_validate(drafted["plan"])
-        ctx.state["plan"] = planner_plan.model_dump_json()
-        if amendment:
-            ctx.state[ORCHESTRATOR_AMENDMENTS_KEY] = [
-                *(ctx.state.get(ORCHESTRATOR_AMENDMENTS_KEY) or ()),
-                cut_user_text(str(amendment), MAX_QUESTION_CHARS),
-            ]
-        if pick is not None:
-            _end_pick_entry(ctx)
-        yield Event(
-            output={
-                **planner_plan.model_dump(mode="json"),
-                "summary": drafted["summary"],
-                "revision": plan_revision(planner_plan),
-                **({"refusal_note": UNREADABLE_PLAN_NOTE} if unreadable else {}),
-                # The draft's version counts from 1 again, on a line of its
-                # own: no earlier card of the turn is a version of this plan.
-                **({"restarted": True} if unreadable else {}),
-                # A first draft starts a new plan card lineage, as a second
-                # `plan` call in a turn does. A re-offer of the plan on
-                # record (`"pending_refusal"`) keeps the lineage it has.
-                **({"new_plan": True} if is_first_draft and not unreadable else {}),
-            },
-            route="ok",
-        )
+    ctx.emit(PlannerStarted(revising=not is_first_draft, pick=pick is not None))
 
-    return draft_plan
+    # The state before the pick, which a pick's replan that is stopped,
+    # refused or raises puts back.
+    before = _pick_snapshot(ctx, resuming=resuming) if pick is not None else None
+    drafting = planner(
+        ctx=ctx,
+        question=question,
+        readings=conversation_readings(ctx.state),
+        prior_plan=(
+            None if is_first_draft else (existing.model_dump(mode="json") if existing else None)
+        ),
+        refusal=refusal,
+        amendment=amendment,
+        canvas_digest=_digest(ctx, "canvas_digest"),
+        conversation_digest=_digest(ctx, "conversation_digest"),
+        pick=pick,
+        answer=answer,
+    )
+    failed: SwitchFailedError | None = None
+    try:
+        drafted = await (drafting if pick is None else switch_module._unless_stopped(ctx, drafting))
+    except SwitchFailedError as exc:
+        # Only a pick's replan, stopped by the user.
+        failed, drafted = exc, {}
+    except BaseException:
+        if before is not None:
+            _end_pick_entry(ctx, before=before)
+        raise
+    asked = drafted.get("asked") if isinstance(drafted, dict) else None
+    if asked is not None:
+        # The planner's run ended on an ask it put to the user, so the
+        # entry pauses on it, after every call the run made has answered.
+        # The resume calls the planner again with the answer. A pick's
+        # replan keeps its state for the resume, and records what to put
+        # back should the resumed replan not land.
+        if before is not None:
+            ctx.state[PICK_REPLAN_KEY] = before
+        return planner_ask_pause(asked)
+    refused = drafted.get("refused") if isinstance(drafted, dict) else None
+    if pick is not None and (failed is not None or refused is not None):
+        assert existing is not None and before is not None
+        _end_pick_entry(ctx, before=before)
+        switch = payload.get("switch") or {}
+        return Next(
+            "pending_refusal",
+            switch_module.switch_failed_offer(
+                existing,
+                choice_id=str(switch.get("choice_id")),
+                option_id=str(switch.get("option_id")),
+                error=failed or _pick_refused(refused or {}, pick),
+            ),
+        )
+    if refused is not None:
+        return _refused_entry(
+            ctx,
+            refused,
+            existing=existing,
+            amendment=amendment,
+            answer=answer,
+            unreadable=unreadable,
+        )
+    planner_plan = PlannerPlan.model_validate(drafted["plan"])
+    ctx.state["plan"] = planner_plan.model_dump_json()
+    if amendment:
+        ctx.state[ORCHESTRATOR_AMENDMENTS_KEY] = [
+            *(ctx.state.get(ORCHESTRATOR_AMENDMENTS_KEY) or ()),
+            cut_user_text(str(amendment), MAX_QUESTION_CHARS),
+        ]
+    if pick is not None:
+        _end_pick_entry(ctx)
+    notes = [UNREADABLE_PLAN_NOTE] if unreadable else []
+    if is_first_draft and (retry := ctx.state.get(ORCHESTRATOR_RETRY_NOTE_KEY)):
+        # `plan_done` gave the plan call back after an approved plan stopped.
+        # The card says which step stopped and why it needs approving again.
+        notes.append(str(retry))
+        ctx.state[ORCHESTRATOR_RETRY_NOTE_KEY] = None
+    return Next(
+        "ok",
+        {
+            **planner_plan.model_dump(mode="json"),
+            "summary": drafted["summary"],
+            "revision": plan_revision(planner_plan),
+            **({"refusal_note": " ".join(notes)} if notes else {}),
+            # The draft's version counts from 1 again, on a line of its
+            # own: no earlier card of the turn is a version of this plan.
+            **({"restarted": True} if unreadable else {}),
+            # A first draft starts a new plan card lineage, as a second
+            # `plan` call in a turn does. A re-offer of the plan on
+            # record (`"pending_refusal"`) keeps the lineage it has.
+            **({"new_plan": True} if is_first_draft and not unreadable else {}),
+        },
+    )
+
+
+def _refused_entry(
+    ctx: NodeCtx[GraphEvent],
+    refused: Mapping[str, Any],
+    *,
+    existing: PlannerPlan | None,
+    amendment: Any,
+    answer: Mapping[str, Any] | None,
+    unreadable: bool,
+) -> Next:
+    """Where an entry the planner refused goes (`_draft`): `new_question`
+    for an amendment read as a different question, `pending_refusal` to
+    offer the plan still awaiting approval again, else `refused`. The new
+    question is the stored text of the user's message the planner's
+    `starts_new_plan` call names (`new_question_in`): `answer`, the text
+    the user typed in `answer` to a question the planner asked about the
+    amendment, or else the amendment itself. A call naming `none` ends the
+    turn on `ASK_FOR_QUESTION_KEY`, with no words to hand back."""
+    if refused.get("code") == ProblemCode.QUESTION_FIXED and amendment:
+        # The user asked a different question on the plan card. The turn
+        # ends here, and the client sends the user's own message as the
+        # next turn, or the user is asked to send it.
+        if refused.get("new_question_in") == NewQuestionSource.NONE:
+            ctx.state[ASK_FOR_QUESTION_KEY] = True
+            return Next("new_question")
+        typed = _typed_answer(answer)
+        ctx.state[NEW_QUESTION_KEY] = (
+            typed
+            if refused.get("new_question_in") == NewQuestionSource.ANSWER and typed
+            else str(amendment)
+        )
+        return Next("new_question")
+    text = str(refused.get("text", ""))
+    if existing is not None and existing.status is PlanStatus.PENDING_APPROVAL:
+        # The plan the user was already looking at is untouched (this
+        # refusal never writes `ctx.state["plan"]`) and still
+        # `PENDING_APPROVAL`, so it can be offered again as it stands.
+        # Go back to the `approve` node with that same plan, carrying
+        # the refusal's own sentence so the user reads why their change
+        # did not land before seeing the unchanged plan again.
+        note = (
+            f"{text} Version {existing.version} is still there to "
+            "approve; anything past that needs a new question."
+        )
+        return Next(
+            "pending_refusal",
+            {
+                **existing.model_dump(mode="json"),
+                "summary": note,
+                "revision": plan_revision(existing),
+                "refusal_note": note,
+            },
+        )
+    if unreadable:
+        text = f"{UNREADABLE_PLAN_UNPLANNED_NOTE} {text}".rstrip()
+    return Next(
+        "refused",
+        {"text": text, "final": bool(refused.get("final")), "code": refused.get("code")},
+    )
+
+
+def _typed_answer(answer: Mapping[str, Any] | None) -> str | None:
+    """The text the user typed in `answer`, the resume value of the question
+    the planner asked (`resume_answers`), whose one question is `q1`, or
+    `None` when the answer typed none: no answer, a skip, or a pick of an
+    option."""
+    reply = (resume_answers(answer) or {}).get("q1")
+    if not isinstance(reply, Mapping) or reply.get("kind") != "text":
+        return None
+    text = reply.get("text")
+    return text if isinstance(text, str) and text.strip() else None
 
 
 def _pick(payload: dict[str, Any]) -> DecisionPick | None:
@@ -383,35 +393,41 @@ def _pick(payload: dict[str, Any]) -> DecisionPick | None:
         ) from exc
 
 
-def planner_ask_interrupt(asked: Mapping[str, Any]) -> Event:
+def planner_ask_pause(asked: Mapping[str, Any]) -> Pause:
     """The pause on the planner's accepted ask, `asked` as a `PlannerModel`
-    answers it: its `RequestInput` takes the ask's call id as the interrupt
-    id, which the user's answer carries back, and the call's arguments as the
-    payload Studio renders the question from
-    (`harness.studio_translate._planner_question`)."""
-    return interrupt_event(
-        RequestInput(
-            interrupt_id=str(asked["call_id"]),
-            message=str(asked["args"]["message"]),
-            payload=dict(asked["args"]),
-        )
+    answers it. Its payload is the call's arguments, which Studio renders the
+    question from (`harness.studio_translate._planner_question`), and the
+    call's id under `ASKED_CALL_ID`, by which the planner's tools read the
+    user's answer to the pause as the answer to that call
+    (`planner.session.session_steps`)."""
+    return Pause(
+        kind=PLANNER_ASK_PAUSE,
+        payload={**asked["args"], ASKED_CALL_ID: asked["call_id"]},
+        message=str(asked["args"]["message"]),
     )
 
 
-def _pick_snapshot(ctx: Context) -> dict[str, Any]:
+def _digest(ctx: NodeCtx[GraphEvent], name: str) -> dict[str, Any] | None:
+    """The turn's digest input `name`, decoded, or `None` when the turn
+    opened with none. The turn holds it as the JSON text it was written as."""
+    raw = ctx.inputs.get(name)
+    return json.loads(raw) if raw else None
+
+
+def _pick_snapshot(ctx: NodeCtx[GraphEvent], *, resuming: bool) -> dict[str, Any]:
     """The state a pick's replan puts back when it does not land.
 
     A fresh entry takes it as the state stands. The resume of a planner-side
     ask reads back the copy the pause recorded under `PICK_REPLAN_KEY`,
-    since the first leg has written drafting state and readings since.
+    since the asking run has written drafting state and readings since.
     """
     held = ctx.state.get(PICK_REPLAN_KEY)
-    if ctx.resume_inputs and isinstance(held, dict):
+    if resuming and isinstance(held, dict):
         return held
     return switch_module._restorable_state(ctx)
 
 
-def _end_pick_entry(ctx: Context, *, before: dict[str, Any] | None = None) -> None:
+def _end_pick_entry(ctx: NodeCtx[GraphEvent], *, before: dict[str, Any] | None = None) -> None:
     """End a pick's planner entry other than by a planner-side ask: put the
     state back as `before` holds it, for a replan that did not land, clear
     the pick so no later entry or revision of the plan holds it, and clear
@@ -438,142 +454,7 @@ def _pick_refused(refused: dict[str, Any], pick: DecisionPick) -> SwitchFailedEr
     )
 
 
-def approve_node(
-    *, early_mints: EarlyMints | None
-) -> Callable[[Context, dict[str, Any]], Iterator[Any]]:
-    """The `approve` node, offering each card it shows to `early_mints` when given."""
-
-    def approve_offering_early_mints(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
-        yield from approve(ctx, node_input, early_mints=early_mints)
-
-    return approve_offering_early_mints
-
-
-def approve(
-    ctx: Context, node_input: dict[str, Any], *, early_mints: EarlyMints | None = None
-) -> Iterator[Any]:
-    """The approval gate, as a graph interrupt. Revision-bound.
-
-    This is the only gate: nothing but the `execute` node reaches the
-    executor.
-
-    `ctx.state["plan"]` always holds a `planner.plan.Plan`, since every
-    `PlannerModel` drafts one. A plan is keyed on `plan_revision(plan)`,
-    a content hash that changes with every amendment. A plan stored in a
-    shape this release does not read (`readable_plan`) has no revision
-    for the answer to name: it routes `"amend"` with
-    `{"unreadable_plan": True}`, and `planner` drafts the question from
-    the start.
-
-    An answer approves when it names the revision and says, under `at`, when
-    the user gave it, as an ISO 8601 time with its offset: the studio's
-    interrupt route sends the time it recorded the first answer to this
-    interrupt (`harness.approval.ApprovalRecord.at`), so a retry resuming
-    the same answer later approves as of the same moment. The `"approved"`
-    route stamps that time on the plan (`Plan.approved_at`), from which the
-    approval's lifetime runs. An answer with no such time approves nothing
-    and routes `"amend"` as one naming another revision does. An answer
-    carrying `switch` (`{"choice_id", "option_id"}`, a scope choice the user
-    moved on the card) routes `"switch"` to the `switch` node
-    (`harness.graph.switch`), which offers the revised plan back here. A
-    switch of a planner decision's row (`harness.decision_pick.decision_pick`)
-    routes `"amend"` with the plan, the `pick` and the `switch`, and the
-    `planner` node replans holding the pick. It
-    records a `plan.approved` span (nesting under the turn span
-    `harness.studio_state.begin_turn` opens) and a matching log line with
-    the same facts, `plan_version` and `amended`, off the `Plan` just
-    approved.
-
-    Offering a card pending approval hands its plan to `early_mints`
-    (`harness.early_mint`), which starts the card's retrievals unless it
-    already started that revision. Approving a card withdraws its early calls
-    still waiting for a slot (`EarlyMints.withdraw`). Neither touches the plan
-    or the state.
-    """
-    answer = (ctx.resume_inputs or {}).get(APPROVE_INTERRUPT)
-    if not (ctx.state.get("awaiting_approve") and answer is not None):
-        ctx.state["awaiting_approve"] = True
-        if early_mints is not None:
-            offered = stored_plan(ctx.state.get("plan"), state_key="plan")
-            if offered is not None and offered.status is PlanStatus.PENDING_APPROVAL:
-                early_mints.offer(offered)
-        yield interrupt_event(
-            RequestInput(
-                interrupt_id=APPROVE_INTERRUPT,
-                message="Approve this plan to run it? Its data may already be loading.",
-                payload=node_input,
-            )
-        )
-        return
-    ctx.state["awaiting_approve"] = False
-    approved_answer = answer.get("approved") if isinstance(answer, dict) else None
-    plan = readable_plan(ctx, ctx.state["plan"])
-    if plan is None:
-        # The card the user answered names a plan this release does not
-        # read, so the answer approves nothing and amends nothing.
-        yield Event(output={"unreadable_plan": True}, route="amend")
-        return
-    switch = answer.get("switch") if isinstance(answer, dict) else None
-    if isinstance(switch, dict):
-        pick = decision_pick(
-            plan,
-            choice_id=str(switch.get("choice_id")),
-            option_id=str(switch.get("option_id")),
-            to_origin=windowed_origins(cast(SessionState, ctx.state)),
-            alignments=alignments(cast(SessionState, ctx.state)),
-        )
-        if pick is not None:
-            # A planner decision's pick changes what the plan states, so the
-            # planner replans with the pick held.
-            yield Event(
-                output={
-                    "plan": plan.model_dump(mode="json"),
-                    "pick": pick.model_dump(mode="json"),
-                    "switch": switch,
-                },
-                route="amend",
-            )
-            return
-        # A switch moves a scope choice and approves nothing: the `switch`
-        # node revises the plan in code and offers it here again. A row it
-        # cannot find, such as a planner decision the plan dropped or one
-        # switched to the option it already has, it offers back unchanged
-        # with `switch_failed`.
-        yield Event(output={"switch": switch}, route="switch")
-        return
-    key: Any = plan_revision(plan)
-    approved_at = _answered_at(answer)
-    if approved_answer == key and approved_at is not None:
-        approved = plan.approve(at=approved_at)
-        ctx.state["plan"] = approved.model_dump_json()
-        plan_version = approved.version
-        amended = plan_version > 1
-        record_span("plan.approved", {"dfo.plan_version": plan_version, "dfo.amended": amended})
-        logger.info("plan approved: plan_version=%s amended=%s", plan_version, amended)
-        if early_mints is not None:
-            early_mints.withdraw()
-        yield Event(output=approved.model_dump(mode="json"), route="approved")
-        return
-    yield Event(
-        output={"plan": plan.model_dump(mode="json"), "answer": answer},
-        route="amend",
-    )
-
-
-def _answered_at(answer: object) -> datetime | None:
-    """When an approve answer says the user gave it, or `None` when it states
-    no timezone-aware ISO 8601 time under `at`."""
-    raw = answer.get("at") if isinstance(answer, dict) else None
-    if not isinstance(raw, str):
-        return None
-    try:
-        at = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    return at if at.tzinfo is not None else None
-
-
-def plan_start(ctx: Context, node_input: dict[str, Any]) -> dict[str, Any]:
+async def _plan_start(ctx: NodeCtx[GraphEvent], node_input: dict[str, Any]) -> Next:
     """Hand the agent's brief to the planner under the orchestrator's own
     key. This call's asks go under `ASKS_STATE_KEY`, the parties they
     break down by under `ASK_BREAKDOWNS_STATE_KEY`, and the numbers of the
@@ -586,5 +467,9 @@ def plan_start(ctx: Context, node_input: dict[str, Any]) -> dict[str, Any]:
     ctx.state[ASK_BREAKDOWNS_STATE_KEY] = node_input.get("ask_breakdowns") or None
     ctx.state[ASKS_ACROSS_YEARS_STATE_KEY] = node_input.get("asks_across_years") or None
     ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
+    ctx.state[ORCHESTRATOR_REPLANNED_STOP_KEY] = None
     ctx.state[ORCHESTRATOR_AMENDMENTS_KEY] = None
-    return {}
+    return Next("next", {})
+
+
+plan_start: Node[GraphEvent] = Node(run=_plan_start)

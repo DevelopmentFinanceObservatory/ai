@@ -4,18 +4,26 @@ reach the wire.
 
 `isolated_telemetry` starts a test from an unconfigured `common.telemetry`
 with no telemetry env vars, no global tracer provider and no tracer left bound
-by ADK's module-level tracers, and puts back what it found: OpenTelemetry
-allows one global provider per process and other suites in the session install
-their own. `fake_langfuse` points the SDK's env vars at a local server that
+by the `mcp` SDK's module-level tracers, and puts back what it found:
+OpenTelemetry allows one global provider per process and other suites in the
+session install their own. `fake_langfuse` points the SDK's env vars at a local server that
 answers the credentials check and records every OTLP trace export. Both mirror
 `packages/common/tests/conftest.py` and `test_telemetry_export.py`; a fixture
 cannot be imported across suites.
+
+`quiescence` brings telemetry up on `fake_langfuse` and yields a `Quiescence`,
+whose `assert_quiescent()` a test calls after each response: no span is open,
+no span was ended twice, and the `turn` observations exported so far match the
+`studio.turn` lines logged so far, one for one and in order, pauses and closes
+apart. `assert_store_agrees` adds the third list: the closes match the turn
+records the store holds, read through a fresh `StudioStore`.
 """
 
 from __future__ import annotations
 
 import gzip
 import json
+import logging
 import os
 import sys
 import threading
@@ -26,12 +34,16 @@ from typing import Any
 
 import pytest
 from common import telemetry
+from common.logging import JSON_FIELDS
+from harness.studio_store import StudioStore
 from langfuse._client.resource_manager import LangfuseResourceManager
 from opentelemetry import trace
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from opentelemetry.proto.trace.v1.trace_pb2 import Span
 from opentelemetry.sdk import trace as sdk_trace
+from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.util._once import Once
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 _PROJECTS_BODY = {
     "data": [
@@ -60,32 +72,41 @@ class FakeLangfuse:
         return [span for _, span in self.scoped_spans()]
 
 
-def _adk_tracer_slots() -> Iterator[tuple[Any, str, Any]]:
-    """Every module-level `(module, attribute, tracer)` in the `google.adk` modules."""
+# The packages whose modules build a tracer once, at import: the `mcp` SDK's
+# (`mcp.shared._otel`), whose `MCP send` spans parent every MCP server span.
+_TRACER_CACHING_PACKAGES = ("mcp",)
+
+
+def _cached_tracer_slots() -> Iterator[tuple[Any, str, Any]]:
+    """Every module-level `(module, attribute, tracer)` in the modules of
+    `_TRACER_CACHING_PACKAGES`."""
     for name, module in list(sys.modules.items()):
-        if not name.startswith("google.adk"):
+        if not any(
+            name == package or name.startswith(f"{package}.")
+            for package in _TRACER_CACHING_PACKAGES
+        ):
             continue
         for attribute, value in list(getattr(module, "__dict__", {}).items()):
             if isinstance(value, trace.ProxyTracer | sdk_trace.Tracer):
                 yield module, attribute, value
 
 
-def _unbind_adk_tracers() -> list[tuple[Any, str, Any]]:
-    """Make ADK's module-level tracers resolve the current global provider, and
-    return the SDK tracers that were replaced so `_rebind_adk_tracers` can put
-    them back.
+def _unbind_cached_tracers() -> list[tuple[Any, str, Any]]:
+    """Make the module-level tracers of `_TRACER_CACHING_PACKAGES` resolve the
+    current global provider, and return the SDK tracers that were replaced so
+    `_rebind_cached_tracers` can put them back.
 
-    ADK builds each tracer once at import. When no provider is global then, it
-    is an OpenTelemetry `ProxyTracer`, which keeps the first real tracer it
+    Such a tracer is built once at import. When no provider is global then,
+    it is an OpenTelemetry `ProxyTracer`, which keeps the first real tracer it
     resolves for the life of the process; when the shared span provider from
     the root `conftest.py` is already global, it is an SDK tracer bound to that
     provider for good. Left alone, either would keep feeding whichever provider
     it first met, and a test that installs its own provider would see none of
-    ADK's spans. A proxy is cleared, and an SDK tracer is swapped for a proxy
+    its spans. A proxy is cleared, and an SDK tracer is swapped for a proxy
     that resolves the provider current when it is first used.
     """
     replaced: list[tuple[Any, str, Any]] = []
-    for module, attribute, value in _adk_tracer_slots():
+    for module, attribute, value in _cached_tracer_slots():
         if isinstance(value, trace.ProxyTracer):
             value._real_tracer = None
             continue
@@ -96,11 +117,11 @@ def _unbind_adk_tracers() -> list[tuple[Any, str, Any]]:
     return replaced
 
 
-def _rebind_adk_tracers(replaced: list[tuple[Any, str, Any]]) -> None:
-    """Put back the SDK tracers `_unbind_adk_tracers` replaced, and clear any proxy."""
+def _rebind_cached_tracers(replaced: list[tuple[Any, str, Any]]) -> None:
+    """Put back the SDK tracers `_unbind_cached_tracers` replaced, and clear any proxy."""
     for module, attribute, original in replaced:
         setattr(module, attribute, original)
-    for _, _, value in _adk_tracer_slots():
+    for _, _, value in _cached_tracer_slots():
         if isinstance(value, trace.ProxyTracer):
             value._real_tracer = None
 
@@ -118,7 +139,7 @@ def isolated_telemetry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     saved_once = trace._TRACER_PROVIDER_SET_ONCE
     trace._TRACER_PROVIDER = None
     trace._TRACER_PROVIDER_SET_ONCE = Once()
-    replaced_tracers = _unbind_adk_tracers()
+    replaced_tracers = _unbind_cached_tracers()
     telemetry._configured = False
     telemetry._backend = None
     telemetry._event_failure_warned = False
@@ -132,7 +153,7 @@ def isolated_telemetry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         os.environ.pop(telemetry._CAPTURE_MESSAGE_CONTENT_VAR, None)
         trace._TRACER_PROVIDER = saved_provider
         trace._TRACER_PROVIDER_SET_ONCE = saved_once
-        _rebind_adk_tracers(replaced_tracers)
+        _rebind_cached_tracers(replaced_tracers)
         telemetry._configured = False
         telemetry._backend = None
         telemetry._event_failure_warned = False
@@ -183,7 +204,7 @@ def fake_langfuse(
     finally:
         # Shutting the client down flushes it, which needs the server up. It
         # leaves the tracer provider's batch thread running, and libraries that
-        # cache the provider's tracer (ADK does) would keep feeding it spans
+        # cache the provider's tracer would keep feeding it spans
         # for later tests to export at a server that is gone, so the provider
         # is shut down as well.
         provider = trace.get_tracer_provider()
@@ -193,3 +214,98 @@ def fake_langfuse(
             shutdown()
         server.shutdown()
         server.server_close()
+
+
+class _OpenSpans(SpanProcessor):
+    """Every span started and not yet ended on the provider, by span id."""
+
+    def __init__(self) -> None:
+        self.open: dict[int, str] = {}
+        self._lock = threading.Lock()
+
+    def on_start(self, span: sdk_trace.Span, parent_context: Any = None) -> None:
+        with self._lock:
+            self.open[span.context.span_id] = span.name
+
+    def on_end(self, span: ReadableSpan) -> None:
+        assert span.context is not None
+        with self._lock:
+            self.open.pop(span.context.span_id, None)
+
+
+def _metadata(span: Span, key: str) -> str | None:
+    for attribute in span.attributes:
+        if attribute.key == f"langfuse.observation.metadata.{key}":
+            return attribute.value.string_value
+    return None
+
+
+@dataclass
+class Quiescence:
+    """What `assert_quiescent` reads: the exports, the open spans, the logs."""
+
+    fake: FakeLangfuse
+    caplog: pytest.LogCaptureFixture
+    spans: _OpenSpans
+
+    def outcomes(self, status: str = "closed") -> list[tuple[str | None, str | None]]:
+        """`(wire trace id, error)` of every exported `turn` observation of a
+        close, or with `status="paused"` of every `turn.pause` observation."""
+        name = telemetry.TURN_PAUSE_NAME if status == "paused" else telemetry.TURN_SPAN_NAME
+        return [
+            (_metadata(span, "dfo.external_id"), _metadata(span, "dfo.turn_error"))
+            for span in self.fake.spans()
+            if span.name == name and (_metadata(span, "dfo.turn_status") or "closed") == status
+        ]
+
+    def lines(self, status: str = "closed") -> list[tuple[str | None, str | None]]:
+        """`(trace_id, error)` of every `studio.turn` line logged for a close,
+        or with `status="paused"` for a pause."""
+        return [
+            (fields.get("trace_id"), fields.get("error"))
+            for record in self.caplog.records
+            if isinstance(fields := getattr(record, JSON_FIELDS, None), dict)
+            and fields.get("event") == "studio.turn"
+            and fields.get("status") == status
+        ]
+
+    def assert_quiescent(self) -> None:
+        """No span is open, none was ended twice, and the exported `turn`
+        observations are the logged `studio.turn` lines, closes and pauses."""
+        assert sorted(self.spans.open.values()) == []
+        assert [
+            record.getMessage()
+            for record in self.caplog.records
+            if record.name.startswith("opentelemetry.sdk.trace")
+            and "ended span" in record.getMessage()
+        ] == []
+        assert self.outcomes() == self.lines()
+        assert self.outcomes("paused") == self.lines("paused")
+
+    async def assert_store_agrees(
+        self, engine: AsyncEngine, *, principal: str, conversation_id: str
+    ) -> None:
+        """`assert_quiescent`, and the closes are the turn records the store
+        on `engine` holds for `conversation_id`, read through a fresh
+        `StudioStore`."""
+        self.assert_quiescent()
+        stored = await StudioStore(engine).load(principal, conversation_id)
+        records = stored.turns if stored is not None else []
+        assert [(record.get("trace_id"), record.get("error")) for record in records] == (
+            self.lines()
+        )
+
+
+@pytest.fixture
+def quiescence(
+    fake_langfuse: FakeLangfuse, caplog: pytest.LogCaptureFixture
+) -> Iterator[Quiescence]:
+    # `set_level` also sets the capture handler's level, so the lowest goes last.
+    caplog.set_level(logging.WARNING, logger="opentelemetry.sdk.trace")
+    caplog.set_level(logging.INFO, logger="harness.studio_store")
+    telemetry.init_telemetry(service_name="harness")
+    provider = trace.get_tracer_provider()
+    assert isinstance(provider, sdk_trace.TracerProvider)
+    spans = _OpenSpans()
+    provider.add_span_processor(spans)
+    yield Quiescence(fake=fake_langfuse, caplog=caplog, spans=spans)

@@ -10,7 +10,7 @@ import logging
 import math
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +20,7 @@ import httpx2
 import pyarrow as pa
 import pytest
 from analysis_mcp import verbs as analysis_verbs
+from analysis_mcp.runner_client import RunnerClient, runner_holder
 from common.materialisation import (
     FrameRef,
     FrameTooLarge,
@@ -43,8 +44,6 @@ from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
 from data_mcp.search_tool import MAX_PARTS, MAX_RAW_QUERY_CHARS, SearchContext
 from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar import Frame
-from google.adk.sessions.state import State
-from google.adk.tools import FunctionTool
 from harness import chart_binding, orchestrator_tools, planner_adapter
 from harness.chart_binding import (
     LINE_CHART_MAX_VALUES,
@@ -59,6 +58,7 @@ from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_PENDING_KEY,
+    ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
     PendingAsk,
     PendingPlan,
@@ -71,14 +71,14 @@ from harness.mcp_client import _presentation_refusal_outcome
 from harness.orchestrator_tools import (
     HANDED_OFF,
     Chart,
-    OrchestratorTool,
     build_orchestrator_tools,
 )
 from harness.reply_figures import card_result, drawn_series
 from harness.rolling_cards import CardWithheld, RollingCards
 from harness.scope_choices import served_facts
-from harness.studio_edit import _revised_frames
+from harness.studio_edit import _record_revision
 from harness.studio_state import (
+    CardRemoval,
     ConversationState,
     _apply_operations,
     _next_manifest,
@@ -93,11 +93,19 @@ from harness.tool_contracts import (
     reading_facts,
     resolver_digest,
 )
-from harness.turn_records import SearchReading, basis_line, loose_match_notes, render_readings
+from harness.turn_records import (
+    SearchReading,
+    basis_line,
+    loose_match_notes,
+    newest_per_spec_id,
+    render_readings,
+)
 from harness.wire import AddOp, CompositionActor, MutationOp, component_revised
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
 from orchestrator.agent import INSTRUCTION
+from orchestrator.call import OrchestratorCall
+from orchestrator.declarations import tool_declaration
 from planner.parties import PartyRole
 from planner.plan import (
     MAX_ASK_CHARS,
@@ -252,11 +260,7 @@ def _tools(
         remove_cards=remove_cards,
     )
     by_name = {fn.__name__: fn for fn in tools}
-    return by_name, SimpleNamespace(
-        state={"surface": surface_name},
-        invocation_id="inv_1",
-        actions=SimpleNamespace(skip_summarization=None),
-    )
+    return by_name, OrchestratorCall(state={"surface": surface_name}, turn_id="turn-1")
 
 
 # --- declarations ---------------------------------------------------------
@@ -266,7 +270,7 @@ def _declarations() -> dict[str, str]:
     """Each tool's function declaration as the model is sent it."""
     tools, _ = _tools()
     return {
-        name: json.dumps(FunctionTool(fn)._get_declaration().model_dump(exclude_none=True))
+        name: json.dumps(tool_declaration(fn).model_dump(exclude_none=True))
         for name, fn in tools.items()
     }
 
@@ -307,7 +311,9 @@ def test_the_search_and_ask_user_declarations_carry_prices_beside_counts():
 
     assert "`other_prices`, each with its spec_id and label" in declarations["search"]
     ask_user = declarations["ask_user"]
-    assert "An option for a count or prices that a search result names" in ask_user
+    assert "An option for one of a part's candidates carries the spec_id" in ask_user
+    assert "names its part in `unit_of`" in ask_user
+    assert "count" not in ask_user
 
 
 def test_every_chart_field_is_described_and_select_json_shows_a_list_of_values():
@@ -389,9 +395,7 @@ def test_validating_arguments_leaves_every_declaration_as_the_model_sees_it():
 
     assert set(wrapped) == set(tools) - {"explain_dfo"}
     for fn in wrapped.values():
-        declaration = FunctionTool(fn.__wrapped__)._get_declaration()
-        assert FunctionTool(fn)._get_declaration() == declaration
-        assert OrchestratorTool(fn)._get_declaration() == declaration
+        assert tool_declaration(fn) == tool_declaration(fn.__wrapped__)
 
 
 # --- argument validation ----------------------------------------------------
@@ -495,7 +499,7 @@ async def test_a_malformed_argument_is_an_error_for_the_model_and_runs_nothing(
 
 
 async def _fetch_without_spec_id(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
-    return await OrchestratorTool(tools["fetch"]).run_async(args={}, tool_context=ctx)
+    return await tools["fetch"](call=ctx)
 
 
 async def test_a_call_missing_a_required_argument_is_an_error_to_correct_and_runs_nothing():
@@ -530,7 +534,7 @@ async def test_a_parsed_search_sends_its_parts_and_no_raw_query(message, args):
     tools, ctx = _tools(resolver)
     token = current_user_message.set(message)
     try:
-        found = await OrchestratorTool(tools["search"]).run_async(args=args, tool_context=ctx)
+        found = await tools["search"](call=ctx, **args)
     finally:
         current_user_message.reset(token)
 
@@ -562,7 +566,7 @@ async def test_a_search_with_nothing_to_search_or_text_beside_several_parts_is_r
     resolver = _resolver(_digest())
     tools, ctx = _tools(resolver)
 
-    found = await OrchestratorTool(tools["search"]).run_async(args=args, tool_context=ctx)
+    found = await tools["search"](call=ctx, **args)
 
     assert _stated(found) == (HarnessCode.TOOL_ARGUMENTS_INVALID, "correct_and_retry")
     assert found["invalid"] == [invalid]
@@ -573,7 +577,7 @@ async def test_a_search_with_nothing_to_search_or_text_beside_several_parts_is_r
 def test_search_declares_parts_and_text_and_requires_neither():
     tools, _ = _tools()
 
-    declaration = OrchestratorTool(tools["search"])._get_declaration()
+    declaration = tool_declaration(tools["search"])
 
     assert declaration is not None
     declaration = declaration.model_dump(exclude_none=True)
@@ -596,12 +600,12 @@ async def test_calls_with_invalid_arguments_stop_at_their_budget(call):
     assert ctx.state[ORCHESTRATOR_CALLS_KEY] == {"invalid_arguments": BUDGETS["invalid_arguments"]}
 
 
-async def test_adk_function_tool_returns_the_argument_error_for_a_part_level_role():
+async def test_a_part_level_role_is_answered_with_the_argument_error():
     resolver = _resolver(_digest())
     tools, ctx = _tools(resolver)
     part = {"variable": "aid", "role": "to", "entities": [{"text": "Kenya"}]}
 
-    found = await FunctionTool(tools["search"]).run_async(args={"parts": [part]}, tool_context=ctx)
+    found = await tools["search"](call=ctx, parts=[part])
 
     assert found["invalid"] == [{"loc": "parts.0.role", "type": "extra_forbidden"}]
     assert '{"text": "Kenya", "role": "to"}' in found["error"]
@@ -1928,12 +1932,92 @@ async def test_a_redraw_of_a_series_on_the_canvas_as_the_turn_began_states_no_fi
         assert (await tools["remove_cards"](ctx, all_cards=True))["removed"]
     redrawn = await tools["make_charts"]([chart], ctx)
     named = await tools["make_charts"]([chart | {"state_values_for": ["country/NGA"]}], ctx)
-    ctx.invocation_id = "inv_2"
+    ctx.turn_id = "turn-2"
     next_turn = await tools["make_charts"]([chart], ctx)
 
     assert _figures(redrawn["charts"][0]) == []
     assert _figures(named["charts"][0]) == [("NGA", 54.5, "2024")]
     assert _figures(next_turn["charts"][0]) == ([("NGA", 54.5, "2024")] if removed_first else [])
+
+
+_PEACE = "civilian peace-building, conflict prevention and resolution"
+
+
+@pytest.mark.parametrize("named", [_PEACE, "CRSPurposeCode15220"])
+async def test_a_table_of_breakdown_codes_names_its_series_by_their_labels(
+    monkeypatch: pytest.MonkeyPatch, named: str
+) -> None:
+    """A table whose `stat_var_crsPurpose` cells hold a code dcid and a label
+    names the code's series by its label with the dcid after it, read from the
+    graph for the dcid alone, and the label cell's by the label. A name the
+    model gives as the label or as the dcid finds the code's series with no
+    read of the frame's rows."""
+    envelope = resolved_revision("table")
+    template = envelope["component"]["rows"][0]
+    envelope["component"]["rows"] = [
+        {
+            **template,
+            "series_id": f"s_{number}",
+            "dimensions": {"stat_var_crsPurpose": cell},
+            "period": "2024",
+            "value": value,
+        }
+        for number, (cell, value) in enumerate(
+            [("CRSPurposeCode15220", 7.0), ("basic education", 3.0)]
+        )
+    ]
+    executor = FakeExecutor()
+    executor.written = drawn_cards.write_reply(envelope)
+    asked: list[list[str]] = []
+
+    def graph(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/api/graph/nodes"
+        dcids = json.loads(request.content)["dcids"]
+        asked.append(dcids)
+        code = {
+            "ref": "CRSPurposeCode15220",
+            "kind": "code",
+            "label": f"{_PEACE} (CRS Purpose)",
+            "code": {"property": "crsPurpose", "code_system": {"label": "CRS Purpose"}},
+        }
+        return httpx2.Response(200, json={"nodes": [code]})
+
+    runner_holder.set(
+        RunnerClient(
+            base_url="http://runner.test",
+            timeout_s=5.0,
+            read_timeout_s=5.0,
+            caller_principal=None,
+            auth=_no_token,
+            transport=httpx2.MockTransport(graph),
+        )
+    )
+    frame_reads: list[object] = []
+
+    async def frame_work(ref: object, work: object) -> None:
+        frame_reads.append(ref)
+
+    monkeypatch.setattr(orchestrator_tools, "_frame_work", frame_work)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    chart = _one_chart(frame_id_for(REF))[0] | {"state_values_for": [named]}
+
+    (card,) = (await tools["make_charts"]([chart], ctx))["charts"]
+
+    peace = f"{_PEACE} (CRSPurposeCode15220)"
+    assert card["holds"]["series"] == [peace, "basic education"]
+    assert "not_matched" not in card
+    assert "not_in_card" not in card
+    assert _figures(card) == [
+        (peace, 7.0, "2024", "largest"),
+        ("basic education", 3.0, "2024", "smallest"),
+    ]
+    assert asked == [["CRSPurposeCode15220"]]
+    assert frame_reads == []
+
+
+async def _no_token() -> dict[str, str]:
+    return {}
 
 
 def _bars(codes: list[str]) -> dict[str, Any]:
@@ -2492,13 +2576,9 @@ class YieldingExecutor(FakeExecutor):
         return await super().__call__(tool=tool, args=args, on_progress=on_progress)
 
 
-def _sibling_calls(session_state: dict[str, Any], count: int) -> list[SimpleNamespace]:
-    """Contexts for `count` function calls of one model response, built the way
-    ADK builds them: each call's own state delta over the one session state."""
-    return [
-        SimpleNamespace(state=State(value=session_state, delta={}), invocation_id="inv_1")
-        for _ in range(count)
-    ]
+def _sibling_calls(session_state: dict[str, Any], count: int) -> list[OrchestratorCall]:
+    """Records for `count` function calls of one model response, over the one turn state."""
+    return [OrchestratorCall(state=session_state, turn_id="turn-1") for _ in range(count)]
 
 
 async def _session_with_frame(executor: FakeExecutor) -> tuple[dict[str, Any], Any]:
@@ -3707,7 +3787,7 @@ async def _draw_wide_twice(
     await tools["fetch"](SPEC_LIFE, ctx)
     results = [await tools["make_charts"]([_wide_chart(**first)], ctx)]
     if later_turn:
-        ctx.invocation_id = "inv_2"
+        ctx.turn_id = "turn-2"
     results.append(await tools["make_charts"]([_wide_chart(**second)], ctx))
     return executor, results
 
@@ -3748,7 +3828,7 @@ async def test_make_charts_reads_the_figures_asked_of_a_card_on_the_canvas(
     await tools["fetch"](SPEC_LIFE, ctx)
     await tools["make_charts"]([_wide_chart(type="bar_chart")], ctx)
     if later_turn:
-        ctx.invocation_id = "inv_2"
+        ctx.turn_id = "turn-2"
 
     again = await tools["make_charts"](
         [_wide_chart(type="bar_chart", state_values_for=["donor/19"])], ctx
@@ -3796,7 +3876,7 @@ async def test_make_charts_refuses_a_card_on_the_canvas_it_cannot_read_back(
     await tools["fetch"](SPEC_LIFE, ctx)
     await tools["make_charts"]([_wide_chart()], ctx)
     if later_turn:
-        ctx.invocation_id = "inv_2"
+        ctx.turn_id = "turn-2"
     executor.described = described
 
     again = await tools["make_charts"]([_wide_chart()], ctx)
@@ -3847,7 +3927,7 @@ async def test_make_charts_draws_again_a_card_remove_cards_took_off(
 
     removed = await tools["remove_cards"](ctx, ["cmp_01"], all_cards=all_cards)
     if later_turn:
-        ctx.invocation_id = "inv_2"
+        ctx.turn_id = "turn-2"
     again = await tools["make_charts"]([table, bars], ctx)
 
     assert removed["removed"] == (["cmp_01", "cmp_02"] if all_cards else ["cmp_01"])
@@ -3873,11 +3953,11 @@ async def test_make_charts_reads_a_card_the_user_added_back(
     await tools["remove_cards"](ctx, ["cmp_01"])
     state = executor.state
     applied = _apply_operations(
-        state, state.composition, [AddOp(op=MutationOp.ADD, component_id="cmp_01")]
+        state.components, state.composition, [AddOp(op=MutationOp.ADD, component_id="cmp_01")]
     )
     assert isinstance(applied, tuple)
     state.composition = _next_manifest(state.composition, applied[0], actor=CompositionActor.USER)
-    ctx.invocation_id = "inv_2"
+    ctx.turn_id = "turn-2"
 
     again = await tools["make_charts"]([_wide_chart()], ctx)
 
@@ -3897,16 +3977,16 @@ async def test_make_charts_draws_again_a_card_revised_since_it_was_drawn(
     await tools["make_charts"]([_wide_chart()], ctx)
     revised = executor.cards["cmp_01"] | {"revision": executor.cards["cmp_01"]["revision"] + 1}
     patch = {"title": "Renamed"}
-    _revised_frames(
+    _record_revision(
         executor.state,
         component_id="cmp_01",
         component=revised,
-        patch=patch,
-        revised=component_revised(revised, "cmp_01", patch),
+        revision=component_revised(revised, "cmp_01", patch).revision,
+        title=patch["title"],
     )
     executor.cards["cmp_01"] = revised
     if later_turn:
-        ctx.invocation_id = "inv_2"
+        ctx.turn_id = "turn-2"
 
     again = await tools["make_charts"]([_wide_chart()], ctx)
 
@@ -4525,15 +4605,12 @@ def test_ask_user_records_the_question_and_refuses_a_second_hand_off():
     ]
 
     assert "refusal" in tools["ask_user"]([], ctx)
-    assert not ctx.actions.skip_summarization
     asked = tools["ask_user"](questions, ctx)
     later.state.update(ctx.state)
     second = tools["plan"]("Congo's GDP", ["Congo's GDP"], later)
 
     assert asked[HANDED_OFF] == "ask"
-    assert ctx.actions.skip_summarization is True
     assert HANDED_OFF not in second
-    assert not later.actions.skip_summarization
     assert pending_action(ctx.state) == PendingAsk(questions=questions)
     assert "already waiting on ask" in second["error"]
     assert _stated(second) == ("hand_off_pending", "do_not_retry")
@@ -4554,9 +4631,14 @@ async def test_search_names_the_count_it_chose_and_the_others_by_spec_id(constan
         ).read_text()
     )
     if constant:
-        envelope["parts"][0]["spec"]["resolved"]["alternative_measures"].append(
+        resolved = envelope["parts"][0]["spec"]["resolved"]
+        resolved["alternative_measures"].append(
             {"label": "constant prices", "axis": "unit", "definition": {"spec_id": SPEC_CONSTANT}}
         )
+        resolved["price_bases"] = [
+            {"prices": "current", "via": "served"},
+            {"prices": "constant", "via": "alternative"},
+        ]
     tools, ctx = _tools(resolver=_resolver(resolver_digest(envelope)))
 
     found = await tools["search"](ctx, [{"variable": "aid"}])
@@ -4569,15 +4651,16 @@ async def test_search_names_the_count_it_chose_and_the_others_by_spec_id(constan
     assert part.get("other_prices") == (
         [{"spec_id": SPEC_CONSTANT, "label": "constant prices"}] if constant else None
     )
-    # The answer spans 1978 to 2024 in current US dollars, and the question
-    # named no prices, so the prices are open with the offered sibling or,
-    # when search offers none, constant prices.
-    assert part["open_prices"] == [
-        {"label": "current prices"},
-        {"spec_id": SPEC_CONSTANT, "label": "constant prices"}
-        if constant
-        else {"label": "constant prices"},
-    ]
+    # The answer spans 1978 to 2024 in current US dollars and the question named
+    # no prices. The recording predates `price_bases`, so the gate stays closed
+    # on it; with the constant sibling and a listed route the prices are open.
+    if constant:
+        assert part["open_prices"] == [
+            {"label": "current prices"},
+            {"spec_id": SPEC_CONSTANT, "label": "constant prices"},
+        ]
+    else:
+        assert "open_prices" not in part
 
 
 SPEC_NET = "spec_" + "c" * 32
@@ -4664,8 +4747,22 @@ _PRICES_QUESTION = {
             "question 'In which prices?' offers no option",
         ),
         (
-            [{"question": "In which prices?", "prices_of": SPEC_NET}],
-            f"prices {SPEC_NET}, which lists no `open_prices` this turn",
+            [{"question": "In which prices?", "unit_of": SPEC_NET}],
+            f"asks the unit of {SPEC_NET}, which lists no `open_prices` this turn",
+        ),
+        (
+            [
+                {
+                    "question": "Which counts?",
+                    "multi_select": True,
+                    "options": [{"label": "Net", "spec_id": SPEC_NET}, {"label": "Gross"}],
+                }
+            ],
+            "offers labels only: no spec_id on an option and no `unit_of`",
+        ),
+        (
+            [{"question": "Which?", "multi_select": True, "unit_of": SPEC_NET, "options": []}],
+            "offers labels only: no spec_id on an option and no `unit_of`",
         ),
     ],
     ids=[
@@ -4678,7 +4775,9 @@ _PRICES_QUESTION = {
         "no_question",
         "four_questions",
         "no_option",
-        "prices_of_no_open_part",
+        "unit_of_no_open_part",
+        "multi_select_with_a_spec_id",
+        "multi_select_with_unit_of",
     ],
 )
 async def test_ask_user_offers_a_count_only_under_a_spec_id_this_turns_search_named(
@@ -4811,7 +4910,7 @@ async def _searched_france_kenya(
         definition_surface=definition_surface,
     )
     by_name = {fn.__name__: fn for fn in tools}
-    ctx = SimpleNamespace(state={"surface": "studio"}, invocation_id="inv_1")
+    ctx = OrchestratorCall(state={"surface": "studio"}, turn_id="turn-1")
     conversation = ConversationState(conversation_id="c1")
     current_recorded_identity.set(conversation.recorded_identity)
     await by_name["search"](ctx, [{"variable": "aid"}])
@@ -4851,6 +4950,134 @@ async def test_a_fetch_of_a_sibling_reads_its_own_block_and_gains_a_reading(offe
     rendered = render_readings([elected, chosen], budget=10_000).text.splitlines()
     for line in lines:
         assert line.format(gross=elected.spec_id, net=FRANCE_KENYA_NET) in rendered
+
+
+async def test_a_fetch_of_a_count_an_earlier_turn_offered_reads_as_that_offer() -> None:
+    """The net count an earlier turn's search offered, fetched in a later
+    turn that searched nothing, gains a reading linked to the earlier turn's
+    reading, as a fetch in the offering turn gives it."""
+    surface = FakeSurface(
+        ToolCallResult(is_error=False, **search_result_parts(_net_family_envelope()))
+    )
+    tools, earlier, _ = await _searched_france_kenya(surface)
+    (offering,) = earlier.state["orchestrator:searches"]
+    later = OrchestratorCall(
+        state={
+            "surface": "studio",
+            ORCHESTRATOR_PRIOR_LEDGER_KEY: {"readings": [offering], "warnings": {}, "spec_ids": []},
+        },
+        turn_id="turn-2",
+    )
+
+    await tools["fetch"](FRANCE_KENYA_NET, later)
+
+    (reading,) = (SearchReading.model_validate(r) for r in later.state["orchestrator:searches"])
+    assert (reading.spec_id, reading.other_count_of, reading.counted_as) == (
+        FRANCE_KENYA_NET,
+        offering["spec_id"],
+        "net disbursements",
+    )
+    assert reading.fetch is not None and reading.fetch.summary == "64 observations"
+
+
+class _BySpecId:
+    """A data-mcp surface answering each `resolve_definition` with the
+    envelope `envelopes` holds for the spec_id it names."""
+
+    def __init__(self, envelopes: Mapping[str, dict[str, Any]]) -> None:
+        self.envelopes = envelopes
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(self, *, tool, arguments, on_progress=None) -> ToolCallResult:
+        envelope = self.envelopes[arguments["spec_id"]]
+        return ToolCallResult(is_error=False, **search_result_parts(envelope))
+
+
+def _later_turn(readings: Sequence[Mapping[str, Any]], turn: int) -> OrchestratorCall:
+    """A later turn that searched nothing, its ledger holding the newest reading of
+    each spec_id among `readings`, as `ConversationState.prior_ledger_state` keeps it."""
+    newest = newest_per_spec_id([SearchReading.model_validate(r) for r in readings])
+    ledger = {"readings": [r.model_dump(mode="json") for r in newest], "warnings": {}}
+    return OrchestratorCall(
+        state={"surface": "studio", ORCHESTRATOR_PRIOR_LEDGER_KEY: {**ledger, "spec_ids": []}},
+        turn_id=f"turn-{turn}",
+    )
+
+
+async def test_a_round_trip_through_another_count_reads_the_elected_count_as_elected() -> None:
+    """Gross fetched, then net in a later turn, then gross again in a third, all
+    with no search: gross is the count Search elected, so its third-turn reading
+    names no other count, and a plan pinning it from the ledger states how it is
+    counted, gross chosen beside net. Net stays the other count of gross."""
+    gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
+    surface = _BySpecId({gross: FRANCE_KENYA, FRANCE_KENYA_NET: _net_family_envelope()})
+    tools, first, _ = await _searched_france_kenya(surface)
+    await tools["fetch"](gross, first)
+    readings = list(first.state["orchestrator:searches"])
+    second = _later_turn(readings, 2)
+    await tools["fetch"](FRANCE_KENYA_NET, second)
+    readings += second.state["orchestrator:searches"]
+    third = _later_turn(readings, 3)
+
+    await tools["fetch"](gross, third)
+
+    readings += third.state["orchestrator:searches"]
+    (net,) = (SearchReading.model_validate(r) for r in second.state["orchestrator:searches"])
+    (again,) = (SearchReading.model_validate(r) for r in third.state["orchestrator:searches"])
+    assert (net.other_count_of, again.other_count_of, again.counted_as) == (
+        gross,
+        None,
+        "gross disbursements",
+    )
+    ledger = _later_turn(readings, 4).state[ORCHESTRATOR_PRIOR_LEDGER_KEY]["readings"]
+    pins = planner_adapter._reading_pin_sources(
+        ledger,
+        [gross],
+        blocks={gross: FRANCE_KENYA["parts"][0]["spec"]},
+        earlier=(),
+        warnings={},
+    )
+    choice = submission_service.measure_choices(pins)[gross]
+    assert (pins[gross].other_count_of, choice.chosen) == (None, "gross disbursements")
+    assert choice.options == ("gross disbursements", "net disbursements")
+
+
+async def test_this_turns_offer_of_another_count_outranks_an_earlier_turns_candidate() -> None:
+    """An earlier turn left the count open, listing gross and net as candidates.
+    This turn's search finds gross with net as another count, and a fetch of
+    net reads it as that offer, the other count of gross in this turn's
+    words."""
+    gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
+    surface = _BySpecId({FRANCE_KENYA_NET: _net_family_envelope()})
+    open_count = SearchReading.from_part(
+        {
+            "variable": "earlier words",
+            "status": "candidates",
+            "candidates": [
+                {"spec_id": gross, "label": "gross disbursements"},
+                {"spec_id": FRANCE_KENYA_NET, "label": "net disbursements"},
+            ],
+            "asked_roles": ["recipient"],
+        }
+    )
+    tools, ctx, _ = await _searched_france_kenya(surface)
+    ctx.state[ORCHESTRATOR_PRIOR_LEDGER_KEY] = {
+        "readings": [open_count.model_dump(mode="json")],
+        "warnings": {},
+        "spec_ids": [],
+    }
+
+    await tools["fetch"](FRANCE_KENYA_NET, ctx)
+
+    offering, net = (SearchReading.model_validate(r) for r in ctx.state["orchestrator:searches"])
+    assert (net.other_count_of, net.counted_as, net.text, net.asked_roles) == (
+        gross,
+        "net disbursements",
+        offering.text,
+        offering.asked_roles,
+    )
 
 
 @pytest.mark.parametrize(
@@ -5496,7 +5723,7 @@ def _recall_callable(state: ConversationState):
 
 
 def _remove_callable(state: ConversationState):
-    async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
+    async def remove(*, component_ids: list[str], all_cards: bool) -> CardRemoval:
         return remove_cards(state, component_ids, all_cards=all_cards)
 
     return remove
@@ -5504,10 +5731,15 @@ def _remove_callable(state: ConversationState):
 
 def _two_card_canvas() -> ConversationState:
     state = ConversationState(conversation_id="c1")
-    for cid in ("cmp_01", "cmp_02"):
+    for cid, title in (("cmp_01", "Aid to Kenya"), ("cmp_02", "Aid to Ghana")):
         land_component(
             state,
-            {"component_id": cid, "revision": 1, "type": "line_chart", "title": "Aid"},
+            {
+                "component_id": cid,
+                "revision": 1,
+                "type": "line_chart",
+                "payload": {"component": {"title": {"text": title}}},
+            },
         )
     return state
 
@@ -5516,9 +5748,13 @@ async def test_remove_cards_takes_named_cards_off_and_says_which_it_never_held()
     state = _two_card_canvas()
     tools, ctx = _tools(remove_cards=_remove_callable(state))
 
-    answer = await tools["remove_cards"](ctx, ["cmp_01", "cmp_99"])
+    answer = await tools["remove_cards"](ctx, ["cmp_01", "cmp_99", "cmp_99"])
 
-    assert answer == {"removed": ["cmp_01"], "not_in_conversation": ["cmp_99"]}
+    assert answer == {
+        "removed": ["cmp_01"],
+        "not_in_conversation": ["cmp_99"],
+        "titles": {"cmp_01": "Aid to Kenya"},
+    }
     assert state.composition is not None
     assert [b.component_id for b in state.composition.blocks] == ["cmp_02"]
 
@@ -5530,10 +5766,48 @@ async def test_remove_cards_clears_the_canvas_and_refuses_a_call_that_names_noth
     nothing = await tools["remove_cards"](ctx)
     cleared = await tools["remove_cards"](ctx, all_cards=True)
     again = await tools["remove_cards"](ctx, all_cards=True)
+    # A fresh turn, since the three calls above spend remove_cards' budget.
+    tools, ctx = _tools(remove_cards=_remove_callable(state))
+    named = await tools["remove_cards"](ctx, ["cmp_99"], all_cards=True)
 
     assert _stated(nothing) == ("tool_arguments_invalid", "correct_and_retry")
-    assert cleared == {"removed": ["cmp_01", "cmp_02"]}
+    assert cleared == {
+        "removed": ["cmp_01", "cmp_02"],
+        "titles": {"cmp_01": "Aid to Kenya", "cmp_02": "Aid to Ghana"},
+    }
     assert again == {"removed": [], "note": "The canvas was already empty."}
+    assert {key: value for key, value in named.items() if key != "note"} == {
+        "removed": [],
+        "not_in_conversation": ["cmp_99"],
+    }
+
+
+async def test_remove_cards_leaves_a_pinned_card_and_names_it():
+    state = _two_card_canvas()
+    assert state.composition is not None
+    state.composition.blocks[0].pinned = True
+    tools, ctx = _tools(remove_cards=_remove_callable(state))
+
+    pinned_only = await tools["remove_cards"](ctx, ["cmp_01"])
+    cleared = await tools["remove_cards"](ctx, all_cards=True)
+    mixed = await tools["remove_cards"](ctx, ["cmp_01", "cmp_02", "cmp_99"])
+
+    assert pinned_only["removed"] == []
+    assert pinned_only["kept_pinned"] == ["cmp_01"]
+    assert "Unpin from Canvas" in pinned_only["note"]
+    assert cleared == {
+        "removed": ["cmp_02"],
+        "kept_pinned": ["cmp_01"],
+        "titles": {"cmp_02": "Aid to Ghana", "cmp_01": "Aid to Kenya"},
+    }
+    assert [b.component_id for b in state.composition.blocks] == ["cmp_01"]
+    assert {key: value for key, value in mixed.items() if key != "note"} == {
+        "removed": [],
+        "kept_pinned": ["cmp_01"],
+        "already_off": ["cmp_02"],
+        "not_in_conversation": ["cmp_99"],
+        "titles": {"cmp_01": "Aid to Kenya"},
+    }
 
 
 async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
@@ -5543,10 +5817,14 @@ async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
     tools, ctx = _tools(remove_cards=_remove_callable(state))
     await tools["remove_cards"](ctx, ["cmp_01"])
 
-    again = await tools["remove_cards"](ctx, ["cmp_01"])
-    unknown = await tools["remove_cards"](ctx, ["cmp_99"])
+    again = await tools["remove_cards"](ctx, ["cmp_01", "cmp_01"])
+    unknown = await tools["remove_cards"](ctx, ["cmp_99", "cmp_99"])
 
-    assert again == {"removed": [], "note": "Those cards were already off the canvas."}
+    assert again == {
+        "removed": [],
+        "already_off": ["cmp_01"],
+        "note": "Those cards were already off the canvas.",
+    }
     assert _stated(unknown) == ("card_not_found", "correct_and_retry")
     assert "cmp_99" not in unknown["error"]
 
@@ -5590,7 +5868,7 @@ async def test_a_canvas_listing_does_not_spend_the_detail_reads():
     listing = await tools["recall"]("canvas", ctx)
     reads = [await tools["recall"]("canvas", ctx, component_id="cmp_01") for _ in range(3)]
 
-    assert [card["component_id"] for card in listing["on_canvas"]] == ["cmp_01"]
+    assert [card["component_id"] for card in listing["blocks"]] == ["cmp_01"]
     assert all("error" not in read for read in reads)
     for _ in range(BUDGETS["recall_canvas"] - 1):
         await tools["recall"]("canvas", ctx)
@@ -5806,7 +6084,7 @@ async def test_fetching_an_alternative_preserves_recorded_source_confirmation():
         definition_surface=surface,
     )
     by_name = {fn.__name__: fn for fn in tools}
-    ctx = SimpleNamespace(state={"surface": "studio"}, invocation_id="inv_1")
+    ctx = OrchestratorCall(state={"surface": "studio"}, turn_id="turn-1")
     conversation = ConversationState(conversation_id="c1")
     token = current_recorded_identity.set(conversation.recorded_identity)
     try:

@@ -18,14 +18,22 @@ stored as `BRIEF`, and a package version in a request's HTTP headers as
 Rewrite the files after a change that moves what the planner produces, then run
 the same tests again without the variable to check them:
 
-    rm -rf services/harness/tests/fixtures/planner_runs && PLANNER_EXPECTATIONS=write \\
+    PLANNER_EXPECTATIONS=write \\
         uv run --package harness pytest services/harness/tests/test_planner_node.py \\
         services/harness/tests/test_planner_turns.py \\
         services/harness/tests/test_planner_events.py \\
+        services/harness/tests/test_switch.py \\
         services/harness/tests/planner/test_recorded_requests.py \\
         services/harness/tests/planner/test_pydantic_agent.py \\
         services/harness/tests/planner/test_pydantic_endings.py \\
         services/harness/tests/telemetry/test_planner_spans.py
+
+A write run writes only a file whose JSON value it changes, and keeps each key of a
+stored expectation that its test names `unread` (`expect`), so a run moves
+exactly the files its change moves. It deletes nothing, so the file of a
+test that has gone stays until it is removed by hand.
+`test_planner_expectations.py` checks that this list names every test module
+that stores an expectation.
 
 A write run fails each test whose file it wrote or changed, so it cannot pass
 while an expectation changed.
@@ -37,12 +45,14 @@ import difflib
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 from harness.planner_adapter import _READINGS_CONTEXT
+
+from .scripted_genai import Request
 
 PLANNER_RUNS = Path(__file__).parent / "fixtures" / "planner_runs"
 _SHARED = PLANNER_RUNS / "shared"
@@ -108,6 +118,31 @@ def versionless_headers(config: Mapping[str, Any]) -> dict[str, Any]:
     return {**config, "http_options": {**options, "headers": headers}}
 
 
+def request_dumped(request: Request) -> dict[str, Any]:
+    """`request`'s model, config and contents, dumped, each package version in the
+    config's HTTP headers put as `<version>` (`versionless_headers`)."""
+    return {
+        "model": request.model,
+        "config": versionless_headers(
+            request.generate_config.model_dump(mode="json", exclude_none=True)
+        ),
+        "contents": [
+            content.model_dump(mode="json", exclude_none=True) for content in request.content_list
+        ],
+    }
+
+
+def briefs(request: Request) -> list[str]:
+    """The text of each part of `request` that holds the planner brief."""
+    return [
+        part.text
+        for content in request.content_list
+        if content.role == "user"
+        for part in content.parts or ()
+        if part.text is not None and part.text.startswith(BRIEF_OPENING)
+    ]
+
+
 def _dumped(value: Any) -> str:
     """The file's text for `value`, in the form the `pretty-format-json` hook keeps."""
     return json.dumps(value, indent=2, ensure_ascii=True) + "\n"
@@ -126,10 +161,9 @@ def shared(value: Any, name: str) -> dict[str, str]:
     if _WRITING:
         if name in _PRODUCED and _PRODUCED[name] != produced:
             pytest.fail(f"two values named shared/{name}.json", pytrace=False)
-        text = _dumped(produced)
-        if not path.exists() or path.read_text() != text:
+        if _stored_value(path) != produced:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
+            path.write_text(_dumped(produced))
             _CHANGED.append(path)
     else:
         stored = _stored_shared(name)
@@ -137,6 +171,18 @@ def shared(value: Any, name: str) -> dict[str, str]:
             pytest.fail(_difference(stored, produced, name=f"shared/{name}"), pytrace=False)
     _PRODUCED[name] = produced
     return {"shared": name}
+
+
+# What `_stored_value` answers for a file that does not exist, which no JSON value equals.
+_ABSENT = object()
+
+
+def _stored_value(path: Path) -> Any:
+    """The JSON value `path` holds, or `_ABSENT` when there is no such file.
+
+    A write run compares values, so a file holding the produced value
+    under another key order or layout is left as it is."""
+    return json.loads(path.read_text()) if path.exists() else _ABSENT
 
 
 def _stored_shared(name: str) -> Any:
@@ -198,21 +244,28 @@ def assert_json_equal(produced: Any, stored: Any, *, name: str) -> None:
     pytest.fail(diff or f"{name}: a shared value is named differently", pytrace=False)
 
 
-def expect(name: str, value: Any) -> None:
+def expect(name: str, value: Any, *, unread: Collection[str] = ()) -> None:
     """Assert that `value` equals the stored expectation `name`.
+
+    `unread` names keys of the stored expectation, an object, that `value`
+    leaves out: they stay in the file as stored and are not compared.
 
     With `PLANNER_EXPECTATIONS=write`, write `value` to the file, and fail when
     that, or a `shared` value written for it, changed a file.
     """
     produced = as_json(value)
     path = PLANNER_RUNS / f"{name}.json"
+    if unread and path.exists():
+        stored = json.loads(path.read_text())
+        kept = {key: stored[key] for key in unread if key in stored}
+        produced = {**kept, **produced}
+        produced = {key: produced[key] for key in [*stored, *produced] if key in produced}
     if _WRITING:
         changed = [*_CHANGED]
         _CHANGED.clear()
-        text = _dumped(produced)
-        if not path.exists() or path.read_text() != text:
+        if _stored_value(path) != produced:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
+            path.write_text(_dumped(produced))
             changed.append(path)
         if changed:
             wrote = ", ".join(str(each.relative_to(PLANNER_RUNS)) for each in changed)

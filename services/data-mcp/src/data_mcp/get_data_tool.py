@@ -26,10 +26,11 @@ import time
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Annotated, Any, Literal, NamedTuple
+from typing import Annotated, Any, Literal
 
 import httpx2
 import pyarrow as pa
+from common.breakdown_labels import NODES_READ_TIMEOUT_S, CellLabels, label_cells
 from common.caller import current_writer
 from common.materialisation import FrameRef, MintRecord
 from common.place_type import PARTY_ROLES, type_column
@@ -63,11 +64,11 @@ from data_mcp.frame_materialisation import (
     ENRICHMENT,
     KIND_COLUMNS,
     WITHOUT_PARTY_TOTALS,
-    coverage_roles,
+    is_incomplete_rendering,
     materialise_and_register,
-    names_flow_role,
     replayed_mint_options,
     resolved_options,
+    select_requested_artifact,
 )
 from data_mcp.get_data_digest import (
     BreakdownLevel,
@@ -85,6 +86,7 @@ from data_mcp.manifest import (
     DefinitionModel,
     Manifest,
     SeriesStatisticsModel,
+    WarningModel,
     render_validation_errors,
     strip_manifest,
 )
@@ -173,7 +175,9 @@ _SPEC_ID_PATTERN = r"^spec_[0-9a-f]{32}$"
 # entity-role namespace is lowercase-initial. A slash alone is not enough:
 # `Congo/Brazzaville` and `Bosnia/Herzegovina` are spoken names a caller types, so a
 # capitalised segment before the slash is a name to resolve. A bare dcid such as
-# `GroupOfSeven` has no slash and passes only behind `ENTITY_DCID_MARKER`.
+# `GroupOfSeven` has no slash and passes only behind `ENTITY_DCID_MARKER`. This decides what
+# `get_data` treats as a dcid rather than a name to resolve; `data_mcp.dcid.DCID_PATTERN`
+# decides what the nodes route accepts.
 _DCID_PATTERN = re.compile(r"^[a-z][A-Za-z0-9_.\-]*(?:/[A-Za-z0-9_.\-]+)+$")
 
 # What `get_data(stat_vars="sum")` asks apis for: `by` names the columns to keep,
@@ -189,11 +193,6 @@ StatVarsReading = Literal["sum", "separate"]
 # `options.groupby.levels` rolls up. A deployment without it serves no `breakdown`.
 _GROUPBY_LEVEL_AXES_FIELD = "groupby_level_axes"
 _CAPABILITIES_PATH = "/api/datasets/capabilities"
-# The route that reads a definition out of apis' registry by `spec_id` and answers its
-# identity under `definition`. A GET of a spec rebuilds its stale head, so it may take a
-# materialisation's time.
-_OPTIONS_ROUTE = "/api/datasets/{id}/options"
-
 # No `UpstreamError` backs a definition-store read failure, so there is no
 # call to derive a wait from. Mirrors `search_tool.py`'s constants of the
 # same name and value.
@@ -207,6 +206,11 @@ _DEFINITION_STORE_SERVICE_NAME = "the definition store"
 # reserve unspent.
 _STATISTICS_FLOOR_S = 8.0
 _STATISTICS_RESERVE_S = 3.0
+# The breakdown cells' label read runs after the statistics read, inside its reserve. It
+# must end with `_LABELS_RENDER_FLOOR_S` left for rendering and waits at most
+# `NODES_READ_TIMEOUT_S`, so a statistics read that spent its whole share still leaves
+# the labels about 2s.
+_LABELS_RENDER_FLOOR_S = 1.0
 
 # The clock a call's deadline reads. Tests replace it to move time without sleeping.
 _deadline_clock: Clock = time.monotonic
@@ -513,69 +517,6 @@ async def _resolve_scope_entities(
     return wire_entities, entity_labels
 
 
-class _RegistryIdentity(NamedTuple):
-    """An identity read from apis' registry, and whether it hashes to the requested id."""
-
-    identity: dict[str, Any]
-    hashes_to_requested_id: bool
-
-
-async def _registry_identity_or_refuse(
-    spec_id: str, *, deadline: CallDeadline
-) -> _RegistryIdentity | ToolResult:
-    """The identity of `spec_id` read from apis' registry, for an id the definition
-    store does not hold.
-
-    `get_data` chooses the mint's columns from the spec's identity, and a spec it cannot
-    read would be asked for the wrong ones: a flow table refuses a place type column, and
-    a frame minted without kinds serves every party total. The read is
-    `GET /api/datasets/{id}/options`, which answers the identity of the version it serves
-    and rebuilds a stale head as any GET of the id does, so it must finish while the
-    current `CallBudget.pre_mint_reserve_s` of `deadline` remains, as the write after it.
-
-    The registry may serve the id under another `spec_id`. Its identity still names the
-    same table's sides, so it chooses the columns, but it goes in the mint's `definition`
-    sidecar, which carries the id it hashes to, and in the definition store, only when
-    that id is the requested one (`hashes_to_requested_id`); a stored one is found by the
-    next call. A refusal `ToolResult` when the registry does not hold the id either
-    (`definition_not_held`), answers with another failure, serves a body this service
-    cannot use, or serves an identity that does not hash to its own id.
-    """
-    reserve_s = current_call_budget().pre_mint_reserve_s
-    try:
-        response = await get_client().request(
-            "GET",
-            f"/api/datasets/{spec_id}/options",
-            route=_OPTIONS_ROUTE,
-            deadline=deadline.reserving(reserve_s),
-        )
-        definition = DefinitionModel.model_validate(response.json()["definition"])
-    except UpstreamError as exc:
-        if exc.code == "spec_not_found":
-            return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
-        return to_tool_result(from_upstream_error(exc, tool="get_data"))
-    except (ValueError, KeyError, TypeError) as exc:
-        return to_tool_result(
-            ToolRefusal.upstream_response_unusable(
-                detail=f"the definition of {spec_id} could not be read from the registry: {exc}"
-            )
-        )
-    hashes_to_requested_id = definition.spec_id == spec_id
-    try:
-        if hashes_to_requested_id:
-            if not await _persist_definition(definition, deadline=deadline, reserve_s=reserve_s):
-                logger.warning(
-                    "get_data: the definition store did not confirm the write of %s; the next "
-                    "call reads the registry again",
-                    spec_id,
-                )
-        else:
-            verify_write(dict(definition.identity), definition.spec_id)
-    except IdentityMismatch as exc:
-        return to_tool_result(ToolRefusal.capability_unavailable(detail=str(exc)))
-    return _RegistryIdentity(dict(definition.identity), hashes_to_requested_id)
-
-
 def _pre_mint_deadline_refusal(*, service: str, step: str) -> ToolResult:
     """The retryable refusal for pre-mint work that ran past its share of the deadline."""
     return to_tool_result(
@@ -675,8 +616,7 @@ async def _persist_definition(
     it has to be resolvable by a later `get_data` call the same way any other id is -- without
     this write, that later call would refuse `definition_not_held` even though apis' own
     registry now holds this id, which is exactly the case the platform contract's
-    `definition_not_held` excludes ("held by neither store nor registry"). Called too for
-    the definition of an id this store did not hold (`_registry_identity_or_refuse`). `verify_write`
+    `definition_not_held` excludes ("held by neither store nor registry"). `verify_write`
     canonicalises and hash-checks `definition.identity` the same way `search_tool.py`'s own
     registration path does, so a corrupt identity is caught rather than trusted forward.
 
@@ -856,6 +796,37 @@ async def _fetch_warning_labels(manifest: Manifest, *, deadline: CallDeadline) -
     return labels
 
 
+async def _fetch_breakdown_labels(
+    series_stats: Sequence[SeriesStatisticsModel] | None, *, deadline: CallDeadline
+) -> CellLabels:
+    """The labels of the breakdown cells `series_stats` name (`stat_var_<axis>` entities),
+    read through `node_lookup.describe_nodes` (`common.breakdown_labels.label_cells`).
+
+    The read waits at most `NODES_READ_TIMEOUT_S` and must end with
+    `_LABELS_RENDER_FLOOR_S` of `deadline` still left. A failed or late read is logged
+    and labels nothing, so the digest names those cells by their values.
+    """
+    cells = [
+        (entity.role, entity.ref) for series in series_stats or () for entity in series.entities
+    ]
+
+    async def read_nodes(dcids: list[str]) -> list[dict[str, Any]]:
+        wait_s = min(NODES_READ_TIMEOUT_S, deadline.reserving(_LABELS_RENDER_FLOOR_S).remaining())
+        try:
+            async with asyncio.timeout(wait_s):
+                outcomes = await node_lookup.describe_nodes(dcids)
+        except (UpstreamError, ValueError, TimeoutError) as exc:
+            logger.warning("get_data: could not label the breakdown cells: %s", exc)
+            return []
+        return [
+            node.model_dump(mode="json")
+            for node in outcomes.values()
+            if not isinstance(node, NotHeldEntry)
+        ]
+
+    return await label_cells(cells, read_nodes=read_nodes)
+
+
 def _mint_json_or_refusal(response: httpx2.Response) -> dict[str, Any] | ToolResult:
     """The mint response's parsed JSON body, or the refusal for one that does not parse."""
     try:
@@ -963,8 +934,9 @@ async def _finish_mint_response(
     `options.groupby` has a `content_version` of its own, and the manifest keeps
     apis' pair, which its artifacts are read under. A failed fetch or an unconfirmed
     store write degrades this call's own digest rather than refusing it (see
-    `render_get_data_digest`'s `degraded_frame`); a genuinely unusable artifact or
-    manifest still refuses.
+    `render_get_data_digest`'s `degraded_frame`), except that a call asking for the kinds
+    whose frame's columns were never read refuses `service_unavailable` with a wait; a
+    genuinely unusable artifact or manifest still refuses.
 
     Args:
         payload: The mint route's own manifest payload -- either an ordinary 200
@@ -986,9 +958,10 @@ async def _finish_mint_response(
         deadline: The `get_data` call's deadline, which cuts the re-mint persist's, the
             frame fetch's, the statistics fetch's and the description read's budgets.
         asked_for_kinds: Whether the call asked for the party kinds, by `place_types` or
-            `without_party_totals`. A manifest naming a flow side, minted without them, refuses
-            `upstream_response_unusable`: a flow frame without kinds would serve every
-            party total beside its parties.
+            `without_party_totals`, passed to `materialise_and_register`, which refuses
+            `upstream_response_unusable` a frame holding a flow party role column without
+            its kind column: a flow frame without kinds would serve every party total
+            beside its parties.
         operation_poll: Set when `payload` was resolved from a 202 operation rather
             than an ordinary 200 mint. Forwarded to the digest renderer.
         breakdown: The code system and level this mint summed within, forwarded to
@@ -1014,18 +987,6 @@ async def _finish_mint_response(
         )
     options = resolved_options(options, manifest=manifest)
     manifest = _narrowed_to_rendering(manifest, options=options)
-    if (
-        asked_for_kinds
-        and not PARTY_ROLES.isdisjoint(coverage_roles(manifest))
-        and not set(KIND_COLUMNS) <= set(options.get("columns") or ())
-    ):
-        return to_tool_result(
-            ToolRefusal.upstream_response_unusable(
-                detail=f"{manifest.definition.spec_id} names a flow side, and this call asked for "
-                "party kinds, but the mint was sent without them; the frame would serve every "
-                "group total beside its parties"
-            )
-        )
 
     remint_persist_failed = False
     if manifest.definition.spec_id != requested_spec_id:
@@ -1046,6 +1007,7 @@ async def _finish_mint_response(
         options=options,
         scope=scope,
         deadline=deadline,
+        kinds_asked=asked_for_kinds,
     )
     if outcome.status == "refused":
         assert outcome.refusal is not None
@@ -1071,6 +1033,7 @@ async def _finish_mint_response(
         series_stats=series_stats,
         description=description,
     )
+    cell_labels = await _fetch_breakdown_labels(series_stats, deadline=deadline)
 
     # The digest and the returned manifest carry the same labelled warning messages.
     manifest = manifest.model_copy(
@@ -1090,6 +1053,7 @@ async def _finish_mint_response(
             breakdown=breakdown,
             description=description,
             summed=summed,
+            cell_labels=cell_labels,
         )
     except ValueError as exc:
         return to_tool_result(ToolRefusal.upstream_response_unusable(detail=str(exc)))
@@ -1122,22 +1086,47 @@ async def _finish_mint_response(
 
 
 def _narrowed_to_rendering(manifest: Manifest, *, options: Mapping[str, Any]) -> Manifest:
-    """`manifest` listing only the artifact whose `rendering` equals `options`, and the
-    statistics artifact.
+    """`manifest` listing only the artifact of the requested rendering
+    (`frame_materialisation.select_requested_artifact`), and the statistics artifact.
 
     apis answers a mint with one data rendering, the one it resolved for the request,
     beside the statistics, so the narrowed list holds the same artifacts unless the
-    rendering apis resolved differs from `options`. The resource links and the harness's freshness date
-    (`harness.provenance.data_artifact`) read the narrowed list, and so does the frame
-    fetch of a mint with columns or a groupby. A manifest without the requested
-    rendering keeps only its statistics, and `materialise_and_register` refuses such a
-    mint unless the store already holds the frame. A default mint's frame is the
+    rendering apis resolved differs from `options`. The resource links and the harness's
+    freshness date (`harness.provenance.data_artifact`) read the narrowed list, and so
+    does the frame fetch of a mint with columns or a groupby. A manifest without the
+    requested rendering keeps only its statistics, and `materialise_and_register`
+    refuses such a mint before it reads the store. A default mint's frame is the
     version's canonical frame, which the snapshot route lists and no mint response
     does.
+
+    A file apis linked after a failed graph metadata read is listed under its
+    incomplete rendering, and the narrowed manifest carries an
+    `INCOMPLETE_METADATA_WARNING` for it.
     """
     statistics = find_statistics_artifact(manifest)
-    artifacts = [a for a in manifest.artifacts if a.rendering == options or a is statistics]
-    return manifest.model_copy(update={"artifacts": artifacts})
+    requested = select_requested_artifact(manifest, options=options)
+    artifacts = [a for a in manifest.artifacts if a is requested or a is statistics]
+    warnings = list(manifest.warnings)
+    if requested is not None and is_incomplete_rendering(requested.rendering):
+        # First, so the digest's warning cap keeps it before apis' other warnings.
+        warnings.insert(0, _incomplete_metadata_warning())
+    return manifest.model_copy(update={"artifacts": artifacts, "warnings": warnings})
+
+
+# The code of the warning `get_data` adds when the file it read is one apis rendered after
+# a failed graph metadata read (`frame_materialisation.is_incomplete_rendering`).
+INCOMPLETE_METADATA_WARNING = "metadata_incomplete"
+
+
+def _incomplete_metadata_warning() -> WarningModel:
+    """The `INCOMPLETE_METADATA_WARNING` for a frame read from an incomplete file."""
+    return WarningModel(
+        code=INCOMPLETE_METADATA_WARNING,
+        severity="warn",
+        message="dfo-apis could not read the graph when it rendered this file, so some "
+        "labels or place types in the frame may be missing. A later get_data call reads "
+        "a complete file once dfo-apis renders one.",
+    )
 
 
 async def _post_mint(
@@ -1358,7 +1347,6 @@ async def _attempt_mint(
     client: UpstreamClient,
     spec_id: str,
     identity: Mapping[str, Any] | None,
-    sends_definition: bool,
     wire_scope: Mapping[str, Any],
     stat_vars: StatVarsReading,
     breakdown: Breakdown | None,
@@ -1381,10 +1369,9 @@ async def _attempt_mint(
     `fix` (`data_mcp.mint_admission.declined_in_background`). `on_sent` hears each
     mint POST written out.
 
-    `identity` is `None` on the registry-fallback path, where the request omits the
-    `definition` sidecar and a `spec_not_found` refusal completes `definition_not_held`.
-    An identity read from the registry (`_registry_identity_or_refuse`) chooses the
-    columns, and goes in the sidecar only when `sends_definition`.
+    `identity` is the stored definition's, sent in the `definition` sidecar, or `None` on
+    the registry-fallback path, where the request omits the sidecar and a `spec_not_found`
+    refusal completes `definition_not_held`.
     `stat_vars="sum"` adds `_SUM_STAT_VARS_GROUPBY` to the request's options. The sum
     sits outside the spec's identity: the manifest keeps `spec_id`, and apis mints
     the summed frame its own `content_version` whenever more than one StatVar
@@ -1396,25 +1383,28 @@ async def _attempt_mint(
     version's own role columns take to the default columns, and the frame is named by
     the columns it resolved to (`frame_materialisation.resolved_options`), a
     `content_version` of its own when there are any (`frame_materialisation.frame_ref_for`).
-    A manifest whose frame holds a flow party role but whose rendering holds no kinds is
-    refused, since a flow frame without kinds would let a sum count party totals beside
-    their parties. `without_party_totals` on a spec naming a flow axis
-    (`frame_materialisation.names_flow_role`) asks for the kinds alone (`KIND_COLUMNS`) when
-    `place_types` is not set, and sends `options.without_party_totals`: apis leaves out the group
-    totals of the
-    party roles the identity it serves leaves open, and mints the frame that remains a
-    version of its own, which the manifest's pair names and its trace lists the totals
-    left out of (`party_totals_left_out`). On any other spec it changes nothing.
+    `without_party_totals` asks for the kinds alone (`KIND_COLUMNS`) when `place_types` is
+    not set, and sends `options.without_party_totals`. apis cuts the group totals of only
+    the party roles the identity it serves leaves open, those whose axis it binds no entity
+    on (`common.materialisation.frame_name.WITHOUT_PARTY_TOTALS`), and mints the frame that
+    remains a version of its own, which the manifest's pair names and its trace lists the
+    totals left out of (`party_totals_left_out`). A spec that binds no flow side, such as a
+    total across every provider and recipient, leaves both sides open and still mints every
+    party of the table: the cut applies to both, and the kinds let an analysis leave out by
+    kind the totals a side keeps. On a table with no provider or recipient column apis
+    serves the same rows, and the kinds and the cut in the rendering name a frame of its own. A call that sets
+    either option asks for the kinds, and a frame that holds a flow party role column without
+    its kind column is refused (`frame_materialisation.materialise_and_register`), since a
+    flow frame without kinds would let a sum count party totals beside their parties.
     """
     mint_input: dict[str, Any] = {
         "kind": "spec_id",
         "spec_id": spec_id,
         "scope": dict(wire_scope),
     }
-    if identity is not None and sends_definition:
-        # Sent whenever the definition is held or read from the registry under this id;
-        # omitted on the registry-fallback path so `mint_spec_id` is free to serve
-        # straight from its own registry on a hit.
+    if identity is not None:
+        # Sent whenever the definition is held; omitted on the registry-fallback path so
+        # `mint_spec_id` is free to serve straight from its own registry on a hit.
         mint_input["definition"] = {
             "schema_version": _SCHEMA_VERSION,
             "spec_id": spec_id,
@@ -1426,12 +1416,12 @@ async def _attempt_mint(
         options["groupby"] = breakdown.groupby()
     elif stat_vars == "sum":
         options["groupby"] = _SUM_STAT_VARS_GROUPBY
-    drops_totals = without_party_totals and names_flow_role(identity)
+    # Either option asks for the kinds, and the response is refused without them.
     if place_types:
         options[ENRICHMENT] = DEFAULT_ENRICHMENT
-    elif drops_totals:
+    elif without_party_totals:
         options["columns"] = list(KIND_COLUMNS)
-    if drops_totals:
+    if without_party_totals:
         options[WITHOUT_PARTY_TOTALS] = True
     request_body = {
         "schema_version": _SCHEMA_VERSION,
@@ -1485,7 +1475,7 @@ async def _attempt_mint(
             raise_upstream_error=True,
         )
     except UpstreamError as exc:
-        if not sends_definition and exc.code == "spec_not_found":
+        if identity is None and exc.code == "spec_not_found":
             # The sidecar-free registry-fallback request above just missed
             # apis' own registry too: `mint_spec_id` raises exactly this
             # code in that case, and the platform contract's
@@ -1885,13 +1875,14 @@ async def get_data(
         Field(
             description=(
                 "On a flow frame, leave out the group totals (kind total, such as DAC Countries "
-                "Total or the G7) from each side the spec leaves open, and add the party cells, "
-                "so the side's members can be compared or ranked without "
-                "totals among them. A sum of these members can differ from the source's "
-                "published total. For a total across the whole side, search naming the "
-                'population ("all donors") with no operation over that side. A side the spec '
-                "names, or one holding only totals, keeps every row, and the digest names what "
-                "was left out. On a spec with no flow side it changes nothing."
+                "Total or the G7) from each side the spec names no party on, and add the party "
+                "cells, so the side's members can be compared or ranked without totals among "
+                "them. A sum of these members can differ from the source's published total. "
+                'For a total across the whole side, search naming the population ("all '
+                'donors") with no operation over that side. A side the spec names, or one '
+                "holding only totals, keeps every row, and the digest names what was left out. "
+                "A spec that names no party on either side has its totals cut on both. On a "
+                "table with no provider or recipient column it leaves the rows as they are."
             )
         ),
     ] = False,
@@ -1974,8 +1965,9 @@ async def get_data(
             each party's type and its kind, class and whole cells on a flow frame, for a
             spec that names no place.
         without_party_totals: Whether a flow frame leaves out the group totals of each side
-            the spec leaves open, to compare or rank its members, and adds the party cells.
-            On a spec with no flow side it changes nothing.
+            the spec names no party on, both sides for a spec that names no party, to compare
+            or rank its members, and adds the party cells. On a table with no provider or
+            recipient column it leaves the rows as they are.
         breakdown: The code system and hierarchy level to sum the family
             within, as described above.
 
@@ -2010,14 +2002,6 @@ async def get_data(
     identity = await _load_identity_or_refuse(spec_id, deadline=deadline)
     if isinstance(identity, ToolResult):
         return identity
-    sends_definition = identity is not None
-    if identity is None and (place_types or without_party_totals):
-        # The columns the mint asks for follow the spec's identity.
-        registry = await _registry_identity_or_refuse(spec_id, deadline=deadline)
-        if isinstance(registry, ToolResult):
-            return registry
-        identity = registry.identity
-        sends_definition = registry.hashes_to_requested_id
 
     wire_scope: dict[str, Any] = {}
     entity_labels: dict[str, str] = {}
@@ -2052,7 +2036,6 @@ async def get_data(
         client=get_client(),
         spec_id=spec_id,
         identity=identity,
-        sends_definition=sends_definition,
         wire_scope=wire_scope,
         stat_vars=stat_vars,
         breakdown=breakdown,

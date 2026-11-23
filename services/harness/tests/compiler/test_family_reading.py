@@ -897,13 +897,13 @@ def test_a_family_whose_membership_is_unsettled_read_separately_is_refused_at_co
     )
 
 
-def test_a_summable_family_the_plan_reads_separately_is_refused_at_compile_time(
+def test_a_summable_family_the_plan_reads_separately_reaches_the_runner_whole(
     compile_question: Callable[..., CompileResult],
 ) -> None:
-    """The plan reads France's education grants separately and totals them.
-    The plan itself cannot count the family, so the compiler refuses it once
-    the source shows 68 StatVars, each open axis summable, and advises
-    reading the family summed."""
+    """The plan reads France's education grants separately and totals them. The
+    source shows 68 StatVars, each open axis summable, so the analysis runner sums
+    the family when the aggregate reads the retrieval (`FrameShape.summed_on_read`):
+    the compiler passes the plan and the retrieval stays separate."""
     source = _source("france_education_grants")
     grants = _dataset(
         "grants",
@@ -923,13 +923,50 @@ def test_a_summable_family_the_plan_reads_separately_is_refused_at_compile_time(
         sources={"grants": source},
     )
 
+    assert result.issues == ()
+    assert _step_args(result, "grants_op")["stat_vars"] == "separate"
+
+
+def test_a_summable_family_read_separately_and_filtered_is_refused_at_compile_time(
+    compile_question: Callable[..., CompileResult],
+) -> None:
+    """A filter between the retrieval and the total stores a recipe the runner
+    reads unsummed, so the total still reads 68 measures and is refused with the
+    advice to read the family summed."""
+    source = _source("france_education_grants")
+    grants = _dataset(
+        "grants",
+        [Entity(name="France", role="donor")],
+        Period(start=2020, end=2024),
+        measure="education grants",
+        stat_vars=StatVarReading.SEPARATE,
+    )
+    recent = FilterRequirement(
+        id="recent",
+        decision_ids=["measure"],
+        input_id="grants",
+        predicates=(PeriodThreshold(op="gte", year=2022),),
+    )
+
+    result = compile_question(
+        [grants, recent, _yearly_total("recent")],
+        [
+            RetrieveOperation(id="grants_op", requirement_id="grants", spec_id=source.spec_id),
+            FilterOperation(
+                id="recent",
+                requirement_id="recent",
+                input="grants_op",
+                predicates=(PeriodThreshold(op="gte", year=2022),),
+            ),
+            _yearly_total_op("recent"),
+        ],
+        terminal=["yearly_total"],
+        sources={"grants": source},
+    )
+
     (issue,) = result.issues
     assert issue.code is CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
     assert issue.operation_id == "yearly_total"
-    assert issue.reason.endswith(
-        "aggregate reads a single measure; got 68, one per StatVar of a family read "
-        "separately; read the family summed (stat_vars='sum') to give it one"
-    )
 
 
 def test_a_family_of_two_the_plan_reads_separately_is_refused_at_compile_time(

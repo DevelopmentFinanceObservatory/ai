@@ -1,25 +1,23 @@
-"""Behavioural tests for the plan path of the root workflow: the `planner`,
+"""Behavioural tests for the plan path of the turn graph: the `planner`,
 `approve` and `execute` nodes the orchestrator's `plan` tool reaches, and
 the helpers they share.
 
-The workflow tests run the orchestrator topology (`orchestrator_runner`):
-the agent hands a brief to a planner, the turn pauses on the plan card,
-and the answer resumes it into `execute` and `plan_done`. The rest are unit
-tests of the node helpers. Everything runs offline against scripted fakes:
-no model, no MCP server.
+The turn tests run the plan path on the turn loop (`_plan_runner`): the
+agent hands a brief to a planner, the turn pauses on the plan card, and the
+answer resumes it into `execute` and `plan_done`. The rest are unit tests
+of the node helpers. Everything runs offline against scripted fakes and a
+test Postgres database: no model, no MCP server.
 """
 
 from __future__ import annotations
 
 import asyncio
-import copy
+import dataclasses
 import json
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, ClassVar, NamedTuple, cast, override
+from typing import Any, cast
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
@@ -35,10 +33,6 @@ from compiler.surface import (
     ToolSchema,
     ToolSurface,
 )
-from data_mcp.definition_store import InMemoryDefinitionStore
-from data_mcp.definition_store.identity import canonicalize, spec_id_for
-from data_mcp.definition_writes import windowed_identity
-from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from executor.classify import ToolFailure
 from executor.completion import FramePublished
@@ -52,12 +46,7 @@ from executor.outcomes import (
     RefusalKind,
     Refused,
 )
-from executor.run import StepProgressCallback, execute_approved_plan
-from google.adk.events import Event
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService, State
-from google.genai import types
-from harness import scripted
+from executor.run import execute_approved_plan
 from harness.chart_binding import (
     LINE_CHART_MAX_VALUES,
     covers_every_row,
@@ -70,65 +59,42 @@ from harness.conversation import current_conversation_id
 from harness.decision_pick import DecisionPick
 from harness.early_mint import EarlyMints
 from harness.graph import answer as answer_module
-from harness.graph import switch as switch_module
+from harness.graph.events import PlannerStarted, StepProgress
 from harness.graph.execute import (
     _failed_step,
     _mark_masked_step_failed,
     _planner_refusal,
     _replan_refusal,
-    _start_relayed,
     record_served_scopes,
 )
 from harness.graph.plan_done import frame_unavailable_reason, plan_done_node
 from harness.graph.state import (
-    APPROVE_INTERRUPT,
-    ORCHESTRATOR_APPLIED_KEY,
+    APPROVE_PAUSE,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
-    ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
-    ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
     PICK_REPLAN_KEY,
-    PLANNER_STARTED_KEY,
-    STEP_PROGRESS_KEY,
     UNREADABLE_PLAN_NOTE,
     UNREADABLE_PLAN_UNPLANNED_NOTE,
-    GraphState,
     frame_id_for,
     frame_store_ref,
-    stored_mapping,
-    stored_sequence,
 )
-from harness.graph.switch import (
-    SCOPE_CHOICE_NOT_APPLIED,
-    SWITCH_CANCELLED,
-    SWITCH_STOP,
-    SwitchFailedError,
-)
-from harness.plan_display import choice_id, decision_option_id
-from harness.planner_adapter import PlannerAdapter, store_searched_pin_readings
-from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
+from harness.plan_display import decision_option_id
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
-from harness.sentences import FAILURE_SENTENCES, FailureClass, StopCode
-from harness.settings import Settings
-from harness.studio_state import ConversationState, StudioStore
-from harness.studio_translate import _node_name, _Translator, failure_detail
-from harness.studio_translate import _RecordingExecutor as _TranslatorRecorder
-from harness.tool_contracts import HarnessCode, reading_facts
-from harness.turn_records import CHIP_STALE_NOTE, SearchReading, basis_line
-from harness.wire import ActivityStep, StepStatus
+from harness.sentences import FAILURE_SENTENCES, FailureClass, failure_cause
+from harness.studio_translate import failure_detail
+from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
+from harness.turn_records import SearchReading, basis_line
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
     ASKS_STATE_KEY,
-    DECISION_PICK_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
-    AnswerMode,
     Coverage,
     DatasetRequirement,
     Decision,
@@ -136,20 +102,14 @@ from planner.plan import (
     Entity,
     GrowthRequirement,
     Period,
-    PinSource,
     PlanStatus,
-    RankRequirement,
     ResolvedBy,
-    SessionState,
     WindowedPin,
     authored,
-    decision_pick,
     open_window,
     plan_revision,
     repinned,
     save_decision_pick,
-    save_pin_sources,
-    windowed_pins,
     with_authored_requirements,
 )
 from planner.plan import Plan as PlannerPlan
@@ -157,84 +117,44 @@ from planner.records import (
     EvidenceIssue,
     EvidenceIssueCode,
     GroupBy,
-    RankAmong,
-    RankDirection,
     Reduction,
     RelativePeriod,
     RollingWindow,
     Severity,
-    StatVarReading,
 )
 from planner.workflow import (
-    EvidenceBinding,
-    ReadingSetBy,
     SelectedSource,
     ToolId,
     Workflow,
     WorkflowStep,
 )
 from pydantic import ValidationError
-from submission.service import (
-    AlignedPin,
-    SearchedPin,
-    save_aligned_pin,
-    save_searched_pin,
-    scope_choice_decisions,
-)
-from translator.discovery import RESOLVED_STATE_PREFIX, PartFault, PartNotResolvedError
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
+from translator.discovery import PartFault, PartNotResolvedError
 
-from .data_mcp_definitions import DataMcpDefinitions, SearchStub
-from .orchestrator_fakes import (
-    ScriptLlm,
-    approve_answer,
-    call,
-    create_request_input_response,
-    frame_for,
-    handed_back,
-    open_session,
-    orchestrator_runner,
-    plan_call,
-    request_text,
-    run_turn,
-    visited_nodes,
+from .graph_turns import agent_read, opening_graph, visited
+from .plan_cards import (
+    SPEC_A,
+    ScriptedExecutor,
+    _analysis_result,
+    _fixture_surface,
+    _get_data_manifest,
+    _Planner,
+    _planner_plan,
 )
-from .planner.test_agent import _FakeToolContext
+from .plan_turns import approve_answer, plan_nodes
+from .planner_host import node_ctx
+from .scripted_genai import ScriptedGenai, reply, text_part
+from .scripted_tools import plan_call, scripted_orchestrator
 from .share_plan import ALL_DONORS, DAC_DONORS, US_DONOR, us_share_of_kenya_oda
 from .split_plan import FIRST_YEAR, SPEC_DEBT_HISTORY, split_draft, stored_split_plan
-from .test_turn_records import _example_part, _manifest, _served_identity, _switchable_scope
+from .test_turn_records import _example_part, _manifest, _served_identity
+from .turn_driver import CONVERSATION, SegmentRun, TurnDriver, scripted_models
 
-SPEC_A = "spec_" + "a" * 32
 SPEC_B = "spec_" + "b" * 32
 REF_A = {"spec_id": SPEC_A, "content_version": "cv_" + "1" * 32}
 REF_B = {"spec_id": SPEC_B, "content_version": "cv_" + "2" * 32}
-
-
-def _get_data_manifest(*, spec_id: str = SPEC_A) -> dict[str, Any]:
-    """A minimal valid `get_data` manifest. The hand-built workflows below
-    carry no `evidence_bindings`, so only its shape (a definition manifest and
-    the `frame_ref` beside it, which `extract_frame_ref` reads) matters."""
-    return {
-        "schema_version": 1,
-        "definition": {"schema_version": 1, "spec_id": spec_id, "identity": {}},
-        "content_version": "cv_" + "1" * 32,
-        "coverage": {"rows": 10, "dimensions": []},
-        "citation": {"text": "Test source", "sources": []},
-        "trace": {},
-        "artifacts": [],
-        "frame_ref": {"spec_id": spec_id, "content_version": "cv_" + "1" * 32},
-    }
-
-
-def _analysis_result(*, spec_id: str = "ops_" + "2" * 32) -> dict[str, Any]:
-    """A minimal analysis-mcp result: one row of one StatVar, matching a
-    `WorkflowStep`'s default `expected_role_keys=()`."""
-    return {
-        "spec_id": spec_id,
-        "content_version": "ocv_" + "3" * 32,
-        "rows": 1,
-        "role_keys": [],
-        "stat_var_count": 1,
-    }
 
 
 @pytest.fixture
@@ -269,95 +189,116 @@ class _CallRecordingSurface:
         )
 
 
-def _fixture_surface(
-    schemas: list[ToolSchema],
-    *,
-    analysis_tool: str = "aggregate",
-    analysis_result: dict[str, Any] | None = None,
-    get_data_result: ToolCallResult | None = None,
-    analysis_call_result: ToolCallResult | None = None,
-) -> FixtureSurface:
-    """A `ToolSurface` over the real schemas, answering `get_data` and one
-    analysis tool. A caller wanting a refusal from either passes its own
-    `ToolCallResult`."""
-    named = {schema.name: schema for schema in schemas}
-    return FixtureSurface(
-        schemas=[named["get_data"], named[analysis_tool]],
-        responses={
-            "get_data": get_data_result
-            or ToolCallResult(
-                is_error=False, structured_content=_get_data_manifest(), text="fetched"
-            ),
-            analysis_tool: analysis_call_result
-            or ToolCallResult(
-                is_error=False,
-                structured_content=analysis_result or _analysis_result(),
-                text="computed",
-            ),
-        },
-    )
-
-
-class ScriptedExecutor:
-    """The executor `plan_done` describes the plan's final frames through:
-    the scripted results in order, then a described frame with an empty view."""
-
-    def __init__(self, results: list[dict[str, Any]] | None = None) -> None:
-        self.results = results or []
-        self.calls: list[dict[str, Any]] = []
-
-    async def __call__(
-        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
-    ) -> dict[str, Any]:
-        self.calls.append({"tool": tool, "args": args})
-        if len(self.calls) <= len(self.results):
-            return self.results[len(self.calls) - 1]
-        return {"outcome": "ok", "view": {}}
-
-
 _BRIEF = "kenya debt"
+# The pause kind of each pause a turn here answers, by the interrupt a test names.
+_PAUSE_KINDS = {APPROVE_PAUSE: "approve", "planner_ask": "planner_ask"}
+
+
+class _PlanTurn:
+    """One conversation's plan turn on the turn loop: `driver` runs its
+    segments, and `last` is the segment that ran last."""
+
+    def __init__(self, driver: TurnDriver) -> None:
+        self.driver = driver
+        self.last: SegmentRun | None = None
+
+    async def run(self, segment: Any) -> list[TurnEvent]:
+        """Await `segment`, keep it as `last`, and return its events. A node
+        that raised fails the turn, and its error is raised here."""
+        self.last = await segment
+        failed = [event for event in self.last.events if isinstance(event, TurnFailed)]
+        if failed:
+            raise failed[-1].error
+        return self.last.events
 
 
 def _plan_runner(
-    planner: Any, *, tool_surface: Any = None, executor: Any = None
-) -> tuple[Runner, ScriptLlm]:
-    """The orchestrator topology whose agent hands `_BRIEF` to `planner` and
-    then answers in plain text; `tool_surface` runs the approved plan."""
-    return orchestrator_runner(
-        plan_call(_BRIEF),
-        planner=planner,
-        tool_surface=tool_surface,
-        executor=executor or ScriptedExecutor(),
+    engine: AsyncEngine,
+    planner: Any,
+    *,
+    tool_surface: Any = None,
+    executor: Any = None,
+    early_mints: EarlyMints | None = None,
+    conversation_id: str = CONVERSATION,
+) -> tuple[_PlanTurn, ScriptedGenai]:
+    """The plan path whose agent hands `_BRIEF` to `planner` and then answers
+    in plain text, in conversation `conversation_id`, and the agent's
+    scripted client; `tool_surface` runs the approved plan, and with `None`
+    `execute` refuses."""
+    models = scripted_models(
+        orchestrator=[reply(plan_call(_BRIEF)), *(reply(text_part("done")) for _ in range(4))]
     )
+    executor = executor or ScriptedExecutor()
+    nodes = plan_nodes(
+        scripted_orchestrator(executor=executor),
+        models,
+        run_ledger=InMemoryRunLedger(),
+        tool_surface=tool_surface,
+        executor=executor,
+        planner=planner,
+        early_mints=early_mints,
+    )
+    driver = TurnDriver(engine, graph=opening_graph(nodes), conversation_id=conversation_id)
+    return _PlanTurn(driver), models.orchestrator
 
 
-async def _start(runner: Runner) -> list[Event]:
-    """Open `runner`'s session and run the turn that asks for a plan."""
-    await open_session(runner)
-    return await run_turn(runner, types.UserContent(_BRIEF))
+async def _start(turn: _PlanTurn) -> list[TurnEvent]:
+    """Run the turn that asks for a plan."""
+    return await turn.run(turn.driver.turn(_BRIEF))
 
 
-async def _resume(runner: Runner, interrupt_id: str, response: dict[str, Any]) -> list[Event]:
-    """Answer the pause `interrupt_id` with `response`."""
-    part = create_request_input_response(interrupt_id, {"result": response})
-    return await run_turn(runner, types.Content(role="user", parts=[part]))
+async def _resume(turn: _PlanTurn, interrupt_id: str, response: dict[str, Any]) -> list[TurnEvent]:
+    """Answer the pause the turn holds, of the kind `interrupt_id` names, with `response`."""
+    assert turn.last is not None
+    pause = turn.last.pause
+    assert pause.kind == _PAUSE_KINDS[interrupt_id], pause.kind
+    return await turn.run(turn.driver.answer(response, to=pause))
 
 
-def _session_state(runner: Runner) -> dict[str, Any]:
-    """The live state of the session `_start` opened."""
-    service = cast(InMemorySessionService, runner.session_service)
-    return service.sessions["t"]["u"]["s"].state
+def _session_state(turn: _PlanTurn) -> dict[str, Any]:
+    """The turn's state as its last segment stored it."""
+    assert turn.last is not None
+    return turn.last.cursor.state
 
 
-def _pending_interrupt(events: list[Event]) -> str | None:
-    """The pause the turn ended on, if it ended on one."""
-    ids = [c.id for e in events for c in e.get_function_calls() if c.name == "adk_request_input"]
-    return ids[-1] if ids else None
+async def _store_state(turn: _PlanTurn, key: str, value: Any) -> None:
+    """Store `value` under `key` in the paused turn's state, for a test that
+    needs state no real node would write."""
+    assert turn.last is not None
+    state = {**turn.last.cursor.state, key: value}
+    async with turn.driver.studio.engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE turn_cursors SET state = CAST(:state AS json) WHERE id = :id"),
+            {"state": json.dumps(state), "id": turn.last.cursor.id},
+        )
 
 
-def _output_of(events: list[Event], node: str) -> Any:
-    outputs = [e.output for e in events if _node_name(e) == node and e.output is not None]
+def _pending_interrupt(events: list[TurnEvent]) -> str | None:
+    """The interrupt of the pause the turn ended on, if it ended on one."""
+    kinds = {kind: interrupt for interrupt, kind in _PAUSE_KINDS.items()}
+    paused = [event for event in events if isinstance(event, Paused)]
+    return kinds[paused[-1].kind] if paused else None
+
+
+def _output_of(events: list[TurnEvent], node: str) -> Any:
+    outputs = [
+        event.output
+        for event in events
+        if isinstance(event, NodeDone) and event.node == node and event.output is not None
+    ]
     return outputs[-1] if outputs else None
+
+
+def handed_back(model: ScriptedGenai) -> tuple[str, dict[str, Any]]:
+    """The agent's last request as it reads it, and the last `plan` result in it."""
+    request = model.requests[-1]
+    (result, *_) = [
+        part.function_response.response or {}
+        for content in reversed(request.content_list)
+        for part in content.parts or []
+        if part.function_response is not None and part.function_response.name == "plan"
+    ]
+    return agent_read(request), result
 
 
 # --- execute's served scopes ---------------------------------------------------
@@ -468,8 +409,8 @@ _PREPARING = "Preparing the dataset (in progress, 3s)"
 _RECEIVED = "Result received; checking it"
 
 
-def _step_progress(event: Event) -> dict[str, Any] | None:
-    return (event.custom_metadata or {}).get(STEP_PROGRESS_KEY)
+def _step_progress(event: object) -> dict[str, Any] | None:
+    return dataclasses.asdict(event) if isinstance(event, StepProgress) else None
 
 
 class _ReportsThenWaits(ScriptedSurface):
@@ -502,34 +443,49 @@ class _ReportsThenWaits(ScriptedSurface):
         return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
 
 
-async def _approval_stream(surface: ToolSurface) -> Any:
-    """The event stream of an approved scripted plan's run against `surface`."""
-    runner, _ = _plan_runner(ScriptedPlannerModel(), tool_surface=surface)
+async def _approved_run(
+    engine: AsyncEngine, surface: ToolSurface, *, observe: Callable[[TurnEvent], None]
+) -> list[TurnEvent]:
+    """The events of an approved scripted plan's run against `surface`, each
+    told to `observe` as the segment emits it."""
+    runner, _ = _plan_runner(engine, ScriptedPlannerModel(), tool_surface=surface)
     events = await _start(runner)
-    part = create_request_input_response(
-        APPROVE_INTERRUPT, {"result": approve_answer(_output_of(events, "planner")["revision"])}
-    )
-    return runner.run_async(
-        user_id="u", session_id="s", new_message=types.Content(role="user", parts=[part])
+    runner.driver.observe = observe
+    return await _resume(
+        runner, APPROVE_PAUSE, approve_answer(_output_of(events, "planner")["revision"])
     )
 
 
-async def test_execute_relays_a_report_while_its_step_is_still_running() -> None:
+async def test_execute_relays_a_report_while_its_step_is_still_running(
+    pg_engine: AsyncEngine,
+) -> None:
     """The surface answers only once the test has seen the report, so the
     report must reach the event stream while the call is still waiting. Once
     a call answers, its step reports that, so the step's line stops showing
-    the server's wait while the run goes on."""
+    the server's wait while the run goes on. The reader keeps the latest
+    report of each step still waiting for it, as Studio's stream does."""
     surface = _ReportsThenWaits()
-    stream = await _approval_stream(surface)
-    seen: list[Event] = []
+    waiting: list[bool] = []
+    reports: dict[str, StepProgress] = {}
+    seen: list[StepProgress] = []
+
+    def read() -> None:
+        seen.extend(reports.values())
+        reports.clear()
+        if not surface.release.is_set():
+            waiting.append(surface.waiting is not None and not surface.waiting.done())
+            surface.release.set()
+
+    def observe(event: TurnEvent) -> None:
+        if isinstance(event, StepProgress):
+            if not reports:
+                asyncio.get_running_loop().call_soon(read)
+            reports[event.step_id] = event
 
     async with asyncio.timeout(10):
-        async for event in stream:
-            seen.append(event)
-            if _step_progress(event) is not None and not surface.release.is_set():
-                assert surface.waiting is not None and not surface.waiting.done()
-                surface.release.set()
+        events = await _approved_run(pg_engine, surface, observe=observe)
 
+    assert waiting == [True]
     progress = [_step_progress(event) for event in seen if _step_progress(event)]
     retrieve = {
         "step_id": "retrieve",
@@ -555,12 +511,18 @@ async def test_execute_relays_a_report_while_its_step_is_still_running() -> None
         {**retrieve, "message": _RECEIVED},
         {**totals, "message": _RECEIVED},
     ]
-    assert _node_name(next(e for e in seen if _step_progress(e))) == "execute"
-    assert "plan_done" in visited_nodes(seen)
+    assert _emitted_by(events, next(e for e in events if _step_progress(e))) == "execute"
+    assert "plan_done" in visited(events)
+
+
+def _emitted_by(events: list[TurnEvent], event: object) -> str:
+    """The node that emitted `event`: the next node to finish after it."""
+    after = events[events.index(event) :]
+    return next(e.node for e in after if isinstance(e, NodeDone))
 
 
 async def test_a_plan_whose_card_places_fail_still_runs_with_unplaced_steps(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The plan card places only label the step lines, so a failure building
     them is logged and the approved plan runs with every step unplaced."""
@@ -569,145 +531,17 @@ async def test_a_plan_whose_card_places_fail_still_runs_with_unplaced_steps(
         raise ValueError("no card for this plan")
 
     monkeypatch.setattr("harness.graph.execute._card_places", fails)
-    stream = await _approval_stream(ScriptedSurface())
 
     with caplog.at_level("ERROR", logger="harness.graph.execute"):
         async with asyncio.timeout(10):
-            seen = [event async for event in stream]
+            seen = await _approved_run(pg_engine, ScriptedSurface(), observe=lambda event: None)
 
     progress = [_step_progress(event) for event in seen if _step_progress(event)]
     assert progress
     assert all(report["position"] is None for report in progress)
-    assert "plan_done" in visited_nodes(seen)
+    assert "plan_done" in visited(seen)
     (logged,) = [r for r in caplog.records if r.name == "harness.graph.execute"]
     assert logged.exc_info is not None
-
-
-class _HoldsGetData(ScriptedSurface):
-    """`ScriptedSurface`, whose `get_data` sends no report of its own and
-    answers only once `release` is set."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.release = asyncio.Event()
-
-    async def call_tool(
-        self,
-        *,
-        tool: ToolId,
-        arguments: Mapping[str, Any],
-        on_progress: ProgressCallback | None = None,
-    ) -> ToolCallResult:
-        if tool.name == "get_data":
-            await self.release.wait()
-        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
-
-
-async def test_a_plan_step_opens_its_running_line_before_its_call_answers() -> None:
-    """The surface sends no report and answers only once the test has seen
-    the step's running frame, so that frame can come only from the start
-    the executor reports before the call. It gives the step's place on the
-    card first, then the card row's description."""
-    surface = _HoldsGetData()
-    stream = await _approval_stream(surface)
-    translator = _Translator(
-        conversation=ConversationState(conversation_id="s"),
-        recorder=_TranslatorRecorder(_no_executor, store=StudioStore(InMemorySessionService())),
-    )
-    held: list[ActivityStep] = []
-
-    async with asyncio.timeout(10):
-        async for event in stream:
-            if _step_progress(event) is not None and not surface.release.is_set():
-                held = [
-                    frame
-                    for frame in translator.translate(event)
-                    if isinstance(frame, ActivityStep) and frame.tool
-                ]
-                surface.release.set()
-
-    assert [(frame.tool, frame.status, frame.detail) for frame in held] == [
-        (
-            "get_data",
-            StepStatus.RUNNING,
-            "step 1 of 2 \u00b7 life expectancy at birth in Kenya, 1960 to 2023",
-        )
-    ]
-
-
-async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, object]:
-    raise AssertionError(f"no agent tool runs in a plan's run, not {tool!r} with {args!r}")
-
-
-async def test_stopping_a_turn_mid_step_cancels_the_run_and_leaves_no_task_behind() -> None:
-    """Studio stops a turn by cancelling the pending `anext` on its event
-    stream (`harness.studio._unwind`). The plan's run is a task of its own,
-    so the `execute` node must cancel it rather than leave it running."""
-    surface = _ReportsThenWaits()
-    stream = await _approval_stream(surface)
-
-    async with asyncio.timeout(10):
-        while _step_progress(await anext(stream)) is None:
-            pass
-        pending = asyncio.ensure_future(anext(stream))
-        await asyncio.sleep(0)
-        pending.cancel()
-        with suppress(asyncio.CancelledError):
-            await pending
-        await stream.aclose()
-
-    assert surface.waiting is not None and surface.waiting.done()
-    assert surface.cancelled
-
-
-async def test_relay_collapses_many_reports_from_one_step_while_blocked() -> None:
-    """`_start_relayed` coalesces at enqueue time, not after: a step that
-    reports many times before the reader gets a chance to drain leaves only
-    its latest report pending, so a fast producer never grows the relay
-    past one entry per distinct step."""
-
-    async def call(on_progress: StepProgressCallback) -> str:
-        for i in range(50):
-            on_progress("only-step", ProgressReport(progress=i, message=f"tick {i}"))
-        return "done"
-
-    task, relay = _start_relayed(call)
-    result = await task  # every report above queued before anything drained the relay
-
-    reports = [report async for report in relay.latest()]
-
-    assert len(reports) == 1
-    assert reports[0].step_id == "only-step"
-    assert reports[0].report == ProgressReport(progress=49, message="tick 49")
-    assert result == "done"
-    assert {task for task in asyncio.all_tasks() if not task.done()} == {asyncio.current_task()}
-
-
-# --- the session state schema ---------------------------------------------------
-
-
-def test_a_session_saved_with_a_key_the_schema_no_longer_declares_still_validates() -> None:
-    """A session saved at an interrupt can hold a key the state schema does not
-    declare, such as `spec_id_stat_vars`. The schema validates it, keeps the
-    fields it declares, and leaves the key unread."""
-    saved = {
-        "surface": "download",
-        "spec_id_stat_vars": json.dumps({"spec_id": SPEC_A, "stat_vars": ["Count_Person"]}),
-    }
-
-    state = GraphState.model_validate(saved)
-
-    assert state.surface == "download"
-    assert "spec_id_stat_vars" not in state.model_dump()
-
-
-def test_every_graph_state_field_has_a_default() -> None:
-    """A session saved at an interrupt resumes under the current schema, so a
-    field it does not hold has to validate from its default."""
-    required = [name for name, field in GraphState.model_fields.items() if field.is_required()]
-
-    assert required == []
-    assert GraphState().model_dump()["seeds"] is None
 
 
 # --- version-bound approval -----------------------------------------------------
@@ -723,24 +557,26 @@ def test_every_graph_state_field_has_a_default() -> None:
     ],
     ids=["stale_revision", "no_time", "time_without_offset", "unreadable_time"],
 )
-async def test_stale_version_approval_routes_to_amend(wrong: Callable[[str], Any]) -> None:
+async def test_stale_version_approval_routes_to_amend(
+    pg_engine: AsyncEngine, wrong: Callable[[str], Any]
+) -> None:
     """A wrong answer, one naming another revision or stating no
     timezone-aware approval time, routes to amend; `ScriptedPlannerModel`
     redrafts the same canned steps as the next version, bumping `version`
     and `previous_version` the way any `PlannerModel` must."""
     surface = _CallRecordingSurface(ScriptedSurface())
-    runner, _ = _plan_runner(ScriptedPlannerModel(), tool_surface=surface)
+    runner, _ = _plan_runner(pg_engine, ScriptedPlannerModel(), tool_surface=surface)
     events = await _start(runner)
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     first = _output_of(events, "planner")
     assert first["new_plan"] is True
 
-    events = await _resume(runner, APPROVE_INTERRUPT, wrong(first["revision"]))
+    events = await _resume(runner, APPROVE_PAUSE, wrong(first["revision"]))
 
     # Wrong answer: nothing executed; the planner redrafted to version 2 and
     # a fresh approval interrupt is pending.
     assert surface.calls == []
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     amended = _output_of(events, "planner")
     assert amended["version"] == 2
     assert amended["previous_version"] == 1
@@ -748,26 +584,26 @@ async def test_stale_version_approval_routes_to_amend(wrong: Callable[[str], Any
     assert amended["revision"] != first["revision"]
     assert "new_plan" not in amended
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(amended["revision"]))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(amended["revision"]))
     assert [call[0] for call in surface.calls] == ["get_data", "aggregate"]
     assert _output_of(events, "execute")["plan_version"] == 2
 
 
 async def test_a_plan_approved_unchanged_opens_a_span_and_logs_the_facts(
-    exported_spans: InMemorySpanExporter, caplog: pytest.LogCaptureFixture
+    pg_engine: AsyncEngine, exported_spans: InMemorySpanExporter, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Version 1 approved unchanged: `approve`'s `plan.approved` span and log
     line record the version and that no amendment preceded it."""
     surface = _CallRecordingSurface(ScriptedSurface())
-    runner, _ = _plan_runner(ScriptedPlannerModel(), tool_surface=surface)
+    runner, _ = _plan_runner(pg_engine, ScriptedPlannerModel(), tool_surface=surface)
     events = await _start(runner)
 
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     plan_payload = _output_of(events, "planner")
     assert plan_payload["version"] == 1
 
-    with caplog.at_level("INFO", logger="harness.graph.planning"):
-        events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_payload["revision"]))
+    with caplog.at_level("INFO", logger="harness.graph.approve"):
+        events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_payload["revision"]))
 
     assert _output_of(events, "execute")["plan_version"] == 1
 
@@ -1066,7 +902,7 @@ def _planner_plan_with_two_terminal_steps(*, schemas: list[ToolSchema]) -> Plann
     ids=["intermediate", "sibling_terminal"],
 )
 async def test_a_stopped_plan_hands_back_no_derived_steps_figures(
-    real_schemas: list[ToolSchema], build_plan: Callable[..., PlannerPlan]
+    pg_engine: AsyncEngine, real_schemas: list[ToolSchema], build_plan: Callable[..., PlannerPlan]
 ) -> None:
     """change fails past the replan budget, leaving get_data's and totals'
     frames in `completed`. totals' derived frame is never published on a
@@ -1077,14 +913,17 @@ async def test_a_stopped_plan_hands_back_no_derived_steps_figures(
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     executor = ScriptedExecutor()
     runner, model = _plan_runner(
-        planner, tool_surface=_stopping_at_growth_surface(real_schemas), executor=executor
+        pg_engine,
+        planner,
+        tool_surface=_stopping_at_growth_surface(real_schemas),
+        executor=executor,
     )
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     replanned = _output_of(events, "planner")
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(replanned["revision"]))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(replanned["revision"]))
 
     executed = _output_of(events, "execute")
     assert executed["failed_step"]["step_id"] == "change"
@@ -1097,6 +936,7 @@ async def test_a_stopped_plan_hands_back_no_derived_steps_figures(
 
 
 async def test_two_terminal_steps_both_come_back_to_the_agent(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """`totals` (step index 1) and `change` (step index 2) are both
@@ -1124,10 +964,10 @@ async def test_two_terminal_steps_both_come_back_to_the_agent(
         },
     )
     executor = ScriptedExecutor()
-    runner, model = _plan_runner(planner, tool_surface=surface, executor=executor)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface, executor=executor)
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
     assert len(_output_of(events, "execute")["frame_refs"]) == 2
     assert [c["tool"] for c in executor.calls] == ["describe_frame", "describe_frame"]
@@ -1412,11 +1252,11 @@ def test_select_binding_ok_rejects_a_non_mapping_select() -> None:
 # --- the Plan objects stay real ------------------------------------------------
 
 
-async def test_plan_amendment_lineage_is_real() -> None:
+async def test_plan_amendment_lineage_is_real(pg_engine: AsyncEngine) -> None:
     """The plan carried through amend cycles is a valid `planner.plan.Plan`."""
-    runner, _ = _plan_runner(ScriptedPlannerModel())
+    runner, _ = _plan_runner(pg_engine, ScriptedPlannerModel())
     await _start(runner)
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(99))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(99))
 
     output = _output_of(events, "planner")
     plan_fields = {k: v for k, v in output.items() if k not in ("summary", "revision")}
@@ -1429,120 +1269,8 @@ async def test_plan_amendment_lineage_is_real() -> None:
 # --- the planner node against a planner model --------------------------------
 
 
-def _planner_plan(
-    *,
-    question: str = "kenya debt",
-    version: int = 1,
-    schemas: list[ToolSchema],
-    bind_evidence: bool = False,
-    stat_vars: str | None = None,
-    terminal: tuple[str, ...] = ("totals",),
-) -> PlannerPlan:
-    """A real, translated `planner.plan.Plan` -- the shape a `PlannerModel` hands back.
-
-    `stat_vars` is the reading its `get_data` step sends, for a plan whose
-    source is a family of StatVars; `None` sends none. `terminal` names the
-    steps that answer: `totals` by default, and `get_data` with it for a plan
-    that shows the series as well as its total.
-    """
-    decision = Decision(
-        slot="window",
-        description="Which years?",
-        options=["2015-2024", "2018-2024"],
-        chosen="2015-2024",
-        resolved_by=ResolvedBy.PLANNER_DEFAULT,
-        rationale="a full decade covers the series",
-    )
-    dataset = DatasetRequirement(
-        id="spending",
-        decision_ids=["window"],
-        measure="health spending",
-        entities=[Entity(name="Kenya", role="recipient")],
-        period=Period(start=2015, end=2024),
-    )
-    totals = AggregateRequirement(
-        id="totals",
-        decision_ids=["window"],
-        input_id="spending",
-        reduction=Reduction.SUM,
-        group_by=(GroupBy.PERIOD,),
-    )
-    draft = PlannerPlan(
-        question=question,
-        decisions=[decision],
-        evidence_requirements=[dataset, totals],
-        version=version,
-    )
-    translation = Translation(
-        operations=[
-            RetrieveOperation(id="get_data", requirement_id=dataset.id, spec_id=SPEC_A),
-            AggregateOperation(
-                id="totals",
-                requirement_id=totals.id,
-                input="get_data",
-                reduction=Reduction.SUM,
-                group_by=(GroupBy.PERIOD,),
-            ),
-        ],
-        terminal=list(terminal),
-    )
-    named = {schema.name: schema for schema in schemas}
-    get_data_schema = named["get_data"]
-    aggregate_schema = named["aggregate"]
-    workflow = Workflow(
-        steps=[
-            WorkflowStep(
-                id="get_data",
-                operation_id="get_data",
-                tool=ToolId(server="data-mcp", name="get_data"),
-                args={"spec_id": SPEC_A} | ({"stat_vars": stat_vars} if stat_vars else {}),
-                input_schema_hash=get_data_schema.input_schema_hash,
-                output_schema_hash=get_data_schema.output_schema_hash,
-                implementation_version=get_data_schema.version,
-            ),
-            WorkflowStep(
-                id="totals",
-                operation_id="totals",
-                tool=ToolId(server="analysis-mcp", name="aggregate"),
-                args={"aggregation": "sum", "group_by": ["time_period"]},
-                bindings={"frame_ref": {"from_step": "get_data", "output": "frame_ref"}},
-                input_schema_hash=aggregate_schema.input_schema_hash,
-                output_schema_hash=aggregate_schema.output_schema_hash,
-                implementation_version=aggregate_schema.version,
-            ),
-        ],
-        sources=[
-            SelectedSource(spec_id=SPEC_A, sentence="health spending in Kenya", has_data=True)
-        ],
-        # No evidence bindings by default: most of these tests are about
-        # approval/execution wiring, not the evidence check, and carry no
-        # real source discovery to check a manifest against. A caller
-        # testing a refusal on the bound step (which never reaches the
-        # check, since it only runs on success) opts in.
-        evidence_bindings=(
-            [EvidenceBinding(requirement_id=dataset.id, step_id="get_data", spec_id=SPEC_A)]
-            if bind_evidence
-            else []
-        ),
-        terminal_steps=list(terminal),
-    )
-    return draft.with_translation(translation=translation, workflow=workflow)
-
-
-class _Planner:
-    """A `PlannerModel` returning `{"plan": ..., "summary": ...}` verbatim."""
-
-    def __init__(self, plans: list[dict[str, Any]]) -> None:
-        self._plans = plans
-        self.calls: list[dict[str, Any]] = []
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(kwargs)
-        index = min(len(self.calls) - 1, len(self._plans) - 1)
-        return self._plans[index]
-
-
 async def test_the_planner_node_validates_the_planners_plan_and_writes_it_to_state(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """The planner returns `{"plan": <planner.plan.Plan JSON>, "summary": ...}`;
@@ -1554,7 +1282,7 @@ async def test_the_planner_node_validates_the_planners_plan_and_writes_it_to_sta
     planner = _Planner(
         [{"plan": plan.model_dump(mode="json"), "summary": {"version": plan.version}}]
     )
-    runner, _ = _plan_runner(planner)
+    runner, _ = _plan_runner(pg_engine, planner)
 
     events = await _start(runner)
 
@@ -1566,141 +1294,20 @@ async def test_the_planner_node_validates_the_planners_plan_and_writes_it_to_sta
     assert validated == plan
 
 
-async def test_the_planner_node_raises_on_a_malformed_plan_rather_than_constructing_one() -> None:
+async def test_the_planner_node_raises_on_a_malformed_plan_rather_than_constructing_one(
+    pg_engine: AsyncEngine,
+) -> None:
     """A draft the planner could not itself validate must not reach the approve gate."""
     planner = _Planner([{"plan": {"decisions": "not-a-list"}, "summary": {}}])
-    runner, _ = _plan_runner(planner)
+    runner, _ = _plan_runner(pg_engine, planner)
 
     with pytest.raises(ValidationError):
         await _start(runner)
 
 
-class _StallingPlanner:
-    """A `PlannerModel` that blocks mid-draft until released, recording
-    whether its own task was cancelled and when it wrote to the graph's
-    session state -- the two things a turn closed mid-draft must leave
-    true: the draft is gone, and it wrote nothing after that close."""
-
-    def __init__(self, *, ready: asyncio.Event, release: asyncio.Event) -> None:
-        self._ready = ready
-        self._release = release
-        self.task: asyncio.Task[Any] | None = None
-        self.state: dict[str, Any] | None = None
-
-    async def __call__(self, *, ctx: Any, **_kwargs: Any) -> dict[str, Any]:
-        self.task = asyncio.current_task()
-        self.state = ctx.session.state
-        self.state["planner_writes"] = [*self.state.get("planner_writes", []), "before"]
-        self._ready.set()
-        await self._release.wait()
-        self.state["planner_writes"] = [*self.state.get("planner_writes", []), "after"]
-        return {"plan": {}, "summary": {}}
-
-
-async def test_a_turn_closed_mid_draft_cancels_the_planner_and_writes_no_state_after() -> None:
-    """`studio._sse_stream`'s stop-and-disconnect path closes the ADK event
-    stream through `_unwind`: cancel the in-flight next-frame task and
-    await that cancellation, which throws into whatever node is suspended.
-    The `planner` node is suspended in exactly that way whenever a draft is
-    in flight: it awaits `models.planner(...)` directly (`harness.graph.planning`'s
-    `planner`), so a cancellation there throws straight into the planner's own
-    suspended `ctx.run_node` call. The draft must not survive: it is a live
-    model and tool round trip that would otherwise keep running, and keep
-    writing session state, after the turn has closed."""
-    ready = asyncio.Event()
-    release = asyncio.Event()
-    planner = _StallingPlanner(ready=ready, release=release)
-    runner, _ = _plan_runner(planner)
-    await open_session(runner)
-    stream = runner.run_async(user_id="u", session_id="s", new_message=types.UserContent(_BRIEF))
-
-    # Drive the stream one frame at a time, the way `studio._sse_stream`
-    # does, until the planner signals a draft is in flight. `next_frame` is
-    # then the in-flight `anext()` task, suspended inside the planner
-    # node's own `await models.planner(...)` call -- exactly what
-    # `_unwind`, below, closes over in the real stop-and-disconnect path.
-    next_frame = asyncio.ensure_future(stream.__anext__())
-    ready_wait = asyncio.ensure_future(ready.wait())
-    async with asyncio.timeout(5):
-        while not ready_wait.done():
-            done, _ = await asyncio.wait(
-                {next_frame, ready_wait}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if next_frame in done:
-                next_frame.result()
-                next_frame = asyncio.ensure_future(stream.__anext__())
-    assert planner.task is not None and not planner.task.done(), "the draft must still be in flight"
-
-    # Cancel the in-flight next-frame task and await the cancellation,
-    # rather than firing it and moving on, so whatever the closed generator
-    # does to clean up actually runs before this assertion. Unlike
-    # `studio._unwind`, this wait is unshielded: nothing here cancels the
-    # awaiting task, so a shield would change nothing.
-    next_frame.cancel()
-    with suppress(asyncio.CancelledError):
-        await next_frame
-
-    # If the draft survived the close it is still blocked on `release`;
-    # release it and let it finish, so a late write shows up if one lands.
-    release.set()
-    if not planner.task.done():
-        with suppress(asyncio.CancelledError):
-            await asyncio.wait_for(planner.task, timeout=5)
-
-    assert planner.task.cancelled(), "a turn closed mid-draft must cancel the draft, not orphan it"
-    assert planner.state is not None
-    assert planner.state.get("planner_writes") == ["before"], (
-        "no draft write may land after the close"
-    )
-
-
-class _AskingPlanner:
-    """A `PlannerModel` that reports two progress rounds, then answers that the
-    planner's run ended on a question for the user, as `PlannerAdapter` does once
-    `ask_user_question` (`planner.tools.ask_user`) accepted one."""
-
-    async def __call__(self, *, on_progress: Any = None, **_kwargs: Any) -> dict[str, Any]:
-        if on_progress is not None:
-            on_progress({"agent": "dfo_planner", "tools": ["propose_plan"]})
-            on_progress({"agent": "dfo_planner", "tools": ["ask_user_question"]})
-        return _ASKED
-
-
-async def test_a_planner_side_pause_relays_its_progress_before_the_question() -> None:
-    """The `planner` node relays the progress the planner reported, then pauses
-    on the planner's question under its call id, carrying the call's
-    arguments as the payload. No `plan.proposed` or `refused` output follows:
-    the turn is suspended, not settled."""
-    planner = _AskingPlanner()
-    runner, _ = _plan_runner(planner)
-
-    events = await _start(runner)
-
-    relayed = [
-        ("progress", event.custom_metadata["progress"]["tools"])
-        if event.custom_metadata and "progress" in event.custom_metadata
-        else ("ask", _pending_interrupt([event]))
-        for event in events
-        if (event.custom_metadata and "progress" in event.custom_metadata)
-        or _pending_interrupt([event]) is not None
-    ]
-    assert relayed == [
-        ("progress", ["propose_plan"]),
-        ("progress", ["ask_user_question"]),
-        ("ask", _PLANNER_ASK),
-    ]
-    (call,) = [
-        call for event in events for call in event.get_function_calls() if call.id == _PLANNER_ASK
-    ]
-    assert (call.args or {})["payload"] == _ASKED["asked"]["args"]
-    assert _output_of(events, "planner") is None
-    assert _output_of(events, "approve") is None
-    assert _output_of(events, "plan_done") is None
-
-
 class _GatedPlanner:
     """A `PlannerModel` that drafts only once its caller has seen the
-    planner node's start event, then pauses like `_AskingPlanner`."""
+    planner node's start event, then pauses on a question for the user."""
 
     def __init__(self) -> None:
         self.seen = asyncio.Event()
@@ -1712,25 +1319,29 @@ class _GatedPlanner:
         return _ASKED
 
 
-async def test_the_planner_node_announces_a_draft_before_the_planner_returns() -> None:
+async def test_the_planner_node_announces_a_draft_before_the_planner_returns(
+    pg_engine: AsyncEngine,
+) -> None:
     """The node's first event reaches the runner stream while the planner is
     still drafting, so Studio can say a plan is under way."""
     planner = _GatedPlanner()
-    runner, _ = _plan_runner(planner)
-    await open_session(runner)
+    runner, _ = _plan_runner(pg_engine, planner)
     started = []
-    async for event in runner.run_async(
-        user_id="u", session_id="s", new_message=types.UserContent(_BRIEF)
-    ):
-        if event.custom_metadata and PLANNER_STARTED_KEY in event.custom_metadata:
-            started.append(event.custom_metadata[PLANNER_STARTED_KEY])
+
+    def observe(event: TurnEvent) -> None:
+        if isinstance(event, PlannerStarted):
+            started.append({"revising": event.revising})
             planner.seen.set()
+
+    runner.driver.observe = observe
+    await _start(runner)
 
     assert started == [{"revising": False}]
     assert planner.drafted
 
 
 async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_discarded(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """The user approved a plan the release cannot read, and the planner
@@ -1743,11 +1354,11 @@ async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_disca
             {"refused": {"text": "The draft budget is spent.", "final": True}},
         ]
     )
-    runner, model = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
-    _session_state(runner)["plan"] = json.dumps({"question": "kenya debt", "tool_calls": []})
+    await _store_state(runner, "plan", json.dumps({"question": "kenya debt", "tool_calls": []}))
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(1))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(1))
 
     refused = _output_of(events, "planner")
     assert refused == {
@@ -1759,7 +1370,7 @@ async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_disca
     assert _pending_interrupt(events) is None
     assert (
         f"The planner could not make a plan: {UNREADABLE_PLAN_UNPLANNED_NOTE} The draft "
-        "budget is spent." in request_text(model.requests[-1])
+        "budget is spent." in agent_read(model.requests[-1])
     )
 
 
@@ -1777,12 +1388,13 @@ class _AskingOnAmendPlanner(_Planner):
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
-        if len(self.calls) > 1 and not kwargs["ctx"].resume_inputs:
+        if len(self.calls) > 1 and kwargs.get("answer") is None:
             return _ASKED
         return self._plans[0]
 
 
 async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_start(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """The planner asks the user a question while amending a plan, and the
@@ -1791,16 +1403,16 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
     no amendment and no prior plan, and the card says why."""
     plan = _planner_plan(schemas=real_schemas)
     planner = _AskingOnAmendPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "amendment": "only 2020"})
+    events = await _resume(runner, APPROVE_PAUSE, {"approved": None, "amendment": "only 2020"})
     assert _pending_interrupt(events) == _PLANNER_ASK
     assert planner.calls[1]["amendment"] == "only 2020"
-    _session_state(runner)["plan"] = json.dumps({"question": "kenya debt", "tool_calls": []})
+    await _store_state(runner, "plan", json.dumps({"question": "kenya debt", "tool_calls": []}))
 
     events = await _resume(runner, _PLANNER_ASK, {"answer": "2020"})
 
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     assert planner.calls[2]["amendment"] is None
     assert planner.calls[2]["prior_plan"] is None
     redrafted = _output_of(events, "planner")
@@ -1859,328 +1471,8 @@ class _ReplanPlanner(_Planner):
         return await super().__call__(**kwargs)
 
 
-async def test_a_planner_decisions_pick_replans_with_the_pick_held(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """A switch of a planner decision's row routes to the planner, which is
-    handed the pick, no amendment, and the plan on record, and offers the
-    replanned plan with nothing else moved."""
-    plan = _pickable_plan(schemas=real_schemas)
-    replanned = _pickable_plan(schemas=real_schemas, chosen="2018-2024", version=2)
-    planner = _ReplanPlanner(
-        [
-            {"plan": plan.model_dump(mode="json"), "summary": {}},
-            {"plan": replanned.model_dump(mode="json"), "summary": {}},
-        ]
-    )
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
-    await _start(runner)
-
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
-
-    assert planner.calls[1]["pick"] == _picked_window(plan)
-    assert planner.calls[1]["amendment"] is None
-    assert planner.calls[1]["prior_plan"] == plan.model_dump(mode="json")
-    offered = _output_of(events, "planner")
-    assert offered["revision"] == plan_revision(replanned)
-    assert "moved" not in offered
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
-    state = _session_state(runner)
-    assert state[_DRAFTING_KEY] == "draft"
-    # The pick belongs to its entry, and only a pause records the snapshot.
-    assert decision_pick(cast(SessionState, state)) is None
-    assert planner.held_snapshot is None
-    assert state.get(PICK_REPLAN_KEY) is None
-
-
-async def test_a_switch_to_the_option_a_planner_decision_has_offers_the_plan_unchanged(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """A switch of a planner decision's row to the option it already has
-    does not apply: the planner is not called again, and the card offers the
-    plan on record with `switch_failed`, saying the choice is already on it."""
-    plan = _pickable_plan(schemas=real_schemas)
-    planner = _ReplanPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
-    await _start(runner)
-    switch = {"choice_id": "decision/window", "option_id": decision_option_id("2015-2024")}
-
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": switch})
-
-    assert len(planner.calls) == 1
-    offered = _output_of(events, "switch")
-    assert offered["revision"] == plan_revision(plan)
-    assert offered["switch_failed"]["choice_id"] == "decision/window"
-    assert offered["switch_failed"]["reason"] == "That choice is already on the plan."
-    assert PlannerPlan.model_validate_json(_session_state(runner)["plan"]) == plan
-
-
-# A pick dump an earlier release wrote: it reads what the card's requirements
-# read as one digest and names the decisions to cite, and states no fixes.
-_OLD_SHAPE_PICK = {
-    "slot": "window",
-    "chosen": "2018-2024",
-    "origin_reading": "0" * 64,
-    "cited": ["window"],
-    "kept_requirements": {},
-    "kept_decisions": {},
-}
-
-
-async def test_a_pick_this_release_cannot_read_offers_the_plan_unchanged(
-    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The approve payload carries a pick in an earlier release's shape, as
-    one written before a deploy. No replan runs: the card offers the plan on
-    record with `switch_failed`, asking the user to make the choice again,
-    and no pick is left in state."""
-    plan = _pickable_plan(schemas=real_schemas)
-    planner = _ReplanPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
-    await _start(runner)
-    monkeypatch.setattr(
-        "harness.graph.planning.decision_pick",
-        lambda *_, **__: SimpleNamespace(model_dump=lambda **_: _OLD_SHAPE_PICK),
-    )
-
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
-
-    assert len(planner.calls) == 1
-    offered = _output_of(events, "planner")
-    assert offered["revision"] == plan_revision(plan)
-    assert offered["switch_failed"] == {
-        **_PICK_SWITCH,
-        "code": SCOPE_CHOICE_NOT_APPLIED,
-        "reason": "That choice could not be applied. Make it again.",
-        "retryable": True,
-    }
-    state = _session_state(runner)
-    assert PlannerPlan.model_validate_json(state["plan"]) == plan
-    assert state.get(DECISION_PICK_STATE_KEY) is None
-
-
-class _StaleSnapshotPlanner(_ReplanPlanner):
-    """`_ReplanPlanner` whose first draft leaves `PICK_REPLAN_KEY` holding a
-    snapshot, as a pick replan paused on an ask the user never answered does."""
-
-    def __init__(self, plans: list[dict[str, Any]], stale: dict[str, Any]) -> None:
-        super().__init__(plans)
-        self.stale = stale
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        if not self.calls:
-            kwargs["ctx"].state[PICK_REPLAN_KEY] = self.stale
-        return await super().__call__(**kwargs)
-
-
-async def test_a_pick_this_release_cannot_read_puts_back_no_stale_snapshot(
-    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A snapshot an earlier, unanswered pick replan left under
-    `PICK_REPLAN_KEY` belongs to no resume. A fresh entry whose pick cannot
-    be read leaves the plan and the drafting state as they stand, so the
-    state on record matches the card it offers."""
-    plan = _pickable_plan(schemas=real_schemas)
-    stale = {
-        "plan": _pickable_plan(
-            schemas=real_schemas, chosen="2018-2024", version=2
-        ).model_dump_json(),
-        _DRAFTING_KEY: "stale",
-    }
-    planner = _StaleSnapshotPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}], stale)
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
-    await _start(runner)
-    assert _session_state(runner)[PICK_REPLAN_KEY] == stale
-    monkeypatch.setattr(
-        "harness.graph.planning.decision_pick",
-        lambda *_, **__: SimpleNamespace(model_dump=lambda **_: _OLD_SHAPE_PICK),
-    )
-
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
-
-    assert _output_of(events, "planner")["switch_failed"]["code"] == SCOPE_CHOICE_NOT_APPLIED
-    state = _session_state(runner)
-    assert PlannerPlan.model_validate_json(state["plan"]) == plan
-    assert state.get(_DRAFTING_KEY) != "stale"
-    assert state.get(PICK_REPLAN_KEY) is None
-
-
-@pytest.mark.parametrize(
-    ("code", "final", "reported", "retryable"),
-    [
-        ("budget_exhausted", False, "budget_exhausted", False),
-        (None, False, StopCode.PLAN_NOT_READY.value, False),
-        (StopCode.DISCOVERY_UNAVAILABLE.value, True, StopCode.DISCOVERY_UNAVAILABLE.value, True),
-    ],
-    ids=["coded", "uncoded", "service-unreachable"],
-)
-async def test_a_refused_pick_replan_offers_the_plan_unchanged_and_puts_its_state_back(
-    real_schemas: list[ToolSchema],
-    code: str | None,
-    final: bool,
-    reported: str,
-    retryable: bool,
-) -> None:
-    """The planner refuses the replan: the card offers the plan on record
-    again with the switch node's `switch_failed`, carrying the refusal's code,
-    or the planner's `plan_not_ready` for a refusal stating none, and the
-    sentence for the user, and the drafting state is put back. The same pick
-    can succeed again only where a scope switch's revision could, whatever
-    the refusal's `final` says."""
-    plan = _pickable_plan(schemas=real_schemas)
-    refused = {
-        "text": "The draft budget is spent.",
-        "final": final,
-        "code": code,
-        "reason": "This request has used its budget of 4 plan drafts.",
-    }
-    planner = _ReplanPlanner(
-        [{"plan": plan.model_dump(mode="json"), "summary": {}}, {"refused": refused}]
-    )
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
-    await _start(runner)
-
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
-
-    offered = _output_of(events, "planner")
-    assert offered["revision"] == plan_revision(plan)
-    assert offered["switch_failed"] == {
-        **_PICK_SWITCH,
-        "code": reported,
-        "reason": refused["reason"],
-        "retryable": retryable,
-    }
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
-    assert _session_state(runner).get(_DRAFTING_KEY) is None
-    assert PlannerPlan.model_validate_json(_session_state(runner)["plan"]) == plan
-
-
-async def test_a_stopped_pick_replan_offers_the_plan_unchanged_and_puts_its_state_back(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """The user stops the replan (`SWITCH_STOP`) while the planner drafts:
-    the draft is cancelled, and the card offers the plan on record again
-    under `switch_cancelled`, as a stopped scope switch does."""
-    plan = _pickable_plan(schemas=real_schemas)
-    planner = _ReplanPlanner(
-        [{"plan": plan.model_dump(mode="json"), "summary": {}}], release=asyncio.Event()
-    )
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
-    await _start(runner)
-    stop = asyncio.Event()
-
-    token = SWITCH_STOP.set(stop)
-    try:
-        resumed = asyncio.ensure_future(
-            _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
-        )
-    finally:
-        SWITCH_STOP.reset(token)
-    await asyncio.wait_for(planner.replanning.wait(), timeout=5)
-    stop.set()
-    events = await asyncio.wait_for(resumed, timeout=5)
-
-    offered = _output_of(events, "planner")
-    assert offered["revision"] == plan_revision(plan)
-    assert offered["switch_failed"]["code"] == SWITCH_CANCELLED
-    assert offered["switch_failed"]["retryable"] is True
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
-    assert _session_state(runner).get(_DRAFTING_KEY) is None
-
-
-class _AskingOnPickPlanner(_ReplanPlanner):
-    """`_ReplanPlanner` that, on its second call, asks the user a question
-    after writing `_DRAFTING_KEY` and the pick, as `PlannerAdapter` records it."""
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        if len(self.calls) == 1:
-            kwargs["ctx"].state[_DRAFTING_KEY] = "draft"
-            save_decision_pick(kwargs["ctx"].state, kwargs["pick"])
-            self.calls.append(kwargs)
-            return _ASKED
-        return await super().__call__(**kwargs)
-
-
-async def test_a_planner_ask_during_a_pick_replan_keeps_its_state_and_resumes_with_the_pick(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """The planner asks the user a question while replanning for a pick. The
-    replan runs as a task so a Stop can reach it, and the ask still pauses
-    the turn, with the replan's state kept for the resume, which is handed
-    the pick again and offers the replanned plan."""
-    plan = _pickable_plan(schemas=real_schemas)
-    replanned = _pickable_plan(schemas=real_schemas, chosen="2018-2024", version=2)
-    planner = _AskingOnPickPlanner(
-        [
-            {"plan": plan.model_dump(mode="json"), "summary": {}},
-            {"plan": plan.model_dump(mode="json"), "summary": {}},
-            {"plan": replanned.model_dump(mode="json"), "summary": {}},
-        ]
-    )
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
-    await _start(runner)
-
-    paused = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
-    assert _pending_interrupt(paused) == _PLANNER_ASK
-    assert _session_state(runner)[_DRAFTING_KEY] == "draft"
-
-    events = await _resume(runner, _PLANNER_ASK, {"answer": "2018"})
-
-    assert planner.calls[2]["pick"] == _picked_window(plan)
-    assert _output_of(events, "planner")["revision"] == plan_revision(replanned)
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
-
-
-@pytest.mark.parametrize("ending", ["refused", "stopped"])
-async def test_a_pick_replan_failing_after_an_ask_puts_back_the_state_from_before_the_pick(
-    real_schemas: list[ToolSchema], ending: str
-) -> None:
-    """The planner asks a question while replanning for a pick, and the
-    resumed replan is refused or the user stops it. The card offers the plan
-    unchanged with `switch_failed`, and the state is as it stood before the
-    pick, with no drafting state, no pick for a later revision of the plan
-    to hold, and no record of the replan."""
-    plan = _pickable_plan(schemas=real_schemas)
-    refused = {"text": "No plan.", "final": False, "code": "plan_not_ready", "reason": "No plan."}
-    planner = _AskingOnPickPlanner(
-        [
-            {"plan": plan.model_dump(mode="json"), "summary": {}},
-            {"plan": plan.model_dump(mode="json"), "summary": {}},
-            {"refused": refused},
-        ],
-        release=asyncio.Event() if ending == "stopped" else None,
-    )
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
-    await _start(runner)
-    paused = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
-    assert _pending_interrupt(paused) == _PLANNER_ASK
-    assert _session_state(runner)[PICK_REPLAN_KEY] is not None
-
-    stop = asyncio.Event()
-    token = SWITCH_STOP.set(stop)
-    try:
-        resumed = asyncio.ensure_future(_resume(runner, _PLANNER_ASK, {"answer": "2018"}))
-    finally:
-        SWITCH_STOP.reset(token)
-    if ending == "stopped":
-        await asyncio.wait_for(planner.replanning.wait(), timeout=5)
-        stop.set()
-    events = await asyncio.wait_for(resumed, timeout=5)
-
-    offered = _output_of(events, "planner")
-    assert offered["revision"] == plan_revision(plan)
-    assert offered["switch_failed"]["code"] == (
-        SWITCH_CANCELLED if ending == "stopped" else "plan_not_ready"
-    )
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
-    state = _session_state(runner)
-    assert PlannerPlan.model_validate_json(state["plan"]) == plan
-    assert state.get(_DRAFTING_KEY) is None
-    assert decision_pick(cast(SessionState, state)) is None
-    assert state.get(PICK_REPLAN_KEY) is None
-
-
 async def test_an_approval_for_a_superseded_revision_routes_to_amend(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """The `approve` node keys a model-drafted plan on
@@ -2202,17 +1494,17 @@ async def test_an_approval_for_a_superseded_revision_routes_to_amend(
     )
     executor = ScriptedExecutor()
     runner, _ = _plan_runner(
-        planner, tool_surface=_fixture_surface(real_schemas), executor=executor
+        pg_engine, planner, tool_surface=_fixture_surface(real_schemas), executor=executor
     )
     events = await _start(runner)
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     revision_1 = plan_revision(plan_v1)
     assert _output_of(events, "planner")["revision"] == revision_1
 
     # A wrong answer routes to amend, which redrafts -- an unrelated plan
     # that also happens to be version 1.
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer("not-a-real-revision"))
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer("not-a-real-revision"))
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     amended = _output_of(events, "planner")
     assert amended["version"] == 1
     revision_2 = amended["revision"]
@@ -2220,16 +1512,16 @@ async def test_an_approval_for_a_superseded_revision_routes_to_amend(
 
     # The first card's revision no longer names what's pending: superseded,
     # not approved -- nothing executes and a fresh approval is still pending.
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_1))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision_1))
     assert executor.calls == []
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     assert _output_of(events, "planner")["revision"] == revision_2
 
     # The correct, current revision approves cleanly: `approve()` succeeds,
     # the gate is passed (no fresh approval interrupt), and the approved
     # workflow's steps ran through `execute_approved_plan` against the
     # tool surface: the executor only describes the final frame.
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_2))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision_2))
     assert _pending_interrupt(events) is None
     assert [call["tool"] for call in executor.calls] == ["describe_frame"]
     assert _output_of(events, "execute")["plan_version"] == 1
@@ -2251,20 +1543,22 @@ async def test_the_scripted_surface_declares_the_schemas_the_saved_plan_names() 
         assert declared[step["tool"]["name"]].input_schema_hash == step["input_schema_hash"]
 
 
-async def test_a_pending_plan_saved_at_the_base_revision_format_is_approved_unamended() -> None:
+async def test_a_pending_plan_saved_at_the_base_revision_format_is_approved_unamended(
+    pg_engine: AsyncEngine,
+) -> None:
     """The card a user holds names the revision computed when the plan was
     saved. A plan saved without the fields its models have since gained
     still hashes to that revision, so the answer approves it and it runs."""
     planner = _Planner([{"plan": _BASE_FORMAT_PLAN["plan"], "summary": {}}])
     surface = _CallRecordingSurface(ScriptedSurface())
-    runner, _ = _plan_runner(planner, tool_surface=surface)
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     assert _output_of(events, "planner")["revision"] == _BASE_FORMAT_PLAN["revision"]
     # The session holds the plan exactly as it was saved.
-    _session_state(runner)["plan"] = json.dumps(_BASE_FORMAT_PLAN["plan"])
+    await _store_state(runner, "plan", json.dumps(_BASE_FORMAT_PLAN["plan"]))
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(_BASE_FORMAT_PLAN["revision"]))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(_BASE_FORMAT_PLAN["revision"]))
 
     assert _pending_interrupt(events) is None
     assert len(planner.calls) == 1
@@ -2363,6 +1657,7 @@ async def test_an_approved_plan_compiled_against_an_older_get_data_is_refused_fo
 
 
 async def test_a_refused_amendment_still_offers_the_pending_version_for_approval(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """A `PlannerModel` can refuse to draft at all
@@ -2392,19 +1687,19 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
     )
     executor = ScriptedExecutor()
     runner, _ = _plan_runner(
-        planner, tool_surface=_fixture_surface(real_schemas), executor=executor
+        pg_engine, planner, tool_surface=_fixture_surface(real_schemas), executor=executor
     )
     events = await _start(runner)
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     revision_1 = plan_revision(plan_v1)
     assert _output_of(events, "planner")["revision"] == revision_1
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer("not-a-real-revision"))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer("not-a-real-revision"))
 
     # Not a dead end: a fresh approval interrupt for the same, unmodified
     # plan comes back instead, carrying why the amendment did not land.
-    assert "plan_done" not in visited_nodes(events)
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert "plan_done" not in visited(events)
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     refused_output = _output_of(events, "planner")
     assert refused_output["revision"] == revision_1
     assert "budget of 4 plan drafts" in refused_output["refusal_note"]
@@ -2419,7 +1714,7 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
     # revision approves it -- the round-cap refusal cost the user their
     # amendment, not their already-drafted plan. The plan's own compiled
     # workflow runs it through to completion against the tool surface.
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_1))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision_1))
     assert _pending_interrupt(events) is None
     approved = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
     assert approved.status is PlanStatus.COMPLETED
@@ -2429,6 +1724,7 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
 
 
 async def test_the_execute_node_runs_the_approved_workflow_through_the_surface(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """`execute` calls `execute_approved_plan` against the injected
@@ -2438,11 +1734,11 @@ async def test_the_execute_node_runs_the_approved_workflow_through_the_surface(
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     executor = ScriptedExecutor()
     surface = _CallRecordingSurface(_fixture_surface(real_schemas))
-    runner, _ = _plan_runner(planner, tool_surface=surface, executor=executor)
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=surface, executor=executor)
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
     assert [call[0] for call in surface.calls] == ["get_data", "aggregate"]
     assert [call["tool"] for call in executor.calls] == ["describe_frame"]
@@ -2489,6 +1785,7 @@ class _ServedPairsPlatform:
 
 
 async def test_a_final_retrieval_read_with_extra_columns_is_shown_by_its_manifests_pair(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """A retrieval the plan answers with is held by data-mcp under a pair of its
@@ -2514,10 +1811,10 @@ async def test_a_final_retrieval_read_with_extra_columns_is_shown_by_its_manifes
         )
     )
     platform = _ServedPairsPlatform([served, total])
-    runner, model = _plan_runner(planner, tool_surface=surface, executor=platform)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface, executor=platform)
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
     (aggregate,) = [args for name, args in surface.calls if name == "aggregate"]
     assert aggregate["frame_ref"] == typed
@@ -2573,10 +1870,10 @@ async def test_a_hand_back_recorded_without_store_pairs_registers_its_frames(
     """A hand-back event or kept ask recorded without store pairs names each
     frame by the pair apis serves alone. Its frame is registered without
     a store pair, so the store is opened by the frame's own pair."""
-    ctx = SimpleNamespace(state=dict(state))
+    ctx = node_ctx(state=dict(state))
     plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
 
-    [_ async for _ in plan_done(cast("Any", ctx), node_input)]
+    await plan_done.run(ctx, node_input)
 
     assert ctx.state[ORCHESTRATOR_FRAMES_KEY] == {frame_id_for(REF_A): {"ref": REF_A, "view": {}}}
     entry = ctx.state[ORCHESTRATOR_FRAMES_KEY][frame_id_for(REF_A)]
@@ -2594,20 +1891,20 @@ async def test_a_share_frame_is_registered_with_the_whole_its_plan_divides_by(
     """The final frame of a share step carries the whole the approved plan's
     denominator source holds, which `make_charts` writes into the card's title."""
     plan = us_share_of_kenya_oda(decision, whole=whole, numerator=US_DONOR)
-    ctx = SimpleNamespace(state={"plan": plan.model_dump_json()})
+    ctx = node_ctx(state={"plan": plan.model_dump_json()})
     plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
     node_input = {
         "frame_refs": [REF_A],
         "frame_ref_steps": [{"step_id": "share", "tool": "share_of", "is_final_step": True}],
     }
 
-    [_ async for _ in plan_done(cast("Any", ctx), node_input)]
+    await plan_done.run(ctx, node_input)
 
     assert ctx.state[ORCHESTRATOR_FRAMES_KEY][frame_id_for(REF_A)]["whole"] == named
 
 
 async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
-    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+    pg_engine: AsyncEngine, real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`execute` hands `plan_done` the sentences `_stat_var_totals` writes,
     and `plan_done` gives each to the agent under `totals`."""
@@ -2618,10 +1915,10 @@ async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
     monkeypatch.setattr(answer_module, "_stat_var_totals", lambda *a, **k: [sentence])
     plan = _planner_plan(schemas=real_schemas)
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, model = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
     assert _output_of(events, "execute")["stat_var_totals"] == [sentence]
     _, body = handed_back(model)
@@ -2629,6 +1926,7 @@ async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
 
 
 async def test_a_none_tool_surface_refuses_loudly_rather_than_executing_nothing(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """`create_root_workflow(tool_surface=None)`, stated explicitly, must not
@@ -2636,15 +1934,16 @@ async def test_a_none_tool_surface_refuses_loudly_rather_than_executing_nothing(
     cannot run has to fail loudly."""
     plan = _planner_plan(schemas=real_schemas)
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, _ = _plan_runner(planner)
+    runner, _ = _plan_runner(pg_engine, planner)
     await _start(runner)
     revision = plan_revision(plan)
 
     with pytest.raises(RuntimeError, match="no tool surface"):
-        await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+        await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
 
 async def test_a_rediscovery_outcome_replans_naming_the_requirement(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """A retrieval step's own evidence binding names the requirement and the
@@ -2663,15 +1962,15 @@ async def test_a_rediscovery_outcome_replans_naming_the_requirement(
         text="refused",
     )
     surface = _fixture_surface(real_schemas, get_data_result=refusal)
-    runner, _ = _plan_runner(planner, tool_surface=surface)
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
     # Replanned (MAX_REPLANS == 1 covers one round): a fresh approval is
     # pending rather than the turn closing on the first refusal.
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     assert planner.calls[-1]["refusal"] == {
         "kind": "rediscovery_needed",
         "step_id": "get_data",
@@ -2690,6 +1989,7 @@ async def test_a_rediscovery_outcome_replans_naming_the_requirement(
 
 
 async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """`MAX_REPLANS == 1`: a second identical refusal closes the turn with
@@ -2708,14 +2008,14 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
     )
     surface = _fixture_surface(real_schemas, analysis_call_result=refusal)
     executor = ScriptedExecutor()
-    runner, model = _plan_runner(planner, tool_surface=surface, executor=executor)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface, executor=executor)
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     replanned = _output_of(events, "planner")
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(replanned["revision"]))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(replanned["revision"]))
 
     assert _pending_interrupt(events) is None
     executed = _output_of(events, "execute")
@@ -2724,15 +2024,28 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
         "tool": "aggregate",
         "code": "entity_ambiguous",
         "message": "more than one entity matches 'Kenya'",
+        "retry_mode": "correct_and_retry",
+        # The `fix` keeps only what the user's sentence reads.
+        "fix": {},
+        "disposition": "method_choice",
+        "cause": "data",
+        "wave_remedy": "replan",
     }
     # get_data ran and completed before the refusal; its frame is kept.
     assert executed["frame_refs"] == [REF_A]
     assert [step["digest"] for step in executed["step_summaries"]] == ["fetched"]
     _, body = handed_back(model)
-    assert body["failed_step"] == executed["failed_step"]
+    # The refusal's retry mode and `fix` word the user's sentence, and its
+    # cause, disposition and wave's remedy decide what follows. The agent
+    # reads the rest, with what happened in the user's words in place of the
+    # tool's message.
+    hidden = ("retry_mode", "fix", "disposition", "cause", "wave_remedy")
+    shown = {k: v for k, v in executed["failed_step"].items() if k not in hidden}
+    assert body["failed_step"] == {**shown, "message": failure_cause("entity_ambiguous", {})}
 
 
 async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_replan(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """An `over_ceiling` refusal naming no `ceiling_kind` at all -- an older
@@ -2756,11 +2069,11 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
         text="refused",
     )
     surface = _fixture_surface(real_schemas, analysis_call_result=refusal)
-    runner, model = _plan_runner(planner, tool_surface=surface)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
     # No replan, no second approval: the turn closes on the first refusal.
     assert _pending_interrupt(events) is None
@@ -2775,17 +2088,23 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
         "tool": None,
         "code": "over_ceiling",
         "message": "over the coverage ceiling: too many series.",
+        "retry_mode": "correct_and_retry",
+        "fix": {},
+        "disposition": "stop",
+        "cause": "data",
+        "wave_remedy": "user",
     }
     assert executed["frame_refs"] == [REF_A]
     _, body = handed_back(model)
     assert body["failed_step"] == {
         "step_id": "totals",
         "code": "over_ceiling",
-        "message": "over the coverage ceiling: too many series.",
+        "message": failure_cause("over_ceiling", {}),
     }
 
 
 async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """A `member_cardinality` `over_ceiling` refusal is fixed by the resolved
@@ -2813,11 +2132,11 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
         text="refused",
     )
     surface = _fixture_surface(real_schemas, get_data_result=refusal)
-    runner, model = _plan_runner(planner, tool_surface=surface)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
     # No replan, no second approval: the turn closes on the first refusal.
     assert _pending_interrupt(events) is None
@@ -2828,6 +2147,11 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
         "code": "over_ceiling",
         "message": "over the coverage ceiling: 2933 members. A narrower question "
         "resolves to a smaller definition.",
+        "retry_mode": "correct_and_retry",
+        "fix": {"ceiling_kind": "member_cardinality"},
+        "disposition": "stop",
+        "cause": "data",
+        "wave_remedy": "user",
     }
     _, body = handed_back(model)
     assert (body["failed_step"]["step_id"], body["failed_step"]["code"]) == (
@@ -2837,6 +2161,7 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
 
 
 async def test_a_member_cardinality_ceilings_remedy_reaches_the_agent_in_the_hand_back(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """`fix.remedy`, the one user-facing sentence naming what the user can do
@@ -2868,10 +2193,10 @@ async def test_a_member_cardinality_ceilings_remedy_reaches_the_agent_in_the_han
         text="refused",
     )
     surface = _fixture_surface(real_schemas, get_data_result=refusal)
-    runner, model = _plan_runner(planner, tool_surface=surface)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface)
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
     assert _pending_interrupt(events) is None
     assert _output_of(events, "execute")["failed_step"]["remedy"] == remedy
@@ -2880,12 +2205,13 @@ async def test_a_member_cardinality_ceilings_remedy_reaches_the_agent_in_the_han
 
 
 async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_can_act_on(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """A `get_data` asked to sum its family declares three StatVars, so the
     sum did not happen. The same plan draws the same frame, so `execute`
     closes the turn on this first refusal: no replan, no second approval of
-    an identical plan. The agent reads the executor's own message and
+    an identical plan. The agent reads what happened and the executor's
     remedy, both written for the user, in place of the count of `stat_vars`
     the refusal's `detail` states."""
     plan = _planner_plan(schemas=real_schemas, stat_vars="sum")
@@ -2896,10 +2222,10 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
         text="fetched",
     )
     surface = _fixture_surface(real_schemas, get_data_result=unsummed)
-    runner, model = _plan_runner(planner, tool_surface=surface)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
     assert _pending_interrupt(events) is None
     assert len(planner.calls) == 1
@@ -2914,6 +2240,11 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
         "tool": None,
         "code": "family_not_summed",
         "message": message,
+        "retry_mode": "do_not_retry",
+        "fix": {},
+        "disposition": "stop",
+        "cause": "data",
+        "wave_remedy": "user",
         "remedy": remedy,
     }
     assert executed["frame_refs"] == []
@@ -2921,13 +2252,14 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
     assert body["failed_step"] == {
         "step_id": "get_data",
         "code": "family_not_summed",
-        "message": message,
+        "message": failure_cause("family_not_summed", {}),
         "remedy": remedy,
     }
     assert "distinct stat_vars" not in text
 
 
 async def test_an_over_ceiling_rows_refusal_still_replans(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """A `rows`/`bytes` ceiling narrows with `scope.entities`/`scope.window`,
@@ -2946,16 +2278,16 @@ async def test_an_over_ceiling_rows_refusal_still_replans(
         text="refused",
     )
     surface = _fixture_surface(real_schemas, analysis_call_result=refusal)
-    runner, _ = _plan_runner(planner, tool_surface=surface)
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
     # A method choice, not a dead end: the planner is asked again (the
     # scripted planner redrafts the same plan, so the version does not bump),
     # and a fresh approval is pending rather than the turn closing.
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     assert len(planner.calls) == 2
     assert planner.calls[-1]["refusal"]["code"] == "over_ceiling"
 
@@ -3005,16 +2337,16 @@ def _stop(revision: str, step_id: str, spec: _StopSpec) -> Refused:
 
 
 @pytest.mark.parametrize(
-    ("primary", "also", "dead_end"),
+    ("primary", "also", "closed_on"),
     [
-        ((_MOVED,), (), True),
-        ((_REBOUND,), (), False),
-        ((_MOVED, _UNCONFIRMED), (), True),
-        ((_MOVED, _REBOUND), (), True),
-        ((_MOVED, _SHORT), (), False),
-        ((_MOVED,), ((_SHORT,),), False),
-        (None, ((_SHORT,),), False),
-        (None, ((_MOVED,), None), True),
+        ((_MOVED,), (), "stat_var_family_moved"),
+        ((_REBOUND,), (), "stat_var_membership_drift"),
+        ((_MOVED, _UNCONFIRMED), (), "stat_var_family_moved"),
+        ((_MOVED, _REBOUND), (), "stat_var_family_moved"),
+        ((_MOVED, _SHORT), (), "stat_var_family_moved"),
+        ((_MOVED,), ((_SHORT,),), "stat_var_family_moved"),
+        (None, ((_SHORT,),), None),
+        (None, ((_MOVED,), None), "stat_var_family_moved"),
     ],
     ids=[
         "family-moved",
@@ -3028,21 +2360,24 @@ def _stop(revision: str, step_id: str, spec: _StopSpec) -> Refused:
     ],
 )
 async def test_a_wave_of_dead_ends_closes_the_turn(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
     monkeypatch: pytest.MonkeyPatch,
     primary: _StopSpec,
     also: tuple[_StopSpec, ...],
-    dead_end: bool,
+    closed_on: str | None,
 ) -> None:
-    """A wave whose every stop is a dead end closes the turn on the first, with
-    no replan. An evidence stop is one when the StatVar family's digest moved
-    since Search approved it and that move explains every error, a family
-    grown past the one series approved included: a replan in the same turn
-    approves the digest the turn already holds, so the turn closes on the
-    source-gone sentence, which asks the user to ask again. A tool's `STOP`
-    refusal is another. A binding that fails the same way for every search, a
-    stop that also fails on another issue, or a wave with any other stop
-    (`also`) replans like any other."""
+    """A wave whose every stop is a dead end, or whose remedy is the user's,
+    closes the turn on the stop that decides its remedy, the first of the
+    most severe, with no replan. An evidence stop is a dead end when the
+    StatVar family's digest moved since Search approved it and that move
+    explains every error, a family grown past the one series approved
+    included: a replan in the same turn approves the digest the turn already
+    holds, so the turn closes on the source-gone sentence, which asks the user
+    to ask again. A tool's `STOP` refusal is another. A moved family is the
+    user's however the rest of its wave fails, and so is a binding that fails
+    the same way for every search. A wave of stops a new plan gets past
+    (`closed_on` None) replans."""
     plan = _planner_plan(schemas=real_schemas)
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
 
@@ -3053,57 +2388,82 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
         return drafted_plan, stop.model_copy(update={"also_stopped": siblings})
 
     monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_wave)
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
-    assert len(planner.calls) == (1 if dead_end else 2)
-    if not dead_end:
-        assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert len(planner.calls) == (2 if closed_on is None else 1)
+    if closed_on is None:
+        assert _pending_interrupt(events) == APPROVE_PAUSE
         return
     assert _pending_interrupt(events) is None
     failed = _output_of(events, "execute")["failed_step"]
-    if primary is None:
-        assert failed["code"] == "spec_not_exportable"
-        return
-    assert failed["code"] == "stat_var_family_moved"
-    gone = FAILURE_SENTENCES[FailureClass.SOURCE_GONE]
-    assert failure_detail(failed) == f"{gone.cause}, {gone.advice}."
+    # Another spec avoids `spec_not_exportable`, and the user has to accept a
+    # moved family, so the family decides the wave wherever it stands.
+    assert failed["code"] == closed_on
+    assert failed["wave_remedy"] == "user"
+    if closed_on == "stat_var_family_moved":
+        gone = FAILURE_SENTENCES[FailureClass.SOURCE_GONE]
+        assert failure_detail(failed) == f"{gone.cause}, {gone.advice}."
 
 
-@pytest.mark.parametrize("retryable", [True, False], ids=["retryable", "permanent"])
-async def test_a_transport_stop_closes_the_turn_only_when_no_retry_can_help(
-    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch, retryable: bool
+@pytest.mark.parametrize(
+    ("retryable", "beside", "wave_remedy"),
+    [
+        (True, False, "wait"),
+        (False, False, "system"),
+        (True, True, "wait"),
+    ],
+    ids=["retryable", "permanent", "retryable-beside-a-replannable-stop"],
+)
+async def test_a_transport_stop_closes_the_turn_without_a_replan(
+    pg_engine: AsyncEngine,
+    real_schemas: list[ToolSchema],
+    monkeypatch: pytest.MonkeyPatch,
+    retryable: bool,
+    beside: bool,
+    wave_remedy: str,
 ) -> None:
-    """A step the tool surface failed for a fault no later attempt gets past
-    closes the turn without a replan, which would spend an approval on the
-    same failure. A retryable transport stop replans."""
+    """A step the tool surface failed closes the turn without a replan, which
+    would ask the user to approve again a plan no new draft gets past: the
+    executor spent its retries on a retryable one, so the user tries again
+    later, and no later attempt gets past a permanent one. A replannable stop
+    in the same wave does not route it to the planner, since the transport
+    stop decides the wave."""
     plan = _planner_plan(schemas=real_schemas)
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
 
     async def _stub_wave(drafted_plan: Any, **_kwargs: Any) -> Any:
+        revision = plan_revision(drafted_plan)
         stop = Refused(
-            revision=plan_revision(drafted_plan),
+            revision=revision,
             refusal=RefusalKind.TRANSPORT_FAILED,
             detail="could not call 'get_data'",
             step_id="get_data",
             retryable=retryable,
         )
+        if beside:
+            stop = stop.model_copy(
+                update={"also_stopped": (_stop(revision, "sibling", (_SHORT,)),)}
+            )
         return drafted_plan, stop
 
     monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_wave)
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
-    assert len(planner.calls) == (2 if retryable else 1)
-    assert (_pending_interrupt(events) == APPROVE_INTERRUPT) is retryable
+    assert len(planner.calls) == 1
+    assert _pending_interrupt(events) is None
+    failed = _output_of(events, "execute")["failed_step"]
+    assert failed["step_id"] == "get_data"
+    assert failed["wave_remedy"] == wave_remedy
 
 
 async def test_a_not_approved_outcome_raises_instead_of_replanning(
-    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+    pg_engine: AsyncEngine, real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`Refused(NOT_APPROVED)` means the workflow's own `approve` node let an
     unapproved plan through -- replanning would loop on the same defect, so
@@ -3126,12 +2486,12 @@ async def test_a_not_approved_outcome_raises_instead_of_replanning(
         )
 
     monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_not_approved)
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
     revision = plan_revision(plan)
 
     with pytest.raises(RuntimeError, match="not_approved"):
-        await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+        await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
 
 def test_a_refused_stop_that_read_a_source_names_it_in_the_replan_payload() -> None:
@@ -3206,6 +2566,11 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": "aggregate",
         "code": "entity_ambiguous",
         "message": "ambiguous",
+        "retry_mode": "correct_and_retry",
+        "fix": {},
+        "disposition": "method_choice",
+        "cause": "data",
+        "wave_remedy": "replan",
     }
 
     rediscovery = RediscoveryNeeded(
@@ -3243,6 +2608,11 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": "get_data",
         "code": "rediscovery_needed",
         "message": "the source moved",
+        "retry_mode": "refresh_then_retry",
+        "fix": {},
+        "disposition": "rediscover",
+        "cause": "data",
+        "wave_remedy": "replan",
     }
 
     refused = Refused(
@@ -3285,6 +2655,11 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": None,
         "code": "over_ceiling",
         "message": "over the coverage ceiling: too many series",
+        "retry_mode": "correct_and_retry",
+        "fix": {},
+        "disposition": "stop",
+        "cause": "data",
+        "wave_remedy": "user",
     }
 
     # A `REQUIREMENT_UNMET` stop carries `check_evidence`'s own findings as
@@ -3324,6 +2699,8 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": None,
         "code": "source_pin_mismatch",
         "message": "the requirement pins 'spec_a', the source found is 'spec_b'",
+        "cause": "data",
+        "wave_remedy": "user",
     }
 
     # No ERROR-severity issue at all (every finding a caveat) falls back to
@@ -3351,6 +2728,8 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": None,
         "code": "source_unverified",
         "message": "the source states no provenance",
+        "cause": "data",
+        "wave_remedy": "replan",
     }
 
     # A stop with every donor named missing. The failed step carries what the
@@ -3381,6 +2760,8 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "code": "entity_missing",
         "message": "the source resolves no entity named 'United States'; the source "
         "resolves no entity named 'Germany'",
+        "cause": "data",
+        "wave_remedy": "user",
     }
 
 
@@ -3548,10 +2929,10 @@ async def test_a_stop_on_a_copy_names_the_requirement_the_model_wrote(
     )
 
     refusal = _planner_refusal(stop, plan=plan, origins={})
-    ctx = SimpleNamespace(state={"plan": plan.model_dump_json()})
+    ctx = node_ctx(state={"plan": plan.model_dump_json()})
     plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
     node_input = {"frame_refs": [], "frame_ref_steps": [], "failed_step": _failed_step(stop)}
-    (handed,) = [event async for event in plan_done(cast("Any", ctx), node_input)]
+    handed = (await plan_done.run(ctx, node_input)).output
 
     assert (refusal["step_id"], refusal["requirement_id"]) == ids
     assert "debt_history" not in json.dumps(refusal)
@@ -3720,7 +3101,7 @@ def test_mark_masked_step_failed_corrects_every_sibling_a_wave_surfaced() -> Non
     """A wave whose primary and one `also_stopped` sibling both passed their
     raw call but were refused by a post-call check (`_check_evidence`) each
     carry a distinct `step_id`. `_mark_masked_step_failed` corrects both
-    Activity feed records, not just the primary's."""
+    Activity feed records, each with its own stop's code, in either order."""
 
     class _RecorderStub:
         def __init__(self) -> None:
@@ -3754,21 +3135,29 @@ def test_mark_masked_step_failed_corrects_every_sibling_a_wave_surfaced() -> Non
         also_stopped=(sibling,),
     )
 
+    pin_record = {
+        "step_id": "fetch_gdp",
+        "code": "source_pin_mismatch",
+        "detail": "the requirement pins 'spec_a', the source found is 'spec_b'",
+    }
+    empty_record = {
+        "step_id": "fetch_population",
+        "code": "empty_answer",
+        "detail": "no rows matched",
+    }
+
     recorder = _RecorderStub()
     _mark_masked_step_failed(recorder, primary, tools={})
+    assert recorder.calls == [pin_record, empty_record]
 
-    assert recorder.calls == [
-        {
-            "step_id": "fetch_gdp",
-            "code": "source_pin_mismatch",
-            "detail": "the requirement pins 'spec_a', the source found is 'spec_b'",
-        },
-        {
-            "step_id": "fetch_population",
-            "code": "empty_answer",
-            "detail": "no rows matched",
-        },
-    ]
+    # With the milder stop first, its record keeps its own code although the
+    # sibling decides the wave.
+    swapped = sibling.model_copy(
+        update={"also_stopped": (primary.model_copy(update={"also_stopped": ()}),)}
+    )
+    recorder = _RecorderStub()
+    _mark_masked_step_failed(recorder, swapped, tools={})
+    assert recorder.calls == [empty_record, pin_record]
 
 
 # --- the seed intake's wording ---------------------------------------------------
@@ -3785,1248 +3174,7 @@ def test_a_stale_reason_for_another_dataset_omits_a_spec_id_search_did_not_name(
 # --- the switch node: a scope choice moved on the plan card, in code ----------
 
 
-def _hashed_scope() -> dict[str, Any]:
-    """US health aid to Africa's scope (`_switchable_scope`), its base under the
-    spec_id its identity hashes to, so data-mcp takes it as posted: health as
-    CRS 120 alone from the user's words, Africa's countries only carried,
-    gross disbursements by default."""
-    scope = _switchable_scope()
-    base = spec_id_for(canonicalize(scope["base"]["identity"]))
-    scope["id"] = scope["base"]["spec_id"] = base
-    for choice in scope["choices"]:
-        choice["id"] = f"{base}:{choice['axis']}"
-    return scope
-
-
-# The window the plan of `_scoped_plan` reads its dataset over.
-_PLAN_WINDOW = {"kind": "range", "start_year": 2015, "end_year": 2024}
-
-
-def _switched_answer(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """The spec_id and envelope Search answers for `scope` switched to CRS
-    120 and 130: grant equivalents become the basis, since gross is out of
-    reach beside the switch."""
-    switched = copy.deepcopy(scope)
-    identity = copy.deepcopy(scope["base"]["identity"])
-    identity["slots"] = [s for s in identity["slots"] if s["property"] != "nettingBasis"]
-    identity["shape"]["measured_property"] = "grantEquivalent"
-    spec_id = spec_id_for(canonicalize(identity))
-    sector, _, basis = switched["choices"]
-    sector["active"] = "sector:120+130"
-    basis["active"] = "measure_basis:grant_equivalent"
-    basis["options"][0]["availability"] = {
-        "status": "unavailable",
-        "code": "conflicts_with",
-        "detail": {"entry": "sector:120+130"},
-    }
-    switched["entries"] = [
-        switched["entries"][1],
-        {
-            "axis": "sector",
-            "option_id": "sector:120+130",
-            "provenance": "explicit",
-            "concept": "health",
-            "origin": {"kind": "choice", "choice_id": sector["id"]},
-        },
-    ]
-    switched["compiled"] = {"spec_id": spec_id, "identity": identity, "components": []}
-    block = {
-        "spec_id": spec_id,
-        "sentence": "US health aid to Africa",
-        "definition": {"schema_version": 1, "spec_id": spec_id, "identity": identity},
-        "resolved": {"scope_choices": switched},
-    }
-    envelope = {
-        "schema_version": 1,
-        "status": "definite",
-        "parts": [{"status": "definite", "variable_text": scope["id"], "spec": block}],
-    }
-    return spec_id, envelope
-
-
-def _scoped_plan(
-    pin: str, scope: dict[str, Any], *, schemas: list[ToolSchema], version: int = 1
-) -> PlannerPlan:
-    """`_planner_plan` with its dataset pinned to `pin`, citing the scope
-    decisions a pin of `scope`'s part states."""
-    plan = _planner_plan(schemas=schemas)
-    block = {"spec_id": pin, "resolved": {"scope_choices": scope}}
-    scoped = scope_choice_decisions({pin: PinSource(block=block, settled=True)})[pin]
-    return PlannerPlan.model_validate(
-        {
-            **plan.model_dump(),
-            "version": version,
-            "previous_version": version - 1 if version > 1 else None,
-            "decisions": [*plan.decisions, *scoped],
-            "evidence_requirements": [
-                r.model_copy(
-                    update={
-                        "source_spec_id": pin,
-                        "decision_ids": (*r.decision_ids, *(d.slot for d in scoped)),
-                    }
-                )
-                if isinstance(r, DatasetRequirement)
-                else r
-                for r in plan.evidence_requirements
-            ],
-        }
-    )
-
-
-def _row_id(plan: PlannerPlan, axis: str) -> str:
-    """The plan card's id for the row of `plan`'s one dataset's choice on `axis`
-    (`harness.plan_display.choice_id`)."""
-    (dataset,) = [r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)]
-    return f"{dataset.id}:{axis}"
-
-
-class _RevisingPlanner(_Planner):
-    """A `PlannerModel` drafting `plans` and answering each revision with `revised`."""
-
-    def __init__(self, plans: list[dict[str, Any]], revised: dict[str, Any]) -> None:
-        super().__init__(plans)
-        self._revised = revised
-        self.revisions: list[dict[str, Any]] = []
-
-    async def revise(self, **kwargs: Any) -> dict[str, Any]:
-        self.revisions.append(kwargs)
-        kwargs["ctx"].state["planner:rounds"] = 1
-        return self._revised
-
-
-# The dataset `_StoppedPlanner`'s revision searches for an input it pinned none for.
-_SEARCHED_PIN = "spec_" + "7" * 32
-
-
-class _StoppedPlanner(_RevisingPlanner):
-    """A `_RevisingPlanner` whose revision the user stops while it runs: it writes
-    drafting state, searches a dataset for an input it pinned none for and stores
-    its reading (`store_searched_pin_readings`), as a revision of a share does,
-    sets `SWITCH_STOP` as a Stop does, and waits to be cancelled."""
-
-    async def revise(self, **kwargs: Any) -> dict[str, Any]:
-        self.revisions.append(kwargs)
-        ctx = kwargs["ctx"]
-        ctx.state["planner:rounds"] = 1
-        block = {"spec_id": _SEARCHED_PIN, "resolved": {"scope_choices": None}}
-        save_searched_pin(
-            cast(SessionState, ctx.state),
-            SearchedPin(
-                requirement_key="total",
-                status="definite",
-                spec_id=_SEARCHED_PIN,
-                digest={
-                    "part_digests": [
-                        {
-                            "variable": "US total ODA",
-                            "status": "definite",
-                            "spec_id": _SEARCHED_PIN,
-                            "spec_block": block,
-                        }
-                    ]
-                },
-                asked_roles=("donor",),
-            ),
-        )
-        store_searched_pin_readings(ctx, cast(SessionState, ctx.state))
-        assert _SEARCHED_PIN in [r["spec_id"] for r in ctx.state[ORCHESTRATOR_SEARCHES_KEY]]
-        stop = SWITCH_STOP.get()
-        assert stop is not None
-        stop.set()
-        return await self._stopped()
-
-    async def _stopped(self) -> dict[str, Any]:
-        """What the revision does once the Stop is set: waits to be cancelled."""
-        # Cancelled at once; the bound fails the test, not the suite, if not.
-        await asyncio.sleep(5)
-        raise AssertionError("a stopped revision is cancelled")
-
-
-class _FinishingStoppedPlanner(_StoppedPlanner):
-    """A `_StoppedPlanner` whose revision finishes in the step the Stop comes in,
-    so the switch's wait sees both done."""
-
-    async def _stopped(self) -> dict[str, Any]:
-        return self._revised
-
-
-async def _switch_runner(
-    real_schemas: list[ToolSchema],
-    search: SearchStub,
-    revised: dict[str, Any] | None = None,
-    *,
-    option_id: str = "sector:120+130",
-    aligned: bool = False,
-    entity_groups: dict[str, Any] | None = None,
-    stored_unreadable: bool = False,
-    stored_groups: list[dict[str, Any]] | None = None,
-    planner_type: type[_RevisingPlanner] = _RevisingPlanner,
-    earlier_whole: AlignedPin | None = None,
-) -> tuple[Runner, _RevisingPlanner, PlannerPlan, dict[str, Any], list[Event]]:
-    """A turn paused on a plan pinning the compiled US health aid source, its
-    reading stored (marked as one the planner compiled to align a basis when
-    `aligned`, as one whose sets were not readable when `stored_unreadable`, and
-    as one resolved with `stored_groups` when given) beside its block naming `entity_groups` when given, held as the
-    whole `earlier_whole` an earlier plan compiled from its part when given,
-    then answered with a switch to `option_id`, by default its sector to CRS
-    120 and 130, through `search`. Returns the runner, the planner, the plan, the scope and the
-    resumed turn's events."""
-    scope = _hashed_scope()
-    pin = scope["compiled"]["spec_id"]
-    plan = _scoped_plan(pin, scope, schemas=real_schemas)
-    planner = planner_type(
-        [{"plan": plan.model_dump(mode="json"), "summary": {}}],
-        revised or {"refused": {"text": "unused"}},
-    )
-    runner, _ = orchestrator_runner(
-        plan_call(_BRIEF),
-        planner=planner,
-        executor=ScriptedExecutor(),
-        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
-    )
-    await _start(runner)
-    reading = SearchReading.from_part(
-        {
-            "variable": "health aid",
-            "status": "definite",
-            "spec_id": pin,
-            "scope": scope,
-            "planner_axes": ["measure_basis"] if aligned else [],
-            "entity_groups": stored_groups or [],
-            "entity_groups_unreadable": stored_unreadable,
-        }
-    )
-    _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
-    if earlier_whole is not None:
-        save_aligned_pin(
-            cast(SessionState, _session_state(runner)),
-            earlier_whole.model_copy(update={"spec_id": pin}),
-            warnings=(),
-        )
-    if entity_groups is not None:
-        _session_state(runner)[ORCHESTRATOR_SPECS_KEY] = {
-            pin: {
-                "spec_id": pin,
-                "resolved": {"scope_choices": scope, "entity_groups": entity_groups},
-            }
-        }
-    choice_id = _row_id(plan, option_id.split(":", maxsplit=1)[0])
-    events = await _resume(
-        runner,
-        APPROVE_INTERRUPT,
-        {"approved": None, "switch": {"choice_id": choice_id, "option_id": option_id}},
-    )
-    return runner, planner, plan, scope, events
-
-
-@pytest.mark.parametrize("basis_row", [True, False], ids=["basis-row", "no-basis-row"])
-async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_moved(
-    real_schemas: list[ToolSchema], basis_row: bool
-) -> None:
-    """The switch node posts the scope's base identity with its entries and
-    the switch, registers what Search compiles, re-pins the plan to it with
-    no planner call, stores the new reading, and offers the revised plan
-    with the basis the switch moved, under the id its row has, or would have
-    on a plan showing no basis row."""
-    scope = _hashed_scope()
-    new_pin, envelope = _switched_answer(scope)
-    revised = _scoped_plan(
-        new_pin,
-        envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
-        schemas=real_schemas,
-        version=2,
-    )
-    if not basis_row:
-        basis = {d.slot for d in revised.decisions if d.scope and d.scope.axis == "measure_basis"}
-        revised = PlannerPlan.model_validate(
-            {
-                **revised.model_dump(),
-                "decisions": [d for d in revised.decisions if d.slot not in basis],
-                "evidence_requirements": [
-                    r.model_copy(
-                        update={"decision_ids": tuple(i for i in r.decision_ids if i not in basis)}
-                    )
-                    for r in revised.evidence_requirements
-                ],
-            }
-        )
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    runner, planner, plan, scope, events = await _switch_runner(
-        real_schemas, search, {"plan": revised.model_dump(mode="json"), "summary": {}}
-    )
-
-    assert len(planner.calls) == 1  # the first draft; the switch drafts nothing
-    (posted,) = search.posted
-    (entry,) = posted["input"]["entries"]
-    assert (entry["variable_text"], entry["identity"]) == (scope["id"], scope["base"]["identity"])
-    assert entry["scope_entries"] == [
-        scope["entries"][1],
-        {
-            "axis": "sector",
-            "option_id": "sector:120+130",
-            "provenance": "explicit",
-            "concept": "health",
-            "origin": {"kind": "choice", "choice_id": f"{scope['id']}:sector"},
-        },
-    ]
-    (revision,) = planner.revisions
-    assert revision["inherits"] == {new_pin: scope["compiled"]["spec_id"]}
-    assert [r["source_spec_id"] for r in revision["evidence_requirements"]] == [new_pin]
-    assert PlannerPlan.model_validate(revision["prior_plan"]) == plan
-    state = _session_state(runner)
-    assert new_pin in state["planner:pin_sources"]
-    assert PlannerPlan.model_validate_json(state["plan"]) == revised
-    stored = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
-    assert (stored.text, stored.spec_id) == ("health aid", new_pin)
-    assert stored.scope is not None
-    assert stored.scope.choices[0].active == "sector:120+130"
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
-    offered = _output_of(events, "switch")
-    assert offered["revision"] == plan_revision(revised)
-    assert offered["moved"] == [
-        {
-            "choice_id": _row_id(revised, "measure_basis"),
-            "from_label": "gross disbursements, current USD",
-            "to_label": "grant equivalents",
-            "reason": "It conflicts with another choice.",
-        }
-    ]
-
-
-def test_one_move_across_two_switched_sources_with_no_row_is_listed_once(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """Two switched sources, each pinned by a requirement of the plan and each
-    moved from gross disbursements to grant equivalents, with no basis row on
-    the card: the move is listed once, under the id a row over both would have."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    after = envelope["parts"][0]["spec"]["resolved"]["scope_choices"]
-
-    def source(prefix: str) -> Any:
-        before, answered = copy.deepcopy(scope), copy.deepcopy(after)
-        for raw in (before, answered):
-            raw["id"] = f"{prefix}_{raw['id']}"
-            for choice in raw["choices"]:
-                choice["id"] = f"{raw['id']}:{choice['axis']}"
-        return switch_module._Switched(
-            pin=f"{prefix}_pin",
-            reading=cast(Any, None),
-            scope=PartScope.from_search(before),
-            envelope={},
-            spec_id=f"{prefix}_spec",
-            after=PartScope.from_search(answered),
-        )
-
-    (dataset,) = [
-        r
-        for r in _planner_plan(schemas=real_schemas).evidence_requirements
-        if isinstance(r, DatasetRequirement)
-    ]
-    plan = SimpleNamespace(
-        decisions=(),
-        evidence_requirements=[
-            dataset.model_copy(update={"id": "first", "source_spec_id": "a_spec"}),
-            dataset.model_copy(update={"id": "second", "source_spec_id": "b_spec"}),
-        ],
-    )
-
-    moved = switch_module._moved_entries(
-        cast(Any, plan), [source("a"), source("b")], axis="sector", stated=cast(Any, plan)
-    )
-
-    assert [entry["choice_id"] for entry in moved] == ["first:measure_basis"]
-
-
-async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """The switched source was compiled for an earlier plan as a whole with its
-    sector left open, and the plan now pins it as a plain requirement with no
-    `whole_of`: it is no whole, so the user's pick of one sector is posted to
-    Search and the revised plan offered."""
-    scope = _hashed_scope()
-    new_pin, envelope = _switched_answer(scope)
-    revised = _scoped_plan(
-        new_pin,
-        envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
-        schemas=real_schemas,
-        version=2,
-    )
-    search = SearchStub(answer={scope["id"]: envelope})
-    part = "spec_" + "4" * 32
-    whole = AlignedPin(origin=part, option_ids=(), spec_id="", digest={}, whole_axis="sector")
-
-    _, planner, _, _, events = await _switch_runner(
-        real_schemas,
-        search,
-        {"plan": revised.model_dump(mode="json"), "summary": {}},
-        earlier_whole=whole,
-    )
-
-    assert len(search.posted) == 1
-    assert len(planner.revisions) == 1
-    offered = _output_of(events, "switch")
-    assert "switch_failed" not in offered
-    assert offered["revision"] == plan_revision(revised)
-
-
-_AFRICA_TOTAL = {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}
-# Africa as a set naming a class of party outside `common.place_type.PartyClass`: the
-# set does not read, but what a resubmit posts of it does.
-_AFRICA_UNKNOWN_CLASS = {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]}
-# Africa as a set stating a registry id that is not text, so what a resubmit posts of
-# it does not read.
-_AFRICA_UNPOSTABLE = {"label": "Africa", "ref": "africa", "group_id": 7}
-
-
-_AFRICA_POSTED = {"destination": {"label": "Africa", "ref": "africa"}}
-
-
-@pytest.mark.parametrize(
-    ("group", "stored_unreadable", "stored_groups", "posted"),
-    [
-        pytest.param(_AFRICA_TOTAL, False, None, _AFRICA_POSTED, id="block-reads-stored-readable"),
-        pytest.param(_AFRICA_TOTAL, True, None, _AFRICA_POSTED, id="block-reads-stored-unreadable"),
-        pytest.param(
-            _AFRICA_UNKNOWN_CLASS,
-            True,
-            None,
-            _AFRICA_POSTED,
-            id="block-of-an-unknown-class-stored-unreadable",
-        ),
-        pytest.param(
-            _AFRICA_UNPOSTABLE,
-            False,
-            [{"role": "destination", **_AFRICA_TOTAL}],
-            _AFRICA_POSTED,
-            id="block-unreadable-stored-readable",
-        ),
-        # The block names no sets and the reading was stored with the G7 on its
-        # donors: the stored set is posted, since the block's none says nothing of it.
-        pytest.param(
-            None,
-            False,
-            [{"role": "origin", "label": "G7"}],
-            {"origin": {"label": "G7"}},
-            id="block-names-none-stored-readable",
-        ),
-    ],
-)
-async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
-    real_schemas: list[ToolSchema],
-    group: dict[str, Any] | None,
-    stored_unreadable: bool,
-    stored_groups: list[dict[str, Any]] | None,
-    posted: dict[str, Any],
-) -> None:
-    """The part's block names Africa as the set its recipients were asked for,
-    with the total party Search states for it. The switch posts the set as a
-    compile on another basis does (`compiler.sources.wire_groups`): its label
-    and ref, and no total, which Search recomputes. It reads the block again,
-    so a reading stored when an earlier release could not read the set switches
-    once this release can. A set naming a class of party this release does not
-    know is posted by its label and ref, all the resubmit sends of it. Where what
-    the block's set posts does not read, as a set stating a registry id that is
-    not text, or where the block names no sets, it posts the
-    readable sets the reading was stored with."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    await _switch_runner(
-        real_schemas,
-        search,
-        entity_groups={"destination": group} if group is not None else {},
-        stored_unreadable=stored_unreadable,
-        stored_groups=stored_groups,
-    )
-
-    (sent,) = search.posted
-    (entry,) = sent["input"]["entries"]
-    assert entry.get("entity_groups") == posted
-
-
-async def test_a_switch_whose_parts_sets_cannot_be_read_offers_the_plan_unchanged(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """The part's block names a set on its recipients with a registry id that is not
-    text, so what the switch would post of it cannot be read. Posting the part without it would let
-    Search count another population, so the switch posts nothing and offers the
-    plan unchanged under `switch_failed`, which asking again cannot get past."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    runner, _, plan, _, events = await _switch_runner(
-        real_schemas, search, entity_groups={"destination": _AFRICA_UNPOSTABLE}
-    )
-
-    assert search.posted == []
-    offered = _output_of(events, "switch")
-    assert offered["revision"] == plan_revision(plan)
-    failed = offered["switch_failed"]
-    assert (failed["code"], failed["retryable"]) == (SCOPE_CHOICE_NOT_APPLIED, False)
-    assert PlannerPlan.model_validate_json(_session_state(runner)["plan"]) == plan
-
-
-@pytest.mark.parametrize(
-    ("option_id", "kept"),
-    [("sector:120+130", True), ("measure_basis:grant_equivalent", False)],
-    ids=["another-axis", "the-basis"],
-)
-async def test_a_switch_keeps_the_planners_basis_mark_unless_it_switches_the_basis(
-    real_schemas: list[ToolSchema], option_id: str, kept: bool
-) -> None:
-    """A reading the planner compiled to align a basis keeps that mark, on the
-    new reading, its stored block and its pin's block, through a switch of its
-    sector, since its basis entry is still the planner's, and the revised card
-    states that basis as the planner's; a switch of the basis is the user's,
-    drops the mark, and the card states that basis as the user's."""
-    scope = _hashed_scope()
-    new_pin, envelope = _switched_answer(scope)
-    answered = envelope["parts"][0]["spec"]["resolved"]["scope_choices"]
-    basis = answered["choices"][2]
-    basis["provenance"] = "explicit"
-    answered["entries"].append(
-        {
-            "axis": "measure_basis",
-            "option_id": basis["active"],
-            "provenance": "explicit",
-            "origin": {"kind": "choice", "choice_id": basis["id"]},
-        }
-    )
-    revised = _scoped_plan(
-        new_pin,
-        envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
-        schemas=real_schemas,
-        version=2,
-    )
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    runner, *_ = await _switch_runner(
-        real_schemas,
-        search,
-        {"plan": revised.model_dump(mode="json"), "summary": {}},
-        option_id=option_id,
-        aligned=True,
-    )
-
-    state = _session_state(runner)
-    stored = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
-    marked = ["measure_basis"] if kept else []
-    assert (stored.spec_id, list(stored.planner_axes)) == (new_pin, marked)
-    assert state[ORCHESTRATOR_SPECS_KEY][new_pin].get(PLANNER_AXES_BLOCK_KEY, []) == marked
-    pinned = state["planner:pin_sources"][new_pin]["block"]
-    assert pinned.get(PLANNER_AXES_BLOCK_KEY, []) == marked
-    card = scope_choice_decisions({new_pin: PinSource(block=pinned, settled=True)}).get(new_pin, ())
-    assert [
-        d.resolved_by for d in card if d.scope is not None and d.scope.axis == "measure_basis"
-    ] == ([ResolvedBy.PLANNER_DEFAULT] if kept else [ResolvedBy.USER])
-
-
-@pytest.mark.parametrize(
-    ("refused_by", "code", "retryable"),
-    [
-        ("search", "requested_option_unavailable", False),
-        ("search", "transient_unavailable", True),
-        ("revision", "operation_unsupported", False),
-        ("revision", "discovery_unavailable", True),
-        ("revision", "surface_unavailable", True),
-    ],
-    ids=["search", "search-transient", "revision", "revision-transient", "revision-surface"],
-)
-async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
-    real_schemas: list[ToolSchema], refused_by: str, code: str, retryable: bool
-) -> None:
-    """Search refusing the switch (`requested_option_unavailable`), or the
-    revision failing, offers the same plan again with the failed switch, its
-    code, one sentence saying why and whether asking again can succeed, which
-    a Search that could not answer "just now" can,
-    leaves the readings as they were and the planner's drafting state as it
-    found it. A revision's refusal gives the reason its own
-    (`harness.sentences.refusal_reason`); only one Search could not answer
-    in time can succeed later. The part Search answered stays in the turn's
-    resolve store, which holds whatever the switch's outcome."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    search = (
-        SearchStub(
-            refuse={
-                scope["id"]: {
-                    "code": code,
-                    "title": "Requested Option Unavailable",
-                    "detail": "Scope entry 1 cannot apply to this part: option_unknown.",
-                    "pointer": "/input/entries/0/scope_entries/1",
-                    "retryable": retryable,
-                }
-            }
-        )
-        if refused_by == "search"
-        else SearchStub(answer={scope["id"]: envelope})
-    )
-
-    why = "Official development assistance would then count different providers' spending."
-    refused = {
-        "refused": {
-            "text": "This cannot be calculated as planned, so nothing was recorded.",
-            "reason": why,
-            "final": False,
-            "code": code,
-        }
-    }
-
-    runner, planner, plan, scope, events = await _switch_runner(real_schemas, search, refused)
-
-    assert len(planner.calls) == 1
-    assert len(planner.revisions) == (0 if refused_by == "search" else 1)
-    offered = _output_of(events, "switch")
-    assert offered["revision"] == plan_revision(plan)
-    assert "refusal_note" not in offered
-    assert offered["switch_failed"] == {
-        "choice_id": _row_id(plan, "sector"),
-        "option_id": "sector:120+130",
-        # A Search that did not answer states no code of its own.
-        "code": SCOPE_CHOICE_NOT_APPLIED if refused_by == "search" and retryable else code,
-        "reason": f"Search {'could not' if retryable else 'cannot'} count health (CRS 120) "
-        "and population and reproductive health (CRS 130) "
-        f"{'just now' if retryable else 'for this source'}."
-        if refused_by == "search"
-        else why,
-        "retryable": retryable,
-    }
-    state = _session_state(runner)
-    assert PlannerPlan.model_validate_json(state["plan"]) == plan
-    assert [r["spec_id"] for r in state[ORCHESTRATOR_SEARCHES_KEY]] == [
-        scope["compiled"]["spec_id"]
-    ]
-    # The fake planner drafted with no pin sources or rounds of its own.
-    assert state.get("planner:rounds") is None
-    assert state.get("planner:pin_sources") is None
-    resolved = [
-        value for key, value in state.items() if key.startswith(RESOLVED_STATE_PREFIX) and value
-    ]
-    assert len(resolved) == (0 if refused_by == "search" else 1)
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
-
-
-@pytest.mark.parametrize(
-    "planner_type",
-    [_StoppedPlanner, _FinishingStoppedPlanner],
-    ids=["revision-cancelled", "revision-finishes-with-the-stop"],
-)
-async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again(
-    real_schemas: list[ToolSchema], planner_type: type[_StoppedPlanner]
-) -> None:
-    """A Stop while the revision runs (`SWITCH_STOP`) cancels it and offers
-    the plan unchanged under `switch_cancelled`, which asking again can get
-    past, on a live pause, with the drafting state, the plan and the readings
-    the revision wrote put back, a searched input's reading among them. A
-    revision that finishes in the same step as the Stop ends stopped too."""
-    scope = _hashed_scope()
-    new_pin, envelope = _switched_answer(scope)
-    revised = _scoped_plan(
-        new_pin,
-        envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
-        schemas=real_schemas,
-        version=2,
-    )
-    token = SWITCH_STOP.set(asyncio.Event())
-    try:
-        runner, planner, plan, scope, events = await _switch_runner(
-            real_schemas,
-            SearchStub(answer={scope["id"]: envelope}),
-            {"plan": revised.model_dump(mode="json"), "summary": {}},
-            planner_type=planner_type,
-        )
-    finally:
-        SWITCH_STOP.reset(token)
-
-    assert len(planner.revisions) == 1
-    offered = _output_of(events, "switch")
-    assert offered["revision"] == plan_revision(plan)
-    assert offered["switch_failed"] == {
-        "choice_id": _row_id(plan, "sector"),
-        "option_id": "sector:120+130",
-        "code": SWITCH_CANCELLED,
-        "reason": "You stopped this change, so the plan is as it was.",
-        "retryable": True,
-    }
-    state = _session_state(runner)
-    assert PlannerPlan.model_validate_json(state["plan"]) == plan
-    assert [r["spec_id"] for r in state[ORCHESTRATOR_SEARCHES_KEY]] == [
-        scope["compiled"]["spec_id"]
-    ]
-    assert state.get("planner:rounds") is None
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
-
-
-class _RaisingPlanner(_StoppedPlanner):
-    """A `_StoppedPlanner` whose revision, once it has written its state, raises an
-    error of its own with no Stop. `sessions` holds the session each revision ran in."""
-
-    sessions: ClassVar[list[Any]] = []
-
-    async def revise(self, **kwargs: Any) -> dict[str, Any]:
-        self.sessions.append(kwargs["ctx"].session)
-        token = SWITCH_STOP.set(asyncio.Event())
-        try:
-            return await super().revise(**kwargs)
-        finally:
-            SWITCH_STOP.reset(token)
-
-    async def _stopped(self) -> dict[str, Any]:
-        raise RuntimeError("revision broke")
-
-
-async def test_a_switch_whose_revision_raises_puts_the_state_back_and_raises(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """A revision ending on an error other than `SwitchFailedError` ends the switch
-    with that error, once the drafting state, the plan and the readings it wrote,
-    a searched input's reading among them, are put back for the next turn."""
-    scope = _hashed_scope()
-    new_pin, envelope = _switched_answer(scope)
-    revised = _scoped_plan(
-        new_pin,
-        envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
-        schemas=real_schemas,
-        version=2,
-    )
-    _RaisingPlanner.sessions.clear()
-
-    with pytest.raises(RuntimeError, match="revision broke"):
-        await _switch_runner(
-            real_schemas,
-            SearchStub(answer={scope["id"]: envelope}),
-            {"plan": revised.model_dump(mode="json"), "summary": {}},
-            planner_type=_RaisingPlanner,
-        )
-
-    (session,) = _RaisingPlanner.sessions
-    state = session.state
-    assert [r["spec_id"] for r in state[ORCHESTRATOR_SEARCHES_KEY]] == [
-        scope["compiled"]["spec_id"]
-    ]
-    assert state.get("planner:rounds") is None
-
-
-def _unwinding_revision(
-    unwinding: asyncio.Event, *, error: type[BaseException], linger: float = 0
-) -> Callable[[], Awaitable[dict[str, Any]]]:
-    """A revision that waits until cancelled, then sets `unwinding`, waits
-    `linger` seconds and raises `error` as its cleanup ends."""
-
-    async def revision() -> dict[str, Any]:
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            unwinding.set()
-            await asyncio.sleep(linger)
-            raise error from None
-        raise AssertionError("unreachable")
-
-    return revision
-
-
-_UNWIND_ERRORS = pytest.mark.parametrize(
-    "error", [asyncio.CancelledError, RuntimeError], ids=["clean-cancel", "cleanup-raises"]
-)
-
-
-@_UNWIND_ERRORS
-async def test_a_stopped_revision_ends_the_switch_as_stopped_however_it_unwinds(
-    error: type[BaseException],
-) -> None:
-    """A Stop cancels the revision, whose cleanup ends cleanly or raises an error of
-    its own: either way the user stopped the switch, so it ends under
-    `switch_cancelled`, which the `switch` node answers by putting the plan back."""
-    stop = asyncio.Event()
-    unwinding = asyncio.Event()
-    revision = _unwinding_revision(unwinding, error=error)
-    token = SWITCH_STOP.set(stop)
-    try:
-        switch = asyncio.ensure_future(switch_module._unless_stopped(cast(Any, None), revision()))
-    finally:
-        SWITCH_STOP.reset(token)
-    await asyncio.sleep(0)
-    stop.set()
-
-    with pytest.raises(SwitchFailedError) as stopped:
-        await asyncio.wait_for(switch, timeout=5)
-    assert stopped.value.code == SWITCH_CANCELLED
-
-
-async def test_a_replan_that_asked_in_the_same_wait_as_the_stop_stays_paused() -> None:
-    """A pick's replan ends on the planner's question to the user as the Stop
-    lands. The question is the user's to answer, so `_unless_stopped` answers
-    it for the planner node to pause on, and no `switch_failed` follows."""
-    stop = asyncio.Event()
-    stop.set()
-
-    async def replan() -> dict[str, Any]:
-        return _ASKED
-
-    token = SWITCH_STOP.set(stop)
-    try:
-        answered = await asyncio.wait_for(
-            switch_module._unless_stopped(cast(Any, None), replan()), timeout=5
-        )
-    finally:
-        SWITCH_STOP.reset(token)
-
-    assert answered == _ASKED
-
-
-@_UNWIND_ERRORS
-async def test_a_switch_cancelled_while_its_stopped_revision_unwinds_stays_cancelled(
-    error: type[BaseException],
-) -> None:
-    """A Stop cancels the revision, and the switch itself is cancelled while the
-    revision's own cleanup still runs, which then ends cleanly or raises: the
-    switch ends cancelled, and offers no plan as if only the Stop had ended it."""
-    stop = asyncio.Event()
-    unwinding = asyncio.Event()
-    revision = _unwinding_revision(unwinding, error=error, linger=5)
-
-    token = SWITCH_STOP.set(stop)
-    try:
-        switch = asyncio.ensure_future(switch_module._unless_stopped(cast(Any, None), revision()))
-    finally:
-        SWITCH_STOP.reset(token)
-    await asyncio.sleep(0)
-    stop.set()
-    await asyncio.wait_for(unwinding.wait(), timeout=5)
-    switch.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(switch, timeout=5)
-
-
-# The source the planner wrote on the deployed plan's numerator, in the
-# question's words, and the provenance Search states for the composite of
-# bilateral and imputed multilateral aid the user switched it to.
-_STATED_SOURCE = "OECD Creditor Reporting System (CRS)"
-_INCLUSIVE_PROVENANCE = {
-    "ref": "provenance/CRSAndONEImputedMultilateralSectors",
-    "label": "CRS and ONE Imputed Multilateral Sectors",
-}
-
-
-class _RecordedFixtures(FixtureSurface):
-    """A `FixtureSurface` recording each call's tool and arguments in `calls`."""
-
-    def __init__(
-        self, *, schemas: list[ToolSchema], responses: Mapping[str, ToolCallResult]
-    ) -> None:
-        super().__init__(schemas=schemas, responses=responses)
-        self.calls: list[tuple[str, Mapping[str, object]]] = []
-
-    @override
-    async def call_tool(
-        self, *, tool: ToolId, arguments: Mapping[str, object], on_progress: Any = None
-    ) -> ToolCallResult:
-        self.calls.append((tool.name, arguments))
-        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
-
-
-class _TranslatingPlanner(_Planner):
-    """A `PlannerModel` drafting `plans` and revising through the real
-    `harness.planner_adapter.PlannerAdapter.revise`: the proposal chain, the
-    translation's discovery and the compile, over `schemas`, answering
-    `responses`, with no model."""
-
-    def __init__(
-        self,
-        plans: list[dict[str, Any]],
-        *,
-        schemas: list[ToolSchema],
-        responses: Mapping[str, ToolCallResult] | None = None,
-    ) -> None:
-        super().__init__(plans)
-        self.surface = _RecordedFixtures(schemas=schemas, responses=responses or {})
-        self._adapter = PlannerAdapter(settings=Settings(), surface=self.surface)
-
-    async def revise(self, **kwargs: Any) -> dict[str, Any]:
-        return await self._adapter.revise(**kwargs)
-
-
-class _SwitchedOff(NamedTuple):
-    """A switch off a stated source (`_switch_off_a_stated_source`): the runner, the
-    switch's events, the planner that revised, the pin Search answered and the copy
-    of it over the plan's years."""
-
-    runner: Any
-    events: list[Any]
-    planner: _TranslatingPlanner
-    new_pin: str
-    copy_pin: str
-
-
-class _RefusingPickPlanner(_TranslatingPlanner):
-    """A `_TranslatingPlanner` whose replan for a pick asks the user a question,
-    after recording the pick and drafting state as `PlannerAdapter` does, and is
-    refused once resumed."""
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        pick = kwargs.get("pick")
-        if pick is None:
-            return await super().__call__(**kwargs)
-        self.calls.append(kwargs)
-        ctx = kwargs["ctx"]
-        if ctx.resume_inputs:
-            return {"refused": {"text": "No plan.", "final": False, "code": "plan_not_ready"}}
-        save_decision_pick(ctx.state, pick)
-        ctx.state[_DRAFTING_KEY] = "draft"
-        return _ASKED
-
-
-async def _switch_off_a_stated_source(
-    real_schemas: list[ToolSchema], *, before_switch: str | None = None
-) -> _SwitchedOff:
-    """The deployed failure: the planner stated the CRS as the health
-    numerator's source, and the user switched it to bilateral plus imputed
-    multilateral, a dataset Search names otherwise and holds from 1995. The
-    switch posts the identity over every year its search answered, which the
-    plan pins. Admission copies the pin over the years the plan reads, and the
-    translation resolves the copy, which Search answers over those years.
-
-    `before_switch` is what happened on the card before the switch:
-    `"refused_pick_replan"` switches the window decision, which then fixes
-    the period, and the planner's replan asks a question and is refused once
-    answered (`_RefusingPickPlanner`)."""
-    scope = _hashed_scope()
-    pin = scope["compiled"]["spec_id"]
-    new_pin, envelope = _switched_answer(scope)
-    block = envelope["parts"][0]["spec"]
-    block["resolved"] |= {
-        "coverage": {
-            "kind": "exact",
-            "has_data": True,
-            "window": {"start_year": 1995, "end_year": 2024},
-        },
-        "facets": {"provenance": _INCLUSIVE_PROVENANCE},
-        "entities": [{"role": "country", "ref": "country/KEN", "label": "Kenya"}],
-    }
-    scoped = _scoped_plan(pin, scope, schemas=real_schemas)
-    plan = PlannerPlan.model_validate(
-        {
-            **scoped.model_dump(),
-            "asks": [_BRIEF],
-            "answered": [{"ask": 0, "outputs": ["spending"]}],
-            "translation": None,
-            "workflow": None,
-            "evidence_requirements": [
-                r.model_copy(update={"source": _STATED_SOURCE})
-                for r in scoped.evidence_requirements
-                if isinstance(r, DatasetRequirement)
-            ],
-        }
-    )
-    if before_switch == "refused_pick_replan":
-        plan = plan.model_copy(
-            update={
-                "decisions": tuple(
-                    d.model_copy(
-                        update={"fixes": DecisionFixes(period=Period(start=2015, end=2024))}
-                    )
-                    if d.slot == "window"
-                    else d
-                    for d in plan.decisions
-                )
-            }
-        )
-    identity = block["definition"]["identity"]
-    copy_pin, copied = windowed_identity(identity, _PLAN_WINDOW)
-    over_window = copy.deepcopy(envelope)
-    copied_block = over_window["parts"][0]["spec"]
-    copied_block["spec_id"] = copied_block["definition"]["spec_id"] = copy_pin
-    copied_block["definition"]["identity"] = copied
-    copied_block["resolved"]["coverage"]["window"]["start_year"] = 2015
-    planner = (
-        _RefusingPickPlanner if before_switch == "refused_pick_replan" else _TranslatingPlanner
-    )(
-        [{"plan": plan.model_dump(mode="json"), "summary": {}}],
-        schemas=real_schemas,
-        responses={
-            "resolve_definition": ToolCallResult(
-                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: over_window}
-            )
-        },
-    )
-    search = SearchStub(answer={scope["id"]: envelope})
-    runner, _ = orchestrator_runner(
-        plan_call(_BRIEF),
-        planner=planner,
-        executor=ScriptedExecutor(),
-        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
-    )
-    await _start(runner)
-    reading = SearchReading.from_part(
-        {"variable": "health aid", "status": "definite", "spec_id": pin, "scope": scope}
-    )
-    _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
-    if before_switch == "refused_pick_replan":
-        paused = await _resume(
-            runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH}
-        )
-        assert _pending_interrupt(paused) == _PLANNER_ASK
-        refused = await _resume(runner, _PLANNER_ASK, {"answer": "2018"})
-        assert _output_of(refused, "planner")["switch_failed"]["code"] == "plan_not_ready"
-
-    events = await _resume(
-        runner,
-        APPROVE_INTERRUPT,
-        {
-            "approved": None,
-            "switch": {"choice_id": _row_id(plan, "sector"), "option_id": "sector:120+130"},
-        },
-    )
-    return _SwitchedOff(runner, events, planner, new_pin, copy_pin)
-
-
-@pytest.mark.parametrize("before_switch", [None, "refused_pick_replan"])
-async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_plan_runs(
-    real_schemas: list[ToolSchema], before_switch: str | None
-) -> None:
-    """A switch off a stated source (`_switch_off_a_stated_source`) drops the
-    stated source with the pin it left, so the translation takes the new pin
-    with no search, the plan compiles, and its run accepts what the new
-    dataset returns. The translation resolves the copy admission made over the
-    plan's years, and searches nothing. A pick on the card belongs to its
-    planner entry, so the revision holds none after a replan for one was
-    refused following a question the planner asked."""
-    runner, events, planner, _, copy_pin = await _switch_off_a_stated_source(
-        real_schemas, before_switch=before_switch
-    )
-
-    assert [(tool, arguments.get("spec_id")) for tool, arguments in planner.surface.calls] == [
-        ("resolve_definition", copy_pin)
-    ]
-    offered = _output_of(events, "switch")
-    assert "switch_failed" not in offered, offered.get("switch_failed")
-    revised = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
-    (dataset,) = [r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)]
-    assert (dataset.source_spec_id, dataset.source) == (copy_pin, None)
-    assert revised.workflow is not None
-    assert [step.args.get("spec_id") for step in revised.workflow.steps] == [copy_pin]
-    approved = PlannerPlan.model_validate(
-        revised.model_dump()
-        | {
-            "status": "approved",
-            "approved_revision": plan_revision(revised),
-            "approved_at": datetime.now(UTC),
-        }
-    )
-    manifest = _get_data_manifest(spec_id=copy_pin)
-    manifest["citation"]["sources"] = [_INCLUSIVE_PROVENANCE]
-    fetched = ToolCallResult(is_error=False, structured_content=manifest, text="fetched")
-
-    _, outcome = await execute_approved_plan(
-        approved,
-        surface=_fixture_surface(real_schemas, get_data_result=fetched),
-        fetch_series_stats=scripted_fetch_series_stats,
-    )
-
-    assert isinstance(outcome, Accepted), outcome
-
-
-async def test_a_later_period_amendment_reads_the_switched_dataset_over_every_year_it_holds(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """After a switch off a stated source (`_switch_off_a_stated_source`), the
-    stored reading is of the switched dataset, the planner's block for it
-    states the years Search holds it for, from 1995, and the plan's copy over
-    its own years is held as a copy of that dataset. A later amendment of the period
-    reads the dataset whole and copies it over the new years."""
-    runner, _, _, new_pin, copy_pin = await _switch_off_a_stated_source(real_schemas)
-
-    state = _session_state(runner)
-    shown = state["planner:pin_sources"][new_pin]["block"]
-    assert shown["resolved"]["coverage"]["window"]["start_year"] == 1995
-    stored = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
-    assert stored.spec_id == new_pin
-    assert windowed_pins(cast(SessionState, state))[copy_pin].windowed_from == new_pin
-
-
 # --- a switch onto a family the mint adds by a declared composite ----------------
-
-
-def _recipient_open(block: dict[str, Any], identity: dict[str, Any]) -> dict[str, Any]:
-    """`identity` with its recipient left open, and `block` reading it under the
-    spec_id it hashes to: Kenya cut from the entities the block resolves, and the
-    recipient side counted at 140 parties (`role_axis_facts`), a count this test
-    sets, not a recorded one."""
-    identity = copy.deepcopy(identity)
-    del identity["entities"]["destination"]
-    identity["open_roles"] = ["destination"]
-    spec_id = spec_id_for(canonicalize(identity))
-    block = copy.deepcopy(block)
-    block["spec_id"] = spec_id
-    block["definition"] |= {"spec_id": spec_id, "identity": identity}
-    resolved = block["resolved"]
-    resolved["entities"] = [e for e in resolved["entities"] if e["role"] != "destination"]
-    resolved["role_axis_facts"] = [
-        {"role": "destination", "member_count": 140, "members_available": True}
-    ]
-    return block
-
-
-def _dac2a_provider_blocks() -> tuple[dict[str, Any], dict[str, Any]]:
-    """US net ODA to every recipient in 2019 on DAC2a, as the bilateral block the
-    card shows and the inclusive block Search answers its provider switch with.
-
-    Both are read from the block dfo-apis serves for the inclusive answer
-    (`tests/fixtures/dac2a_inclusive_spec_block.json`), its recipient left open
-    (`_recipient_open`). The bilateral block is its bilateral component: the
-    composite's first component identity, one StatVar served, no composite flag,
-    the provider row on bilateral flows as the user's words chose. The inclusive
-    block is the composite compiled from that base."""
-    recorded = json.loads(
-        (Path(__file__).parent / "fixtures" / "dac2a_inclusive_spec_block.json").read_text()
-    )
-    scope = recorded["resolved"]["scope_choices"]
-    bilateral_component, _ = scope["compiled"]["components"]
-    bilateral = _recipient_open(recorded, bilateral_component["identity"])
-    inclusive = _recipient_open(recorded, recorded["definition"]["identity"])
-    base = {**scope["base"], "spec_id": bilateral["spec_id"]}
-    base["identity"] = bilateral["definition"]["identity"]
-
-    shown = bilateral["resolved"]
-    shown["facets"]["provenance"] = {"ref": "provenance/OECDDAC2A", "label": "OECD DAC2a"}
-    shown["stat_vars"] = {
-        **{k: v for k, v in shown["stat_vars"].items() if k != "sums_components"},
-        "member_count": 1,
-        "served_count": 1,
-    }
-    shown_scope = shown["scope_choices"]
-    shown_scope |= {
-        "id": base["spec_id"],
-        "base": base,
-        "entries": [],
-        "compiled": {"spec_id": base["spec_id"], "identity": base["identity"], "components": []},
-    }
-    for choice in shown_scope["choices"]:
-        choice["id"] = f"{base['spec_id']}:{choice['axis']}"
-        if choice["axis"] == "provider":
-            choice["active"] = "provider:bilateral"
-    switched_scope = inclusive["resolved"]["scope_choices"]
-    switched_scope |= {
-        "id": base["spec_id"],
-        "base": base,
-        "compiled": {
-            **switched_scope["compiled"],
-            "spec_id": inclusive["spec_id"],
-            "identity": inclusive["definition"]["identity"],
-        },
-    }
-    for choice in switched_scope["choices"]:
-        choice["id"] = f"{base['spec_id']}:{choice['axis']}"
-    return bilateral, inclusive
-
-
-async def test_a_ranking_switched_to_dac2a_s_inclusive_scope_compiles_its_sum(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """The deployed failure: a card ranking the recipients of US net ODA in 2019 on
-    DAC2a's bilateral flows, switched to bilateral plus imputed multilateral. The
-    inclusive answer binds every slot and serves two StatVars, the lines the mint
-    adds (`sums_components`), and the plan states no reading. The revision
-    re-pins the ranking's dataset and compiles: the rule reads the family summed,
-    so the rank reads one measure."""
-    bilateral, inclusive = _dac2a_provider_blocks()
-    pin = bilateral["spec_id"]
-    scoped = scope_choice_decisions({pin: PinSource(block=bilateral, settled=True)})[pin]
-    measure = Decision(
-        slot="measure",
-        description="Which measure answers the question.",
-        options=["DAC2a net ODA", "another source"],
-        chosen="DAC2a net ODA",
-        resolved_by=ResolvedBy.PLANNER_DEFAULT,
-        rationale="DAC2a reports ODA by donor and recipient.",
-    )
-    every = Decision(
-        slot="every_recipient",
-        description="Whether to rank every recipient or named ones.",
-        options=["every recipient", "named recipients"],
-        chosen="every recipient",
-        resolved_by=ResolvedBy.PLANNER_DEFAULT,
-        rationale="The question asks which recipients received the most.",
-        fixes=DecisionFixes(among=RankAmong.POPULATION),
-    )
-    oda = DatasetRequirement(
-        id="oda",
-        decision_ids=["measure", *(d.slot for d in scoped)],
-        measure="US net ODA",
-        entities=[Entity(name="United States", role="donor")],
-        across=("recipient",),
-        period=Period(start=2019, end=2019),
-        source_spec_id=pin,
-    )
-    top = RankRequirement(
-        id="top",
-        decision_ids=["measure", "every_recipient"],
-        input_id="oda",
-        direction=RankDirection.HIGHEST_FIRST,
-        among=RankAmong.POPULATION,
-        axis="recipient",
-        reduction=Reduction.SUM,
-        limit=10,
-    )
-    plan = PlannerPlan(
-        question="Which countries received the most US net ODA in 2019?",
-        answer_mode=AnswerMode.COMPUTED,
-        decisions=[measure, every, *scoped],
-        evidence_requirements=[oda, top],
-        version=1,
-    )
-    ctx = _FakeToolContext()
-    state = cast(SessionState, ctx.state)
-    save_pin_sources(state, {pin: PinSource(block=bilateral, settled=True)})
-    reading = SearchReading.from_part(
-        {
-            "variable": "US net ODA",
-            "status": "definite",
-            "spec_id": pin,
-            "scope": PartScope.from_search(bilateral["resolved"]["scope_choices"]).model_dump(
-                mode="json"
-            ),
-            "asked_roles": ["donor"],
-        }
-    )
-    ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
-    answered = {"parts": [{"status": "definite", "spec": inclusive}]}
-    planner = _TranslatingPlanner(
-        [],
-        schemas=real_schemas,
-        responses={
-            "resolve_definition": ToolCallResult(
-                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: answered}
-            )
-        },
-    )
-    (row,) = [d for d in plan.decisions if d.scope is not None and d.scope.axis == "provider"]
-
-    await switch_module._switched_plan(
-        cast(Any, ctx),
-        plan,
-        choice_id=choice_id(plan, row),
-        option_id="provider:inclusive",
-        planner=cast(Any, planner),
-        surface=planner.surface,
-    )
-
-    revised = PlannerPlan.model_validate_json(ctx.state["plan"])
-    assert revised.workflow is not None
-    (source,) = revised.workflow.sources
-    assert source.spec_id == inclusive["spec_id"]
-    assert (source.stat_var_reading, source.stat_var_reading_set_by) == (
-        StatVarReading.SUM,
-        ReadingSetBy.RULE,
-    )
-    fetch = next(step for step in revised.workflow.steps if step.tool.name == "get_data")
-    assert fetch.args["stat_vars"] == "sum"
 
 
 @pytest.mark.parametrize(
@@ -5059,234 +3207,6 @@ def test_a_repinned_requirement_keeps_its_series_code_only_where_the_new_dataset
     assert moved.source_code == ("DT.ODA.ALLD.CD" if kept else None)
 
 
-# --- a chip under an answer, applied with no search ----------------------------
-
-
-class _RecordingExecutor(scripted.ScriptedExecutor):
-    """`harness.scripted.ScriptedExecutor`, recording each call and each step a node records."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-        self.steps: list[dict[str, Any]] = []
-
-    async def __call__(
-        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
-    ) -> dict[str, Any]:
-        self.calls.append({"tool": tool, "args": args})
-        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
-
-    def record_step(self, **step: Any) -> None:
-        self.steps.append(step)
-
-
-class _BrokenFetchExecutor(_RecordingExecutor):
-    """`_RecordingExecutor` whose `get_data` raises, as a fault inside DFO would."""
-
-    async def __call__(
-        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
-    ) -> dict[str, Any]:
-        if tool == "get_data":
-            raise RuntimeError("get_data broke")
-        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
-
-
-async def _chip_turn(
-    search: SearchStub,
-    *,
-    option_id: str = "sector:120+130",
-    executor: _RecordingExecutor | None = None,
-    spec_id: str | None = None,
-    entity_groups: dict[str, Any] | None = None,
-) -> tuple[Runner, ScriptLlm, _RecordingExecutor, dict[str, Any]]:
-    """A turn applying a chip that moves the US health aid answer's
-    `option_id` axis to `option_id`, offered on the reading `spec_id`, by
-    default the answer's own, its reading stored by an earlier turn from a
-    block naming `entity_groups` when given, resubmitted through `search`.
-    Its model tries to search, then answers."""
-    scope = _hashed_scope()
-    pin = scope["compiled"]["spec_id"]
-    block = {"spec_id": pin, "resolved": {"scope_choices": scope}}
-    if entity_groups is not None:
-        block["resolved"]["entity_groups"] = entity_groups
-    reading = SearchReading.from_part(
-        {"variable": "health aid", "status": "definite", "spec_id": pin, **reading_facts(block)}
-    ).model_dump(mode="json")
-    executor = executor or _RecordingExecutor()
-    runner, model = orchestrator_runner(
-        call("search", parts=[{"variable": "health aid"}]),
-        executor=executor,
-        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
-    )
-    axis = option_id.split(":", maxsplit=1)[0]
-    await open_session(
-        runner,
-        apply_choice=json.dumps(
-            {
-                "choice_id": f"{scope['id']}:{axis}",
-                "option_id": option_id,
-                "spec_id": spec_id or pin,
-            }
-        ),
-        **{ORCHESTRATOR_PRIOR_LEDGER_KEY: {"readings": [reading], "warnings": {}, "spec_ids": []}},
-    )
-    await run_turn(runner, types.UserContent("Count health and population."))
-    return runner, model, executor, scope
-
-
-async def test_a_chip_compiles_through_search_fetches_what_it_compiled_and_never_searches() -> None:
-    """The `seed` node posts the stored reading's base identity with the
-    switched entries, stores the reading Search compiles, fetches its spec_id
-    and hands the agent the result; the agent's own search is refused unsent."""
-    scope = _hashed_scope()
-    new_pin, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    runner, model, executor, scope = await _chip_turn(search)
-
-    (posted,) = search.posted
-    (entry,) = posted["input"]["entries"]
-    assert entry["identity"] == scope["base"]["identity"]
-    assert entry["scope_entries"][-1]["option_id"] == "sector:120+130"
-    assert [c["args"]["spec_id"] for c in executor.calls if c["tool"] == "get_data"] == [new_pin]
-    state = _session_state(runner)
-    stored = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
-    assert (stored.text, stored.spec_id) == ("health aid", new_pin)
-    assert stored.fetch is not None and stored.fetch.refusal_code is None
-    assert state[ORCHESTRATOR_APPLIED_KEY] == {
-        "choice_id": f"{scope['id']}:sector",
-        "option_id": "sector:120+130",
-        "from_option_id": "sector:120",
-        "spec_id": new_pin,
-    }
-    first = request_text(model.requests[0])
-    assert f"counted it again as {new_pin}" in first
-    assert frame_for(new_pin) in first
-    searched = model.requests[1].contents[-1].parts[0].function_response.response
-    assert searched["code"] == "tool_budget_spent"
-    assert [step["result"]["outcome"] for step in executor.steps] == ["ok"]
-
-
-@pytest.mark.parametrize(
-    "group", [_AFRICA_TOTAL, _AFRICA_UNKNOWN_CLASS], ids=["total", "unknown-class"]
-)
-async def test_a_chip_posts_the_groups_its_reading_was_resolved_with(
-    group: dict[str, Any],
-) -> None:
-    """The answer's reading came from a search whose block named Africa as the
-    set its recipients were asked for, and no plan kept that block. The chip's
-    resubmit posts the set as every resubmit does (`compiler.sources.wire_groups`),
-    one naming a class of party this release does not know too, since the reading
-    stored what the resubmit posts of it."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    await _chip_turn(search, entity_groups={"destination": group})
-
-    (posted,) = search.posted
-    (entry,) = posted["input"]["entries"]
-    assert entry["entity_groups"] == {"destination": {"label": "Africa", "ref": "africa"}}
-
-
-async def test_a_chip_whose_readings_sets_could_not_be_read_posts_nothing() -> None:
-    """The answer's reading came from a block naming a set on its recipients with a
-    registry id that is not text, and no block of it is kept, so nothing names the set. Posting the part
-    without it would let Search count another population, so the chip posts nothing
-    and its step fails as a plan card's switch over such a block does."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    runner, _, executor, _ = await _chip_turn(
-        search, entity_groups={"destination": _AFRICA_UNPOSTABLE}
-    )
-
-    assert search.posted == []
-    (step,) = executor.steps
-    refusal = step["result"]["refusal"]
-    assert (refusal["code"], refusal["retry_mode"]) == (SCOPE_CHOICE_NOT_APPLIED, "do_not_retry")
-    assert not any(c["tool"] == "get_data" for c in executor.calls)
-    assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)
-
-
-async def test_a_chip_offered_on_another_reading_is_refused_stale_and_compiles_nothing() -> None:
-    """The chip names a reading other than the newest one holding its choice, as
-    after a later switch of that choice: it is refused as the studio refuses a
-    stale chip, and nothing is posted or fetched."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    runner, model, executor, _ = await _chip_turn(search, spec_id=f"spec_{'9' * 32}")
-
-    assert search.posted == []
-    assert CHIP_STALE_NOTE in request_text(model.requests[0])
-    (step,) = executor.steps
-    assert step["result"]["refusal"]["code"] == SCOPE_CHOICE_NOT_APPLIED
-    assert not any(c["tool"] == "get_data" for c in executor.calls)
-    assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)
-
-
-async def test_a_chip_whose_fetch_raises_answers_as_the_agents_own_fetch_would() -> None:
-    """The chip's fetch raises inside DFO: the agent is handed the failure the
-    orchestrator's own tool calls answer with, and the turn goes on."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    _, model, _, _ = await _chip_turn(search, executor=_BrokenFetchExecutor())
-
-    first = request_text(model.requests[0])
-    assert "fetch failed inside DFO (RuntimeError)" in first
-    assert HarnessCode.RAISED.value in first
-
-
-@pytest.mark.parametrize(
-    ("code", "retryable", "step_code", "retry_mode"),
-    [
-        ("requested_option_unavailable", False, "requested_option_unavailable", "do_not_retry"),
-        # A Search that did not answer states no code of its own.
-        ("transient_unavailable", True, SCOPE_CHOICE_NOT_APPLIED, "retry_after_delay"),
-    ],
-    ids=["refused", "transient"],
-)
-async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_nothing(
-    code: str, retryable: bool, step_code: str, retry_mode: str
-) -> None:
-    """The chip's step fails with the code and retryability the plan card's
-    switch reports for the same refusal."""
-    scope = _hashed_scope()
-    search = SearchStub(
-        refuse={
-            scope["id"]: {
-                "code": code,
-                "title": "Requested Option Unavailable",
-                "detail": "Scope entry 1 cannot apply to this part: option_unknown.",
-                "pointer": "/input/entries/0/scope_entries/1",
-                "retryable": retryable,
-            }
-        }
-    )
-
-    runner, model, executor, _ = await _chip_turn(search)
-
-    note = (
-        f"Search {'could not' if retryable else 'cannot'} count health (CRS 120) and "
-        "population and reproductive health (CRS 130) "
-        f"{'just now' if retryable else 'for this source'}."
-    )
-    assert note in request_text(model.requests[0])
-    (step,) = executor.steps
-    assert step["result"]["refusal"] == {
-        "code": step_code,
-        "retry_mode": retry_mode,
-        "fix": None,
-        "message": note,
-    }
-    assert not any(c["tool"] == "get_data" for c in executor.calls)
-    assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)
-
-
 # --- early mints at the card offer ---------------------------------------------
 
 
@@ -5314,6 +3234,7 @@ class _EarlySends:
 
 
 async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_execution_sends(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """The first card starts its retrieval, an amendment's card starts its own,
@@ -5329,11 +3250,10 @@ async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_e
     )
     sends = _EarlySends()
     surface = _CallRecordingSurface(_fixture_surface(real_schemas))
-    runner, _ = orchestrator_runner(
-        plan_call(_BRIEF),
-        planner=planner,
+    runner, _ = _plan_runner(
+        pg_engine,
+        planner,
         tool_surface=surface,
-        executor=ScriptedExecutor(),
         early_mints=EarlyMints(send=sends, max_concurrent=4, settle_s=3.0),
     )
 
@@ -5341,17 +3261,17 @@ async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_e
     await asyncio.sleep(0)
     assert sends.sent == [{"spec_id": SPEC_A, "stat_vars": "sum"}]
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer("not-a-real-revision"))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer("not-a-real-revision"))
     await asyncio.sleep(0)
     revision_2 = _output_of(events, "planner")["revision"]
     assert len(sends.sent) == 2
 
     # An answer naming the superseded card offers the same card again.
-    await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan_v1)))
+    await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan_v1)))
     await asyncio.sleep(0)
     assert len(sends.sent) == 2
 
-    await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_2))
+    await _resume(runner, APPROVE_PAUSE, approve_answer(revision_2))
     assert [args for tool, args in surface.calls if tool == "get_data"] == sends.sent[1:]
 
 
@@ -5364,6 +3284,7 @@ async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_e
     ids=["declined", "raised"],
 )
 async def test_an_early_mint_that_fails_is_logged_and_leaves_the_card_and_plan_alone(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
     caplog: pytest.LogCaptureFixture,
     outcome: str | Exception,
@@ -5373,8 +3294,11 @@ async def test_an_early_mint_that_fails_is_logged_and_leaves_the_card_and_plan_a
 
     async def card(early_mints: EarlyMints | None) -> tuple[Any, Any, str | None]:
         planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-        runner, _ = orchestrator_runner(
-            plan_call(_BRIEF), planner=planner, executor=ScriptedExecutor(), early_mints=early_mints
+        runner, _ = _plan_runner(
+            pg_engine,
+            planner,
+            early_mints=early_mints,
+            conversation_id="conv_early" if early_mints is not None else "conv_none",
         )
         events = await _start(runner)
         await asyncio.sleep(0)
@@ -5389,7 +3313,7 @@ async def test_an_early_mint_that_fails_is_logged_and_leaves_the_card_and_plan_a
         offered = await card(EarlyMints(send=sends, max_concurrent=4, settle_s=3.0))
 
     assert offered == await card(None)
-    assert offered[2] == APPROVE_INTERRUPT
+    assert offered[2] == APPROVE_PAUSE
     (line,) = [r.getMessage() for r in caplog.records if r.name == "harness.early_mint"]
     assert f"spec_id={SPEC_A}" in line
     assert f"plan_revision={plan_revision(plan)}" in line
@@ -5519,24 +3443,23 @@ async def test_evicting_a_conversation_withdraws_its_calls_still_waiting_for_a_s
 
 
 async def test_approving_a_card_withdraws_its_early_calls_and_offering_it_does_not(
-    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+    pg_engine: AsyncEngine, real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     plan = _planner_plan(schemas=real_schemas)
     early = EarlyMints(send=_EarlySends(), max_concurrent=4, settle_s=3.0)
     withdrawn: list[str] = []
     monkeypatch.setattr(early, "withdraw", lambda: withdrawn.append("withdraw"))
-    runner, _ = orchestrator_runner(
-        plan_call(_BRIEF),
-        planner=_Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}]),
+    runner, _ = _plan_runner(
+        pg_engine,
+        _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}]),
         tool_surface=_fixture_surface(real_schemas),
-        executor=ScriptedExecutor(),
         early_mints=early,
     )
 
     await _start(runner)
     assert withdrawn == []
 
-    await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
     assert withdrawn == ["withdraw"]
 
 
@@ -5552,61 +3475,8 @@ async def test_closing_early_mints_cancels_the_calls_still_running(
     await early.aclose()
 
     assert sends.cancelled == 1
-
-
-# A dict and a list key, each with the accessor that reads it and an in-place
-# write into what a read hands out.
-_STORED_READS = [
-    pytest.param(
-        ORCHESTRATOR_SPECS_KEY,
-        {"spec_a": {"label": "a"}},
-        stored_mapping,
-        lambda held: held["spec_a"].update(label="b"),
-        id="mapping",
-    ),
-    pytest.param(
-        ORCHESTRATOR_SEARCHES_KEY,
-        [{"text": "a"}],
-        stored_sequence,
-        lambda held: held[0].update(text="b"),
-        id="sequence",
-    ),
-]
-
-
-@pytest.mark.parametrize(("key", "stored", "read", "write_into"), _STORED_READS)
-def test_a_stored_read_takes_no_copy_for_adk_to_track(
-    key: str, stored: Any, read: Callable[[Any, str], Any], write_into: Callable[[Any], None]
-) -> None:
-    """ADK's `State` copies a dict or list on its first read, which is what lets
-    it record a later write into it; a read through `stored_mapping` or
-    `stored_sequence` takes no copy, so the same write leaves no delta."""
-    tracked = State(value={key: copy.deepcopy(stored)}, delta={})
-    write_into(tracked.get(key))
-    assert tracked.has_delta()
-
-    untracked = State(value={key: copy.deepcopy(stored)}, delta={})
-    write_into(read(untracked, key))
-    assert not untracked.has_delta()
-
-
-@pytest.mark.parametrize(("key", "stored", "read", "write_into"), _STORED_READS)
-def test_a_stored_read_sees_the_pending_delta_first_as_state_get_does(
-    key: str, stored: Any, read: Callable[[Any, str], Any], write_into: Callable[[Any], None]
-) -> None:
-    del write_into
-    state = State(value={key: type(stored)()}, delta={key: stored})
-
-    assert list(read(state, key)) == list(state.to_dict()[key]) == list(stored)
-    assert list(read({key: stored}, key)) == list(stored)
-    assert not read({}, key)
-
-
-def test_a_stored_read_refuses_a_write_into_it() -> None:
-    state = State(value={ORCHESTRATOR_SPECS_KEY: {}, ORCHESTRATOR_SEARCHES_KEY: []}, delta={})
-
-    with pytest.raises(TypeError):
-        stored_mapping(state, ORCHESTRATOR_SPECS_KEY)["spec_a"] = {}  # ty: ignore[invalid-assignment]
-    with pytest.raises(AttributeError):
-        stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY).append({})  # ty: ignore[unresolved-attribute]
-    assert state.to_dict() == {ORCHESTRATOR_SPECS_KEY: {}, ORCHESTRATOR_SEARCHES_KEY: []}
+    # An offer after the close, as a cut segment's owed work can make at
+    # shutdown, starts nothing.
+    early.offer(_planner_plan(schemas=real_schemas))
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 1

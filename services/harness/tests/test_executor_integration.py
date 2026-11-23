@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -38,7 +39,7 @@ from compiler.surface import (
 from data_mcp import client_holder, frame_materialisation
 from data_mcp.deadline import CallDeadline
 from data_mcp.definition_store import canonicalize, spec_id_for
-from data_mcp.frame_materialisation import DEFAULT_MINT_OPTIONS, KIND_COLUMNS, frame_ref_for
+from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
 from data_mcp.manifest import SeriesStatisticsModel
 from data_mcp.series_statistics import series_statistics_table
 from executor.completion import ResultPublisher
@@ -57,6 +58,7 @@ from harness.server import create_app
 from harness.settings import ANALYSIS_MCP_MOUNT_PATH, DATA_MCP_MOUNT_PATH, Settings
 from harness.studio_translate import _RecordingSurface
 from harness.tool_contracts import HarnessCode
+from orchestrator.call import OrchestratorCall
 from planner.operations import (
     AggregateOperation,
     FilterOperation,
@@ -93,6 +95,7 @@ from planner.records import (
     EntityIn,
     GrowthChange,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -329,6 +332,7 @@ async def test_an_approved_plan_runs_end_to_end_through_the_mounted_services(
     derived_requirement: Callable[..., AggregateRequirement],
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
+    pg_database_url: str,
 ) -> None:
     async def fake_fetch(**_kwargs: Any) -> bytes:
         return _parquet_bytes()
@@ -343,7 +347,7 @@ async def test_an_approved_plan_runs_end_to_end_through_the_mounted_services(
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = McpSurface(
@@ -614,6 +618,7 @@ async def test_the_keyed_share_chain_runs_end_to_end_through_the_mounted_service
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
+    pg_database_url: str,
 ) -> None:
     """`retrieve(health) + retrieve(total) -> share_of(axis=donor) -> rank`, run
     through the real compiler and the real mounted services. France spends
@@ -639,7 +644,7 @@ async def test_the_keyed_share_chain_runs_end_to_end_through_the_mounted_service
         return httpx2.Response(200, json=response)
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = McpSurface(
@@ -881,16 +886,14 @@ async def test_kenyas_rank_series_runs_end_to_end_through_the_mounted_services(
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
+    pg_database_url: str,
 ) -> None:
     """The motivating per-period-rank chain, over a fixture with a genuine
     hole (Uganda has no row in 2011), so each year's rank positions depend
     on which entities reported that year. A population-wide change in rank
     would mix movement with reporting, which is why the plan narrows to
     Kenya between the rank and the growth. A fixture with every entity in
-    every period would hide that hole. See
-    `test_verb_coverage_corpus.py::_run_kenya_rank_change_since_2010` for
-    what growth computes straight off the population-wide series, against
-    the bare tool functions."""
+    every period would hide that hole."""
 
     async def fake_fetch(**_kwargs: Any) -> bytes:
         return _rank_parquet_bytes()
@@ -905,7 +908,7 @@ async def test_kenyas_rank_series_runs_end_to_end_through_the_mounted_services(
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = McpSurface(
@@ -1095,6 +1098,7 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
+    pg_database_url: str,
 ) -> None:
     """A planned `limit=3` reaches `rank` as an argument, so the stored frame
     holds the three highest donors at their measured amounts, and the three
@@ -1113,7 +1117,7 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = McpSurface(
@@ -1148,6 +1152,202 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
     assert rank_step.row_count == 3
     assert "limit 3 (kept 3 of 6 ranked entities)" in rank_step.digest
     assert "beyond_limit (ranked beyond the limit): 3 row(s)" in rank_step.digest
+
+
+APART_SPEC = "spec_" + "8" * 32
+APART_YEARS = range(2019, 2024)
+
+
+def _apart_parquet_bytes() -> bytes:
+    """One row a year from 2019 to 2023 for each donor of `TOP_DONORS`, the first
+    donor's the largest and each year one higher than the last."""
+    rows = [
+        (donor.ref, str(year), 10.0 * (len(TOP_DONORS) - position) + (year - 2019))
+        for position, donor in enumerate(TOP_DONORS)
+        for year in APART_YEARS
+    ]
+    table = pa.table(
+        {
+            "stat_var": pa.array(["dcid:OdaDisbursed"] * len(rows), type=pa.string()),
+            "donor": pa.array([row[0] for row in rows], type=pa.string()),
+            "time_period": pa.array([row[1] for row in rows], type=pa.string()),
+            "value": pa.array([row[2] for row in rows], type=pa.float64()),
+            "unit": pa.array(["USD"] * len(rows), type=pa.string()),
+        }
+    )
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    return buf.getvalue()
+
+
+def _apart_mint_response() -> dict[str, Any]:
+    parquet = _apart_parquet_bytes()
+    first, last = str(APART_YEARS[0]), str(APART_YEARS[-1])
+    return {
+        "schema_version": 1,
+        "definition": {"schema_version": 1, "spec_id": APART_SPEC, "identity": TOP_DONOR_IDENTITY},
+        "content_version": version_of(parquet),
+        "coverage": {
+            "rows": len(TOP_DONORS) * len(APART_YEARS),
+            "dimensions": [{"label": "years", "count": len(APART_YEARS)}],
+        },
+        "citation": {"text": "OECD DAC", "sources": []},
+        "trace": {"graph_revision": "g1", "facets": []},
+        "warnings": [],
+        "artifacts": [
+            {
+                "artifact_digest": f"sha256:{hashlib.sha256(parquet).hexdigest()}",
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
+                "bytes": len(parquet),
+                "media_type": "application/vnd.apache.parquet",
+                "created_at": "2026-08-11T00:00:00+00:00",
+                "tier": "working",
+                "url": "/links/should-not-be-fetched",
+            }
+        ],
+        "statistics": [
+            {
+                "stat_var": "dcid:OdaDisbursed",
+                "entities": [{"role": "donor", "ref": donor.ref}],
+                "facet": {"unit": "USD"},
+                "observations": len(APART_YEARS),
+                "first": {"value": 10.0, "period": first},
+                "latest": {"value": 14.0, "period": last},
+                "minimum": {"value": 10.0, "period": first},
+                "maximum": {"value": 14.0, "period": last},
+            }
+            for donor in TOP_DONORS
+        ],
+    }
+
+
+def _years_apart_approved_plan(decision: Callable[..., Decision], schemas: dict[str, Any]) -> Plan:
+    """The top three donors in 2019 and in 2023, as `planner.plan.FilterRequirement`'s
+    `predicates` describe years asked for apart. The dataset reads 2019 to 2023 and
+    a `period_in` filter keeps the two years. Translated, compiled and approved."""
+    source = SelectedSource(
+        spec_id=APART_SPEC,
+        sentence="ODA disbursed by six DAC donors, 2019 to 2023",
+        has_data=True,
+        served_count=1,
+        shape_member_digest=member_digest(["OdaDisbursed"]),
+        entities=TOP_DONORS,
+        unit_ref="USD",
+        unit_label="US dollars",
+        coverage_window=Period(start=2019, end=2023),
+        identity=TOP_DONOR_IDENTITY,
+    )
+    population = decision(
+        slot="population_scope",
+        description="Whether the rank compares the named donors or every donor the source holds.",
+        options=["the named donors only", "every donor the source holds"],
+        chosen="every donor the source holds",
+        rationale="The question asks for the top three donors overall.",
+        fixes=DecisionFixes(among=RankAmong.POPULATION),
+    )
+    draft = Plan(
+        question="Which three donors disbursed the most ODA in 2019 and in 2023, in one chart?",
+        decisions=[decision(), population],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="oda_disbursed",
+                decision_ids=["measure"],
+                measure="ODA disbursed",
+                entities=[Entity(name=donor.label, role="donor") for donor in TOP_DONORS],
+                period=Period(start=2019, end=2023),
+            ),
+            FilterRequirement(
+                id="two_years",
+                decision_ids=["measure"],
+                input_id="oda_disbursed",
+                predicates=(PeriodIn(years=(2019, 2023)),),
+            ),
+            RankRequirement(
+                id="top_three",
+                decision_ids=["measure", "population_scope"],
+                input_id="two_years",
+                direction=RankDirection.HIGHEST_FIRST,
+                among=RankAmong.POPULATION,
+                axis="donor",
+                per_period=True,
+                limit=3,
+            ),
+        ],
+        status=PlanStatus.DRAFT,
+    )
+    translation = build_translation(draft, {"oda_disbursed": APART_SPEC})
+    compiled = compile_plan(
+        plan=draft,
+        translation=translation,
+        schemas=schemas,
+        discovered={"oda_disbursed": source},
+    )
+    assert compiled.workflow is not None, compiled.issues
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
+
+
+async def test_years_asked_for_apart_run_and_chart_as_the_listed_years_of_a_range(
+    monkeypatch: pytest.MonkeyPatch,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., Any],
+    decision: Callable[..., Decision],
+    _stats_registry: _StatsRegistry,
+    runner: Any,
+    pg_database_url: str,
+) -> None:
+    """2019 and 2023 compile against the mounted services' own tool schemas to a
+    retrieval of 2019 to 2023, a filter keeping 2019 and 2023 by the runner's
+    `category_match` on `time_period`, and a per-year rank. The run keeps the top three donors in each of the two years and
+    no other year, and one chart draws them on the run's own frame."""
+
+    async def fake_fetch(**_kwargs: Any) -> bytes:
+        return _apart_parquet_bytes()
+
+    serve_canonical_frames(monkeypatch, fake_fetch)
+    mint_response = _register_statistics(_stats_registry, _apart_mint_response())
+
+    def mint_handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            return httpx2.Response(200, json=mint_response)
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    planned: list[Plan] = []
+
+    def plan_of(schemas: dict[str, ToolSchema]) -> Plan:
+        planned.append(_years_apart_approved_plan(decision, schemas))
+        return planned[-1]
+
+    top_three = [donor.ref for donor in TOP_DONORS[:3]]
+    async with _studio_session(
+        monkeypatch,
+        running_lifespan,
+        mounted_mcp_transport,
+        runner,
+        pg_database_url,
+        mint_handler=mint_handler,
+        plan_of=plan_of,
+        result_id="top_three",
+        closed_end=[],
+    ) as studio:
+        stored = (await result_table(FrameRef.model_validate(studio.run_frame))).to_pylist()
+        (drawn,) = await studio.charts(
+            studio.chart(top_three, title="The top three donors in 2019 and in 2023")
+        )
+
+    (approved,) = planned
+    assert approved.workflow is not None
+    retrieve, kept, ranked = approved.workflow.steps
+    assert (retrieve.tool.name, kept.tool.name, ranked.tool.name) == ("get_data", "filter", "rank")
+    assert kept.args["predicates"] == [
+        {"kind": "category_match", "column": "time_period", "values": ["2019", "2023"]}
+    ]
+    assert sorted((row["time_period"], row["donor"]) for row in stored) == sorted(
+        (year, donor) for year in ("2019", "2023") for donor in top_three
+    )
+    assert "reply_figures" in drawn, drawn
+    assert [intent["frame_ref"] for intent in studio.platform.created()] == [studio.run_frame]
 
 
 ROLLING_SPEC = "spec_" + "9" * 32
@@ -1332,6 +1532,7 @@ def run_rolling_plan(
     mounted_mcp_transport: Callable[..., Any],
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
+    pg_database_url: str,
 ) -> Callable[..., Any]:
     """Return a coroutine function running the rolling plan twice over one version of its data.
 
@@ -1357,7 +1558,9 @@ def run_rolling_plan(
             raise AssertionError(f"unexpected call to {request.url.path}")
 
         client_holder.set_client(data_mcp_client(mint_handler))
-        app = create_app(settings=Settings(mcp_api_token="test-token"))
+        app = create_app(
+            settings=Settings(database_url=pg_database_url, mcp_api_token="test-token")
+        )
         async with running_lifespan(app):
             surface = _CountingSurface(
                 McpSurface(
@@ -1521,7 +1724,7 @@ class _Studio:
     stand-in, and each replay's populations and analysis calls."""
 
     tools: dict[str, Any]
-    context: SimpleNamespace
+    context: OrchestratorCall
     executor: McpExecutor
     platform: _Platform
     run_frame: dict[str, Any]
@@ -1557,6 +1760,7 @@ async def studio(
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
     runner: Any,
+    pg_database_url: str,
 ) -> AsyncIterator[_Studio]:
     """The orchestrator's tools after the rolling plan ran on the mounted services.
 
@@ -1586,13 +1790,43 @@ async def studio(
         definition = {**mint_response["definition"], "identity": identity}
         return httpx2.Response(200, json={**mint_response, "definition": definition})
 
+    async with _studio_session(
+        monkeypatch,
+        running_lifespan,
+        mounted_mcp_transport,
+        runner,
+        pg_database_url,
+        mint_handler=mint_handler,
+        plan_of=lambda schemas: _rolling_approved_plan(decision, schemas),
+        result_id="change",
+        closed_end=closed_end,
+    ) as studio:
+        yield studio
+
+
+@asynccontextmanager
+async def _studio_session(
+    monkeypatch: pytest.MonkeyPatch,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., Any],
+    runner: Any,
+    pg_database_url: str,
+    *,
+    mint_handler: Callable[[httpx2.Request], httpx2.Response],
+    plan_of: Callable[[dict[str, ToolSchema]], Plan],
+    result_id: str,
+    closed_end: list[int],
+) -> AsyncIterator[_Studio]:
+    """The orchestrator's tools once `plan_of`'s plan ran on the mounted services,
+    the frame of its step `result_id` registered for charts. `mint_handler`
+    answers data-mcp's mints."""
     client_holder.set_client(data_mcp_client(mint_handler))
     apis = FakeApis(runner)
     assembler = apis.assembler()
     replays: list[Sequence[Mapping[str, Any]]] = []
     replay_calls: list[str] = []
     pending: list[bool] = []
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
     async with running_lifespan(app):
         surface = McpSurface(
             sources={
@@ -1615,6 +1849,7 @@ async def studio(
             recipe: Mapping[str, Any],
             *,
             deadline: CallDeadline,
+            surface: str,
             populations: Sequence[Mapping[str, Any]],
         ) -> Replayed | Pending | ReplayRefused:
             replays.append(populations)
@@ -1629,6 +1864,7 @@ async def studio(
                     apis=client,
                     publish=assembler.publish_frame,
                     row_budget=RowBudget(max_rows=100_000),
+                    surface=surface,
                     populations=populations,
                 )
 
@@ -1642,12 +1878,12 @@ async def studio(
         # the provenance a card on it must cite.
         recording = _RecordingSurface(surface, provenance=provenance)
         schemas = {schema.name: schema for schema in await surface.list_tools()}
-        plan = _rolling_approved_plan(decision, schemas)
+        plan = plan_of(schemas)
         _, outcome = await execute_approved_plan(plan, surface=recording)
         assert isinstance(outcome, Accepted), outcome
         assert plan.workflow is not None
         link_evidence_to_terminal_frames(recording, outcome, workflow=plan.workflow)
-        run_frame = outcome.results["change"].model_dump()
+        run_frame = outcome.results[result_id].model_dump()
 
         # `plan_done` lists a plan's final frames to the agent this way.
         described = await executor(tool="describe_frame", args={"frame_ref": run_frame})
@@ -1656,10 +1892,7 @@ async def studio(
         tools = build_orchestrator_tools(resolver=_no_search, executor=executor)
         yield _Studio(
             tools={tool.__name__: tool for tool in tools},
-            context=SimpleNamespace(
-                state=state,
-                invocation_id="inv_1",
-            ),
+            context=OrchestratorCall(state=state, turn_id="turn-1"),
             executor=executor,
             platform=platform,
             run_frame=run_frame,
@@ -1852,12 +2085,13 @@ async def test_a_chart_counting_back_on_data_fetched_to_a_stated_end_year_is_ref
 async def test_a_surface_reading_the_mounted_services_without_the_token_is_refused(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., Any],
+    pg_database_url: str,
 ) -> None:
     """The same mount the previous test reads, but through a transport that
     carries no bearer -- proving `McpSurface` doesn't quietly bypass the gate
     `common.auth.apply_gate` put on it (`common.auth`'s own suite proves the
     gate itself; this proves the compiler's own client reaching it obeys it)."""
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     statuses: list[int] = []
     async with running_lifespan(app):
@@ -2051,6 +2285,7 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
+    pg_database_url: str,
 ) -> None:
     """The retrieval asks apis for each place's types, the filter keeps the
     places typed Country, and the top two are the two largest countries: Earth
@@ -2068,13 +2303,10 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
         if request.url.path == "/api/datasets":
             options.append(json.loads(request.content)["options"])
             return httpx2.Response(200, json=mint_response)
-        if request.url.path.endswith("/options"):
-            # The spec is not in the definition store, so `get_data` reads its identity here.
-            return httpx2.Response(200, json=mint_response)
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = McpSurface(
@@ -2141,9 +2373,6 @@ def _serve_gdp_in_both_renderings(
         if request.url.path == "/api/datasets":
             typed = "enrichment" in json.loads(request.content)["options"]
             return httpx2.Response(200, json=renderings[typed])
-        if request.url.path.endswith("/options"):
-            # The spec is not in the definition store, so `get_data` reads its identity here.
-            return httpx2.Response(200, json=renderings[True])
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     serve_canonical_frames(monkeypatch, fake_fetch)
@@ -2162,12 +2391,13 @@ async def test_a_level_filtered_rank_after_a_plain_read_of_the_same_mint_keeps_t
     mounted_mcp_transport: Callable[..., Any],
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
+    pg_database_url: str,
 ) -> None:
     """A plain read of GDP is stored first. The rank's retrieval asks for place types,
     and apis answers under the same `{spec_id, content_version}`; the typed frame is
     a frame of its own, so the level filter finds its type column."""
     fetched = _serve_gdp_in_both_renderings(monkeypatch, _stats_registry)
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = _gdp_surface(app, mounted_mcp_transport)
@@ -2190,12 +2420,13 @@ async def test_a_plain_total_after_a_level_filtered_rank_of_the_same_mint_reads_
     mounted_mcp_transport: Callable[..., Any],
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
+    pg_database_url: str,
 ) -> None:
     """The rank stores GDP's typed frame first. A later plain read of the same mint
     gets the plain frame, so a period total over it runs: over the typed frame, whose
     places span several levels, the total refuses `place_levels_mixed`."""
     fetched = _serve_gdp_in_both_renderings(monkeypatch, _stats_registry)
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = _gdp_surface(app, mounted_mcp_transport)
@@ -2228,13 +2459,14 @@ async def test_a_reads_freshness_date_is_its_own_renderings_beside_a_sibling(
     mounted_mcp_transport: Callable[..., Any],
     _stats_registry: _StatsRegistry,
     typed: bool,
+    pg_database_url: str,
 ) -> None:
     """The harness dates a retrieval by its manifest's data artifact
     (`harness.provenance.data_artifact`). A plain mint's manifest lists the typed
     rendering first with its own `created_at`, and get_data's manifest keeps only the
     requested one."""
     _serve_gdp_in_both_renderings(monkeypatch, _stats_registry)
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = _gdp_surface(app, mounted_mcp_transport)
@@ -2476,6 +2708,7 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
+    pg_database_url: str,
 ) -> None:
     """The compiled retrieval asks get_data for the frame without party totals, which
     data-mcp asks apis for. apis answers with the version of the cut frame, so the
@@ -2493,11 +2726,6 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
     serve_canonical_frames(monkeypatch, fake_fetch)
 
     def mint_handler(request: httpx2.Request) -> httpx2.Response:
-        if request.url.path.endswith("/options"):
-            # The spec is not in the definition store, so `get_data` reads its identity here.
-            return httpx2.Response(
-                200, json=_kenya_donors_mint_response(cut=False, options=DEFAULT_MINT_OPTIONS)
-            )
         if request.url.path != "/api/datasets":
             raise AssertionError(f"unexpected call to {request.url.path}")
         options = json.loads(request.content)["options"]
@@ -2508,7 +2736,7 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
         return httpx2.Response(200, json=_register_statistics(_stats_registry, response))
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
     served = {
         version: list(_kenya_donors(cut=cut))
         for version, cut in ((KENYA_DONORS_BASE, False), (KENYA_DONORS_CUT, True))
@@ -2565,18 +2793,20 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
                     ),
                 }
             ],
-            SimpleNamespace(state=state, invocation_id="inv_1"),
+            OrchestratorCall(state=state, turn_id="turn-1"),
         )
         held = await get_frame_store().get(answer.store)
         assert held is not None
 
     cut = FrameRef(spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT)
     assert answer.presented == cut
+    cut_file = _kenya_donors_parquet_bytes(cut=True)
     assert answer.store == frame_ref_for(
         spec_id=KENYA_DONORS_SPEC,
         content_version=KENYA_DONORS_CUT,
         columns=KIND_COLUMNS,
         without_party_totals=True,
+        artifact_digest=f"sha256:{hashlib.sha256(cut_file).hexdigest()}",
     )
     # The frame the answer is described and drawn by is the cut version's.
     assert platform.described == [cut.model_dump()]
@@ -2766,10 +2996,6 @@ def _serve_whole_totals(
                     ],
                 }
             return httpx2.Response(200, json=answer)
-        if request.url.path.endswith("/options"):
-            # The spec is not in the definition store, so `get_data` reads its identity here.
-            spec_id = request.url.path.split("/")[-2]
-            return httpx2.Response(200, json=renderings[spec_id, False])
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     serve_canonical_frames(monkeypatch, fake_fetch)
@@ -2786,11 +3012,12 @@ async def test_get_data_with_default_flags_on_a_spec_binding_the_official_total_
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., Any],
     _stats_registry: _StatsRegistry,
+    pg_database_url: str,
 ) -> None:
     """The OECD's figure for every official donor, read by an outside model that sets no
     flag, is the one row it sums."""
     minted = _serve_whole_totals(monkeypatch, _stats_registry)
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = _flow_surface(app, mounted_mcp_transport)
@@ -2812,6 +3039,7 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., Any],
     _stats_registry: _StatsRegistry,
+    pg_database_url: str,
 ) -> None:
     """`search` for "all donors including private" returns one spec binding both totals.
     `get_data` with default flags gives two rows, and no kind column says they are
@@ -2819,7 +3047,7 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
     `place_types`, both are totals whose whole cells are `true`, and the sum is both
     populations."""
     minted = _serve_whole_totals(monkeypatch, _stats_registry)
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async def total(surface: McpSurface, frame_ref: dict[str, Any]) -> Any:
         return await surface.call_tool(
@@ -2860,13 +3088,18 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
         (None, None),
         (None, "default"),
     ]
-    # The frame holding the kinds is named apart from the plain one, under its file's stamp.
+    # The frame holding the kinds is named apart from the plain one, under its file's stamp
+    # and digest.
+    typed_file = _whole_totals_parquet_bytes(
+        _WHOLE_TOTAL_IDENTITIES[BOTH_TOTALS_SPEC][1], kinds=True
+    )
     assert typed_content["frame_ref"] != plain_content["frame_ref"]
     assert typed_content["frame_ref"] == frame_ref_for(
         spec_id=BOTH_TOTALS_SPEC,
         content_version=typed_content["content_version"],
         columns=flow_columns,
         enrichment_stamp=_WHOLE_TOTALS_STAMP,
+        artifact_digest=f"sha256:{hashlib.sha256(typed_file).hexdigest()}",
     ).model_dump(mode="json")
     assert summed_table.column("value").to_pylist() == pytest.approx([4_578_400_000.0])
 
@@ -3019,6 +3252,7 @@ async def test_a_sum_of_converted_frames_pairs_one_deflation_basis_and_refuses_t
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
     right_spec: str,
+    pg_database_url: str,
 ) -> None:
     """Two series converted to constant 2024 US dollars compile as one unit: the
     requests are equal and the compiler pins neither side. DAC2a and CRS, both
@@ -3039,7 +3273,7 @@ async def test_a_sum_of_converted_frames_pairs_one_deflation_basis_and_refuses_t
         return httpx2.Response(200, json=response)
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with running_lifespan(app):
         surface = _flow_surface(app, mounted_mcp_transport)

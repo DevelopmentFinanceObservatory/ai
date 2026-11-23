@@ -49,10 +49,11 @@ from planner.plan import (
     plan_revision,
 )
 from planner.workflow import ToolId
+from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.mechanical import build_translation
 
 from .basis_alignment import WholeCompiles, us_2023_block
-from .orchestrator_fakes import approve_answer
+from .plan_turns import approve_answer
 from .planner.test_agent import (
     _US_MULTILATERAL,
     _US_TOTAL,
@@ -69,10 +70,11 @@ from .planner.test_agent import (
     _us_2023,
 )
 from .planner.test_aligned_identity import _multilateral_compiles
+from .planner_host import PlannerHarness
 from .planner_tools import call_planner_tool
 from .scripted_genai import ScriptedGenai, call_part, reply, text_part
 from .test_graph import (
-    APPROVE_INTERRUPT,
+    APPROVE_PAUSE,
     _ManifestSurface,
     _output_of,
     _plan_runner,
@@ -80,7 +82,6 @@ from .test_graph import (
     _resume,
     _start,
 )
-from .test_planner_adapter import _AdapterHarness
 
 _FRANCE = _french_dac1(_US_MULTILATERAL)
 _MULTILATERAL = _US_MULTILATERAL["spec_id"]
@@ -157,7 +158,7 @@ async def _turn_one(
         us or _searched(_US_TOTAL, "US ODA"),
         _searched(_FRANCE, "France's multilateral ODA"),
     ]
-    turn_one = _AdapterHarness(
+    turn_one = PlannerHarness(
         {
             ORCHESTRATOR_SEARCHES_KEY: searched,
             ORCHESTRATOR_SPECS_KEY: {_TOTAL: _US_TOTAL, _FRANCE["spec_id"]: _FRANCE},
@@ -325,7 +326,7 @@ async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_mark
     prior = await _turn_one_closed(decision)
     surface = cast(ToolSurface, _multilateral_compiles())
 
-    turn_two = _AdapterHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
+    turn_two = PlannerHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
     share = "What share of US ODA goes to multilaterals?"
     adapter = _adapter(
         surface,
@@ -373,7 +374,7 @@ async def test_a_turn_two_restatement_of_the_comparison_moves_the_total_again(
     year = Period(start=2020, end=2020)
     copies = {_over_period(block, year): block for block in (_US_MULTILATERAL, _FRANCE)}
     surface = _multilateral_compiles(copies, translates=True)
-    turn_two = _AdapterHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
+    turn_two = PlannerHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
     question = "And in 2020?"
     adapter = _adapter(
         cast(ToolSurface, surface),
@@ -485,7 +486,9 @@ async def test_a_declared_wholes_dataset_reaches_a_later_turn_under_the_wholes_o
 _STORED_FRANCE = _another_part(_US_MULTILATERAL)
 
 
-async def test_a_paused_plan_stored_before_the_change_approves_on_its_revision() -> None:
+async def test_a_paused_plan_stored_before_the_change_approves_on_its_revision(
+    pg_engine: AsyncEngine,
+) -> None:
     """`fixtures/aligned_total_plan_stored.json` holds the session state the comparison
     above leaves, stored before a requirement recorded what alignment did: the plan,
     its total moved onto the multilateral row, and that compile held as an aligned
@@ -507,12 +510,12 @@ async def test_a_paused_plan_stored_before_the_change_approves_on_its_revision()
     )
     planner = _Planner([{"plan": paused.model_dump(mode="json"), "summary": {}}])
     surface = _Unreachable()
-    runner, _ = _plan_runner(planner, tool_surface=surface)
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
     offered = _output_of(events, "planner")
     assert offered["revision"] == plan_revision(paused)
 
-    await _resume(runner, APPROVE_INTERRUPT, approve_answer(offered["revision"]))
+    await _resume(runner, APPROVE_PAUSE, approve_answer(offered["revision"]))
 
     assert ("get_data", _MULTILATERAL) in surface.calls
 

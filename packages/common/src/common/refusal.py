@@ -6,7 +6,8 @@ line of compact JSON, so a client that shows its model only `content` still
 sees the code, the retry mode and the fix. `refusal_text` renders that text
 for all four. `refusal_code` reads the code from a refusal's
 `structuredContent`. `detail_sentence` turns an upstream service's `detail`
-fragment into a sentence of a refusal's message.
+fragment into a sentence of a refusal's message. `REPOST_RECOVERS_CODES` are the
+refusal codes the same request sent once more can get past.
 
 Every refusal from those four also carries its code in `_meta` under
 `REFUSAL_META_KEY` (`refusal_meta`), where the combined server reads it.
@@ -30,6 +31,31 @@ from common.telemetry import current_trace_id
 
 # The tool result `_meta` key under which a refusal carries its code.
 REFUSAL_META_KEY = "org.one.dfo/refusal"
+
+# The `fix.kind` of a refusal whose code alone does not say whose failure it
+# is. Every server that answers the code sets it, from this one place.
+#
+# On `upstream_error`, the upstream service failed of itself (a 5xx, an answer
+# with no problem document, a call that got no answer, or a response the server
+# could not use). An `upstream_error` without it is a refusal of the request
+# under a code the server does not map.
+SERVICE_FAILURE = "service_failure"
+# On `upstream_error`, data-mcp refused a definition dfo-apis would not
+# register, and another definition gets past it.
+SPEC_NOT_REGISTERED = "spec_not_registered"
+# On `frame_integrity_failed`, the frame data-mcp minted under one content
+# version reads back wrong, and a narrower scope mints another. Any other
+# stored frame that fails its check is the store's fault.
+MINTED_FRAME = "minted_frame"
+
+# The codes a request sent once more, unchanged, can get past.
+# `upstream_version_changed` comes from a read of a source's newest version (the
+# analysis runner's Spec and `latest` roots and recipe replays, data-mcp's mint) whose
+# upstream refreshed twice while it loaded. dfo-apis caches rate tables by refresh
+# date, so the next request loads the refreshed table and reads the new version. A
+# ref pinned to a version that is gone refuses with another code. Each caller sends
+# the request once more, at once, and answers a second refusal as it stands.
+REPOST_RECOVERS_CODES = frozenset({"upstream_version_changed"})
 
 
 def refusal_text(
