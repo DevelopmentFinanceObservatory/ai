@@ -120,7 +120,13 @@ from harness.studio_store import StudioStore, keep_turn_records
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
-from harness.unit_offer import offers_another_unit, unit_option_id, unit_words, whole_units
+from harness.unit_offer import (
+    offers_another_unit,
+    row_units,
+    unit_option_id,
+    unit_words,
+    whole_units,
+)
 from harness.wire import (
     ActivityStep,
     ApplyChoiceSuggestion,
@@ -1302,13 +1308,10 @@ def _unit_members(decision: Decision, offer: UnitOffer) -> dict[str, Any]:
     """The `PlanDecision` members of the row stating a unit question's whole
     unit `decision`: its row id, `offer` as `unit`, and as options the whole
     units a client that renders no unit picker switches between
-    (`whole_units`), each labelled in words (`unit_words`), status
-    "available", the offer's start active. A start in a currency that serves
-    one basis, which `whole_units` leaves out, is listed first."""
-    units = whole_units(offer)
+    (`row_units`), each labelled in words (`unit_words`), status
+    "available", the offer's start active."""
+    units = row_units(offer)
     start = unit_option_id(offer.start)
-    if start not in units:
-        units = {start: offer.start, **units}
     return {
         "choice_id": plan_display.decision_choice_id(decision),
         "active_option_id": start,

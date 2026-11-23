@@ -178,7 +178,14 @@ from harness.turn.store import (
 )
 from harness.turn_budget import start_turn_budget
 from harness.turn_records import CHIP_STALE_NOTE, is_count_choice, stored_choice, stored_count
-from harness.unit_offer import offered_unit_refusal, unit_option_id, unit_words, whole_units
+from harness.unit_offer import (
+    offered_unit_refusal,
+    row_units,
+    unit_option_id,
+    unit_phrase,
+    unit_words,
+    whole_units,
+)
 from harness.wire import (
     MAX_CLOSED_SINCE,
     MAX_TURN_REQUEST_BYTES,
@@ -441,11 +448,6 @@ def _row_unit_offer(pending: _PendingInterrupt, choice_id: str) -> UnitOffer | N
     return next((d.unit for d in decisions if d.choice_id == choice_id), None)
 
 
-def _lowered(words: str) -> str:
-    """`harness.unit_offer.unit_words` inside a sentence: "constant 2023 US dollars"."""
-    return words[:1].lower() + words[1:]
-
-
 def _switch_answer(body: InterruptResponse) -> dict[str, Any]:
     """What a `switch` answer hands the paused `approve` node under `switch`
     (`harness.graph.approve.decide`): the row and option, and the unit a
@@ -485,7 +487,7 @@ def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSON
         elif (refusal := offered_unit_refusal(offer, body.unit)) is not None:
             detail = f"That unit is not offered for this choice: {refusal}."
         elif body.option_id == choice.active:
-            detail = f"The plan already uses {_lowered(unit_words(body.unit, offer))}."
+            detail = f"The plan already uses {unit_phrase(body.unit, offer)}."
         else:
             return None
     elif option is None:
@@ -836,13 +838,13 @@ def _answer_turn_lines(
     match body.decision:
         case InterruptDecision.SWITCH:
             assert body.choice_id is not None and body.option_id is not None
-            option = pending.choices[body.choice_id].options.get(body.option_id)
-            if option is not None:
-                label = option.label
+            if (offer := _row_unit_offer(pending, body.choice_id)) is not None:
+                # A unit row names the unit in one form whether the unit is
+                # one of its options or not (`_switch_refusal`).
+                unit = body.unit or row_units(offer)[body.option_id]
+                label = unit_phrase(unit, offer)
             else:
-                # A unit its row's options do not list (`_switch_refusal`).
-                assert body.unit is not None
-                label = _lowered(unit_words(body.unit, _row_unit_offer(pending, body.choice_id)))
+                label = pending.choices[body.choice_id].options[body.option_id].label
             verb = "use" if is_decision_choice(body.choice_id) else "count"
             return [(f"{verb} {label}", False)]
         case InterruptDecision.AMEND:

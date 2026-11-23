@@ -270,6 +270,7 @@ from submission.prices_choice import (
     PricesChoice,
     base_year_refusal,
     prices_decisions,
+    whole_unit_slots,
 )
 
 # What a combination ask asks about: the `sum_of` requirement's id and the
@@ -731,11 +732,19 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         requirements_after = _requirements_after(
             previous, evidence_requirements, removed_evidence_requirements
         )
-    # The user's prices answer owns the unit of every requirement it holds, so
-    # a decision of the planner's stating that unit alone goes from those.
-    held_units = _units_the_user_holds(
-        requirements_after, _decisions_after(previous, settled, removed=removed_decisions)
+    # The user's whole unit answer owns the unit of every requirement it
+    # holds, so no decision of the planner's fixes that unit on those.
+    held_units, unit_beside = _units_the_user_holds(
+        requirements_after,
+        _decisions_after(previous, settled, removed=removed_decisions),
+        whole_units=whole_unit_slots(view.prices_chosen()),
     )
+    if unit_beside:
+        settled = _without_unit_fix(settled, unit_beside)
+        if previous is not None:
+            previous = previous.model_copy(
+                update={"decisions": tuple(_without_unit_fix(previous.decisions, unit_beside))}
+            )
     if held_units:
         evidence_requirements = _without_held_unit_citations(
             requirements_after, evidence_requirements, held=held_units
@@ -958,35 +967,55 @@ def _without_user_prices(drafts: Sequence[DecisionDraft]) -> list[DecisionDraft]
 
 
 def _units_the_user_holds(
-    requirements: Sequence[EvidenceRequirement], decisions: Sequence[Decision]
-) -> dict[str, frozenset[str]]:
-    """The planner's decisions stating a unit the user's prices answer holds, by each requirement citing them.
+    requirements: Sequence[EvidenceRequirement],
+    decisions: Sequence[Decision],
+    *,
+    whole_units: Collection[str],
+) -> tuple[dict[str, frozenset[str]], frozenset[str]]:
+    """The planner's decisions stating a unit the user's whole unit answer
+    holds: those fixing `unit` alone by each requirement citing them, and the
+    slots of those fixing `unit` beside other fields.
 
-    A requirement citing a decision of the prices the user chose
-    (`USER_PRICES_SLOT_PREFIXES`, `submission.prices_choice.prices_decisions`)
-    states the unit that answer holds it to, which code writes and a switch
-    of its plan card row moves. A decision the planner wrote
-    (`planner.plan.is_code_written`) fixing that `unit` and nothing else
-    states the same choice a second time, so the requirement does not cite
-    it: the plan card shows the user's answer once, and a switch of it is
-    not held back by the planner's copy.
+    A requirement citing a decision recording a whole unit the user chose
+    (`whole_units`, `submission.prices_choice.whole_unit_slots`) states the
+    unit that answer holds it to, which code writes and a switch of its plan
+    card row moves. A decision the planner wrote
+    (`planner.plan.is_code_written`) fixing `unit` on such a requirement
+    states that choice a second time: one fixing nothing else is not cited
+    by the requirement, and one fixing other fields too fixes those alone
+    (`_without_unit_fix`). The plan card shows the user's answer once, and a
+    switch of it is not held back by the planner's copy. A bare prices
+    answer, current or constant, holds no unit, so the planner's decision
+    stating one stands.
     """
     by_slot = {decision.slot: decision for decision in decisions}
     held: dict[str, frozenset[str]] = {}
+    beside: set[str] = set()
     for requirement in requirements:
-        if not any(slot.startswith(USER_PRICES_SLOT_PREFIXES) for slot in requirement.decision_ids):
+        if not any(slot in whole_units for slot in requirement.decision_ids):
             continue
-        slots = frozenset(
-            slot
+        fixing = {
+            slot: decision.fixes.model_dump(exclude_none=True).keys()
             for slot in requirement.decision_ids
             if (decision := by_slot.get(slot)) is not None
             and not is_code_written(decision)
             and decision.fixes is not None
-            and decision.fixes.model_dump(exclude_none=True).keys() == {"unit"}
-        )
-        if slots:
+            and decision.fixes.unit is not None
+        }
+        if slots := frozenset(slot for slot, fixed in fixing.items() if fixed == {"unit"}):
             held[requirement.id] = slots
-    return held
+        beside.update(slot for slot, fixed in fixing.items() if fixed != {"unit"})
+    return held, frozenset(beside)
+
+
+def _without_unit_fix(decisions: Sequence[Decision], slots: Collection[str]) -> list[Decision]:
+    """`decisions` with each under `slots` fixing every field it fixes but `unit`."""
+    return [
+        decision.model_copy(update={"fixes": decision.fixes.model_copy(update={"unit": None})})
+        if decision.slot in slots and decision.fixes is not None
+        else decision
+        for decision in decisions
+    ]
 
 
 def _without_held_unit_citations(

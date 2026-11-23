@@ -768,6 +768,7 @@ async def test_a_count_refused_a_unit_is_fetched_in_the_unit_the_count_is_served
         unit=Unit(currency="EUR", prices="current"),
         count=_FK_NET,
         group=_FK_GROSS,
+        chosen=Unit(currency="USD", prices="constant", base_year=2023),
     )
     assert f"Fetch {_FK_NET} as served, in current EUR, and say so." in handed.output["text"]
 
@@ -821,7 +822,12 @@ async def test_a_unit_answer_records_the_series_fetched_and_the_unit_it_is_serve
 
     fetched = search.posted[0]["spec_id"] if search.posted and refusal is None else _FK_GROSS
     assert units_served(state) == {
-        _FK_GROSS: ServedUnit(spec_id=fetched, unit=Unit.model_validate(served), group=_FK_GROSS)
+        _FK_GROSS: ServedUnit(
+            spec_id=fetched,
+            unit=Unit.model_validate(served),
+            group=_FK_GROSS,
+            chosen=Unit.model_validate(unit),
+        )
     }
     # The series fetched is a reading on record with its block, which the
     # planner's entry shows it (`harness.planner_adapter`'s pin sources).

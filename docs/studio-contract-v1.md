@@ -815,12 +815,12 @@ Otherwise the change runs in code, with no model call, as the Edit Card route do
 
 ## A unit row on the plan card (delta 31, v1.16)
 
-After the user answers a unit question, the plan card states the unit in one row for the parts the question covered. That row can be switched to another unit.
+After the user answers a unit question, the plan card states the unit in one row for the parts the question covered that are served in the unit chosen. That row can be switched to another unit. A part Search could not read in that unit has a row of its own stating the unit it is served in, with no `choice_id`, and a switch of the unit row leaves it as it is.
 
 - `PlanDecision` gains an optional `unit`, a `UnitOffer`, set only on a row that also carries `choice_id`, `active_option_id` and `options`. The row's `choice_id` is `"decision/user_unit_<lead part>"`, the lead part being the first spec_id the question covered. `unit.currencies` lists every unit all of those parts convert into, and `unit.start` is the unit they are in now.
 - The row's `options` are whole units, so a client that renders no unit picker switches between them: both price bases of the start's currency, the start first and active; or, when that currency serves one basis, the start and then both bases of the first offered currency that serves both. Each `option_id` names its unit as a unit question's whole units do (`USD-current`, `USD-constant-2023`), and each `status` is `available`.
 - `interrupt.response` gains an optional `unit`, a `UnitChoice`, allowed only with `decision: "switch"`. `choice_id`, `option_id` and `plan_revision` stay required; `option_id` names the unit `unit` carries in the same form. The harness reads `unit` when present, else the unit `option_id` names among the row's options, and refuses a unit outside the row's offer. A switch re-reads every part the row covers in that unit and offers the revised plan; one part Search cannot re-read leaves every part as it was, and the plan comes back with `switch_failed`.
-- A row stating a unit without `choice_id`, from a plan card stored before this delta, cannot be switched.
+- A row stating a unit without `choice_id` cannot be switched.
 
 ```json
 {

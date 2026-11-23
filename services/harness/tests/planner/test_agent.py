@@ -13014,6 +13014,10 @@ _EUR = {"currency": "EUR", "prices": "current"}
 _USD_2020 = {"currency": "USD", "prices": "constant", "base_year": 2020}
 _USD_2023 = {"currency": "USD", "prices": "constant", "base_year": 2023}
 _USD = {"currency": "USD", "prices": "current"}
+_EUR_2020 = {"currency": "EUR", "prices": "constant", "base_year": 2020}
+# A series of the gross part's measure in constant 2020 euros that a search
+# found apart from the part, not one the part's block offers.
+_EUR_2020_FOUND = "spec_" + "3a" * 16
 
 
 def _read_in(spec_id: str, unit: dict[str, Any]) -> dict[str, Any]:
@@ -13034,7 +13038,14 @@ def _unit_answered(
     question = {**_UNIT_QUESTION, "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS]}}
     if fetched != _GROSS:
         record_unit_read(ctx.state, _GROSS, fetched)
-    record_unit_served(ctx.state, _GROSS, fetched, UnitChoice.model_validate(served), group=_GROSS)
+    record_unit_served(
+        ctx.state,
+        _GROSS,
+        fetched,
+        UnitChoice.model_validate(served),
+        group=_GROSS,
+        chosen=UnitChoice.model_validate(chose),
+    )
     ctx.records = [
         turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
         user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **chose}}}),
@@ -13052,8 +13063,19 @@ def _unit_answered(
             _CONSTANT_GROSS,
             _USD_2023,
         ),
+        (
+            _EUR,
+            _EUR_READ,
+            lambda: [
+                _FRANCE_KENYA,
+                _read_in(_EUR_READ, _EUR),
+                _read_in(_EUR_2020_FOUND, _EUR_2020),
+            ],
+            _EUR_2020_FOUND,
+            _EUR_2020,
+        ),
     ],
-    ids=["currency", "base-year"],
+    ids=["currency", "base-year", "chosen-currency-found-apart"],
 )
 def test_a_plan_in_another_unit_than_the_user_chose_is_refused_and_told_the_series(
     decision: DecisionFactory,
@@ -13065,10 +13087,13 @@ def test_a_plan_in_another_unit_than_the_user_chose_is_refused_and_told_the_seri
     stated: dict[str, Any],
 ) -> None:
     """The user chose current euros, or constant 2020 US dollars, for the gross
-    part, and Search re-read it in that unit. A plan pinning a series of the
-    part in the same prices but another currency or base year is refused,
-    told the unit and the re-read series to pin; one pinning that series in
-    that unit lands, stating the user's choice as one decision on the part."""
+    part, whose reading is in current US dollars, and Search re-read it in
+    that unit. A plan pinning a series of the part in the same prices but
+    another currency or base year is refused, as is one pinning a series of
+    the part's measure in the chosen currency but other prices that a search
+    found apart from the part; each refusal tells the unit and the re-read
+    series to pin. One pinning that series in that unit lands, stating the
+    user's choice as one decision on the part."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_blocks(ctx, *shown())
@@ -13130,16 +13155,18 @@ _GROSS_2020 = "spec_" + "6" * 32
 _EUR_READ_2020 = "spec_" + "5" * 32
 
 
+@pytest.mark.parametrize("wrong", ["all", "recent"], ids=["first-window", "later-window"])
 def test_a_unit_answer_holds_every_window_of_the_measure_its_question_covers(
-    decision: DecisionFactory, requirements: RequirementPair
+    decision: DecisionFactory, requirements: RequirementPair, wrong: str
 ) -> None:
     """The unit question covers the gross part over every year and over
     2020-2024, two windows of one measure. The user chose current euros, and
-    Search re-read each window in them. Both windows hold that choice, so a
-    plan pinning the first window in current US dollars is refused and told
-    the series the agent fetches for it. A plan pinning each window's re-read
-    series in euros lands with one decision for the question's unit, under
-    the lead part, cited by both requirements."""
+    Search re-read each window in them. Each window holds that choice, so a
+    plan pinning both windows with one of them in current US dollars is
+    refused under the question's one decision and told the series the agent
+    fetches for that window. A plan pinning each window's re-read series in
+    euros lands with one decision for the question's unit, under the lead
+    part, cited by both requirements."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     later = copy.deepcopy(_FRANCE_KENYA)
@@ -13152,7 +13179,14 @@ def test_a_unit_answer_holds_every_window_of_the_measure_its_question_covers(
     _show_blocks(ctx, _FRANCE_KENYA, later)
     for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
         record_unit_read(ctx.state, part, read)
-        record_unit_served(ctx.state, part, read, UnitChoice.model_validate(_EUR), group=_GROSS)
+        record_unit_served(
+            ctx.state,
+            part,
+            read,
+            UnitChoice.model_validate(_EUR),
+            group=_GROSS,
+            chosen=UnitChoice.model_validate(_EUR),
+        )
     question = {
         **_UNIT_QUESTION,
         "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
@@ -13167,19 +13201,38 @@ def test_a_unit_answer_holds_every_window_of_the_measure_its_question_covers(
         _GROSS_2020: PricesChoice("current", _EUR_READ_2020, unit=Unit(**_EUR), group=_GROSS),
     }
 
-    dataset, derived = requirements
+    dataset, _ = requirements
+    in_eur = {"unit": Unit(**_EUR)}
+    windows = {
+        "all": (_GROSS, _EUR_READ, None),
+        "recent": (_GROSS_2020, _EUR_READ_2020, Period(start=2020, end=2024)),
+    }
     refused = _propose_one(
         tools,
         ctx,
         decision(),
-        [dataset.model_copy(update={"source_spec_id": _GROSS, "unit": Unit(**_USD)}), derived],
+        [
+            dataset.model_copy(
+                update={
+                    "id": rid,
+                    **({"period": period} if period is not None else {}),
+                    **(
+                        {"source_spec_id": part, "unit": Unit(**_USD)}
+                        if rid == wrong
+                        else {"source_spec_id": read, **in_eur}
+                    ),
+                }
+            )
+            for rid, (part, read, period) in windows.items()
+        ],
+        answer_mode=AnswerMode.SERIES,
     )
 
     assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
-    assert (refused["detail"]["unit"], refused["detail"]["pin"]) == (_EUR, _EUR_READ)
+    assert (refused["detail"]["unit"], refused["detail"]["pin"]) == (_EUR, windows[wrong][1])
+    assert refused["detail"]["requirement_id"] == wrong
     assert refused["detail"]["slot"] == f"user_unit_{_GROSS}"
 
-    in_eur = {"unit": Unit(**_EUR)}
     landed = _propose_one(
         tools,
         ctx,
@@ -13242,7 +13295,14 @@ def test_a_window_the_planner_pins_in_the_unit_the_user_answered_falls_under_tha
     _show_blocks(ctx, _FRANCE_KENYA, later, *reads, whole)
     for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
         record_unit_read(ctx.state, part, read)
-        record_unit_served(ctx.state, part, read, UnitChoice.model_validate(_EUR), group=_GROSS)
+        record_unit_served(
+            ctx.state,
+            part,
+            read,
+            UnitChoice.model_validate(_EUR),
+            group=_GROSS,
+            chosen=UnitChoice.model_validate(_EUR),
+        )
     question = {
         **_UNIT_QUESTION,
         "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
@@ -13291,16 +13351,33 @@ def test_a_window_the_planner_pins_in_the_unit_the_user_answered_falls_under_tha
     ]
 
 
-@pytest.mark.parametrize("answered", [True, False], ids=["unit-answered", "no-answer"])
+@pytest.mark.parametrize(
+    ("answer", "with_measure", "fixing_unit", "cited"),
+    [
+        ("unit", False, ["user_unit"], ["user_unit"]),
+        ("none", False, ["currency_unit"], ["currency_unit"]),
+        ("bare-prices", False, ["currency_unit"], ["currency_unit"]),
+        ("unit", True, ["user_unit"], ["currency_unit", "user_unit"]),
+    ],
+    ids=["unit-answered", "no-answer", "bare-prices-answered", "unit-and-measure"],
+)
 def test_a_planner_decision_stating_the_unit_the_user_answered_goes_from_the_plan(
-    decision: DecisionFactory, requirements: RequirementPair, answered: bool
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    answer: str,
+    with_measure: bool,
+    fixing_unit: list[str],
+    cited: list[str],
 ) -> None:
     """The user chose current euros for both windows of the gross part. The
-    planner states that unit a second time, in a decision of its own fixing
-    `unit` alone, cited by both windows. The plan lands with the user's
+    planner states that unit a second time, in a decision of its own cited
+    by both windows. Fixing `unit` alone, the plan lands with the user's
     answer as the one decision on the unit, and neither window cites the
-    planner's. With no unit answer, the planner's decision stating the unit
-    stands, cited by the requirement it fixes."""
+    planner's. Fixing the measure too, both windows still cite it, and it
+    fixes the measure alone, so a switch of the user's unit leaves it true.
+    With no unit answer, or a bare current prices answer, which holds no
+    currency, the planner's decision stating the unit stands, cited by the
+    requirements it fixes."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     later = copy.deepcopy(_FRANCE_KENYA)
@@ -13311,11 +13388,19 @@ def test_a_planner_decision_stating_the_unit_the_user_answered_goes_from_the_pla
         "end_year": 2024,
     }
     _show_blocks(ctx, _FRANCE_KENYA, later)
+    answered = answer == "unit"
     unit = _EUR if answered else _USD
     if answered:
         for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
             record_unit_read(ctx.state, part, read)
-            record_unit_served(ctx.state, part, read, UnitChoice.model_validate(_EUR), group=_GROSS)
+            record_unit_served(
+                ctx.state,
+                part,
+                read,
+                UnitChoice.model_validate(_EUR),
+                group=_GROSS,
+                chosen=UnitChoice.model_validate(_EUR),
+            )
         question = {
             **_UNIT_QUESTION,
             "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
@@ -13324,6 +13409,9 @@ def test_a_planner_decision_stating_the_unit_the_user_answered_goes_from_the_pla
             turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
             user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
         ]
+    elif answer == "bare-prices":
+        ctx.records = _prices_ask_events(pick="o1")
+    dataset, _ = requirements
     currency = decision(
         slot="currency_unit",
         description="Currency and price basis for the flows.",
@@ -13331,9 +13419,8 @@ def test_a_planner_decision_stating_the_unit_the_user_answered_goes_from_the_pla
         chosen="current euros" if answered else "current USD",
         resolved_by=ResolvedBy.USER if answered else ResolvedBy.PLANNER_DEFAULT,
         rationale="The figures are stated in one currency.",
-        fixes=DecisionFixes(unit=Unit(**unit)),
+        fixes=DecisionFixes(unit=Unit(**unit), measure=dataset.measure if with_measure else None),
     )
-    dataset, _ = requirements
     stated = {"unit": Unit(**unit), "decision_ids": ["currency_unit"]}
 
     landed = _propose_one(
@@ -13363,18 +13450,46 @@ def test_a_planner_decision_stating_the_unit_the_user_answered_goes_from_the_pla
     assert landed["outcome"] == Outcome.OK.value, landed
     plan = load_plan(ctx.state)
     assert plan is not None
-    unit_slots = [f"user_unit_{_GROSS}"] if answered else ["currency_unit"]
+    named = {"user_unit": f"user_unit_{_GROSS}", "currency_unit": "currency_unit"}
     assert [
-        d.slot for d in plan.decisions if d.fixes is not None and d.fixes.source_spec_id is None
-    ] == unit_slots
+        d.slot
+        for d in plan.decisions
+        if d.fixes is not None and (d.fixes.unit is not None or d.slot == named["user_unit"])
+    ] == [named[slot] for slot in fixing_unit]
     assert [
-        [
-            slot
-            for slot in plan.requirement(rid).decision_ids
-            if slot in {*unit_slots, "currency_unit"}
-        ]
+        [slot for slot in plan.requirement(rid).decision_ids if slot in named.values()]
         for rid in ("all", "recent")
-    ] == [unit_slots, unit_slots]
+    ] == [[named[slot] for slot in cited]] * 2
+    if not with_measure:
+        return
+    kept = next(d for d in plan.decisions if d.slot == "currency_unit")
+    assert kept.fixes is not None
+    assert kept.fixes.measure == dataset.measure
+
+    # The user's unit row is switched to current US dollars, which both
+    # windows are served in: the revision lands with the planner's decision
+    # still cited.
+    usd = UnitChoice.model_validate(_USD)
+    for part in (_GROSS, _GROSS_2020):
+        record_unit_served(ctx.state, part, part, usd, group=_GROSS, chosen=usd)
+    switched = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=plan.version,
+        decisions=[],
+        evidence_requirements=[
+            plan.requirement(rid).model_copy(update={"source_spec_id": pin, "unit": Unit(**_USD)})
+            for rid, pin in (("all", _GROSS), ("recent", _GROSS_2020))
+        ],
+        tool_context=ctx,
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    assert [
+        "currency_unit" in revised.requirement(rid).decision_ids for rid in ("all", "recent")
+    ] == [True, True]
 
 
 def test_a_carried_planner_decision_stating_the_unit_the_user_answered_goes_on_amendment(
@@ -13396,7 +13511,14 @@ def test_a_carried_planner_decision_stating_the_unit_the_user_answered_goes_on_a
     _show_blocks(ctx, _FRANCE_KENYA, later)
     for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
         record_unit_read(ctx.state, part, read)
-        record_unit_served(ctx.state, part, read, UnitChoice.model_validate(_EUR), group=_GROSS)
+        record_unit_served(
+            ctx.state,
+            part,
+            read,
+            UnitChoice.model_validate(_EUR),
+            group=_GROSS,
+            chosen=UnitChoice.model_validate(_EUR),
+        )
     question = {
         **_UNIT_QUESTION,
         "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
@@ -13488,14 +13610,16 @@ def test_a_unit_search_refused_holds_the_plan_to_the_unit_the_series_is_served_i
     assert landed["outcome"] == Outcome.OK.value, landed
 
 
+@pytest.mark.parametrize("lead_refused", [False, True], ids=["window-refused", "lead-refused"])
 def test_a_window_search_refused_the_unit_keeps_a_prices_decision_of_its_own(
-    decision: DecisionFactory, requirements: RequirementPair
+    decision: DecisionFactory, requirements: RequirementPair, lead_refused: bool
 ) -> None:
     """The unit question covers two windows of the gross part. The user chose
-    current euros; Search re-read the first window in them and refused the
-    second, which the agent fetches as served, in current US dollars. The
-    plan states the question's unit as one decision on the first window, and
-    the second window's own unit as a decision of its own."""
+    current euros; Search re-read one window in them and refused the other,
+    which the agent fetches as served, in current US dollars: the later
+    window, or the question's lead part. The plan states the unit the user
+    chose as the question's one decision on the window read in it, and the
+    refused window's own unit as a decision of its own."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     later = copy.deepcopy(_FRANCE_KENYA)
@@ -13506,11 +13630,12 @@ def test_a_window_search_refused_the_unit_keeps_a_prices_decision_of_its_own(
         "end_year": 2024,
     }
     _show_blocks(ctx, _FRANCE_KENYA, later)
-    record_unit_read(ctx.state, _GROSS, _EUR_READ)
-    record_unit_served(ctx.state, _GROSS, _EUR_READ, UnitChoice.model_validate(_EUR), group=_GROSS)
-    record_unit_served(
-        ctx.state, _GROSS_2020, _GROSS_2020, UnitChoice.model_validate(_USD), group=_GROSS
-    )
+    eur, usd = UnitChoice.model_validate(_EUR), UnitChoice.model_validate(_USD)
+    read, refused = (_GROSS_2020, _GROSS) if lead_refused else (_GROSS, _GROSS_2020)
+    read_as = _EUR_READ_2020 if lead_refused else _EUR_READ
+    record_unit_read(ctx.state, read, read_as)
+    record_unit_served(ctx.state, read, read_as, eur, group=_GROSS, chosen=eur)
+    record_unit_served(ctx.state, refused, refused, usd, group=_GROSS, chosen=eur)
     question = {
         **_UNIT_QUESTION,
         "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
@@ -13520,6 +13645,7 @@ def test_a_window_search_refused_the_unit_keeps_a_prices_decision_of_its_own(
         user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
     ]
     dataset, _ = requirements
+    pins = {read: (read_as, _EUR), refused: (refused, _USD)}
 
     landed = _propose_one(
         tools,
@@ -13527,14 +13653,18 @@ def test_a_window_search_refused_the_unit_keeps_a_prices_decision_of_its_own(
         decision(),
         [
             dataset.model_copy(
-                update={"id": "all", "source_spec_id": _EUR_READ, "unit": Unit(**_EUR)}
+                update={
+                    "id": "all",
+                    "source_spec_id": pins[_GROSS][0],
+                    "unit": Unit(**pins[_GROSS][1]),
+                }
             ),
             dataset.model_copy(
                 update={
                     "id": "recent",
-                    "source_spec_id": _GROSS_2020,
+                    "source_spec_id": pins[_GROSS_2020][0],
                     "period": Period(start=2020, end=2024),
-                    "unit": Unit(**_USD),
+                    "unit": Unit(**pins[_GROSS_2020][1]),
                 }
             ),
         ],
@@ -13548,12 +13678,12 @@ def test_a_window_search_refused_the_unit_keeps_a_prices_decision_of_its_own(
         rid: [slot for slot in plan.requirement(rid).decision_ids if slot.startswith("user_")]
         for rid in ("all", "recent")
     }
-    assert cited == {"all": [f"user_unit_{_GROSS}"], "recent": [f"user_prices_{_GROSS_2020}"]}
+    row, own = f"user_unit_{_GROSS}", f"user_prices_{refused}"
+    on_row = "recent" if lead_refused else "all"
+    off_row = "all" if lead_refused else "recent"
+    assert cited == {on_row: [row], off_row: [own]}
     chosen = {d.slot: d.chosen for d in plan.decisions if d.slot.startswith("user_")}
-    assert chosen == {
-        f"user_unit_{_GROSS}": "current prices in EUR",
-        f"user_prices_{_GROSS_2020}": "current prices in USD",
-    }
+    assert chosen == {row: "current prices in EUR", own: "current prices in USD"}
 
 
 _DAC2A = "provenance/OECDDAC2A"

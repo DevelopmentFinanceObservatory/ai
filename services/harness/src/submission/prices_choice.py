@@ -101,30 +101,27 @@ def unit_slot(group: str) -> str:
 def decision_slots(choices: Mapping[str, PricesChoice]) -> dict[str, str]:
     """The slot of the decision recording each part's choice in `choices`, by the part.
 
-    The parts one unit question covered (`PricesChoice.group`) share one
-    decision under `unit_slot`, the question's whole unit: the lead part's
-    unit, or the first priced member's when the lead holds no whole unit. A
-    member served in another unit, as when Search refused to re-read it in
-    the one chosen, keeps a decision of its own under `prices_slot`, as does
-    every choice naming no whole unit or no group.
+    The parts on one unit row (`PricesChoice.group`), every one served in the
+    whole unit its question chose, share one decision under `unit_slot`.
+    Every other choice, a part Search refused to read in that unit among
+    them, keeps a decision of its own under `prices_slot`.
     """
-    units: dict[str, Unit] = {}
-    for choice in choices.values():
-        if choice.unit is None or choice.group is None:
-            continue
-        lead = choices.get(choice.group)
-        held = lead.unit if lead is not None and lead.group == choice.group else None
-        units.setdefault(choice.group, held or choice.unit)
     return {
         part: (
             unit_slot(choice.group)
-            if choice.group is not None
-            and choice.unit is not None
-            and units.get(choice.group) == choice.unit
+            if choice.group is not None and choice.unit is not None
             else prices_slot(part)
         )
         for part, choice in choices.items()
     }
+
+
+def whole_unit_slots(choices: Mapping[str, PricesChoice]) -> frozenset[str]:
+    """The slots of the decisions recording a whole unit the user chose
+    (`decision_slots`): each choice's that names a `unit`, which a bare
+    prices answer, current or constant, never does."""
+    slots = decision_slots(choices)
+    return frozenset(slots[part] for part, choice in choices.items() if choice.unit is not None)
 
 
 class PricesChoice(NamedTuple):
@@ -136,8 +133,8 @@ class PricesChoice(NamedTuple):
     A unit question's answer also names the whole `unit`, currency and base
     year with the prices, that the series `spec_id` is served in: the series
     the agent fetches for the part (`harness.graph.state.units_served`), and
-    the `group`, the question's lead part (`harness.graph.state.ServedUnit.group`),
-    `None` when the record names none."""
+    the `group`, the lead part of the unit row the part sits on
+    (`harness.graph.state.ServedUnit.row`), `None` for a part on none."""
 
     prices: PriceBasis
     spec_id: str | None = None
@@ -714,9 +711,8 @@ def prices_decisions(
     whose dataset admission compiles the whole from, is the part's series
     or one the part offers in its place (`Parts.series`). Each part that some requirement reads states
     one decision fixing `prices`, which each of those cites, its `chosen`
-    what the user chose in words (`PricesChoice.words`). The parts one unit
-    question covered in one whole unit state one decision between them
-    (`decision_slots`), cited by every requirement reading any of them. A
+    what the user chose in words (`PricesChoice.words`). The parts on one
+    unit row state one decision between them (`decision_slots`), cited by every requirement reading any of them. A
     requirement citing one that `patch` does not state is appended, so
     `Plan.amend` replaces it. A part no requirement reads states nothing.
 

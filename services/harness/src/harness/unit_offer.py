@@ -188,6 +188,12 @@ def unit_words(unit: UnitChoice, offer: UnitOffer | None = None) -> str:
     return f"Current {name}"
 
 
+def unit_phrase(unit: UnitChoice, offer: UnitOffer | None = None) -> str:
+    """`unit_words` inside a sentence: "constant 2023 US dollars"."""
+    words = unit_words(unit, offer)
+    return words[:1].lower() + words[1:]
+
+
 def offered_unit_refusal(offer: UnitOffer, unit: UnitChoice) -> str | None:
     """Why `unit` lies outside `offer`, or `None` when the offer holds it."""
     currency = next((c for c in offer.currencies if c.code == unit.currency), None)
@@ -247,6 +253,15 @@ def whole_units(offer: UnitOffer) -> dict[str, UnitChoice]:
             year = both.base_year_max
         units.append(UnitChoice(currency=both.code, prices=prices, base_year=year))
     return {unit_option_id(unit): unit for unit in units}
+
+
+def row_units(offer: UnitOffer) -> dict[str, UnitChoice]:
+    """The units a plan card's unit row offering `offer` lists as options, by
+    option id: its `whole_units`, the start first when they leave it out, as
+    when its currency serves one basis."""
+    units = whole_units(offer)
+    start = unit_option_id(offer.start)
+    return units if start in units else {start: offer.start, **units}
 
 
 def unit_option_id(unit: UnitChoice) -> str:

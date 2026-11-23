@@ -8173,12 +8173,27 @@ _UNIT_ROW = _UNIT_DECISION.choice_id
 _USD_2015 = {"currency": "USD", "prices": "constant", "base_year": 2015}
 
 
-async def test_a_unit_row_switch_takes_any_unit_its_offer_holds_and_hands_it_on() -> None:
+@pytest.mark.parametrize(
+    ("switch", "line"),
+    [
+        ({"option_id": "USD-constant-2015", "unit": _USD_2015}, "use constant 2015 US dollars"),
+        ({"option_id": "EUR-current"}, "use current Euros"),
+        (
+            {"option_id": "EUR-current", "unit": {"currency": "EUR", "prices": "current"}},
+            "use current Euros",
+        ),
+    ],
+    ids=["unlisted-unit", "listed-option", "listed-unit"],
+)
+async def test_a_unit_row_switch_takes_any_unit_its_offer_holds_and_hands_it_on(
+    switch: dict[str, Any], line: str
+) -> None:
     """A switch of a unit row may carry `unit`, any unit the row's offer
     holds, named by `option_id`, though the row's whole units do not list it.
     A unit `option_id` does not name, one outside the offer, the one the row
     holds and a unit on a row offering none are refused 422. Constant 2015
-    US dollars resumes the plan, and the turn's record names that unit."""
+    US dollars, or current euros the row lists, by its option or as a unit,
+    resumes the plan, and the turn's record names that unit in one form."""
     app = _app(*_plan())
     async with _client(app) as client:
         plan = await _plan_with_a_choice(
@@ -8222,7 +8237,7 @@ async def test_a_unit_row_switch_takes_any_unit_its_offer_holds_and_hands_it_on(
         await _stream(
             client,
             "/api/studio/interrupt",
-            _switch_body(plan, choice_id=_UNIT_ROW, option_id="USD-constant-2015", unit=_USD_2015),
+            _switch_body(plan, choice_id=_UNIT_ROW, **switch),
         )
 
     assert [(r.status_code, r.json().get("constraint_id")) for r in refused] == [
@@ -8230,7 +8245,7 @@ async def test_a_unit_row_switch_takes_any_unit_its_offer_holds_and_hands_it_on(
     ] * len(cases)
     conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
     assert conversation.approvals == []
-    assert conversation.turn_user_message.endswith("(then: use constant 2015 US dollars)")
+    assert conversation.turn_user_message.endswith(f"(then: {line})")
 
 
 @pytest.mark.parametrize(

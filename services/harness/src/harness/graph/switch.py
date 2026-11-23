@@ -62,9 +62,10 @@ read_part_in_unit`), each from its own block, and re-pins every requirement
 citing the row to the series Search read for its part, stating that unit,
 in one revision (`_switched_unit`). A part Search cannot read in that unit
 fails the whole switch. A row stating a part's whole unit under the part's
-prices slot, on a plan card stored before unit questions had a row of their
-own, and a question whose parts are recorded with no `group`
-(`harness.graph.state.ServedUnit.group`) cannot be switched.
+own prices slot (`submission.prices_choice.prices_slot`) cannot be switched,
+nor can a unit row no part is recorded on (`harness.graph.state.
+ServedUnit.row`), as when the parts are recorded with no group or no unit
+chosen.
 
 A switch Search refuses (`requested_option_unavailable`,
 `conflicting_requested_options`), or one that fails anywhere else, offers
@@ -155,6 +156,7 @@ from harness.graph.state import (
     store_search,
     stored_mapping,
     unit_row_offers,
+    unit_row_parts,
     units_served,
 )
 from harness.plan_display import (
@@ -186,7 +188,7 @@ from harness.turn_records import (
     stored_choice,
     stored_count,
 )
-from harness.unit_offer import offered_unit_refusal, unit_option_id, unit_words, whole_units
+from harness.unit_offer import offered_unit_refusal, row_units, unit_option_id, unit_phrase
 from harness.unit_switch import UnitRefused
 from harness.wire import RetryMode, UnitChoice, UnitOffer
 
@@ -495,8 +497,8 @@ async def _switched_plan(
         and priced is not None
         and not switchable_decision(priced)
     ):
-        # A part's prices row stating a whole unit, on a card stored before
-        # unit questions had a row of their own. A switchable prices row
+        # A part's prices row stating a whole unit: a part on no unit row
+        # (`harness.graph.state.ServedUnit.row`). A switchable prices row
         # replans with the pick (`harness.decision_pick`).
         raise _unit_not_switchable()
     counted = chosen_count_decision(plan, choice_id)
@@ -738,8 +740,11 @@ async def _switched_unit(
     the decision under `slot` (`submission.prices_choice.unit_slot`), to the
     unit picked (`_picked_unit`).
 
-    The row's parts are those `units_served` records under the question's
-    lead part (`ServedUnit.group`), and its offer the one the card showed,
+    The row's parts are those `units_served` records on it
+    (`harness.graph.state.unit_row_parts`): the parts its question covered
+    that are served in the unit the question chose. A part Search refused to
+    read in that unit keeps a prices row of its own and is neither re-read
+    nor re-pinned. The row's offer is the one the card showed,
     recomputed from state (`harness.graph.state.unit_row_offers`). Each part
     is read in the unit picked at once (`read_part_in_unit`), the count read
     in its place re-read again in its place, and every requirement citing the
@@ -750,9 +755,8 @@ async def _switched_unit(
     new unit (`submission.prices_choice.prices_decisions`).
 
     Raises:
-        SwitchFailedError: Non-retryable when the plan holds no such row, the
-            question's parts are recorded with no group or its lead part not
-            at all, the row offers no unit, the unit picked lies outside its
+        SwitchFailedError: Non-retryable when the plan holds no such row, no
+            part is recorded on it (`ServedUnit.row`), the row offers no unit, the unit picked lies outside its
             offer or is the one it holds, or a requirement citing the row
             reads no part of the question; as Search's refusal says
             (`harness.unit_switch.UnitRefused`) when it cannot read a part in
@@ -763,9 +767,9 @@ async def _switched_unit(
     if decision is None:
         raise _choice_gone()
     lead = slot.removeprefix(UNIT_SLOT_PREFIX)
-    members = {part: served for part, served in units_served(state).items() if served.group == lead}
+    members = unit_row_parts(state).get(lead, {})
     offer = unit_row_offers(state).get(slot)
-    if lead not in members or offer is None:
+    if not members or offer is None:
         raise _unit_not_switchable()
     picked = _picked_unit(offer, option_id=option_id, unit=unit)
     if picked == offer.start:
@@ -811,7 +815,7 @@ async def _switched_unit(
         evidence_requirements=requirements,
         inherits={new: old for old, new in moves.items() if new != old},
     )
-    words = _lowered(unit_words(picked, offer))
+    words = unit_phrase(picked, offer)
     if "plan" not in revised:
         refused_revision = revised.get("refused") or {}
         logger.warning("plan unit switch not revised: %s", refused_revision)
@@ -897,8 +901,7 @@ def _picked_unit(offer: UnitOffer, *, option_id: str, unit: object) -> UnitChoic
     """The unit a switch of a unit row offering `offer` picks: `unit` when
     the answer states one, which `option_id` must name
     (`harness.unit_offer.unit_option_id`), else the whole unit the row lists
-    under `option_id` (`harness.studio_translate`'s options: `whole_units`
-    and the start).
+    under `option_id` (`row_units`).
 
     Raises:
         SwitchFailedError: Non-retryable when `unit` is no unit or not the
@@ -915,8 +918,7 @@ def _picked_unit(offer: UnitOffer, *, option_id: str, unit: object) -> UnitChoic
         if unit_option_id(picked) != option_id:
             raise SwitchFailedError("That unit is not the option picked.", code=_OPTION_UNAVAILABLE)
     else:
-        listed = {unit_option_id(offer.start): offer.start, **whole_units(offer)}
-        if (found := listed.get(option_id)) is None:
+        if (found := row_units(offer).get(option_id)) is None:
             raise SwitchFailedError(
                 "That unit is not offered for these figures.", code=_OPTION_UNAVAILABLE
             )
@@ -929,15 +931,15 @@ def _picked_unit(offer: UnitOffer, *, option_id: str, unit: object) -> UnitChoic
 def _unit_unavailable(unit: UnitChoice, offer: UnitOffer) -> SwitchFailedError:
     """The refusal of a switch to `unit`, which `offer` does not hold or no plan can state."""
     return SwitchFailedError(
-        f"Search does not offer {_lowered(unit_words(unit, offer))} for these figures.",
+        f"Search does not offer {unit_phrase(unit, offer)} for these figures.",
         code=_OPTION_UNAVAILABLE,
     )
 
 
 def _unit_not_switchable() -> SwitchFailedError:
-    """The refusal of a switch of a unit row this release cannot re-read: one
-    under a part's prices slot, or one whose question's parts are recorded
-    with no group (`ServedUnit.group`)."""
+    """The refusal of a switch of a whole unit no re-read can move: a row
+    under a part's prices slot, or a unit row no part is recorded on
+    (`ServedUnit.row`)."""
     return SwitchFailedError(
         "This plan's unit cannot be changed here. Ask for the unit you want.",
         code=SCOPE_CHOICE_NOT_APPLIED,
@@ -947,11 +949,6 @@ def _unit_not_switchable() -> SwitchFailedError:
 def _already_chosen() -> SwitchFailedError:
     """The refusal of a switch to the option its row already holds."""
     return SwitchFailedError("That choice is already on the plan.", code=SCOPE_CHOICE_NOT_APPLIED)
-
-
-def _lowered(words: str) -> str:
-    """`harness.unit_offer.unit_words` inside a sentence: "constant 2023 US dollars"."""
-    return words[:1].lower() + words[1:]
 
 
 def _count_spec_ids(ctx: NodeCtx[GraphEvent], pin: str) -> dict[str, str]:

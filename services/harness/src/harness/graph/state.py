@@ -328,13 +328,27 @@ class ServedUnit(BaseModel):
     the user picked in the same pause and Search read in the part's place,
     `None` when the part's own count was read or the record names no count.
     `group` is the lead part of the unit question that covered the part
-    (`UnitAsk.parts[0]`), which every part that question covered shares;
-    `None` on a record that names no group."""
+    (`UnitAsk.parts[0]`), which every part that question covered shares, and
+    `chosen` the unit that question's answer, or the last switch of its plan
+    card row, asked the part to be read in (`stated_unit`); each is `None`
+    on a record that names none."""
 
     spec_id: str
     unit: Unit | None
     count: str | None = None
     group: str | None = None
+    chosen: Unit | None = None
+
+    @property
+    def row(self) -> str | None:
+        """The lead part of the unit row the part sits on
+        (`submission.prices_choice.unit_slot`): `group`, when the part is
+        served in the unit `chosen` names. `None` for a part Search refused
+        to read in that unit, which keeps a prices row of its own, and for a
+        record naming no group or no chosen unit."""
+        if self.group is None or self.chosen is None or self.unit != self.chosen:
+            return None
+        return self.group
 
 
 def units_served(state: SessionState) -> dict[str, ServedUnit]:
@@ -363,45 +377,52 @@ def record_unit_served(
     unit: UnitChoice | None,
     *,
     group: str,
+    chosen: UnitChoice,
     count: str | None = None,
 ) -> None:
     """Record that `part`, which the unit question led by `group` covered, is
     fetched as `spec_id`, served in `unit`, read as `count`, another count of
-    the part, when one was read in its place. A unit no plan can state is
-    recorded as none (`stated_unit`)."""
+    the part, when one was read in its place, the question's answer having
+    chosen `chosen`. A unit no plan can state is recorded as none
+    (`stated_unit`)."""
     stated = stated_unit(unit) if unit is not None else None
     served = {name: one.model_dump(mode="json") for name, one in units_served(state).items()}
-    served[part] = ServedUnit(spec_id=spec_id, unit=stated, count=count, group=group).model_dump(
-        mode="json"
-    )
+    served[part] = ServedUnit(
+        spec_id=spec_id, unit=stated, count=count, group=group, chosen=stated_unit(chosen)
+    ).model_dump(mode="json")
     state[ORCHESTRATOR_UNIT_SERVED_KEY] = served
+
+
+def unit_row_parts(state: SessionState) -> dict[str, dict[str, ServedUnit]]:
+    """The parts on each unit row (`ServedUnit.row`), by the row's lead part,
+    each part with its record, in record order. Every part on a row is served
+    in the unit the row's question chose."""
+    rows: dict[str, dict[str, ServedUnit]] = {}
+    for part, served in units_served(state).items():
+        if (lead := served.row) is not None:
+            rows.setdefault(lead, {})[part] = served
+    return rows
 
 
 def unit_row_offers(state: SessionState) -> dict[str, UnitOffer]:
     """The units the plan card's row for each unit question's whole unit offers,
     by the row's decision slot (`submission.prices_choice.unit_slot`).
 
-    A question's parts are the records of `units_served` naming its lead part
-    as their `group`, the lead first. The offer is what every part's block on
-    record (`ORCHESTRATOR_SPECS_KEY`) converts into (`unit_offer`), starting
-    on the unit the parts are in now: the lead's served unit, else the first
-    part's that names one (`submission.prices_choice.decision_slots`). A
-    question with a part whose block is not on record, with no served unit,
-    or whose blocks share no unit both bases serve or leave its unit out,
-    offers none.
+    A row's parts are the records of `units_served` on it (`unit_row_parts`).
+    The offer is what each of those parts' blocks on record
+    (`ORCHESTRATOR_SPECS_KEY`) converts into (`unit_offer`), starting on the
+    unit they are served in, the one the question's answer chose
+    (`ServedUnit.chosen`). A part Search refused to read in that unit sits on
+    no row. A row with a part whose block is not on record, or whose blocks
+    share no unit both bases serve or leave its unit out, offers none.
     """
-    groups: dict[str, list[tuple[str, ServedUnit]]] = {}
-    for part, served in units_served(state).items():
-        if served.group is not None:
-            groups.setdefault(served.group, []).append((part, served))
     specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
     offers: dict[str, UnitOffer] = {}
-    for lead, members in groups.items():
-        members.sort(key=lambda member: member[0] != lead)
-        if any(part not in specs for part, _ in members):
+    for lead, members in unit_row_parts(state).items():
+        if any(part not in specs for part in members):
             continue
-        unit = next((served.unit for _, served in members if served.unit is not None), None)
-        offer = unit_offer([specs[part] for part, _ in members])
+        unit = next(iter(members.values())).unit
+        offer = unit_offer([specs[part] for part in members])
         if unit is None or offer is None:
             continue
         start = UnitChoice.model_validate(unit.model_dump(mode="json"))

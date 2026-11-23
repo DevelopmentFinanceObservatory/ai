@@ -52,6 +52,9 @@ from harness.graph.state import (
     ORCHESTRATOR_UNIT_SERVED_KEY,
     ORCHESTRATOR_UNIT_SETTLED_KEY,
     PICK_REPLAN_KEY,
+    ServedUnit,
+    unit_row_offers,
+    units_served,
 )
 from harness.graph.switch import SCOPE_CHOICE_NOT_APPLIED, SWITCH_CANCELLED, SwitchFailedError
 from harness.plan_display import choice_id, count_choice_id, decision_option_id
@@ -67,6 +70,7 @@ from harness.turn.loop import Outcome, stop_turn
 from harness.turn.node import Next
 from harness.turn.store import Cursor, TurnStatus
 from harness.turn_records import SearchReading
+from harness.wire import UnitChoice
 from planner.call import PlannerCall
 from planner.plan import (
     DECISION_PICK_STATE_KEY,
@@ -2232,6 +2236,7 @@ def _unit_state(
     *,
     unit: Mapping[str, Any] = _USD_2023,
     group: str | None = _FK_GROSS,
+    chosen: bool = True,
     count: str | None = None,
     parts: tuple[str, ...] = (_FK_GROSS, _OTHER),
 ) -> dict[str, Any]:
@@ -2240,7 +2245,8 @@ def _unit_state(
     same measure over 2010 to 2014) with `unit`: Search read each part in
     constant 2023 US dollars, and served each as it stands in current US
     dollars. Each part is recorded under `group`, the question's lead part,
-    and read as `count` when given."""
+    with `unit` as the unit chosen unless `chosen` is false, and read as
+    `count` when given."""
     reread = unit != _USD
     reads = dict(zip((_FK_GROSS, _OTHER), (_READ_RECENT, _READ_EARLY), strict=True))
     fetched = {part: reads[part] if reread else part for part in parts}
@@ -2253,7 +2259,13 @@ def _unit_state(
         ],
         ORCHESTRATOR_UNIT_READ_KEY: {part: [reads[part]] for part in parts} if reread else {},
         ORCHESTRATOR_UNIT_SERVED_KEY: {
-            part: {"spec_id": fetched[part], "unit": dict(unit), "count": count, "group": group}
+            part: {
+                "spec_id": fetched[part],
+                "unit": dict(unit),
+                "count": count,
+                "group": group,
+                "chosen": dict(unit) if chosen else None,
+            }
             for part in parts
         },
         ORCHESTRATOR_UNIT_SETTLED_KEY: sorted({*parts, *fetched.values()}),
@@ -2300,8 +2312,8 @@ def _unit_plan(*, slot: str = _UNIT_SLOT, unit: Mapping[str, Any] = _USD_2023) -
 class _UnitRevisingPlanner(_Planner):
     """A `PlannerModel` drafting `plans` and answering each revision with the
     prior plan, each requirement it is handed in place of the one by its id,
-    and each user decision on prices fixing the prices they state, as
-    admission writes it again."""
+    and each user decision on prices those requirements cite fixing the
+    prices they state, as admission writes it again."""
 
     def __init__(self, plans: list[dict[str, Any]] | None = None) -> None:
         super().__init__(plans or [])
@@ -2312,12 +2324,13 @@ class _UnitRevisingPlanner(_Planner):
         prior = kwargs["prior_plan"]
         handed = {r["id"]: r for r in kwargs["evidence_requirements"]}
         prices = {r["unit"]["prices"] for r in handed.values() if r.get("unit")}
+        cited = {slot for r in handed.values() for slot in r.get("decision_ids") or ()}
         revised = {
             **prior,
             "version": prior["version"] + 1,
             "decisions": [
                 {**d, "fixes": {**d["fixes"], "prices": next(iter(prices))}}
-                if d["slot"].startswith("user_") and len(prices) == 1
+                if d["slot"].startswith("user_") and d["slot"] in cited and len(prices) == 1
                 else d
                 for d in prior["decisions"]
             ],
@@ -2494,15 +2507,23 @@ async def test_a_unit_row_switch_to_a_unit_the_row_does_not_offer_asks_search_no
     assert offered["revision"] == plan_revision(plan)
 
 
-async def test_a_unit_row_whose_parts_name_no_question_is_not_switched() -> None:
-    """Parts recorded with no group, as a turn paused before records named
-    their question left them, cannot be told apart from another question's:
-    the row is refused for good with nothing asked of Search."""
+@pytest.mark.parametrize(
+    "recorded",
+    [{"group": None}, {"chosen": False}],
+    ids=["no-group", "no-unit-chosen"],
+)
+async def test_a_unit_row_whose_parts_name_no_question_is_not_switched(
+    recorded: dict[str, Any],
+) -> None:
+    """Parts recorded with no group cannot be told apart from another
+    question's, and parts recorded with no unit chosen cannot be told apart
+    from a part Search refused that unit: the row is refused for good with
+    nothing asked of Search."""
     plan = _unit_plan()
     search = _UnitSearch()
 
     offered, planner = await _switch_unit(
-        _unit_state(plan, group=None),
+        _unit_state(plan, **recorded),
         {"choice_id": _UNIT_ROW, "option_id": "USD-current"},
         search,
     )
@@ -2511,6 +2532,120 @@ async def test_a_unit_row_whose_parts_name_no_question_is_not_switched() -> None
     assert offered["switch_failed"]["retryable"] is False
     assert search.posted == []
     assert planner.revisions == []
+
+
+_THIRD = "spec_" + "3" * 32
+_READ_THIRD = "spec_" + "4" * 32
+
+
+async def test_a_unit_row_switch_moves_only_the_parts_served_in_the_unit_chosen() -> None:
+    """A unit question led by the recent window covers three windows of one
+    measure. The user chose constant 2023 US dollars; Search refused the
+    lead window, which the agent fetches in current US dollars under a
+    prices row of its own, and read the 2010 to 2014 and 2000 to 2004
+    windows in the unit chosen, which the unit row states. The row starts
+    on the unit chosen and offers what those two windows convert into. A
+    switch to constant 2015 US dollars re-reads those two windows alone and
+    re-pins the two requirements citing the row; the lead window is neither
+    asked of Search nor re-pinned, and its record stands."""
+    third = _other_window()
+    third["spec_id"] = third["definition"]["spec_id"] = _THIRD
+    third["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start": 2000,
+        "end": 2004,
+    }
+    usd_2015 = {**_USD_2023, "base_year": 2015}
+    own = f"user_prices_{_FK_GROSS}"
+    row = _unit_plan().decisions[0]
+    requirement = _unit_plan().evidence_requirements[0]
+    plan = PlannerPlan(
+        question=_AID,
+        decisions=[
+            row,
+            row.model_copy(
+                update={
+                    "slot": own,
+                    "options": ("current prices in USD", "constant prices"),
+                    "chosen": "current prices in USD",
+                    "rationale": "The user chose current prices in USD.",
+                    "fixes": DecisionFixes(prices="current"),
+                }
+            ),
+        ],
+        evidence_requirements=[
+            requirement.model_copy(
+                update={
+                    "id": rid,
+                    "decision_ids": (slot,),
+                    "period": period,
+                    "source_spec_id": pin,
+                    "unit": Unit(**unit),
+                }
+            )
+            for rid, slot, period, pin, unit in (
+                ("recent", own, Period(start=2018, end=2022), _FK_GROSS, _USD),
+                ("early", _UNIT_SLOT, Period(start=2010, end=2014), _READ_EARLY, _USD_2023),
+                ("earliest", _UNIT_SLOT, Period(start=2000, end=2004), _READ_THIRD, _USD_2023),
+            )
+        ],
+        version=1,
+    )
+    served = {
+        _FK_GROSS: {"spec_id": _FK_GROSS, "unit": _USD, "group": _FK_GROSS, "chosen": _USD_2023},
+        _OTHER: {
+            "spec_id": _READ_EARLY,
+            "unit": _USD_2023,
+            "group": _FK_GROSS,
+            "chosen": _USD_2023,
+        },
+        _THIRD: {
+            "spec_id": _READ_THIRD,
+            "unit": _USD_2023,
+            "group": _FK_GROSS,
+            "chosen": _USD_2023,
+        },
+    }
+    state: dict[str, Any] = {
+        "plan": plan.model_dump_json(),
+        ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: _FRANCE_KENYA, _OTHER: _other_window(), _THIRD: third},
+        ORCHESTRATOR_SEARCHES_KEY: [
+            _open_reading(_FK_GROSS, text=_AID),
+            _open_reading(_OTHER, text=_AID),
+            _open_reading(_THIRD, text=_AID),
+        ],
+        ORCHESTRATOR_UNIT_READ_KEY: {_OTHER: [_READ_EARLY], _THIRD: [_READ_THIRD]},
+        ORCHESTRATOR_UNIT_SERVED_KEY: copy.deepcopy(served),
+        ORCHESTRATOR_UNIT_SETTLED_KEY: sorted(
+            {_FK_GROSS, _OTHER, _THIRD, _READ_EARLY, _READ_THIRD}
+        ),
+    }
+    offers = unit_row_offers(cast(Any, state))
+    assert list(offers) == [_UNIT_SLOT]
+    assert offers[_UNIT_SLOT].start == UnitChoice.model_validate(_USD_2023)
+    search = _UnitSearch()
+
+    offered, planner = await _switch_unit(
+        state,
+        {"choice_id": _UNIT_ROW, "option_id": "USD-constant-2015", "unit": usd_2015},
+        search,
+    )
+
+    assert "switch_failed" not in offered, offered.get("switch_failed")
+    windows = sorted(posted["identity"]["requested_window"]["start"] for posted in search.posted)
+    assert windows == [2000, 2010]
+    assert _requested_units(search) == [usd_2015, usd_2015]
+    (revision,) = planner.revisions
+    assert {r["id"]: Unit(**r["unit"]) for r in revision["evidence_requirements"]} == {
+        "early": Unit(**usd_2015),
+        "earliest": Unit(**usd_2015),
+    }
+    now = units_served(cast(Any, state))
+    assert now[_FK_GROSS] == ServedUnit.model_validate(served[_FK_GROSS])
+    assert {part: now[part].chosen for part in (_OTHER, _THIRD)} == {
+        _OTHER: Unit(**usd_2015),
+        _THIRD: Unit(**usd_2015),
+    }
 
 
 async def test_a_unit_row_switch_reads_the_count_picked_beside_the_unit_again() -> None:

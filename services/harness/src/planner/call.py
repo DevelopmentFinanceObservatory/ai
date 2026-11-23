@@ -336,8 +336,9 @@ def _priced_answers(
     the user chose, or the one its chips started on for a skip, unless
     Search refused it, when the part keeps the unit it is served in. The
     choice is keyed by the part alone, names that series (`spec_id`) and
-    the question's lead part the record holds (`ServedUnit.group`),
-    whose currency may differ from the part's; the series reaches the part
+    the unit row the part sits on (`ServedUnit.row`), none for a part Search
+    refused to read in the unit chosen, and the series' currency may differ
+    from the part's; the series reaches the part
     through `submission.prices_choice.Parts.fetched`. A part whose
     served unit cannot be stated takes no choice. A part with no served unit
     recorded, answered in a turn paused before the `ask` node recorded one,
@@ -364,7 +365,7 @@ def _priced_answers(
                         fetched.unit.prices,
                         fetched.spec_id,
                         unit=fetched.unit,
-                        group=fetched.group,
+                        group=fetched.row,
                     )
             elif prices is not None:
                 for priced in (part, *reads.get(part, ())):

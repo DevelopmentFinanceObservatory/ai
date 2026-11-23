@@ -64,7 +64,7 @@ from harness.scope_choices import mark_planner_axes
 from harness.tool_contracts import resolver_digest
 from harness.turn.node import Next, Node, NodeCtx, Pause, TurnKey
 from harness.turn_records import SearchReading
-from harness.unit_offer import served_unit, unit_words
+from harness.unit_offer import served_unit, unit_phrase
 from harness.unit_switch import UnitRefused, UnitResubmitted, resubmit_unit
 from harness.wire import UnitChoice, UnitOffer
 
@@ -330,7 +330,7 @@ async def _unit_reply(
     unit when they left it to the agent, then a sentence for each part it
     covers (`_part_in_unit`)."""
     unit = answered_unit(ask.offer, answer)
-    words = _in_sentence(unit_words(unit, ask.offer))
+    words = unit_phrase(unit, ask.offer)
     lead = (
         f"The user chose {words}."
         if answer.get("kind") == "unit"
@@ -356,11 +356,6 @@ async def _unit_reply(
             )
         )
     return " ".join(sentences)
-
-
-def _in_sentence(words: str) -> str:
-    """`harness.unit_offer.unit_words` inside a sentence: "constant 2023 US dollars"."""
-    return words[:1].lower() + words[1:]
 
 
 def _latest_reading(state: Any, spec_id: str) -> SearchReading | None:
@@ -414,9 +409,10 @@ async def read_part_in_unit(
 
     The part, and the count, are settled on every path, so the question is
     not asked of them again, and the series fetched for the part is recorded
-    with the unit it is served in, the count read in the part's place and
-    `group` (`record_unit_served`): `unit`, unless Search refuses it, when the series
-    keeps the unit it is served in."""
+    with the unit it is served in, the count read in the part's place,
+    `group` and `unit` as the unit chosen (`record_unit_served`): served in
+    `unit`, unless Search refuses it, when the series keeps the unit it is
+    served in."""
     block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(part) or {}
     reading = _latest_reading(state, part)
     label = (reading.text if reading is not None else None) or part
@@ -429,7 +425,7 @@ async def read_part_in_unit(
     served = served_unit(target_block)
     read_count = target if target != part else None
     if count is None and served == unit:
-        record_unit_served(state, part, part, unit, group=group)
+        record_unit_served(state, part, part, unit, group=group, chosen=unit)
         return UnitRead(label, target, served, None)
     result = await resubmit_unit(
         surface,
@@ -439,11 +435,13 @@ async def read_part_in_unit(
         label=label,
     )
     if isinstance(result, UnitRefused):
-        record_unit_served(state, part, target, served, group=group, count=read_count)
+        record_unit_served(state, part, target, served, group=group, chosen=unit, count=read_count)
         return UnitRead(label, target, served, result)
     settle_unit(state, result.spec_id)
     record_unit_read(state, part, result.spec_id)
-    record_unit_served(state, part, result.spec_id, unit, group=group, count=read_count)
+    record_unit_served(
+        state, part, result.spec_id, unit, group=group, chosen=unit, count=read_count
+    )
     digest = resolver_digest({"parts": [dict(result.part)]})
     for read in digest.get("part_digests") or ():
         read["variable"] = label
@@ -472,13 +470,13 @@ async def _part_in_unit(
     """What the agent fetches for `part` in `unit`, in a sentence: the part
     as it stands, the series Search re-read it as (`read_part_in_unit`), or,
     for a unit Search does not serve, the part as served, said so."""
-    words = _in_sentence(unit_words(unit, offer))
+    words = unit_phrase(unit, offer)
     read = await read_part_in_unit(state, surface, part, unit, group=group, count=count)
     if read.result is None:
         return f"{read.label} ({part}) is served in {words}: fetch it as it stands."
     if isinstance(read.result, UnitRefused):
         served = read.served
-        as_served = f", in {_in_sentence(unit_words(served, offer))}," if served is not None else ""
+        as_served = f", in {unit_phrase(served, offer)}," if served is not None else ""
         return (
             f"Search could not serve {words} for {read.label}: {read.result.reason} Fetch "
             f"{read.target} as served{as_served} and say so."
