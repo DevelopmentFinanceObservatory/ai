@@ -193,6 +193,7 @@ from common.refusal import internal_error_message
 from common.telemetry import current_trace_id
 from compiler.arguments import literal_argument_errors
 from compiler.capabilities import CAPABILITIES, Extract, ToolCapability
+from compiler.compile import wholes_on_their_sources
 from compiler.evidence import (
     EvidenceIssue,
     Severity,
@@ -1588,6 +1589,15 @@ class _Run:
             b.step_id: workflow.source_of(b.step_id) or self.sources[b.spec_id]
             for b in workflow.evidence_bindings
         }
+        # Each retrieval's evidence is held to its requirement as the compiler read it
+        # on the approved source: a whole (`DatasetRequirement.whole_of`) covering what
+        # its part covers (`compiler.compile.wholes_on_their_sources`). Every whole a
+        # retrieval reads has its approved source, so none is read without one.
+        self.retrieved: dict[str, DatasetRequirement] = wholes_on_their_sources(
+            self.requirements,
+            {b.requirement_id: self.approved_source[b.step_id] for b in workflow.evidence_bindings},
+            summed=(),
+        )
         self.steps_by_id: dict[str, WorkflowStep] = {s.id: s for s in workflow.steps}
         # The entities each retrieval left out, by the role and ref its
         # approved source resolved them to, with their findings
@@ -2889,7 +2899,8 @@ class _Run:
         return frame, manifest_ref if manifest_ref != frame else None
 
     async def _check_evidence(self, step: WorkflowStep, result: ToolCallResult) -> EvidenceRecord:
-        requirement = self.requirements[self.evidence_bindings[step.id].requirement_id]
+        requirement_id = self.evidence_bindings[step.id].requirement_id
+        requirement = self.retrieved.get(requirement_id) or self.requirements[requirement_id]
         # An evidence binding only ever names a retrieval, and only a dataset
         # requirement is ever carried out by one (`planner.proof.mismatches`
         # rejects any other pairing before a plan can be approved).

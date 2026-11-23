@@ -54,6 +54,7 @@ from harness.graph.state import (
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
 from harness.planner_adapter import (
+    _as_authored,
     _reading_pin_sources,
 )
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
@@ -78,7 +79,7 @@ from planner.operations import (
     RetrieveOperation,
     Translation,
 )
-from planner.parties import PARTY_ROLES, PartyRole, flow_side, party_role, role_party
+from planner.parties import PARTY_ROLES, PartyRole, flow_side, party_role
 from planner.plan import (
     ALIGNED_PINS_STATE_KEY,
     AMENDMENT_ENTRY_STATE_KEY,
@@ -123,19 +124,23 @@ from planner.plan import (
     RefusedSpec,
     RequirementSide,
     ResolvedBy,
+    SessionState,
     ShareOfRequirement,
     SumOfRequirement,
     Unit,
     UnsupportedOperation,
     WholeOf,
+    WholeSum,
     WindowedPin,
     aligned_pins,
+    authored,
     clear_unsupported,
     compile_warnings,
     current_discovery_time_left,
     current_recorded_identity,
     fix_disagreements,
     held_sources,
+    inputs_of,
     is_dataset,
     is_scope_choice,
     is_search_pin,
@@ -6906,7 +6911,7 @@ def _us_2023(
             id=requirement_id,
             decision_ids=["measure", *cited],
             measure=measure,
-            entities=[Entity(name="United States", role="donor")],
+            entities=[] if whole_of else [Entity(name="United States", role="donor")],
             period=Period(start=2023, end=2023),
             source=named,
             source_spec_id=None if name is None else _us_block(name)["spec_id"],
@@ -7150,7 +7155,14 @@ async def test_a_declared_whole_offers_no_row_on_the_axis_it_leaves_open(
         restated = load_plan(ctx.state).requirement(_WHOLE)  # type: ignore[union-attr]
         result = await propose(
             evidence_requirements=[
-                restated.model_copy(update={"whole_of": whole_of if declared else None})
+                restated.model_copy(
+                    update={
+                        "whole_of": whole_of if declared else None,
+                        "entities": ()
+                        if declared
+                        else (Entity(name="United States", role="donor"),),
+                    }
+                )
             ],
             amends_version=result["version"],
             tool_context=ctx,
@@ -7288,7 +7300,6 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
                 id="narrow_whole",
                 decision_ids=["measure"],
                 measure="US total ODA",
-                entities=[united_states],
                 period=Period(start=2023, end=2023),
                 whole_of=WholeOf(part="narrow_part", axis="sector"),
             ),
@@ -7576,7 +7587,6 @@ async def test_wholes_declaring_one_part_and_axis_share_one_compile(
         id="total_reported",
         decision_ids=["measure"],
         measure="US total ODA",
-        entities=[Entity(name="United States", role="donor")],
         period=Period(start=2023, end=2023),
         whole_of=WholeOf(part=_PART, axis="sector"),
     )
@@ -7716,6 +7726,7 @@ async def test_a_declared_whole_replaces_the_planners_decision_on_its_source(
                 pinned.model_copy(
                     update={
                         "source_spec_id": None,
+                        "entities": (),
                         "whole_of": WholeOf(part=_PART, axis="sector"),
                     }
                 )
@@ -8913,43 +8924,24 @@ async def test_a_declared_whole_names_why_its_part_could_not_be_read(
     assert surface.calls == []
 
 
-_KENYA_RECIPIENT = Entity(name="Kenya", role="recipient")
-
-
 @pytest.mark.parametrize(
     ("whole_of", "entities", "across"),
     [
-        pytest.param(WholeOf(part=_SHARE, axis="sector"), None, (), id="part-is-a-calculation"),
-        pytest.param(WholeOf(part=_WHOLE, axis="sector"), None, (), id="part-is-itself"),
+        pytest.param(WholeOf(part=_SHARE, axis="sector"), (), (), id="part-is-a-calculation"),
+        pytest.param(WholeOf(part=_WHOLE, axis="sector"), (), (), id="part-is-itself"),
+        # A whole covers its part's parties, so it states none of its own.
         pytest.param(
             WholeOf(part=_PART, axis="sector"),
             [Entity(name="France", role="donor")],
             (),
-            id="other-parties",
+            id="states-entities",
         ),
-        # All aid to Kenya does not hold US aid to every recipient.
-        pytest.param(
-            WholeOf(part=_PART, axis="donor"),
-            [_KENYA_RECIPIENT],
-            ("donor",),
-            id="donor-whole-names-a-party-the-part-does-not",
-        ),
-        # A donor whole names one group in place of 'donor' only where it is not the
-        # part's own donor, which would divide the part by itself.
-        pytest.param(
-            WholeOf(part=_PART, axis="donor"), None, (), id="donor-whole-names-the-parts-donor"
-        ),
-        pytest.param(
-            WholeOf(part=_PART, axis="donor"),
-            [Entity(name="DAC countries", role="donor"), Entity(name="France", role="donor")],
-            (),
-            id="donor-whole-names-two-donors",
-        ),
+        pytest.param(WholeOf(part=_PART, axis="donor"), (), ("donor",), id="states-across"),
         # The part names no recipient, so there is none to leave open.
         pytest.param(
             WholeOf(part=_PART, axis="recipient"),
-            None,
-            ("recipient",),
+            (),
+            (),
             id="recipient-whole-of-a-part-naming-none",
         ),
     ],
@@ -8957,20 +8949,20 @@ _KENYA_RECIPIENT = Entity(name="Kenya", role="recipient")
 def test_a_whole_of_naming_no_part_it_can_be_counted_from_is_an_invalid_plan(
     decision: DecisionFactory,
     whole_of: WholeOf,
-    entities: list[Entity] | None,
+    entities: list[Entity],
     across: tuple[str, ...],
 ) -> None:
-    """A whole declared over a calculation, over itself, for other parties than its
-    part, over every donor while naming a party the part does not, or over every
-    recipient of a part naming none, does not hold its part or cannot be compiled
-    from the part's pin, so the plan is refused for repair."""
+    """A whole declared over a calculation, over itself, or over every recipient of
+    a part naming none cannot be compiled from the part's pin, and one stating
+    parties of its own can only disagree with its part's, so the plan is refused
+    for repair."""
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"))
     whole = DatasetRequirement(
         id=_WHOLE,
         decision_ids=["measure"],
         measure="total ODA",
-        entities=entities if entities is not None else [Entity(name="United States", role="donor")],
+        entities=entities,
         across=across,
         period=Period(start=2023, end=2023),
         whole_of=whole_of,
@@ -9153,15 +9145,14 @@ async def _share_over_every(
     decision: DecisionFactory,
     *,
     year: int = 2023,
-    whole_names: str | None = None,
+    pooled: bool = True,
 ) -> dict[str, object]:
     """Propose the part `block` as a share of its whole over every `axis`, a donor or
-    recipient, summed by year, over `year`, with `surface` answering the whole; `block`
-    is shown.
+    recipient, over `year`, with `surface` answering the whole; `block` is shown. The
+    whole states no entities or `across`, and with `pooled` it is summed by year
+    before the share reads it.
     The part names its donor by Search's label for it, and Africa as its recipient
-    where `block` names Africa's set there, else Search's label for its recipient.
-    With `whole_names`, the whole names that entity on `axis` in place of stating
-    `axis` in `across`, the form `name_pinned_groups` rewrites a whole to."""
+    where `block` names Africa's set there, else Search's label for its recipient."""
     _show_blocks(ctx, block)
     resolved = block["resolved"]
     labels = {e["role"]: e["label"] for e in resolved["entities"]}
@@ -9171,7 +9162,6 @@ async def _share_over_every(
         group = (resolved.get("entity_groups") or {}).get("destination")
         recipient = group["label"] if group else labels["destination"]
         named.append(Entity(name=recipient, role="recipient"))
-    side = "giving" if axis == "donor" else "receiving"
     period = Period(start=year, end=year)
     return await call_planner_tool(
         _tools_reading(cast(ToolSurface, surface))["propose_plan"],
@@ -9191,26 +9181,27 @@ async def _share_over_every(
                 id=_WHOLE,
                 decision_ids=["measure"],
                 measure="total aid",
-                entities=[
-                    *(e for e in named if role_party(cast(str, e.role)) != side),
-                    *([Entity(name=whole_names, role=axis)] if whole_names else []),
-                ],
-                across=() if whole_names else (axis,),
                 period=period,
                 whole_of=WholeOf(part=_PART, axis=axis),
             ),
-            AggregateRequirement(
-                id=_TOTAL,
-                decision_ids=["measure"],
-                input_id=_WHOLE,
-                reduction=Reduction.SUM,
-                group_by=(GroupBy.PERIOD,),
+            *(
+                [
+                    AggregateRequirement(
+                        id=_TOTAL,
+                        decision_ids=["measure"],
+                        input_id=_WHOLE,
+                        reduction=Reduction.SUM,
+                        group_by=(GroupBy.PERIOD,),
+                    )
+                ]
+                if pooled
+                else []
             ),
             ShareOfRequirement(
                 id=_SHARE,
                 decision_ids=["measure"],
                 numerator=RequirementSide(input_id=_PART),
-                denominator=RequirementSide(input_id=_TOTAL),
+                denominator=RequirementSide(input_id=_TOTAL if pooled else _WHOLE),
             ),
         ],
         tool_context=ctx,
@@ -9329,6 +9320,320 @@ async def test_a_declared_whole_over_every_donor_or_recipient_leaves_that_role_o
     assert stated.chosen.endswith(total), stated.chosen
     assert stated.rationale.endswith(f"count the same {alike}."), stated.rationale
     assert stated.slot in plan.requirement(_WHOLE).decision_ids
+
+
+def _summed_whole(plan: Plan) -> tuple[DatasetRequirement, list[EvidenceRequirement]]:
+    """The whole of `plan` (`DatasetRequirement.whole_of`) and every requirement
+    reading it."""
+    (whole,) = [
+        r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement) and r.whole_of
+    ]
+    return whole, [r for r in plan.evidence_requirements if whole.id in inputs_of(r)]
+
+
+# Search's answer for US health aid to Africa over every donor, binding the donors
+# to the published total of official donors as DAC2a does, where the CRS leaves
+# them open.
+_DONORS_BOUND: dict[str, Any] = {
+    "groups": {
+        "origin": {
+            "label": "official donors",
+            "total": "DACOfficialDonors",
+            "members": ["country/USA", "country/FRA"],
+        }
+    },
+    "bound": ["DACOfficialDonors"],
+}
+
+
+@pytest.mark.parametrize(
+    ("answer", "pooled", "summed"),
+    [
+        pytest.param({}, False, True, id="donors-open-read-directly"),
+        pytest.param({}, True, True, id="donors-open-planner-pool"),
+        pytest.param(_DONORS_BOUND, False, False, id="donors-bound"),
+    ],
+)
+async def test_a_whole_search_leaves_open_is_summed_by_one_step_admission_adds(
+    decision: DecisionFactory, answer: dict[str, Any], pooled: bool, summed: bool
+) -> None:
+    """US health aid to Africa as a share of every donor's. Where Search leaves the
+    donors open on the whole, as the CRS does, `propose_plan` adds one aggregate
+    summing them by year, keeping Africa, and every reader of the whole reads it, a
+    pool the planner wrote included. The planner is shown the plan without it.
+    Where Search binds the donors' total the plan is as written."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block, **answer)
+    ctx = _FakeToolContext()
+
+    result = await _share_over_every(surface, ctx, block, "donor", decision, pooled=pooled)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole, readers = _summed_whole(plan)
+    if not summed:
+        assert plan.whole_sums == ()
+        assert [type(reader) for reader in readers] == [
+            AggregateRequirement if pooled else ShareOfRequirement
+        ]
+        return
+    (added,) = readers
+    assert plan.whole_sums == (WholeSum(whole_id=whole.id, sum_id=added.id),)
+    assert isinstance(added, AggregateRequirement)
+    assert (added.reduction, added.group_by) == (Reduction.SUM, (GroupBy.PERIOD, GroupBy.ENTITY))
+    over_sum = [r for r in plan.evidence_requirements if added.id in inputs_of(r)]
+    assert [type(r) for r in over_sum] == [AggregateRequirement if pooled else ShareOfRequirement]
+    shown = _as_authored(plan)
+    assert shown is not None
+    assert added.id not in [r["id"] for r in shown["evidence_requirements"]]
+    assert "whole_sums" not in shown
+
+
+async def test_a_part_moved_between_datasets_takes_or_drops_the_sum_with_its_whole(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid to Africa over every donor, the part moved by amendment from a
+    dataset whose whole Search leaves the donors open, as the CRS does, to one
+    whose whole binds their total, as DAC2a does, and back. The sum goes with the
+    first move and comes back with the second."""
+    crs = _us_health_to_africa()
+    dac2a = json.loads(json.dumps(crs).replace(_AFRICA_PART, f"spec_{'d' * 32}"))
+    surface = _OpenedWholeCompiles(crs)
+    ctx = _FakeToolContext()
+    await _share_over_every(surface, ctx, crs, "donor", decision, pooled=False)
+    _show_blocks(ctx, crs, dac2a)
+    surface.part, surface.groups, surface.bound = (
+        dac2a,
+        _DONORS_BOUND["groups"],
+        _DONORS_BOUND["bound"],
+    )
+    tool = _tools_reading(cast(ToolSurface, surface))["propose_plan"]
+    summed: list[int] = []
+    for block in (dac2a, crs):
+        plan = load_plan(ctx.state)
+        assert plan is not None
+        part = plan.requirement(_PART)
+        assert isinstance(part, DatasetRequirement)
+
+        result = await call_planner_tool(
+            tool,
+            decisions=drafts([decision()]),
+            evidence_requirements=[part.model_copy(update={"source_spec_id": block["spec_id"]})],
+            amends_version=plan.version,
+            tool_context=ctx,
+        )
+
+        assert result["outcome"] == Outcome.OK.value, result
+        amended = load_plan(ctx.state)
+        assert amended is not None
+        summed.append(len(amended.whole_sums))
+    assert summed == [0, 1]
+
+
+async def test_an_added_sum_takes_an_id_no_requirement_of_the_plan_holds(
+    decision: DecisionFactory,
+) -> None:
+    """The sum over a whole is named `{whole}_sum`, or the first free id after it
+    where a requirement the planner wrote already holds that one."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+    await _share_over_every(surface, ctx, block, "donor", decision, pooled=False)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole, _ = _summed_whole(plan)
+    (pin,) = [pin for pin in aligned_pins(ctx.state) if pin.whole_axis is not None]
+    planners = AggregateRequirement(
+        id=f"{whole.id}_sum", input_id=whole.id, reduction=Reduction.SUM, group_by=()
+    )
+
+    sums = submission_service._whole_sums(
+        {whole.id: pin}, [*authored(plan).evidence_requirements, planners]
+    )
+
+    assert sums == (WholeSum(whole_id=whole.id, sum_id=f"{whole.id}_sum_2"),)
+
+
+async def test_a_whole_compiled_with_no_spec_block_on_record_is_compiled_again(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid to Africa as a share of every donor's, the whole's compile on
+    record holding no spec block, so nothing there says whether Search leaves the
+    donors open. Admission compiles the whole again in its place, once, and sums
+    the donors Search's new answer leaves open."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+    blockless = AlignedPin(
+        origin=block["spec_id"],
+        option_ids=(),
+        spec_id=_OPENED_WHOLE["donor"],
+        digest={},
+        whole_axis="donor",
+    )
+    save_aligned_pin(ctx.state, blockless, warnings=())
+
+    result = await _share_over_every(surface, ctx, block, "donor", decision, pooled=False)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert len(surface.calls) == 1
+    (pin,) = [pin for pin in aligned_pins(ctx.state) if pin.whole_axis is not None]
+    assert pin.block is not None
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole, (added,) = _summed_whole(plan)
+    assert plan.whole_sums == (WholeSum(whole_id=whole.id, sum_id=added.id),)
+
+
+async def test_a_whole_search_answers_with_no_spec_block_is_refused_unheld(
+    decision: DecisionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """US health aid to Africa as a share of every donor's, Search's answer for the
+    whole read as stating no spec block. The compile holds no pin, which admission
+    would compile again on every proposal, and the whole is refused after one call."""
+    digest = planner_source_reads.resolver_digest
+
+    def blockless(envelope: dict[str, Any]) -> dict[str, Any]:
+        return {**digest(envelope), "spec_block": None}
+
+    monkeypatch.setattr(planner_source_reads, "resolver_digest", blockless)
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+
+    result = await _share_over_every(surface, ctx, block, "donor", decision, pooled=False)
+
+    assert result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert len(surface.calls) == 1
+    assert [pin for pin in aligned_pins(ctx.state) if pin.whole_axis is not None] == []
+
+
+async def test_a_whole_compiled_again_within_a_call_is_refused(
+    decision: DecisionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """US health aid to Africa as a share of every donor's, where each compile of the
+    whole holds a pin with no spec block. Admission asks for the whole again after
+    the first compile, and the call answers the refusal in place of a second."""
+    block = _us_health_to_africa()
+    compiles: list[Realignment] = []
+
+    async def holding_blockless(
+        surface: ToolSurface, realignment: Realignment, *, state: SessionState
+    ) -> planner_source_reads.SourceRead:
+        del surface, state
+        compiles.append(realignment)
+        if len(compiles) > 1:
+            return lambda _: {"code": "compiled_twice"}
+        pin = AlignedPin(
+            origin=realignment.spec_id,
+            option_ids=(),
+            spec_id=_OPENED_WHOLE["donor"],
+            digest={},
+            whole_axis=realignment.whole_axis,
+        )
+        return lambda into: save_aligned_pin(into, pin, warnings=())
+
+    monkeypatch.setattr(planner_source_reads, "compile_whole", holding_blockless)
+    ctx = _FakeToolContext()
+
+    result = await _share_over_every(
+        _OpenedWholeCompiles(block), ctx, block, "donor", decision, pooled=False
+    )
+
+    assert result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert len(compiles) == 1
+
+
+async def test_a_whole_with_a_second_open_side_is_summed_keeping_that_side_apart(
+    decision: DecisionFactory,
+) -> None:
+    """Every recipient's US health aid as a share of every donor's aid to it. The
+    part keeps the recipients open in `across`, and Search leaves the donors open
+    on the whole, so the sum admission adds totals the donors and keeps each
+    recipient apart, grouped by entity."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, block)
+    labels = {e["role"]: e["label"] for e in block["resolved"]["entities"]}
+    period = Period(start=2023, end=2023)
+
+    result = await call_planner_tool(
+        _tools_reading(cast(ToolSurface, surface))["propose_plan"],
+        question="What share of the aid to each recipient came from the United States?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            DatasetRequirement(
+                id=_PART,
+                decision_ids=["measure"],
+                measure="US aid",
+                entities=[Entity(name=labels["origin"], role="donor")],
+                across=["recipient"],
+                period=period,
+                source_spec_id=block["spec_id"],
+            ),
+            DatasetRequirement(
+                id="every_donor",
+                decision_ids=["measure"],
+                measure="total aid",
+                period=period,
+                whole_of=WholeOf(part=_PART, axis="donor"),
+            ),
+            ShareOfRequirement(
+                id=_SHARE,
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id=_PART),
+                denominator=RequirementSide(input_id="every_donor"),
+                axis="recipient",
+                denominator_scope=DenominatorScope.PER_AXIS,
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole, (added,) = _summed_whole(plan)
+    assert plan.whole_sums == (WholeSum(whole_id=whole.id, sum_id=added.id),)
+    assert split_of(plan).kept_open == {added.id: ("recipient",)}
+    assert isinstance(added, AggregateRequirement)
+    assert added.group_by == (GroupBy.PERIOD, GroupBy.ENTITY)
+
+
+@pytest.mark.parametrize("restated", [False, True], ids=["whole-carried", "whole-restated"])
+async def test_an_amended_plan_keeps_one_sum_over_its_whole(
+    decision: DecisionFactory, restated: bool
+) -> None:
+    """A plan whose whole Search leaves open, amended. The amendment is read without
+    the sum and admission adds it again, so the plan holds one sum under the id it
+    had, whether the patch restates the whole and its share or leaves them."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+    await _share_over_every(surface, ctx, block, "donor", decision, pooled=False)
+    first = load_plan(ctx.state)
+    assert first is not None
+    whole, (added,) = _summed_whole(first)
+    shown = authored(first)
+    patch = [r for r in shown.evidence_requirements if r.id in {whole.id, _SHARE}]
+
+    amended = await call_planner_tool(
+        _tools_reading(cast(ToolSurface, surface))["propose_plan"],
+        decisions=drafts([decision(rationale="Reconsidered.")]),
+        evidence_requirements=patch if restated else [],
+        amends_version=first.version,
+        tool_context=ctx,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.whole_sums == first.whole_sums == (WholeSum(whole_id=whole.id, sum_id=added.id),)
+    ids = [r.id for r in plan.evidence_requirements]
+    assert len(ids) == len(set(ids)) == len(first.evidence_requirements)
 
 
 def test_a_whole_search_counts_on_another_provider_scope_says_what_each_counts() -> None:
@@ -9878,41 +10183,43 @@ async def test_a_dac_donor_whole_reads_searchs_answer_for_it(
     assert stated.rationale.endswith(f"count {alike}"), stated.rationale
 
 
-@pytest.mark.parametrize(
-    ("name", "whole_names", "refused"),
-    [
-        # DAC1 binds DAC countries' total: the whole may name that total, as
-        # `name_pinned_groups` rewrites it to, and no other donor.
-        pytest.param("dac1", "DAC countries", False, id="dac1-names-its-total"),
-        pytest.param("dac1", "France", True, id="dac1-names-another-donor"),
-        # DAC2a binds no donor, so the whole names none.
-        pytest.param("dac2a", "France", True, id="dac2a-names-a-donor"),
-    ],
-)
-async def test_a_donor_whole_names_on_its_opened_side_only_the_total_search_bound(
-    decision: DecisionFactory, name: str, whole_names: str, refused: bool
+# The total dfo-apis serves DAC2a over every recipient as, which no name resolves to,
+# holding every country that receives aid. Regional aid is the side's residual.
+_DEVELOPING_COUNTRIES = {
+    "label": "developing countries (DAC)",
+    "ref": "DACDevelopingCountries",
+    "total": "DACDevelopingCountries",
+    "whole_of": ["official"],
+    "side_classes": ["official", "residual"],
+}
+
+
+@pytest.mark.parametrize("pooled", [False, True], ids=["read-directly", "summed-by-year"])
+async def test_a_whole_stating_no_entity_compiles_from_its_part(
+    decision: DecisionFactory, pooled: bool
 ) -> None:
-    """US ODA as a share of its whole over every donor, the whole naming one donor
-    in place of `across` donor: admitted where Search's answer for the whole binds
-    the donor side to that total, and refused under `whole_names_another_total`
-    where it names any other party, as [France (donor), Kenya] over US ODA to Kenya,
-    which would read as France's total while dividing by every donor's."""
-    surface = _RecordedWhole(name)
-    ctx = _FakeToolContext()
-    block = json.loads(json.dumps(surface.recorded["part"]))
-
-    result = await _share_over_every(
-        cast(Any, surface), ctx, block, "donor", decision, whole_names=whole_names
+    """The planner's first plan in a recorded Studio turn on "G7 aid to Africa as a
+    share of its total aid": the whole declares itself the part over every recipient
+    and states no entity and no `across`. It is admitted and compiled from the part,
+    Search binding the recipients to the developing countries' total, whether the
+    share reads it directly or summed by year, and it keeps stating nothing."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(
+        block,
+        groups={"destination": _DEVELOPING_COUNTRIES},
+        bound=[_DEVELOPING_COUNTRIES["ref"]],
     )
+    ctx = _FakeToolContext()
 
-    if not refused:
-        assert result["outcome"] == Outcome.OK.value, result
-        year = Period(start=2023, end=2023)
-        assert dict(_pins(ctx))[_WHOLE] == _over_period(surface.recorded["whole"], year)
-        return
-    assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
-    assert result["detail"]["whole"]["cause"] == "whole_names_another_total"
-    assert load_plan(ctx.state) is None
+    result = await _share_over_every(surface, ctx, block, "recipient", decision, pooled=pooled)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, _OPENED_WHOLE["recipient"])]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole = plan.requirement(_WHOLE)
+    assert isinstance(whole, DatasetRequirement)
+    assert (whole.entities, whole.across) == ((), ())
 
 
 def test_a_dac1_donor_whole_with_no_choices_says_nothing_both_sides_count_alike() -> None:
@@ -9957,30 +10264,34 @@ class _SearchRefused:
 
 
 @pytest.mark.parametrize(
-    ("name", "group"),
+    ("name", "pooled"),
     [
-        pytest.param("dac1", "DAC countries", id="dac1"),
-        pytest.param("dac1_bilateral_uncovered", "DAC countries", id="dac1-bilateral-uncovered"),
-        pytest.param("dac2a", None, id="dac2a"),
+        pytest.param("dac1", True, id="dac1"),
+        pytest.param("dac1", False, id="dac1-read-directly"),
+        pytest.param("dac1_bilateral_uncovered", True, id="dac1-bilateral-uncovered"),
+        pytest.param("dac2a", True, id="dac2a"),
+        pytest.param("dac2a", False, id="dac2a-read-directly"),
     ],
 )
 async def test_a_dac_donor_whole_searchs_answer_compiles(
-    decision: DecisionFactory, name: str, group: str | None
+    decision: DecisionFactory, name: str, pooled: bool
 ) -> None:
     """US ODA as a share of its whole over every donor, the whole pinned to Search's
     answer to the resubmit `compile_whole` posts: the translator takes the pin with no
-    fresh search and the plan compiles, whether Search binds the donor side to one
-    published total (DAC1's DAC countries' total) or leaves it open (DAC2a)."""
+    fresh search and no rewrite, and the plan compiles, whether Search binds the donor
+    side to one published total (DAC1's DAC countries' total), which the share may
+    read directly, or leaves it open (DAC2a), which the compiler sums by year after
+    the retrieval, so the share reads it directly or summed by year either way."""
     surface = _RecordedWhole(name)
     ctx = _FakeToolContext()
     block = json.loads(json.dumps(surface.recorded["part"]))
-    proposed = await _share_over_every(cast(Any, surface), ctx, block, "donor", decision, year=2019)
+    proposed = await _share_over_every(
+        cast(Any, surface), ctx, block, "donor", decision, year=2019, pooled=pooled
+    )
     assert proposed["outcome"] == Outcome.OK.value, proposed
 
     refused = _SearchRefused()
-    named = await name_pinned_groups(ctx.state, surface=cast(ToolSurface, refused))
-    named_in_place = [(g.requirement_id, g.entity.name, g.across) for g in named]
-    assert named_in_place == ([(_WHOLE, group, "donor")] if group else [])
+    assert await name_pinned_groups(ctx.state, surface=cast(ToolSurface, refused)) == ()
     discover_source = build_discover_source(surface=cast(ToolSurface, refused))
     for requirement_id in (_PART, _WHOLE):
         found = await discover_source(requirement_id=requirement_id, state=ctx.state)
@@ -19063,12 +19374,13 @@ _EDUCATION, _EDUCATION_INCLUSIVE = (f"spec_{'8' * 32}", f"spec_{'9' * 32}")
 def _us_dataset(
     requirement_id: str, measure: str, pin: str | None, whole_of: WholeOf | None = None
 ) -> DatasetRequirement:
-    """US aid of `measure` in 2023, pinned to `pin`, declaring `whole_of` when given."""
+    """US aid of `measure` in 2023, pinned to `pin`, declaring `whole_of` when given,
+    which names no entity."""
     return DatasetRequirement(
         id=requirement_id,
         decision_ids=["measure"],
         measure=measure,
-        entities=[Entity(name="United States", role="donor")],
+        entities=[] if whole_of else [Entity(name="United States", role="donor")],
         period=Period(start=2023, end=2023),
         source_spec_id=pin,
         whole_of=whole_of,

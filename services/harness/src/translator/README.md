@@ -144,7 +144,7 @@ members on a role it leaves open or binds in part) goes under the referral's
 `withheld`, never under `candidates`, so the planner cannot pin it. The
 referral's `repair` then names the change that keeps that scope, when the
 pinned source held the side to one group or one entity ("name 'Africa' as
-recipient in `entities` and drop 'recipient' from `across`"). That holds
+recipient in `entities` with `dcid: africa` and drop 'recipient' from `across`"). That holds
 only while every requirement reading the pinned one sums the side away, or
 ranks over a side the pin holds to one group's members, where the repair
 names the group with `members: true` so the rank orders them. Any other

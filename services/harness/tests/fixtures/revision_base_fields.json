@@ -244,6 +244,10 @@
     "copy_id",
     "origin_id"
   ],
+  "planner.plan.WholeSum": [
+    "whole_id",
+    "sum_id"
+  ],
   "planner.plan.ScopeOptionState": [
     "option_id",
     "status",

@@ -21,7 +21,7 @@ double-reporting it.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from common.place_type import PLACE_ROLE
@@ -199,6 +199,7 @@ def shapes_for(
     sources: Mapping[str, SelectedSource],
     order: Sequence[str],
     whole_history: Mapping[str, int],
+    kept_open: Mapping[str, Collection[str]] | None = None,
 ) -> tuple[dict[str, ResolvedShape], list[str]]:
     """Walk `operations` in `order`, resolving one `ResolvedShape` per operation that has one.
 
@@ -222,6 +223,8 @@ def shapes_for(
             read from its dataset's first year, by requirement id, where its
             shape starts (`planner.plan.HistorySplit.whole_history`). Every
             other retrieval starts at its stated period.
+        kept_open: The parties each aggregate summing a whole's open side
+            keeps open, by requirement id (`planner.plan.HistorySplit.kept_open`).
 
     Returns:
         A `(shapes_by_id, issues)` pair: the shape resolved for each
@@ -273,6 +276,7 @@ def shapes_for(
             sources,
             retrieve_by_requirement,
             whole_history,
+            kept_open or {},
         )
         if built is None:
             continue
@@ -381,6 +385,7 @@ def _resolve(  # noqa: PLR0911 -- one isinstance branch per operation kind narro
     sources: Mapping[str, SelectedSource],
     retrieve_by_requirement: Mapping[str, str],
     whole_history: Mapping[str, int],
+    kept_open: Mapping[str, Collection[str]],
 ) -> ResolvedShape | str | None:
     if isinstance(operation, RetrieveOperation):
         return _retrieve_resolved(
@@ -391,7 +396,11 @@ def _resolve(  # noqa: PLR0911 -- one isinstance branch per operation kind narro
         )
     if isinstance(operation, AggregateOperation):
         upstream = _input_shape(operation.input, operations, shapes)
-        return None if upstream is None else _aggregate_resolved(operation, upstream)
+        if upstream is None:
+            return None
+        return _aggregate_resolved(
+            operation, upstream, kept_open=kept_open.get(operation.requirement_id, ())
+        )
     if isinstance(operation, GrowthOperation):
         upstream = _input_shape(operation.input, operations, shapes)
         return None if upstream is None else _growth_resolved(operation, upstream)
@@ -636,7 +645,10 @@ def _carry_columns(
 
 
 def _aggregate_resolved(
-    operation: AggregateOperation, upstream: ResolvedShape
+    operation: AggregateOperation,
+    upstream: ResolvedShape,
+    *,
+    kept_open: Collection[str] = (),
 ) -> ResolvedShape | str:
     by_entity = GroupBy.ENTITY in operation.group_by
     by_period = GroupBy.PERIOD in operation.group_by
@@ -648,6 +660,7 @@ def _aggregate_resolved(
         by_period=by_period,
         by_breakdown=by_breakdown,
         reduction=operation.reduction,
+        kept_open=kept_open,
     )
     if reason is not None:
         return reason
@@ -657,6 +670,7 @@ def _aggregate_resolved(
         by_entity=by_entity,
         by_period=by_period,
         by_breakdown=by_breakdown,
+        kept_open=kept_open,
         step_id=operation.id,
     )
     return ResolvedShape(shape=shape, columns=_carry_columns(upstream.columns, shape.roles))
