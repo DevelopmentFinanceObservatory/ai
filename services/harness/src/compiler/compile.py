@@ -77,6 +77,7 @@ from planner.records import (
     PlaceLevel,
     RankAmong,
     RankDirection,
+    Reduction,
     StatVarReading,
     StrictModel,
     ValueThreshold,
@@ -331,6 +332,19 @@ Upstream = tuple[SelectedSource, DatasetRequirement]
 _SINGLE_INPUT = (AggregateOperation, GrowthOperation, RankOperation, FilterOperation)
 
 
+class _Parties(NamedTuple):
+    """The parties a frame still holds on the donor and recipient columns
+    (`_Build._parties_behind`).
+
+    `sources` is the source of each dataset requirement the frame rests on, by its
+    id. `kept` holds, for each such requirement and donor or recipient column its
+    source resolves entities on, the refs of those entities still on the frame.
+    """
+
+    sources: Mapping[str, SelectedSource]
+    kept: Mapping[tuple[str, str], frozenset[str]]
+
+
 def wholes_on_their_sources(
     requirements_by_id: Mapping[str, EvidenceRequirement],
     discovered: Mapping[str, SelectedSource],
@@ -430,6 +444,7 @@ class _Build:
         self.sources: dict[str, SelectedSource] = {}
         self.shapes: dict[str, ResolvedShape] = {}
         self._retrieve_by_requirement: dict[str, str] = {}
+        self._parties: dict[str, _Parties | None] = {}
         self.tools: dict[str, tuple[ToolCapability, ToolSchema]] = {}
         self.steps: dict[str, WorkflowStep] = {}
 
@@ -1878,95 +1893,91 @@ class _Build:
 
     def _check_share_holds_part(self, operation: ShareOfOperation) -> None:
         """Report `SHARE_PART_OUTSIDE_WHOLE` for a share whose denominator shows it
-        does not hold a party its numerator names.
+        does not hold a party its numerator keeps.
 
         A share is a part over its whole, so on each donor or recipient side
         (`compiler.sources.WHOLE_COLUMNS`) the denominator holds every party the
-        numerator keeps there, by `compiler.sources.parties_outside`. Each side is
-        read as every source its shape rests on, and each source behind the
-        numerator is checked against the sources behind the denominator together,
-        so a denominator summing several datasets holds a party one of them holds.
-        Each operand keeps the parties its sources bind that survive its filters
-        and the entity it names (`_kept_parties`), so a numerator filtered to Kenya
-        from a source binding Kenya and the United States names Kenya alone, and a
-        denominator naming the United States from that source holds the United
-        States alone. A denominator so narrowed to countries alone holds no other
-        country (`compiler.sources.countries_apart`). A numerator whose entity does
-        not resolve on its frame is not checked, since the side check reports it.
-        A numerator source that keeps no bound party, as where the numerator names
-        a set whose members it resolves and the source binds the set's total, is
-        checked on every party it binds.
-        A share whose sources are all the numerator's and whose denominator keeps
-        every party its sources bind is not read, nor one whose sources are not
-        all known or whose denominator sources state no identity, and a source
-        stating no identity is logged. Where a denominator source binds parties on
-        a side and states no named set there, a party it does not bind is unshown,
-        since a bound region holds countries no set lists. So is a party whose ref
-        shows no class of party (`compiler.sources.party_class`), where no named
-        set states it on the numerator's side, since nothing lists what it holds. A
-        party nothing shows is inside or outside is not refused. A `quotient_of`
-        divides any two measures and is not checked.
+        numerator keeps there, by `compiler.sources.parties_outside`, read against
+        every source the denominator rests on together. Each operand keeps the
+        parties `_side_parties` folds through its operations: a numerator filtered
+        to Kenya from a source resolving Kenya and the United States keeps Kenya,
+        and a denominator naming the United States from that source holds the
+        United States alone. A numerator's parties on a column its source resolves
+        no entity on are those its identity binds. A denominator holds its
+        identity's parties and named set until the plan narrows it; narrowed, it
+        holds the parties it keeps, its named set only while the set's total is
+        among them, and no country it does not keep
+        (`compiler.sources.countries_apart`). A column the denominator is keyed by
+        pairs its rows key by key, which `_check_key_axes` reads, so it is not
+        checked here.
+
+        Nothing is checked where either operand's parties are unknown or empty, or
+        where both rest on the same sources and the denominator narrows none. A
+        party nothing shows is inside or outside is not refused. The refusal names
+        `quotient_of` where the plan narrowed the denominator, since a figure the
+        plan chose to divide by makes a ratio, and `whole_of` where the
+        denominator's sources hold another population.
         """
-        numerators = self._roots_behind(operation.numerator.input)
-        denominators = self._roots_behind(operation.denominator.input)
-        if not numerators or not denominators:
+        part = self._side_parties(operation.id, operation.numerator)
+        whole = self._side_parties(operation.id, operation.denominator)
+        keyed_axis = _keyed_axes(operation)[1]
+        keyed = (
+            self._key_column(operation.denominator, keyed_axis) if keyed_axis is not None else None
+        )
+        if (
+            part is None
+            or whole is None
+            or not all(part.kept.values())
+            or not all(whole.kept.values())
+            or (keyed_axis is not None and keyed is None)
+        ):
+            logger.info(
+                "share %r: what an operand keeps is unknown, so the parties its numerator "
+                "names are not checked",
+                operation.id,
+            )
             return
-        wholes = {
-            column: self._kept_whole(operation.id, operation.denominator, denominators, column)
-            for column in WHOLE_COLUMNS.values()
+        narrowed = {
+            key
+            for key, kept in whole.kept.items()
+            if kept != _resolved_refs(whole.sources[key[0]], key[1])
         }
-        if {source.spec_id for _, source in numerators} == {
-            source.spec_id for _, source in denominators
-        } and not any(narrowed for _, narrowed in wholes.values()):
+        if not narrowed and {source.spec_id for source in part.sources.values()} == {
+            source.spec_id for source in whole.sources.values()
+        }:
             return
-        if any(source.identity is None for _, source in denominators):
-            logger.info(
-                "share %r: a denominator source states no identity, so the parties its "
-                "numerator names are not checked",
-                operation.id,
-            )
-            return
-        selected = self._side_selection(operation.id, operation.numerator)
-        if selected is False:
-            return
-        unread = [source.spec_id for _, source in numerators if source.identity is None]
-        if unread:
-            logger.info(
-                "share %r: numerator sources %s state no identity, so the parties they name "
-                "are not checked",
-                operation.id,
-                unread,
-            )
         outside: list[str] = []
         for axis, column in WHOLE_COLUMNS.items():
-            whole, narrowed = wholes[column]
-            held_by_whole = [party for side in whole for party in side.bound]
-            for requirement_id, numerator in numerators:
-                part = source_whole_side(numerator, column)
-                if part is None:
+            if keyed is not None and keyed.column == column:
+                continue
+            held = [
+                side
+                for requirement_id in whole.sources
+                if (side := _held_side(whole, requirement_id, column, narrowed)) is not None
+            ]
+            held_by_whole = [party for side in held for party in side.bound]
+            column_narrowed = any(key[1] == column for key in narrowed)
+            for requirement_id, source in part.sources.items():
+                named = source_whole_side(source, column)
+                if named is None:
                     continue
-                kept = (
-                    self._kept_parties(
-                        operation.numerator, requirement_id, numerator, column, part.bound, selected
-                    )
-                    or part.bound
-                )
-                labels = {entity.ref: entity.label for entity in numerator.entities}
-                for party in kept:
-                    held = parties_outside(
+                kept = part.kept.get((requirement_id, column))
+                labels = {entity.ref: entity.label for entity in source.entities}
+                for party in sorted(kept) if kept is not None else named.bound:
+                    found = parties_outside(
                         (party,),
-                        whole,
-                        part_group=part.group,
-                        part_readable=part.group is not None or party_class(party) is not None,
+                        held,
+                        part_group=named.group,
+                        part_readable=named.group is not None or party_class(party) is not None,
                         bound_is_exact=False,
                     )
                     # A whole narrowed to countries alone holds no other country.
                     unheld = (
-                        *held.outside,
+                        *found.outside,
                         *(
                             party
-                            for party in held.unshown
-                            if narrowed and countries_apart((party,), held_by_whole)
+                            for party in found.unshown
+                            if column_narrowed and countries_apart((party,), held_by_whole)
                         ),
                     )
                     outside.extend(
@@ -1974,142 +1985,112 @@ class _Build:
                     )
         if not outside:
             return
-        part = self._requirement_upstream(operation.numerator.input)
-        whole_of = (
-            f"; for a part of its whole, state `whole_of` with part {part.id!r} on the "
-            "denominator's dataset requirement"
-            if part is not None
-            else ""
-        )
+        requirement = self._requirement_upstream(operation.numerator.input)
+        if narrowed:
+            repair = (
+                "; to divide by a figure that does not hold the numerator, such as each "
+                "donor's aid over one donor's total, use quotient_of"
+            )
+        elif requirement is not None:
+            repair = (
+                f"; for a part of its whole, state `whole_of` with part {requirement.id!r} on "
+                "the denominator's dataset requirement"
+            )
+        else:
+            repair = ""
         self._issue(
             CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE,
             f"operation {operation.id!r} divides by a denominator that does not hold "
             f"{', '.join(dict.fromkeys(outside))}, which its numerator names, so the share "
-            f"would not be a part of its whole{whole_of}; to divide by a figure that does "
-            "not hold the numerator, such as each donor's aid over one donor's total, use "
-            "quotient_of",
+            f"would not be a part of its whole{repair}",
             operation_id=operation.id,
         )
 
-    def _kept_whole(
-        self,
-        op_id: str,
-        side: Side,
-        roots: Sequence[tuple[str, SelectedSource]],
-        column: str,
-    ) -> tuple[list[WholeSide], bool]:
-        """What the denominator `side` holds on `column`, one `WholeSide` per source
-        behind it, and whether its filters or entity narrow any of them, for
-        `_check_share_holds_part`.
-
-        Each source's bound parties are narrowed to those that still reach `side`
-        (`_kept_parties`). Where the entity `side` names does not resolve on its
-        frame, or narrowing leaves a source no bound party there, nothing shows
-        which parties it keeps, so it holds every party it binds. A source
-        narrowed off the total of the named set it states there no longer holds
-        that set's members.
-        """
-        selected = self._side_selection(op_id, side)
-        whole: list[WholeSide] = []
-        narrowed = False
-        for requirement_id, source in roots:
-            held = source_whole_side(source, column)
-            if held is None:
-                continue
-            kept = self._kept_parties(
-                side, requirement_id, source, column, held.bound, selected or None
-            )
-            if kept and kept != held.bound:
-                # A named set holds its members only while its total is kept.
-                group = held.group if held.group is not None and held.group.total in kept else None
-                held = held._replace(bound=kept, group=group)
-                narrowed = True
-            whole.append(held)
-        return whole, narrowed
-
-    def _kept_parties(
-        self,
-        side: Side,
-        requirement_id: str,
-        source: SelectedSource,
-        column: str,
-        bound: tuple[str, ...],
-        selected: tuple[str, frozenset[str]] | None,
-    ) -> tuple[str, ...]:
-        """The parties of `bound`, what `source` binds on `column`, that still reach
-        `side`, which reads the retrieval of `requirement_id`.
-
-        A party is dropped where `selected`, the entity `side` names
-        (`_side_selection`), is on `column` and does not hold it, or where a
-        filter between the retrieval and `side` keeps none of the labels
-        `source` resolves it under on `column` (`_retained_labels`). A party
-        `source` resolves no label for on `column` stays, since no filter can
-        name it. Filters are read only where `side.input` reaches the retrieval
-        through single-input operations; behind a verb that reads several
-        inputs, such as a `share_of` or a `sum_of`, every bound party stays.
-        """
-        kept = bound
-        if selected is not None and selected[0] == column:
-            kept = tuple(party for party in kept if party in selected[1])
-        retrieve_id = self._retrieve_by_requirement.get(requirement_id)
-        retrieved = self.shapes.get(retrieve_id) if retrieve_id is not None else None
-        columns = retrieved.columns if retrieved is not None else ()
-        role = next((one for one in columns if one.column == column), None)
-        if (
-            role is None
-            or retrieve_id is None
-            or not self._single_input_chain(side.input, retrieve_id)
-        ):
-            return kept
-        labels = self._retained_labels(side.input, role)
-        resolved = {entity.ref for entity in source.entities if entity.role == column}
-        retained = {
-            entity.ref
-            for entity in source.entities
-            if entity.role == column and entity.label.casefold() in labels
-        }
-        return tuple(party for party in kept if party not in resolved - retained)
-
-    def _single_input_chain(self, op_id: str, target: str) -> bool:
-        """Whether `op_id` reads `target` through single-input operations alone, or is it."""
-        seen: set[str] = set()
-        while op_id not in seen:
-            if op_id == target:
-                return True
-            seen.add(op_id)
-            operation = self.operations.get(op_id)
-            if not isinstance(operation, _SINGLE_INPUT):
-                return False
-            op_id = operation.input
-        return False
-
-    def _side_selection(
-        self, op_id: str, side: Side
-    ) -> tuple[str, frozenset[str]] | Literal[False] | None:
-        """The role column and refs `side.entity` narrows `side` to, for
-        `_check_share_holds_part`.
-
-        `None` when the side names no entity, so every party its sources bind
-        survives it. `False` when the name does not resolve on the side's
-        frame (`_frame_entity`), so what the side keeps is unknown.
-        """
-        if side.entity is None:
+    def _side_parties(self, op_id: str, side: Side) -> _Parties | None:
+        """The parties `side` of the two-sided operation `op_id` keeps: those of its
+        input (`_parties_behind`), narrowed to the entity it names. `None` where they
+        are unknown, or where the name does not resolve on the side's frame
+        (`_frame_entity`), which the side check reports."""
+        parties = self._parties_behind(side.input)
+        if parties is None or side.entity is None:
+            return parties
+        if not isinstance(self._frame_entity(op_id, side.input, side.entity), tuple):
             return None
-        members = self._frame_entity(op_id, side.input, side.entity)
-        if not isinstance(members, tuple):
-            return False
-        return members[0].role, frozenset(one.ref for one in members)
+        return self._narrowed_parties(side.input, parties, side=side)
 
-    def _roots_behind(self, op_id: str) -> tuple[tuple[str, SelectedSource], ...]:
-        """Every dataset requirement the shape at `op_id` rests on, with the source its
-        retrieval selected; none where a retrieval it rests on has no source."""
-        roots: list[tuple[str, SelectedSource]] = []
-        for root in self._root_requirement_ids(op_id):
-            source = self._source_of(root)
-            if source is None:
-                return ()
-            roots.append((root, source))
-        return tuple(roots)
+    def _parties_behind(self, op_id: str) -> _Parties | None:
+        """The parties the frame at `op_id` still holds on the donor and recipient
+        columns, folded once per operation over the operations it rests on; `None`
+        where they are unknown.
+
+        A retrieval keeps every entity its source resolves on each donor or
+        recipient column its frame carries, and is unknown where its source states
+        no identity. A filter of entities and periods narrows each column its frame
+        still carries to the members left there (`_column_members`); one keeping
+        rows by their values or place level is unknown. A `sum` aggregate keeps the
+        parties it adds, whatever it groups by. A `sum_of` keeps the parties of
+        both its sides (`_side_parties`). Every other operation is unknown.
+        """
+        if op_id not in self._parties:
+            # Seeded first, so an operation reading itself is unknown.
+            self._parties[op_id] = None
+            self._parties[op_id] = self._fold_parties(op_id)
+        return self._parties[op_id]
+
+    def _fold_parties(self, op_id: str) -> _Parties | None:
+        """`_parties_behind` for one operation, from the parties of its inputs."""
+        match self.operations.get(op_id):
+            case RetrieveOperation() as operation:
+                return self._retrieved_parties(operation)
+            case FilterOperation(input=input_id, predicates=predicates) if all(
+                isinstance(predicate, EntityIn | PeriodIn | PeriodThreshold)
+                for predicate in predicates
+            ):
+                parties = self._parties_behind(input_id)
+                return None if parties is None else self._narrowed_parties(op_id, parties)
+            case AggregateOperation(input=input_id, reduction=Reduction.SUM):
+                return self._parties_behind(input_id)
+            case SumOfOperation(left=left, right=right):
+                left_parties = self._side_parties(op_id, left)
+                right_parties = self._side_parties(op_id, right)
+                if left_parties is None or right_parties is None:
+                    return None
+                kept = dict(left_parties.kept)
+                for key, refs in right_parties.kept.items():
+                    kept[key] = kept.get(key, frozenset()) | refs
+                return _Parties({**left_parties.sources, **right_parties.sources}, kept)
+            case _:
+                return None
+
+    def _retrieved_parties(self, operation: RetrieveOperation) -> _Parties | None:
+        """`_parties_behind` for a retrieval: every entity its source resolves on each
+        donor or recipient column its frame carries and does not leave open."""
+        source = self.sources.get(operation.id)
+        resolved = self.shapes.get(operation.id)
+        if source is None or resolved is None or source.identity is None:
+            return None
+        kept = {
+            (role.requirement_id, role.column): refs
+            for role in resolved.columns
+            if role.column in WHOLE_COLUMNS.values()
+            and not role.open
+            and (refs := _resolved_refs(source, role.column))
+        }
+        return _Parties({operation.requirement_id: source}, kept)
+
+    def _narrowed_parties(
+        self, op_id: str, parties: _Parties, *, side: Side | None = None
+    ) -> _Parties:
+        """`parties`, each column the frame at `op_id` carries narrowed to the members
+        still there and, when `side` is given, to the entity it names
+        (`_column_members`)."""
+        resolved = self.shapes.get(op_id)
+        kept = dict(parties.kept)
+        for role in resolved.columns if resolved is not None else ():
+            key = (role.requirement_id, role.column)
+            if key in kept:
+                kept[key] = frozenset(self._column_members(op_id, role, side=side))
+        return parties._replace(kept=kept)
 
     def _report_share_units(self, op_id: str, numerator: str, denominator: str) -> None:
         self._issue(
@@ -3693,6 +3674,26 @@ def _narrowed_by_side(
         return retained
     named = _member_labels((side.entity,), None, role, source)
     return retained & named if named else retained
+
+
+def _resolved_refs(source: SelectedSource, column: str) -> frozenset[str]:
+    """The refs of every entity `source` resolves on the role column `column`."""
+    return frozenset(entity.ref for entity in source.entities if entity.role == column)
+
+
+def _held_side(
+    whole: _Parties, requirement_id: str, column: str, narrowed: Collection[tuple[str, str]]
+) -> WholeSide | None:
+    """What the source of `requirement_id` behind the denominator `whole` holds on
+    `column`, for `_Build._check_share_holds_part`: what its identity binds and the
+    named set it states there (`source_whole_side`), or, where the plan narrowed it
+    (`narrowed`), the parties it keeps, with the set only while its total is kept."""
+    held = source_whole_side(whole.sources[requirement_id], column)
+    if held is None or (requirement_id, column) not in narrowed:
+        return held
+    kept = whole.kept[requirement_id, column]
+    group = held.group if held.group is not None and held.group.total in kept else None
+    return held._replace(bound=tuple(sorted(kept)), group=group)
 
 
 def _axis_column(columns: Sequence[ResolvedRole], axis: str | None) -> ResolvedRole | None:

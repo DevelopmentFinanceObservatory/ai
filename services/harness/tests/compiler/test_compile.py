@@ -9006,62 +9006,100 @@ def test_a_share_divides_by_a_whole_that_holds_its_part(
 
 _UNITED_STATES = ResolvedEntity(role="destination", ref="country/USA", label="United States")
 _NIGERIA = ResolvedEntity(role="destination", ref="country/NGA", label="Nigeria")
+_ETHIOPIA = ResolvedEntity(role="destination", ref="country/ETH", label="Ethiopia")
+_REFUSED = [(Code.SHARE_PART_OUTSIDE_WHOLE, "share")]
+_UNBOUND = (Code.SOURCE_UNUSABLE, "fetch")
 
 
 @pytest.mark.parametrize(
-    ("narrowed_to", "by_filter", "whole", "whole_entity", "codes"),
+    ("numerator", "reading", "whole", "whole_entity", "issues"),
     [
-        pytest.param("Kenya", False, "africa", None, [], id="kenya-inside"),
+        pytest.param("Kenya", "entity", "africa", None, [], id="kenya-inside"),
         pytest.param(
-            "United States",
-            False,
-            "africa",
-            None,
-            [Code.SHARE_PART_OUTSIDE_WHOLE],
-            id="united-states-outside",
+            "United States", "entity", "africa", None, _REFUSED, id="united-states-outside"
         ),
-        pytest.param("Kenya", True, "africa", None, [], id="filtered-to-kenya-inside"),
+        pytest.param("Kenya", "filter", "africa", None, [], id="filtered-to-kenya-inside"),
         pytest.param(
             "United States",
-            True,
+            "filter",
             "africa",
             None,
-            [Code.SHARE_PART_OUTSIDE_WHOLE],
+            _REFUSED,
             id="filtered-to-united-states-outside",
         ),
         pytest.param(
             "Kenya",
-            False,
+            "entity",
             "kenya-and-us",
             "United States",
-            [Code.SHARE_PART_OUTSIDE_WHOLE],
+            _REFUSED,
             id="kenya-over-united-states-selected",
         ),
-        pytest.param("Kenya", False, "kenya-and-us", "Kenya", [], id="kenya-over-kenya-selected"),
+        pytest.param(
+            "Kenya", "entity", "kenya-and-us", "Kenya", [], id="kenya-over-kenya-selected"
+        ),
         pytest.param(
             "Nigeria",
-            False,
+            "entity",
             "kenya-and-us-in-africa",
             "Kenya",
-            [Code.SHARE_PART_OUTSIDE_WHOLE],
+            _REFUSED,
             id="nigeria-over-kenya-selected-off-africa",
         ),
         pytest.param(
             "Kenya",
-            True,
+            "filter",
             "kenya-and-us-aliased",
             "United States",
-            [Code.SHARE_PART_OUTSIDE_WHOLE],
+            _REFUSED,
             id="kenya-over-united-states-filtered-under-two-labels",
         ),
-        pytest.param("Kenya", False, "same", None, [], id="same-dataset-kenya-inside"),
+        pytest.param("Kenya", "entity", "same", None, [], id="same-dataset-kenya-inside"),
+        pytest.param(
+            "Nigeria", "entity", "same", None, _REFUSED, id="same-dataset-nigeria-outside"
+        ),
+        pytest.param(("Kenya", "Nigeria"), "entity", "africa", None, [], id="sum-of-two-inside"),
+        pytest.param(
+            ("Kenya", "United States"),
+            "entity",
+            "africa",
+            None,
+            _REFUSED,
+            id="sum-of-one-outside",
+        ),
+        pytest.param(
+            "Nigeria", "entity", "kenya-plus-us", None, _REFUSED, id="nigeria-over-a-sum-of-two"
+        ),
+        pytest.param("Kenya", "entity", "kenya-plus-us", None, [], id="kenya-over-a-sum-of-two"),
+        # A sum of two sides carries no role column, so the plan refuses a filter
+        # above it naming an entity (`None`), and the share's check never reads one.
+        pytest.param(
+            ("Kenya", "United States"),
+            "filter",
+            "africa",
+            None,
+            None,
+            id="filter-above-a-sum-of-two",
+        ),
+        pytest.param(
+            "United States", "threshold", "africa", None, [], id="read-through-a-value-threshold"
+        ),
+        pytest.param("United States", "mean", "africa", None, [], id="read-through-a-mean"),
         pytest.param(
             "Nigeria",
-            False,
-            "same",
-            None,
-            [Code.SHARE_PART_OUTSIDE_WHOLE],
-            id="same-dataset-nigeria-outside",
+            "entity",
+            "africa-members-summed",
+            "Africa",
+            [],
+            id="nigeria-over-africa-s-members-summed",
+        ),
+        pytest.param(
+            "United States",
+            "entity",
+            "africa-members-summed",
+            "Africa",
+            _REFUSED,
+            id="united-states-over-africa-s-members-summed",
         ),
     ],
 )
@@ -9071,26 +9109,31 @@ def test_a_share_checks_only_the_entities_each_operand_keeps(
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     source: SourceFactory,
-    narrowed_to: str,
-    by_filter: bool,
+    numerator: str | tuple[str, str],
+    reading: str,
     whole: str,
     whole_entity: str | None,
-    codes: list[Code],
+    issues: list[tuple[Code, str]] | None,
 ) -> None:
     """G7 aid to Kenya, the United States and Nigeria, narrowed to one of them by the
-    share's numerator entity or by a filter before it.
+    share's numerator entity or by a filter before it (`reading`), or summed from two
+    of them.
 
     Over G7 aid to Africa (`africa`), Kenya is inside Africa, so the share holds its
     part even though the numerator's source also binds the United States; the United
-    States is outside it. Over G7 aid to Kenya and the United States with the
-    denominator narrowed to one of them by its entity or a filter, the whole is that
-    one recipient, so Kenya over the United States is refused even though the
-    denominator's source binds Kenya. That holds where the source resolves the United
-    States under two labels and the filter names one (`kenya-and-us-aliased`), and
-    where the source states Africa's set, whose members a denominator narrowed to
-    Kenya no longer holds (`kenya-and-us-in-africa`). A denominator summing Kenya and
-    the United States, filtered from the numerator's own retrieval (`same`), holds
-    Kenya and not Nigeria."""
+    States is outside it, alone or summed with Kenya. Over G7 aid to Kenya and the
+    United States with the denominator narrowed to one of them by its entity or a
+    filter, the whole is that one recipient, so Kenya over the United States is
+    refused even though the denominator's source binds Kenya. That holds where the
+    source resolves the United States under two labels and the filter names one
+    (`kenya-and-us-aliased`), and where the source states Africa's set, whose members
+    a denominator narrowed to Kenya no longer holds (`kenya-and-us-in-africa`). A
+    denominator summing Kenya and the United States from the numerator's own
+    retrieval, by an aggregate over a filter (`same`) or by a `sum_of` of two sides
+    (`kenya-plus-us`), holds Kenya and not Nigeria. A denominator filtered to Africa
+    and summed, on a source binding Africa's members (`africa-members-summed`), holds
+    Nigeria and not the United States. A numerator read through a value threshold or a
+    mean keeps rows nothing here can name, so it is not checked."""
     g7 = Entity(name="G7", role="donor")
     recipients = [
         g7,
@@ -9099,47 +9142,117 @@ def test_a_share_checks_only_the_entities_each_operand_keeps(
         Entity(name="Nigeria", role="recipient"),
     ]
     aid = requirement(id="aid", measure="official development assistance", entities=recipients)
-    numerator_entity = None if by_filter else narrowed_to
+    by_filter = reading == "filter"
     whole_by_entity = None if by_filter else whole_entity
 
-    def narrowed(filter_id: str, input_id: str, *names: str) -> FilterRequirement:
+    def narrowed(filter_id: str, input_id: str, *predicates: Any) -> FilterRequirement:
         return FilterRequirement(
-            id=filter_id,
-            decision_ids=["measure"],
-            input_id=input_id,
-            predicates=(EntityIn(names=names),),
+            id=filter_id, decision_ids=["measure"], input_id=input_id, predicates=predicates
         )
 
-    def narrowing(filter_id: str, input_id: str, *names: str) -> FilterOperation:
+    def narrowing(filter_id: str, input_id: str, *predicates: Any) -> FilterOperation:
         return FilterOperation(
-            id=filter_id,
-            requirement_id=filter_id,
-            input=input_id,
-            predicates=(EntityIn(names=names),),
+            id=filter_id, requirement_id=filter_id, input=input_id, predicates=predicates
+        )
+
+    def summing(sum_id: str, left: str, right: str) -> None:
+        """A sum of `left` from G7 aid and `right` from a second, disjoint dataset."""
+        requirements.append(
+            SumOfRequirement(
+                id=sum_id,
+                decision_ids=["measure"],
+                left=RequirementSide(input_id="aid", entity=left),
+                right=RequirementSide(input_id="more", entity=right),
+            )
+        )
+        operations.append(
+            SumOfOperation(
+                id=sum_id,
+                requirement_id=sum_id,
+                left=Side(input="fetch", entity=left),
+                right=Side(input="fetch_more", entity=right),
+            )
         )
 
     requirements: list[EvidenceRequirement] = [aid]
     operations: list[Operation] = [
         RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA)
     ]
-    numerator_input, numerator_op = "aid", "fetch"
-    if by_filter:
-        requirements.append(narrowed("kept", "aid", narrowed_to))
-        operations.append(narrowing("kept", "fetch", narrowed_to))
-        numerator_input, numerator_op = "kept", "kept"
     discovered = {
         "aid": _flow_source(source, SPEC_KENYA, recipients=[_KENYA, _UNITED_STATES, _NIGERIA])
     }
+    if isinstance(numerator, tuple) or whole == "kenya-plus-us":
+        # A sum adds two datasets, which each pin their own StatVar so the sum
+        # counts no value twice.
+        for requirement_id, spec_id, stat_var in (
+            ("aid", SPEC_KENYA, "BilateralAid"),
+            ("more", _SPEC_THIRD, "ImputedMultilateralAid"),
+        ):
+            flows = _flow_source(source, spec_id, recipients=[_KENYA, _UNITED_STATES, _NIGERIA])
+            pinned = _pinned(stat_var, {"identity": flows.identity})
+            discovered[requirement_id] = flows.model_copy(update=pinned)
+        requirements.append(
+            requirement(
+                id="more",
+                measure="imputed multilateral official development assistance",
+                entities=recipients,
+            )
+        )
+        operations.append(
+            RetrieveOperation(id="fetch_more", requirement_id="more", spec_id=_SPEC_THIRD)
+        )
+    numerator_input, numerator_op, numerator_entity = "aid", "fetch", None
+    if isinstance(numerator, tuple):
+        summing("parts", *numerator)
+        numerator_input = numerator_op = "parts"
+        if by_filter:
+            kenya = EntityIn(names=(numerator[0],))
+            requirements.append(narrowed("kept", "parts", kenya))
+            operations.append(narrowing("kept", "parts", kenya))
+            numerator_input = numerator_op = "kept"
+    elif reading == "filter":
+        requirements.append(narrowed("kept", "aid", EntityIn(names=(numerator,))))
+        operations.append(narrowing("kept", "fetch", EntityIn(names=(numerator,))))
+        numerator_input = numerator_op = "kept"
+    elif reading == "threshold":
+        requirements.append(narrowed("kept", "aid", ValueThreshold(op="gt", value=0)))
+        operations.append(narrowing("kept", "fetch", ValueThreshold(op="gt", value=0)))
+        numerator_input = numerator_op = "kept"
+        numerator_entity = numerator
+    elif reading == "mean":
+        by_entity = (GroupBy.PERIOD, GroupBy.ENTITY)
+        requirements.append(
+            derived_requirement(
+                id="mean", input_id="aid", reduction=Reduction.MEAN, group_by=by_entity
+            )
+        )
+        operations.append(
+            _aggregate(
+                id="mean",
+                requirement_id="mean",
+                input="fetch",
+                reduction=Reduction.MEAN,
+                group_by=by_entity,
+            )
+        )
+        numerator_input = numerator_op = "mean"
+        numerator_entity = numerator
+    else:
+        numerator_entity = numerator
     if whole == "same":
+        pair = EntityIn(names=("Kenya", "United States"))
         requirements += [
-            narrowed("pair", "aid", "Kenya", "United States"),
+            narrowed("pair", "aid", pair),
             derived_requirement(id="summed", input_id="pair"),
         ]
         operations += [
-            narrowing("pair", "fetch", "Kenya", "United States"),
+            narrowing("pair", "fetch", pair),
             _aggregate(id="summed", requirement_id="summed", input="pair"),
         ]
         whole_input, whole_op = "summed", "summed"
+    elif whole == "kenya-plus-us":
+        summing("pair", "Kenya", "United States")
+        whole_input, whole_op = "pair", "pair"
     elif whole == "africa":
         requirements += [
             requirement(
@@ -9156,6 +9269,29 @@ def test_a_share_checks_only_the_entities_each_operand_keeps(
         whole_input, whole_op = "summed", "summed"
         discovered["total"] = _flow_source(
             source, SPEC_OTHER, recipients=[_AFRICA], groups=[_AFRICA_GROUP]
+        )
+    elif whole == "africa-members-summed":
+        assert whole_entity is not None
+        africa = EntityIn(names=(whole_entity,))
+        requirements += [
+            requirement(
+                id="total",
+                measure="official development assistance",
+                entities=[g7, Entity(name=whole_entity, role="recipient", members=True)],
+            ),
+            narrowed("in_africa", "total", africa),
+            derived_requirement(id="summed", input_id="in_africa"),
+        ]
+        operations += [
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            narrowing("in_africa", "fetch_total", africa),
+            _aggregate(id="summed", requirement_id="summed", input="in_africa"),
+        ]
+        whole_input, whole_op, whole_by_entity = "summed", "summed", None
+        # Africa read as its members, the set's own refs, with no published total.
+        members = ResolvedGroup(role="destination", label="Africa", members=_AFRICA_GROUP.members)
+        discovered["total"] = _flow_source(
+            source, SPEC_OTHER, recipients=[_ETHIOPIA, _KENYA, _NIGERIA], groups=[members]
         )
     else:
         requirements.append(
@@ -9178,8 +9314,10 @@ def test_a_share_checks_only_the_entities_each_operand_keeps(
             total = total.model_copy(update={"entities": (*total.entities, alias)})
         discovered["total"] = total
         if by_filter and whole_entity is not None:
-            requirements.append(narrowed("kept_total", "total", whole_entity))
-            operations.append(narrowing("kept_total", "fetch_total", whole_entity))
+            requirements.append(narrowed("kept_total", "total", EntityIn(names=(whole_entity,))))
+            operations.append(
+                narrowing("kept_total", "fetch_total", EntityIn(names=(whole_entity,)))
+            )
             whole_input, whole_op = "kept_total", "kept_total"
     requirements.append(
         ShareOfRequirement(
@@ -9198,13 +9336,17 @@ def test_a_share_checks_only_the_entities_each_operand_keeps(
         )
     )
 
+    if issues is None:
+        with pytest.raises(ValidationError):
+            _draft([decision()], requirements)
+        return
     result = build(
         _draft([decision()], requirements),
         _translation(*operations, terminal=["share"]),
         discovered=discovered,
     )
 
-    assert _codes(result) == codes, result.issues
+    assert [(issue.code, issue.operation_id) for issue in result.issues] == issues, result.issues
 
 
 def test_a_share_reads_no_filter_behind_a_share_it_divides_by(
@@ -9296,19 +9438,32 @@ def test_a_share_reads_no_filter_behind_a_share_it_divides_by(
     assert _codes(result) == [], result.issues
 
 
-def test_a_keyed_share_over_one_member_of_its_own_dataset_is_refused(
+@pytest.mark.parametrize(
+    ("scope", "issues"),
+    [
+        pytest.param(DenominatorScope.POOLED, _REFUSED, id="over-one-donor-s-total"),
+        pytest.param(DenominatorScope.PER_AXIS, [], id="over-each-donor-s-own-total"),
+    ],
+)
+def test_a_keyed_share_reads_its_key_column_by_how_it_divides(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     requirement: RequirementFactory,
     source: SourceFactory,
+    scope: DenominatorScope,
+    issues: list[tuple[Code, str]],
 ) -> None:
-    """Each donor's aid to Kenya over the United States' aid to Kenya, from one
-    dataset. The denominator holds the United States alone, so Germany's row is no
-    part of it: the figures are ratios, which `quotient_of` computes, and the share
-    is refused."""
+    """Each donor's aid to Kenya, from one dataset binding the United States, Germany
+    and France. Over the United States' aid alone (`pooled`), the denominator holds
+    the United States alone, so Germany's and France's rows are no part of it: the
+    figures are ratios, which `quotient_of` computes, and the share is refused. Over
+    each donor's own aid, filtered to the United States and Germany (`per_axis`),
+    rows pair donor by donor and France's finds no partner, which the share's key
+    check owns, so the donor column is not checked for containment."""
     donors = [
         ResolvedEntity(role="origin", ref="country/USA", label="United States"),
         ResolvedEntity(role="origin", ref="country/DEU", label="Germany"),
+        ResolvedEntity(role="origin", ref="country/FRA", label="France"),
     ]
     flows = source(
         spec_id=SPEC_KENYA,
@@ -9325,41 +9480,147 @@ def test_a_keyed_share_over_one_member_of_its_own_dataset_is_refused(
         id="aid",
         measure="official development assistance",
         entities=[
-            Entity(name="United States", role="donor"),
-            Entity(name="Germany", role="donor"),
+            *(Entity(name=donor.label, role="donor") for donor in donors),
             Entity(name="Kenya", role="recipient"),
         ],
     )
-    pooled = decision(slot="pooled", fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED))
+    pooled = scope is DenominatorScope.POOLED
+    two = EntityIn(names=("United States", "Germany"))
+    denominator_entity = "United States" if pooled else None
+    denominator_input = "aid" if pooled else "kept"
+    keyed = decision(slot="keyed", fixes=DecisionFixes(denominator_scope=scope))
     share = ShareOfRequirement(
         id="share",
-        decision_ids=["measure", "pooled"],
+        decision_ids=["measure", "keyed"],
         numerator=RequirementSide(input_id="aid"),
-        denominator=RequirementSide(input_id="aid", entity="United States"),
+        denominator=RequirementSide(input_id=denominator_input, entity=denominator_entity),
         axis="donor",
-        denominator_scope=DenominatorScope.POOLED,
+        denominator_scope=scope,
+    )
+    filtered = (
+        []
+        if pooled
+        else [
+            FilterRequirement(
+                id="kept", decision_ids=["measure"], input_id="aid", predicates=(two,)
+            )
+        ]
     )
 
     result = build(
-        _draft([decision(), pooled], [aid, share]),
+        _draft([decision(), keyed], [aid, *filtered, share]),
         _translation(
             RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            *(
+                []
+                if pooled
+                else [
+                    FilterOperation(
+                        id="kept", requirement_id="kept", input="fetch", predicates=(two,)
+                    )
+                ]
+            ),
             ShareOfOperation(
                 id="share",
                 requirement_id="share",
                 numerator=Side(input="fetch"),
-                denominator=Side(input="fetch", entity="United States"),
+                denominator=Side(input="fetch" if pooled else "kept", entity=denominator_entity),
                 axis="donor",
-                denominator_scope=DenominatorScope.POOLED,
+                denominator_scope=scope,
             ),
             terminal=["share"],
         ),
         discovered={"aid": flows},
     )
 
-    assert _codes(result) == [Code.SHARE_PART_OUTSIDE_WHOLE], result.issues
-    (issue,) = result.issues
-    assert "quotient_of" in issue.reason
+    assert [(issue.code, issue.operation_id) for issue in result.issues] == issues, result.issues
+
+
+@pytest.mark.parametrize(
+    ("recipient", "issues"),
+    [
+        pytest.param("Kenya", [_UNBOUND], id="member-inside"),
+        pytest.param("Egypt", [_UNBOUND, *_REFUSED], id="member-outside"),
+    ],
+)
+def test_a_share_naming_a_member_its_source_binds_as_a_total_checks_the_member(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    recipient: str,
+    issues: list[tuple[Code, str]],
+) -> None:
+    """G7 aid to one African country over G7 aid to Sub-Saharan Africa, whose set
+    lists Kenya and not Egypt. The numerator's source binds Africa's total and
+    resolves Kenya and Egypt on it, so the share checks the country its numerator
+    names, not the total its source binds: Kenya is inside, Egypt is outside. The
+    plan is refused regardless, since the source binds the total and leaves out the
+    countries the requirement names. No recorded Search block binds a total while
+    resolving a member on the same column, so the source is built by hand."""
+    egypt = ResolvedEntity(role="destination", ref="country/EGY", label="Egypt")
+    sub_saharan = ResolvedEntity(role="destination", ref="DACSubSaharanAfrica", label="SSA")
+    g7 = Entity(name="G7", role="donor")
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[
+            g7,
+            Entity(name="Kenya", role="recipient"),
+            Entity(name="Egypt", role="recipient"),
+        ],
+    )
+    total = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[g7, Entity(name="SSA", role="recipient")],
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid", entity=recipient),
+        denominator=RequirementSide(input_id="total"),
+    )
+    part = _flow_source(
+        source,
+        SPEC_KENYA,
+        recipients=[_AFRICA],
+        groups=[_AFRICA_GROUP.model_copy(update={"members": (*_AFRICA_GROUP.members, egypt.ref)})],
+    )
+    part = part.model_copy(update={"entities": (_G7, _KENYA, egypt)})
+
+    result = build(
+        _draft([decision()], [aid, total, share]),
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="fetch", entity=recipient),
+                denominator=Side(input="fetch_total"),
+            ),
+            terminal=["share"],
+        ),
+        discovered={
+            "aid": part,
+            "total": _flow_source(
+                source,
+                SPEC_OTHER,
+                recipients=[sub_saharan],
+                groups=[
+                    ResolvedGroup(
+                        role="destination",
+                        label="SSA",
+                        total=sub_saharan.ref,
+                        members=("country/ETH", "country/KEN", "country/NGA"),
+                    )
+                ],
+            ),
+        },
+    )
+
+    assert [(issue.code, issue.operation_id) for issue in result.issues] == issues, result.issues
 
 
 @pytest.mark.parametrize(
