@@ -34,6 +34,7 @@ from data_mcp.scope import ScopeAxis, ScopeEntry, TextOrigin
 from executor.classify import RECOVERABLE_SPEC_CODES
 from executor.ledger import RunStatus
 from planner.parties import PARTY_ROLES, column_party_roles, party_role
+from planner.phrasing import CONSTANT_PRICES, CURRENT_PRICES
 from planner.plan import (
     DatasetRequirement,
     Decline,
@@ -1018,12 +1019,6 @@ def settled_by_readings(
         reading = SearchReading.model_validate(raw)
         if reading.spec_id is not None and reading.status in SETTLED_STATUSES:
             yield reading.spec_id, reading.observed_at
-
-
-# How `open_prices` words the prices search read, and the prices it offers
-# when search lists no other prices of its own.
-CURRENT_PRICES = "current prices"
-CONSTANT_PRICES = "constant prices"
 
 
 type PricesForm = Literal["unit", "options", "closed"]
