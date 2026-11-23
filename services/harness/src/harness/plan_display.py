@@ -66,6 +66,8 @@ from compiler.shapes import breakdown_level
 from compiler.sources import stat_var_count
 from planner.parties import across_party, flow_side, party_role, role_party, singular
 from planner.phrasing import (
+    CONSTANT_PRICES,
+    CURRENT_PRICES,
     among_phrase,
     datasets_of,
     denominator_scope_phrase,
@@ -1672,10 +1674,26 @@ def switchable_decision(decision: Decision) -> bool:
     writes (`planner.plan.is_code_written`) are not: a search pin's measure
     and a scope choice switch through Search (`choice_id`), and one
     qualifying the answer (`Decision.caveat`) reaches the card only as a
-    caveat.
+    caveat. Nor is the prices of a whole unit a unit answer chose for a part
+    (`_states_whole_unit`): the card shows that row with no other options.
     """
-    return decision.fixes is not None and (
-        decision.fixes.prices is not None or not is_code_written(decision)
+    return (
+        decision.fixes is not None
+        and not _states_whole_unit(decision)
+        and (decision.fixes.prices is not None or not is_code_written(decision))
+    )
+
+
+def _states_whole_unit(decision: Decision) -> bool:
+    """Whether `decision` is the prices a unit answer chose for a part as a
+    whole unit: it fixes the part's prices, as only that decision does
+    (`planner.plan.is_code_written`), and its `chosen`
+    (`submission.prices_choice.PricesChoice.words`) names the unit's
+    currency, which the bare prices labels of a choice with no unit never do."""
+    return (
+        decision.fixes is not None
+        and decision.fixes.prices is not None
+        and decision.chosen not in (CURRENT_PRICES, CONSTANT_PRICES)
     )
 
 

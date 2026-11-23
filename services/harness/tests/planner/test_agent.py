@@ -13068,7 +13068,7 @@ def test_a_plan_in_another_unit_than_the_user_chose_is_refused_and_told_the_seri
     part, and Search re-read it in that unit. A plan pinning a series of the
     part in the same prices but another currency or base year is refused,
     told the unit and the re-read series to pin; one pinning that series in
-    that unit lands."""
+    that unit lands, stating the user's choice as one decision on the part."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_blocks(ctx, *shown())
@@ -13094,6 +13094,11 @@ def test_a_plan_in_another_unit_than_the_user_chose_is_refused_and_told_the_seri
     )
 
     assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    prices = [d.slot for d in plan.decisions if d.slot.startswith("user_prices_")]
+    assert prices == [f"user_prices_{_GROSS}"]
+    assert plan.requirement(dataset.id).decision_ids.count(prices[0]) == 1
 
 
 def test_a_plan_on_the_part_in_another_unit_is_refused_with_no_block_for_the_re_read(
@@ -13119,6 +13124,57 @@ def test_a_plan_on_the_part_in_another_unit_is_refused_with_no_block_for_the_re_
     assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
     assert (refused["detail"]["unit"], refused["detail"]["pin"]) == (_EUR, _EUR_READ)
     assert load_plan(ctx.state) is None
+
+
+_GROSS_2020 = "spec_" + "6" * 32
+_EUR_READ_2020 = "spec_" + "5" * 32
+
+
+def test_a_unit_answer_holds_every_window_of_the_measure_its_question_covers(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The unit question covers the gross part over every year and over
+    2020-2024, two windows of one measure. The user chose current euros, and
+    Search re-read each window in them. Both windows hold that choice, so a
+    plan pinning the first window in current US dollars is refused and told
+    the series the agent fetches for it."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    later = copy.deepcopy(_FRANCE_KENYA)
+    later["spec_id"] = later["definition"]["spec_id"] = _GROSS_2020
+    later["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    _show_blocks(ctx, _FRANCE_KENYA, later)
+    for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
+        record_unit_read(ctx.state, part, read)
+        record_unit_served(ctx.state, part, read, UnitChoice.model_validate(_EUR))
+    question = {
+        **_UNIT_QUESTION,
+        "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
+    }
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+        user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+
+    assert prices_chosen(session_call(ctx)) == {
+        _GROSS: PricesChoice("current", _EUR_READ, unit=Unit(**_EUR)),
+        _GROSS_2020: PricesChoice("current", _EUR_READ_2020, unit=Unit(**_EUR)),
+    }
+
+    dataset, derived = requirements
+    refused = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _GROSS, "unit": Unit(**_USD)}), derived],
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert (refused["detail"]["unit"], refused["detail"]["pin"]) == (_EUR, _EUR_READ)
 
 
 def test_a_unit_search_refused_holds_the_plan_to_the_unit_the_series_is_served_in(

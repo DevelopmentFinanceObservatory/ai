@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import Any, Literal, NamedTuple
 
@@ -46,7 +46,7 @@ from compiler.evidence import PriceBasis, UnitReading, read_unit_currency, read_
 from compiler.evidence import requested_unit as requested_unit_of
 from compiler.sources import readable_source
 from harness.turn_events import PLANNER_ASK
-from harness.turn_records import CONSTANT_PRICES, CURRENT_PRICES
+from planner.phrasing import CONSTANT_PRICES, CURRENT_PRICES
 from planner.plan import (
     BaseYearUnstatedError,
     DatasetRequirement,
@@ -95,16 +95,12 @@ class PricesChoice(NamedTuple):
 
     A unit question's answer also names the whole `unit`, currency and base
     year with the prices, that the series `spec_id` is served in: the series
-    the agent fetches for the part (`harness.graph.state.units_served`). A
-    switch of the part's prices row on the plan card to the other prices
-    keeps that unit's `currency` alone, since the new prices name no base
-    year."""
+    the agent fetches for the part (`harness.graph.state.units_served`)."""
 
     prices: PriceBasis
     spec_id: str | None = None
     asked: bool = False
     unit: Unit | None = None
-    currency: str | None = None
 
     @classmethod
     def of_candidate(cls, candidate: Mapping[str, Any]) -> PricesChoice | None:
@@ -127,16 +123,15 @@ class PricesChoice(NamedTuple):
 
     @property
     def held_currency(self) -> str | None:
-        """The currency the choice holds the part to: a whole `unit`'s, else
-        the `currency` kept from one; `None` when it holds none."""
-        return self.unit.currency if self.unit is not None else self.currency
+        """The currency the choice holds the part to: a whole `unit`'s; `None`
+        when it names none."""
+        return self.unit.currency if self.unit is not None else None
 
     @property
     def words(self) -> str:
         """What the user chose in words: the prices, with the base year and
         currency of a whole `unit`, "constant 2020 prices in EUR". The prices
-        decision's `chosen`, so a plan-card switch to the other prices, which
-        picks `label`, is the decision a replan states."""
+        decision's `chosen`."""
         if self.unit is None:
             return self.label
         year = f" {self.unit.base_year}" if self.unit.base_year is not None else ""
@@ -151,14 +146,15 @@ class Parts:
     when none is held. `shown` is every spec_id the planner was shown, and
     `searched` those a search settled on as readings of their own, not
     fetched as another count of one (`of_shown`); `None` reads every shown
-    series so. `priced` are the parts the user chose prices for
-    (`priced_by`).
+    series so. `priced` are the parts the user chose prices for, and
+    `fetched` the part each series fetched for a part in a currency the
+    user chose is fetched for, by that series (`priced_by`).
 
-    A part's series are the part, each series its block offers in its place,
-    another count or other prices, and each shown series measuring what one
-    of those measures in the part's currency, in any prices (`same_measure`),
-    such as one a later search found, each less any series another reading
-    owns (`owner_of`).
+    A part's series are the part, each series fetched for it, each series
+    its block offers in its place, another count or other prices, and each
+    shown series measuring what one of those measures in the part's
+    currency, in any prices (`same_measure`), such as one a later search
+    found, each less any series another reading owns (`owner_of`).
     """
 
     source_of: Callable[[str], SelectedSource | None]
@@ -166,6 +162,7 @@ class Parts:
     shown: Collection[str] = ()
     searched: Collection[str] | None = None
     priced: Collection[str] = ()
+    fetched: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def of_shown(
@@ -206,8 +203,22 @@ class Parts:
         )
 
     def priced_by(self, choices: Mapping[str, PricesChoice]) -> Parts:
-        """These parts, with the parts `choices` prices marked."""
-        return replace(self, priced=frozenset(choices))
+        """These parts, with the parts `choices` prices marked, and the series
+        fetched for each part a choice holds to a currency
+        (`PricesChoice.held_currency`), whose currency may differ from the part's.
+        A fetched series that is itself a part `choices` prices stays that
+        part's alone, so no series belongs to two parts."""
+        return replace(
+            self,
+            priced=frozenset(choices),
+            fetched={
+                choice.spec_id: part
+                for part, choice in choices.items()
+                if choice.held_currency is not None
+                and choice.spec_id is not None
+                and choice.spec_id not in choices
+            },
+        )
 
     def unit_of(self, spec_id: str) -> UnitReading:
         """What the unit of the series `spec_id` states (`source_unit`), nothing when no source is held."""
@@ -234,10 +245,14 @@ class Parts:
         ]
 
     def series(self, part: str) -> frozenset[str]:
-        """`part` and every series it reaches (`_reached`) that no other reading
-        owns (`owner_of`)."""
+        """`part`, each series fetched for it (`fetched`), and every series it
+        reaches (`_reached`) that no other reading owns (`owner_of`)."""
         return frozenset(
-            {part, *(one for one in self._reached(part) if self.owner_of(one) in (part, None))}
+            {
+                part,
+                *(one for one, owner in self.fetched.items() if owner == part),
+                *(one for one in self._reached(part) if self.owner_of(one) in (part, None)),
+            }
         )
 
     def _reached(self, reading: str) -> list[str]:
@@ -280,7 +295,10 @@ class Parts:
         (`_reached`), each time a priced one of them first. `None` when no
         reading reaches it. So a gross part and a net part of one flow pair
         never claim each other's series, and a constant series goes to the
-        reading the user priced."""
+        reading the user priced. A series fetched for a part in a currency
+        the user chose (`fetched`) is that part's."""
+        if spec_id in self.fetched:
+            return self.fetched[spec_id]
         if spec_id in self._readings:
             return spec_id if spec_id in self.priced else self._part_of(spec_id)
         for claims in (self._offers_in_prices, self._measures, self._reached):
@@ -689,7 +707,6 @@ def prices_decisions(
         if not reading:
             continue
         slot = prices_slot(part)
-        held = f", in {choice.currency}" if choice.unit is None and choice.currency else ""
         decisions.append(
             Decision(
                 slot=slot,
@@ -700,7 +717,7 @@ def prices_decisions(
                 ),
                 chosen=choice.words,
                 resolved_by=ResolvedBy.USER,
-                rationale=f"The user chose {choice.words}{held}.",
+                rationale=f"The user chose {choice.words}.",
                 fixes=DecisionFixes(prices=choice.prices),
             )
         )

@@ -67,6 +67,7 @@ from planner.operations import (
     SumOfOperation,
     Translation,
 )
+from planner.phrasing import CONSTANT_PRICES, CURRENT_PRICES
 from planner.plan import (
     AggregateRequirement,
     ComparisonRequirement,
@@ -89,6 +90,7 @@ from planner.plan import (
     ScopeOptionState,
     ShareOfRequirement,
     SumOfRequirement,
+    Unit,
     WholeOf,
     frame_shapes,
     scope_choice_slot,
@@ -131,6 +133,7 @@ from planner.workflow import (
     WorkflowStep,
 )
 from pydantic import BaseModel
+from submission.prices_choice import PricesChoice, prices_slot
 from submission.service import SourceReadings, _card_names
 from translator.mechanical import build_translation
 
@@ -5072,6 +5075,23 @@ def _planner_decision(**update: Any) -> Decision:
     )
 
 
+def _prices_decision(choice: PricesChoice) -> Decision:
+    """The decision `propose_plan` writes for `choice`, the prices the user
+    chose for a part, as `submission.prices_choice.prices_decisions` words it."""
+    return Decision(
+        slot=prices_slot(_SPEC_A),
+        description="Which prices the figures are in.",
+        options=tuple(
+            choice.words if label == choice.label else label
+            for label in (CURRENT_PRICES, CONSTANT_PRICES)
+        ),
+        chosen=choice.words,
+        resolved_by=ResolvedBy.USER,
+        rationale=f"The user chose {choice.words}.",
+        fixes=DecisionFixes(prices=choice.prices),
+    )
+
+
 @pytest.mark.parametrize(
     ("decision", "switchable"),
     [
@@ -5083,14 +5103,38 @@ def _planner_decision(**update: Any) -> Decision:
         ),
         (_scope_decision(_SPEC_A, "sector"), False),
         (_planner_decision(caveat="providers_differ"), False),
+        (_prices_decision(PricesChoice("current")), True),
+        (
+            _prices_decision(PricesChoice("current", unit=Unit(currency="EUR", prices="current"))),
+            False,
+        ),
+        (
+            _prices_decision(
+                PricesChoice(
+                    "constant", unit=Unit(currency="USD", prices="constant", base_year=2023)
+                )
+            ),
+            False,
+        ),
     ],
-    ids=["fixes_fields", "rationale_only", "search_pin", "scope_choice", "caveat"],
+    ids=[
+        "fixes_fields",
+        "rationale_only",
+        "search_pin",
+        "scope_choice",
+        "caveat",
+        "prices",
+        "whole_unit",
+        "whole_unit_in_usd",
+    ],
 )
 def test_only_a_planner_decision_settling_fields_switches_on_the_card(
     decision: Decision, switchable: bool
 ) -> None:
     """The decisions `propose_plan` writes switch through Search or qualify
-    the answer, and a rationale settles nothing a switch could change."""
+    the answer, and a rationale settles nothing a switch could change. The
+    prices the user chose for a part switch to the other prices, unless a
+    unit answer chose them as a whole unit, which the card shows read-only."""
     assert switchable_decision(decision) is switchable
 
 
