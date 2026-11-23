@@ -204,67 +204,90 @@ def absorbed(
     return merged
 
 
+class AnsweredPart(NamedTuple):
+    """A part a unit question's answer put on a unit row: `group`, the row's
+    lead part (`unit_slot`), `spec_id`, the series the agent fetches for the
+    part, and `unit`, the unit that series is served in
+    (`harness.graph.state.ServedUnit`)."""
+
+    group: str
+    spec_id: str
+    unit: Unit | None
+
+
 def plan_held_choices(
     choices: Mapping[str, PricesChoice],
     plan: Plan,
     *,
     units: Mapping[str, Unit],
+    answered: Mapping[str, AnsweredPart] = MappingProxyType({}),
     rows: AbsorbedRows = MappingProxyType({}),
     fresh: Collection[str] = (),
 ) -> dict[str, PricesChoice]:
-    """`choices` with each part a unit row `plan` states has absorbed read off the plan.
+    """`choices` with every unit row `plan` states holding its members to the row's unit.
 
     A unit row's choices (`PricesChoice.group`) seed the plan that first
-    states the row, from the series the unit question's answer fetched for
-    each part. Once `plan` states the row, its unit is the one its citing
-    requirements state (`plan_unit`), or the one `units` holds for its slot,
-    the unit a switch of the row picked, and its series are the distinct
-    pins of those requirements: the choices of the parts the row absorbed
-    are replaced by one per pin, each that pin in that unit.
+    states the row. Once `plan` states the row (slot `unit_slot`), its unit
+    U is the one `units` holds for the slot, the unit a switch of the row
+    picked, else the one its citing requirements state (`plan_unit`), and
+    every member of the row holds U, whether or not `choices` still holds a
+    choice for it, as after a message the user typed:
 
-    A part the row absorbed is one `rows` records under the row's slot
-    whose requirements still cite it, every part of the group on state
-    recorded before rows were (no entry for the slot). A part no citing
-    requirement reads, as in a plan that left it out, keeps its choice. So
-    does a group answered since the plan landed (`fresh`, its parts): the
-    newest answer holds the group. A pin a choice outside the group holds,
-    as a bare prices answer the user gave on it after a refusal, keeps that
-    choice. A row `plan` does not state, or whose requirements state no one
-    unit, keeps its choices.
+    - each distinct pin of the requirements citing the row, as that pin in U;
+    - each part the unit question's answer put on the row (`answered`) that
+      the row has not absorbed, as the series fetched for it, in U, which
+      that series is served in or not (`PricesChoice.in_unit`). A part the
+      row absorbed is one
+      `rows` records under the slot whose requirements still cite the row,
+      every part on state recorded before rows were (no entry for the
+      slot); its requirements' pins stand for it.
+
+    Two answers stand over the row: a part answered since the plan landed
+    (`fresh`) holds its row's choices as answered, and a pin a choice
+    outside the row holds, as a bare prices answer the user gave on it
+    after a refusal, keeps that choice. A row `plan` does not state, or
+    whose requirements state no one unit, keeps the choices `choices` gives it.
     """
     held = dict(choices)
-    for group in dict.fromkeys(
-        choice.group
-        for choice in choices.values()
-        if choice.group is not None and choice.unit is not None
-    ):
-        slot = unit_slot(group)
-        members = [part for part, choice in held.items() if choice.group == group]
-        if any(part in fresh for part in members):
+    for decision in plan.decisions:
+        slot = decision.slot
+        if not slot.startswith(UNIT_SLOT_PREFIX):
+            continue
+        group = slot.removeprefix(UNIT_SLOT_PREFIX)
+        live = [part for part, choice in held.items() if choice.group == group]
+        members = [part for part, answer in answered.items() if answer.group == group]
+        if any(part in fresh for part in (*live, *members)):
             continue
         unit = units.get(slot) or plan_unit(plan, slot)
+        if unit is None:
+            continue
         citing = [
             requirement
             for requirement in plan.evidence_requirements
             if isinstance(requirement, DatasetRequirement) and slot in requirement.decision_ids
         ]
         pins = list(dict.fromkeys(r.source_spec_id for r in citing if r.source_spec_id is not None))
-        if unit is None or not pins:
-            continue
         recorded = rows.get(slot)
         cited = {requirement.id for requirement in citing}
-        taken = (
-            members
-            if recorded is None
-            else [part for part in members if cited.intersection(recorded.get(part, ()))]
-        )
-        if not taken:
-            continue
-        held = {part: choice for part, choice in held.items() if part not in taken}
-        for pin in pins:
-            if (other := held.get(pin)) is not None and other.group != group:
-                continue
-            held[pin] = PricesChoice(unit.prices, pin, unit=unit, group=group)
+        absorbed_parts = {
+            part
+            for part in members
+            if recorded is None or cited.intersection(recorded.get(part, ()))
+        }
+        held = {part: choice for part, choice in held.items() if choice.group != group}
+        holds = [
+            *((pin, pin, True) for pin in pins),
+            *(
+                (part, answered[part].spec_id, answered[part].unit == unit)
+                for part in members
+                if part not in absorbed_parts
+            ),
+        ]
+        for key, spec_id, in_unit in holds:
+            if key not in held:
+                held[key] = PricesChoice(
+                    unit.prices, spec_id, unit=unit, group=group, in_unit=in_unit
+                )
     return held
 
 
@@ -278,13 +301,17 @@ class PricesChoice(NamedTuple):
     year with the prices, that the series `spec_id` is served in: the series
     the agent fetches for the part (`harness.graph.state.units_served`), and
     the `group`, the lead part of the unit row the part sits on
-    (`harness.graph.state.ServedUnit.row`), `None` for a part on none."""
+    (`harness.graph.state.ServedUnit.row`), `None` for a part on none.
+    `in_unit` is false for a part a switch of its row moved to a unit its
+    series `spec_id` is not served in, the series no longer read
+    (`plan_held_choices`): the part has no series in `unit`."""
 
     prices: PriceBasis
     spec_id: str | None = None
     asked: bool = False
     unit: Unit | None = None
     group: str | None = None
+    in_unit: bool = True
 
     @classmethod
     def of_candidate(cls, candidate: Mapping[str, Any]) -> PricesChoice | None:
@@ -669,11 +696,14 @@ class _Wanted(NamedTuple):
     """What a requirement reading a priced part states to honour the user's
     choice: `unit`, and `pin` when it moves to another series of the part;
     `unit` is `None` when no series shown serves those prices. `exact` when
-    the requirement states `unit` whole, currency and base year included."""
+    the requirement states `unit` whole, currency and base year included.
+    `unserved` when the requirement's pin is not served in `unit` and no
+    series of the part is known in it, so the pin cannot stand."""
 
     unit: Unit | None
     pin: str | None = None
     exact: bool = False
+    unserved: bool = False
 
 
 def _wanted(
@@ -728,15 +758,32 @@ def _whole_unit(pin: str | None, part: str, choice: PricesChoice, parts: Parts) 
     is the part itself, which that series reads in the unit, or measures
     what that series measures; and it stands, held to the unit, when it is
     another of the part's series. The part's own pin needs no block for the
-    series fetched, which a re-read may leave unheld."""
+    series fetched, which a re-read may leave unheld.
+
+    A part with no series in the unit (`PricesChoice.in_unit` false) moves
+    nowhere: a pin served in the unit stands, and one that is the series
+    fetched, the part, or measures what they measure, or another of the
+    part's series, cannot stand (`_Wanted.unserved`)."""
     if choice.unit is None or choice.spec_id is None or pin is None:
         return None
+    if not choice.in_unit:
+        return _unserved_unit(pin, choice.spec_id, part, choice.unit, parts)
     if pin == choice.spec_id or _served_in(parts.unit_of(pin), choice.unit):
         return _Wanted(choice.unit, exact=True)
     if pin == part or parts.measures_alike(pin, choice.spec_id):
         return _Wanted(choice.unit, choice.spec_id, exact=True)
     if pin in parts.series(part):
         return _Wanted(choice.unit, exact=True)
+    return None
+
+
+def _unserved_unit(pin: str, fetched: str, part: str, unit: Unit, parts: Parts) -> _Wanted | None:
+    """`_whole_unit` for a part with no series in `unit`, whose series
+    `fetched` is served in another."""
+    if _served_in(parts.unit_of(pin), unit):
+        return _Wanted(unit, exact=True)
+    if pin in (fetched, part) or parts.measures_alike(pin, fetched) or pin in parts.series(part):
+        return _Wanted(unit, exact=True, unserved=True)
     return None
 
 
@@ -900,7 +947,7 @@ def prices_decisions(
             elif wanted.exact and unit != wanted.unit:
                 code = ProblemCode.USER_DECISION_CONTRADICTED
                 opening = f"states `unit` {unit.model_dump(mode='json', exclude_none=True)}"
-            elif wanted.unit is None or wanted.pin is not None:
+            elif wanted.unit is None or wanted.pin is not None or wanted.unserved:
                 code = ProblemCode.USER_DECISION_CONTRADICTED
                 other = "another unit" if wanted.exact else "other prices"
                 opening = f"pins {requirement.source_spec_id}, a series in {other}"

@@ -73,7 +73,7 @@ from compiler.sources import (
 )
 from data_mcp.scope import ChoiceOrigin, ScopeAxis
 from data_mcp.settings import Settings as DataMcpSettings
-from harness.graph.state import conversation_readings
+from harness.graph.state import conversation_readings, units_served
 from harness.plan_display import plan_words
 from harness.scope_choices import (
     ANY_REPORTERS,
@@ -273,6 +273,7 @@ from translator.tool import authored_answer
 from submission.prices_choice import (
     USER_PRICES_SLOT_PREFIXES,
     AbsorbedRows,
+    AnsweredPart,
     Parts,
     PricesChoice,
     absorbed,
@@ -532,21 +533,23 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         # shape: a value that is no list states none.
         stated = raw if isinstance(raw := proposal.evidence_requirements, list) else []
         readings = SourceReadings.of_shown(held_sources(view.state))
-        on_record = load_plan(view.state)
+        # The plan the proposal amends, as the chain below resolves it.
+        intent = _intent(view, proposal)
+        amended = intent[0] if not isinstance(intent, dict) else None
         return base_year_refusal(
             exc,
             stated,
             choices=_user_prices(
                 view,
                 statement(
-                    on_record,
+                    amended,
                     to_origin={
                         copy.spec_id: copy.windowed_from
                         for copy in windowed_pins(view.state).values()
                     },
                     alignments=alignments(view.state),
                 )
-                if on_record is not None
+                if amended is not None
                 else None,
             ),
             parts=Parts.of_shown(
@@ -568,16 +571,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     removed_evidence_requirements = patch.removed_evidence_requirements
     existing = load_plan(view.state)
     referral = _authored_referral(view, existing)
-    resolved = _resolve_intent(
-        existing,
-        amends_version=proposal.amends_version,
-        starts_new_plan=proposal.starts_new_plan,
-        amendment_entry=in_amendment_entry,
-        rounds_so_far=load_plan_rounds(view.state),
-        question=question,
-        new_question_in=_new_question_source(proposal.new_question_in),
-        answered_in_words=answered_in_words(view.state),
-    )
+    resolved = _intent(view, proposal)
     if isinstance(resolved, dict):
         return resolved
     previous, rounds = resolved
@@ -1011,6 +1005,22 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     )
 
 
+def _intent(view: SessionView, proposal: Proposal) -> tuple[Plan | None, int] | dict[str, object]:
+    """The plan `proposal` amends, `None` for a fresh plan, with the round
+    count it brings the entry to, or the refusal of its intent
+    (`_resolve_intent`)."""
+    return _resolve_intent(
+        load_plan(view.state),
+        amends_version=proposal.amends_version,
+        starts_new_plan=proposal.starts_new_plan,
+        amendment_entry=amendment_entry(view.state),
+        rounds_so_far=load_plan_rounds(view.state),
+        question=proposal.question,
+        new_question_in=_new_question_source(proposal.new_question_in),
+        answered_in_words=answered_in_words(view.state),
+    )
+
+
 def _user_prices(view: SessionView, previous: Plan | None) -> Mapping[str, PricesChoice]:
     """The prices the user chose (`SessionView.prices_chosen`), each unit row
     `previous`, the plan amended as the planner states it, holds read off it
@@ -1018,11 +1028,13 @@ def _user_prices(view: SessionView, previous: Plan | None) -> Mapping[str, Price
     card moved in the unit it picked (`SessionView.switched_units`).
 
     The unit question's answer seeds the plan that first states its row.
-    From then on the plan holds the row's unit and series for each part the
-    row absorbed (`submission.prices_choice.absorbed_rows`), so a count or
-    scope switch that moves a pin moves the series the unit holds, and an
-    answer the plan has not read (`SessionView.answered_since_plan`) holds
-    its parts.
+    From then on every member of the row, each part the answer put on it
+    (`harness.graph.state.units_served`) and each pin citing it, holds the
+    row's unit, whether or not the turn still holds the answer. The plan's
+    pins stand for each part the row absorbed
+    (`submission.prices_choice.absorbed_rows`), so a count or scope switch
+    that moves a pin moves the series the unit holds, and an answer the
+    plan has not read (`SessionView.answered_since_plan`) holds its parts.
     """
     chosen = view.prices_chosen()
     if previous is None:
@@ -1031,6 +1043,11 @@ def _user_prices(view: SessionView, previous: Plan | None) -> Mapping[str, Price
         chosen,
         previous,
         units=view.switched_units(),
+        answered={
+            part: AnsweredPart(served.row, served.spec_id, served.unit)
+            for part, served in units_served(view.state).items()
+            if served.row is not None
+        },
         rows=absorbed_rows(view.state),
         fresh=view.answered_since_plan(),
     )
