@@ -42,7 +42,16 @@ from harness.turn_records import CandidateReading, SearchReading, WindowReading
 from harness.unit_offer import unit_offer
 from orchestrator.run import ToolsAnswered
 from planner.call import _picks
-from planner.plan import Unit
+from planner.plan import (
+    DatasetRequirement,
+    Decision,
+    DecisionFixes,
+    Entity,
+    Period,
+    Plan,
+    ResolvedBy,
+    Unit,
+)
 from sqlalchemy.ext.asyncio import AsyncEngine
 from submission.prices_choice import prices_slot, unit_slot
 
@@ -718,7 +727,7 @@ async def test_a_count_read_again_in_a_unit_keeps_the_part_s_roles_and_no_pair_n
     assert "search once for that reading" not in handed.output["text"]
     assert {_FK_GROSS, _FK_NET} <= set(unit_settled(state))
     assert unit_reads(state) == {_FK_GROSS: [posted["spec_id"]]}
-    assert units_served(state)[_FK_GROSS].count == _FK_NET
+    assert units_served(state)[_FK_GROSS].spec_id == posted["spec_id"]
 
 
 async def test_a_count_refused_a_unit_is_fetched_in_the_unit_the_count_is_served_in() -> None:
@@ -766,7 +775,6 @@ async def test_a_count_refused_a_unit_is_fetched_in_the_unit_the_count_is_served
     assert units_served(state)[_FK_GROSS] == ServedUnit(
         spec_id=_FK_NET,
         unit=Unit(currency="EUR", prices="current"),
-        count=_FK_NET,
         group=_FK_GROSS,
         chosen=Unit(currency="USD", prices="constant", base_year=2023),
     )
@@ -839,8 +847,9 @@ async def test_a_unit_answer_records_each_part_under_the_question_s_lead_part() 
     """A unit question covers its part and the part measuring the same thing
     over other years. Each part's record names the question's lead part as
     its group, so the parts' prices are one decision on the plan, and the
-    plan card's row for it offers what both parts convert into, starting on
-    the unit answered. A part's own prices row offers no unit."""
+    plan card's row for it offers what both series the plan pins for them
+    convert into, starting on the unit the plan states. A part's own prices
+    row offers no unit."""
     search = _UnitSearch()
     state: dict[str, Any] = {
         ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: _FRANCE_KENYA, _OTHER: _other_window()},
@@ -871,6 +880,34 @@ async def test_a_unit_answer_records_each_part_under_the_question_s_lead_part() 
         _OTHER: _FK_GROSS,
     }
     row, own = unit_slot(_FK_GROSS), prices_slot(_OTHER)
+    usd_2020 = Unit(currency="USD", prices="constant", base_year=2020)
+    state["plan"] = Plan(
+        question=_AID,
+        decisions=[
+            Decision(
+                slot=row,
+                description="Which prices the figures are in.",
+                options=("current prices", "constant 2020 prices in USD"),
+                chosen="constant 2020 prices in USD",
+                resolved_by=ResolvedBy.USER,
+                rationale="The user chose constant 2020 prices in USD.",
+                fixes=DecisionFixes(prices="constant"),
+            )
+        ],
+        evidence_requirements=[
+            DatasetRequirement(
+                id=f"r{index}",
+                decision_ids=[row],
+                measure=_AID,
+                entities=[Entity(name="Kenya", role="recipient")],
+                period=Period(start=2018, end=2022),
+                source_spec_id=served.spec_id,
+                unit=usd_2020,
+            )
+            for index, served in enumerate(units_served(state).values())
+        ],
+        version=1,
+    ).model_dump_json()
     card = offer(ctx, {"decisions": [{"slot": row}, {"slot": own}]}, early_mints=None)
     shared = unit_offer([_FRANCE_KENYA, _other_window()])
     assert shared is not None

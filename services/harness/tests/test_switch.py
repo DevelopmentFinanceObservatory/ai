@@ -45,6 +45,7 @@ from executor.outcomes import Accepted
 from executor.run import execute_approved_plan
 from harness.decision_pick import DecisionPick
 from harness.graph import switch as switch_module
+from harness.graph.approve import offer
 from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
@@ -52,9 +53,7 @@ from harness.graph.state import (
     ORCHESTRATOR_UNIT_SERVED_KEY,
     ORCHESTRATOR_UNIT_SETTLED_KEY,
     PICK_REPLAN_KEY,
-    ServedUnit,
     unit_row_offers,
-    units_served,
 )
 from harness.graph.switch import SCOPE_CHOICE_NOT_APPLIED, SWITCH_CANCELLED, SwitchFailedError
 from harness.plan_display import choice_id, count_choice_id, decision_option_id
@@ -142,7 +141,6 @@ from .test_orchestrate_ask import (
     _AID,
     _BOTH_BASES,
     _FK_GROSS,
-    _FK_NET,
     _FRANCE_KENYA,
     _OTHER,
     _open_reading,
@@ -2231,30 +2229,43 @@ _UNIT_SLOT = f"user_unit_{_FK_GROSS}"
 _UNIT_ROW = f"decision/{_UNIT_SLOT}"
 _USD_2023 = {"currency": "USD", "prices": "constant", "base_year": 2023}
 _USD = {"currency": "USD", "prices": "current"}
+_WINDOWS = {_FK_GROSS: (2018, 2022), _OTHER: (2010, 2014)}
+
+
+def _read_in(spec_id: str, unit: Mapping[str, Any], start: int, end: int) -> dict[str, Any]:
+    """The France to Kenya block as Search reads it in `unit` under
+    `spec_id`, over `start` to `end`, its identity requesting the unit
+    (`data_mcp.definition_writes.unit_identity`)."""
+    block = copy.deepcopy(_FRANCE_KENYA)
+    block["spec_id"] = block["definition"]["spec_id"] = spec_id
+    identity = block["definition"]["identity"]
+    identity["facets"] = {"unit": {"request": dict(unit)}}
+    identity["requested_window"] = {"kind": "range", "start": start, "end": end}
+    block["resolved"]["alternative_measures"] = []
+    return block
 
 
 def _unit_state(
     plan: PlannerPlan,
     *,
     unit: Mapping[str, Any] = _USD_2023,
-    group: str | None = _FK_GROSS,
-    chosen: bool = True,
-    count: str | None = None,
     parts: tuple[str, ...] = (_FK_GROSS, _OTHER),
 ) -> dict[str, Any]:
     """The state of a turn paused on `plan` after the user answered a unit
     question covering `parts` (aid from France to Kenya since 2018, and the
     same measure over 2010 to 2014) with `unit`: Search read each part in
-    constant 2023 US dollars, and served each as it stands in current US
-    dollars. Each part is recorded under `group`, the question's lead part,
-    with `unit` as the unit chosen unless `chosen` is false, and read as
-    `count` when given."""
+    constant 2023 US dollars, its block on record as the `ask` node stores
+    it, and served each as it stands in current US dollars. The `ask` node
+    recorded each part under the question's lead part."""
     reread = unit != _USD
     reads = dict(zip((_FK_GROSS, _OTHER), (_READ_RECENT, _READ_EARLY), strict=True))
     fetched = {part: reads[part] if reread else part for part in parts}
+    specs = {_FK_GROSS: _FRANCE_KENYA, _OTHER: _other_window()}
+    if reread:
+        specs |= {reads[part]: _read_in(reads[part], unit, *_WINDOWS[part]) for part in parts}
     return {
         "plan": plan.model_dump_json(),
-        ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: _FRANCE_KENYA, _OTHER: _other_window()},
+        ORCHESTRATOR_SPECS_KEY: specs,
         ORCHESTRATOR_SEARCHES_KEY: [
             _open_reading(_FK_GROSS, text=_AID),
             _open_reading(_OTHER, text=_AID),
@@ -2264,9 +2275,8 @@ def _unit_state(
             part: {
                 "spec_id": fetched[part],
                 "unit": dict(unit),
-                "count": count,
-                "group": group,
-                "chosen": dict(unit) if chosen else None,
+                "group": _FK_GROSS,
+                "chosen": dict(unit),
             }
             for part in parts
         },
@@ -2383,55 +2393,49 @@ def _is_early(posted: Mapping[str, Any]) -> bool:
 
 
 @pytest.mark.parametrize(
-    ("start", "switch", "unit", "searched"),
+    ("start", "switch", "unit"),
     [
         (
             _USD_2023,
             {"option_id": "USD-constant-2015", "unit": {**_USD_2023, "base_year": 2015}},
             {**_USD_2023, "base_year": 2015},
-            True,
         ),
-        (_USD, {"option_id": "USD-constant-2023"}, _USD_2023, True),
-        (_USD_2023, {"option_id": "USD-current", "unit": _USD}, _USD, False),
+        (_USD, {"option_id": "USD-constant-2023"}, _USD_2023),
+        (_USD_2023, {"option_id": "USD-current", "unit": _USD}, _USD),
     ],
     ids=["unit-picked", "option-only", "back-to-the-served-unit"],
 )
 async def test_a_unit_row_switch_reads_every_part_in_the_unit_and_states_it(
-    start: dict[str, Any], switch: dict[str, Any], unit: dict[str, Any], searched: bool
+    start: dict[str, Any], switch: dict[str, Any], unit: dict[str, Any]
 ) -> None:
     """The unit row of a question covering two windows of one measure is
     switched: from constant 2023 to constant 2015 US dollars; by a client
     naming one of the row's whole units by its option id alone, from current
-    to constant 2023 US dollars; and back to current US dollars, which both
-    parts are served in. Search is asked for each part in the unit, once per
-    part, unless the part is served in it, and each requirement citing the
-    row is re-pinned to the series its part is fetched as now and states the
-    unit, in one revision inheriting from the series each left. The turn
-    records each part fetched in that unit under the question's lead part."""
+    to constant 2023 US dollars; and back to current US dollars. Search is
+    asked once for each series the plan pins, from that series' own block,
+    in the unit, and each requirement citing the row is re-pinned to its own
+    series' read and states the unit, in one revision inheriting from the
+    series each left and holding the row to the unit. The answer's records
+    of what each part was fetched as stand."""
     plan = _unit_plan(unit=start)
     state = _unit_state(plan, unit=start)
+    served = copy.deepcopy(state[ORCHESTRATOR_UNIT_SERVED_KEY])
     pins = {r.id: r.source_spec_id for r in plan.evidence_requirements}
     search = _UnitSearch()
 
     offered, planner = await _switch_unit(state, {"choice_id": _UNIT_ROW, **switch}, search)
 
     assert "switch_failed" not in offered, offered.get("switch_failed")
-    assert _requested_units(search) == ([unit, unit] if searched else [])
-    if searched:
-        new = {_is_early(posted): posted["spec_id"] for posted in search.posted}
-        recent, early = new[False], new[True]
-    else:
-        recent, early = _FK_GROSS, _OTHER
+    assert _requested_units(search) == [unit, unit]
+    new = {_is_early(posted): posted["spec_id"] for posted in search.posted}
     (revision,) = planner.revisions
     stated = Unit(**unit)
     assert {
         r["id"]: (r["source_spec_id"], Unit(**r["unit"])) for r in revision["evidence_requirements"]
-    } == {"recent": (recent, stated), "early": (early, stated)}
-    assert revision["inherits"] == {recent: pins["recent"], early: pins["early"]}
-    assert {
-        part: (served["spec_id"], Unit(**served["unit"]), served["group"])
-        for part, served in state[ORCHESTRATOR_UNIT_SERVED_KEY].items()
-    } == {_FK_GROSS: (recent, stated, _FK_GROSS), _OTHER: (early, stated, _FK_GROSS)}
+    } == {"recent": (new[False], stated), "early": (new[True], stated)}
+    assert revision["inherits"] == {new[False]: pins["recent"], new[True]: pins["early"]}
+    assert revision["units"] == {_UNIT_SLOT: stated}
+    assert state[ORCHESTRATOR_UNIT_SERVED_KEY] == served
     assert offered["revision"] != plan_revision(plan)
 
 
@@ -2442,9 +2446,8 @@ async def test_a_unit_row_switch_one_part_cannot_be_read_in_leaves_every_part_as
     """The row is in current US dollars, and Search reads the recent window
     in constant 2023 US dollars but refuses the early one. The switch fails
     whole: the plan is offered unchanged with the refusal, which asking again
-    cannot escape, nothing is revised, and the series each part is fetched
-    as, the series it was read as, the parts settled and the readings and
-    blocks on record are those of the unit it was in."""
+    cannot escape, nothing is revised, and the readings, blocks and settled
+    series on record are those of the unit it was in."""
     plan = _unit_plan(unit=_USD)
     state = _unit_state(plan, unit=_USD)
     before = copy.deepcopy(state)
@@ -2509,25 +2512,39 @@ async def test_a_unit_row_switch_to_a_unit_the_row_does_not_offer_asks_search_no
     assert offered["revision"] == plan_revision(plan)
 
 
+def _units_apart(plan: PlannerPlan) -> PlannerPlan:
+    """`plan` with its early window stating constant 2015 US dollars, so the
+    requirements citing its unit row state no one unit."""
+    recent, early = plan.evidence_requirements
+    return plan.model_copy(
+        update={
+            "evidence_requirements": (
+                recent,
+                early.model_copy(update={"unit": Unit(**{**_USD_2023, "base_year": 2015})}),
+            )
+        }
+    )
+
+
 @pytest.mark.parametrize(
-    "recorded",
-    [{"group": None}, {"chosen": False}],
-    ids=["no-group", "no-unit-chosen"],
+    ("plan_of", "dropped"),
+    [(_units_apart, None), (lambda plan: plan, _READ_EARLY)],
+    ids=["units-apart", "no-block"],
 )
-async def test_a_unit_row_whose_parts_name_no_question_is_not_switched(
-    recorded: dict[str, Any],
+async def test_a_unit_row_the_plan_does_not_hold_to_one_series_unit_is_not_switched(
+    plan_of: Callable[[PlannerPlan], PlannerPlan], dropped: str | None
 ) -> None:
-    """Parts recorded with no group cannot be told apart from another
-    question's, and parts recorded with no unit chosen cannot be told apart
-    from a part Search refused that unit: the row is refused for good with
-    nothing asked of Search."""
-    plan = _unit_plan()
+    """The requirements citing the row state different units, or one pins a
+    series no block on record states, so the row offers no unit: its switch
+    is refused for good with nothing asked of Search."""
+    plan = plan_of(_unit_plan())
+    state = _unit_state(plan)
+    if dropped is not None:
+        del state[ORCHESTRATOR_SPECS_KEY][dropped]
     search = _UnitSearch()
 
     offered, planner = await _switch_unit(
-        _unit_state(plan, **recorded),
-        {"choice_id": _UNIT_ROW, "option_id": "USD-current"},
-        search,
+        state, {"choice_id": _UNIT_ROW, "option_id": "USD-current"}, search
     )
 
     assert offered["switch_failed"]["code"] == SCOPE_CHOICE_NOT_APPLIED
@@ -2540,7 +2557,7 @@ _THIRD = "spec_" + "3" * 32
 _READ_THIRD = "spec_" + "4" * 32
 
 
-async def test_a_unit_row_switch_moves_only_the_parts_served_in_the_unit_chosen() -> None:
+async def test_a_unit_row_switch_moves_only_the_requirements_citing_it() -> None:
     """A unit question led by the recent window covers three windows of one
     measure. The user chose constant 2023 US dollars; Search refused the
     lead window, which the agent fetches in current US dollars under a
@@ -2549,7 +2566,7 @@ async def test_a_unit_row_switch_moves_only_the_parts_served_in_the_unit_chosen(
     on the unit chosen and offers what those two windows convert into. A
     switch to constant 2015 US dollars re-reads those two windows alone and
     re-pins the two requirements citing the row; the lead window is neither
-    asked of Search nor re-pinned, and its record stands."""
+    asked of Search nor re-pinned."""
     third = _other_window()
     third["spec_id"] = third["definition"]["spec_id"] = _THIRD
     third["definition"]["identity"]["requested_window"] = {
@@ -2593,36 +2610,25 @@ async def test_a_unit_row_switch_moves_only_the_parts_served_in_the_unit_chosen(
         ],
         version=1,
     )
-    served = {
-        _FK_GROSS: {"spec_id": _FK_GROSS, "unit": _USD, "group": _FK_GROSS, "chosen": _USD_2023},
-        _OTHER: {
-            "spec_id": _READ_EARLY,
-            "unit": _USD_2023,
-            "group": _FK_GROSS,
-            "chosen": _USD_2023,
-        },
-        _THIRD: {
-            "spec_id": _READ_THIRD,
-            "unit": _USD_2023,
-            "group": _FK_GROSS,
-            "chosen": _USD_2023,
-        },
-    }
     state: dict[str, Any] = {
         "plan": plan.model_dump_json(),
-        ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: _FRANCE_KENYA, _OTHER: _other_window(), _THIRD: third},
+        ORCHESTRATOR_SPECS_KEY: {
+            _FK_GROSS: _FRANCE_KENYA,
+            _OTHER: _other_window(),
+            _THIRD: third,
+            _READ_EARLY: _read_in(_READ_EARLY, _USD_2023, 2010, 2014),
+            _READ_THIRD: _read_in(_READ_THIRD, _USD_2023, 2000, 2004),
+        },
         ORCHESTRATOR_SEARCHES_KEY: [
             _open_reading(_FK_GROSS, text=_AID),
             _open_reading(_OTHER, text=_AID),
             _open_reading(_THIRD, text=_AID),
         ],
-        ORCHESTRATOR_UNIT_READ_KEY: {_OTHER: [_READ_EARLY], _THIRD: [_READ_THIRD]},
-        ORCHESTRATOR_UNIT_SERVED_KEY: copy.deepcopy(served),
         ORCHESTRATOR_UNIT_SETTLED_KEY: sorted(
             {_FK_GROSS, _OTHER, _THIRD, _READ_EARLY, _READ_THIRD}
         ),
     }
-    offers = unit_row_offers(cast(Any, state))
+    offers = unit_row_offers(cast(Any, state), plan)
     assert list(offers) == [_UNIT_SLOT]
     assert offers[_UNIT_SLOT].start == UnitChoice.model_validate(_USD_2023)
     search = _UnitSearch()
@@ -2642,29 +2648,29 @@ async def test_a_unit_row_switch_moves_only_the_parts_served_in_the_unit_chosen(
         "early": Unit(**usd_2015),
         "earliest": Unit(**usd_2015),
     }
-    now = units_served(cast(Any, state))
-    assert now[_FK_GROSS] == ServedUnit.model_validate(served[_FK_GROSS])
-    assert {part: now[part].chosen for part in (_OTHER, _THIRD)} == {
-        _OTHER: Unit(**usd_2015),
-        _THIRD: Unit(**usd_2015),
-    }
 
 
-def test_a_unit_row_read_as_another_count_offers_what_that_count_converts_into() -> None:
-    """The user picked the net count beside the unit answer, and the net
-    count's own block on record converts into constant US dollars up to base
-    year 2020 alone. The unit row offers that range, not the gross part's."""
+def test_a_unit_row_offers_what_the_series_it_pins_convert_into() -> None:
+    """The row's one requirement pins the series Search read in constant
+    2023 US dollars, whose block converts into constant US dollars up to
+    base year 2020 alone. The row offers that range, not the part's."""
     base = _unit_plan()
     plan = base.model_copy(update={"evidence_requirements": base.evidence_requirements[:1]})
-    state = _unit_state(plan, unit=_USD, count=_FK_NET, parts=(_FK_GROSS,))
-    net = copy.deepcopy(_FRANCE_KENYA)
-    net["spec_id"] = net["definition"]["spec_id"] = _FK_NET
-    (usd,) = net["resolved"]["unit_conversion"]["currencies"]
+    state = _unit_state(plan, parts=(_FK_GROSS,))
+    read = state[ORCHESTRATOR_SPECS_KEY][_READ_RECENT]
+    (usd,) = read["resolved"]["unit_conversion"]["currencies"]
     usd["constant_years"] = {"start_year": 2000, "end_year": 2020}
     usd["base_year_max"] = 2020
-    state[ORCHESTRATOR_SPECS_KEY] = {**state[ORCHESTRATOR_SPECS_KEY], _FK_NET: net}
+    plan_with_2020 = plan.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                r.model_copy(update={"unit": Unit(**{**_USD_2023, "base_year": 2020})})
+                for r in plan.evidence_requirements
+            )
+        }
+    )
 
-    (currency,) = unit_row_offers(cast(Any, state))[_UNIT_SLOT].currencies
+    (currency,) = unit_row_offers(cast(Any, state), plan_with_2020)[_UNIT_SLOT].currencies
 
     assert (currency.code, currency.base_year_max) == ("USD", 2020)
 
@@ -2676,8 +2682,8 @@ async def test_a_unit_row_switch_after_a_count_switch_reads_the_count_switched_t
     """The user chose constant 2023 US dollars, and Search re-read the part
     in them, offering its net count beside it. The card's count row switches
     the requirement to that net count, with no search. A switch of the unit
-    row to current US dollars then reads the net count's definition in them,
-    keeps the requirement on the net count and records the part read as it."""
+    row to current US dollars then reads the net count's definition in them
+    and keeps the requirement on the net count."""
     base = _unit_plan()
     pin = search_pin_slot(_READ_RECENT)
     counted = Decision(
@@ -2742,23 +2748,11 @@ async def test_a_unit_row_switch_after_a_count_switch_reads_the_count_switched_t
     (requirement,) = revised.evidence_requirements
     assert isinstance(requirement, DatasetRequirement)
     assert (requirement.source_spec_id, requirement.unit) == (posted["spec_id"], Unit(**_USD))
-    served = units_served(cast(Any, state))[_FK_GROSS]
-    assert (served.spec_id, served.count) == (posted["spec_id"], _FK_NET)
 
 
-async def test_a_unit_row_switch_after_a_scope_switch_keeps_the_scope_switched_to(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """The user's unit answer holds US health aid to Africa in current US
-    dollars. The card's sector row switches it to CRS 120 and 130 through
-    Search. A switch of the unit row to constant 2023 US dollars then posts
-    the scope's base in that unit with the switched sector, re-pins the
-    requirement to what Search answers, holds that answer as the pin's
-    source, which the revision's discovery reads, and records the part read
-    with that scope."""
-    scope = _hashed_scope()
-    pin = scope["compiled"]["spec_id"]
-    scoped = _scoped_plan(pin, scope, schemas=real_schemas)
+def _unit_scoped_plan(pin: str, scope: dict[str, Any], *, schemas: list[ToolSchema]) -> PlannerPlan:
+    """`_scoped_plan` with a unit row in current US dollars, which its dataset cites."""
+    scoped = _scoped_plan(pin, scope, schemas=schemas)
     row = Decision(
         slot=f"user_unit_{pin}",
         description="Which prices the figures are in.",
@@ -2768,7 +2762,7 @@ async def test_a_unit_row_switch_after_a_scope_switch_keeps_the_scope_switched_t
         rationale="The user chose current prices in USD.",
         fixes=DecisionFixes(prices="current"),
     )
-    plan = scoped.model_copy(
+    return scoped.model_copy(
         update={
             "decisions": (*scoped.decisions, row),
             "evidence_requirements": tuple(
@@ -2781,8 +2775,12 @@ async def test_a_unit_row_switch_after_a_scope_switch_keeps_the_scope_switched_t
             ),
         }
     )
-    new_pin, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
+
+
+def _unit_scoped_state(plan: PlannerPlan, scope: dict[str, Any], pin: str) -> dict[str, Any]:
+    """The state of a turn paused on `plan`, whose one dataset pins `pin`,
+    US health aid to Africa read with `scope` in current US dollars, which
+    the user's unit answer chose."""
     reading = SearchReading.from_part(
         {"variable": "health aid", "status": "definite", "spec_id": pin, "scope": scope}
     )
@@ -2795,7 +2793,7 @@ async def test_a_unit_row_switch_after_a_scope_switch_keeps_the_scope_switched_t
         },
         "resolved": {"scope_choices": scope, **_BOTH_BASES},
     }
-    state: dict[str, Any] = {
+    return {
         "plan": plan.model_dump_json(),
         ORCHESTRATOR_SPECS_KEY: {pin: block},
         ORCHESTRATOR_SEARCHES_KEY: [reading.model_dump(mode="json")],
@@ -2804,6 +2802,27 @@ async def test_a_unit_row_switch_after_a_scope_switch_keeps_the_scope_switched_t
         },
         ORCHESTRATOR_UNIT_SETTLED_KEY: [pin],
     }
+
+
+async def test_a_unit_row_switch_after_a_scope_switch_keeps_the_scope_switched_to(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The user's unit answer holds US health aid to Africa in current US
+    dollars. The card's sector row switches it to CRS 120 and 130 through
+    Search. A switch of the unit row to constant 2023 US dollars then posts
+    the scope's base in that unit with the switched sector, re-pins the
+    requirement to what Search answers, and holds that answer as the pin's
+    source, which the revision's discovery reads. The row's offer comes from
+    the switched answer's block."""
+    scope = _hashed_scope()
+    pin = scope["compiled"]["spec_id"]
+    plan = _unit_scoped_plan(pin, scope, schemas=real_schemas)
+    row = f"user_unit_{pin}"
+    _, envelope = _switched_answer(scope)
+    # Search converts the switched answer as it converts the part.
+    envelope["parts"][0]["spec"]["resolved"].update(_BOTH_BASES)
+    search = SearchStub(answer={scope["id"]: envelope})
+    state = _unit_scoped_state(plan, scope, pin)
     node = switch_module.switch_node(
         planner=cast(Any, _UnitRevisingPlanner()),
         definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
@@ -2838,7 +2857,7 @@ async def test_a_unit_row_switch_after_a_scope_switch_keeps_the_scope_switched_t
         node_ctx(state=state),
         {
             "switch": {
-                "choice_id": f"decision/{row.slot}",
+                "choice_id": f"decision/{row}",
                 "option_id": "USD-constant-2023",
                 "unit": _USD_2023,
             }
@@ -2856,31 +2875,208 @@ async def test_a_unit_row_switch_after_a_scope_switch_keeps_the_scope_switched_t
     revised = PlannerPlan.model_validate_json(state["plan"])
     (dataset,) = [r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)]
     assert (dataset.source_spec_id, dataset.unit) == (read_spec, Unit(**_USD_2023))
-    served = units_served(cast(Any, state))[pin]
-    assert (served.spec_id, served.scope_of) == (read_spec, new_pin)
     # The revision's discovery reads the re-pinned dataset from the block
     # held for it, as it reads the sector switch's compile.
     held = _resolve_pin_block(_PinRecords(cast(Any, state)), plan=revised, requirement=dataset)
     assert held is not None and held["spec_id"] == read_spec
 
 
+def _with_net_count(envelope: dict[str, Any]) -> str:
+    """Give the one part of `envelope`, Search's answer for a scope switch,
+    a net count beside its own, as Search names one
+    (`resolved.alternative_measures`), and answer the net count's spec_id."""
+    spec = envelope["parts"][0]["spec"]
+    identity = copy.deepcopy(spec["definition"]["identity"])
+    identity["slots"] = [
+        *(s for s in identity["slots"] if s["property"] != "nettingBasis"),
+        {"property": "nettingBasis", "binding": {"state": "value", "ref": "Net"}},
+    ]
+    net = spec_id_for(canonicalize(identity))
+    resolved = _FRANCE_KENYA["resolved"]
+    (alternative,) = copy.deepcopy(resolved["alternative_measures"])
+    alternative["definition"] = {"schema_version": 1, "spec_id": net, "identity": identity}
+    spec["resolved"] = {
+        **spec["resolved"],
+        **_BOTH_BASES,
+        "alternative_measures": [alternative],
+        **{
+            key: copy.deepcopy(resolved[key])
+            for key in ("measure_label", "measure_label_axes", "measure_axis_values")
+        },
+    }
+    return net
+
+
+async def test_a_unit_row_switch_after_a_scope_and_a_count_switch_keeps_both(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The user's unit answer holds US health aid to Africa in current US
+    dollars. The card's sector row switches it to CRS 120 and 130 through
+    Search, and its count row then to the net count Search named beside
+    that answer, which holds no reading of its own. A switch of the unit row
+    to constant 2023 US dollars posts the net count's identity in that unit
+    with the switched sector's scope entries, so Search answers it with the
+    scope's choices and the sector row stands, and re-pins the requirement
+    to what Search answers."""
+    scope = _hashed_scope()
+    pin = scope["compiled"]["spec_id"]
+    plan = _unit_scoped_plan(pin, scope, schemas=real_schemas)
+    row = f"user_unit_{pin}"
+    new_pin, envelope = _switched_answer(scope)
+    net = _with_net_count(envelope)
+    search = SearchStub(answer={scope["id"]: envelope})
+    state = _unit_scoped_state(plan, scope, pin)
+    node = switch_module.switch_node(
+        planner=cast(Any, _UnitRevisingPlanner()),
+        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
+    )
+    by_scope = await node.run(
+        node_ctx(state=state),
+        {"switch": {"choice_id": _row_id(plan, "sector"), "option_id": "sector:120+130"}},
+    )
+    assert isinstance(by_scope, Next)
+    assert "switch_failed" not in by_scope.output, by_scope.output.get("switch_failed")
+    switched = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
+    assert switched.scope is not None and switched.spec_id == new_pin
+    # The count row admission writes for the switched pin.
+    scoped = PlannerPlan.model_validate_json(state["plan"])
+    count_slot = search_pin_slot(new_pin)
+    counted = Decision(
+        slot=count_slot,
+        description="How the flow is counted.",
+        options=("gross disbursements", "net disbursements"),
+        chosen="gross disbursements",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="Search's default.",
+        fixes=DecisionFixes(source_spec_id=new_pin),
+    )
+    scoped = scoped.model_copy(
+        update={
+            "decisions": (*scoped.decisions, counted),
+            "evidence_requirements": tuple(
+                r.model_copy(update={"decision_ids": (*r.decision_ids, count_slot)})
+                if isinstance(r, DatasetRequirement)
+                else r
+                for r in scoped.evidence_requirements
+            ),
+        }
+    )
+    state["plan"] = scoped.model_dump_json()
+    count_row = count_choice_id(scoped, counted)
+    assert count_row is not None
+    by_count = await node.run(
+        node_ctx(state=state),
+        {"switch": {"choice_id": count_row, "option_id": decision_option_id("net disbursements")}},
+    )
+    assert isinstance(by_count, Next)
+    assert "switch_failed" not in by_count.output, by_count.output.get("switch_failed")
+    counted_plan = PlannerPlan.model_validate_json(state["plan"])
+    (dataset,) = [
+        r for r in counted_plan.evidence_requirements if isinstance(r, DatasetRequirement)
+    ]
+    assert dataset.source_spec_id == net
+    spec = envelope["parts"][0]["spec"]
+    (alternative,) = spec["resolved"]["alternative_measures"]
+    unit_spec, unit_identity_posted = unit_identity(
+        alternative["definition"]["identity"], _USD_2023
+    )
+    compiled = copy.deepcopy(alternative["definition"]["identity"])
+    compiled["facets"] = {"unit": {"request": _USD_2023}}
+    read_spec = spec_id_for(canonicalize(compiled))
+    read = copy.deepcopy(envelope)
+    read["parts"][0]["variable_text"] = unit_spec
+    read["parts"][0]["spec"] = {
+        **read["parts"][0]["spec"],
+        "spec_id": read_spec,
+        "definition": {"schema_version": 1, "spec_id": read_spec, "identity": compiled},
+    }
+    search._answer[unit_spec] = read
+
+    by_unit = await node.run(
+        node_ctx(state=state),
+        {
+            "switch": {
+                "choice_id": f"decision/{row}",
+                "option_id": "USD-constant-2023",
+                "unit": _USD_2023,
+            }
+        },
+    )
+
+    assert isinstance(by_unit, Next)
+    assert "switch_failed" not in by_unit.output, by_unit.output.get("switch_failed")
+    (entry,) = search.posted[-1]["input"]["entries"]
+    assert entry["identity"] == unit_identity_posted
+    assert entry["scope_entries"] == [
+        e.model_dump(mode="json", exclude_none=True) for e in switched.scope.entries
+    ]
+    assert "sector:120+130" in {e["option_id"] for e in entry["scope_entries"]}
+    revised = PlannerPlan.model_validate_json(state["plan"])
+    (moved,) = [r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)]
+    assert (moved.source_spec_id, moved.unit) == (read_spec, Unit(**_USD_2023))
+
+
+async def test_a_unit_row_offers_what_the_series_a_scope_switch_read_converts_into(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The user's unit answer holds US health aid to Africa in current US
+    dollars, and the card's sector row switches it to CRS 120 and 130, which
+    Search converts into constant US dollars up to base year 2020 alone. The
+    card offered with the switched plan offers that range on the unit row,
+    starting on the unit the plan states."""
+    scope = _hashed_scope()
+    pin = scope["compiled"]["spec_id"]
+    plan = _unit_scoped_plan(pin, scope, schemas=real_schemas)
+    row = f"user_unit_{pin}"
+    _, envelope = _switched_answer(scope)
+    narrower = copy.deepcopy(_BOTH_BASES)
+    (usd,) = narrower["unit_conversion"]["currencies"]
+    usd["constant_years"] = {"start_year": 2000, "end_year": 2020}
+    usd["base_year_max"] = 2020
+    envelope["parts"][0]["spec"]["resolved"].update(narrower)
+    search = SearchStub(answer={scope["id"]: envelope})
+    state = _unit_scoped_state(plan, scope, pin)
+    node = switch_module.switch_node(
+        planner=cast(Any, _UnitRevisingPlanner()),
+        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
+    )
+    ctx = node_ctx(state=state)
+
+    by_scope = await node.run(
+        ctx,
+        {"switch": {"choice_id": _row_id(plan, "sector"), "option_id": "sector:120+130"}},
+    )
+    assert isinstance(by_scope, Next)
+    assert "switch_failed" not in by_scope.output, by_scope.output.get("switch_failed")
+    card = offer(ctx, by_scope.output, early_mints=None)
+
+    (currency,) = card.payload["unit_offers"][row]["currencies"]
+    assert (currency["code"], currency["base_year_max"]) == ("USD", 2020)
+    assert card.payload["unit_offers"][row]["start"] == {**_USD, "base_year": None}
+
+
 async def test_a_unit_row_switch_reads_the_count_picked_beside_the_unit_again() -> None:
     """The user picked the net count beside the unit answer, so Search read
-    the net count in the part's place. A switch of the unit reads the net
-    count's definition again in the new unit, not the gross part's."""
+    the net count in the part's place, and the plan pins that read. A switch
+    of the unit reads the net count's definition again in the new unit, not
+    the gross part's."""
     base = _unit_plan()
     plan = base.model_copy(update={"evidence_requirements": base.evidence_requirements[:1]})
+    state = _unit_state(plan, parts=(_FK_GROSS,))
+    (net,) = _FRANCE_KENYA["resolved"]["alternative_measures"]
+    read = state[ORCHESTRATOR_SPECS_KEY][_READ_RECENT]
+    read["definition"]["identity"] = {
+        **copy.deepcopy(net["definition"]["identity"]),
+        "facets": {"unit": {"request": _USD_2023}},
+    }
     search = _UnitSearch()
 
     offered, _ = await _switch_unit(
-        _unit_state(plan, count=_FK_NET, parts=(_FK_GROSS,)),
-        {"choice_id": _UNIT_ROW, "option_id": "USD-current"},
-        search,
+        state, {"choice_id": _UNIT_ROW, "option_id": "USD-current"}, search
     )
 
     assert "switch_failed" not in offered
     (posted,) = search.posted
-    (net,) = _FRANCE_KENYA["resolved"]["alternative_measures"]
     assert {**posted["identity"], "facets": None} == {
         **net["definition"]["identity"],
         "facets": None,
@@ -2959,30 +3155,17 @@ async def test_an_old_cards_whole_unit_prices_row_is_refused_and_the_card_still_
 _PLANNER_WINDOW = "spec_" + "3" * 32
 
 
-def _read_in_usd_2023(spec_id: str, start: int, end: int) -> dict[str, Any]:
-    """The France to Kenya block as Search reads it in constant 2023 US
-    dollars under `spec_id`, over `start` to `end`."""
-    block = copy.deepcopy(_FRANCE_KENYA)
-    block["spec_id"] = block["definition"]["spec_id"] = spec_id
-    identity = block["definition"]["identity"]
-    identity["facets"] = {"unit": {"request": _USD_2023}}
-    identity["requested_window"] = {"kind": "range", "start": start, "end": end}
-    block["resolved"]["alternative_measures"] = []
-    return block
-
-
 @pytest.mark.parametrize("on_record", [True, False], ids=["block-on-record", "no-block"])
-async def test_a_unit_row_switch_moves_a_window_the_planner_pinned_itself(
+async def test_a_unit_row_switch_reads_a_window_the_planner_pinned_itself(
     on_record: bool,
 ) -> None:
     """Besides the question's two windows, the plan reads the measure over
     2010-2024 from a series the planner pinned itself, in constant 2023 US
     dollars, which the user's answer holds too. A switch to current US
-    dollars reads only the question's parts, and that window moves to the
-    series the part measuring the same thing is fetched as, which admission
-    copies over its own years. A window whose series is not on record, so
-    nothing says which part it reads, refuses the switch for good before
-    Search is asked."""
+    dollars reads that window from its own block as it reads the question's
+    windows, and re-pins each requirement to its own series' read. A window
+    whose series is not on record refuses the switch for good before Search
+    is asked."""
     base = _unit_plan()
     (recent, early) = base.evidence_requirements
     assert isinstance(recent, DatasetRequirement)
@@ -3002,11 +3185,10 @@ async def test_a_unit_row_switch_moves_a_window_the_planner_pinned_itself(
         }
     )
     state = _unit_state(plan)
-    state[ORCHESTRATOR_SPECS_KEY] |= {
-        _READ_RECENT: _read_in_usd_2023(_READ_RECENT, 2018, 2022),
-        _READ_EARLY: _read_in_usd_2023(_READ_EARLY, 2010, 2014),
-        **({_PLANNER_WINDOW: _read_in_usd_2023(_PLANNER_WINDOW, 2010, 2024)} if on_record else {}),
-    }
+    if on_record:
+        state[ORCHESTRATOR_SPECS_KEY][_PLANNER_WINDOW] = _read_in(
+            _PLANNER_WINDOW, _USD_2023, 2010, 2024
+        )
     search = _UnitSearch()
 
     offered, planner = await _switch_unit(
@@ -3019,12 +3201,16 @@ async def test_a_unit_row_switch_moves_a_window_the_planner_pinned_itself(
         assert (search.posted, planner.revisions) == ([], [])
         return
     assert "switch_failed" not in offered, offered.get("switch_failed")
-    assert search.posted == []
+    by_window = {
+        tuple(posted["identity"]["requested_window"][k] for k in ("start", "end")): posted
+        for posted in search.posted
+    }
+    assert _requested_units(search) == [_USD] * 3
     (revision,) = planner.revisions
     assert {
         r["id"]: (r["source_spec_id"], Unit(**r["unit"])) for r in revision["evidence_requirements"]
     } == {
-        "recent": (_FK_GROSS, Unit(**_USD)),
-        "early": (_OTHER, Unit(**_USD)),
-        "series": (_FK_GROSS, Unit(**_USD)),
+        "recent": (by_window[2018, 2022]["spec_id"], Unit(**_USD)),
+        "early": (by_window[2010, 2014]["spec_id"], Unit(**_USD)),
+        "series": (by_window[2010, 2024]["spec_id"], Unit(**_USD)),
     }

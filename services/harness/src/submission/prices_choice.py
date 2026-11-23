@@ -54,6 +54,7 @@ from planner.plan import (
     DecisionFixes,
     EvidenceRequirement,
     PinSource,
+    Plan,
     ResolvedBy,
     Unit,
 )
@@ -122,6 +123,60 @@ def whole_unit_slots(choices: Mapping[str, PricesChoice]) -> frozenset[str]:
     prices answer, current or constant, never does."""
     slots = decision_slots(choices)
     return frozenset(slots[part] for part, choice in choices.items() if choice.unit is not None)
+
+
+def plan_unit(plan: Plan, slot: str) -> Unit | None:
+    """The whole unit `plan` holds the parts of the unit row under `slot`
+    (`unit_slot`) to: the one `unit` every dataset requirement citing the
+    slot states. `None` when none cites it, one states no unit, or they
+    state different units."""
+    units = {
+        requirement.unit
+        for requirement in plan.evidence_requirements
+        if isinstance(requirement, DatasetRequirement) and slot in requirement.decision_ids
+    }
+    if len(units) != 1:
+        return None
+    (unit,) = units
+    return unit
+
+
+def plan_held_choices(
+    choices: Mapping[str, PricesChoice], plan: Plan, *, units: Mapping[str, Unit]
+) -> dict[str, PricesChoice]:
+    """`choices` with each unit row `plan` states read off the plan.
+
+    A unit row's choices (`PricesChoice.group`) seed the plan that first
+    states the row, from the series the unit question's answer fetched for
+    each part. Once `plan` states the row, its unit is the one its citing
+    requirements state (`plan_unit`), or the one `units` holds for its slot,
+    the unit a switch of the row picked, and its parts are the distinct
+    series those requirements pin: the row's choices are replaced by one per
+    pin, each that pin in that unit. A row `plan` does not state, or whose
+    requirements state no one unit, keeps its choices.
+    """
+    held = dict(choices)
+    for group in dict.fromkeys(
+        choice.group
+        for choice in choices.values()
+        if choice.group is not None and choice.unit is not None
+    ):
+        slot = unit_slot(group)
+        unit = units.get(slot) or plan_unit(plan, slot)
+        pins = list(
+            dict.fromkeys(
+                requirement.source_spec_id
+                for requirement in plan.evidence_requirements
+                if isinstance(requirement, DatasetRequirement)
+                and slot in requirement.decision_ids
+                and requirement.source_spec_id is not None
+            )
+        )
+        if unit is None or not pins:
+            continue
+        held = {part: choice for part, choice in held.items() if choice.group != group}
+        held |= {pin: PricesChoice(unit.prices, pin, unit=unit, group=group) for pin in pins}
+    return held
 
 
 class PricesChoice(NamedTuple):
@@ -710,7 +765,10 @@ def prices_decisions(
     or one the part offers in its place (`Parts.series`). Each part that some requirement reads states
     one decision fixing `prices`, which each of those cites, its `chosen`
     what the user chose in words (`PricesChoice.words`). The parts on one
-    unit row state one decision between them (`decision_slots`), cited by every requirement reading any of them. A
+    unit row state one decision between them (`decision_slots`), cited by
+    every requirement reading any of them, which includes one no part reads
+    by its series that cites the row already or measures what a part of it
+    measures (`_row_readers`). A
     requirement citing one that `patch` does not state is appended, so
     `Plan.amend` replaces it. A part no requirement reads states nothing.
 
@@ -733,15 +791,25 @@ def prices_decisions(
             else requirement.source_spec_id
         )
 
+    series_of = {part: parts.series(part) for part in choices}
+    row_of = _row_readers(
+        [r for r in requirements if isinstance(r, DatasetRequirement)],
+        choices,
+        read_pin=read_pin,
+        series_of=series_of,
+        slot_of=slot_of,
+        parts=parts,
+    )
     decisions: dict[str, Decision] = {}
     slots: dict[str, list[str]] = {}
     for part, choice in choices.items():
         slot = slot_of[part]
-        series = parts.series(part)
+        series = series_of[part]
         reading = [
             requirement
             for requirement in requirements
-            if isinstance(requirement, DatasetRequirement) and read_pin(requirement) in series
+            if isinstance(requirement, DatasetRequirement)
+            and (read_pin(requirement) in series or row_of.get(requirement.id, ("",))[0] == part)
         ]
         for requirement in reading:
             unit = requirement.unit
@@ -752,6 +820,10 @@ def prices_decisions(
                 choice,
                 parts,
             )
+            if row_of.get(requirement.id) == (part, True) and not wanted.exact:
+                # It cites the row: the plan holds its pin to the row's unit.
+                assert choice.unit is not None
+                wanted = _Wanted(choice.unit, exact=True)
             if unit is None:
                 code, opening = ProblemCode.USER_DECISION_DROPPED, "states no `unit`"
             elif unit.prices != choice.prices:
@@ -814,6 +886,56 @@ def prices_decisions(
         *(citing.get(requirement.id, requirement) for requirement in patch),
         *(requirement for rid, requirement in citing.items() if rid not in stated),
     ]
+
+
+def _row_readers(
+    requirements: Sequence[DatasetRequirement],
+    choices: Mapping[str, PricesChoice],
+    *,
+    read_pin: Callable[[DatasetRequirement], str | None],
+    series_of: Mapping[str, Collection[str]],
+    slot_of: Mapping[str, str],
+    parts: Parts,
+) -> dict[str, tuple[str, bool]]:
+    """The part of a unit row (`PricesChoice.group`) each of `requirements`
+    no part reads by its series (`series_of`) reads, by the requirement's id,
+    with whether the requirement cites the row.
+
+    One already citing the row's slot (`slot_of`) reads its first part,
+    whatever series a count or scope switch of the plan card moved it to,
+    and states the row's unit whole on that pin.
+    One citing none reads the first part of a row whose series measures what
+    its pin measures (`Parts.measures_alike`), such as the part pinned again
+    in the unit it is served in, which `_whole_unit` moves to the series in
+    the row's unit. A requirement reading no row is left out.
+    """
+    rows = {
+        part: choice
+        for part, choice in choices.items()
+        if choice.group is not None and choice.unit is not None
+    }
+    readers: dict[str, tuple[str, bool]] = {}
+    for requirement in requirements:
+        pin = read_pin(requirement)
+        if any(pin in series for series in series_of.values()):
+            continue
+        cited = next((part for part in rows if slot_of[part] in requirement.decision_ids), None)
+        if cited is not None:
+            readers[requirement.id] = (cited, True)
+            continue
+        part = next(
+            (
+                part
+                for part, choice in rows.items()
+                if pin is not None
+                and choice.spec_id is not None
+                and parts.measures_alike(pin, choice.spec_id)
+            ),
+            None,
+        )
+        if part is not None:
+            readers[requirement.id] = (part, False)
+    return readers
 
 
 def base_year_refusal(

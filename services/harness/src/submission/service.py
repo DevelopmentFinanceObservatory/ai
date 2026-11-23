@@ -157,6 +157,7 @@ from planner.plan import (
     SessionState,
     ShareOfRequirement,
     SumOfRequirement,
+    Unit,
     UnreadablePickError,
     UnsupportedOperation,
     UnsupportedPlanError,
@@ -269,6 +270,7 @@ from submission.prices_choice import (
     Parts,
     PricesChoice,
     base_year_refusal,
+    plan_held_choices,
     prices_decisions,
     whole_unit_slots,
 )
@@ -337,6 +339,13 @@ class SessionView(Protocol):
 
     def prices_chosen(self) -> Mapping[str, PricesChoice]:
         """The prices the user picked answering an ask, by the part each prices, until released."""
+        ...
+
+    def switched_units(self) -> Mapping[str, Unit]:
+        """The whole unit a switch of a unit row on the plan card picked, by
+        the row's slot (`submission.prices_choice.unit_slot`), which the plan
+        this proposal revises states in place of the one it held. Empty
+        outside such a revision."""
         ...
 
     def decision_pick(self) -> DecisionPick | None:
@@ -505,10 +514,23 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         # shape: a value that is no list states none.
         stated = raw if isinstance(raw := proposal.evidence_requirements, list) else []
         readings = SourceReadings.of_shown(held_sources(view.state))
+        on_record = load_plan(view.state)
         return base_year_refusal(
             exc,
             stated,
-            choices=view.prices_chosen(),
+            choices=_user_prices(
+                view,
+                statement(
+                    on_record,
+                    to_origin={
+                        copy.spec_id: copy.windowed_from
+                        for copy in windowed_pins(view.state).values()
+                    },
+                    alignments=alignments(view.state),
+                )
+                if on_record is not None
+                else None,
+            ),
             parts=Parts.of_shown(
                 pin_sources(view.state),
                 readings.get,
@@ -696,8 +718,9 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     requirements_after = _requirements_after(
         previous, evidence_requirements, removed_evidence_requirements
     )
+    chosen = _user_prices(view, previous)
     priced = prices_decisions(
-        view.prices_chosen(),
+        chosen,
         evidence_requirements,
         requirements_after,
         parts=Parts.of_shown(
@@ -737,7 +760,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     held_units = _units_the_user_holds(
         requirements_after,
         _decisions_after(previous, settled, removed=removed_decisions),
-        whole_units=whole_unit_slots(view.prices_chosen()),
+        whole_units=whole_unit_slots(chosen),
     )
     if held_units:
         evidence_requirements = _without_held_unit_citations(
@@ -948,6 +971,22 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         alignments=tuple(entries.values()),
         pin_verdicts=verdicts,
     )
+
+
+def _user_prices(view: SessionView, previous: Plan | None) -> Mapping[str, PricesChoice]:
+    """The prices the user chose (`SessionView.prices_chosen`), each unit row
+    `previous`, the plan amended as the planner states it, holds read off it
+    (`submission.prices_choice.plan_held_choices`), a row a switch of the
+    card moved in the unit it picked (`SessionView.switched_units`).
+
+    The unit question's answer seeds the plan that first states its row.
+    From then on the plan holds the row's unit and series, so a count or
+    scope switch that moves a pin moves the series the unit holds.
+    """
+    chosen = view.prices_chosen()
+    if previous is None:
+        return chosen
+    return plan_held_choices(chosen, previous, units=view.switched_units())
 
 
 def _without_user_prices(drafts: Sequence[DecisionDraft]) -> list[DecisionDraft]:

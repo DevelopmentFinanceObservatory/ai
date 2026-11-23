@@ -23,10 +23,20 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple
 
 from data_mcp.search_tool import MAX_PARTS
-from planner.plan import AskBreakdown, SessionState, Unit, scope_unread, stored_plan, with_blocks
+from planner.plan import (
+    AskBreakdown,
+    DatasetRequirement,
+    SessionState,
+    Unit,
+    earlier_block,
+    held_sources,
+    scope_unread,
+    stored_plan,
+    with_blocks,
+)
 from planner.plan import Plan as PlannerPlan
 from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, ValidationError
-from submission.prices_choice import measure_key, unit_slot
+from submission.prices_choice import UNIT_SLOT_PREFIX, measure_key, plan_unit
 
 from harness.tool_contracts import (
     reading_facts,
@@ -83,11 +93,13 @@ ORCHESTRATOR_UNIT_SETTLED_KEY = "orchestrator:unit_settled"
 # reach the re-read series (`planner.call.prices_chosen`).
 ORCHESTRATOR_UNIT_READ_KEY = "orchestrator:unit_read"
 # Each part a unit question covered -> the series the agent fetches for it,
-# the unit that series is served in after the answer, and the other count
-# read in the part's place, as `ServedUnit` JSON (`units_served`,
+# the unit that series is served in after the answer, the question's lead
+# part and the unit it chose, as `ServedUnit` JSON (`units_served`,
 # `record_unit_served`): the chosen unit when Search serves or re-reads it,
-# the served unit when Search refuses the re-read. Plan admission holds the
-# part to that unit (`planner.call.prices_chosen`).
+# the served unit when Search refuses the re-read. Written once, by the `ask`
+# node: admission holds the part to that unit in the plan that first states
+# it (`planner.call.prices_chosen`), and the plan holds it from then on
+# (`submission.service._user_prices`).
 ORCHESTRATOR_UNIT_SERVED_KEY = "orchestrator:unit_served"
 # The search readings of the conversation's earlier turns, with the warnings
 # of the spec_ids they name and the spec_ids whose block an earlier turn
@@ -322,26 +334,18 @@ def record_unit_read(state: SessionState, part: str, spec_id: str) -> None:
 
 class ServedUnit(BaseModel):
     """What a part a unit question covered is fetched as after the answer:
-    `spec_id`, the series the agent was told to fetch, `unit`, the unit
+    `spec_id`, the series the agent was told to fetch, and `unit`, the unit
     that series is served in, `None` when its unit cannot be read as one a
-    plan states (`stated_unit`), and `count`, the other count of the part
-    the user picked in the same pause and Search read in the part's place,
-    `None` when the part's own count was read or the record names no count.
-    `group` is the lead part of the unit question that covered the part
-    (`UnitAsk.parts[0]`), which every part that question covered shares, and
-    `chosen` the unit that question's answer, or the last switch of its plan
-    card row, asked the part to be read in (`stated_unit`); each is `None`
-    on a record that names none. `scope_of` is the series whose newest
-    reading holds the scope the part is read with, set when a scope switch
-    of the plan card moves the series the part is fetched as; `None` reads
-    the part with its own reading."""
+    plan states (`stated_unit`). `group` is the lead part of the unit
+    question that covered the part (`UnitAsk.parts[0]`), which every part
+    that question covered shares, and `chosen` the unit that question's
+    answer asked the part to be read in (`stated_unit`); each is `None` on a
+    record that names none."""
 
     spec_id: str
     unit: Unit | None
-    count: str | None = None
     group: str | None = None
     chosen: Unit | None = None
-    scope_of: str | None = None
 
     @property
     def row(self) -> str | None:
@@ -382,50 +386,17 @@ def record_unit_served(
     *,
     group: str,
     chosen: UnitChoice,
-    count: str | None = None,
-    scope_of: str | None = None,
 ) -> None:
     """Record that `part`, which the unit question led by `group` covered, is
-    fetched as `spec_id`, served in `unit`, read as `count`, another count of
-    the part, when one was read in its place, with the scope of `scope_of`'s
-    reading when given, the question's answer having chosen `chosen`. A unit
-    no plan can state is recorded as none (`stated_unit`)."""
+    fetched as `spec_id`, served in `unit`, the question's answer having
+    chosen `chosen`. A unit no plan can state is recorded as none
+    (`stated_unit`)."""
     stated = stated_unit(unit) if unit is not None else None
     served = {name: one.model_dump(mode="json") for name, one in units_served(state).items()}
     served[part] = ServedUnit(
-        spec_id=spec_id,
-        unit=stated,
-        count=count,
-        group=group,
-        chosen=stated_unit(chosen),
-        scope_of=scope_of,
+        spec_id=spec_id, unit=stated, group=group, chosen=stated_unit(chosen)
     ).model_dump(mode="json")
     state[ORCHESTRATOR_UNIT_SERVED_KEY] = served
-
-
-def move_unit_served(state: SessionState, moves: Mapping[str, ServedUnit]) -> None:
-    """Record each part `moves` names as now fetched as its new record there,
-    as a count or scope switch of the plan card re-pins the series a unit
-    question's part is fetched as. The part keeps its group and the unit
-    chosen, so a later switch of its unit row re-reads the series the plan
-    pins now. With nothing to move it writes nothing."""
-    if not moves:
-        return
-    served = {name: one.model_dump(mode="json") for name, one in units_served(state).items()}
-    for part, moved in moves.items():
-        served[part] = moved.model_dump(mode="json")
-    state[ORCHESTRATOR_UNIT_SERVED_KEY] = served
-
-
-def unit_row_parts(state: SessionState) -> dict[str, dict[str, ServedUnit]]:
-    """The parts on each unit row (`ServedUnit.row`), by the row's lead part,
-    each part with its record, in record order. Every part on a row is served
-    in the unit the row's question chose."""
-    rows: dict[str, dict[str, ServedUnit]] = {}
-    for part, served in units_served(state).items():
-        if (lead := served.row) is not None:
-            rows.setdefault(lead, {})[part] = served
-    return rows
 
 
 def count_block(block: Mapping[str, Any], count: str) -> dict[str, Any] | None:
@@ -438,50 +409,95 @@ def count_block(block: Mapping[str, Any], count: str) -> dict[str, Any] | None:
     return None
 
 
-def _read_as_block(
-    specs: Mapping[str, Any], part: str, served: ServedUnit
-) -> Mapping[str, Any] | None:
-    """The block of the series `part` is read as: the count read in its place
-    (`ServedUnit.count`), its own block on record, else the part's block with
-    the count's definition (`count_block`); else the part's block. `None`
-    when no such block is on record."""
-    block = specs.get(part)
-    if served.count is None:
+def _blocks_on_record(state: SessionState) -> dict[str, Mapping[str, Any]]:
+    """Every spec block on record, by spec_id: this turn's searches'
+    (`ORCHESTRATOR_SPECS_KEY`), then the planner's held sources'
+    (`planner.plan.held_sources`)."""
+    blocks: dict[str, Mapping[str, Any]] = dict(stored_mapping(state, ORCHESTRATOR_SPECS_KEY))
+    for spec_id, source in held_sources(state).items():
+        if spec_id not in blocks and (block := source.spec_block(spec_id)) is not None:
+            blocks[spec_id] = block
+    return blocks
+
+
+def counted_from(state: SessionState, pin: str) -> str | None:
+    """The series whose block on record offers `pin` as another count of it
+    (`resolved.alternative_measures`), as a count switch of the plan card
+    pins; `None` when no block on record does."""
+    return next(
+        (
+            spec_id
+            for spec_id, block in _blocks_on_record(state).items()
+            if spec_id != pin and count_block(block, pin) is not None
+        ),
+        None,
+    )
+
+
+def own_block(state: SessionState, pin: str) -> Mapping[str, Any] | None:
+    """The spec block on record for the series `pin` itself
+    (`_blocks_on_record`, else an earlier turn's, `planner.plan.earlier_block`)."""
+    return _blocks_on_record(state).get(pin) or earlier_block(pin)
+
+
+def pin_block(state: SessionState, pin: str) -> Mapping[str, Any] | None:
+    """The spec block of the series `pin`: its own (`own_block`), else, for
+    another count a block on record offers (`counted_from`), which a count
+    switch may pin with no block of its own, that block with the count's
+    definition (`count_block`). `None` when nothing on record states it."""
+    if (block := own_block(state, pin)) is not None:
         return block
-    own = specs.get(served.count)
-    if own is not None:
-        return own
-    return count_block(block, served.count) if block is not None else None
+    source = counted_from(state, pin)
+    return count_block(_blocks_on_record(state)[source], pin) if source is not None else None
 
 
-def unit_row_offers(state: SessionState) -> dict[str, UnitOffer]:
+def unit_rows(plan: PlannerPlan) -> dict[str, list[str]]:
+    """The series each unit row of `plan` covers, by the row's decision slot
+    (`submission.prices_choice.unit_slot`): the distinct pins of the dataset
+    requirements citing it, in plan order. `plan` is read as the planner
+    states it (`submission.service.statement`)."""
+    rows: dict[str, list[str]] = {}
+    for decision in plan.decisions:
+        if not decision.slot.startswith(UNIT_SLOT_PREFIX):
+            continue
+        rows[decision.slot] = list(
+            dict.fromkeys(
+                requirement.source_spec_id
+                for requirement in plan.evidence_requirements
+                if isinstance(requirement, DatasetRequirement)
+                and decision.slot in requirement.decision_ids
+                and requirement.source_spec_id is not None
+            )
+        )
+    return rows
+
+
+def unit_row_offers(state: SessionState, plan: PlannerPlan) -> dict[str, UnitOffer]:
     """The units the plan card's row for each unit question's whole unit offers,
     by the row's decision slot (`submission.prices_choice.unit_slot`).
 
-    A row's parts are the records of `units_served` on it (`unit_row_parts`).
-    The offer is what the block on record (`ORCHESTRATOR_SPECS_KEY`) of the
-    series each part is read as converts into (`unit_offer`): the count read
-    in the part's place (`ServedUnit.count`), else the part. It starts on the
-    unit they are served in, the one the question's answer chose
-    (`ServedUnit.chosen`). A part Search refused to read in that unit sits on
-    no row. A row with a part whose block is not on record, or whose blocks
-    share no unit both bases serve or leave its unit out, offers none.
+    `plan` is read as the planner states it (`submission.service.statement`).
+    A row's series are the pins of the requirements citing it (`unit_rows`),
+    and its offer is what the block of each converts into (`pin_block`,
+    `unit_offer`). It starts on the unit the plan holds the row to
+    (`submission.prices_choice.plan_unit`). A row with a series whose block
+    is not on record, whose requirements state no one unit, or whose blocks
+    share no unit both bases serve or leave that unit out, offers none.
     """
-    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
     offers: dict[str, UnitOffer] = {}
-    for lead, members in unit_row_parts(state).items():
-        blocks = [_read_as_block(specs, part, served) for part, served in members.items()]
-        if any(block is None for block in blocks):
+    for slot, pins in unit_rows(plan).items():
+        blocks = [pin_block(state, pin) for pin in pins]
+        unit = plan_unit(plan, slot)
+        if not blocks or unit is None:
             continue
-        unit = next(iter(members.values())).unit
         offer = unit_offer([block for block in blocks if block is not None])
-        if unit is None or offer is None:
+        if offer is None or None in blocks:
             continue
         start = UnitChoice.model_validate(unit.model_dump(mode="json"))
         if (refusal := offered_unit_refusal(offer, start)) is not None:
-            logger.warning("unit row for %s offers no switch: %s", lead, refusal)
+            logger.warning("unit row %s offers no switch: %s", slot, refusal)
             continue
-        offers[unit_slot(lead)] = offer.model_copy(update={"start": start})
+        offers[slot] = offer.model_copy(update={"start": start})
     return offers
 
 

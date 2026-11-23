@@ -79,6 +79,7 @@ from planner.plan import (
     PlanStatus,
     RefusedSpec,
     SessionState,
+    Unit,
     UnsupportedOperation,
     clear_plan,
     clear_unsupported,
@@ -306,11 +307,17 @@ class _RevisionSession(CallSession):
     an ask (`inherits`, the new spec_id to the one it replaces) counts as
     picked too, so the measure decision a pin of it states stays theirs, and
     so does one the switch itself picked (`picked`), another count chosen on
-    the card.
+    the card. A switch of a unit row states the unit it picked by the row's
+    slot (`units`, `switched_units`).
     """
 
     inherits: Mapping[str, str] = field(default_factory=dict)
     picked: frozenset[str] = frozenset()
+    units: Mapping[str, Unit] = field(default_factory=dict)
+
+    def switched_units(self) -> Mapping[str, Unit]:
+        """The unit each unit row the switch moved is in now, by the row's slot."""
+        return self.units
 
     def user_spoke_since(self, version: int) -> bool:
         """Always: the revision answers the user's own switch."""
@@ -637,6 +644,7 @@ class PlannerAdapter:
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],
         picked: Collection[str] = (),
+        units: Mapping[str, Unit] | None = None,
     ) -> dict[str, Any]:
         """Amend `prior_plan` with `evidence_requirements` and translate it, calling no model.
 
@@ -650,7 +658,8 @@ class PlannerAdapter:
         decisions that pin states and drops those of the one it left, which
         go with it. The proposal opens its own round count, as a planner
         entry does. `inherits` maps each new spec_id to the one it
-        replaces, and `picked` holds those the user picked by the switch
+        replaces, `picked` holds those the user picked by the switch, and
+        `units` the unit a switch of a unit row picked, by the row's slot
         (`_RevisionSession`).
 
         Returns `{"plan", "summary"}` once the revised plan awaits approval,
@@ -675,6 +684,7 @@ class PlannerAdapter:
                 evidence_requirements=evidence_requirements,
                 inherits=inherits,
                 picked=frozenset(picked),
+                units=dict(units or {}),
             )
 
     async def _revised(
@@ -685,6 +695,7 @@ class PlannerAdapter:
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],
         picked: frozenset[str],
+        units: Mapping[str, Unit],
     ) -> dict[str, Any]:
         """`revise`'s answer, inside the turn's answers."""
         state = cast(SessionState, ctx.state)
@@ -692,7 +703,7 @@ class PlannerAdapter:
         save_plan(state, prior)
         save_plan_rounds(state, 0)
         call = SessionCall(ctx.transcript.records, state, None)
-        view = _RevisionSession(call=call, inherits=dict(inherits), picked=picked)
+        view = _RevisionSession(call=call, inherits=dict(inherits), picked=picked, units=units)
         proposal = Proposal(
             evidence_requirements=list(evidence_requirements), amends_version=prior.version
         )

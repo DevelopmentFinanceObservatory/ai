@@ -55,6 +55,7 @@ from translator.referral import clear_referral
 from planner.plan import (
     DecisionPick,
     SessionState,
+    Unit,
     UnsupportedOperation,
     decision_pick,
     keep_found_sources,
@@ -200,8 +201,9 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
     part, marked `asked` too, while its replan is under way or once the plan
     on record states it (`_switch_stands`). A switch of the row of a whole
     unit a unit question chose is no answer here: the `switch` node re-reads
-    the question's parts in the unit picked (`harness.graph.switch`), and the
-    question's answer then reads the unit each part is served in.
+    the series the plan pins in the unit picked (`harness.graph.switch`), and
+    admission reads that row's unit and series off the plan
+    (`submission.service._user_prices`).
     Any other `propose_plan` response, the plan landing included, clears the
     refusal, so no later ask of another kind is read as that one. A message the user typed
     (a `message` step) releases every choice and clears the refusal, and an
@@ -760,6 +762,10 @@ class CallSession:
     def prices_chosen(self) -> dict[str, PricesChoice]:
         """`prices_chosen` over the call."""
         return prices_chosen(self.call)
+
+    def switched_units(self) -> Mapping[str, Unit]:
+        """None: a planner call revises no unit row a switch moved."""
+        return {}
 
     def decision_pick(self) -> DecisionPick | None:
         """The pick on the plan card the call's planner entry holds (`planner.plan.decision_pick`)."""

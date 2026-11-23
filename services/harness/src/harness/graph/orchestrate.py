@@ -388,71 +388,68 @@ async def read_part_in_unit(
     *,
     group: str,
     count: str | None = None,
-    scope_of: str | None = None,
 ) -> UnitRead:
     """Settle `part`, which the unit question led by `group` covers, in
-    `unit`: the part as it stands when served in that
-    unit, else the part Search re-reads in it
-    (`harness.unit_switch.resubmit_unit`), stored as the turn's newest reading
-    of it. With `count`, another count of the part the user picked in the same
-    pause, the count's definition is re-read in place of the part's, with the
-    part's reading for its roles and named sets; the part's scope base is
-    left out, since it compiles the part's own count. With `scope_of`, the
-    series a scope switch moved the part to, the part is re-read with the
-    scope of that series' newest reading, so the switch stands.
+    `unit`: the part as it stands when served in that unit, else the part
+    Search re-reads in it (`reread_in_unit`). With `count`, another count of
+    the part the user picked in the same pause, the count's definition is
+    re-read in place of the part's, with the part's reading for its roles
+    and named sets; the part's scope base is left out, since it compiles the
+    part's own count.
 
     The part, and the count, are settled on every path, so the question is
     not asked of them again, and the series fetched for the part is recorded
-    with the unit it is served in, the count read in the part's place,
-    `group` and `unit` as the unit chosen (`record_unit_served`): served in
-    `unit`, unless Search refuses it, when the series keeps the unit it is
-    served in."""
+    with the unit it is served in, `group` and `unit` as the unit chosen
+    (`record_unit_served`): served in `unit`, unless Search refuses it, when
+    the series keeps the unit it is served in."""
     block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(part) or {}
     reading = _latest_reading(state, part)
     label = (reading.text if reading is not None else None) or part
-    scoped = _latest_reading(state, scope_of) if scope_of is not None else None
-    target, target_block, resubmitted = part, block, scoped or reading
+    target, target_block, posted = part, block, reading
     if count is not None and (counted := count_block(block, count)) is not None:
         target, target_block = count, counted
-        if resubmitted is not None:
-            resubmitted = resubmitted.model_copy(update={"scope": None})
+        if posted is not None:
+            posted = posted.model_copy(update={"scope": None})
     settle_unit(state, part, target)
     served = served_unit(target_block)
-    read_count = target if target != part else None
-    if count is None and scoped is None and served == unit:
+    if count is None and served == unit:
         record_unit_served(state, part, part, unit, group=group, chosen=unit)
         return UnitRead(label, target, served, None)
+    result = await reread_in_unit(
+        state, surface, reading=posted, block=target_block, unit=unit, label=label
+    )
+    if isinstance(result, UnitRefused):
+        record_unit_served(state, part, target, served, group=group, chosen=unit)
+        return UnitRead(label, target, served, result)
+    record_unit_read(state, part, result.spec_id)
+    record_unit_served(state, part, result.spec_id, unit, group=group, chosen=unit)
+    return UnitRead(label, target, served, result)
+
+
+async def reread_in_unit(
+    state: SessionState,
+    surface: ToolSurface,
+    *,
+    reading: SearchReading | None,
+    block: Mapping[str, Any],
+    unit: UnitChoice,
+    label: str,
+) -> UnitResubmitted | UnitRefused:
+    """Search's read, in `unit`, of the series `block` and `reading` stand
+    for (`harness.unit_switch.resubmit_unit`), named `label`. A series Search
+    reads is settled in the unit (`settle_unit`) and stored as the turn's
+    newest reading of it, under `label`, with `reading`'s roles and planner
+    axes (`store_search`). A refusal stores nothing."""
     result = await resubmit_unit(
         surface,
-        reading=resubmitted,
-        block=target_block,
+        reading=reading,
+        block=block,
         unit=unit.model_dump(mode="json", exclude_none=True),
         label=label,
     )
     if isinstance(result, UnitRefused):
-        record_unit_served(
-            state,
-            part,
-            target,
-            served,
-            group=group,
-            chosen=unit,
-            count=read_count,
-            scope_of=scope_of,
-        )
-        return UnitRead(label, target, served, result)
+        return result
     settle_unit(state, result.spec_id)
-    record_unit_read(state, part, result.spec_id)
-    record_unit_served(
-        state,
-        part,
-        result.spec_id,
-        unit,
-        group=group,
-        chosen=unit,
-        count=read_count,
-        scope_of=scope_of,
-    )
     digest = resolver_digest({"parts": [dict(result.part)]})
     for read in digest.get("part_digests") or ():
         read["variable"] = label
@@ -465,7 +462,7 @@ async def read_part_in_unit(
         held_open=[reading.open_roles] if reading is not None else (),
         share_sides=[reading.share_over] if reading is not None else (),
     )
-    return UnitRead(label, target, served, result)
+    return result
 
 
 async def _part_in_unit(

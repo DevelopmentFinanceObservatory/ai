@@ -24,6 +24,7 @@ from planner.plan import (
     stored_plan,
     windowed_origins,
 )
+from submission.service import statement
 
 from harness.decision_pick import decision_pick
 from harness.early_mint import EarlyMints
@@ -60,7 +61,8 @@ def offer(
     """Pause on the plan card `node_input`, the plan the node before drafted
     or revised, with `unit_offers` beside it when one of its decisions is a
     unit question's whole unit: the units that decision's row offers, by its
-    slot (`harness.graph.state.unit_row_offers`), which the card builder
+    slot, read off the plan on record as the planner states it
+    (`harness.graph.state.unit_row_offers`), which the card builder
     (`harness.studio_translate`) reads, since it holds no session state.
 
     A card pending approval is offered to `early_mints` (`harness.early_mint`),
@@ -78,12 +80,25 @@ def offer(
                 early_mints.offer(offered)
 
             ctx.after_commit(start_retrievals)
+    state = cast(SessionState, ctx.state)
+    on_record = stored_plan(state.get("plan"), state_key="plan")
     slots = {decision.get("slot") for decision in node_input.get("decisions") or ()}
-    offers = {
-        slot: offer.model_dump(mode="json")
-        for slot, offer in unit_row_offers(cast(SessionState, ctx.state)).items()
-        if slot in slots
-    }
+    offers = (
+        {
+            slot: offer.model_dump(mode="json")
+            for slot, offer in unit_row_offers(
+                state,
+                statement(
+                    on_record,
+                    to_origin=windowed_origins(state),
+                    alignments=alignments(state),
+                ),
+            ).items()
+            if slot in slots
+        }
+        if on_record is not None
+        else {}
+    )
     payload = {**node_input, "unit_offers": offers} if offers else node_input
     return Pause(kind=APPROVE_PAUSE, payload=payload, message=APPROVE_MESSAGE)
 

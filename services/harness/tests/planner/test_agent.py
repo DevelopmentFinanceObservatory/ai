@@ -55,6 +55,7 @@ from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
 from harness.planner_adapter import (
     _reading_pin_sources,
+    _RevisionSession,
 )
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.sentences import PlanWords, refusal_reason, refusal_sentence
@@ -13030,6 +13031,40 @@ def _read_in(spec_id: str, unit: dict[str, Any]) -> dict[str, Any]:
     return block
 
 
+# The gross part as Search re-reads it in current US dollars.
+_USD_READ = "spec_" + "9e" * 16
+
+
+def _switch_unit_row(
+    ctx: _FakeToolContext,
+    plan: Plan,
+    requirements: Sequence[DatasetRequirement],
+    units: Mapping[str, Unit],
+) -> dict[str, object]:
+    """Admission of the revision a switch of `plan`'s unit rows to `units`,
+    by slot, proposes: `requirements`, each restated in its row's unit, as
+    `harness.graph.switch` re-pins them, with no model call
+    (`harness.planner_adapter.PlannerAdapter.revise`)."""
+    unit_of = {
+        requirement.id: next(
+            (unit for slot, unit in units.items() if slot in requirement.decision_ids),
+            requirement.unit,
+        )
+        for requirement in requirements
+    }
+    return submission_service.submit(
+        _RevisionSession(call=session_call(ctx), units=dict(units)),
+        submission_service.Proposal(
+            evidence_requirements=[
+                r.model_copy(update={"unit": unit_of[r.id]}).model_dump(mode="json")
+                for r in requirements
+            ],
+            amends_version=plan.version,
+        ),
+        proposer=submission_service.PROPOSE_PLAN,
+    )
+
+
 def _unit_answered(
     ctx: _FakeToolContext, chose: dict[str, Any], fetched: str, served: dict[str, Any]
 ) -> None:
@@ -13544,8 +13579,9 @@ def test_a_planner_unit_decision_stays_whole_on_a_requirement_the_user_s_unit_do
     in euros, which no unit question covered, both citing a decision of its
     own fixing the unit and the measure. The gross part's requirement cites
     the user's unit row and not the planner's decision; the other keeps
-    citing it whole. A switch of the user's row to current US dollars then
-    lands, and the planner's decision still fixes euros, the unit of the one
+    citing it whole. A switch of the user's row to current US dollars, which
+    re-pins the gross part to Search's read of it in them, then lands, and
+    the planner's decision still fixes euros, the unit of the one
     requirement citing it."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
@@ -13554,7 +13590,7 @@ def test_a_planner_unit_decision_stays_whole_on_a_requirement_the_user_s_unit_do
         "destination": ["country/KEN"],
         "origin": ["country/DEU"],
     }
-    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), german)
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_USD_READ, _USD), german)
     _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
     dataset, _ = requirements
     currency = decision(
@@ -13589,20 +13625,11 @@ def test_a_planner_unit_decision_stays_whole_on_a_requirement_the_user_s_unit_do
     }
     assert cites == {"france": [row], "germany": ["currency_unit"]}
 
-    usd = UnitChoice.model_validate(_USD)
-    record_unit_served(ctx.state, _GROSS, _GROSS, usd, group=_GROSS, chosen=usd)
-    switched = call_planner_tool(
-        tools["propose_plan"],
-        question="q",
-        answer_mode=AnswerMode.SERIES,
-        amends_version=plan.version,
-        decisions=[],
-        evidence_requirements=[
-            plan.requirement("france").model_copy(
-                update={"source_spec_id": _GROSS, "unit": Unit(**_USD)}
-            )
-        ],
-        tool_context=ctx,
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement("france").model_copy(update={"source_spec_id": _USD_READ})],
+        {row: Unit(**_USD)},
     )
 
     assert switched["outcome"] == Outcome.OK.value, switched
@@ -13614,6 +13641,132 @@ def test_a_planner_unit_decision_stays_whole_on_a_requirement_the_user_s_unit_do
         "currency_unit" in revised.requirement(rid).decision_ids for rid in ("france", "germany")
     ] == [False, True]
     assert revised.requirement("germany").unit == Unit(**_EUR)
+
+
+# The gross part's net count as Search names it beside the part's read in
+# current euros, and the gross part as Search reads it in current pounds.
+_EUR_NET = "spec_" + "e7" * 16
+_GBP_READ = "spec_" + "e8" * 16
+_GBP = {"currency": "GBP", "prices": "current"}
+
+
+def _read_in_euros_offering_net() -> dict[str, Any]:
+    """The gross part's read in current euros under `_EUR_READ`, naming its
+    net count in current euros beside it under `_EUR_NET`."""
+    block = _read_in(_EUR_READ, _EUR)
+    (net,) = copy.deepcopy(_FRANCE_KENYA["resolved"]["alternative_measures"])
+    net["definition"] = {
+        **net["definition"],
+        "spec_id": _EUR_NET,
+        "identity": {**net["definition"]["identity"], "facets": {"unit": {"request": _EUR}}},
+    }
+    block["resolved"]["alternative_measures"] = [net]
+    return block
+
+
+_DE_KENYA_USD = "spec_" + "d2" * 16
+_TO_POUNDS = {"inherits": {_GBP_READ: _EUR_READ}, "units": {f"user_unit_{_GROSS}": Unit(**_GBP)}}
+
+
+def _germany_in_dollars() -> dict[str, Any]:
+    """Aid from Germany to Kenya in current US dollars under `_DE_KENYA_USD`,
+    another measure than the gross part's."""
+    block = _read_in(_DE_KENYA_USD, _USD)
+    block["definition"]["identity"]["entities"] = {
+        "destination": ["country/KEN"],
+        "origin": ["country/DEU"],
+    }
+    return block
+
+
+@pytest.mark.parametrize(
+    ("switch", "pin", "proposed", "cites_row", "told"),
+    [
+        (
+            {"inherits": {_EUR_NET: _EUR_READ}, "picked": frozenset({_EUR_NET})},
+            _EUR_NET,
+            _NET,
+            True,
+            (_EUR, _EUR_NET),
+        ),
+        (_TO_POUNDS, _GBP_READ, _GROSS, False, (_GBP, _GBP_READ)),
+        (_TO_POUNDS, _GBP_READ, _DE_KENYA_USD, True, (_GBP, None)),
+    ],
+    ids=["count-the-part-s-own", "unit-the-part-citing-nothing", "unit-another-measure-citing-it"],
+)
+def test_a_re_proposal_after_a_switch_is_told_the_series_and_unit_the_plan_holds(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    switch: dict[str, Any],
+    pin: str,
+    proposed: str,
+    cites_row: bool,
+    told: tuple[dict[str, Any], str | None],
+) -> None:
+    """The user chose current euros for the gross part, which Search re-read
+    in them, and a switch of the card moved the plan to the net count Search
+    named beside that read, or its unit row to current pounds, which Search
+    read the part in. The unit answer's record still names the euro read.
+    A proposal in US dollars is refused and told what the plan holds: one
+    pinning the part's own net count, to pin the net count in euros; one
+    pinning the part itself, citing no decision, to pin its read in pounds;
+    one pinning another measure while citing the unit row, to state pounds."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        _FRANCE_KENYA,
+        _read_in_euros_offering_net(),
+        _read_in(_GBP_READ, _GBP),
+        _germany_in_dollars(),
+    )
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, derived = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)}), derived],
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    # The unit switch restates the requirement in the unit it picked.
+    restated = {"unit": Unit(**_GBP)} if "units" in switch else {}
+    switched = submission_service.submit(
+        _RevisionSession(call=session_call(ctx), **switch),
+        submission_service.Proposal(
+            evidence_requirements=[
+                plan.requirement(dataset.id)
+                .model_copy(update={"source_spec_id": pin, **restated})
+                .model_dump(mode="json")
+            ],
+            amends_version=plan.version,
+        ),
+        proposer=submission_service.PROPOSE_PLAN,
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+    moved = load_plan(ctx.state)
+    assert moved is not None
+    held = moved.requirement(dataset.id)
+    cited = held.decision_ids if cites_row else ()
+
+    refused = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        amends_version=moved.version,
+        decisions=[],
+        evidence_requirements=[
+            held.model_copy(
+                update={"source_spec_id": proposed, "unit": Unit(**_USD), "decision_ids": cited}
+            )
+        ],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert (refused["detail"]["unit"], refused["detail"].get("pin")) == told
 
 
 def test_a_carried_planner_decision_stating_the_unit_the_user_answered_goes_on_amendment(
