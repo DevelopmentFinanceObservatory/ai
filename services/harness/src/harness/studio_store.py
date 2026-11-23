@@ -386,25 +386,69 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 }
                 for choice_id, choice in p.choices.items()
             },
-            # `new_plan` is stored beside the card. An instance rolled back to a
-            # model without it cannot load a stored card that holds it, and
-            # ignores an unknown key of the entry.
-            "card": (
+            # `new_plan` is stored beside the card, and each decision's `unit`
+            # beside the card and the frames (`_units_apart`). An instance
+            # rolled back to a model without them cannot load a stored card or
+            # frame that holds them, and ignores an unknown key of the entry.
+            **_units_apart(
+                "card",
                 p.card.model_dump(mode="json", exclude_none=True, exclude={"new_plan"})
                 if p.card
-                else None
+                else None,
             ),
             "card_new_plan": bool(p.card and p.card.new_plan),
             # Written only when set: an entry with no admitted run has no key.
             **({"admitted_run": p.admitted_run} if p.admitted_run is not None else {}),
             # Written only when set, as the wire sends each frame.
             **(
-                {"frames": [frame.model_dump(mode="json", exclude_none=True) for frame in p.frames]}
+                _frames_apart(
+                    [frame.model_dump(mode="json", exclude_none=True) for frame in p.frames]
+                )
                 if p.frames
                 else {}
             ),
         }
         for interrupt_id, p in pending.items()
+    }
+
+
+def _units_apart(key: str, frame: dict[str, Any] | None) -> dict[str, Any]:
+    """`frame` under `key` with no decision's `unit`, and each unit taken out,
+    by its decision's id, under `<key>_units` when there is one; `_units_back`
+    puts them back."""
+    if frame is None or not any("unit" in d for d in frame.get("decisions") or ()):
+        return {key: frame}
+    decisions = frame["decisions"]
+    return {
+        key: {
+            **frame,
+            "decisions": [{k: v for k, v in d.items() if k != "unit"} for d in decisions],
+        },
+        f"{key}_units": {d["id"]: d["unit"] for d in decisions if "unit" in d},
+    }
+
+
+def _frames_apart(frames: list[dict[str, Any]]) -> dict[str, Any]:
+    """`frames` under `"frames"`, each with no decision's `unit`, and each
+    frame's units taken out, by its index, under `"frames_units"` when there
+    is one (`_units_apart`)."""
+    apart = [_units_apart("frame", frame) for frame in frames]
+    units = {
+        str(index): one["frame_units"] for index, one in enumerate(apart) if "frame_units" in one
+    }
+    return {"frames": [one["frame"] for one in apart], **({"frames_units": units} if units else {})}
+
+
+def _units_back(frame: dict[str, Any], units: Mapping[str, Any] | None) -> dict[str, Any]:
+    """`frame` with each decision's `unit` from `units`, by the decision's id."""
+    if not units:
+        return frame
+    return {
+        **frame,
+        "decisions": [
+            {**d, "unit": units[d["id"]]} if d.get("id") in units else d
+            for d in frame.get("decisions") or ()
+        ],
     }
 
 
@@ -430,14 +474,20 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         },
         card=(
             PlanProposed.model_validate(
-                {**entry["card"], "new_plan": True if entry.get("card_new_plan") else None}
+                {
+                    **_units_back(entry["card"], entry.get("card_units")),
+                    "new_plan": True if entry.get("card_new_plan") else None,
+                }
             )
             if entry.get("card")
             else None
         ),
         admitted_run=entry.get("admitted_run"),
         frames=tuple(
-            STUDIO_FRAME_ADAPTER.validate_python(frame) for frame in entry.get("frames") or ()
+            STUDIO_FRAME_ADAPTER.validate_python(
+                _units_back(frame, (entry.get("frames_units") or {}).get(str(index)))
+            )
+            for index, frame in enumerate(entry.get("frames") or ())
         ),
     )
     if "questions" in entry:

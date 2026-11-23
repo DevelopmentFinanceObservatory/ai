@@ -49,6 +49,7 @@ from harness.graph.state import (
     UnitAsk,
     ask_candidates,
     ask_questions,
+    count_block,
     pending_action,
     priced_options,
     record_unit_read,
@@ -64,7 +65,7 @@ from harness.scope_choices import mark_planner_axes
 from harness.tool_contracts import resolver_digest
 from harness.turn.node import Next, Node, NodeCtx, Pause, TurnKey
 from harness.turn_records import SearchReading
-from harness.unit_offer import served_unit, unit_words
+from harness.unit_offer import served_unit, unit_phrase
 from harness.unit_switch import UnitRefused, UnitResubmitted, resubmit_unit
 from harness.wire import UnitChoice, UnitOffer
 
@@ -330,7 +331,7 @@ async def _unit_reply(
     unit when they left it to the agent, then a sentence for each part it
     covers (`_part_in_unit`)."""
     unit = answered_unit(ask.offer, answer)
-    words = _in_sentence(unit_words(unit, ask.offer))
+    words = unit_phrase(unit, ask.offer)
     lead = (
         f"The user chose {words}."
         if answer.get("kind") == "unit"
@@ -351,14 +352,11 @@ async def _unit_reply(
             None,
         )
         sentences.append(
-            await _part_in_unit(state, surface, part, unit, offer=ask.offer, count=count)
+            await _part_in_unit(
+                state, surface, part, unit, offer=ask.offer, group=ask.parts[0], count=count
+            )
         )
     return " ".join(sentences)
-
-
-def _in_sentence(words: str) -> str:
-    """`harness.unit_offer.unit_words` inside a sentence: "constant 2023 US dollars"."""
-    return words[:1].lower() + words[1:]
 
 
 def _latest_reading(state: Any, spec_id: str) -> SearchReading | None:
@@ -366,16 +364,6 @@ def _latest_reading(state: Any, spec_id: str) -> SearchReading | None:
     for stored in reversed(stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY)):
         if stored.get("spec_id") == spec_id:
             return SearchReading.model_validate(stored)
-    return None
-
-
-def _count_block(block: Mapping[str, Any], count: str) -> dict[str, Any] | None:
-    """`block` with the definition of `count`, another count it offers
-    (`resolved.alternative_measures`), in place of its own; `None` when it offers none."""
-    for alternative in (block.get("resolved") or {}).get("alternative_measures") or ():
-        definition = alternative.get("definition") if isinstance(alternative, Mapping) else None
-        if isinstance(definition, Mapping) and definition.get("spec_id") == count:
-            return {**block, "definition": dict(definition)}
     return None
 
 
@@ -398,48 +386,70 @@ async def read_part_in_unit(
     part: str,
     unit: UnitChoice,
     *,
+    group: str,
     count: str | None = None,
 ) -> UnitRead:
-    """Settle `part` in `unit`: the part as it stands when served in that
-    unit, else the part Search re-reads in it
-    (`harness.unit_switch.resubmit_unit`), stored as the turn's newest reading
-    of it. With `count`, another count of the part the user picked in the same
-    pause, the count's definition is re-read in place of the part's, with the
-    part's reading for its roles and named sets; the part's scope base is
-    left out, since it compiles the part's own count.
+    """Settle `part`, which the unit question led by `group` covers, in
+    `unit`: the part as it stands when served in that unit, else the part
+    Search re-reads in it (`reread_in_unit`). With `count`, another count of
+    the part the user picked in the same pause, the count's definition is
+    re-read in place of the part's, with the part's reading for its roles
+    and named sets; the part's scope base is left out, since it compiles the
+    part's own count.
 
     The part, and the count, are settled on every path, so the question is
     not asked of them again, and the series fetched for the part is recorded
-    with the unit it is served in and the count read in the part's place
-    (`record_unit_served`): `unit`, unless Search refuses it, when the series
-    keeps the unit it is served in."""
+    with the unit it is served in, `group` and `unit` as the unit chosen
+    (`record_unit_served`): served in `unit`, unless Search refuses it, when
+    the series keeps the unit it is served in."""
     block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(part) or {}
     reading = _latest_reading(state, part)
     label = (reading.text if reading is not None else None) or part
-    target, target_block, resubmitted = part, block, reading
-    if count is not None and (counted := _count_block(block, count)) is not None:
+    target, target_block, posted = part, block, reading
+    if count is not None and (counted := count_block(block, count)) is not None:
         target, target_block = count, counted
-        if reading is not None:
-            resubmitted = reading.model_copy(update={"scope": None})
+        if posted is not None:
+            posted = posted.model_copy(update={"scope": None})
     settle_unit(state, part, target)
     served = served_unit(target_block)
-    read_count = target if target != part else None
     if count is None and served == unit:
-        record_unit_served(state, part, part, unit)
+        record_unit_served(state, part, part, unit, group=group, chosen=unit)
         return UnitRead(label, target, served, None)
+    result = await reread_in_unit(
+        state, surface, reading=posted, block=target_block, unit=unit, label=label
+    )
+    if isinstance(result, UnitRefused):
+        record_unit_served(state, part, target, served, group=group, chosen=unit)
+        return UnitRead(label, target, served, result)
+    record_unit_read(state, part, result.spec_id)
+    record_unit_served(state, part, result.spec_id, unit, group=group, chosen=unit)
+    return UnitRead(label, target, served, result)
+
+
+async def reread_in_unit(
+    state: SessionState,
+    surface: ToolSurface,
+    *,
+    reading: SearchReading | None,
+    block: Mapping[str, Any],
+    unit: UnitChoice,
+    label: str,
+) -> UnitResubmitted | UnitRefused:
+    """Search's read, in `unit`, of the series `block` and `reading` stand
+    for (`harness.unit_switch.resubmit_unit`), named `label`. A series Search
+    reads is settled in the unit (`settle_unit`) and stored as the turn's
+    newest reading of it, under `label`, with `reading`'s roles and planner
+    axes (`store_search`). A refusal stores nothing."""
     result = await resubmit_unit(
         surface,
-        reading=resubmitted,
-        block=target_block,
+        reading=reading,
+        block=block,
         unit=unit.model_dump(mode="json", exclude_none=True),
         label=label,
     )
     if isinstance(result, UnitRefused):
-        record_unit_served(state, part, target, served, count=read_count)
-        return UnitRead(label, target, served, result)
+        return result
     settle_unit(state, result.spec_id)
-    record_unit_read(state, part, result.spec_id)
-    record_unit_served(state, part, result.spec_id, unit, count=read_count)
     digest = resolver_digest({"parts": [dict(result.part)]})
     for read in digest.get("part_digests") or ():
         read["variable"] = label
@@ -452,7 +462,7 @@ async def read_part_in_unit(
         held_open=[reading.open_roles] if reading is not None else (),
         share_sides=[reading.share_over] if reading is not None else (),
     )
-    return UnitRead(label, target, served, result)
+    return result
 
 
 async def _part_in_unit(
@@ -462,18 +472,19 @@ async def _part_in_unit(
     unit: UnitChoice,
     *,
     offer: UnitOffer,
+    group: str,
     count: str | None,
 ) -> str:
     """What the agent fetches for `part` in `unit`, in a sentence: the part
     as it stands, the series Search re-read it as (`read_part_in_unit`), or,
     for a unit Search does not serve, the part as served, said so."""
-    words = _in_sentence(unit_words(unit, offer))
-    read = await read_part_in_unit(state, surface, part, unit, count=count)
+    words = unit_phrase(unit, offer)
+    read = await read_part_in_unit(state, surface, part, unit, group=group, count=count)
     if read.result is None:
         return f"{read.label} ({part}) is served in {words}: fetch it as it stands."
     if isinstance(read.result, UnitRefused):
         served = read.served
-        as_served = f", in {_in_sentence(unit_words(served, offer))}," if served is not None else ""
+        as_served = f", in {unit_phrase(served, offer)}," if served is not None else ""
         return (
             f"Search could not serve {words} for {read.label}: {read.result.reason} Fetch "
             f"{read.target} as served{as_served} and say so."

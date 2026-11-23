@@ -89,7 +89,8 @@
       "call_id": null,
       "args": null,
       "body": {},
-      "name": null
+      "name": null,
+      "record": 0
     }
   ],
   "frames": [],

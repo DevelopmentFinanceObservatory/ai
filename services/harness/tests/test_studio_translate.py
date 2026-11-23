@@ -15,7 +15,7 @@ import logging
 import ssl
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 
 import aiohttp
@@ -41,7 +41,7 @@ from harness.conversation import current_conversation_id, current_conversation_k
 from harness.decision_pick import DecisionPick, decision_pick
 from harness.graph.events import PlannerStarted, StepProgress
 from harness.graph.planning import planner_ask_pause
-from harness.graph.state import ORCHESTRATOR_PRIOR_LEDGER_KEY
+from harness.graph.state import ORCHESTRATOR_PRIOR_LEDGER_KEY, save_card_unit_offers
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import decision_choice_id, decision_option_id
 from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
@@ -89,6 +89,10 @@ from harness.wire import (
     PlanProposed,
     PlanStep,
     StepStatus,
+    UnitChoice,
+    UnitCurrency,
+    UnitOffer,
+    UnitPrices,
     component_created,
 )
 from mcp import MCPError
@@ -98,10 +102,12 @@ from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
     Decision,
+    DecisionFixes,
     PinSource,
     Plan,
     ResolvedBy,
     SessionState,
+    Unit,
     UnsupportedOperation,
     plan_revision,
 )
@@ -115,6 +121,7 @@ from pydantic_ai.exceptions import ModelHTTPError
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 from sqlalchemy.ext.asyncio import AsyncEngine
+from submission.prices_choice import prices_slot, unit_slot
 from submission.service import COMBINATION_OPTIONS, scope_choice_decisions
 from translator.discovery import NoTimeLeftError
 from translator.referral import (
@@ -158,16 +165,28 @@ def _translator() -> _Translator:
     )
 
 
-def _pause(kind: str, payload: dict[str, Any], *, message: str = "") -> Paused:
-    """The turn's pause of `kind` on `payload`, under a wire id of its own."""
+def _pause(
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    message: str = "",
+    state: Mapping[str, Any] = MappingProxyType({}),
+) -> Paused:
+    """The turn's pause of `kind` on `payload`, under a wire id of its own,
+    committed with `state`."""
     return Paused(
-        kind=kind, interrupt_id=_wire_id("int"), round=1, payload=payload, message=message
+        kind=kind,
+        interrupt_id=_wire_id("int"),
+        round=1,
+        payload=payload,
+        message=message,
+        state=state,
     )
 
 
-def _card(payload: dict[str, Any]) -> Paused:
-    """The `approve` node's pause offering the plan card `payload`."""
-    return _pause("approve", payload)
+def _card(payload: dict[str, Any], *, state: Mapping[str, Any] = MappingProxyType({})) -> Paused:
+    """The `approve` node's pause offering the plan card `payload`, committed with `state`."""
+    return _pause("approve", payload, state=state)
 
 
 async def _stored_conversation(engine: AsyncEngine) -> tuple[StudioStore, ConversationState]:
@@ -767,6 +786,116 @@ def test_a_caveat_reaches_the_card_only_as_a_caveat() -> None:
     assert differ.slot not in rows
     cited = {slot for requirement in card.requirements or () for slot in requirement.decision_ids}
     assert cited and cited <= rows
+
+
+_EUR = UnitCurrency(
+    code="EUR",
+    name="euros",
+    prices=[UnitPrices.CURRENT, UnitPrices.CONSTANT],
+    base_year_min=2015,
+    base_year_max=2023,
+)
+_USD = _EUR.model_copy(update={"code": "USD", "name": "US dollars"})
+_XOF = UnitCurrency(code="XOF", name="CFA francs", prices=[UnitPrices.CURRENT])
+_KES = UnitCurrency(code="KES", name="Kenyan shillings", prices=[UnitPrices.CURRENT])
+
+
+@pytest.mark.parametrize(
+    ("start", "options", "currencies"),
+    [
+        pytest.param(
+            UnitChoice(currency="EUR", prices=UnitPrices.CONSTANT, base_year=2020),
+            [
+                ("EUR-constant-2020", "Constant 2020 euros"),
+                ("EUR-current", "Current euros"),
+            ],
+            [_USD, _EUR, _XOF],
+            id="both-bases",
+        ),
+        pytest.param(
+            UnitChoice(currency="XOF", prices=UnitPrices.CURRENT),
+            [
+                ("XOF-current", "Current CFA francs"),
+                ("USD-current", "Current US dollars"),
+                ("USD-constant-2023", "Constant 2023 US dollars"),
+            ],
+            [_USD, _EUR, _XOF],
+            id="start-in-one-basis",
+        ),
+        pytest.param(
+            UnitChoice(currency="XOF", prices=UnitPrices.CURRENT),
+            [("XOF-current", "Current CFA francs")],
+            [_XOF, _KES],
+            id="no-currency-in-both-bases",
+        ),
+    ],
+)
+def test_a_unit_question_s_row_offers_its_unit_and_the_whole_units_beside_it(
+    start: UnitChoice, options: list[tuple[str, str]], currencies: list[UnitCurrency]
+) -> None:
+    """The row stating a unit question's whole unit carries the offer the
+    approve pause sets beside the plan, starting on the unit the parts are in,
+    and switches: a client that renders no unit picker gets the whole units of
+    the start's currency, the start active, or the start first and then both
+    bases of a currency serving both. With no currency serving both, the
+    start is the one whole unit, and the row still switches, to any other
+    unit its offer holds. The row's choice and alternatives read as its
+    options. A part's own whole-unit prices row, with no offer, still
+    offers no switch."""
+    plan = _us_health_share()
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    row = Decision(
+        slot=unit_slot(dataset.id),
+        description="Which prices the figures are in.",
+        options=("constant 2020 prices in EUR", "current prices"),
+        chosen="constant 2020 prices in EUR",
+        resolved_by=ResolvedBy.USER,
+        rationale="The user chose constant 2020 prices in EUR.",
+        fixes=DecisionFixes(prices="constant"),
+    )
+    own = row.model_copy(update={"slot": prices_slot(dataset.id)})
+    plan = _us_health_share(
+        decisions=[*plan.decisions, row, own],
+        evidence_requirements=[
+            r.model_copy(
+                update={
+                    "decision_ids": (*r.decision_ids, row.slot, own.slot),
+                    "unit": Unit(currency="EUR", prices="constant", base_year=2020),
+                }
+            )
+            if r.id == dataset.id
+            else r
+            for r in plan.evidence_requirements
+        ],
+    )
+    offer = UnitOffer(currencies=currencies, presets=[c.code for c in currencies[:2]], start=start)
+    translator = _translator()
+
+    state: dict[str, Any] = {}
+    save_card_unit_offers(state, "rev-1", {row.slot: offer})
+
+    (card,) = translator._interrupt_frames(
+        _card({**plan.model_dump(mode="json"), "revision": "rev-1"}, state=state)
+    )
+
+    rows = {decision.id: decision for decision in card.decisions}
+    unit_row = rows[row.slot]
+    assert (unit_row.unit, unit_row.choice_id, unit_row.active_option_id) == (
+        offer,
+        decision_choice_id(row),
+        options[0][0],
+    )
+    assert [(o.option_id, o.label, o.status) for o in unit_row.options or ()] == [
+        (option_id, label, "available") for option_id, label in options
+    ]
+    assert (unit_row.chosen, unit_row.alternatives) == (
+        options[0][1],
+        [label for _, label in options],
+    )
+    assert (rows[own.slot].choice_id, rows[own.slot].unit) == (None, None)
+    assert PlanAction.SWITCH in card.actions
+    (pending,) = translator._conversation.pending.values()
+    assert set(pending.choices[decision_choice_id(row)].options) == {o for o, _ in options}
 
 
 def test_a_planner_decisions_options_one_label_would_read_alike_reach_the_card_apart() -> None:

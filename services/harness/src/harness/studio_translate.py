@@ -88,6 +88,7 @@ from harness.graph.state import (
     APPROVE_PAUSE,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
+    card_unit_offers,
 )
 from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
@@ -120,7 +121,13 @@ from harness.studio_store import StudioStore, keep_turn_records
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
-from harness.unit_offer import unit_words, whole_units
+from harness.unit_offer import (
+    offers_another_unit,
+    row_units,
+    unit_option_id,
+    unit_words,
+    whole_units,
+)
 from harness.wire import (
     ActivityStep,
     ApplyChoiceSuggestion,
@@ -1226,10 +1233,17 @@ def _data_phrase(plan: PlannerPlan) -> str | None:
 
 
 def _choice_members(
-    decision: Decision | None, plan: PlannerPlan, named: Callable[[str], str]
+    decision: Decision | None,
+    plan: PlannerPlan,
+    named: Callable[[str], str],
+    unit_offers: Mapping[str, UnitOffer],
 ) -> dict[str, Any]:
     """The `PlanDecision` members a switchable decision of `plan` adds: the id
     of its row, its active option and each option with its label and status.
+
+    A decision whose slot `unit_offers` holds, a unit question's whole unit
+    (`harness.graph.state.unit_row_offers`), takes `plan_display.
+    decision_choice_id` and that offer as `unit` (`_unit_members`).
 
     A scope decision's row takes `plan_display.choice_id`, and each option
     the status Search gave it, its years and why it is limited
@@ -1245,6 +1259,8 @@ def _choice_members(
     """
     if decision is None:
         return {}
+    if (offer := unit_offers.get(decision.slot)) is not None:
+        return _unit_members(decision, offer)
     if (row := plan_display.count_choice_id(plan, decision)) is not None:
         return {
             "choice_id": row,
@@ -1289,6 +1305,31 @@ def _choice_members(
     }
 
 
+def _unit_members(decision: Decision, offer: UnitOffer) -> dict[str, Any]:
+    """The `PlanDecision` members of the row stating a unit question's whole
+    unit `decision`: its row id, `offer` as `unit`, and as options the whole
+    units a client that renders no unit picker switches between
+    (`row_units`), each labelled in words (`unit_words`), status
+    "available", the offer's start active. Its `chosen` is the start in
+    those words and its `alternatives` every option's label, so the row
+    reads as its options do."""
+    units = row_units(offer)
+    start = unit_option_id(offer.start)
+    return {
+        "chosen": unit_words(offer.start, offer),
+        "alternatives": [unit_words(unit, offer) for unit in units.values()],
+        "choice_id": plan_display.decision_choice_id(decision),
+        "active_option_id": start,
+        "options": [
+            PlanDecisionOption(
+                option_id=option_id, label=unit_words(unit, offer), status="available"
+            )
+            for option_id, unit in units.items()
+        ],
+        "unit": offer,
+    }
+
+
 def _search_default(decision: Decision | None) -> bool:
     """Whether `decision` states a scope choice Search's default settled."""
     return (
@@ -1303,8 +1344,12 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
     scope choices and switchable planner decisions (`_choice_members`).
 
     A choice is switchable when an option other than its active one is
-    available or partial. The plan card lists `PlanAction.SWITCH` only
-    when one is, and `/interrupt` checks a switch against what is kept.
+    available or partial, or, for a row offering a unit (`PlanDecision.unit`),
+    when its offer holds a unit other than the one it is in
+    (`harness.unit_offer.offers_another_unit`), which a switch names by
+    `unit` though its options list it not. The plan card lists
+    `PlanAction.SWITCH` only when one is, and `/interrupt` checks a switch
+    against what is kept.
     """
     choices: dict[str, _PendingChoice] = {}
     for decision in decisions:
@@ -1314,7 +1359,7 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
         if not any(
             option.status != "unavailable" and option.option_id != decision.active_option_id
             for option in decision.options
-        ):
+        ) and (decision.unit is None or not offers_another_unit(decision.unit)):
             continue
         choices[decision.choice_id] = _PendingChoice(
             active=decision.active_option_id,
@@ -2443,6 +2488,7 @@ class _Translator:
                     )
                 conversation.latest_plan_version = version
             plan = _plan_from_payload(payload)
+            unit_offers = card_unit_offers(pause.state, payload.get("revision"))
             questions = plan_display.card_questions(plan)
             by_slot = {decision.slot: decision for decision in plan.decisions}
             named = functools.partial(plan_display.card_decision_text, plan=plan)
@@ -2508,30 +2554,36 @@ class _Translator:
                 for row in plan_display.ask_rows(plan)
             ]
             decisions = [
-                PlanDecision(
-                    id=decision.get("slot", f"d{index + 1}"),
-                    question=questions[decision.get("slot", "")],
-                    chosen=option_named(decision.get("chosen", ""), decision=held, options=offered),
-                    alternatives=(
-                        [
-                            option_named(option, decision=held, options=offered)
-                            for option in decision["options"]
-                        ]
-                        if decision.get("options") is not None
-                        else None
-                    ),
-                    # A reason saying only that Search's default holds says nothing.
-                    reason=""
-                    if _search_default(held)
-                    else named(decision.get("rationale", ""), decision=held),
-                    resolved_by=_RESOLVED_BY_TO_WIRE.get(
-                        decision.get("resolved_by", ""), "default"
-                    ),
-                    **_choice_members(
-                        held,
-                        plan,
-                        functools.partial(option_named, decision=held, options=offered),
-                    ),
+                PlanDecision.model_validate(
+                    {
+                        "id": decision.get("slot", f"d{index + 1}"),
+                        "question": questions[decision.get("slot", "")],
+                        "chosen": option_named(
+                            decision.get("chosen", ""), decision=held, options=offered
+                        ),
+                        "alternatives": (
+                            [
+                                option_named(option, decision=held, options=offered)
+                                for option in decision["options"]
+                            ]
+                            if decision.get("options") is not None
+                            else None
+                        ),
+                        # A reason saying only that Search's default holds says nothing.
+                        "reason": ""
+                        if _search_default(held)
+                        else named(decision.get("rationale", ""), decision=held),
+                        "resolved_by": _RESOLVED_BY_TO_WIRE.get(
+                            decision.get("resolved_by", ""), "default"
+                        ),
+                        # A unit row words its choice and alternatives as its options.
+                        **_choice_members(
+                            held,
+                            plan,
+                            functools.partial(option_named, decision=held, options=offered),
+                            unit_offers,
+                        ),
+                    }
                 )
                 for index, decision in enumerate(payload.get("decisions", []))
                 if decision.get("slot") in questions

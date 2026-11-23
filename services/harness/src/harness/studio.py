@@ -158,7 +158,7 @@ from harness.studio_translate import (
     recorded_fatal,
 )
 from harness.turn import transcript as entries
-from harness.turn.events import Paused, TurnEvent, TurnFailed
+from harness.turn.events import Paused, TurnEvent, TurnFailed, pause_state
 from harness.turn.loop import (
     Answer,
     Graph,
@@ -178,7 +178,14 @@ from harness.turn.store import (
 )
 from harness.turn_budget import start_turn_budget
 from harness.turn_records import CHIP_STALE_NOTE, is_count_choice, stored_choice, stored_count
-from harness.unit_offer import offered_unit_refusal, unit_words, whole_units
+from harness.unit_offer import (
+    offered_unit_refusal,
+    row_units,
+    unit_option_id,
+    unit_phrase,
+    unit_words,
+    whole_units,
+)
 from harness.wire import (
     MAX_CLOSED_SINCE,
     MAX_TURN_REQUEST_BYTES,
@@ -216,6 +223,7 @@ from harness.wire import (
     TurnStatusName,
     UnitAnswer,
     UnitChoice,
+    UnitOffer,
     declared_features,
 )
 
@@ -432,6 +440,24 @@ def _interrupt_refusal(
     )
 
 
+def _row_unit_offer(pending: _PendingInterrupt, choice_id: str) -> UnitOffer | None:
+    """The units the row `choice_id` of `pending`'s plan card offers
+    (`PlanDecision.unit`), `None` for a row offering none or a pause stored
+    with no card."""
+    decisions = (pending.card.decisions if pending.card is not None else None) or ()
+    return next((d.unit for d in decisions if d.choice_id == choice_id), None)
+
+
+def _switch_answer(body: InterruptResponse) -> dict[str, Any]:
+    """What a `switch` answer hands the paused `approve` node under `switch`
+    (`harness.graph.approve.decide`): the row and option, and the unit a
+    unit row's switch names, when it names one."""
+    switch: dict[str, Any] = {"choice_id": body.choice_id, "option_id": body.option_id}
+    if body.unit is not None:
+        switch["unit"] = body.unit.model_dump(mode="json", exclude_none=True)
+    return switch
+
+
 def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSONResponse | None:
     """What is wrong with a `switch` on a plan card, as one HTTP refusal, or `None`.
 
@@ -440,14 +466,30 @@ def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSON
     (`_PendingInterrupt.choices`), a scope choice or a planner decision
     (`harness.decision_pick.is_decision_choice`), to an option the card
     offers as available or partial, other than the active one, or is refused
-    422 `switch_option_unavailable`. `detail` is copy the card shows.
+    422 `switch_option_unavailable`. A row offering a unit
+    (`PlanDecision.unit`) also takes a switch carrying `unit`, any unit its
+    offer holds other than the one it is in, named by `option_id` as
+    `harness.unit_offer.unit_option_id` names it; a `unit` on any other row
+    is refused the same way. `detail` is copy the card shows.
     """
     if body.plan_revision != pending.plan_revision:
         return _stale_plan_refusal(pending)
     choice = pending.choices.get(body.choice_id or "")
     option = choice.options.get(body.option_id or "") if choice is not None else None
+    offer = _row_unit_offer(pending, body.choice_id or "")
     if choice is None:
         detail = "That choice cannot be switched on this plan."
+    elif body.unit is not None:
+        if offer is None:
+            detail = "That choice offers no unit."
+        elif unit_option_id(body.unit) != body.option_id:
+            detail = "That option is not the unit picked."
+        elif (refusal := offered_unit_refusal(offer, body.unit)) is not None:
+            detail = f"That unit is not offered for this choice: {refusal}."
+        elif body.option_id == choice.active:
+            detail = f"The plan already uses {unit_phrase(body.unit, offer)}."
+        else:
+            return None
     elif option is None:
         detail = "That option is not offered for this choice."
     elif body.option_id == choice.active:
@@ -796,7 +838,13 @@ def _answer_turn_lines(
     match body.decision:
         case InterruptDecision.SWITCH:
             assert body.choice_id is not None and body.option_id is not None
-            label = pending.choices[body.choice_id].options[body.option_id].label
+            if (offer := _row_unit_offer(pending, body.choice_id)) is not None:
+                # A unit row names the unit in one form whether the unit is
+                # one of its options or not (`_switch_refusal`).
+                unit = body.unit or row_units(offer)[body.option_id]
+                label = unit_phrase(unit, offer)
+            else:
+                label = pending.choices[body.choice_id].options[body.option_id].label
             verb = "use" if is_decision_choice(body.choice_id) else "count"
             return [(f"{verb} {label}", False)]
         case InterruptDecision.AMEND:
@@ -1068,6 +1116,7 @@ class _SegmentWork:
                     interrupt_id=pause.interrupt_id,
                     round=pause.round,
                     payload=pause.payload,
+                    state=pause_state(self._cursor.state),
                 )
             )
             return Segment(cursor=self._cursor, outcome=Outcome.PAUSED)
@@ -2897,10 +2946,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 }
             if body.decision is InterruptDecision.SWITCH:
                 # Likewise a retry switching to another option.
-                requested_answer["switch"] = {
-                    "choice_id": body.choice_id,
-                    "option_id": body.option_id,
-                }
+                requested_answer["switch"] = _switch_answer(body)
             # The answer reaches the paused node's `resume`. A retry of an
             # answer the turn already took finds the turn running and carries
             # it on from its cursor, when the node owes the answer its
@@ -3304,10 +3350,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # replans with the pick held (`harness.decision_pick`). The
                 # turn's history record carries the choice (`_answer_turn_lines`).
                 assert body.choice_id is not None and body.option_id is not None
-                answer = {
-                    "approved": None,
-                    "switch": {"choice_id": body.choice_id, "option_id": body.option_id},
-                }
+                answer = {"approved": None, "switch": _switch_answer(body)}
             else:  # amend: a stated non-approval routes the graph to the planner
                 answer = {"approved": None, "amendment": body.payload}
             # The user's words as amended, so a search after the resume reads the

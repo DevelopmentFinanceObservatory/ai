@@ -1104,7 +1104,10 @@ class InterruptResponse(_WireModel):
     for a plan's `amend`. Both are absent for approve, reject, skip and
     switch. A plan's `switch` carries `choice_id` (a `PlanDecision.choice_id`),
     `option_id` (one of that decision's options) and `plan_revision` (the
-    `PlanProposed.revision` the user saw), all three. An `approve` may carry
+    `PlanProposed.revision` the user saw), all three. A switch of a row
+    offering a unit (`PlanDecision.unit`) may also carry `unit`, the unit
+    picked, with `option_id` naming it as `harness.unit_offer.unit_option_id`
+    does. The harness checks that the row's offer holds it. An `approve` may carry
     `plan_revision` alone, and is refused when it is not the paused plan's;
     without one it approves the paused plan, as older clients do. Every
     other decision carries none of them. `client_features` is
@@ -1130,12 +1133,14 @@ class InterruptResponse(_WireModel):
     choice_id: str | None = Field(default=None, min_length=1)
     option_id: str | None = Field(default=None, min_length=1)
     plan_revision: str | None = Field(default=None, min_length=1)
+    # A `switch` of a row offering a unit: the unit the user picked.
+    unit: UnitChoice | None = None
     client_features: list[str] | None = None
 
     @model_validator(mode="after")
     def _switch_members_come_with_switch(self) -> InterruptResponse:
         """Refuse a `switch` missing one of its three members, and any other
-        decision carrying one, save an `approve`'s `plan_revision`."""
+        decision carrying one or a `unit`, save an `approve`'s `plan_revision`."""
         members = {
             "choice_id": self.choice_id,
             "option_id": self.option_id,
@@ -1146,6 +1151,7 @@ class InterruptResponse(_WireModel):
             if missing:
                 raise ValueError(f"decision 'switch' requires {', '.join(missing)}")
             return self
+        members["unit"] = self.unit
         if self.decision is InterruptDecision.APPROVE:
             del members["plan_revision"]
         stated = [name for name, value in members.items() if value is not None]
@@ -1341,7 +1347,14 @@ class PlanDecision(_WireModel):
     are counted has `choice_id` `"<requirement id>:count"`
     (`harness.plan_display.count_choice_id`), one row for every source
     counted the same way, and its options' ids derived the same way.
-    A decision without `choice_id` cannot be switched.
+    The decision stating the whole unit a unit question's answer holds its
+    parts to has `choice_id` `"decision/user_unit_<lead part>"` and `unit`,
+    the units its parts convert into with `start` the unit they are in now;
+    its `options` are whole units (`harness.unit_offer.row_units`), each
+    id naming its unit (`harness.unit_offer.unit_option_id`), so a client
+    that renders no unit picker switches between them. A decision without
+    `choice_id` cannot be switched, and only one with `choice_id` carries
+    `unit`.
     """
 
     id: str
@@ -1353,13 +1366,16 @@ class PlanDecision(_WireModel):
     choice_id: str | None = None
     active_option_id: str | None = None
     options: list[PlanDecisionOption] | None = None
+    unit: UnitOffer | None = None
 
     @model_validator(mode="after")
     def _scope_members_come_together(self) -> PlanDecision:
-        """Refuse a scope choice missing one of its three members, or whose
-        active option is not among its options."""
+        """Refuse a scope choice missing one of its three members, a `unit`
+        on a decision without them, or an active option not among the options."""
         members = (self.choice_id, self.active_option_id, self.options)
         if all(member is None for member in members):
+            if self.unit is not None:
+                raise ValueError("unit is set only with choice_id")
             return self
         if any(member is None for member in members):
             raise ValueError("choice_id, active_option_id and options are set together")

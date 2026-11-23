@@ -177,7 +177,8 @@
       "call_id": null,
       "args": null,
       "body": {},
-      "name": null
+      "name": null,
+      "record": 0
     },
     {
       "kind": "response",
@@ -186,7 +187,8 @@
       "body": {
         "result": "The slow page."
       },
-      "name": "get_skill"
+      "name": "get_skill",
+      "record": 2
     },
     {
       "kind": "response",
@@ -195,7 +197,8 @@
       "body": {
         "result": "The fast page."
       },
-      "name": "get_skill"
+      "name": "get_skill",
+      "record": 2
     }
   ],
   "frames": [],
