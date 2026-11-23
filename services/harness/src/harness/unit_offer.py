@@ -205,6 +205,24 @@ def offered_unit_refusal(offer: UnitOffer, unit: UnitChoice) -> str | None:
     return None
 
 
+def offers_another_unit(offer: UnitOffer) -> bool:
+    """Whether `offer` holds a unit other than its `start`: another currency,
+    the start's currency on another price basis, or constant prices at
+    another base year."""
+    start = offer.start
+    for currency in offer.currencies:
+        if currency.code != start.currency or len(currency.prices) > 1:
+            return True
+        if (
+            UnitPrices.CONSTANT in currency.prices
+            and currency.base_year_min is not None
+            and currency.base_year_max is not None
+            and currency.base_year_min < currency.base_year_max
+        ):
+            return True
+    return False
+
+
 def whole_units(offer: UnitOffer) -> dict[str, UnitChoice]:
     """The whole units a client that renders no unit question picks among, by option id.
 

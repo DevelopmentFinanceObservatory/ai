@@ -55,6 +55,17 @@ definition on record, so it posts nothing to Search: every requirement
 stating one of those pins is re-pinned to that pin's other count in one
 revision, with the user's pick held (`_switched_count`).
 
+A switch of the row stating the whole unit a unit question's answer holds
+its parts to (`submission.prices_choice.unit_slot`) re-reads every part the
+question covered in the unit picked (`harness.graph.orchestrate.
+read_part_in_unit`), each from its own block, and re-pins every requirement
+citing the row to the series Search read for its part, stating that unit,
+in one revision (`_switched_unit`). A part Search cannot read in that unit
+fails the whole switch. A row stating a part's whole unit under the part's
+prices slot, on a plan card stored before unit questions had a row of their
+own, and a question whose parts are recorded with no `group`
+(`harness.graph.state.ServedUnit.group`) cannot be switched.
+
 A switch Search refuses (`requested_option_unavailable`,
 `conflicting_requested_options`), or one that fails anywhere else, offers
 the unchanged plan again with `switch_failed` naming the option, the
@@ -114,6 +125,7 @@ from planner.source_reads import run_together
 from planner.tool_results import ProblemCode
 from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
+from submission.prices_choice import PRICES_SLOT_PREFIX, UNIT_SLOT_PREFIX, measure_key
 from submission.service import part_scope, statement
 from translator.discovery import (
     RESOLVED_AT_STATE_PREFIX,
@@ -127,26 +139,35 @@ from translator.discovery import (
 from harness.decision_pick import picks_the_chosen_option
 from harness.graph.events import GraphEvent
 from harness.graph.interfaces import PlannerModel
-from harness.graph.orchestrate import turn_id
+from harness.graph.orchestrate import read_part_in_unit, turn_id
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    ORCHESTRATOR_UNIT_READ_KEY,
+    ORCHESTRATOR_UNIT_SERVED_KEY,
+    ORCHESTRATOR_UNIT_SETTLED_KEY,
+    ServedUnit,
     conversation_readings,
     readable_plan,
+    stated_unit,
     store_search,
     stored_mapping,
+    unit_row_offers,
+    units_served,
 )
-from harness.plan_display import choice_id as row_choice_id
 from harness.plan_display import (
+    DECISION_CHOICE_PREFIX,
     chosen_count_decision,
     chosen_scope_decision,
     count_options,
     decision_option_id,
     listed_together,
     pinned_choice_id,
+    switchable_decision,
 )
+from harness.plan_display import choice_id as row_choice_id
 from harness.scope_choices import (
     PartScope,
     ScopeChoice,
@@ -165,7 +186,9 @@ from harness.turn_records import (
     stored_choice,
     stored_count,
 )
-from harness.wire import RetryMode
+from harness.unit_offer import offered_unit_refusal, unit_option_id, unit_words, whole_units
+from harness.unit_switch import UnitRefused
+from harness.wire import RetryMode, UnitChoice, UnitOffer
 
 logger = logging.getLogger(__name__)
 
@@ -198,12 +221,19 @@ _DRAFTING_PREFIXES = ("planner:", "translator:")
 # maps to the value it is put back as when unset, since the readers take the
 # readings and blocks as a list and a mapping. The blocks are the turn's whole
 # spec mapping, which the turn store writes as given (`harness.turn.store`), so
-# a block the revision added is deleted and one it rewrote is put back.
+# a block the revision added is deleted and one it rewrote is put back. A unit
+# row's switch also writes the series each part is fetched as, the series it
+# was re-read as and the spec_ids settled (`harness.graph.orchestrate.
+# read_part_in_unit`), so a switch that fails leaves every part of the
+# question in the unit it was in.
 _RESTORED_KEYS: Mapping[str, Any] = {
     "plan": None,
     ORCHESTRATOR_SEARCHES_KEY: [],
     ORCHESTRATOR_SPECS_KEY: {},
     ORCHESTRATOR_SPEC_WARNINGS_KEY: {},
+    ORCHESTRATOR_UNIT_READ_KEY: {},
+    ORCHESTRATOR_UNIT_SERVED_KEY: {},
+    ORCHESTRATOR_UNIT_SETTLED_KEY: [],
 }
 
 
@@ -292,7 +322,8 @@ def switch_node(*, planner: PlannerModel, definition_surface: ToolSurface) -> No
     """The `switch` node, revising with `planner` and posting through `definition_surface`."""
 
     async def switch(ctx: NodeCtx[GraphEvent], node_input: Any) -> Next:
-        """Apply the switch `node_input` carries (`{"switch": {"choice_id", "option_id"}}`) and offer the plan again.
+        """Apply the switch `node_input` carries (`{"switch": {"choice_id",
+        "option_id"}}`, with `unit` on a unit row's switch) and offer the plan again.
 
         One route out, `"offer"`, to the `approve` node: the revised plan
         with a new revision and `moved`, or the unchanged plan with a
@@ -318,6 +349,7 @@ def switch_node(*, planner: PlannerModel, definition_surface: ToolSurface) -> No
                         plan,
                         choice_id=choice_id,
                         option_id=option_id,
+                        unit=pick.get("unit"),
                         planner=planner,
                         surface=definition_surface,
                     ),
@@ -433,18 +465,40 @@ async def _switched_plan(
     *,
     choice_id: str,
     option_id: str,
+    unit: object = None,
     planner: PlannerModel,
     surface: ToolSurface,
 ) -> dict[str, Any]:
-    """The `approve` payload of `plan` revised for the switch.
+    """The `approve` payload of `plan` revised for the switch, `unit` the
+    unit a unit row's switch names beside `option_id`, when it names one.
 
     Raises:
         SwitchFailedError: If the switch cannot be applied, with the note to show.
     """
     if picks_the_chosen_option(plan, choice_id=choice_id, option_id=option_id):
-        raise SwitchFailedError(
-            "That choice is already on the plan.", code=SCOPE_CHOICE_NOT_APPLIED
+        raise _already_chosen()
+    slot = choice_id.removeprefix(DECISION_CHOICE_PREFIX)
+    if choice_id.startswith(DECISION_CHOICE_PREFIX) and slot.startswith(UNIT_SLOT_PREFIX):
+        return await _switched_unit(
+            ctx,
+            plan,
+            slot,
+            option_id=option_id,
+            unit=unit,
+            planner=planner,
+            surface=surface,
         )
+    priced = next((d for d in plan.decisions if d.slot == slot), None)
+    if (
+        choice_id.startswith(DECISION_CHOICE_PREFIX)
+        and slot.startswith(PRICES_SLOT_PREFIX)
+        and priced is not None
+        and not switchable_decision(priced)
+    ):
+        # A part's prices row stating a whole unit, on a card stored before
+        # unit questions had a row of their own. A switchable prices row
+        # replans with the pick (`harness.decision_pick`).
+        raise _unit_not_switchable()
     counted = chosen_count_decision(plan, choice_id)
     if counted is not None:
         return await _switched_count(
@@ -668,6 +722,236 @@ async def _switched_count(
         "revision": plan_revision(revised_plan),
         "moved": [],
     }
+
+
+async def _switched_unit(
+    ctx: NodeCtx[GraphEvent],
+    plan: PlannerPlan,
+    slot: str,
+    *,
+    option_id: str,
+    unit: object,
+    planner: PlannerModel,
+    surface: ToolSurface,
+) -> dict[str, Any]:
+    """The `approve` payload of `plan` revised for a switch of its unit row,
+    the decision under `slot` (`submission.prices_choice.unit_slot`), to the
+    unit picked (`_picked_unit`).
+
+    The row's parts are those `units_served` records under the question's
+    lead part (`ServedUnit.group`), and its offer the one the card showed,
+    recomputed from state (`harness.graph.state.unit_row_offers`). Each part
+    is read in the unit picked at once (`read_part_in_unit`), the count read
+    in its place re-read again in its place, and every requirement citing the
+    row, as the planner states it (`submission.service.statement`), is
+    re-pinned to the series the part it reads (`_covering_members`) is
+    fetched as now (`planner.plan.repinned`) and states the unit. The plan is
+    revised with no model call, and admission writes the row again in the
+    new unit (`submission.prices_choice.prices_decisions`).
+
+    Raises:
+        SwitchFailedError: Non-retryable when the plan holds no such row, the
+            question's parts are recorded with no group or its lead part not
+            at all, the row offers no unit, the unit picked lies outside its
+            offer or is the one it holds, or a requirement citing the row
+            reads no part of the question; as Search's refusal says
+            (`harness.unit_switch.UnitRefused`) when it cannot read a part in
+            the unit; and as the revision's refusal when it is refused.
+    """
+    state = cast(SessionState, ctx.state)
+    decision = next((d for d in plan.decisions if d.slot == slot), None)
+    if decision is None:
+        raise _choice_gone()
+    lead = slot.removeprefix(UNIT_SLOT_PREFIX)
+    members = {part: served for part, served in units_served(state).items() if served.group == lead}
+    offer = unit_row_offers(state).get(slot)
+    if lead not in members or offer is None:
+        raise _unit_not_switchable()
+    picked = _picked_unit(offer, option_id=option_id, unit=unit)
+    if picked == offer.start:
+        raise _already_chosen()
+    stated = stated_unit(picked)
+    if stated is None:
+        raise _unit_unavailable(picked, offer)
+    covered = [
+        requirement
+        for requirement in _statement_of(plan, state).evidence_requirements
+        if isinstance(requirement, DatasetRequirement) and slot in requirement.decision_ids
+    ]
+    if not covered:
+        raise _choice_gone()
+    member_of = _covering_members(state, covered, members)
+    reads = await run_together(
+        read_part_in_unit(state, surface, part, picked, group=lead, count=served.count)
+        for part, served in members.items()
+    )
+    refused = next((read.result for read in reads if isinstance(read.result, UnitRefused)), None)
+    if refused is not None:
+        raise SwitchFailedError(
+            refused.reason,
+            code=refused.code or _OPTION_UNAVAILABLE,
+            retryable=refused.retryable,
+        )
+    now = units_served(state)
+    moves = {served.spec_id: now[part].spec_id for part, served in members.items()}
+    blocks = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)
+    requirements: list[dict[str, Any]] = []
+    for requirement in covered:
+        pin = requirement.source_spec_id
+        new = now[member_of[requirement.id]].spec_id
+        moved = (
+            repinned(requirement, new, exact_codes(blocks.get(new) or earlier_block(new)))
+            if new != pin
+            else requirement
+        )
+        requirements.append(moved.model_copy(update={"unit": stated}).model_dump(mode="json"))
+    revised = await planner.revise(
+        ctx=ctx,
+        prior_plan=plan.model_dump(mode="json"),
+        evidence_requirements=requirements,
+        inherits={new: old for old, new in moves.items() if new != old},
+    )
+    words = _lowered(unit_words(picked, offer))
+    if "plan" not in revised:
+        refused_revision = revised.get("refused") or {}
+        logger.warning("plan unit switch not revised: %s", refused_revision)
+        code = str(refused_revision.get("code") or SCOPE_CHOICE_NOT_APPLIED)
+        raise SwitchFailedError(
+            str(refused_revision.get("reason") or f"The plan could not be revised to {words}."),
+            code=code,
+            retryable=code in _RETRYABLE_REVISION_CODES,
+        )
+    revised_plan = PlannerPlan.model_validate(revised["plan"])
+    ctx.state["plan"] = revised_plan.model_dump_json()
+    logger.info(
+        "plan unit switched: slot=%s unit=%s moves=%s version=%d",
+        slot,
+        unit_option_id(picked),
+        moves,
+        revised_plan.version,
+    )
+    return {
+        **revised_plan.model_dump(mode="json"),
+        "summary": revised["summary"],
+        "revision": plan_revision(revised_plan),
+        "moved": [],
+    }
+
+
+def _covering_members(
+    state: SessionState,
+    covered: Sequence[DatasetRequirement],
+    members: Mapping[str, ServedUnit],
+) -> dict[str, str]:
+    """The part of the unit question each of `covered` reads, by the
+    requirement's id: the member whose series it pins, else the member whose
+    series measures what its pin measures in the same currency, window and
+    prices left out (`submission.prices_choice.measure_key`), such as a
+    window of the measure the planner pinned itself, which the user's answer
+    holds too. A requirement pinned to a member's series moves to the series
+    that member is read as in the new unit, and admission copies it over the
+    requirement's own years (`submission.service._window_pins`).
+
+    Raises:
+        SwitchFailedError: Non-retryable when a requirement pins a series
+            whose block is not on record or that measures what no member's
+            series measures, so no re-read can move it.
+    """
+    by_pin = {served.spec_id: part for part, served in members.items()}
+    by_measure: dict[str, str] = {}
+    for part, served in members.items():
+        block = _block_on_record(state, served.spec_id)
+        if block is not None and (key := measure_key(block)) is not None:
+            by_measure.setdefault(key, part)
+    member_of: dict[str, str] = {}
+    for requirement in covered:
+        pin = requirement.source_spec_id or ""
+        block = _block_on_record(state, pin)
+        key = measure_key(block) if block is not None else None
+        member = by_pin.get(pin) or (by_measure.get(key) if key is not None else None)
+        if member is None:
+            logger.warning(
+                "unit switch cannot move %s: pin %s matches no part of the question",
+                requirement.id,
+                pin,
+            )
+            raise _unit_not_switchable()
+        member_of[requirement.id] = member
+    return member_of
+
+
+def _block_on_record(state: SessionState, spec_id: str) -> Mapping[str, Any] | None:
+    """The spec block on record for `spec_id`: this turn's search's, the
+    planner's held source's (`planner.plan.held_sources`), else an earlier
+    turn's."""
+    if (block := stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(spec_id)) is not None:
+        return block
+    if (source := held_sources(state).get(spec_id)) is not None and (
+        block := source.spec_block(spec_id)
+    ) is not None:
+        return block
+    return earlier_block(spec_id)
+
+
+def _picked_unit(offer: UnitOffer, *, option_id: str, unit: object) -> UnitChoice:
+    """The unit a switch of a unit row offering `offer` picks: `unit` when
+    the answer states one, which `option_id` must name
+    (`harness.unit_offer.unit_option_id`), else the whole unit the row lists
+    under `option_id` (`harness.studio_translate`'s options: `whole_units`
+    and the start).
+
+    Raises:
+        SwitchFailedError: Non-retryable when `unit` is no unit or not the
+            one `option_id` names, `option_id` names no unit the row lists,
+            or the unit lies outside `offer` (`offered_unit_refusal`).
+    """
+    if unit is not None:
+        try:
+            picked = UnitChoice.model_validate(unit)
+        except ValidationError:
+            raise SwitchFailedError(
+                "That unit is not one the plan can be stated in.", code=_OPTION_UNAVAILABLE
+            ) from None
+        if unit_option_id(picked) != option_id:
+            raise SwitchFailedError("That unit is not the option picked.", code=_OPTION_UNAVAILABLE)
+    else:
+        listed = {unit_option_id(offer.start): offer.start, **whole_units(offer)}
+        if (found := listed.get(option_id)) is None:
+            raise SwitchFailedError(
+                "That unit is not offered for these figures.", code=_OPTION_UNAVAILABLE
+            )
+        picked = found
+    if offered_unit_refusal(offer, picked) is not None:
+        raise _unit_unavailable(picked, offer)
+    return picked
+
+
+def _unit_unavailable(unit: UnitChoice, offer: UnitOffer) -> SwitchFailedError:
+    """The refusal of a switch to `unit`, which `offer` does not hold or no plan can state."""
+    return SwitchFailedError(
+        f"Search does not offer {_lowered(unit_words(unit, offer))} for these figures.",
+        code=_OPTION_UNAVAILABLE,
+    )
+
+
+def _unit_not_switchable() -> SwitchFailedError:
+    """The refusal of a switch of a unit row this release cannot re-read: one
+    under a part's prices slot, or one whose question's parts are recorded
+    with no group (`ServedUnit.group`)."""
+    return SwitchFailedError(
+        "This plan's unit cannot be changed here. Ask for the unit you want.",
+        code=SCOPE_CHOICE_NOT_APPLIED,
+    )
+
+
+def _already_chosen() -> SwitchFailedError:
+    """The refusal of a switch to the option its row already holds."""
+    return SwitchFailedError("That choice is already on the plan.", code=SCOPE_CHOICE_NOT_APPLIED)
+
+
+def _lowered(words: str) -> str:
+    """`harness.unit_offer.unit_words` inside a sentence: "constant 2023 US dollars"."""
+    return words[:1].lower() + words[1:]
 
 
 def _count_spec_ids(ctx: NodeCtx[GraphEvent], pin: str) -> dict[str, str]:

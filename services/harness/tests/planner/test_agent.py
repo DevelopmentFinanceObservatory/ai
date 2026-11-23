@@ -13210,6 +13210,261 @@ def test_a_unit_answer_holds_every_window_of_the_measure_its_question_covers(
     ] == [1, 1]
 
 
+_EUR_WHOLE = "spec_" + "4" * 32
+
+
+@pytest.mark.parametrize("reads_shown", [True, False], ids=["reads-shown", "reads-unshown"])
+def test_a_window_the_planner_pins_in_the_unit_the_user_answered_falls_under_that_answer(
+    decision: DecisionFactory, requirements: RequirementPair, reads_shown: bool
+) -> None:
+    """The unit question covers two windows of the gross part, served in US
+    dollars, and the user chose current euros, which Search read each in.
+    The planner then pins a third window, 2010-2024, that a search of its
+    own found in euros. That window measures what the question's parts
+    measure, in the unit the user chose, so it is held to that answer: it
+    cites the question's one unit decision beside the two windows."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    later = copy.deepcopy(_FRANCE_KENYA)
+    later["spec_id"] = later["definition"]["spec_id"] = _GROSS_2020
+    later["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    whole = _read_in(_EUR_WHOLE, _EUR)
+    whole["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2010,
+        "end_year": 2024,
+    }
+    reads = (_read_in(_EUR_READ, _EUR), _read_in(_EUR_READ_2020, _EUR)) if reads_shown else ()
+    _show_blocks(ctx, _FRANCE_KENYA, later, *reads, whole)
+    for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
+        record_unit_read(ctx.state, part, read)
+        record_unit_served(ctx.state, part, read, UnitChoice.model_validate(_EUR), group=_GROSS)
+    question = {
+        **_UNIT_QUESTION,
+        "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
+    }
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+        user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+    dataset, _ = requirements
+    in_eur = {"unit": Unit(**_EUR)}
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [
+            dataset.model_copy(update={"id": "all", "source_spec_id": _EUR_READ, **in_eur}),
+            dataset.model_copy(
+                update={
+                    "id": "recent",
+                    "source_spec_id": _EUR_READ_2020,
+                    "period": Period(start=2020, end=2024),
+                    **in_eur,
+                }
+            ),
+            dataset.model_copy(
+                update={
+                    "id": "series",
+                    "source_spec_id": _EUR_WHOLE,
+                    "period": Period(start=2010, end=2024),
+                    **in_eur,
+                }
+            ),
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    slot = f"user_unit_{_GROSS}"
+    assert [slot in plan.requirement(rid).decision_ids for rid in ("all", "recent", "series")] == [
+        True,
+        True,
+        True,
+    ]
+
+
+@pytest.mark.parametrize("answered", [True, False], ids=["unit-answered", "no-answer"])
+def test_a_planner_decision_stating_the_unit_the_user_answered_goes_from_the_plan(
+    decision: DecisionFactory, requirements: RequirementPair, answered: bool
+) -> None:
+    """The user chose current euros for both windows of the gross part. The
+    planner states that unit a second time, in a decision of its own fixing
+    `unit` alone, cited by both windows. The plan lands with the user's
+    answer as the one decision on the unit, and neither window cites the
+    planner's. With no unit answer, the planner's decision stating the unit
+    stands, cited by the requirement it fixes."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    later = copy.deepcopy(_FRANCE_KENYA)
+    later["spec_id"] = later["definition"]["spec_id"] = _GROSS_2020
+    later["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    _show_blocks(ctx, _FRANCE_KENYA, later)
+    unit = _EUR if answered else _USD
+    if answered:
+        for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
+            record_unit_read(ctx.state, part, read)
+            record_unit_served(ctx.state, part, read, UnitChoice.model_validate(_EUR), group=_GROSS)
+        question = {
+            **_UNIT_QUESTION,
+            "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
+        }
+        ctx.records = [
+            turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+            user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+        ]
+    currency = decision(
+        slot="currency_unit",
+        description="Currency and price basis for the flows.",
+        options=["current euros", "current USD"],
+        chosen="current euros" if answered else "current USD",
+        resolved_by=ResolvedBy.USER if answered else ResolvedBy.PLANNER_DEFAULT,
+        rationale="The figures are stated in one currency.",
+        fixes=DecisionFixes(unit=Unit(**unit)),
+    )
+    dataset, _ = requirements
+    stated = {"unit": Unit(**unit), "decision_ids": ["currency_unit"]}
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        currency,
+        [
+            dataset.model_copy(
+                update={
+                    "id": "all",
+                    "source_spec_id": _EUR_READ if answered else _GROSS,
+                    **stated,
+                }
+            ),
+            dataset.model_copy(
+                update={
+                    "id": "recent",
+                    "source_spec_id": _EUR_READ_2020 if answered else _GROSS_2020,
+                    "period": Period(start=2020, end=2024),
+                    **stated,
+                }
+            ),
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    unit_slots = [f"user_unit_{_GROSS}"] if answered else ["currency_unit"]
+    assert [
+        d.slot for d in plan.decisions if d.fixes is not None and d.fixes.source_spec_id is None
+    ] == unit_slots
+    assert [
+        [
+            slot
+            for slot in plan.requirement(rid).decision_ids
+            if slot in {*unit_slots, "currency_unit"}
+        ]
+        for rid in ("all", "recent")
+    ] == [unit_slots, unit_slots]
+
+
+def test_a_carried_planner_decision_stating_the_unit_the_user_answered_goes_on_amendment(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """A plan recorded before the rule above holds the planner's decision
+    stating the unit the user answered beside the user's own, both windows
+    citing both. The next amendment carries it no further: the plan holds
+    the user's answer alone, and neither window cites the planner's."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    later = copy.deepcopy(_FRANCE_KENYA)
+    later["spec_id"] = later["definition"]["spec_id"] = _GROSS_2020
+    later["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    _show_blocks(ctx, _FRANCE_KENYA, later)
+    for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
+        record_unit_read(ctx.state, part, read)
+        record_unit_served(ctx.state, part, read, UnitChoice.model_validate(_EUR), group=_GROSS)
+    question = {
+        **_UNIT_QUESTION,
+        "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
+    }
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+        user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+    dataset, _ = requirements
+    in_eur = {"unit": Unit(**_EUR)}
+    windows = [
+        dataset.model_copy(update={"id": "all", "source_spec_id": _EUR_READ, **in_eur}),
+        dataset.model_copy(
+            update={
+                "id": "recent",
+                "source_spec_id": _EUR_READ_2020,
+                "period": Period(start=2020, end=2024),
+                **in_eur,
+            }
+        ),
+    ]
+    landed = _propose_one(tools, ctx, decision(), windows, answer_mode=AnswerMode.SERIES)
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    currency = decision(
+        slot="currency_unit",
+        description="Currency and price basis for the flows.",
+        options=["current euros", "current USD"],
+        chosen="current euros",
+        resolved_by=ResolvedBy.USER,
+        rationale="The figures are stated in one currency.",
+        fixes=DecisionFixes(unit=Unit(**_EUR)),
+    )
+    save_plan(
+        ctx.state,
+        Plan.model_validate(
+            {
+                **plan.model_dump(),
+                "decisions": [*plan.decisions, currency],
+                "evidence_requirements": [
+                    r.model_copy(update={"decision_ids": (*r.decision_ids, "currency_unit")})
+                    if r.id in {"all", "recent"}
+                    else r
+                    for r in plan.evidence_requirements
+                ],
+            }
+        ),
+    )
+
+    amended = _propose(
+        tools,
+        ctx,
+        decision(),
+        [windows[0].model_copy(update={"measure": "aid from France to Kenya"})],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    assert "currency_unit" not in {d.slot for d in revised.decisions}
+    assert [
+        "currency_unit" in revised.requirement(rid).decision_ids for rid in ("all", "recent")
+    ] == [False, False]
+    assert f"user_unit_{_GROSS}" in revised.requirement("recent").decision_ids
+
+
 def test_a_unit_search_refused_holds_the_plan_to_the_unit_the_series_is_served_in(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:

@@ -785,10 +785,11 @@ _EUR = UnitCurrency(
 )
 _USD = _EUR.model_copy(update={"code": "USD", "name": "US dollars"})
 _XOF = UnitCurrency(code="XOF", name="CFA francs", prices=[UnitPrices.CURRENT])
+_KES = UnitCurrency(code="KES", name="Kenyan shillings", prices=[UnitPrices.CURRENT])
 
 
 @pytest.mark.parametrize(
-    ("start", "options"),
+    ("start", "options", "currencies"),
     [
         pytest.param(
             UnitChoice(currency="EUR", prices=UnitPrices.CONSTANT, base_year=2020),
@@ -796,6 +797,7 @@ _XOF = UnitCurrency(code="XOF", name="CFA francs", prices=[UnitPrices.CURRENT])
                 ("EUR-constant-2020", "Constant 2020 euros"),
                 ("EUR-current", "Current euros"),
             ],
+            [_USD, _EUR, _XOF],
             id="both-bases",
         ),
         pytest.param(
@@ -805,19 +807,28 @@ _XOF = UnitCurrency(code="XOF", name="CFA francs", prices=[UnitPrices.CURRENT])
                 ("USD-current", "Current US dollars"),
                 ("USD-constant-2023", "Constant 2023 US dollars"),
             ],
+            [_USD, _EUR, _XOF],
             id="start-in-one-basis",
+        ),
+        pytest.param(
+            UnitChoice(currency="XOF", prices=UnitPrices.CURRENT),
+            [("XOF-current", "Current CFA francs")],
+            [_XOF, _KES],
+            id="no-currency-in-both-bases",
         ),
     ],
 )
 def test_a_unit_question_s_row_offers_its_unit_and_the_whole_units_beside_it(
-    start: UnitChoice, options: list[tuple[str, str]]
+    start: UnitChoice, options: list[tuple[str, str]], currencies: list[UnitCurrency]
 ) -> None:
     """The row stating a unit question's whole unit carries the offer the
     approve pause sets beside the plan, starting on the unit the parts are in,
     and switches: a client that renders no unit picker gets the whole units of
     the start's currency, the start active, or the start first and then both
-    bases of a currency serving both. A part's own whole-unit prices row, with
-    no offer, still offers no switch."""
+    bases of a currency serving both. With no currency serving both, the
+    start is the one whole unit, and the row still switches, to any other
+    unit its offer holds. A part's own whole-unit prices row, with no offer,
+    still offers no switch."""
     plan = _us_health_share()
     dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
     row = Decision(
@@ -844,7 +855,7 @@ def test_a_unit_question_s_row_offers_its_unit_and_the_whole_units_beside_it(
             for r in plan.evidence_requirements
         ],
     )
-    offer = UnitOffer(currencies=[_USD, _EUR, _XOF], presets=["USD", "EUR"], start=start)
+    offer = UnitOffer(currencies=currencies, presets=[c.code for c in currencies[:2]], start=start)
     translator = _translator()
 
     (card,) = translator._interrupt_frames(

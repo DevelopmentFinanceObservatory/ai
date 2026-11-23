@@ -119,7 +119,10 @@ def decide(
     (`harness.graph.switch`), which offers the revised plan back here. A
     switch of a planner decision's row (`harness.decision_pick.decision_pick`)
     routes `amend` with the plan, the `pick` and the `switch`, and the
-    `planner` node replans holding the pick.
+    `planner` node replans holding the pick. The row of a unit question's
+    whole unit (`submission.prices_choice.unit_slot`) is no planner pick
+    (`harness.plan_display.switchable_decision`): its switch, with the `unit`
+    it names when it names one, routes `switch`, which re-reads the parts.
 
     Once the approval commits (`NodeCtx.after_commit`), it records a
     `plan.approved` span (nesting under the segment's `turn.segment` span)

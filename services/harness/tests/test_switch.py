@@ -48,6 +48,9 @@ from harness.graph import switch as switch_module
 from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    ORCHESTRATOR_UNIT_READ_KEY,
+    ORCHESTRATOR_UNIT_SERVED_KEY,
+    ORCHESTRATOR_UNIT_SETTLED_KEY,
     PICK_REPLAN_KEY,
 )
 from harness.graph.switch import SCOPE_CHOICE_NOT_APPLIED, SWITCH_CANCELLED, SwitchFailedError
@@ -61,6 +64,7 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.turn.events import NodeDone, TurnFailed
 from harness.turn.loop import Outcome, stop_turn
+from harness.turn.node import Next
 from harness.turn.store import Cursor, TurnStatus
 from harness.turn_records import SearchReading
 from planner.call import PlannerCall
@@ -76,6 +80,7 @@ from planner.plan import (
     RankRequirement,
     ResolvedBy,
     SessionState,
+    Unit,
     authored,
     current_recorded_identity,
     decision_pick,
@@ -128,6 +133,16 @@ from .scripted_genai import ScriptedGenai, call_part, reply
 from .scripted_planner import SIGNED
 from .scripted_tools import plan_call, scripted_orchestrator
 from .session_events import one_answer
+from .test_orchestrate_ask import (
+    _AID,
+    _FK_GROSS,
+    _FK_NET,
+    _FRANCE_KENYA,
+    _OTHER,
+    _open_reading,
+    _other_window,
+    _UnitSearch,
+)
 from .test_planner_entry_eval import entry, validate
 from .test_planner_node import _ask_call, _proposals, _steps
 from .turn_driver import SegmentRun, TurnDriver, numbered_call_ids, scripted_models
@@ -2196,3 +2211,469 @@ async def test_a_count_row_standing_for_two_pins_switches_both() -> None:
         ("net disbursements", ResolvedBy.USER)
     ] * 2
     assert {count_choice_id(revised, decision) for decision in moved} == {row}
+
+
+# --- a switch of the row stating a unit question's whole unit -------------------------
+
+
+# The series Search re-read the unit question's two parts as when the user
+# answered it with constant 2023 US dollars. Both parts are served in current
+# US dollars, so an answer in those reads neither again.
+_READ_RECENT = "spec_" + "1" * 32
+_READ_EARLY = "spec_" + "2" * 32
+_UNIT_SLOT = f"user_unit_{_FK_GROSS}"
+_UNIT_ROW = f"decision/{_UNIT_SLOT}"
+_USD_2023 = {"currency": "USD", "prices": "constant", "base_year": 2023}
+_USD = {"currency": "USD", "prices": "current"}
+
+
+def _unit_state(
+    plan: PlannerPlan,
+    *,
+    unit: Mapping[str, Any] = _USD_2023,
+    group: str | None = _FK_GROSS,
+    count: str | None = None,
+    parts: tuple[str, ...] = (_FK_GROSS, _OTHER),
+) -> dict[str, Any]:
+    """The state of a turn paused on `plan` after the user answered a unit
+    question covering `parts` (aid from France to Kenya since 2018, and the
+    same measure over 2010 to 2014) with `unit`: Search read each part in
+    constant 2023 US dollars, and served each as it stands in current US
+    dollars. Each part is recorded under `group`, the question's lead part,
+    and read as `count` when given."""
+    reread = unit != _USD
+    reads = dict(zip((_FK_GROSS, _OTHER), (_READ_RECENT, _READ_EARLY), strict=True))
+    fetched = {part: reads[part] if reread else part for part in parts}
+    return {
+        "plan": plan.model_dump_json(),
+        ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: _FRANCE_KENYA, _OTHER: _other_window()},
+        ORCHESTRATOR_SEARCHES_KEY: [
+            _open_reading(_FK_GROSS, text=_AID),
+            _open_reading(_OTHER, text=_AID),
+        ],
+        ORCHESTRATOR_UNIT_READ_KEY: {part: [reads[part]] for part in parts} if reread else {},
+        ORCHESTRATOR_UNIT_SERVED_KEY: {
+            part: {"spec_id": fetched[part], "unit": dict(unit), "count": count, "group": group}
+            for part in parts
+        },
+        ORCHESTRATOR_UNIT_SETTLED_KEY: sorted({*parts, *fetched.values()}),
+    }
+
+
+def _unit_plan(*, slot: str = _UNIT_SLOT, unit: Mapping[str, Any] = _USD_2023) -> PlannerPlan:
+    """A plan reading aid from France to Kenya over two windows, each pinned
+    to the series its part is fetched as in `unit` (`_unit_state`), which the
+    decision under `slot`, cited by both, states."""
+    reread = unit != _USD
+    words = "constant 2023 prices in USD" if reread else "current prices in USD"
+    decision = Decision(
+        slot=slot,
+        description="Which prices the figures are in.",
+        options=(words, "constant prices") if not reread else ("current prices", words),
+        chosen=words,
+        resolved_by=ResolvedBy.USER,
+        rationale=f"The user chose {words}.",
+        fixes=DecisionFixes(prices=unit["prices"]),
+    )
+    return PlannerPlan(
+        question=_AID,
+        decisions=[decision],
+        evidence_requirements=[
+            DatasetRequirement(
+                id=requirement,
+                decision_ids=[slot],
+                measure=_AID,
+                entities=[Entity(name="Kenya", role="recipient")],
+                period=period,
+                source_spec_id=read if reread else part,
+                unit=Unit(**unit),
+            )
+            for requirement, period, part, read in (
+                ("recent", Period(start=2018, end=2022), _FK_GROSS, _READ_RECENT),
+                ("early", Period(start=2010, end=2014), _OTHER, _READ_EARLY),
+            )
+        ],
+        version=1,
+    )
+
+
+class _UnitRevisingPlanner(_Planner):
+    """A `PlannerModel` drafting `plans` and answering each revision with the
+    prior plan, each requirement it is handed in place of the one by its id,
+    and each user decision on prices fixing the prices they state, as
+    admission writes it again."""
+
+    def __init__(self, plans: list[dict[str, Any]] | None = None) -> None:
+        super().__init__(plans or [])
+        self.revisions: list[dict[str, Any]] = []
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        self.revisions.append(kwargs)
+        prior = kwargs["prior_plan"]
+        handed = {r["id"]: r for r in kwargs["evidence_requirements"]}
+        prices = {r["unit"]["prices"] for r in handed.values() if r.get("unit")}
+        revised = {
+            **prior,
+            "version": prior["version"] + 1,
+            "decisions": [
+                {**d, "fixes": {**d["fixes"], "prices": next(iter(prices))}}
+                if d["slot"].startswith("user_") and len(prices) == 1
+                else d
+                for d in prior["decisions"]
+            ],
+            "evidence_requirements": [
+                handed.get(r["id"], r) for r in prior["evidence_requirements"]
+            ],
+        }
+        return {"plan": revised, "summary": {}}
+
+
+class _RefusingEarlyWindow(_UnitSearch):
+    """`_UnitSearch` refusing, as Search refuses an option it does not serve,
+    the part read over 2010 to 2014 alone."""
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Any, on_progress: ProgressCallback | None = None
+    ) -> ToolCallResult:
+        window = arguments["identity"].get("requested_window") or {}
+        if window.get("start") == 2010:
+            self.posted.append(dict(arguments))
+            return ToolCallResult(
+                is_error=True,
+                structured_content={"code": "requested_option_unavailable"},
+                text="refused",
+            )
+        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
+async def _switch_unit(
+    state: dict[str, Any], switch: Mapping[str, Any], search: _UnitSearch
+) -> tuple[dict[str, Any], _UnitRevisingPlanner]:
+    """What the `switch` node offers for `switch` on a turn holding `state`,
+    re-reading through `search`, and the planner that revised."""
+    planner = _UnitRevisingPlanner()
+    node = switch_module.switch_node(planner=cast(Any, planner), definition_surface=search)
+    done = await node.run(node_ctx(state=state), {"switch": dict(switch)})
+    assert isinstance(done, Next) and done.label == "offer"
+    return done.output, planner
+
+
+def _requested_units(search: _UnitSearch) -> list[dict[str, Any]]:
+    return [posted["identity"]["facets"]["unit"]["request"] for posted in search.posted]
+
+
+def _is_early(posted: Mapping[str, Any]) -> bool:
+    """Whether `posted` asks for the part read over 2010 to 2014."""
+    return (posted["identity"].get("requested_window") or {}).get("start") == 2010
+
+
+@pytest.mark.parametrize(
+    ("start", "switch", "unit", "searched"),
+    [
+        (
+            _USD_2023,
+            {"option_id": "USD-constant-2015", "unit": {**_USD_2023, "base_year": 2015}},
+            {**_USD_2023, "base_year": 2015},
+            True,
+        ),
+        (_USD, {"option_id": "USD-constant-2023"}, _USD_2023, True),
+        (_USD_2023, {"option_id": "USD-current", "unit": _USD}, _USD, False),
+    ],
+    ids=["unit-picked", "option-only", "back-to-the-served-unit"],
+)
+async def test_a_unit_row_switch_reads_every_part_in_the_unit_and_states_it(
+    start: dict[str, Any], switch: dict[str, Any], unit: dict[str, Any], searched: bool
+) -> None:
+    """The unit row of a question covering two windows of one measure is
+    switched: from constant 2023 to constant 2015 US dollars; by a client
+    naming one of the row's whole units by its option id alone, from current
+    to constant 2023 US dollars; and back to current US dollars, which both
+    parts are served in. Search is asked for each part in the unit, once per
+    part, unless the part is served in it, and each requirement citing the
+    row is re-pinned to the series its part is fetched as now and states the
+    unit, in one revision inheriting from the series each left. The turn
+    records each part fetched in that unit under the question's lead part."""
+    plan = _unit_plan(unit=start)
+    state = _unit_state(plan, unit=start)
+    pins = {r.id: r.source_spec_id for r in plan.evidence_requirements}
+    search = _UnitSearch()
+
+    offered, planner = await _switch_unit(state, {"choice_id": _UNIT_ROW, **switch}, search)
+
+    assert "switch_failed" not in offered, offered.get("switch_failed")
+    assert _requested_units(search) == ([unit, unit] if searched else [])
+    if searched:
+        new = {_is_early(posted): posted["spec_id"] for posted in search.posted}
+        recent, early = new[False], new[True]
+    else:
+        recent, early = _FK_GROSS, _OTHER
+    (revision,) = planner.revisions
+    stated = Unit(**unit)
+    assert {
+        r["id"]: (r["source_spec_id"], Unit(**r["unit"])) for r in revision["evidence_requirements"]
+    } == {"recent": (recent, stated), "early": (early, stated)}
+    assert revision["inherits"] == {recent: pins["recent"], early: pins["early"]}
+    assert {
+        part: (served["spec_id"], Unit(**served["unit"]), served["group"])
+        for part, served in state[ORCHESTRATOR_UNIT_SERVED_KEY].items()
+    } == {_FK_GROSS: (recent, stated, _FK_GROSS), _OTHER: (early, stated, _FK_GROSS)}
+    assert offered["revision"] != plan_revision(plan)
+
+
+@pytest.mark.parametrize("unit_sent", [True, False], ids=["unit-picked", "option-only"])
+async def test_a_unit_row_switch_one_part_cannot_be_read_in_leaves_every_part_as_it_was(
+    unit_sent: bool,
+) -> None:
+    """The row is in current US dollars, and Search reads the recent window
+    in constant 2023 US dollars but refuses the early one. The switch fails
+    whole: the plan is offered unchanged with the refusal, which asking again
+    cannot escape, nothing is revised, and the series each part is fetched
+    as, the series it was read as, the parts settled and the readings and
+    blocks on record are those of the unit it was in."""
+    plan = _unit_plan(unit=_USD)
+    state = _unit_state(plan, unit=_USD)
+    before = copy.deepcopy(state)
+    search = _RefusingEarlyWindow()
+    switch = {"choice_id": _UNIT_ROW, "option_id": "USD-constant-2023"}
+
+    offered, planner = await _switch_unit(
+        state, {**switch, **({"unit": _USD_2023} if unit_sent else {})}, search
+    )
+
+    assert sorted(map(_is_early, search.posted)) == [False, True]
+    assert _requested_units(search) == [_USD_2023, _USD_2023]
+    assert offered["switch_failed"]["code"] == "requested_option_unavailable"
+    assert offered["switch_failed"]["retryable"] is False
+    assert offered["revision"] == plan_revision(plan)
+    assert planner.revisions == []
+    assert {key: state.get(key) for key in before} == before
+
+
+@pytest.mark.parametrize(
+    ("switch", "code"),
+    [
+        (
+            {"option_id": "USD-constant-1990", "unit": {**_USD_2023, "base_year": 1990}},
+            "requested_option_unavailable",
+        ),
+        (
+            {"option_id": "USD-current", "unit": {**_USD_2023, "base_year": 2015}},
+            "requested_option_unavailable",
+        ),
+        ({"option_id": "EUR-current"}, "requested_option_unavailable"),
+        ({"option_id": "USD-constant-2023", "unit": _USD_2023}, SCOPE_CHOICE_NOT_APPLIED),
+        ({"option_id": "USD-constant-2023"}, SCOPE_CHOICE_NOT_APPLIED),
+    ],
+    ids=[
+        "outside-the-offer",
+        "option-names-another-unit",
+        "option-unlisted",
+        "unit-held",
+        "option-held",
+    ],
+)
+async def test_a_unit_row_switch_to_a_unit_the_row_does_not_offer_asks_search_nothing(
+    switch: dict[str, Any], code: str
+) -> None:
+    """A base year outside the offer, a unit `option_id` does not name, an
+    option the row does not list, and the unit the row holds are refused
+    with nothing asked of Search and the plan offered unchanged."""
+    plan = _unit_plan()
+    search = _UnitSearch()
+
+    offered, planner = await _switch_unit(
+        _unit_state(plan), {"choice_id": _UNIT_ROW, **switch}, search
+    )
+
+    assert (offered["switch_failed"]["code"], offered["switch_failed"]["retryable"]) == (
+        code,
+        False,
+    )
+    assert search.posted == []
+    assert planner.revisions == []
+    assert offered["revision"] == plan_revision(plan)
+
+
+async def test_a_unit_row_whose_parts_name_no_question_is_not_switched() -> None:
+    """Parts recorded with no group, as a turn paused before records named
+    their question left them, cannot be told apart from another question's:
+    the row is refused for good with nothing asked of Search."""
+    plan = _unit_plan()
+    search = _UnitSearch()
+
+    offered, planner = await _switch_unit(
+        _unit_state(plan, group=None),
+        {"choice_id": _UNIT_ROW, "option_id": "USD-current"},
+        search,
+    )
+
+    assert offered["switch_failed"]["code"] == SCOPE_CHOICE_NOT_APPLIED
+    assert offered["switch_failed"]["retryable"] is False
+    assert search.posted == []
+    assert planner.revisions == []
+
+
+async def test_a_unit_row_switch_reads_the_count_picked_beside_the_unit_again() -> None:
+    """The user picked the net count beside the unit answer, so Search read
+    the net count in the part's place. A switch of the unit reads the net
+    count's definition again in the new unit, not the gross part's."""
+    base = _unit_plan()
+    plan = base.model_copy(update={"evidence_requirements": base.evidence_requirements[:1]})
+    search = _UnitSearch()
+
+    offered, _ = await _switch_unit(
+        _unit_state(plan, count=_FK_NET, parts=(_FK_GROSS,)),
+        {"choice_id": _UNIT_ROW, "option_id": "USD-current"},
+        search,
+    )
+
+    assert "switch_failed" not in offered
+    (posted,) = search.posted
+    (net,) = _FRANCE_KENYA["resolved"]["alternative_measures"]
+    assert {**posted["identity"], "facets": None} == {
+        **net["definition"]["identity"],
+        "facets": None,
+    }
+
+
+async def test_an_old_cards_whole_unit_prices_row_is_refused_and_the_card_still_approves(
+    pg_engine: AsyncEngine, real_schemas: list[ToolSchema]
+) -> None:
+    """A plan card stored before unit questions had a row of their own
+    states a part's whole unit under the part's prices slot. A switch of
+    that row is refused for good with nothing asked of Search, the plan is
+    offered unchanged, and approving it goes on."""
+    slot = f"user_prices_{_FK_GROSS}"
+    base = _planner_plan(schemas=real_schemas)
+    unit_row = _unit_plan(slot=slot).decisions[0]
+    plan = PlannerPlan.model_validate(
+        {
+            **base.model_dump(),
+            "decisions": [*base.decisions, unit_row],
+            "evidence_requirements": [
+                r.model_copy(
+                    update={
+                        "source_spec_id": _READ_RECENT,
+                        "unit": Unit(**_USD_2023),
+                        "decision_ids": (*r.decision_ids, slot),
+                    }
+                )
+                if isinstance(r, DatasetRequirement)
+                else r
+                for r in base.evidence_requirements
+            ],
+        }
+    )
+    search = _UnitSearch()
+    planner = _UnitRevisingPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    models = scripted_models(orchestrator=[reply(plan_call(_BRIEF))])
+    nodes = plan_nodes(
+        scripted_orchestrator(),
+        models,
+        run_ledger=InMemoryRunLedger(),
+        tool_surface=ScriptedSurface(),
+        executor=ScriptedExecutor(),
+        planner=planner,
+        definition_surface=search,
+    )
+    state = {k: v for k, v in _unit_state(plan, parts=(_FK_GROSS,)).items() if k != "plan"}
+    driver = TurnDriver(
+        pg_engine,
+        graph=opening_graph(
+            nodes, before=given(specs=state.pop(ORCHESTRATOR_SPECS_KEY), state=state)
+        ),
+    )
+    card = (await _carded(driver)).pause
+
+    run = await driver.answer(
+        _answer_switch({"choice_id": f"decision/{slot}", "option_id": "USD-current"}), to=card
+    )
+
+    offered = _output_of(run, "switch")
+    assert offered["switch_failed"]["code"] == SCOPE_CHOICE_NOT_APPLIED
+    assert offered["switch_failed"]["retryable"] is False
+    assert offered["revision"] == plan_revision(plan)
+    assert search.posted == []
+    assert planner.revisions == []
+    assert _pauses_on_the_card(run)
+
+    approved = await driver.answer(approve_answer(run.pause.payload["revision"]), to=run.pause)
+
+    assert _output_of(approved, "approve") is not None
+    assert approved.outcome is not Outcome.FAILED
+
+
+# A window of the question's measure, 2010-2024, the planner pinned itself
+# from a search of its own in the unit the user chose.
+_PLANNER_WINDOW = "spec_" + "3" * 32
+
+
+def _read_in_usd_2023(spec_id: str, start: int, end: int) -> dict[str, Any]:
+    """The France to Kenya block as Search reads it in constant 2023 US
+    dollars under `spec_id`, over `start` to `end`."""
+    block = copy.deepcopy(_FRANCE_KENYA)
+    block["spec_id"] = block["definition"]["spec_id"] = spec_id
+    identity = block["definition"]["identity"]
+    identity["facets"] = {"unit": {"request": _USD_2023}}
+    identity["requested_window"] = {"kind": "range", "start": start, "end": end}
+    block["resolved"]["alternative_measures"] = []
+    return block
+
+
+@pytest.mark.parametrize("on_record", [True, False], ids=["block-on-record", "no-block"])
+async def test_a_unit_row_switch_moves_a_window_the_planner_pinned_itself(
+    on_record: bool,
+) -> None:
+    """Besides the question's two windows, the plan reads the measure over
+    2010-2024 from a series the planner pinned itself, in constant 2023 US
+    dollars, which the user's answer holds too. A switch to current US
+    dollars reads only the question's parts, and that window moves to the
+    series the part measuring the same thing is fetched as, which admission
+    copies over its own years. A window whose series is not on record, so
+    nothing says which part it reads, refuses the switch for good before
+    Search is asked."""
+    base = _unit_plan()
+    (recent, early) = base.evidence_requirements
+    assert isinstance(recent, DatasetRequirement)
+    plan = base.model_copy(
+        update={
+            "evidence_requirements": (
+                recent,
+                early,
+                recent.model_copy(
+                    update={
+                        "id": "series",
+                        "period": Period(start=2010, end=2024),
+                        "source_spec_id": _PLANNER_WINDOW,
+                    }
+                ),
+            )
+        }
+    )
+    state = _unit_state(plan)
+    state[ORCHESTRATOR_SPECS_KEY] |= {
+        _READ_RECENT: _read_in_usd_2023(_READ_RECENT, 2018, 2022),
+        _READ_EARLY: _read_in_usd_2023(_READ_EARLY, 2010, 2014),
+        **({_PLANNER_WINDOW: _read_in_usd_2023(_PLANNER_WINDOW, 2010, 2024)} if on_record else {}),
+    }
+    search = _UnitSearch()
+
+    offered, planner = await _switch_unit(
+        state, {"choice_id": _UNIT_ROW, "option_id": "USD-current", "unit": _USD}, search
+    )
+
+    if not on_record:
+        assert offered["switch_failed"]["code"] == SCOPE_CHOICE_NOT_APPLIED
+        assert offered["switch_failed"]["retryable"] is False
+        assert (search.posted, planner.revisions) == ([], [])
+        return
+    assert "switch_failed" not in offered, offered.get("switch_failed")
+    assert search.posted == []
+    (revision,) = planner.revisions
+    assert {
+        r["id"]: (r["source_spec_id"], Unit(**r["unit"])) for r in revision["evidence_requirements"]
+    } == {
+        "recent": (_FK_GROSS, Unit(**_USD)),
+        "early": (_OTHER, Unit(**_USD)),
+        "series": (_FK_GROSS, Unit(**_USD)),
+    }

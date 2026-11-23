@@ -189,15 +189,17 @@ class Parts:
     when none is held. `shown` is every spec_id the planner was shown, and
     `searched` those a search settled on as readings of their own, not
     fetched as another count of one (`of_shown`); `None` reads every shown
-    series so. `priced` are the parts the user chose prices for, and
+    series so. `priced` are the parts the user chose prices for,
     `fetched` the part each series fetched for a part in a currency the
-    user chose is fetched for, by that series (`priced_by`).
+    user chose is fetched for, by that series, and `held` the currency a
+    whole unit the user chose holds each part to (`priced_by`).
 
     A part's series are the part, each series fetched for it, each series
     its block offers in its place, another count or other prices, and each
     shown series measuring what one of those measures in the part's
-    currency, in any prices (`same_measure`), such as one a later search
-    found, each less any series another reading owns (`owner_of`).
+    currency, or in the currency the user's whole unit holds it to, in any
+    prices (`same_measure`), such as one a later search found, each less
+    any series another reading owns (`owner_of`).
     """
 
     source_of: Callable[[str], SelectedSource | None]
@@ -206,6 +208,7 @@ class Parts:
     searched: Collection[str] | None = None
     priced: Collection[str] = ()
     fetched: Mapping[str, str] = field(default_factory=dict)
+    held: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def of_shown(
@@ -248,12 +251,17 @@ class Parts:
     def priced_by(self, choices: Mapping[str, PricesChoice]) -> Parts:
         """These parts, with the parts `choices` prices marked, and the series
         fetched for each part a choice holds to a currency
-        (`PricesChoice.held_currency`), whose currency may differ from the part's.
-        A fetched series that is itself a part `choices` prices stays that
-        part's alone, so no series belongs to two parts."""
+        (`PricesChoice.held_currency`), whose currency may differ from the part's,
+        with that currency. A fetched series that is itself a part `choices`
+        prices stays that part's alone, so no series belongs to two parts."""
         return replace(
             self,
             priced=frozenset(choices),
+            held={
+                part: choice.held_currency
+                for part, choice in choices.items()
+                if choice.held_currency is not None
+            },
             fetched={
                 choice.spec_id: part
                 for part, choice in choices.items()
@@ -300,10 +308,22 @@ class Parts:
 
     def _reached(self, reading: str) -> list[str]:
         """Every series `reading` offers (`offered`), and every shown series
-        measuring what one of those measures in its own currency (`same_measure`)."""
-        currency = self.unit_of(reading).currency
+        measuring what one of those measures in its own currency, or in the
+        currency a whole unit the user chose holds it to (`held`), as
+        `same_measure` reads it."""
+        currencies = [self.unit_of(reading).currency]
+        if (held := self.held.get(reading)) is not None and held not in currencies:
+            currencies.append(held)
         offered = self.offered(reading)
-        return [*offered, *(found for one in offered for found in self.same_measure(one, currency))]
+        return [
+            *offered,
+            *(
+                found
+                for currency in currencies
+                for one in offered
+                for found in self.same_measure(one, currency)
+            ),
+        ]
 
     def _offers_in_prices(self, reading: str) -> list[str]:
         """The series `reading`'s block offers as its count in other prices (axis `unit`)."""
@@ -325,7 +345,22 @@ class Parts:
         """The reading whose part `reading` is: the first priced reading
         measuring what it measures (`_measures`), whatever the shown order,
         else the first such reading. Readings differing only in window are
-        one part; another count or currency is another measure."""
+        one part; another count or currency is another measure, save the
+        currency a whole unit the user chose holds a priced reading to
+        (`held`): a reading measuring what that reading measures in that
+        currency is that reading's part, so the user's unit holds it."""
+        holder = next(
+            (
+                one
+                for one in self._readings
+                if one in self.held
+                and one != reading
+                and reading in self.same_measure(one, self.held[one])
+            ),
+            None,
+        )
+        if holder is not None:
+            return holder
         same = [reading, *(one for one in self._measures(reading) if one in self._readings)]
         ordered = [one for one in self._readings if one in same]
         return next((one for one in ordered if one in self.priced), ordered[0])

@@ -120,7 +120,7 @@ from harness.studio_store import StudioStore, keep_turn_records
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
-from harness.unit_offer import unit_option_id, unit_words, whole_units
+from harness.unit_offer import offers_another_unit, unit_option_id, unit_words, whole_units
 from harness.wire import (
     ActivityStep,
     ApplyChoiceSuggestion,
@@ -1336,8 +1336,12 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
     scope choices and switchable planner decisions (`_choice_members`).
 
     A choice is switchable when an option other than its active one is
-    available or partial. The plan card lists `PlanAction.SWITCH` only
-    when one is, and `/interrupt` checks a switch against what is kept.
+    available or partial, or, for a row offering a unit (`PlanDecision.unit`),
+    when its offer holds a unit other than the one it is in
+    (`harness.unit_offer.offers_another_unit`), which a switch names by
+    `unit` though its options list it not. The plan card lists
+    `PlanAction.SWITCH` only when one is, and `/interrupt` checks a switch
+    against what is kept.
     """
     choices: dict[str, _PendingChoice] = {}
     for decision in decisions:
@@ -1347,7 +1351,7 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
         if not any(
             option.status != "unavailable" and option.option_id != decision.active_option_id
             for option in decision.options
-        ):
+        ) and (decision.unit is None or not offers_another_unit(decision.unit)):
             continue
         choices[decision.choice_id] = _PendingChoice(
             active=decision.active_option_id,

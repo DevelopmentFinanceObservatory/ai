@@ -198,8 +198,10 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
     keeps it, marking a constant choice `asked`. A switch of the part's
     prices row on the plan card (`_prices_switched`) is a new answer for the
     part, marked `asked` too, while its replan is under way or once the plan
-    on record states it (`_switch_stands`). The row of a whole unit a unit
-    question chose has no switch (`harness.plan_display.switchable_decision`).
+    on record states it (`_switch_stands`). A switch of the row of a whole
+    unit a unit question chose is no answer here: the `switch` node re-reads
+    the question's parts in the unit picked (`harness.graph.switch`), and the
+    question's answer then reads the unit each part is served in.
     Any other `propose_plan` response, the plan landing included, clears the
     refusal, so no later ask of another kind is read as that one. A message the user typed
     (a `message` step) releases every choice and clears the refusal, and an

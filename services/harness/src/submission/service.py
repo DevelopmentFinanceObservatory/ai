@@ -731,6 +731,27 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         requirements_after = _requirements_after(
             previous, evidence_requirements, removed_evidence_requirements
         )
+    # The user's prices answer owns the unit of every requirement it holds, so
+    # a decision of the planner's stating that unit alone goes from those.
+    held_units = _units_the_user_holds(
+        requirements_after, _decisions_after(previous, settled, removed=removed_decisions)
+    )
+    if held_units:
+        evidence_requirements = _without_held_unit_citations(
+            requirements_after, evidence_requirements, held=held_units
+        )
+        requirements_after = _requirements_after(
+            previous, evidence_requirements, removed_evidence_requirements
+        )
+        cited = {slot for requirement in requirements_after for slot in requirement.decision_ids}
+        gone = {slot for slots in held_units.values() for slot in slots} - cited
+        settled = [decision for decision in settled if decision.slot not in gone]
+        if previous is not None and gone:
+            # Code removes the carried ones, so none reads as the user's
+            # decision dropped, and the plan amended holds none of them.
+            previous = previous.model_copy(
+                update={"decisions": tuple(d for d in previous.decisions if d.slot not in gone)}
+            )
     read = full_histories(view.state)
     definition_lookup = load_log(view.state).recorded_definition
     settled = [
@@ -934,6 +955,69 @@ def _without_user_prices(drafts: Sequence[DecisionDraft]) -> list[DecisionDraft]
     decision stands as code derives or carries it, whatever a draft restates.
     """
     return [draft for draft in drafts if not draft.slot.startswith(USER_PRICES_SLOT_PREFIXES)]
+
+
+def _units_the_user_holds(
+    requirements: Sequence[EvidenceRequirement], decisions: Sequence[Decision]
+) -> dict[str, frozenset[str]]:
+    """The planner's decisions stating a unit the user's prices answer holds, by each requirement citing them.
+
+    A requirement citing a decision of the prices the user chose
+    (`USER_PRICES_SLOT_PREFIXES`, `submission.prices_choice.prices_decisions`)
+    states the unit that answer holds it to, which code writes and a switch
+    of its plan card row moves. A decision the planner wrote
+    (`planner.plan.is_code_written`) fixing that `unit` and nothing else
+    states the same choice a second time, so the requirement does not cite
+    it: the plan card shows the user's answer once, and a switch of it is
+    not held back by the planner's copy.
+    """
+    by_slot = {decision.slot: decision for decision in decisions}
+    held: dict[str, frozenset[str]] = {}
+    for requirement in requirements:
+        if not any(slot.startswith(USER_PRICES_SLOT_PREFIXES) for slot in requirement.decision_ids):
+            continue
+        slots = frozenset(
+            slot
+            for slot in requirement.decision_ids
+            if (decision := by_slot.get(slot)) is not None
+            and not is_code_written(decision)
+            and decision.fixes is not None
+            and decision.fixes.model_dump(exclude_none=True).keys() == {"unit"}
+        )
+        if slots:
+            held[requirement.id] = slots
+    return held
+
+
+def _without_held_unit_citations(
+    requirements: Sequence[EvidenceRequirement],
+    patch: Sequence[EvidenceRequirement],
+    *,
+    held: Mapping[str, frozenset[str]],
+) -> list[EvidenceRequirement]:
+    """`patch` with each requirement `held` names restated without citing the
+    slots it maps that requirement to (`_units_the_user_holds`).
+
+    `requirements` is every requirement the patched plan states. One `patch`
+    states is replaced in place; a carried one is appended, so `Plan.amend`
+    replaces it.
+    """
+    rewritten = {
+        requirement.id: requirement.model_copy(
+            update={
+                "decision_ids": tuple(
+                    slot for slot in requirement.decision_ids if slot not in held[requirement.id]
+                )
+            }
+        )
+        for requirement in requirements
+        if requirement.id in held
+    }
+    stated = {requirement.id for requirement in patch}
+    return [
+        *(rewritten.get(requirement.id, requirement) for requirement in patch),
+        *(requirement for rid, requirement in rewritten.items() if rid not in stated),
+    ]
 
 
 def _unmade_prices_citations(
