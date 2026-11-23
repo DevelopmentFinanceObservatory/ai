@@ -1107,8 +1107,7 @@ class InterruptResponse(_WireModel):
     `PlanProposed.revision` the user saw), all three. A switch of a row
     offering a unit (`PlanDecision.unit`) may also carry `unit`, the unit
     picked, with `option_id` naming it as `harness.unit_offer.unit_option_id`
-    does; whether the row's offer holds it is the harness's check, not the
-    wire's. An `approve` may carry
+    does. The harness checks that the row's offer holds it. An `approve` may carry
     `plan_revision` alone, and is refused when it is not the paused plan's;
     without one it approves the paused plan, as older clients do. Every
     other decision carries none of them. `client_features` is

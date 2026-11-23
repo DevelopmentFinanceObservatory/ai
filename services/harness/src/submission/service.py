@@ -267,9 +267,13 @@ from translator.tool import authored_answer
 
 from submission.prices_choice import (
     USER_PRICES_SLOT_PREFIXES,
+    AbsorbedRows,
     Parts,
     PricesChoice,
+    absorbed,
+    absorbed_rows,
     base_year_refusal,
+    part_readings,
     plan_held_choices,
     prices_decisions,
     whole_unit_slots,
@@ -339,6 +343,11 @@ class SessionView(Protocol):
 
     def prices_chosen(self) -> Mapping[str, PricesChoice]:
         """The prices the user picked answering an ask, by the part each prices, until released."""
+        ...
+
+    def answered_since_plan(self) -> frozenset[str]:
+        """The parts of `prices_chosen` an answer given since the plan on
+        record landed priced: the plan has not read them."""
         ...
 
     def switched_units(self) -> Mapping[str, Unit]:
@@ -431,7 +440,10 @@ class Admission:
     to a compile in place of the pin it states (`planner.plan.AlignedInput`),
     to replace those on record: they belong to this plan, so a fresh plan
     holding none writes none. `pin_verdicts` are admission's verdicts on the
-    plan's pins (`_pin_verdicts`), to replace those on record.
+    plan's pins (`_pin_verdicts`), to replace those on record. `unit_rows`
+    is what each unit row has absorbed of the user's unit answers, those on
+    record with this plan's (`submission.prices_choice.absorbed`), to
+    replace them.
     """
 
     plan: Plan
@@ -439,6 +451,7 @@ class Admission:
     windowed_pins: tuple[WindowedPin, ...] | None
     alignments: tuple[AlignedInput, ...]
     pin_verdicts: tuple[PinVerdict, ...]
+    unit_rows: AbsorbedRows
 
 
 def submit(
@@ -719,21 +732,22 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         previous, evidence_requirements, removed_evidence_requirements
     )
     chosen = _user_prices(view, previous)
+    shown_parts = Parts.of_shown(
+        pins,
+        sources.get,
+        sources.block,
+        pinned=[
+            requirement.source_spec_id
+            for requirement in requirements_after
+            if isinstance(requirement, DatasetRequirement)
+            and requirement.source_spec_id is not None
+        ],
+    )
     priced = prices_decisions(
         chosen,
         evidence_requirements,
         requirements_after,
-        parts=Parts.of_shown(
-            pins,
-            sources.get,
-            sources.block,
-            pinned=[
-                requirement.source_spec_id
-                for requirement in requirements_after
-                if isinstance(requirement, DatasetRequirement)
-                and requirement.source_spec_id is not None
-            ],
-        ),
+        parts=shown_parts,
         propose=proposer.call,
     )
     if isinstance(priced, dict):
@@ -745,6 +759,12 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         requirements_after = _requirements_after(
             previous, evidence_requirements, removed_evidence_requirements
         )
+    # Each part of a unit answer a requirement reads is absorbed by its row.
+    unit_rows = absorbed(
+        absorbed_rows(view.state),
+        view.prices_chosen(),
+        part_readings(chosen, requirements_after, parts=shown_parts),
+    )
     unmade = _unmade_prices_citations(
         requirements_after, _decisions_after(previous, settled, removed=removed_decisions)
     )
@@ -970,6 +990,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         windowed_pins=tuple(copies) if copies or held_copies else None,
         alignments=tuple(entries.values()),
         pin_verdicts=verdicts,
+        unit_rows=unit_rows,
     )
 
 
@@ -980,13 +1001,22 @@ def _user_prices(view: SessionView, previous: Plan | None) -> Mapping[str, Price
     card moved in the unit it picked (`SessionView.switched_units`).
 
     The unit question's answer seeds the plan that first states its row.
-    From then on the plan holds the row's unit and series, so a count or
-    scope switch that moves a pin moves the series the unit holds.
+    From then on the plan holds the row's unit and series for each part the
+    row absorbed (`submission.prices_choice.absorbed_rows`), so a count or
+    scope switch that moves a pin moves the series the unit holds, and an
+    answer the plan has not read (`SessionView.answered_since_plan`) holds
+    its parts.
     """
     chosen = view.prices_chosen()
     if previous is None:
         return chosen
-    return plan_held_choices(chosen, previous, units=view.switched_units())
+    return plan_held_choices(
+        chosen,
+        previous,
+        units=view.switched_units(),
+        rows=absorbed_rows(view.state),
+        fresh=view.answered_since_plan(),
+    )
 
 
 def _without_user_prices(drafts: Sequence[DecisionDraft]) -> list[DecisionDraft]:

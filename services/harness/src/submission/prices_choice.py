@@ -40,6 +40,7 @@ import re
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import cached_property
+from types import MappingProxyType
 from typing import Any, Literal, NamedTuple
 
 from compiler.evidence import PriceBasis, UnitReading, read_unit_currency, read_unit_dcid
@@ -56,6 +57,7 @@ from planner.plan import (
     PinSource,
     Plan,
     ResolvedBy,
+    SessionState,
     Unit,
 )
 from planner.tool_results import Action, Outcome, ProblemCode, problem
@@ -118,11 +120,17 @@ def decision_slots(choices: Mapping[str, PricesChoice]) -> dict[str, str]:
 
 
 def whole_unit_slots(choices: Mapping[str, PricesChoice]) -> frozenset[str]:
-    """The slots of the decisions recording a whole unit the user chose
-    (`decision_slots`): each choice's that names a `unit`, which a bare
-    prices answer, current or constant, never does."""
+    """The slots of the unit rows recording a whole unit the user chose
+    (`decision_slots`): each choice's that names a `unit` and sits on a row
+    (`PricesChoice.group`). A bare prices answer, current or constant, names
+    no unit, and a part Search refused to read in the unit chosen keeps a
+    prices row of its own stating the unit it is served in."""
     slots = decision_slots(choices)
-    return frozenset(slots[part] for part, choice in choices.items() if choice.unit is not None)
+    return frozenset(
+        slots[part]
+        for part, choice in choices.items()
+        if choice.unit is not None and choice.group is not None
+    )
 
 
 def plan_unit(plan: Plan, slot: str) -> Unit | None:
@@ -141,19 +149,88 @@ def plan_unit(plan: Plan, slot: str) -> Unit | None:
     return unit
 
 
+# The session-state slot holding, by each unit row's slot (`unit_slot`),
+# the parts of the unit question's answer the row has absorbed, each with
+# the ids of the dataset requirements that read it when admission wrote the
+# row (`absorbed_rows`, `absorbed`). Admission alone writes it, and only
+# adds to it: a switch of the card moves pins and keeps requirement ids, so
+# what a row absorbed stays true across switches.
+UNIT_ROWS_STATE_KEY = "planner:unit_rows"
+
+# Each unit row's absorbed parts, by the row's slot, each with the ids of
+# the requirements that read it.
+type AbsorbedRows = Mapping[str, Mapping[str, tuple[str, ...]]]
+
+
+def absorbed_rows(state: SessionState) -> dict[str, dict[str, tuple[str, ...]]]:
+    """What `UNIT_ROWS_STATE_KEY` holds; empty when unset. An entry not in
+    its shape is left out."""
+    stored = state.get(UNIT_ROWS_STATE_KEY)
+    rows: dict[str, dict[str, tuple[str, ...]]] = {}
+    for slot, parts in (stored or {}).items() if isinstance(stored, Mapping) else ():
+        if not isinstance(parts, Mapping):
+            continue
+        rows[str(slot)] = {
+            str(part): tuple(str(rid) for rid in ids)
+            for part, ids in parts.items()
+            if isinstance(ids, list | tuple)
+        }
+    return rows
+
+
+def save_absorbed_rows(state: SessionState, rows: AbsorbedRows) -> None:
+    """Record `rows` as `UNIT_ROWS_STATE_KEY`."""
+    state[UNIT_ROWS_STATE_KEY] = {
+        slot: {part: list(ids) for part, ids in parts.items()} for slot, parts in rows.items()
+    }
+
+
+def absorbed(
+    rows: AbsorbedRows,
+    answered: Mapping[str, PricesChoice],
+    readings: Mapping[str, tuple[str, ...]],
+) -> dict[str, dict[str, tuple[str, ...]]]:
+    """`rows` with each part of a unit question's answer (`answered`, the
+    choices `prices_chosen` gives, `PricesChoice.group`) that some
+    requirement reads (`readings`, `part_readings`) absorbed by its row,
+    with the ids of the requirements reading it. A part read again is
+    recorded with this reading's ids, and no part leaves its row."""
+    merged = {slot: dict(parts) for slot, parts in rows.items()}
+    for part, ids in readings.items():
+        choice = answered.get(part)
+        if not ids or choice is None or choice.group is None or choice.unit is None:
+            continue
+        merged.setdefault(unit_slot(choice.group), {})[part] = ids
+    return merged
+
+
 def plan_held_choices(
-    choices: Mapping[str, PricesChoice], plan: Plan, *, units: Mapping[str, Unit]
+    choices: Mapping[str, PricesChoice],
+    plan: Plan,
+    *,
+    units: Mapping[str, Unit],
+    rows: AbsorbedRows = MappingProxyType({}),
+    fresh: Collection[str] = (),
 ) -> dict[str, PricesChoice]:
-    """`choices` with each unit row `plan` states read off the plan.
+    """`choices` with each part a unit row `plan` states has absorbed read off the plan.
 
     A unit row's choices (`PricesChoice.group`) seed the plan that first
     states the row, from the series the unit question's answer fetched for
     each part. Once `plan` states the row, its unit is the one its citing
     requirements state (`plan_unit`), or the one `units` holds for its slot,
-    the unit a switch of the row picked, and its parts are the distinct
-    series those requirements pin: the row's choices are replaced by one per
-    pin, each that pin in that unit. A row `plan` does not state, or whose
-    requirements state no one unit, keeps its choices.
+    the unit a switch of the row picked, and its series are the distinct
+    pins of those requirements: the choices of the parts the row absorbed
+    are replaced by one per pin, each that pin in that unit.
+
+    A part the row absorbed is one `rows` records under the row's slot
+    whose requirements still cite it, every part of the group on state
+    recorded before rows were (no entry for the slot). A part no citing
+    requirement reads, as in a plan that left it out, keeps its choice. So
+    does a group answered since the plan landed (`fresh`, its parts): the
+    newest answer holds the group. A pin a choice outside the group holds,
+    as a bare prices answer the user gave on it after a refusal, keeps that
+    choice. A row `plan` does not state, or whose requirements state no one
+    unit, keeps its choices.
     """
     held = dict(choices)
     for group in dict.fromkeys(
@@ -162,20 +239,32 @@ def plan_held_choices(
         if choice.group is not None and choice.unit is not None
     ):
         slot = unit_slot(group)
+        members = [part for part, choice in held.items() if choice.group == group]
+        if any(part in fresh for part in members):
+            continue
         unit = units.get(slot) or plan_unit(plan, slot)
-        pins = list(
-            dict.fromkeys(
-                requirement.source_spec_id
-                for requirement in plan.evidence_requirements
-                if isinstance(requirement, DatasetRequirement)
-                and slot in requirement.decision_ids
-                and requirement.source_spec_id is not None
-            )
-        )
+        citing = [
+            requirement
+            for requirement in plan.evidence_requirements
+            if isinstance(requirement, DatasetRequirement) and slot in requirement.decision_ids
+        ]
+        pins = list(dict.fromkeys(r.source_spec_id for r in citing if r.source_spec_id is not None))
         if unit is None or not pins:
             continue
-        held = {part: choice for part, choice in held.items() if choice.group != group}
-        held |= {pin: PricesChoice(unit.prices, pin, unit=unit, group=group) for pin in pins}
+        recorded = rows.get(slot)
+        cited = {requirement.id for requirement in citing}
+        taken = (
+            members
+            if recorded is None
+            else [part for part in members if cited.intersection(recorded.get(part, ()))]
+        )
+        if not taken:
+            continue
+        held = {part: choice for part, choice in held.items() if part not in taken}
+        for pin in pins:
+            if (other := held.get(pin)) is not None and other.group != group:
+                continue
+            held[pin] = PricesChoice(unit.prices, pin, unit=unit, group=group)
     return held
 
 
@@ -781,46 +870,22 @@ def prices_decisions(
     """
     parts = parts.priced_by(choices)
     slot_of = decision_slots(choices)
-    by_id = {requirement.id: requirement for requirement in requirements}
-
-    def read_pin(requirement: DatasetRequirement) -> str | None:
-        part = by_id.get(requirement.whole_of.part) if requirement.whole_of is not None else None
-        return (
-            part.source_spec_id
-            if isinstance(part, DatasetRequirement)
-            else requirement.source_spec_id
-        )
-
-    series_of = {part: parts.series(part) for part in choices}
-    row_of = _row_readers(
-        [r for r in requirements if isinstance(r, DatasetRequirement)],
-        choices,
-        read_pin=read_pin,
-        series_of=series_of,
-        slot_of=slot_of,
-        parts=parts,
-    )
+    read = _Readings.of(choices, requirements, parts=parts)
     decisions: dict[str, Decision] = {}
     slots: dict[str, list[str]] = {}
     for part, choice in choices.items():
         slot = slot_of[part]
-        series = series_of[part]
-        reading = [
-            requirement
-            for requirement in requirements
-            if isinstance(requirement, DatasetRequirement)
-            and (read_pin(requirement) in series or row_of.get(requirement.id, ("",))[0] == part)
-        ]
+        reading = read.by_part[part]
         for requirement in reading:
             unit = requirement.unit
             wanted = _wanted(
-                read_pin(requirement),
+                read.pin(requirement),
                 unit.currency if unit is not None else None,
                 part,
                 choice,
                 parts,
             )
-            if row_of.get(requirement.id) == (part, True) and not wanted.exact:
+            if read.row_of.get(requirement.id) == (part, True) and not wanted.exact:
                 # It cites the row: the plan holds its pin to the row's unit.
                 assert choice.unit is not None
                 wanted = _Wanted(choice.unit, exact=True)
@@ -847,7 +912,7 @@ def prices_decisions(
                 f"{requirement.id!r} {opening}.",
                 slot=slot,
                 part=part,
-                reading=read_pin(requirement),
+                reading=read.pin(requirement),
                 choice=choice,
                 requirement_id=requirement.id,
                 wanted=wanted,
@@ -886,6 +951,83 @@ def prices_decisions(
         *(citing.get(requirement.id, requirement) for requirement in patch),
         *(requirement for rid, requirement in citing.items() if rid not in stated),
     ]
+
+
+@dataclass(frozen=True)
+class _Readings:
+    """Which dataset requirements read each part `prices_decisions` prices.
+
+    `pin` is the series a requirement reads: the pin it states, or a declared
+    whole's part's (`DatasetRequirement.whole_of`), whose dataset admission
+    compiles the whole from. `row_of` holds the unit row part each
+    requirement no part reads by its series reads (`_row_readers`), and
+    `by_part` every requirement each part reads, by its series or so.
+    """
+
+    pin: Callable[[DatasetRequirement], str | None]
+    row_of: Mapping[str, tuple[str, bool]]
+    by_part: Mapping[str, list[DatasetRequirement]]
+
+    @classmethod
+    def of(
+        cls,
+        choices: Mapping[str, PricesChoice],
+        requirements: Sequence[EvidenceRequirement],
+        *,
+        parts: Parts,
+    ) -> _Readings:
+        """The readings of `requirements` by the parts `choices` prices, read
+        through `parts` with those choices marked (`Parts.priced_by`)."""
+        by_id = {requirement.id: requirement for requirement in requirements}
+
+        def read_pin(requirement: DatasetRequirement) -> str | None:
+            whole = (
+                by_id.get(requirement.whole_of.part) if requirement.whole_of is not None else None
+            )
+            return (
+                whole.source_spec_id
+                if isinstance(whole, DatasetRequirement)
+                else requirement.source_spec_id
+            )
+
+        datasets = [r for r in requirements if isinstance(r, DatasetRequirement)]
+        series_of = {part: parts.series(part) for part in choices}
+        row_of = _row_readers(
+            datasets,
+            choices,
+            read_pin=read_pin,
+            series_of=series_of,
+            slot_of=decision_slots(choices),
+            parts=parts,
+        )
+        return cls(
+            pin=read_pin,
+            row_of=row_of,
+            by_part={
+                part: [
+                    requirement
+                    for requirement in datasets
+                    if read_pin(requirement) in series_of[part]
+                    or row_of.get(requirement.id, ("",))[0] == part
+                ]
+                for part in choices
+            },
+        )
+
+
+def part_readings(
+    choices: Mapping[str, PricesChoice],
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    parts: Parts,
+) -> dict[str, tuple[str, ...]]:
+    """The id of each dataset requirement of `requirements` that reads each
+    part `choices` prices, by the part, as `prices_decisions` reads them."""
+    read = _Readings.of(choices, requirements, parts=parts.priced_by(choices))
+    return {
+        part: tuple(requirement.id for requirement in reading)
+        for part, reading in read.by_part.items()
+    }
 
 
 def _row_readers(

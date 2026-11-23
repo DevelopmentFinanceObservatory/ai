@@ -202,7 +202,14 @@ from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, 
 from pydantic import TypeAdapter, ValidationError
 from pydantic_core import to_jsonable_python
 from submission import service as submission_service
-from submission.prices_choice import PRICES_OPTIONS, Parts, PricesChoice, prices_decisions
+from submission.prices_choice import (
+    PRICES_OPTIONS,
+    Parts,
+    PricesChoice,
+    plan_held_choices,
+    prices_decisions,
+    whole_unit_slots,
+)
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
@@ -13065,6 +13072,12 @@ def _switch_unit_row(
     )
 
 
+def _landed(ctx: _FakeToolContext, answer: Mapping[str, Any]) -> None:
+    """Record `propose_plan`'s `answer`, a plan landing, in `ctx`'s
+    transcript, as the planner host records each tool's answer."""
+    ctx.records = [*ctx.records, tool_answers(("landed", "propose_plan", answer))]
+
+
 def _unit_answered(
     ctx: _FakeToolContext, chose: dict[str, Any], fetched: str, served: dict[str, Any]
 ) -> None:
@@ -13616,6 +13629,7 @@ def test_a_planner_unit_decision_stays_whole_on_a_requirement_the_user_s_unit_do
     )
 
     assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
     plan = load_plan(ctx.state)
     assert plan is not None
     row = f"user_unit_{_GROSS}"
@@ -13729,6 +13743,7 @@ def test_a_re_proposal_after_a_switch_is_told_the_series_and_unit_the_plan_holds
         [dataset.model_copy(update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)}), derived],
     )
     assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
     plan = load_plan(ctx.state)
     assert plan is not None
     # The unit switch restates the requirement in the unit it picked.
@@ -13767,6 +13782,205 @@ def test_a_re_proposal_after_a_switch_is_told_the_series_and_unit_the_plan_holds
 
     assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
     assert (refused["detail"]["unit"], refused["detail"].get("pin")) == told
+
+
+def _two_windows_answered(ctx: _FakeToolContext) -> None:
+    """The user answered one unit question covering the gross part over every
+    year and over 2020-2024 with current euros, and Search re-read each
+    window in them (`_EUR_READ`, `_EUR_READ_2020`), every block on record."""
+    later = copy.deepcopy(_FRANCE_KENYA)
+    later["spec_id"] = later["definition"]["spec_id"] = _GROSS_2020
+    later["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    later_read = _read_in(_EUR_READ_2020, _EUR)
+    later_read["definition"]["identity"]["requested_window"] = later["definition"]["identity"][
+        "requested_window"
+    ]
+    _show_blocks(ctx, _FRANCE_KENYA, later, _read_in(_EUR_READ, _EUR), later_read)
+    for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
+        record_unit_read(ctx.state, part, read)
+        record_unit_served(
+            ctx.state,
+            part,
+            read,
+            UnitChoice.model_validate(_EUR),
+            group=_GROSS,
+            chosen=UnitChoice.model_validate(_EUR),
+        )
+    question = {
+        **_UNIT_QUESTION,
+        "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
+    }
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+        user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+
+
+def test_a_window_the_first_plan_left_out_keeps_the_unit_its_answer_chose(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The unit question covers two windows of the gross part, and the user
+    chose current euros. The first plan reads the whole history alone, so
+    its unit row absorbs that window only. A later proposal adding the
+    2020-2024 window as the part itself in US dollars is refused and told
+    to pin that window's own read in euros, not the whole history's."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _two_windows_answered(ctx)
+    dataset, _ = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [
+            dataset.model_copy(
+                update={"id": "all", "source_spec_id": _EUR_READ, "unit": Unit(**_EUR)}
+            )
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+
+    refused = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=plan.version,
+        decisions=[],
+        evidence_requirements=[
+            dataset.model_copy(
+                update={
+                    "id": "recent",
+                    "period": Period(start=2020, end=2024),
+                    "source_spec_id": _GROSS_2020,
+                    "unit": Unit(**_USD),
+                }
+            )
+        ],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert (refused["detail"]["unit"], refused["detail"]["pin"]) == (_EUR, _EUR_READ_2020)
+
+
+def test_a_unit_answer_given_after_the_plan_landed_holds_the_row_over_the_plan(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose current euros for the gross part, and the plan landed
+    with its unit row in them. The user then wrote again, was asked the unit
+    question once more and chose current pounds, which Search read the part
+    in. A proposal pinning that read in pounds lands, the row stating
+    pounds: the newer answer holds the row, not the plan's euros."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_GBP_READ, _GBP))
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, _ = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    record_unit_served(
+        ctx.state,
+        _GROSS,
+        _GBP_READ,
+        UnitChoice.model_validate(_GBP),
+        group=_GROSS,
+        chosen=UnitChoice.model_validate(_GBP),
+    )
+    question = {**_UNIT_QUESTION, "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS]}}
+    ctx.records = [
+        *ctx.records,
+        transcript.user_message("In pounds, please."),
+        turn_pause("ask", "int_ask_again", {"questions": [question]}),
+        user_answer("int_ask_again", {"answers": {"q1": {"kind": "unit", **_GBP}}}),
+    ]
+
+    again = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=plan.version,
+        decisions=[],
+        evidence_requirements=[
+            plan.requirement(dataset.id).model_copy(
+                update={"source_spec_id": _GBP_READ, "unit": Unit(**_GBP)}
+            )
+        ],
+        tool_context=ctx,
+    )
+
+    assert again["outcome"] == Outcome.OK.value, again
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    assert [d.chosen for d in revised.decisions if d.slot == f"user_unit_{_GROSS}"] == [
+        "current prices in GBP"
+    ]
+
+
+def test_a_bare_prices_answer_on_a_row_s_series_keeps_the_series_off_the_row() -> None:
+    """The plan's unit row pins the gross part's read in euros, and the user
+    then answered the planner's prices question on that read with constant
+    prices alone, as a refusal of the row sends the planner to ask. The read
+    keeps that answer: the row does not take it back."""
+    row = f"user_unit_{_GROSS}"
+    plan = Plan(
+        question="q",
+        decisions=[
+            Decision(
+                slot=row,
+                description="Which prices the figures are in.",
+                options=("current prices in EUR", "constant prices"),
+                chosen="current prices in EUR",
+                resolved_by=ResolvedBy.USER,
+                rationale="The user chose current prices in EUR.",
+                fixes=DecisionFixes(prices="current"),
+            )
+        ],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="aid",
+                decision_ids=[row],
+                measure="aid",
+                entities=[Entity(name="Kenya", role="recipient")],
+                period=Period(start=2018, end=2022),
+                source_spec_id=_EUR_READ,
+                unit=Unit(**_EUR),
+            )
+        ],
+        version=1,
+    )
+    bare = PricesChoice("constant", asked=True)
+    choices = {
+        _GROSS: PricesChoice("current", _EUR_READ, unit=Unit(**_EUR), group=_GROSS),
+        _EUR_READ: bare,
+    }
+
+    assert plan_held_choices(choices, plan, units={})[_EUR_READ] == bare
+
+
+def test_a_part_refused_the_unit_chosen_states_no_whole_unit_row() -> None:
+    """A part Search refused to read in the unit chosen keeps its served
+    unit on a prices row of its own, which records no whole unit the user
+    chose, so the planner's own unit decisions on it stand."""
+    refused = PricesChoice("current", _GROSS, unit=Unit(**_USD))
+
+    assert whole_unit_slots({_GROSS: refused}) == frozenset()
 
 
 def test_a_carried_planner_decision_stating_the_unit_the_user_answered_goes_on_amendment(

@@ -40,6 +40,7 @@ from submission.prices_choice import (
     PricesChoice,
     measure_key,
     prices_slot,
+    save_absorbed_rows,
 )
 from submission.service import (
     COMBINATION_OPTIONS,
@@ -70,7 +71,7 @@ from planner.plan import (
     save_plan_rounds,
     save_windowed_pins,
 )
-from planner.tool_results import ProblemCode
+from planner.tool_results import Outcome, ProblemCode
 
 
 class Step(NamedTuple):
@@ -211,6 +212,20 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
     An answer to any other question leaves them standing. A Studio turn is
     one session, so a choice holds for the turn it was made in.
     """
+    return _prices_by_step(call)[0]
+
+
+def answered_since_plan(call: PlannerCall) -> frozenset[str]:
+    """The parts of `prices_chosen` whose choice a step after the last
+    `propose_plan` response that landed a plan set, every part when no
+    response in the call's session landed one: answers the plan on record
+    has not read, so they hold their parts over it
+    (`submission.prices_choice.plan_held_choices`)."""
+    return _prices_by_step(call)[1]
+
+
+def _prices_by_step(call: PlannerCall) -> tuple[dict[str, PricesChoice], frozenset[str]]:
+    """`prices_chosen` and `answered_since_plan` over `call`, in one walk of its steps."""
     measures = {
         spec_id: measure_key(block)
         for spec_id, source in pin_sources(call.state).items()
@@ -222,7 +237,10 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
     refused: str | None = None
     asked: dict[str, str] = {}
     offered = [dict(option) for option in PRICES_OPTIONS]
-    for step in call.steps():
+    set_at: dict[str, int] = {}
+    landed = -1
+    for index, step in enumerate(call.steps()):
+        before = dict(chosen)
         if step.kind == "message":
             chosen.clear()
             refused = None
@@ -254,7 +272,15 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
             _priced_answers(
                 step.args or {}, step.body, chosen, measures, reads=reads, served=served
             )
-    return chosen
+        # A choice set again, even to what it was, is a new answer.
+        set_at |= {part: index for part, choice in chosen.items() if before.get(part) is not choice}
+        if (
+            step.kind == "response"
+            and step.name == PROPOSE_PLAN_PROPOSER.call
+            and step.body.get("outcome") == Outcome.OK.value
+        ):
+            landed = index
+    return chosen, frozenset(part for part in chosen if set_at.get(part, -1) > landed)
 
 
 def _prices_switched(body: Mapping[str, Any]) -> tuple[str, PriceBasis] | None:
@@ -763,6 +789,10 @@ class CallSession:
         """`prices_chosen` over the call."""
         return prices_chosen(self.call)
 
+    def answered_since_plan(self) -> frozenset[str]:
+        """`answered_since_plan` over the call."""
+        return answered_since_plan(self.call)
+
     def switched_units(self) -> Mapping[str, Unit]:
         """None: a planner call revises no unit row a switch moved."""
         return {}
@@ -790,6 +820,8 @@ class CallSession:
             save_windowed_pins(state, admission.windowed_pins)
         save_alignments(state, admission.alignments)
         save_pin_verdicts(state, admission.pin_verdicts)
+        if admission.unit_rows:
+            save_absorbed_rows(state, admission.unit_rows)
         save_plan(state, admission.plan)
         keep_found_sources(
             state,
