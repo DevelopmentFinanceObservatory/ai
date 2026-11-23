@@ -233,11 +233,15 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
             part, basis = switched
             if _switch_stands(call.state, part, basis):
                 held = chosen.get(part)
-                keys = (part, *(p for p in _read_together(part, reads) if p in chosen))
+                # A whole unit is chosen for the part and the series fetched
+                # for it alike, and the switch moves both.
+                keys = dict.fromkeys(
+                    (part, *(p for p, c in chosen.items() if held is not None and c == held))
+                )
                 for priced in keys:
                     _release_measure(chosen, priced, measures)
                 for priced in keys:
-                    chosen[priced] = _switched_choice(held, basis, served.get(part))
+                    chosen[priced] = _switched_choice(held, basis)
         elif step.call_id in asked:
             part = asked.pop(step.call_id)
             answer = _answers(step.body.get("result")).get("q1") or {}
@@ -254,16 +258,6 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
                 step.args or {}, step.body, chosen, measures, reads=reads, served=served
             )
     return chosen
-
-
-def _read_together(part: str, reads: Mapping[str, Sequence[str]]) -> tuple[str, ...]:
-    """The other keys a unit answer priced with `part`: the part `part` was
-    re-read from, and every series that part was re-read as (`reads`), the
-    one choice `_priced_answers` sets on each when no served unit was recorded."""
-    for read_from, read_as in reads.items():
-        if part == read_from or part in read_as:
-            return tuple(p for p in (read_from, *read_as) if p != part)
-    return ()
 
 
 def _prices_switched(body: Mapping[str, Any]) -> tuple[str, PriceBasis] | None:
@@ -288,26 +282,15 @@ def _prices_switched(body: Mapping[str, Any]) -> tuple[str, PriceBasis] | None:
     return (slot.removeprefix(PRICES_SLOT_PREFIX), basis) if basis is not None else None
 
 
-def _switched_choice(
-    held: PricesChoice | None, basis: PriceBasis, fetched: ServedUnit | None
-) -> PricesChoice:
+def _switched_choice(held: PricesChoice | None, basis: PriceBasis) -> PricesChoice:
     """The choice a switch of a part's prices row to `basis` makes over `held`,
-    the part's choice before it: the whole unit the series fetched for the
-    part is served in now (`fetched`, `harness.graph.state.units_served`)
-    when that unit is in `basis`, as it is once the `planner` node re-read a
-    part Search converts in the switched prices (`harness.graph.planning.
-    _read_switched_prices`), so the row states it in words as a unit
-    answer's does (`PricesChoice.words`); `held` itself when it names a
-    whole unit in `basis`; else `basis`, keeping the currency `held` holds
-    the part to (`PricesChoice.held_currency`) and the series fetched for
-    the part in it. A row switched more than once ends on its last switch."""
-    if fetched is not None and fetched.unit is not None and fetched.unit.prices == basis:
-        return PricesChoice(basis, fetched.spec_id, asked=True, unit=fetched.unit)
+    the part's choice before it: `held` itself when it already names a whole
+    unit in `basis`, else `basis`, keeping the currency `held` holds the part
+    to (`PricesChoice.held_currency`)."""
     if held is not None and held.unit is not None and held.prices == basis:
         return held._replace(asked=True)
     currency = held.held_currency if held is not None else None
-    spec_id = held.spec_id if held is not None and currency is not None else None
-    return PricesChoice(basis, spec_id, asked=True, currency=currency)
+    return PricesChoice(basis, asked=True, currency=currency)
 
 
 def _switch_stands(state: Any, part: str, basis: PriceBasis) -> bool:

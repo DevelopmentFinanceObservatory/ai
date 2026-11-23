@@ -265,7 +265,6 @@ from translator.referral import USER_DECIDES, Referral, ReferralKind, load_refer
 from translator.tool import authored_answer
 
 from submission.prices_choice import (
-    PRICES_BY_LABEL,
     PRICES_SLOT_PREFIX,
     Parts,
     PricesChoice,
@@ -8034,7 +8033,7 @@ def _picked_decision(
     stated = next((decision for decision in decisions if decision.slot == pick.slot), None)
     if stated is None:
         states = "drops that decision"
-    elif not _chosen_as_picked(stated, pick):
+    elif stated.chosen != pick.chosen:
         states = f"states {stated.chosen!r} for it"
     elif stated.fixes is None:
         states = "states it, but the requirements citing it fix none of what it names"
@@ -8043,18 +8042,6 @@ def _picked_decision(
     else:
         return stated.model_copy(update={"resolved_by": ResolvedBy.USER})
     return _pick_not_held(pick, states, None, proposer, stated=stated)
-
-
-def _chosen_as_picked(stated: Decision, pick: DecisionPick) -> bool:
-    """Whether `stated` chooses what `pick` picked: the picked label, or, on
-    the user's prices row (`PRICES_SLOT_PREFIX`), the picked prices
-    (`PRICES_BY_LABEL`) when `stated` fixes any, which a choice naming a
-    whole unit in them states in its own words (`PricesChoice.words`). A
-    prices row fixing nothing is left to `_picked_decision`'s own refusal."""
-    basis = PRICES_BY_LABEL.get(pick.chosen) if pick.slot.startswith(PRICES_SLOT_PREFIX) else None
-    if basis is None:
-        return stated.chosen == pick.chosen
-    return stated.fixes is None or stated.fixes.prices == basis
 
 
 def _same_shape(pick: DecisionPick, requirements: Sequence[EvidenceRequirement]) -> bool:

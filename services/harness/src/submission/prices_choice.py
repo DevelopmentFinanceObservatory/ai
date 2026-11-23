@@ -46,7 +46,7 @@ from compiler.evidence import PriceBasis, UnitReading, read_unit_currency, read_
 from compiler.evidence import requested_unit as requested_unit_of
 from compiler.sources import readable_source
 from harness.turn_events import PLANNER_ASK
-from harness.turn_records import CONSTANT_PRICES, CURRENT_PRICES
+from planner.phrasing import CONSTANT_PRICES, CURRENT_PRICES
 from planner.plan import (
     BaseYearUnstatedError,
     DatasetRequirement,
@@ -97,9 +97,8 @@ class PricesChoice(NamedTuple):
     year with the prices, that the series `spec_id` is served in: the series
     the agent fetches for the part (`harness.graph.state.units_served`). A
     switch of the part's prices row on the plan card to the other prices
-    that the part is not re-read in keeps that unit's `currency` alone,
-    since the new prices name no base year, and `spec_id`, the series still
-    fetched for the part."""
+    keeps that unit's `currency` alone, since the new prices name no base
+    year."""
 
     prices: PriceBasis
     spec_id: str | None = None

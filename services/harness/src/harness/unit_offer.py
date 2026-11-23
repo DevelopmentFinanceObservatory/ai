@@ -149,22 +149,6 @@ def unit_offer(
     )
 
 
-def unit_on_basis(
-    block: Mapping[str, Any], offer: UnitOffer, *, currency: str, prices: UnitPrices
-) -> UnitChoice | None:
-    """`prices` in `currency`, as `offer`, the units `block` converts into,
-    serves them: for constant prices, at the base year `block` completes an
-    unnamed one to (`default_base_year`), clamped into the currency's range.
-    `None` when `offer` does not serve `currency` in `prices`."""
-    served = next((c for c in offer.currencies if c.code == currency), None)
-    if served is None or prices not in served.prices:
-        return None
-    default = _conversion(block).get("default_base_year")
-    return _start(
-        served, prefer=prices.value, base_year=default if isinstance(default, int) else None
-    )
-
-
 def served_unit(block: Mapping[str, Any]) -> UnitChoice | None:
     """The unit `block`'s series is served in, `None` when its currency cannot be read.
 

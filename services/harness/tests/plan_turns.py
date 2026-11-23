@@ -86,7 +86,7 @@ def plan_nodes(
             resume=resume,
         ),
         "plan_start": planning.plan_start,
-        "planner": planning.planner_node(planner=planner, definition_surface=definition_surface),
+        "planner": planning.planner_node(planner=planner),
         "approve": approve_node(early_mints=early_mints),
         "switch": switch_node(planner=planner, definition_surface=definition_surface),
         "execute": execute_node(

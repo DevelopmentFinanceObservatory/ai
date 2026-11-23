@@ -201,10 +201,11 @@ _DRAFTING_PREFIXES = ("planner:", "translator:")
 # maps to the value it is put back as when unset, since the readers take the
 # readings and blocks as a list and a mapping. The blocks are the turn's whole
 # spec mapping, which the turn store writes as given (`harness.turn.store`), so
-# a block the revision added is deleted and one it rewrote is put back. A
-# pick of a prices row re-reads its part in the picked unit
-# (`harness.graph.planning._read_switched_prices`), writing the series each
-# part is fetched as, re-read as and settled in, which are put back too.
+# a block the revision added is deleted and one it rewrote is put back. The
+# series each part a unit question covered is fetched as, re-read as and
+# settled in (`harness.graph.state.units_served`, `unit_reads`,
+# `unit_settled`) are put back too, so they stand with the plan they were
+# read for.
 _RESTORED_KEYS: Mapping[str, Any] = {
     "plan": None,
     ORCHESTRATOR_SEARCHES_KEY: [],

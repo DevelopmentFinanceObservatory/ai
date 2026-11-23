@@ -9,7 +9,6 @@ import logging
 from collections.abc import Mapping
 from typing import Any, cast
 
-from compiler.surface import ToolSurface
 from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
@@ -27,13 +26,11 @@ from planner.plan import (
 from planner.plan import Plan as PlannerPlan
 from planner.session import ASKED_CALL_ID, PLANNER_ASK_PAUSE
 from planner.tool_results import ProblemCode
-from submission.prices_choice import PRICES_BY_LABEL, PRICES_SLOT_PREFIX
 
 from harness.decision_pick import DecisionPick
 from harness.graph import switch as switch_module
 from harness.graph.events import GraphEvent, PlannerStarted
 from harness.graph.interfaces import PlannerModel
-from harness.graph.orchestrate import read_part_in_unit
 from harness.graph.state import (
     ASK_FOR_QUESTION_KEY,
     NEW_QUESTION_KEY,
@@ -42,44 +39,32 @@ from harness.graph.state import (
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_REPLANNED_STOP_KEY,
     ORCHESTRATOR_RETRY_NOTE_KEY,
-    ORCHESTRATOR_SPECS_KEY,
     PICK_REPLAN_KEY,
     UNREADABLE_PLAN_NOTE,
     UNREADABLE_PLAN_UNPLANNED_NOTE,
     conversation_readings,
     readable_plan,
     resume_answers,
-    stated_unit,
-    stored_mapping,
-    units_served,
 )
 from harness.graph.switch import SwitchFailedError
 from harness.sentences import StopCode
 from harness.turn.node import Next, Node, NodeCtx, Pause
-from harness.unit_offer import served_unit, unit_offer, unit_on_basis
-from harness.unit_switch import UnitRefused
-from harness.wire import UnitPrices
 
 logger = logging.getLogger(__name__)
 
 
-def planner_node(*, planner: PlannerModel, definition_surface: ToolSurface) -> Node[GraphEvent]:
+def planner_node(*, planner: PlannerModel) -> Node[GraphEvent]:
     """The `planner` node, drafting with `planner`. `run` opens an entry;
     `resume` takes the user's answer to the ask the entry's planner ended
-    on and runs the planner again with it. A pick of a prices row re-reads
-    its part through `definition_surface` first (`_read_switched_prices`)."""
+    on and runs the planner again with it."""
 
     async def run(ctx: NodeCtx[GraphEvent], node_input: Any) -> Next | Pause:
-        return await _draft(
-            ctx, node_input, planner=planner, surface=definition_surface, answer=None
-        )
+        return await _draft(ctx, node_input, planner=planner, answer=None)
 
     async def resume(
         ctx: NodeCtx[GraphEvent], node_input: Any, answer: dict[str, Any]
     ) -> Next | Pause:
-        return await _draft(
-            ctx, node_input, planner=planner, surface=definition_surface, answer=answer
-        )
+        return await _draft(ctx, node_input, planner=planner, answer=answer)
 
     # A pick's replan the user stops offers the unchanged plan, whose pause
     # records the Stop.
@@ -91,7 +76,6 @@ async def _draft(
     node_input: Any,
     *,
     planner: PlannerModel,
-    surface: ToolSurface,
     answer: dict[str, Any] | None,
 ) -> Next | Pause:
     """One planner entry, or its resume by the user's `answer`.
@@ -149,12 +133,8 @@ async def _draft(
     An `"amend"` entry carrying `pick` (`approve` routes a switch of a
     planner decision's row so) replans with the user's pick held: the
     planner is passed it, and admission refuses a plan that does not state
-    it. A pick of a prices row whose part a unit answer chose a unit for and
-    Search converts re-reads the part in the picked prices through `surface` before the planner runs
-    (`_read_switched_prices`), so the planner is shown the series to pin.
-    The run can be stopped as a switch is, so it runs under the switch
-    node's `_unless_stopped`. A stop, a re-read Search refuses, or a
-    refusal ends on
+    it. The run can be stopped as a switch is, so it runs under the switch
+    node's `_unless_stopped`. A stop or a refusal ends on
     `"pending_refusal"` with the unchanged plan and the `switch_failed` the
     switch node offers (`switch_failed_offer`). It puts back the state from
     before the pick (`_pick_snapshot`), as it does when the run raises.
@@ -232,32 +212,25 @@ async def _draft(
     # The state before the pick, which a pick's replan that is stopped,
     # refused or raises puts back.
     before = _pick_snapshot(ctx, resuming=resuming) if pick is not None else None
-
-    async def drafting() -> dict[str, Any]:
-        if pick is not None:
-            await _read_switched_prices(ctx, pick, surface=surface)
-        return await planner(
-            ctx=ctx,
-            question=question,
-            readings=conversation_readings(ctx.state),
-            prior_plan=(
-                None if is_first_draft else (existing.model_dump(mode="json") if existing else None)
-            ),
-            refusal=refusal,
-            amendment=amendment,
-            canvas_digest=_digest(ctx, "canvas_digest"),
-            conversation_digest=_digest(ctx, "conversation_digest"),
-            pick=pick,
-            answer=answer,
-        )
-
+    drafting = planner(
+        ctx=ctx,
+        question=question,
+        readings=conversation_readings(ctx.state),
+        prior_plan=(
+            None if is_first_draft else (existing.model_dump(mode="json") if existing else None)
+        ),
+        refusal=refusal,
+        amendment=amendment,
+        canvas_digest=_digest(ctx, "canvas_digest"),
+        conversation_digest=_digest(ctx, "conversation_digest"),
+        pick=pick,
+        answer=answer,
+    )
     failed: SwitchFailedError | None = None
     try:
-        drafted = await (
-            drafting() if pick is None else switch_module._unless_stopped(ctx, drafting())
-        )
+        drafted = await (drafting if pick is None else switch_module._unless_stopped(ctx, drafting))
     except SwitchFailedError as exc:
-        # Only a pick's replan: stopped by the user, or its re-read refused.
+        # Only a pick's replan, stopped by the user.
         failed, drafted = exc, {}
     except BaseException:
         if before is not None:
@@ -418,64 +391,6 @@ def _pick(payload: dict[str, Any]) -> DecisionPick | None:
             code=switch_module.SCOPE_CHOICE_NOT_APPLIED,
             retryable=True,
         ) from exc
-
-
-async def _read_switched_prices(
-    ctx: NodeCtx[GraphEvent], pick: DecisionPick, *, surface: ToolSurface
-) -> None:
-    """Re-read through Search the part a pick of its prices row switches
-    (`submission.prices_choice.prices_slot`), in the picked prices, when a
-    unit answer chose the part's unit (`units_served`) and Search converts
-    the part (`harness.unit_offer.unit_offer`), as the `ask` node reads a
-    unit answer (`read_part_in_unit`): in the currency the part is fetched
-    in, else the one its series is served in, and, for constant prices, at
-    the base year its block completes an unnamed one to (`unit_on_basis`).
-    The count the unit answer read in the part's place (`ServedUnit.count`)
-    is read again in it. The planner reads the series fetched for the part
-    as the user's choice (`planner.call.prices_chosen`).
-
-    The resume of the planner's ask inside the replan finds the part fetched
-    in that unit already and reads nothing. A pick of any other row, of a
-    part no unit answer chose a unit for, or of a part Search does not
-    convert, reads nothing either: the replan holds the part to the picked
-    prices alone.
-
-    Raises:
-        SwitchFailedError: When Search does not offer the currency in the
-            picked prices, or refuses the re-read, retryable as its refusal is.
-    """
-    basis = PRICES_BY_LABEL.get(pick.chosen)
-    if not pick.slot.startswith(PRICES_SLOT_PREFIX) or basis is None:
-        return
-    state = cast(SessionState, ctx.state)
-    part = pick.slot.removeprefix(PRICES_SLOT_PREFIX)
-    fetched = units_served(state).get(part)
-    block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(part)
-    offer = unit_offer([block]) if block is not None else None
-    if fetched is None or block is None or offer is None:
-        return
-    served = served_unit(block)
-    if fetched.unit is not None:
-        currency = fetched.unit.currency
-    elif served is not None:
-        currency = served.currency
-    else:
-        return
-    unit = unit_on_basis(block, offer, currency=currency, prices=UnitPrices(basis))
-    if unit is None:
-        raise SwitchFailedError(
-            f"Search does not serve this series in {currency} at {basis} prices.",
-            code=switch_module.SCOPE_CHOICE_NOT_APPLIED,
-        )
-    if fetched.unit is not None and fetched.unit == stated_unit(unit):
-        return
-    read = await read_part_in_unit(state, surface, part, unit, count=fetched.count)
-    if isinstance(read.result, UnitRefused):
-        raise SwitchFailedError(
-            read.result.reason,
-            code=read.result.code or switch_module.SCOPE_CHOICE_NOT_APPLIED,
-            retryable=read.result.retryable,
-        )
 
 
 def planner_ask_pause(asked: Mapping[str, Any]) -> Pause:

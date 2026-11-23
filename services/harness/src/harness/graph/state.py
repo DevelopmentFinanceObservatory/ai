@@ -76,24 +76,18 @@ ORCHESTRATOR_SPEC_WARNINGS_KEY = "orchestrator:spec_warnings"
 # The spec_ids whose unit the user settled this turn: each part a unit
 # question covered and the count picked beside it, whether Search served,
 # re-read or refused the chosen unit, and each spec_id it re-read them as.
-# Their prices are closed (`unit_settled`, `settle_unit`). Written by the
-# `ask` node and by the `planner` node's re-read of a part whose prices row
-# the user switched on the plan card (`harness.graph.planning.
-# _read_switched_prices`).
+# Their prices are closed (`unit_settled`, `settle_unit`).
 ORCHESTRATOR_UNIT_SETTLED_KEY = "orchestrator:unit_settled"
-# The spec_ids each part a unit question covered was re-read in, by the
-# part (`unit_reads`, `record_unit_read`), so the prices the user chose
-# reach the re-read series (`planner.call.prices_chosen`). Written by the
-# `ask` node and by the `planner` node's plan-card prices switch.
+# The spec_ids the `ask` node re-read each part in, by the part a unit question
+# covered (`unit_reads`, `record_unit_read`), so the prices the user chose
+# reach the re-read series (`planner.call.prices_chosen`).
 ORCHESTRATOR_UNIT_READ_KEY = "orchestrator:unit_read"
 # Each part a unit question covered -> the series the agent fetches for it,
 # the unit that series is served in after the answer, and the other count
 # read in the part's place, as `ServedUnit` JSON (`units_served`,
 # `record_unit_served`): the chosen unit when Search serves or re-reads it,
 # the served unit when Search refuses the re-read. Plan admission holds the
-# part to that unit (`planner.call.prices_chosen`). Written by the `ask`
-# node and by the `planner` node's plan-card prices switch, which re-reads
-# the part in the switched prices.
+# part to that unit (`planner.call.prices_chosen`).
 ORCHESTRATOR_UNIT_SERVED_KEY = "orchestrator:unit_served"
 # The search readings of the conversation's earlier turns, with the warnings
 # of the spec_ids they name and the spec_ids whose block an earlier turn

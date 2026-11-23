@@ -15,7 +15,6 @@ records of the user's words, since a pick is none.
 
 from __future__ import annotations
 
-import copy
 import functools
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -28,23 +27,10 @@ from compiler.sources import source_from_spec_block
 from compiler.surface import McpSurface
 from data_mcp.server import mcp as data_mcp
 from harness.decision_pick import decision_pick
-from harness.graph import planning
-from harness.graph.state import (
-    ORCHESTRATOR_SEARCHES_KEY,
-    ORCHESTRATOR_SPECS_KEY,
-    ORCHESTRATOR_UNIT_READ_KEY,
-    ORCHESTRATOR_UNIT_SERVED_KEY,
-    ORCHESTRATOR_UNIT_SETTLED_KEY,
-    record_unit_served,
-    unit_settled,
-    units_served,
-)
-from harness.graph.switch import SwitchFailedError
-from harness.plan_display import decision_option_id
+from harness.graph.switch import SwitchFailedError, _switched_plan
+from harness.plan_display import decision_option_id, switchable_decision
 from harness.studio_state import _turn_identities
-from harness.turn.node import Next, Pause
 from harness.turn.store import AgentRecord
-from harness.wire import UnitChoice
 from planner.plan import (
     ASKS_STATE_KEY,
     DECISION_PICK_STATE_KEY,
@@ -53,7 +39,6 @@ from planner.plan import (
     DatasetRequirement,
     Decision,
     DecisionFixes,
-    DecisionPick,
     Entity,
     Period,
     RankRequirement,
@@ -69,7 +54,6 @@ from planner.plan import (
 from planner.records import GroupBy, RankAmong, RankDirection, Reduction
 from planner.specs import planner_tool_specs
 from planner.tool_results import Outcome, ProblemCode
-from submission.service import PROPOSE_PLAN, _picked_decision
 from translator.mechanical import build_translation
 
 from ..basis_alignment import HEALTH, TOTAL, provider_block
@@ -84,7 +68,6 @@ from .test_agent import (
     _EUR_READ,
     _FRANCE_KENYA,
     _GROSS,
-    _NET,
     _US_MULTILATERAL,
     _US_TOTAL,
     _constant_block,
@@ -2285,12 +2268,12 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
     assert result["outcome"] == Outcome.OK.value, result
 
 
-def test_a_prices_switch_after_a_whole_unit_keeps_its_currency() -> None:
+async def test_a_whole_unit_prices_row_is_one_row_the_card_cannot_switch() -> None:
     """The user chose current euros for the gross part, and the plan on the
-    series Search re-read in them records that choice in words, as one
-    decision on the part. A switch of
-    the card's prices row to constant prices keeps the euros: a replan in
-    constant US dollars is refused and told the unit in euros."""
+    series Search re-read in them records that choice in words as one
+    decision on the part. The card offers that row no other prices: a switch
+    naming it makes no pick, and the `switch` node refuses it without asking
+    Search for anything."""
     measure = Decision(
         slot="measure",
         description="What to measure.",
@@ -2299,420 +2282,51 @@ def test_a_prices_switch_after_a_whole_unit_keeps_its_currency() -> None:
         resolved_by=ResolvedBy.PLANNER_DEFAULT,
         rationale="r",
     )
-
-    def aid(requirement_id: str, **update: Any) -> DatasetRequirement:
-        return DatasetRequirement(
-            id=requirement_id,
-            decision_ids=("measure",),
-            measure="French aid to Kenya",
-            entities=(Entity(name="France", role="donor"), Entity(name="Kenya", role="recipient")),
-            period=Period(start=2015, end=2022),
-            source_spec_id=_EUR_READ,
-            unit=Unit(currency="EUR", prices="current"),
-        ).model_copy(update=update)
-
     ctx = _FakeToolContext()
     _show_blocks(ctx, _offering_constant(), _constant_block(), _read_in(_EUR_READ, _EUR))
     _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
-    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
-    card = propose(
-        question="q",
-        answer_mode=AnswerMode.SERIES,
-        decisions=drafts([measure]),
-        evidence_requirements=[aid("first")],
-        tool_context=ctx,
-    )
-    assert card["outcome"] == Outcome.OK.value, card
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    slot = f"user_prices_{_GROSS}"
-    (decided,) = [d for d in plan.decisions if d.slot.startswith("user_prices_")]
-    assert decided.slot == slot
-    assert (decided.chosen, decided.options) == (
-        "current prices in EUR",
-        ("current prices in EUR", "constant prices"),
-    )
-    assert decided.rationale == "The user chose current prices in EUR."
-    option = decision_option_id("constant prices")
-    pick = decision_pick(
-        plan, choice_id=f"decision/{slot}", option_id=option, to_origin={}, alignments={}
-    )
-    assert pick is not None
-    save_decision_pick(ctx.state, pick)
-    ctx.records = [
-        *ctx.records,
-        response_event("propose_plan", card),
-        _switch_event(f"decision/{slot}", option),
-    ]
-
-    result = propose(
-        amends_version=card["version"],
-        evidence_requirements=[
-            aid(
-                "second",
-                source_spec_id=_CONSTANT_GROSS,
-                unit=Unit(currency="USD", prices="constant", base_year=2023),
-            )
-        ],
-        removed_evidence_requirements=["first"],
-        tool_context=ctx,
-    )
-
-    assert result["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, result
-    in_euros = Unit(currency="EUR", prices="constant", base_year=2023)
-    assert result["detail"]["unit"] == in_euros.model_dump(mode="json")
-
-
-# The France to Kenya block converting into US dollars and euros, current or
-# constant at a base year from 2000 to 2024, an unnamed one completing to 2023.
-_CONVERTED = {
-    **_FRANCE_KENYA,
-    "resolved": {
-        **_FRANCE_KENYA["resolved"],
-        "unit_conversion": {
-            "currencies": [
-                {
-                    "code": code,
-                    "noun": noun,
-                    "current_years": {"start_year": 2000, "end_year": 2023},
-                    "constant_years": {"start_year": 2000, "end_year": 2023},
-                    "base_year_min": 2000,
-                    "base_year_max": 2024,
-                }
-                for code, noun in (("USD", "US dollars"), ("EUR", "euros"))
-            ],
-            "default_base_year": 2023,
-        },
-    },
-}
-_CONSTANT_EUR = {"currency": "EUR", "prices": "constant", "base_year": 2023}
-
-
-def _eur_aid(requirement_id: str, **update: Any) -> DatasetRequirement:
-    """French aid to Kenya on the series Search re-read in current euros."""
-    return DatasetRequirement(
-        id=requirement_id,
-        decision_ids=("measure",),
-        measure="French aid to Kenya",
-        entities=(Entity(name="France", role="donor"), Entity(name="Kenya", role="recipient")),
-        period=Period(start=2015, end=2022),
-        source_spec_id=_EUR_READ,
-        unit=Unit(**_EUR),
-    ).model_copy(update=update)
-
-
-class _EurReplanner:
-    """The planner of a pick's replan over the tools of `ctx`: it records the
-    pick as the adapter does, asks the user once first when `asks`, and then
-    proposes the requirement on the series fetched for the gross part
-    (`units_served`) in the unit it is served in, shown beside the turn's
-    blocks as the adapter shows the readings, replacing requirement
-    `replaces[0]` with `replaces[1]`; or refuses to draft, when `refuses`."""
-
-    def __init__(
-        self,
-        ctx: _FakeToolContext,
-        version: int,
-        *,
-        asks: bool = False,
-        refuses: bool = False,
-        replaces: tuple[str, str] = ("first", "second"),
-    ) -> None:
-        self.ctx = ctx
-        self.version = version
-        self.asks = asks
-        self.refuses = refuses
-        self.replaces = replaces
-        self.calls: list[dict[str, Any]] = []
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(kwargs)
-        save_decision_pick(self.ctx.state, kwargs["pick"])
-        if self.asks and len(self.calls) == 1:
-            return {"asked": {"args": {"message": "Which years?"}, "call_id": "ask-1"}}
-        if self.refuses:
-            return {"refused": {"text": "No plan.", "code": "plan_not_ready"}}
-        fetched = units_served(self.ctx.state)[_GROSS]
-        assert fetched.unit is not None
-        specs = self.ctx.state[ORCHESTRATOR_SPECS_KEY]
-        _show_blocks(self.ctx, _CONVERTED, _read_in(_EUR_READ, _EUR), specs[fetched.spec_id])
-        result = call_planner_tool(
-            _tools_by_name()["propose_plan"],
-            amends_version=self.version,
-            evidence_requirements=[
-                _eur_aid(self.replaces[1], source_spec_id=fetched.spec_id, unit=fetched.unit)
-            ],
-            removed_evidence_requirements=[self.replaces[0]],
-            tool_context=self.ctx,
-        )
-        if result["outcome"] != Outcome.OK.value:
-            return {"refused": {"text": result["message"], "code": result["code"]}}
-        plan = load_plan(self.ctx.state)
-        assert plan is not None
-        return {"plan": plan.model_dump(mode="json"), "summary": {}}
-
-
-def _eur_card() -> tuple[_FakeToolContext, dict[str, Any], dict[str, Any]]:
-    """The user chose current euros for the gross part, which Search converts,
-    and the plan on the series re-read in them is on the card; then the user
-    switched the card's prices row to constant prices. The context, the
-    card's `propose_plan` answer and the planner entry's input for the switch."""
-    ctx = _FakeToolContext()
-    ctx.state[ORCHESTRATOR_SPECS_KEY] = {_GROSS: _CONVERTED, _EUR_READ: _read_in(_EUR_READ, _EUR)}
-    _show_blocks(ctx, _CONVERTED, _read_in(_EUR_READ, _EUR))
-    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
-    measure = Decision(
-        slot="measure",
-        description="What to measure.",
-        options=["a", "b"],
-        chosen="a",
-        resolved_by=ResolvedBy.PLANNER_DEFAULT,
-        rationale="r",
-    )
     card = call_planner_tool(
         _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([measure]),
-        evidence_requirements=[_eur_aid("first")],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="first",
+                decision_ids=("measure",),
+                measure="French aid to Kenya",
+                entities=(
+                    Entity(name="France", role="donor"),
+                    Entity(name="Kenya", role="recipient"),
+                ),
+                period=Period(start=2015, end=2022),
+                source_spec_id=_EUR_READ,
+                unit=Unit(currency="EUR", prices="current"),
+            )
+        ],
         tool_context=ctx,
     )
     assert card["outcome"] == Outcome.OK.value, card
     plan = load_plan(ctx.state)
     assert plan is not None
-    # The planner node records the plan it offers on the card.
-    ctx.state["plan"] = plan.model_dump_json()
+    (decided,) = [d for d in plan.decisions if d.slot.startswith("user_prices_")]
+    assert (decided.slot, decided.chosen) == (f"user_prices_{_GROSS}", "current prices in EUR")
+    assert decided.rationale == "The user chose current prices in EUR."
+    assert switchable_decision(decided) is False
     switch = {
-        "choice_id": f"decision/user_prices_{_GROSS}",
+        "choice_id": f"decision/{decided.slot}",
         "option_id": decision_option_id("constant prices"),
     }
-    pick = decision_pick(plan, **switch, to_origin={}, alignments={})
-    assert pick is not None
-    ctx.records = [
-        *ctx.records,
-        response_event("propose_plan", card),
-        _switch_event(switch["choice_id"], switch["option_id"]),
-    ]
-    entry = {
-        "plan": plan.model_dump(mode="json"),
-        "pick": pick.model_dump(mode="json"),
-        "switch": switch,
-    }
-    return ctx, card, entry
 
-
-async def test_a_prices_switch_after_a_unit_answer_re_reads_the_part_and_lands_on_that_series() -> (
-    None
-):
-    """The user chose current euros, and switches the plan card's prices row
-    to constant prices. The planner node re-reads the part through Search in
-    constant euros at the base year Search completes to, and the replan on
-    that series lands, its prices row naming the unit. The planner asks the
-    user once inside the replan, and the resume reads nothing again."""
-    ctx, card, entry = _eur_card()
+    assert decision_pick(plan, **switch, to_origin={}, alignments={}) is None
     search = _UnitSearch()
-    planner = _EurReplanner(ctx, card["version"], asks=True)
-    node = planning.planner_node(planner=planner, definition_surface=search)
-    assert node.resume is not None
-
-    asked = await node.run(node_ctx(state=ctx.state), entry)
-    assert isinstance(asked, Pause), asked
-    landed = await node.resume(node_ctx(state=ctx.state), entry, {"answer": "2015"})
-
-    assert [posted["identity"]["facets"]["unit"]["request"] for posted in search.posted] == [
-        _CONSTANT_EUR
-    ]
-    assert isinstance(landed, Next) and landed.label == "ok", landed
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    (prices,) = [d for d in plan.decisions if d.slot.startswith("user_prices_")]
-    assert (prices.slot, prices.chosen, prices.fixes) == (
-        f"user_prices_{_GROSS}",
-        "constant 2023 prices in EUR",
-        DecisionFixes(prices="constant"),
-    )
-    read = units_served(ctx.state)[_GROSS].spec_id
-    pin = plan.requirement("second").source_spec_id
-    assert read != _EUR_READ
-    # Admission pins the requirement's years as a copy of the series.
-    assert windowed_pins(ctx.state)[pin].windowed_from == read
-    block = ctx.state[ORCHESTRATOR_SPECS_KEY][read]
-    assert block["definition"]["identity"]["facets"]["unit"]["request"] == _CONSTANT_EUR
-
-
-@pytest.mark.parametrize(
-    ("refusal", "code", "drafted"),
-    [
-        ({"code": "requested_option_unavailable"}, "requested_option_unavailable", False),
-        (None, "plan_not_ready", True),
-    ],
-    ids=["re-read-refused", "replan-refused"],
-)
-async def test_a_prices_switch_that_does_not_land_offers_the_plan_unchanged_with_the_state_back(
-    refusal: dict[str, object] | None, code: str, drafted: bool
-) -> None:
-    """Search refuses to re-read the part in constant euros, and the planner
-    never runs; or Search re-reads it and the planner refuses the replan. The
-    card offers the plan unchanged under the refusal's code, and the series
-    fetched for the part, its re-reads, the settled units and the turn's
-    readings are as they stood before the switch."""
-    ctx, card, entry = _eur_card()
-    before = copy.deepcopy(ctx.state)
-    search = _UnitSearch(refusal=refusal)
-    planner = _EurReplanner(ctx, card["version"], refuses=True)
-    node = planning.planner_node(planner=planner, definition_surface=search)
-
-    offered = await node.run(node_ctx(state=ctx.state), entry)
-
-    assert isinstance(offered, Next) and offered.label == "pending_refusal", offered
-    assert offered.output["switch_failed"]["code"] == code
-    assert bool(planner.calls) is drafted
-    for key in (
-        ORCHESTRATOR_UNIT_SERVED_KEY,
-        ORCHESTRATOR_UNIT_READ_KEY,
-        ORCHESTRATOR_UNIT_SETTLED_KEY,
-        ORCHESTRATOR_SPECS_KEY,
-        ORCHESTRATOR_SEARCHES_KEY,
-    ):
-        assert (ctx.state.get(key) or None) == (before.get(key) or None), key
-
-
-async def test_a_prices_row_switched_twice_states_the_whole_unit_it_lands_on() -> None:
-    """The user chose current euros, switched the card's prices row to
-    constant prices, and then back to current prices. Each switch re-reads
-    the part, and the row of the second replan states current euros in the
-    words of the first plan's row, its active option the chosen one."""
-    ctx, card, entry = _eur_card()
-    search = _UnitSearch()
-    first = planning.planner_node(
-        planner=_EurReplanner(ctx, card["version"]), definition_surface=search
-    )
-    landed = await first.run(node_ctx(state=ctx.state), entry)
-    assert isinstance(landed, Next) and landed.label == "ok", landed
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    ctx.state["plan"] = plan.model_dump_json()
-    switch = {
-        "choice_id": f"decision/user_prices_{_GROSS}",
-        "option_id": decision_option_id("current prices"),
-    }
-    pick = decision_pick(plan, **switch, to_origin={}, alignments={})
-    assert pick is not None
-    ctx.records = [*ctx.records, _switch_event(switch["choice_id"], switch["option_id"])]
-    second = planning.planner_node(
-        planner=_EurReplanner(ctx, plan.version, replaces=("second", "third")),
-        definition_surface=search,
-    )
-    again = {
-        "plan": plan.model_dump(mode="json"),
-        "pick": pick.model_dump(mode="json"),
-        "switch": switch,
-    }
-
-    landed = await second.run(node_ctx(state=ctx.state), again)
-
-    assert isinstance(landed, Next) and landed.label == "ok", landed
-    assert [posted["identity"]["facets"]["unit"]["request"] for posted in search.posted] == [
-        _CONSTANT_EUR,
-        _EUR,
-    ]
-    replanned = load_plan(ctx.state)
-    assert replanned is not None
-    (prices,) = [d for d in replanned.decisions if d.slot.startswith("user_prices_")]
-    assert (prices.chosen, prices.options) == (
-        "current prices in EUR",
-        ("current prices in EUR", "constant prices"),
-    )
-
-
-def _switched_to_constant() -> DecisionPick:
-    """A pick of constant prices on the gross part's prices row."""
-    return DecisionPick(
-        slot=f"user_prices_{_GROSS}",
-        chosen="constant prices",
-        origin_fixes=DecisionFixes(prices="current"),
-        replaced_readings=(),
-        replaced_kinds=(),
-        cited_by_every=(),
-        cited_by_any=(),
-        kept_requirements={},
-        kept_decisions={},
-    )
-
-
-async def test_a_prices_switch_on_a_part_no_unit_answer_priced_reads_nothing() -> None:
-    """Search converts the gross part, but no unit answer chose its unit. A
-    switch of its prices row asks Search for nothing and settles nothing:
-    the replan holds the part to the picked prices alone."""
-    state: dict[str, Any] = {ORCHESTRATOR_SPECS_KEY: {_GROSS: _CONVERTED}}
-    search = _UnitSearch()
-
-    await planning._read_switched_prices(
-        node_ctx(state=state), _switched_to_constant(), surface=search
-    )
-
-    assert search.posted == []
-    assert unit_settled(state) == frozenset()
-    assert units_served(state) == {}
-
-
-async def test_a_prices_switch_in_a_unit_no_plan_states_re_reads_the_part() -> None:
-    """The gross part is served in a currency code no plan can state, so the
-    unit answer recorded no unit for it. A switch to constant prices tries
-    the re-read in that currency, and its refusal is the switch's, which the
-    card offers with the plan unchanged."""
-    block = copy.deepcopy(_CONVERTED)
-    conversion = block["resolved"]["unit_conversion"]
-    conversion["currencies"] = [{**conversion["currencies"][0], "code": "Eur"}]
-    block["definition"]["identity"]["facets"] = {
-        "unit": {"request": {"currency": "Eur", "prices": "current"}}
-    }
-    state: dict[str, Any] = {ORCHESTRATOR_SPECS_KEY: {_GROSS: block}}
-    record_unit_served(state, _GROSS, _GROSS, UnitChoice(currency="Eur", prices="current"))
-    search = _UnitSearch()
-
     with pytest.raises(SwitchFailedError):
-        await planning._read_switched_prices(
-            node_ctx(state=state), _switched_to_constant(), surface=search
+        await _switched_plan(
+            node_ctx(state=ctx.state), plan, **switch, planner=_no_planner, surface=search
         )
+    assert search.posted == []
 
 
-async def test_a_prices_switch_reads_again_the_count_the_unit_answer_read() -> None:
-    """The unit answer read the net count in the gross part's place, and the
-    `ask` node recorded so. A switch to constant prices re-reads the net
-    count, whatever else the turn settled."""
-    state: dict[str, Any] = {ORCHESTRATOR_SPECS_KEY: {_GROSS: _CONVERTED}}
-    record_unit_served(state, _GROSS, _EUR_READ, UnitChoice.model_validate(_EUR), count=_NET)
-    search = _UnitSearch()
-
-    await planning._read_switched_prices(
-        node_ctx(state=state), _switched_to_constant(), surface=search
-    )
-
-    (posted,) = search.posted
-    (net,) = _CONVERTED["resolved"]["alternative_measures"]
-    assert {**posted["identity"], "facets": None} == {
-        **net["definition"]["identity"],
-        "facets": None,
-    }
-    assert units_served(state)[_GROSS].count == _NET
-
-
-def test_a_prices_row_restated_fixing_nothing_is_refused_saying_so() -> None:
-    """The replan restates the gross part's prices row in the picked prices'
-    words, but its requirements fix nothing of it: the refusal says so, not
-    that the plan states other prices."""
-    stated = Decision(
-        slot=f"user_prices_{_GROSS}",
-        description="Which prices the figures are in.",
-        options=("current prices", "constant 2023 prices in EUR"),
-        chosen="constant 2023 prices in EUR",
-        resolved_by=ResolvedBy.USER,
-        rationale="r",
-    )
-
-    refused = _picked_decision(_switched_to_constant(), [stated], [], PROPOSE_PLAN)
-
-    assert isinstance(refused, dict)
-    assert refused["code"] == ProblemCode.USER_PICK_NOT_HELD.value
-    assert "fix none of what it names" in str(refused["message"])
+async def _no_planner(**_: Any) -> dict[str, Any]:
+    """A planner a test expects never to be called."""
+    raise AssertionError("the planner was called")
