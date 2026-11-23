@@ -25,6 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, NamedTuple, cast, override
 
+import httpx2
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from compiler.surface import (
@@ -35,14 +36,18 @@ from compiler.surface import (
     ToolCallResult,
     ToolSchema,
 )
+from data_mcp import client_holder
+from data_mcp.client import UpstreamClient
 from data_mcp.definition_store import InMemoryDefinitionStore
 from data_mcp.definition_store.identity import canonicalize, spec_id_for
 from data_mcp.definition_writes import unit_identity, windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
+from data_mcp.settings import Settings as DataMcpSettings
 from executor.ledger import InMemoryRunLedger
 from executor.outcomes import Accepted
 from executor.run import execute_approved_plan
+from fastmcp import Client
 from harness.decision_pick import DecisionPick
 from harness.graph import switch as switch_module
 from harness.graph.approve import offer
@@ -56,6 +61,8 @@ from harness.graph.state import (
     unit_row_offers,
 )
 from harness.graph.switch import SCOPE_CHOICE_NOT_APPLIED, SWITCH_CANCELLED, SwitchFailedError
+from harness.mcp_client import McpResolver
+from harness.orchestrator_tools import build_orchestrator_tools
 from harness.plan_display import choice_id, count_choice_id, decision_option_id
 from harness.planner_adapter import PlannerAdapter, store_searched_pin_readings
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
@@ -66,10 +73,11 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.turn.events import NodeDone, TurnFailed
 from harness.turn.loop import Outcome, stop_turn
-from harness.turn.node import Next
+from harness.turn.node import Next, NodeCtx
 from harness.turn.store import Cursor, TurnStatus
 from harness.turn_records import SearchReading
 from harness.wire import UnitChoice
+from orchestrator.call import OrchestratorCall
 from planner.call import PlannerCall
 from planner.plan import (
     DECISION_PICK_STATE_KEY,
@@ -1826,15 +1834,19 @@ def _dac2a_provider_blocks() -> tuple[dict[str, Any], dict[str, Any]]:
     return bilateral, inclusive
 
 
-async def test_a_ranking_switched_to_dac2a_s_inclusive_scope_compiles_its_sum(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """The deployed failure: a card ranking the recipients of US net ODA in 2019 on
-    DAC2a's bilateral flows, switched to bilateral plus imputed multilateral. The
-    inclusive answer binds every slot and serves two StatVars, the lines the mint
-    adds (`sums_components`), and the plan states no reading. The revision
-    re-pins the ranking's dataset and compiles: the rule reads the family summed,
-    so the rank reads one measure."""
+class _ProviderSwitched(NamedTuple):
+    """A US net ODA ranking on DAC2a's bilateral flows switched on the card to
+    bilateral plus imputed multilateral (`_provider_switched`): the node context
+    the switch ran in, and the inclusive block Search answered with."""
+
+    ctx: NodeCtx[Any]
+    inclusive: dict[str, Any]
+
+
+async def _provider_switched(real_schemas: list[ToolSchema]) -> _ProviderSwitched:
+    """A card ranking the recipients of US net ODA in 2019 on DAC2a's bilateral
+    flows, its reading stored, switched to bilateral plus imputed multilateral
+    (`_dac2a_provider_blocks`) through the real revision."""
     bilateral, inclusive = _dac2a_provider_blocks()
     pin = bilateral["spec_id"]
     scoped = scope_choice_decisions({pin: PinSource(block=bilateral, settled=True)})[pin]
@@ -1916,6 +1928,19 @@ async def test_a_ranking_switched_to_dac2a_s_inclusive_scope_compiles_its_sum(
         planner=cast(Any, planner),
         surface=planner.surface,
     )
+    return _ProviderSwitched(ctx, inclusive)
+
+
+async def test_a_ranking_switched_to_dac2a_s_inclusive_scope_compiles_its_sum(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The deployed failure: a card ranking the recipients of US net ODA in 2019 on
+    DAC2a's bilateral flows, switched to bilateral plus imputed multilateral. The
+    inclusive answer binds every slot and serves two StatVars, the lines the mint
+    adds (`sums_components`), and the plan states no reading. The revision
+    re-pins the ranking's dataset and compiles: the rule reads the family summed,
+    so the rank reads one measure."""
+    ctx, inclusive = await _provider_switched(real_schemas)
 
     revised = PlannerPlan.model_validate_json(ctx.state["plan"])
     assert revised.workflow is not None
@@ -1927,6 +1952,66 @@ async def test_a_ranking_switched_to_dac2a_s_inclusive_scope_compiles_its_sum(
     )
     fetch = next(step for step in revised.workflow.steps if step.tool.name == "get_data")
     assert fetch.args["stat_vars"] == "sum"
+
+
+async def test_a_search_after_a_provider_switch_posts_the_switched_provider_to_search(
+    monkeypatch: pytest.MonkeyPatch, real_schemas: list[ToolSchema]
+) -> None:
+    """A parsed search the orchestrator makes after a card switched to bilateral
+    plus imputed multilateral posts that provider to Search as a carried entry,
+    through data-mcp's own `search` with its settings left as deployed, so the
+    search keeps the user's pick and does not fall back to bilateral flows."""
+    monkeypatch.delenv("SEARCH_SENDS_CONVERSATION_CONTEXT", raising=False)
+    ctx, inclusive = await _provider_switched(real_schemas)
+    envelope = json.loads(
+        (
+            Path(__file__).parents[2] / "data-mcp/tests/fixtures/resolve_aid_france_kenya.json"
+        ).read_text()
+    )
+    posted: list[dict[str, Any]] = []
+
+    def search_api(request: httpx2.Request) -> httpx2.Response:
+        posted.append(json.loads(request.content))
+        return httpx2.Response(200, json=envelope)
+
+    client_holder.set_client(
+        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(search_api))
+    )
+    try:
+        async with Client(data_mcp) as client:
+
+            async def get() -> Client:
+                return client
+
+            async def release(_client: Client) -> None:
+                return None
+
+            resolver = McpResolver(settings=Settings())
+            monkeypatch.setattr(resolver, "_clients", SimpleNamespace(get=get, release=release))
+            tools = {
+                tool.__name__: tool
+                for tool in build_orchestrator_tools(
+                    resolver=resolver, executor=cast(Any, SimpleNamespace())
+                )
+            }
+            await tools["search"](
+                OrchestratorCall(state=cast(SessionState, ctx.state), turn_id="turn-1"),
+                [{"variable": "US net ODA"}],
+            )
+    finally:
+        client_holder.set_client(None)
+
+    (body,) = posted
+    provider = [e for e in body["input"].get("carried_entries", []) if e["axis"] == "provider"]
+    base = inclusive["resolved"]["scope_choices"]["id"]
+    assert provider == [
+        {
+            "axis": "provider",
+            "option_id": "provider:inclusive",
+            "provenance": "carried",
+            "origin": {"kind": "choice", "choice_id": f"{base}:provider"},
+        }
+    ]
 
 
 # --- a switch after a planner entry that asked the user -----------------------------------

@@ -322,14 +322,29 @@ def scope_repair(held: SelectedSource, across: str, *, members: bool = False) ->
     side = flow_side(across)
     if role is None or side is None:
         return None
-    groups = {group.label for group in held.groups if flow_side(group.role) == side}
-    entities = {entity.label for entity in held.entities if flow_side(entity.role) == side}
-    labels = groups if members else groups or entities
-    if len(labels) != 1:
+    groups = {group.label: group.ref for group in held.groups if flow_side(group.role) == side}
+    entities = {
+        entity.label: entity.ref for entity in held.entities if flow_side(entity.role) == side
+    }
+    parties = groups if members else groups or entities
+    if len(parties) != 1:
         return None
-    (label,) = labels
-    named = "with `members: true` " if members else ""
-    return f"name {label!r} as {role} in `entities` {named}and drop {across!r} from `across`"
+    ((label, ref),) = parties.items()
+    named = _entity_fields(ref, members=members)
+    return f"name {label!r} as {role} in `entities`{named} and drop {across!r} from `across`"
+
+
+def _entity_fields(ref: str | None, *, members: bool) -> str:
+    """The `entities` fields a repair sets beside the name, as " with `dcid: ref`, `members: true`".
+
+    The `dcid` is the graph node the system already resolved the party to, so
+    the plan names that node and the label is only a reading aid; empty
+    where the party has no node (`ResolvedGroup.ref` is `None`).
+    """
+    fields = [f"`dcid: {ref}`"] if ref else []
+    if members:
+        fields.append("`members: true`")
+    return f" with {', '.join(fields)}" if fields else ""
 
 
 def kept_scope_repair(kept: Sequence[Mapping[str, object]]) -> str | None:
@@ -338,14 +353,18 @@ def kept_scope_repair(kept: Sequence[Mapping[str, object]]) -> str | None:
     `kept` are the `search` entities a pin, set aside for leaving open the
     side a named entity sits on, holds its other sides to
     (`translator.discovery._kept_scope`): each with its `text`, its `role`
-    and, for a group read as its members, `members`. Naming each in the
+    and, where the graph holds a node for it, `dcid`; for a group read as its
+    members, `members`. Naming each by its `dcid` in the
     requirement's `entities` under its role brings the pinned source's
     scope back, as Kenya named recipient does for "Japan's ODA to Kenya".
     """
     return (
         "; ".join(
             f"name {party['text']!r} as {party['role']} in `entities`"
-            + (" with `members: true`" if party.get("members") else "")
+            + _entity_fields(
+                dcid if isinstance(dcid := party.get("dcid"), str) else None,
+                members=bool(party.get("members")),
+            )
             for party in kept
         )
         or None

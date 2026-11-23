@@ -72,6 +72,8 @@ from planner.operations import (
     GroupBy,
     Reduction,
     RetrieveOperation,
+    ShareOfOperation,
+    Side,
     Translation,
 )
 from planner.plan import (
@@ -82,9 +84,15 @@ from planner.plan import (
     Entity,
     Plan,
     PlanStatus,
+    RequirementSide,
+    ShareOfRequirement,
+    WholeOf,
+    WholeSum,
     plan_revision,
+    with_whole_sums,
 )
-from planner.workflow import SelectedSource, ToolId
+from planner.records import Period
+from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
 
 from ..unreachable_surface import unreachable_surface
 from .conftest import (
@@ -1067,6 +1075,126 @@ async def test_a_retrieval_reminted_under_another_id_is_still_checked_against_it
     assert isinstance(outcome, Refused)
     assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
     assert "source_drift" in [issue.code.value for issue in outcome.issues]
+
+
+class _BySpecSurface(ScriptedSurface):
+    """A `ScriptedSurface` whose `get_data` answers each call with the manifest held
+    for the spec_id it names."""
+
+    def __init__(self, schemas: list[ToolSchema], manifests: Mapping[str, dict[str, Any]]) -> None:
+        super().__init__(schemas=schemas, responses={})
+        self.manifests = dict(manifests)
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, object],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        if tool.name != "get_data":
+            return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        self.calls.append((tool.name, dict(arguments)))
+        return ok(self.manifests[str(arguments["spec_id"])])
+
+
+async def test_a_wholes_retrieval_is_held_to_the_parties_its_part_covers(
+    decision: Callable[..., Decision],
+    source: Callable[..., SelectedSource],
+    manifest_for: ManifestFactory,
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The United States' ODA to Kenya as a share of its whole over every donor, whose
+    source binds Kenya and leaves the donors open, so the plan sums them
+    (`Plan.whole_sums`). The whole states no entity, and its retrieval answering
+    with Uganda's aid is refused, since the whole covers what its part covers,
+    Kenya included."""
+    usa = ResolvedEntity(role="origin", ref="country/USA", label="United States")
+    kenya = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
+    uganda = ResolvedEntity(role="destination", ref="country/UGA", label="Uganda")
+    period = Period(start=2015, end=2024)
+    part = DatasetRequirement(
+        id="us_oda",
+        decision_ids=["measure"],
+        measure="official development assistance",
+        entities=[
+            Entity(name="United States", role="donor"),
+            Entity(name="Kenya", role="recipient"),
+        ],
+        period=period,
+    )
+    whole = DatasetRequirement(
+        id="all_oda",
+        decision_ids=["measure"],
+        measure="official development assistance",
+        period=period,
+        whole_of=WholeOf(part="us_oda", axis="donor"),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="us_oda"),
+        denominator=RequirementSide(input_id="all_oda"),
+    )
+    part_source = source(
+        entities=(usa, kenya),
+        identity={"stat_var": "ODA", "entities": {"origin": [usa.ref], "destination": [kenya.ref]}},
+    )
+    whole_source = source(
+        spec_id=SPEC_POPULATION,
+        entities=(kenya,),
+        identity={"stat_var": "ODA", "entities": {"destination": [kenya.ref]}},
+        open_entity_axes=(OpenEntityAxis(column="origin", member_count=40),),
+    )
+    sums = (WholeSum(whole_id="all_oda", sum_id="all_oda_sum"),)
+    draft = Plan(
+        question="What share of ODA to Kenya does the United States give?",
+        decisions=[decision()],
+        evidence_requirements=with_whole_sums([part, whole, share], sums),
+        whole_sums=sums,
+        status=PlanStatus.DRAFT,
+    )
+    translation = Translation(
+        operations=[
+            RetrieveOperation(id="us", requirement_id="us_oda", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="all", requirement_id="all_oda", spec_id=SPEC_POPULATION),
+            AggregateOperation(
+                id="all_summed",
+                requirement_id="all_oda_sum",
+                input="all",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD, GroupBy.ENTITY),
+            ),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="us"),
+                denominator=Side(input="all_summed"),
+            ),
+        ],
+        terminal=["share"],
+    )
+    compiled = compile_plan(
+        plan=draft,
+        translation=translation,
+        schemas={schema.name: schema for schema in real_schemas},
+        discovered={"us_oda": part_source, "all_oda": whole_source},
+    )
+    assert compiled.workflow is not None, compiled.issues
+    plan = draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
+    elsewhere = whole_source.model_copy(update={"entities": (uganda,)})
+    surface = _BySpecSurface(
+        real_schemas,
+        {SPEC_KENYA: manifest_for(part_source), SPEC_POPULATION: manifest_for(elsewhere)},
+    )
+
+    outcome = await _run(plan, surface=surface, sleep=_Sleeps())
+
+    assert isinstance(outcome, Refused), outcome
+    assert (outcome.refusal, outcome.requirement_id) == (RefusalKind.REQUIREMENT_UNMET, "all_oda")
+    assert "entity_no_series" in [issue.code.value for issue in outcome.issues]
 
 
 async def test_one_entity_short_of_the_period_is_not_hidden_by_anothers_reach(

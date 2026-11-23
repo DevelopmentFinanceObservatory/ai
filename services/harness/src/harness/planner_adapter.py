@@ -104,6 +104,8 @@ from planner.plan import (
     truncate,
     warning_codes,
     windowed_origins,
+    without_stated_coverage,
+    without_whole_sums,
 )
 from planner.pydantic_agent import (
     PlannerAnswers,
@@ -1620,13 +1622,27 @@ def _as_authored(plan: Plan | None) -> dict[str, Any] | None:
     """`plan` as the model wrote it, for `_plan_context` to render.
 
     A stored plan holds the copies the split of whole-history reads added
-    (`Plan.rolling_copies`), which the model did not write and cannot
+    (`Plan.rolling_copies`) and the sums `propose_plan` added over a whole's
+    open side (`Plan.whole_sums`), which the model did not write and cannot
     patch by name. The render shows the plan without them
-    (`plan_display.shown_plan`), and the stored plan is saved as it is.
+    (`plan_display.shown_plan`, `planner.plan.without_whole_sums`), each
+    reader of a sum reading its whole, and the stored plan is saved as it is.
+    A whole stored with the `entities` and `across` its part settles shows
+    without them (`without_stated_coverage`), since a proposal stating them is
+    refused.
     """
     if plan is None:
         return None
-    return plan_display.shown_plan(plan).model_dump(mode="json")
+    shown = plan_display.shown_plan(plan)
+    return shown.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                without_stated_coverage(requirement)
+                for requirement in without_whole_sums(shown.evidence_requirements, shown.whole_sums)
+            ),
+            "whole_sums": (),
+        }
+    ).model_dump(mode="json")
 
 
 def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] = ()) -> str:

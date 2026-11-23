@@ -27,9 +27,10 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
+import translator.discovery
 import translator.tool
 from compiler.compile import CompileIssue, CompileIssueCode, CompileResult
-from compiler.sources import DiscoveryStatus
+from compiler.sources import DiscoveryStatus, source_from_spec_block
 from compiler.surface import (
     FixtureSurface,
     ProgressCallback,
@@ -44,6 +45,8 @@ from planner.operations import Translation
 from planner.plan import (
     PLAN_STATE_KEY,
     AggregateRequirement,
+    AlignedInput,
+    AlignedPin,
     AskAnswer,
     Coverage,
     DatasetRequirement,
@@ -60,12 +63,14 @@ from planner.plan import (
     ShareOfRequirement,
     Unit,
     UnsupportedOperation,
+    WholeOf,
     WindowedPin,
     current_discovery_time_left,
     load_optional_declines,
     load_unsupported,
     period_window,
     plan_revision,
+    save_alignments,
     save_pin_sources,
     save_windowed_pins,
     split_of,
@@ -85,9 +90,11 @@ from planner.records import (
 from planner.shapes import pooling_remedy
 from planner.tool_results import Outcome, referred
 from planner.workflow import SelectedSource, ToolId
+from submission.service import save_aligned_pin
 from translator.discovery import (
     DiscoveryRecord,
     NamedGroup,
+    build_discover_source,
     load_log,
     name_pinned_groups,
     requirement_revision,
@@ -1207,13 +1214,13 @@ async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin
     assert answer["named_in_place_of_across"] == [
         {
             "requirement_id": "annual_debt_service",
-            "entity": {"name": "Africa", "role": "recipient"},
+            "entity": {"name": "Africa", "role": "recipient", "dcid": "africa"},
             "across": "recipient",
         }
     ]
     assert (stored.version, stored.status) == (1, PlanStatus.PENDING_APPROVAL)
     assert pinned.across == ()
-    assert [*pinned.entities] == [*france, Entity(name="Africa", role="recipient")]
+    assert [*pinned.entities] == [*france, Entity(name="Africa", role="recipient", dcid="africa")]
     assert stored.workflow is not None
     assert [source.spec_id for source in stored.workflow.sources] == [SPEC_AFRICA]
 
@@ -1486,13 +1493,251 @@ async def test_a_group_a_shares_numerator_names_is_not_named_on_its_whole(
 
     found = await name_pinned_groups(context.state, surface=FixtureSurface(schemas=real_schemas))
 
-    g7 = Entity(name="G7", role="donor")
+    g7 = Entity(name="G7", role="donor", dcid="GroupOfSeven")
     assert found == ((NamedGroup("oda", g7, "donor"),) if named else ())
     total = _stored(context).requirement("oda")
     assert isinstance(total, DatasetRequirement)
     assert (total.entities, total.across) == (
         ((kenya, g7), ()) if named else ((kenya,), ("donor",))
     )
+
+
+# G7 aid to Africa, and the whole `propose_plan` compiles from it over every
+# recipient. That is G7 aid to developing countries, a total Search binds
+# `destination` to.
+SPEC_G7_AFRICA = "spec_2a634c06" + "0" * 24
+SPEC_G7_EVERY_RECIPIENT = "spec_66627f58" + "0" * 24
+_G7_COVERAGE = {"kind": "exact", "has_data": True, "window": {"start_year": 1960, "end_year": 2024}}
+_G7_DONOR = {"role": "origin", "label": "Group of Seven", "ref": "GroupOfSeven"}
+_G7_AFRICA_BLOCK = _spec(
+    SPEC_G7_AFRICA,
+    "Net ODA from the Group of Seven to Africa",
+    coverage=_G7_COVERAGE,
+    entities=[_G7_DONOR, {"role": "destination", "label": "Africa", "ref": "africa"}],
+)
+_DEVELOPING = {"label": "developing countries (DAC)", "ref": "DACDevelopingCountries"}
+_G7_EVERY_RECIPIENT_BLOCK = _spec(
+    SPEC_G7_EVERY_RECIPIENT,
+    "Net ODA from the Group of Seven to developing countries (DAC)",
+    coverage=_G7_COVERAGE,
+    entities=[_G7_DONOR, {"role": "destination", **_DEVELOPING}],
+    entity_groups={"destination": {**_DEVELOPING, "total": "DACDevelopingCountries"}},
+)
+
+
+@pytest.mark.parametrize("stored", [False, True], ids=["states-nothing", "stored-with-across"])
+async def test_a_whole_pinned_to_its_compile_is_never_searched(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    stored: bool,
+) -> None:
+    """G7 aid to Africa as a share of G7 aid to every recipient, the whole pinned to
+    the compile `propose_plan` made of it, which Search binds to the developing
+    countries' total. The whole is settled, and translation compiles it from that pin
+    with no search and no rewrite. A stored plan may hold a whole stating its part's
+    donor and the recipients in `across`, pooled by year, which reads the same way."""
+    g7 = Entity(name="Group of Seven", role="donor")
+    period = Period(start=1960, end=2024)
+    whole = requirement(
+        id="g7_total_aid",
+        measure="official development assistance",
+        entities=[],
+        period=period,
+        source_spec_id=SPEC_G7_EVERY_RECIPIENT,
+        unit=None,
+        whole_of=WholeOf(part="g7_africa_aid", axis="recipient"),
+    )
+    if stored:
+        whole = whole.model_copy(update={"entities": (g7,), "across": ("recipient",)})
+    pooled = [derived_requirement(id="g7_total_pooled", input_id=whole.id)] if stored else []
+    context = context_holding(
+        draft(
+            evidence_requirements=[
+                requirement(
+                    id="g7_africa_aid",
+                    measure="official development assistance",
+                    entities=[g7, Entity(name="Africa", role="recipient")],
+                    period=period,
+                    source_spec_id=SPEC_G7_AFRICA,
+                    unit=None,
+                ),
+                whole,
+                *pooled,
+                ShareOfRequirement(
+                    id="g7_africa_share",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="g7_africa_aid"),
+                    denominator=RequirementSide(input_id="g7_total_pooled" if stored else whole.id),
+                ),
+            ],
+        )
+    )
+    save_pin_sources(
+        context.state,
+        {
+            SPEC_G7_AFRICA: PinSource(block=_G7_AFRICA_BLOCK, settled=True),
+            SPEC_G7_EVERY_RECIPIENT: PinSource(block=_G7_EVERY_RECIPIENT_BLOCK, settled=True),
+        },
+    )
+    surface = _CountingSurface(schemas=real_schemas)
+
+    answer = await build_translate(surface=surface)(FakeCall(context.state))
+
+    assert answer["outcome"] == Outcome.OK.value, answer
+    assert "search" not in surface.calls
+    assert "named_in_place_of_across" not in answer
+    plan = _stored(context)
+    assert plan.requirement(whole.id) == whole
+    assert plan.workflow is not None
+    assert {source.spec_id for source in plan.workflow.sources} == {
+        SPEC_G7_AFRICA,
+        SPEC_G7_EVERY_RECIPIENT,
+    }
+
+
+# A dataset the whole's part is not pinned to.
+_SPEC_ELSEWHERE = "spec_" + "9" * 32
+
+
+@pytest.mark.parametrize(
+    ("pinned", "answered"),
+    [
+        ("compiled-from-its-part", "definite"),
+        ("compiled-from-another-dataset", "share_whole_underivable"),
+        ("no-pin", "share_whole_underivable"),
+        ("read-off-the-log", "share_whole_underivable"),
+        ("compiled-block-unreadable", "search_refused"),
+        ("unreadable-from-another-dataset", "share_whole_underivable"),
+        ("unavailable-from-another-dataset", "share_whole_underivable"),
+    ],
+)
+async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    context_holding: ContextHolding,
+    monkeypatch: pytest.MonkeyPatch,
+    pinned: str,
+    answered: str,
+) -> None:
+    """G7 aid to Africa's whole over every recipient, pinned to a compile of G7 aid.
+    The whole is settled with no search on a compile of the dataset its part is
+    pinned to. A compile of another dataset, no pin at all, and a pin known only
+    from the discovery log, whose identity carries another search's years, each
+    refer the whole back, so the plan is proposed again and the whole compiled
+    from its part. A compile whose block names a class of party this release does
+    not know is refused as the unreadable answer it is, since its part's search
+    answers the same way, unless it was compiled from another dataset, which a
+    compile from its part's may read. A compile of another dataset is referred
+    back before any reader of its pin runs, so a reader that cannot reach Search
+    has no say."""
+    g7 = Entity(name="Group of Seven", role="donor")
+    period = Period(start=1960, end=2024)
+    whole = requirement(
+        id="g7_total_aid",
+        measure="official development assistance",
+        entities=[],
+        period=period,
+        source_spec_id=None if pinned == "no-pin" else SPEC_G7_EVERY_RECIPIENT,
+        unit=None,
+        whole_of=WholeOf(part="g7_africa_aid", axis="recipient"),
+    )
+    context = context_holding(
+        draft(
+            evidence_requirements=[
+                requirement(
+                    id="g7_africa_aid",
+                    measure="official development assistance",
+                    entities=[g7, Entity(name="Africa", role="recipient")],
+                    period=period,
+                    source_spec_id=SPEC_G7_AFRICA,
+                    unit=None,
+                ),
+                whole,
+                ShareOfRequirement(
+                    id="g7_africa_share",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="g7_africa_aid"),
+                    denominator=RequirementSide(input_id=whole.id),
+                ),
+            ],
+        )
+    )
+    save_pin_sources(
+        context.state, {SPEC_G7_AFRICA: PinSource(block=_G7_AFRICA_BLOCK, settled=True)}
+    )
+    elsewhere = pinned in {
+        "compiled-from-another-dataset",
+        "unreadable-from-another-dataset",
+        "unavailable-from-another-dataset",
+    }
+    read: list[str] = []
+    if pinned == "unavailable-from-another-dataset":
+
+        async def unavailable(
+            *_: object, requirement: DatasetRequirement, **__: object
+        ) -> dict[str, object]:
+            read.append(requirement.id)
+            return {"outcome": Outcome.TRANSIENT.value, "code": "surface_unavailable"}
+
+        monkeypatch.setattr(translator.discovery, "_pin_source", unavailable)
+    origin = _SPEC_ELSEWHERE if elsewhere else SPEC_G7_AFRICA
+    save_alignments(
+        context.state,
+        [
+            AlignedInput(
+                requirement_id=whole.id,
+                spec_id=SPEC_G7_EVERY_RECIPIENT,
+                origin=origin,
+                whole_axis="recipient",
+                stated_pin=None,
+            )
+        ],
+    )
+    if pinned == "read-off-the-log":
+        _discovered(
+            context,
+            source_from_spec_block(_G7_EVERY_RECIPIENT_BLOCK),
+            status=DiscoveryStatus.DEFINITE,
+            requirement_id=whole.id,
+        )
+    else:
+        block = json.loads(json.dumps(_G7_EVERY_RECIPIENT_BLOCK))
+        if pinned in {"compiled-block-unreadable", "unreadable-from-another-dataset"}:
+            block["resolved"]["entity_groups"]["destination"]["whole_of"] = ["sovereign_fund"]
+        save_aligned_pin(
+            context.state,
+            AlignedPin(
+                origin=origin,
+                option_ids=(),
+                spec_id=SPEC_G7_EVERY_RECIPIENT,
+                digest={"spec_block": block},
+                whole_axis="recipient",
+            ),
+            warnings=(),
+        )
+    surface = _CountingSurface(schemas=[])
+
+    found = await build_discover_source(surface=surface)(
+        requirement_id=whole.id, state=context.state
+    )
+
+    assert surface.calls == {}
+    assert read == []
+    if answered == "definite":
+        assert (found["status"], found["sources"][0]["spec_id"]) == (
+            "definite",
+            SPEC_G7_EVERY_RECIPIENT,
+        )
+    elif answered == "search_refused":
+        assert found["code"] == answered
+    else:
+        assert (found["code"], found["action"]["arguments"]["kind"]) == (
+            answered,
+            "requirement_unmeetable",
+        )
 
 
 # DAC1 grant equivalents with the donor side bound to the members of "DAC members",
@@ -1578,7 +1823,7 @@ async def test_a_rank_over_a_side_a_pin_holds_to_a_group_ranks_its_members(
 
     found = await name_pinned_groups(context.state, surface=FixtureSurface(schemas=real_schemas))
 
-    members = Entity(name="DAC members", role="donor", members=True)
+    members = Entity(name="DAC members", role="donor", members=True, dcid="DACMembers")
     assert found == ((NamedGroup("req_oda", members, "donor"),) if named else ())
     ranked = _stored(context).requirement("req_oda")
     assert isinstance(ranked, DatasetRequirement)
@@ -1605,7 +1850,7 @@ async def test_a_group_a_pin_holds_is_named_on_a_dataset_and_its_whole_history_c
     copy, and the copy keeps its own pin, the dataset over its whole history.
     """
     france = Entity(name="France", role="donor")
-    africa = Entity(name="Africa", role="recipient")
+    africa = Entity(name="Africa", role="recipient", dcid="africa")
     written = draft(
         decisions=[pinning_decision(SPEC_AFRICA)],
         evidence_requirements=[

@@ -217,11 +217,21 @@ async def test_lifespan_does_not_touch_the_frame_store_when_no_bucket_is_configu
         assert frame_store_is_set() is False
 
 
-@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize(
+    ("setting", "enabled"),
+    [(None, True), ("true", True), ("false", False)],
+    ids=["unset", "on", "off"],
+)
 async def test_lifespan_logs_whether_search_sends_the_conversation_context(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, enabled: bool
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    setting: str | None,
+    enabled: bool,
 ) -> None:
-    monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", str(enabled).lower())
+    if setting is None:
+        monkeypatch.delenv("SEARCH_SENDS_CONVERSATION_CONTEXT", raising=False)
+    else:
+        monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", setting)
 
     with caplog.at_level(logging.INFO, logger="data_mcp.server"):
         async with server._lifespan(mcp):

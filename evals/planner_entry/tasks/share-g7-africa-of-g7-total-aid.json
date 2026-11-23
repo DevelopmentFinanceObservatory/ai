@@ -1,0 +1,115 @@
+{
+  "id": "share-g7-africa-of-g7-total-aid",
+  "kind": "share_of",
+  "origin": "trace 9d55ccafd1adc4065a7b83e423e648af",
+  "question": "G7 aid to Africa as a share of its total aid since the earliest available year",
+  "searches": [
+    {
+      "parts": [
+        {
+          "variable": "aid",
+          "entities": [
+            {
+              "text": "g7",
+              "role": "from"
+            },
+            {
+              "text": "Africa",
+              "role": "to"
+            }
+          ],
+          "operations": [
+            {
+              "verb": "share_of",
+              "over": "destination",
+              "phrase": "share of its total aid"
+            }
+          ],
+          "time": "since the earliest available year"
+        }
+      ]
+    }
+  ],
+  "brief": "G7 official development assistance to Africa as a share of total G7 official development assistance across all recipients, from 1960 to 2024.",
+  "asks": [
+    {
+      "text": "G7 official development assistance to Africa as a share of G7 total official development assistance",
+      "over": [
+        "recipient"
+      ]
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "share_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "share_of"
+  ],
+  "neighbour": {
+    "kind": "quotient_of",
+    "distinction": "share_of, not quotient_of: G7 aid to Africa is a part of G7 aid to every recipient, both in one unit"
+  },
+  "unit_asked": false,
+  "period_reduction": "none",
+  "reference_payload": {
+    "question": "G7 official development assistance to Africa as a share of total G7 official development assistance across all recipients, from 1960 to 2024.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "g7_africa_aid",
+        "measure": "official development assistance",
+        "entities": [
+          {
+            "name": "Group of Seven",
+            "role": "donor"
+          },
+          {
+            "name": "Africa",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 1960,
+          "end": 2024
+        },
+        "source_spec_id": "spec_2a634c06dc3937cc8692b41d25268397"
+      },
+      {
+        "kind": "dataset",
+        "id": "g7_total_aid",
+        "measure": "official development assistance",
+        "period": {
+          "start": 1960,
+          "end": 2024
+        },
+        "whole_of": {
+          "part": "g7_africa_aid",
+          "axis": "recipient"
+        }
+      },
+      {
+        "kind": "share_of",
+        "id": "g7_africa_share",
+        "numerator": {
+          "input_id": "g7_africa_aid"
+        },
+        "denominator": {
+          "input_id": "g7_total_aid"
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "g7_africa_share"
+        ]
+      }
+    ]
+  },
+  "alternative_payloads": []
+}

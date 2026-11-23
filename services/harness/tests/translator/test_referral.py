@@ -261,6 +261,9 @@ _FRANCE = ResolvedEntity(role="origin", ref="country/FRA", label="France")
 _GHANA = ResolvedEntity(role="destination", ref="country/GHA", label="Ghana")
 _KENYA = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
 _AFRICA = ResolvedGroup(role="destination", label="Africa", ref="africa")
+_DEVELOPING_COUNTRIES = ResolvedGroup(
+    role="destination", label="developing countries (DAC)", ref="DACDevelopingCountries"
+)
 _EVERY_RECIPIENT = (OpenEntityAxis(column="destination", member_count=266),)
 
 
@@ -312,17 +315,23 @@ def test_dropped_scope_names_each_column_the_found_source_widens_or_drops(
         (
             {"entities": (_FRANCE, _GHANA, _KENYA), "groups": (_AFRICA,)},
             "recipient",
-            "name 'Africa' as recipient in `entities` and drop 'recipient' from `across`",
+            "name 'Africa' as recipient in `entities` with `dcid: africa` and drop 'recipient' from `across`",
+        ),
+        (
+            {"groups": (_DEVELOPING_COUNTRIES,)},
+            "recipients",
+            "name 'developing countries (DAC)' as recipient in `entities` with "
+            "`dcid: DACDevelopingCountries` and drop 'recipients' from `across`",
         ),
         (
             {"entities": (_FRANCE, _GHANA)},
             "recipients",
-            "name 'Ghana' as recipient in `entities` and drop 'recipients' from `across`",
+            "name 'Ghana' as recipient in `entities` with `dcid: country/GHA` and drop 'recipients' from `across`",
         ),
         ({"entities": (_FRANCE, _GHANA, _KENYA)}, "recipient", None),
         ({"entities": (_FRANCE,), "groups": (_AFRICA,)}, "country", None),
     ],
-    ids=["a-group", "one-member", "several-members", "no-side"],
+    ids=["a-group", "a-group-by-ref", "one-member", "several-members", "no-side"],
 )
 def test_scope_repair_names_the_one_member_the_pinned_source_held(
     source: SourceFactory, held: dict[str, Any], across: str, repair: str | None

@@ -19,9 +19,16 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from typing import Any, NamedTuple, cast
+from typing import Any, cast
 
-from compiler.sources import block_group, party_class, readable_wire_groups
+from compiler.sources import (
+    WHOLE_COLUMNS,
+    Containment,
+    WholeSide,
+    block_group,
+    parties_outside,
+    readable_wire_groups,
+)
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
@@ -42,7 +49,6 @@ from harness.tool_contracts import resolver_digest
 from pydantic import JsonValue
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from submission.service import (
-    WHOLE_COLUMNS,
     AlignedPin,
     Realignment,
     ScopeRead,
@@ -426,7 +432,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     unbinding the slot the part's sector choice binds
     (`submission.service.axis_slot`). A donor or recipient is opened by
     dropping that role's column from the identity
-    (`submission.service.WHOLE_COLUMNS`), with the set named on it and the
+    (`compiler.sources.WHOLE_COLUMNS`), with the set named on it and the
     choice adding entities to it, the region, so Search answers with the
     total over every party there that holds the part, and what population
     that is stays Search's answer. Search keeps the part's measure basis,
@@ -469,7 +475,8 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     or with a donor or recipient whole that Search shows does not hold a party
     the part names on that role (`part_outside_whole`), or bound to one total
     that states neither its members nor a whole class of party, so nothing
-    shows it does (`whole_members_unstated`) (`_parties_outside`).
+    shows it does (`whole_members_unstated`) (`_parties_outside`), or with no
+    spec block to hold (`whole_refused`).
     """
     part_pin, axis = realignment.spec_id, cast(str, realignment.whole_axis)
 
@@ -530,7 +537,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     held = (
         _parties_outside(scope, spec, column, part_block=block)
         if column is not None
-        else _Containment()
+        else Containment()
     )
     if held.outside or held.unshown:
         return underivable(*_uncontained(part_pin, axis, held))
@@ -541,6 +548,10 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
         if answered.get(choice.axis) == choice.active
     }
     digest = resolver_digest({"parts": [_as_whole(part, inherited, entries, answered)]})
+    if not isinstance(digest.get("spec_block"), Mapping):
+        # A whole held with no block is compiled again on every proposal
+        # (`AlignedPin.complete`), so one is never held.
+        return underivable(f"Search's answer for the whole of {part_pin} states no spec block")
     mark_planner_axes(digest, planner_axes(block) & inherited.keys())
 
     def hold(into: SessionState) -> None:
@@ -626,16 +637,7 @@ def _answered_options(spec_id: str, spec: Mapping[str, Any]) -> dict[str, str]:
     return {choice.axis: choice.active for choice in scope.choices} if scope is not None else {}
 
 
-class _Containment(NamedTuple):
-    """The parties a part names on a donor or recipient whole's role that Search's
-    answer shows are outside the whole (`outside`), and those it does not show are
-    inside or outside (`unshown`) (`_parties_outside`)."""
-
-    outside: tuple[str, ...] = ()
-    unshown: tuple[str, ...] = ()
-
-
-def _uncontained(part_pin: str, axis: str, held: _Containment) -> tuple[str, str]:
+def _uncontained(part_pin: str, axis: str, held: Containment) -> tuple[str, str]:
     """Why the whole over every `axis` of the part pinned `part_pin` does not contain
     it, `held` its containment (`_parties_outside`), as a clause and its
     `share_whole_underivable` cause: `part_outside_whole` where Search shows a
@@ -658,96 +660,37 @@ def _uncontained(part_pin: str, axis: str, held: _Containment) -> tuple[str, str
 # Search's cause for an entry dropped because the part has no choice on its axis.
 _AXIS_ABSENT = "axis_absent"
 
-# A total holding a whole population can leave out this class of party and still
-# hold every party the part names. A residual names no party (`common.place_type`).
-_NOT_A_PARTY_CLASS = "residual"
-
 
 def _parties_outside(
     scope: PartScope, spec: Mapping[str, Any], column: str, *, part_block: Mapping[str, Any]
-) -> _Containment:
+) -> Containment:
     """Whether the whole Search answered with (`spec`) holds each party the part
-    `scope` records names on the role `column` (`compile_whole`). `part_block`
-    is the part's spec block.
+    `scope` records names on the role column `column` (`compile_whole`), by
+    `compiler.sources.parties_outside`. `part_block` is the part's spec block.
 
-    A whole binding nothing on `column` counts every party its dataset holds
-    there, the part's own dataset, so it holds every party the part names.
-    One binding parties there holds those it binds, and of a total it binds,
-    the members Search lists for the group naming it on `column`
-    (`ResolvedGroup.members`, DAC countries' total). A total holding a whole
-    population (`ResolvedGroup.whole_of`) holds every party of its classes and
-    no other. It holds the part's party where its ref shows it is of one
-    (`compiler.sources.party_class`, a country official), and not where its
-    ref shows another. It holds a party whose ref shows no class where its
-    classes are every class the side publishes (`ResolvedGroup.side_classes`),
-    residuals aside. Where the side publishes another class, or Search states
-    no classes for the side but residuals, nothing here says which class that
-    party is, so it is unshown.
-    Any other party is outside where Search binds parties or lists a total's
-    members there, and unshown where the total it binds states neither its
-    members nor a whole class. Where Search's group on `column` is not
-    readable (`compiler.sources.block_group`), as one naming a class of party
-    outside `PartyClass`, every party it does not bind is unshown. A group on
-    another role is not read. The parties the part and the whole bind on
-    `column` are those their scope records bind
-    (`submission.service.bound_parties`), a choice's among them. Where the
-    whole's record does not read, the parties it binds are those its
-    definition binds (`submission.service.block_parties`).
-
-    A party of the part the whole neither binds nor lists is read through the
-    part's own group on `column` where it is that group's total (the G7's). The
-    whole holds that party where it holds every member Search lists for the
-    group, does not where one is outside, and nothing shows it does where
-    Search lists no members, or the part's group there is not readable.
+    The whole is the part's own dataset with `column` left open, so the parties it
+    binds there with no named set are all it holds. The parties the part and the
+    whole bind on `column` are those their scope records bind
+    (`submission.service.bound_parties`), a choice's among them. Where the whole's
+    record does not read, the parties it binds are those its definition binds
+    (`submission.service.block_parties`). A named set on another role is not read.
     """
-    named = bound_parties(scope, column)
     bound = block_parties(spec, column, scope=part_scope(str(spec.get("spec_id")), spec))
-    if not bound:
-        return _Containment()
     try:
-        group = block_group(spec, column)
+        whole = WholeSide(bound=bound, group=block_group(spec, column))
     except ValueError:
-        return _Containment(unshown=tuple(party for party in named if party not in bound))
-    members = set(group.members) if group is not None else set()
-
-    def holds(party: str) -> bool | None:
-        """Whether the whole holds `party` as itself, `None` where nothing shows it."""
-        if party in bound or party in members:
-            return True
-        if group is not None and group.whole_of:
-            if (held := party_class(party)) is not None:
-                return held in group.whole_of
-            classes = set(group.side_classes) - {_NOT_A_PARTY_CLASS}
-            return True if classes and classes <= set(group.whole_of) else None
-        if members or group is None or group.total not in bound:
-            return False
-        return None
-
+        whole = WholeSide(bound=bound, readable=False)
     try:
-        part_group = block_group(part_block, column)
+        part_group, part_readable = block_group(part_block, column), True
     except ValueError:
         part_group, part_readable = None, False
-    else:
-        part_readable = True
-    outside: list[str] = []
-    unshown: list[str] = []
-    for party in named:
-        held = holds(party)
-        if held:
-            continue
-        if not part_readable:
-            # The party may be the total of a group nothing here reads.
-            held = None
-        elif part_group is not None and party == part_group.total:
-            each = [holds(member) for member in part_group.members]
-            if not each:
-                held = None
-            elif all(each):
-                continue
-            else:
-                held = False if False in each else None
-        (outside if held is False else unshown).append(party)
-    return _Containment(outside=tuple(outside), unshown=tuple(unshown))
+    return parties_outside(
+        bound_parties(scope, column),
+        [whole],
+        part_group=part_group,
+        part_readable=part_readable,
+        bound_is_exact=True,
+    )
 
 
 def _as_whole(
@@ -976,7 +919,9 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
     A pin already compiled on a set of options, or a whole already compiled,
     is asked for once, so a refusal naming one is answered as it stands, and
     inputs sharing a pin and a set of options compile it once
-    (`_alignment_key`).
+    (`_alignment_key`). A whole on record with no spec block is compiled
+    again, once a call: a refusal naming a whole this call compiled answers
+    `SHARE_WHOLE_UNDERIVABLE`.
 
     The reads one refusal asks for run at once. Their writes are made in the
     order the refusal names them, up to the first read refused. That refusal
@@ -987,6 +932,7 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
     next proposal searches only for what was refused.
     """
     scopes_read: set[str] = set()
+    compiled: set[tuple[str, tuple[str, ...], str | None]] = set()
     while True:
         result = propose()
         pin = _first_year_wanted(result)
@@ -1037,10 +983,28 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
         done = {
             _alignment_key(pin.origin, pin.option_ids, pin.whole_axis)
             for pin in aligned_pins(state)
+            if pin.complete
         }
         keys = [_alignment_key(item.spec_id, item.option_ids, item.whole_axis) for item in wanted]
         if not wanted or any(key in done for key in keys):
             return result
+        again = next(
+            (item for key, item in zip(keys, wanted, strict=True) if key in compiled), None
+        )
+        if again is not None:
+            # Held and refused again for want of what it holds: Search's answer
+            # will not change within the call.
+            if again.whole_axis is None:
+                return result
+            return share_whole_underivable(
+                whole_id=again.requirement_id,
+                part_spec_id=again.spec_id,
+                reason=(
+                    f"Search's answer for the whole of {again.spec_id} does not say how it "
+                    f"serves every {again.whole_axis}"
+                ),
+                cause="whole_refused",
+            )
         compiles: dict[tuple[str, tuple[str, ...], str | None], Realignment] = {}
         for key, item in zip(keys, wanted, strict=True):
             compiles.setdefault(key, item)
@@ -1048,6 +1012,7 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
             (compile_on_basis(surface, item, state=state) for item in compiles.values()),
             state=state,
         )
+        compiled.update(compiles)
         if refused is not None:
             return refused
 

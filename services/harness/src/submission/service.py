@@ -58,12 +58,14 @@ import rfc8785
 from compiler.evidence import named_members, named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
+    WHOLE_COLUMNS,
     block_concept_label,
     block_group,
     countries_apart,
     is_country,
     measure_named_by_query,
     open_entity_axes_of,
+    open_side_column,
     readable_groups,
     readable_source,
     slot_codes,
@@ -103,7 +105,6 @@ from planner.parties import (
     flow_side,
     party_among,
     party_role,
-    role_party,
 )
 from planner.plan import (
     ALIGNED_PIN_WARNINGS_STATE_KEY,
@@ -162,6 +163,7 @@ from planner.plan import (
     UnsupportedOperation,
     UnsupportedPlanError,
     WholeIsItsMemberError,
+    WholeSum,
     WindowedPin,
     aligned_entry,
     aligned_input,
@@ -204,6 +206,7 @@ from planner.plan import (
     load_terminal_declines,
     load_unsupported,
     open_window,
+    opened_role,
     period_licences_held,
     period_window,
     pin_slot_moves,
@@ -224,12 +227,14 @@ from planner.plan import (
     settle_decisions,
     spec_searched_at,
     split_of,
+    stated_coverage_fault,
     unaligned_requirement,
     unstated_period_reductions,
     unstated_result_scopes,
     whole_of_fault,
     windowed_pin,
     windowed_pins,
+    with_whole_sums,
 )
 from planner.records import (
     MAX_IDENTIFIER_CHARS,
@@ -697,6 +702,10 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     )
     wholes = {rid: pin for rid, pin in targets.items() if pin.whole_axis is not None}
     moved = {rid: pin for rid, pin in targets.items() if pin.whole_axis is None}
+    # A whole Search leaves open on the side it opens is summed by a step of its own,
+    # derived again on every admission, since the plan it amends is read without one
+    # (`statement`).
+    sums = _whole_sums(wholes, aligned_after)
     settled, evidence_requirements = _without_replaced_whole_decisions(
         settle_decisions(drafts, aligned_after),
         evidence_requirements,
@@ -902,6 +911,14 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 asks_across_years=load_asks_across_years(view.state),
                 answered=patch.answered,
                 first_years=_first_years_on_record(requirements_after, shown=on_record, read=read),
+            )
+        if sums:
+            plan = Plan.model_validate(
+                {
+                    **plan.model_dump(),
+                    "evidence_requirements": with_whole_sums(plan.evidence_requirements, sums),
+                    "whole_sums": sums,
+                }
             )
         stated = plan.model_copy(
             update={
@@ -1258,6 +1275,20 @@ class _Patch(BaseModel):
                 f"an entity's role is one of {', '.join(PARTY_ROLES)}, or unset for a place "
                 f"the measure is about; {'; '.join(refused)}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _wholes_state_no_coverage(self) -> _Patch:
+        """Reject a whole stating `entities` or `across`, which its part settles
+        (`planner.plan.stated_coverage_fault`)."""
+        faults = [
+            fault
+            for requirement in self.evidence_requirements
+            if isinstance(requirement, DatasetRequirement)
+            and (fault := stated_coverage_fault(requirement))
+        ]
+        if faults:
+            raise ValueError("; ".join(faults))
         return self
 
 
@@ -6725,15 +6756,14 @@ def _declared_wholes(
     (`whole_axis_held`, `planner.source_reads.compile_whole`) and every other choice
     held. `compiled` holds the wholes compiled so far
     (`AlignedPin.key`), so wholes declaring one part and axis share one
-    compile.
+    compile. One on record with no spec block is compiled again in its place
+    (`AlignedPin.complete`).
 
     Raises:
         _Unservable: With `BASES_UNALIGNED`, naming each whole not compiled
             yet, once per part pin and axis (`Realignment.whole_axis`),
             or `SHARE_WHOLE_UNDERIVABLE` when Search's scope records for a
-            part's pin hold nothing on the axis to leave open, or when a
-            compiled whole names an entity on the side it leaves open other
-            than the total Search bound there (`_misnamed_total`).
+            part's pin hold nothing on the axis to leave open.
     """
     pins = {pin.key: pin for pin in compiled}
     wanted: dict[tuple[str, str], Realignment] = {}
@@ -6751,16 +6781,7 @@ def _declared_wholes(
                 )
             )
         held = pins.get((pin, (), axis))
-        if held is not None:
-            if reason := _misnamed_total(whole, axis, held):
-                raise _Unservable(
-                    share_whole_underivable(
-                        whole_id=whole.id,
-                        part_spec_id=pin,
-                        reason=reason,
-                        cause="whole_names_another_total",
-                    )
-                )
+        if held is not None and held.complete:
             wholes[whole.id] = held
         else:
             wanted.setdefault(
@@ -6771,42 +6792,67 @@ def _declared_wholes(
     return wholes
 
 
-def _misnamed_total(whole: DatasetRequirement, axis: str, held: AlignedPin) -> str | None:
-    """Why the entity `whole`, compiled as `held` over every `axis`, names on that
-    side is not the total Search bound there, as a clause; `None` where it names
-    none there, or names that total.
+def _whole_sums(
+    wholes: Mapping[str, AlignedPin], requirements: Sequence[EvidenceRequirement]
+) -> tuple[WholeSum, ...]:
+    """The aggregate each compiled whole of `wholes` takes over the side it opens
+    (`planner.plan.WholeSum`), in plan order.
 
-    A whole over every donor or recipient states the side in `across`, or names
-    the one group Search's answer binds the side to, by its label case-folded
-    (`compiler.evidence.resolve_group`), as `translator.discovery.name_pinned_groups`
-    rewrites it (`planner.plan._entity_whole_fault`). The whole is compiled over
-    every party there whatever it names, so a name other than that group's
-    would label the total as one party's.
+    Search's answer for the whole (`AlignedPin.block`, which every pin
+    `_declared_wholes` returns holds; one without is logged and given no sum)
+    either binds that side to one total, as
+    DAC2a binds developing countries, and the whole is read as it is, or
+    leaves it open with one row per party there, as the CRS does over every
+    donor. The block's open axes say which (`compiler.sources.open_side_column`
+    over `compiler.sources.open_entity_axes_of`), read as the compiler reads
+    them off the whole's source when it checks the pair again
+    (`compiler.compile._Build._check_whole_sum`). That reading never fails on
+    a block, so a block whose other fields this release cannot read is summed
+    as Search serves it, and the compiler refers the whole back as it reads
+    the source (`translator.discovery._settled_whole`). An open side is summed
+    by period under the first free id of `{whole}_sum`, `{whole}_sum_2` and on
+    (`planner.plan.whole_sum`).
     """
-    column = WHOLE_COLUMNS.get(axis)
-    side = role_party(axis)
-    named = [e.name for e in whole.entities if e.role is not None and role_party(e.role) == side]
-    if column is None or not named:
-        return None
-    try:
-        group = block_group(cast(Mapping[str, Any], held.digest.get("spec_block") or {}), column)
-    except ValueError:
-        group = None
-    label = group.label.casefold() if group is not None else None
-    others = [name for name in named if name.casefold() != label]
-    if not others:
-        return None
-    names = f"{whole.id!r} names {', '.join(map(repr, others))} as its {axis}"
-    if group is None:
-        return (
-            f"{names}, and Search counts the whole over every {axis} of {held.origin} "
-            f"with no total named there; state {axis!r} in `across` and name no {axis}"
+    by_id = {requirement.id: requirement for requirement in requirements}
+    taken = set(by_id)
+    sums: list[WholeSum] = []
+    for requirement in requirements:
+        pin = wholes.get(requirement.id)
+        if pin is None or not isinstance(requirement, DatasetRequirement):
+            continue
+        if requirement.whole_of is None:
+            continue
+        part = by_id.get(requirement.whole_of.part)
+        if not isinstance(part, DatasetRequirement):
+            continue
+        role = opened_role(requirement, part)
+        if role is None:
+            continue
+        block = pin.block
+        if block is None:
+            # `_declared_wholes` compiles such a pin again, so none reaches here. The
+            # compiler refers back a whole whose open side has no sum.
+            logger.warning(
+                "whole %r's compile %s holds no spec block, so no sum is added for it",
+                requirement.id,
+                pin.spec_id,
+            )
+            continue
+        resolved = block.get("resolved")
+        axes = open_entity_axes_of(resolved if isinstance(resolved, Mapping) else {})
+        if open_side_column(axes, role) is None:
+            continue
+        stem = requirement.id[: MAX_IDENTIFIER_CHARS - len("_sum_99")]
+        sum_id = next(
+            candidate
+            for candidate in itertools.chain(
+                (f"{stem}_sum",), (f"{stem}_sum_{n}" for n in itertools.count(2))
+            )
+            if candidate not in taken
         )
-    return (
-        f"{names}, and Search counts the whole over every {axis} of {held.origin} as "
-        f"{group.label!r}; name {group.label!r} as its {axis}, or state {axis!r} in "
-        f"`across` and name no {axis}"
-    )
+        taken.add(sum_id)
+        sums.append(WholeSum(whole_id=requirement.id, sum_id=sum_id))
+    return tuple(sums)
 
 
 def _whole_slot(requirement_id: str) -> str:
@@ -7403,11 +7449,6 @@ def axis_slot(scope: PartScope, axis: str) -> str | None:
     return next(iter(slots)) if len(slots) == 1 and slots <= held else None
 
 
-# The role column a declared whole over every donor or recipient leaves open, by
-# `planner.plan.WholeOf.axis`.
-WHOLE_COLUMNS: Mapping[str, str] = {"donor": "origin", "recipient": "destination"}
-
-
 def bound_parties(scope: PartScope, column: str) -> tuple[str, ...]:
     """The parties the part `scope` records binds on the role column `column`: those
     of the identity its active options compile to (`PartScope.compiled`), so a party
@@ -7486,15 +7527,14 @@ def share_whole_underivable(
       this release cannot read.
     - `whole_refused`: Search refuses the whole, its code in `reason`
       (`requested_option_unavailable` where it cannot hold an option the part
-      holds), or answers with no one dataset.
+      holds), answers with no one dataset or with no spec block, or a compile
+      held within the call is asked for again (`planner.source_reads.with_source_reads`).
     - `part_outside_whole`, `whole_members_unstated`: Search's whole does not
       hold, or does not show it holds, a party the part names
       (`planner.source_reads._uncontained`).
-    - `whole_names_another_total`: the whole names an entity on the side it
-      leaves open other than the total Search bound there (`_misnamed_total`).
 
-    `_declared_wholes` answers the first two kinds and the last, and
-    `planner.source_reads.compile_whole` every kind but the first and the last.
+    `_declared_wholes` answers the first two kinds, and
+    `planner.source_reads.compile_whole` every other kind but `part_unpinned`.
     `detail.requirement_id` names the whole for the refusal's sentence
     (`harness.sentences`).
     """

@@ -100,9 +100,9 @@ from planner.plan import (
     SumOfRequirement,
     Unit,
     answering_results,
-    authored,
     authored_text,
     copy_origins,
+    covered,
     dataset_of,
     frame_shapes,
     inputs_of,
@@ -110,6 +110,7 @@ from planner.plan import (
     is_scope_choice,
     is_search_pin,
     side_entities,
+    unsplit,
 )
 from planner.records import (
     Breakdown,
@@ -160,16 +161,19 @@ def shown_plan(plan: Plan) -> Plan:
     The plan as stored runs a dataset read from its first year beside a copy
     of each step between it and its rolling-start readers
     (`Plan.rolling_copies`). The card, the plan record and the planner's
-    digest name the model's steps only. This is `planner.plan.authored`
+    digest name the model's steps only. This is `planner.plan.unsplit`
     without the copies' operations, workflow steps, evidence bindings and
     the sources compiled for those bindings, and with a warning that names
-    a copy naming its origin, once.
+    a copy naming its origin, once. It keeps the aggregates `propose_plan`
+    added to sum a whole (`Plan.whole_sums`), each a row of its own; the
+    planner's digest leaves them out
+    (`harness.planner_adapter._as_authored`).
 
     The result is a view for reading and is not validated. Shapes, which
     need the first years, are read off `plan` itself (`answer_scopes`).
     """
     origins = copy_origins(plan.rolling_copies)
-    shown = authored(plan)
+    shown = unsplit(plan)
     if not origins:
         return shown
     update: dict[str, object] = {}
@@ -630,7 +634,7 @@ def _who(
     region = _governing(requirement, plan).get("region")
     source = _source(requirement.id, plan, sources)
     sides: dict[str | None, list[str]] = {"giving": [], "receiving": [], None: []}
-    for entity in requirement.entities:
+    for entity in covered(requirement, plan).entities:
         side = flow_side(entity.role) if entity.role else None
         name = region.chosen if entity.members and region is not None else entities_phrase([entity])
         sides[side].append(name)
@@ -2139,7 +2143,9 @@ def _populations(requirement: EvidenceRequirement, plan: Plan) -> dict[str, _Pop
     if datasets is None:
         return None
     populations: dict[str, _Population] = {}
-    for dataset in datasets:
+    for stated in datasets:
+        # A whole covers its part's parties (`planner.plan.covered`).
+        dataset = covered(stated, plan)
         source = _selected_source(dataset.id, plan)
         if source is None:
             continue
@@ -2268,7 +2274,7 @@ def _kept_apart(role: RoleDimension, plan: Plan) -> bool:
         return True
     dataset = plan.requirement(role.requirement_id)
     assert isinstance(dataset, DatasetRequirement)
-    named = [entity for entity in dataset.entities if entity.role == role.role]
+    named = [entity for entity in covered(dataset, plan).entities if entity.role == role.role]
     return len(named) > 1 or any(entity.members for entity in named)
 
 
@@ -2483,7 +2489,7 @@ def _axis_role(requirement: RankRequirement, plan: Plan) -> str | None:
     `across` carry when the axis is left to infer from a single-role input."""
     if requirement.axis is not None:
         return requirement.axis
-    datasets = datasets_of(requirement, plan)
+    datasets = [covered(dataset, plan) for dataset in datasets_of(requirement, plan)]
     roles = sorted(
         {entity.role for dataset in datasets for entity in dataset.entities if entity.role}
         | {word for dataset in datasets for word in dataset.across}
@@ -2558,6 +2564,7 @@ def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | 
     keeps. A set on a side no `across` word covers is left unsaid, as the
     requirement leaves it. Before compile the requirement's own words.
     """
+    requirement = covered(requirement, plan)
     sides = {across_party(word) for word in requirement.across}
     source = _selected_source(requirement.id, plan)
     groups = [(side, label) for side, label in _side_groups(source) if side in sides]
@@ -2738,7 +2745,8 @@ def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
             return stated
         read = ", ".join(clauses)
         return f"{stated} {read[0].upper()}{read[1:]}."
-    parties = entities_phrase(requirement.entities, across=requirement.across)
+    stated = covered(requirement, plan)
+    parties = entities_phrase(stated.entities, across=stated.across)
     period = f"{requirement.period.start}-{requirement.period.end}" + (
         _FOLLOWING if requirement.period_end_open else ""
     )
@@ -2784,6 +2792,7 @@ def _population_count(requirement: DatasetRequirement, word: str, plan: Plan) ->
     set of open axes.
     """
     source = _selected_source(requirement.id, plan)
+    requirement = covered(requirement, plan)
     if source is None or word not in requirement.across:
         return None
     axes = open_axes_for(requirement.across, source.open_entity_axes)

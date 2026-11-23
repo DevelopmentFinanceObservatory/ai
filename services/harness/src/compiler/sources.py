@@ -22,10 +22,11 @@ import hashlib
 import logging
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from enum import StrEnum
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import rfc8785
-from common.place_type import FLOW_ROLE_COLUMNS, PartyClass
+from common.place_type import FLOW_ROLE_COLUMNS, IDENTITY_KEY_AXES, PartyClass
+from planner.parties import flow_side
 from planner.records import (
     AmbiguousEntityReading,
     AmbiguousSourceReading,
@@ -1188,6 +1189,182 @@ def readable_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...] | 
     except ValueError as exc:
         logger.warning("named sets of %s are not readable: %s", block.get("spec_id"), exc)
         return None
+
+
+# The role column a whole over every donor or recipient leaves open, by
+# `planner.plan.WholeOf.axis`. A part and its whole are checked for containment on
+# these columns alone (`parties_outside`).
+WHOLE_COLUMNS: Mapping[str, str] = {"donor": "origin", "recipient": "destination"}
+
+# The prefix of the axis an identity key outside `IDENTITY_KEY_AXES` names (`identity_side`).
+_DECLARED_ROLE_AXIS = "role:"
+
+# A total holding a whole population can leave out this class of party and still
+# hold every party a part names. A residual names no party (`common.place_type`).
+_NOT_A_PARTY_CLASS = "residual"
+
+
+class WholeSide(NamedTuple):
+    """What one dataset of a whole binds on one role column, for `parties_outside`.
+
+    `bound` are the parties it binds there, none where it leaves the column open.
+    `group` is the named set Search states there (`ResolvedGroup`), `None` where it
+    states none, and `readable` is false where it states one this release cannot
+    read (`block_group`).
+    """
+
+    bound: tuple[str, ...]
+    group: ResolvedGroup | None = None
+    readable: bool = True
+
+
+def identity_side(key: str) -> str:
+    """The axis a role column or a key of an identity's `entities` names
+    (`common.place_type.IDENTITY_KEY_AXES`), so `origin`, `financingProvider` and
+    `creditor` are one axis. A key outside that table, such as a role dfo-apis
+    declares as `reporter`, is an axis of its own, `role:reporter`, compared only
+    with parties resolved under that same role. dfo-apis spells a role in letters,
+    digits and underscores alone, so the colon keeps a declared role named `place`
+    off the place axis."""
+    return IDENTITY_KEY_AXES.get(key) or f"{_DECLARED_ROLE_AXIS}{key}"
+
+
+def open_side_column(axes: Iterable[OpenEntityAxis] | None, role: str) -> str | None:
+    """The role column of `axes`, the entity axes a spec block leaves open
+    (`open_entity_axes_of`, `SelectedSource.open_entity_axes`), on the side of the
+    flow `role` names, one row per party there; `None` where none is open there,
+    the block binding that side to a total, or where `role` names no side.
+
+    A whole (`planner.plan.WholeOf`) opening that side reads it open where Search
+    leaves it so, as the CRS does over every donor, and an aggregate sums it
+    (`planner.plan.WholeSum`). Admission reads the axes off Search's block for
+    the whole's pin (`submission.service._whole_sums`) and the compiler off the
+    source it reads for that pin (`compiler.compile._Build._check_whole_sum`),
+    both through `open_entity_axes_of`, which never fails on a block, so a
+    block whose other fields do not read still answers.
+    """
+    side = flow_side(role)
+    if side is None:
+        return None
+    return next((axis.column for axis in axes or () if flow_side(axis.column) == side), None)
+
+
+def source_whole_side(source: SelectedSource, column: str) -> WholeSide | None:
+    """What `source` binds on the role column `column`: the parties its definition's
+    identity binds on that axis (`identity_side`) and the named set it states there.
+    `None` where it records no identity, so nothing says what it binds."""
+    if source.identity is None:
+        return None
+    entities = source.identity.get("entities")
+    side = identity_side(column)
+    bound: list[str] = []
+    if isinstance(entities, Mapping):
+        for key, refs in entities.items():
+            if identity_side(str(key)) != side or not isinstance(refs, list):
+                continue
+            bound.extend(ref for ref in refs if isinstance(ref, str) and ref not in bound)
+    group = next((group for group in source.groups if group.role == column), None)
+    return WholeSide(bound=tuple(bound), group=group)
+
+
+class Containment(NamedTuple):
+    """The parties a part names on a role column that a whole shows are outside it
+    (`outside`), and those nothing shows are inside or outside (`unshown`)
+    (`parties_outside`)."""
+
+    outside: tuple[str, ...] = ()
+    unshown: tuple[str, ...] = ()
+
+
+def _side_holds(  # noqa: PLR0911 -- one return per way a dataset shows what it holds
+    whole: WholeSide, party: str, *, bound_is_exact: bool
+) -> bool | None:
+    """Whether the dataset `whole` describes holds `party` on its column, `None` where
+    nothing shows it (`parties_outside`)."""
+    if not whole.bound or party in whole.bound:
+        return True
+    if not whole.readable:
+        return None
+    group = whole.group
+    if group is None:
+        return False if bound_is_exact else None
+    if party in group.members:
+        return True
+    if group.whole_of:
+        if (held := party_class(party)) is not None:
+            return held in group.whole_of
+        classes = set(group.side_classes) - {_NOT_A_PARTY_CLASS}
+        return True if classes and classes <= set(group.whole_of) else None
+    if group.members or group.total not in whole.bound:
+        return False
+    return None
+
+
+def parties_outside(
+    named: Iterable[str],
+    whole: Sequence[WholeSide],
+    *,
+    part_group: ResolvedGroup | None,
+    part_readable: bool = True,
+    bound_is_exact: bool,
+) -> Containment:
+    """Whether a whole holds each party of `named`, the parties a part binds on one
+    role column. `whole` is each dataset the whole reads on that column, and the
+    whole holds a party one of them holds. `part_group` is the part's named set on
+    the column, and `part_readable` false where it states one this release cannot
+    read.
+
+    A dataset binding nothing on the column counts every party its dataset holds
+    there, so it holds every party the part names. One binding parties there holds
+    those it binds, and of a total it binds, the members Search lists for the group
+    naming it on the column (`ResolvedGroup.members`, DAC countries' total). A total
+    holding a whole population (`ResolvedGroup.whole_of`) holds every party of its
+    classes and no other. It holds the part's party where its ref shows it is of
+    one (`party_class`, a country official), and not where its ref shows another.
+    It holds a party whose ref shows no class where its classes are every class the
+    side publishes (`ResolvedGroup.side_classes`), residuals aside. Where the side
+    publishes another class, or Search states no classes for the side but
+    residuals, nothing here says which class that party is, so it is unshown. Any
+    other party is outside where Search lists the members of the total the dataset
+    binds there or reads its group as members, and unshown where the total it binds
+    states neither its members nor a whole class. Where the dataset states no group
+    there, a party it does not bind is outside where `bound_is_exact` says what it
+    binds is all it holds, as for a whole compiled from the part's own dataset, and
+    unshown otherwise, since a bound region holds countries no group lists. Where
+    its group is not readable, every party it does not bind is unshown.
+
+    A party of the part no dataset of the whole holds is read through the part's
+    own group where it is that group's total (the G7's). The whole holds that party
+    where it holds every member Search lists for the group, does not where one is
+    outside, and nothing shows it does where Search lists no members, or the part's
+    group is not readable.
+    """
+
+    def holds(party: str) -> bool | None:
+        each = [_side_holds(side, party, bound_is_exact=bound_is_exact) for side in whole]
+        if True in each:
+            return True
+        return False if each and all(held is False for held in each) else None
+
+    outside: list[str] = []
+    unshown: list[str] = []
+    for party in named:
+        held = holds(party)
+        if held:
+            continue
+        if not part_readable:
+            # The party may be the total of a group nothing here reads.
+            held = None
+        elif part_group is not None and party == part_group.total:
+            each = [holds(member) for member in part_group.members]
+            if not each:
+                held = None
+            elif all(each):
+                continue
+            else:
+                held = False if False in each else None
+        (outside if held is False else unshown).append(party)
+    return Containment(outside=tuple(outside), unshown=tuple(unshown))
 
 
 def alternative_definitions(block: Mapping[str, object]) -> dict[str, dict[str, JsonValue]]:

@@ -1166,6 +1166,7 @@ def aggregated(
     by_entity: bool,
     by_period: bool,
     by_breakdown: bool = False,
+    kept_open: Collection[str] = (),
     step_id: Identifier | None,
 ) -> FrameShape:
     """The shape `aggregate` produces, reducing `shape` by `reduction` per entity and/or period.
@@ -1195,6 +1196,10 @@ def aggregated(
     rows hold, which only the data decides, so its `period` is `None`. A
     span the aggregate writes is named for `step_id`, and one it keeps
     keeps its name (`FrameShape.span_of`).
+
+    A group by entity keeps apart the open dimensions `kept_open` names by
+    role, as the aggregate summing a whole's open side keeps each party its
+    part leaves open (`planner.plan.WholeSum`).
     """
     period = shape.period
     if by_period:
@@ -1207,7 +1212,7 @@ def aggregated(
             period = None
     drift = shape.drift if period is not None else FIXED
     if by_entity:
-        roles = tuple(role for role in shape.roles if not role.open)
+        roles = tuple(role for role in shape.roles if not role.open or role.role in kept_open)
     elif by_breakdown:
         roles = tuple(role for role in shape.roles if role.breakdown)
     else:
@@ -1902,7 +1907,9 @@ def _several_measures(verb: str, shape: FrameShape) -> str | None:
     )
 
 
-def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bool) -> str | None:
+def _missing_group_roles(
+    shape: FrameShape, *, by_entity: bool, by_breakdown: bool, kept_open: Collection[str] = ()
+) -> str | None:
     """Why `shape` has no role an aggregate's group by entity or breakdown keeps, or `None`.
 
     A frame with no role dimension that rests on two retrievals, a
@@ -1911,7 +1918,7 @@ def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bo
     yearly sum. Over one retrieval's frame it is refused, and an empty
     group is the one figure it would mean. A group by entity keeps only the
     parties a requirement names, so over a frame whose every party is open
-    it would keep none.
+    it would keep none, unless it keeps open ones apart (`kept_open`).
     """
     if by_entity and not shape.roles and len(shape.roots) < 2:
         return (
@@ -1919,7 +1926,10 @@ def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bo
             f"entity in the step that collapsed the roles, or, {one_figure_remedy()}"
         )
     open_roles = [role.role for role in shape.roles if role.open]
-    if by_entity and open_roles and all(role.open or role.breakdown for role in shape.roles):
+    keeps_none = all(
+        (role.open and role.role not in kept_open) or role.breakdown for role in shape.roles
+    )
+    if by_entity and open_roles and keeps_none:
         return (
             "aggregate grouping by entity keeps the parties the requirement names apart and "
             f"sums its open {open_roles!r} away, and this input names no entity, so the group "
@@ -1964,13 +1974,16 @@ def _rejects_aggregate(
     by_period: bool = False,
     by_breakdown: bool = False,
     reduction: Reduction | None = None,
+    kept_open: Collection[str] = (),
 ) -> str | None:
     several = _several_measures("aggregate", shape) or _rejects_summed_rate(
         "an aggregate", shape, reduction
     )
     if several is not None:
         return several
-    if missing := _missing_group_roles(shape, by_entity=by_entity, by_breakdown=by_breakdown):
+    if missing := _missing_group_roles(
+        shape, by_entity=by_entity, by_breakdown=by_breakdown, kept_open=kept_open
+    ):
         return missing
     sums_open = not by_entity or any(role.open for role in shape.roles)
     if sums_open and (mixed := _mixed_levels("a total or an average across places", shape)):
