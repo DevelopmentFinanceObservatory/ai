@@ -275,6 +275,7 @@ from submission.prices_choice import (
     AbsorbedRows,
     AnsweredPart,
     Parts,
+    PricesAnswers,
     PricesChoice,
     absorbed,
     absorbed_rows,
@@ -347,13 +348,11 @@ class SessionView(Protocol):
         """Whether the user has said anything (an answer, an amendment, a new message) since plan `version` was recorded."""
         ...
 
-    def prices_chosen(self) -> Mapping[str, PricesChoice]:
-        """The prices the user picked answering an ask, by the part each prices, until released."""
-        ...
-
-    def answered_since_plan(self) -> frozenset[str]:
-        """The parts of `prices_chosen` an answer given since the plan on
-        record landed priced: the plan has not read them."""
+    def prices_answers(self) -> PricesAnswers:
+        """The prices the user picked answering an ask, by the part each
+        prices, until released, with the parts an answer given since the plan
+        on record landed priced, and whether the user's words since then
+        release its unit rows."""
         ...
 
     def switched_units(self) -> Mapping[str, Unit]:
@@ -541,6 +540,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             stated,
             choices=_user_prices(
                 view,
+                view.prices_answers(),
                 statement(
                     amended,
                     to_origin={
@@ -734,7 +734,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     requirements_after = _requirements_after(
         previous, evidence_requirements, removed_evidence_requirements
     )
-    chosen = _user_prices(view, previous)
+    answers = view.prices_answers()
+    chosen = _user_prices(view, answers, previous)
     shown_parts = Parts.of_shown(
         pins,
         sources.get,
@@ -762,10 +763,11 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         requirements_after = _requirements_after(
             previous, evidence_requirements, removed_evidence_requirements
         )
-    # Each part of a unit answer a requirement reads is absorbed by its row.
+    # Each part of a unit answer a requirement reads is absorbed by its row,
+    # on the record of the plan this proposal amends; a fresh plan starts one.
     unit_rows = absorbed(
-        absorbed_rows(view.state),
-        view.prices_chosen(),
+        absorbed_rows(view.state) if previous is not None else {},
+        answers.chosen,
         part_readings(chosen, requirements_after, parts=shown_parts),
     )
     unmade = _unmade_prices_citations(
@@ -1021,8 +1023,10 @@ def _intent(view: SessionView, proposal: Proposal) -> tuple[Plan | None, int] | 
     )
 
 
-def _user_prices(view: SessionView, previous: Plan | None) -> Mapping[str, PricesChoice]:
-    """The prices the user chose (`SessionView.prices_chosen`), each unit row
+def _user_prices(
+    view: SessionView, answers: PricesAnswers, previous: Plan | None
+) -> Mapping[str, PricesChoice]:
+    """The prices the user chose (`answers`, `SessionView.prices_answers`), each unit row
     `previous`, the plan amended as the planner states it, holds read off it
     (`submission.prices_choice.plan_held_choices`), a row a switch of the
     card moved in the unit it picked (`SessionView.switched_units`).
@@ -1034,22 +1038,26 @@ def _user_prices(view: SessionView, previous: Plan | None) -> Mapping[str, Price
     pins stand for each part the row absorbed
     (`submission.prices_choice.absorbed_rows`), so a count or scope switch
     that moves a pin moves the series the unit holds, and an answer the
-    plan has not read (`SessionView.answered_since_plan`) holds its parts.
+    plan has not read (`PricesAnswers.fresh`) holds its parts. A message the
+    user typed or an amendment of the card since the plan landed releases
+    its rows (`PricesAnswers.released`), as it releases every choice, save
+    in a switch's revision of a unit row, which states the row's new unit.
     """
-    chosen = view.prices_chosen()
-    if previous is None:
+    chosen = answers.chosen
+    units = view.switched_units()
+    if previous is None or (answers.released and not units):
         return chosen
     return plan_held_choices(
         chosen,
         previous,
-        units=view.switched_units(),
+        units=units,
         answered={
             part: AnsweredPart(served.row, served.spec_id, served.unit)
             for part, served in units_served(view.state).items()
             if served.row is not None
         },
         rows=absorbed_rows(view.state),
-        fresh=view.answered_since_plan(),
+        fresh=answers.fresh,
     )
 
 

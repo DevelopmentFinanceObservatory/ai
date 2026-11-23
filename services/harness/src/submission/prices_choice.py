@@ -152,9 +152,11 @@ def plan_unit(plan: Plan, slot: str) -> Unit | None:
 # The session-state slot holding, by each unit row's slot (`unit_slot`),
 # the parts of the unit question's answer the row has absorbed, each with
 # the ids of the dataset requirements that read it when admission wrote the
-# row (`absorbed_rows`, `absorbed`). Admission alone writes it, and only
-# adds to it: a switch of the card moves pins and keeps requirement ids, so
-# what a row absorbed stays true across switches.
+# row (`absorbed_rows`, `absorbed`), for the plan on record and the plans it
+# amends. Admission alone writes it: an amendment adds to the record of the
+# plan it amends, and a fresh plan starts a record of its own, so ids from
+# an earlier plan never count. A switch of the card moves pins and keeps
+# requirement ids, so what a row absorbed stays true across switches.
 UNIT_ROWS_STATE_KEY = "planner:unit_rows"
 
 # Each unit row's absorbed parts, by the row's slot, each with the ids of
@@ -202,6 +204,19 @@ def absorbed(
             continue
         merged.setdefault(unit_slot(choice.group), {})[part] = ids
     return merged
+
+
+class PricesAnswers(NamedTuple):
+    """What the user answered on prices, read off a planner call's steps in
+    one walk (`planner.call.prices_answers`): `chosen`, the choices by part
+    (`planner.call.prices_chosen`); `fresh`, the parts of `chosen` set since
+    the plan on record landed; and `released`, whether the user typed a
+    message or amended the plan card since it landed, which releases its
+    unit rows (`plan_held_choices`)."""
+
+    chosen: Mapping[str, PricesChoice]
+    fresh: frozenset[str] = frozenset()
+    released: bool = False
 
 
 class AnsweredPart(NamedTuple):

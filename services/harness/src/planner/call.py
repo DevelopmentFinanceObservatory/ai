@@ -36,7 +36,9 @@ from submission.prices_choice import (
     PRICES_OPTIONS,
     PRICES_PICKS,
     PRICES_SLOT_PREFIX,
+    UNIT_ROWS_STATE_KEY,
     USER_PRICES_SLOT_PREFIXES,
+    PricesAnswers,
     PricesChoice,
     measure_key,
     prices_slot,
@@ -212,20 +214,17 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
     An answer to any other question leaves them standing. A Studio turn is
     one session, so a choice holds for the turn it was made in.
     """
-    return _prices_by_step(call)[0]
+    return dict(prices_answers(call).chosen)
 
 
-def answered_since_plan(call: PlannerCall) -> frozenset[str]:
-    """The parts of `prices_chosen` whose choice a step after the last
-    `propose_plan` response that landed a plan set, every part when no
-    response in the call's session landed one: answers the plan on record
-    has not read, so they hold their parts over it
+def prices_answers(call: PlannerCall) -> PricesAnswers:
+    """`prices_chosen` over `call`, with the parts whose choice a step after
+    the last `propose_plan` response that landed a plan set (`fresh`), and
+    whether a message the user typed or an amendment of the approval card
+    came after it (`released`), in one walk of its steps. With no response
+    in the call's session landing a plan, every part is fresh and any such
+    step releases: the plan on record has read neither
     (`submission.prices_choice.plan_held_choices`)."""
-    return _prices_by_step(call)[1]
-
-
-def _prices_by_step(call: PlannerCall) -> tuple[dict[str, PricesChoice], frozenset[str]]:
-    """`prices_chosen` and `answered_since_plan` over `call`, in one walk of its steps."""
     measures = {
         spec_id: measure_key(block)
         for spec_id, source in pin_sources(call.state).items()
@@ -239,11 +238,13 @@ def _prices_by_step(call: PlannerCall) -> tuple[dict[str, PricesChoice], frozens
     offered = [dict(option) for option in PRICES_OPTIONS]
     set_at: dict[str, int] = {}
     landed = -1
+    spoke = -1
     for index, step in enumerate(call.steps()):
         before = dict(chosen)
         if step.kind == "message":
             chosen.clear()
             refused = None
+            spoke = index
         elif step.kind == "response":
             if step.name == PROPOSE_PLAN_PROPOSER.call:
                 refused = _prices_refused(step.body)
@@ -252,6 +253,7 @@ def _prices_by_step(call: PlannerCall) -> tuple[dict[str, PricesChoice], frozens
                 asked[str(step.call_id)], refused = refused, None
         elif _is_amendment(step.body):
             chosen.clear()
+            spoke = index
         elif (switched := _prices_switched(step.body)) is not None:
             part, basis = switched
             if _switch_stands(call.state, part, basis):
@@ -280,7 +282,11 @@ def _prices_by_step(call: PlannerCall) -> tuple[dict[str, PricesChoice], frozens
             and step.body.get("outcome") == Outcome.OK.value
         ):
             landed = index
-    return chosen, frozenset(part for part in chosen if set_at.get(part, -1) > landed)
+    return PricesAnswers(
+        chosen,
+        frozenset(part for part in chosen if set_at.get(part, -1) > landed),
+        released=spoke > landed,
+    )
 
 
 def _prices_switched(body: Mapping[str, Any]) -> tuple[str, PriceBasis] | None:
@@ -785,13 +791,9 @@ class CallSession:
         """`user_spoke_since_recorded` over the call."""
         return user_spoke_since_recorded(self.call, version)
 
-    def prices_chosen(self) -> dict[str, PricesChoice]:
-        """`prices_chosen` over the call."""
-        return prices_chosen(self.call)
-
-    def answered_since_plan(self) -> frozenset[str]:
-        """`answered_since_plan` over the call."""
-        return answered_since_plan(self.call)
+    def prices_answers(self) -> PricesAnswers:
+        """`prices_answers` over the call."""
+        return prices_answers(self.call)
 
     def switched_units(self) -> Mapping[str, Unit]:
         """None: a planner call revises no unit row a switch moved."""
@@ -820,7 +822,9 @@ class CallSession:
             save_windowed_pins(state, admission.windowed_pins)
         save_alignments(state, admission.alignments)
         save_pin_verdicts(state, admission.pin_verdicts)
-        if admission.unit_rows:
+        # Each admission replaces the record; a state that never held one
+        # gains none until a row absorbs a part.
+        if admission.unit_rows or state.get(UNIT_ROWS_STATE_KEY) is not None:
             save_absorbed_rows(state, admission.unit_rows)
         save_plan(state, admission.plan)
         keep_found_sources(

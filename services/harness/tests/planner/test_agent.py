@@ -135,6 +135,7 @@ from planner.plan import (
     WindowedPin,
     aligned_pins,
     authored,
+    clear_plan,
     clear_unsupported,
     compile_warnings,
     current_discovery_time_left,
@@ -14299,9 +14300,9 @@ def test_a_unit_switch_after_a_typed_message_moves_the_row_s_decision(
 ) -> None:
     """The user chose current euros for the gross part, the plan landed with
     its unit row in them, and the user then typed a message, which releases
-    the turn's choices. A switch of the row to current US dollars lands with
-    the row stating dollars, and a later proposal pinning the part in euros
-    is refused and told the dollars read."""
+    the turn's choices and the plan's unit rows. A switch of the row to
+    current US dollars is a revision stating the row's new unit, so it lands
+    with the row stating dollars."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_USD_READ, _USD))
@@ -14329,27 +14330,9 @@ def test_a_unit_switch_after_a_typed_message_moves_the_row_s_decision(
     )
 
     assert switched["outcome"] == Outcome.OK.value, switched
-    _landed(ctx, switched)
     revised = load_plan(ctx.state)
     assert revised is not None
     assert [d.chosen for d in revised.decisions if d.slot == row] == ["current prices in USD"]
-
-    refused = call_planner_tool(
-        tools["propose_plan"],
-        question="q",
-        answer_mode=AnswerMode.SERIES,
-        amends_version=revised.version,
-        decisions=[],
-        evidence_requirements=[
-            revised.requirement(dataset.id).model_copy(
-                update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)}
-            )
-        ],
-        tool_context=ctx,
-    )
-
-    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
-    assert (refused["detail"]["unit"], refused["detail"]["pin"]) == (_USD, _USD_READ)
 
 
 def test_a_window_the_plan_left_out_takes_the_unit_a_switch_of_its_row_picked(
@@ -14394,7 +14377,6 @@ def test_a_window_the_plan_left_out_takes_the_unit_a_switch_of_its_row_picked(
         {f"user_unit_{_GROSS}": Unit(**_USD)},
     )
     assert switched["outcome"] == Outcome.OK.value, switched
-    _landed(ctx, switched)
     revised = load_plan(ctx.state)
     assert revised is not None
 
@@ -14474,7 +14456,6 @@ def test_a_fresh_plan_s_base_year_refusal_reads_the_answer_not_the_plan_on_recor
         {f"user_unit_{_GROSS}": Unit(**_USD_2023)},
     )
     assert switched["outcome"] == Outcome.OK.value, switched
-    _landed(ctx, switched)
 
     refused = call_planner_tool(
         tools["propose_plan"],
@@ -14494,6 +14475,150 @@ def test_a_fresh_plan_s_base_year_refusal_reads_the_answer_not_the_plan_on_recor
 
     assert refused["code"] == ProblemCode.INVALID_PLAN.value, refused
     assert refused["detail"]["unit"] == _USD_2020, refused
+
+
+def test_a_typed_message_after_the_plan_landed_releases_its_unit_row(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose current euros for the gross part, and the plan landed
+    with its unit row in them. The user then typed "use US dollars
+    instead", which releases the row as it releases every choice: the
+    planner's proposal pinning the part's read in dollars lands in them."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_USD_READ, _USD))
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, _ = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    ctx.records = [*ctx.records, transcript.user_message("Use US dollars instead.")]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+
+    again = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=plan.version,
+        decisions=[],
+        evidence_requirements=[
+            plan.requirement(dataset.id).model_copy(
+                update={"source_spec_id": _USD_READ, "unit": Unit(**_USD)}
+            )
+        ],
+        tool_context=ctx,
+    )
+
+    assert again["outcome"] == Outcome.OK.value, again
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    assert revised.requirement(dataset.id).unit == Unit(**_USD)
+
+
+@pytest.mark.parametrize("first_reads_gross", [True, False], ids=["at-once", "on-amendment"])
+def test_a_fresh_plan_does_not_read_what_an_earlier_plan_s_unit_row_absorbed(
+    decision: DecisionFactory, requirements: RequirementPair, first_reads_gross: bool
+) -> None:
+    """The unit question covers two windows of the gross part, and the user
+    chose current euros. A first plan reads the 2020-2024 window alone under
+    the id "r1". A later first-draft entry clears it, as the planner adapter
+    does, and its fresh plan reads the whole history alone under "r1", at
+    once or on an amendment of a draft reading aid from Germany alone; a
+    switch of that plan's unit row to current US dollars lands. Its row never
+    absorbed the 2020-2024 window, so a later proposal adding that window in
+    euros is refused and told dollars and no series, as for a window the
+    plan left out."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _two_windows_answered(ctx)
+    germany = _read_in(_DE_KENYA_EUR, _EUR)
+    germany["definition"]["identity"]["entities"] = {
+        "destination": ["country/KEN"],
+        "origin": ["country/DEU"],
+    }
+    save_pin_sources(
+        ctx.state,
+        {
+            **pin_sources(ctx.state),
+            _USD_READ: PinSource(block=_read_in(_USD_READ, _USD), settled=True),
+            _DE_KENYA_EUR: PinSource(block=germany, settled=True),
+        },
+    )
+    dataset, _ = requirements
+    recent = {"period": Period(start=2020, end=2024), "source_spec_id": _EUR_READ_2020}
+    first = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"id": "r1", **recent, "unit": Unit(**_EUR)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    _landed(ctx, first)
+    clear_plan(ctx.state)
+
+    whole = dataset.model_copy(
+        update={"id": "r1", "source_spec_id": _EUR_READ, "unit": Unit(**_EUR)}
+    )
+    german = dataset.model_copy(
+        update={"id": "de", "source_spec_id": _DE_KENYA_EUR, "unit": Unit(**_EUR)}
+    )
+    fresh = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [whole if first_reads_gross else german],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert fresh["outcome"] == Outcome.OK.value, fresh
+    if not first_reads_gross:
+        _landed(ctx, fresh)
+        drafted = load_plan(ctx.state)
+        assert drafted is not None
+        fresh = call_planner_tool(
+            tools["propose_plan"],
+            question="q",
+            answer_mode=AnswerMode.SERIES,
+            amends_version=drafted.version,
+            decisions=[],
+            evidence_requirements=[whole],
+            tool_context=ctx,
+        )
+        assert fresh["outcome"] == Outcome.OK.value, fresh
+    _landed(ctx, fresh)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement("r1").model_copy(update={"source_spec_id": _USD_READ})],
+        {f"user_unit_{_GROSS}": Unit(**_USD)},
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+    revised = load_plan(ctx.state)
+    assert revised is not None
+
+    refused = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=revised.version,
+        decisions=[],
+        evidence_requirements=[
+            dataset.model_copy(update={"id": "r2", **recent, "unit": Unit(**_EUR)})
+        ],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert (refused["detail"]["unit"], refused["detail"].get("pin")) == (_USD, None), refused
 
 
 def test_a_carried_planner_decision_stating_the_unit_the_user_answered_goes_on_amendment(
