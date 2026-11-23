@@ -10,20 +10,20 @@ what is held (`stated_scope_record`), so the planner cannot write it: a requirem
 provider option when Search reads it from the requirement's `measure` and the turn's words
 name it (`submission.service._stated_reading`).
 
-A read that fails records nothing, so `propose_plan` never admits a plan on a reading it
-does not hold. A failure that can pass answers `SURFACE_UNAVAILABLE`, asking the planner to
-propose again; one no retry changes (a 404, a refused request) ends the entry on
-`STATED_SCOPE_UNREADABLE`. A turn with no words of the user's, such as a
-chip's or one outside Studio, holds no reading, and admission applies no stated scope.
+A read that fails records nothing, so `propose_plan` admits a plan only on a reading it
+holds. A failure that can pass answers `SURFACE_UNAVAILABLE`, asking the planner to
+propose again. A failure no retry changes (a 404, a refused request) ends the entry on
+`STATED_SCOPE_UNREADABLE`. A turn with no words of the user's, such as a chip's or one
+outside Studio, holds no reading, and admission applies no stated scope.
 
 Four more slots belong to the rule, each holding for the turn: where the question
 whether to keep a dataset that cannot count the provider scope the user's words ask
 for stands (`KEEP_STATE_KEY`), the measures of the requirements each
-`STATED_SCOPE_UNATTRIBUTED` refusal named (`UNATTRIBUTED_STATE_KEY`), which pass
-proposed again unchanged, the pins
-Search refused to compile on a stated option (`UNCOMPILED_STATE_KEY`), and the
-compiles moving a stated option beside a calculation's axis that Search refused
-(`COMBINED_REFUSED_STATE_KEY`), which a later proposal does not post again.
+`STATED_SCOPE_UNATTRIBUTED` refusal named (`UNATTRIBUTED_STATE_KEY`), which pass when
+proposed again unchanged, the pins Search refused to compile on a stated option
+(`UNCOMPILED_STATE_KEY`), and the compiles moving a stated option beside a
+calculation's axis that Search refused (`COMBINED_REFUSED_STATE_KEY`), which a later
+proposal does not post again.
 """
 
 from __future__ import annotations

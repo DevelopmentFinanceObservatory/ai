@@ -333,10 +333,11 @@ class SessionView(Protocol):
     asks, the pending referral, the discovery log), read through their own
     loaders. The four readers answer from what the user was asked and
     answered in this session, and `decision_pick` names the pick on the plan
-    card a planner entry replans for. The five writes are the chain's only side
+    card a planner entry replans for. The six writes are the chain's only side
     effects: an `unsupported` answer, an optional decline, the asks a
-    `PERIOD_REDUCTION_UNSTATED` refusal names and the provider option a
-    `STATED_SCOPE_UNATTRIBUTED` refusal names, each recorded even though the
+    `PERIOD_REDUCTION_UNSTATED` refusal names, the provider option a
+    `STATED_SCOPE_UNATTRIBUTED` refusal names and the datasets a
+    `STATED_PROVIDER_DROPPED` refusal lists, each recorded even though the
     call is refused, and an admitted plan.
     """
 
@@ -6741,7 +6742,7 @@ def _summed_beside_unchosen(
 
     Such a dataset, as the imputed multilateral series is, states nothing of the
     provider scopes its figure counts, so admission cannot tell what an input moved
-    onto another scope adds twice beside it: G7 bilateral aid moved onto bilateral
+    onto another scope adds twice beside it. G7 bilateral aid moved onto bilateral
     plus imputed multilateral aid, added to G7 imputed multilateral aid, would
     count the imputed aid twice. A side reads every dataset requirement beneath it
     (`planner.plan.reached`).
@@ -6824,7 +6825,7 @@ def _stated_summed(
 ) -> dict[str, object]:
     """The `PROVIDERS_UNALIGNED` problem for an input whose `measure` states
     `option_id` in the user's words, which `summed` adds to `unchosen`, a dataset with
-    no provider choice (`_summed_beside_unchosen`): counted as stated, the sum may
+    no provider choice (`_summed_beside_unchosen`). Counted as stated, the sum may
     count what `unchosen` adds twice, as bilateral plus imputed multilateral aid
     added to imputed multilateral aid does. The repair is one requirement counted as
     stated. `detail` names the input as `_summed_input_moved`'s does."""
@@ -7108,7 +7109,7 @@ _PROVIDER_OPTION_LABELS: Mapping[str, str] = {
 def _stated_label(option_id: str, *, words: str, offered: str | None = None) -> str:
     """How text the user or the planner reads names the provider option `option_id`,
     stated in the user's `words`: by `_PROVIDER_OPTION_LABELS`, else by `offered`, the
-    label a pin's provider choice gives it, else by the words. Never by the id."""
+    label a pin's provider choice gives it, else by the words."""
     return _PROVIDER_OPTION_LABELS.get(option_id) or offered or words
 
 
@@ -7144,22 +7145,22 @@ def _stated_reading(
     A requirement states an option where Search reads it from its `measure` and the
     turn's words name it (`TextReading.mentions`), so a `measure` naming a scope the
     user never named states nothing. Where the turn's words state one option counting
-    all of a donor's ODA (one outside `_NARROWER_THAN_TOTAL`: imputed multilateral aid
-    included, or the summed lines), a `measure` naming it states it in the turn's
-    words even beside a narrower word, which then states nothing of its own:
-    "bilateral net disbursements including imputed multilateral aid" is the inclusive
+    all of a donor's ODA (one outside `_NARROWER_THAN_TOTAL`, such as imputed
+    multilateral aid included, or the summed lines), a `measure` naming it states it in
+    the turn's words even beside a narrower word, which then states nothing of its own.
+    "Bilateral net disbursements including imputed multilateral aid" is the inclusive
     count, whose label it is. A narrower option keeps the rule above, so under "what
     share of G7 ODA is bilateral" a `measure` of "bilateral and multilateral ODA"
-    states nothing: the planner attributes the user's words to the
+    states nothing. The planner attributes the user's words to the
     requirements they qualify, and cannot add one. A declared whole follows its
     part and states nothing. A `measure` asking for a total, naming no provider
     option, under words asking for a total and naming an option narrower than one
     (`_NARROWER_THAN_TOTAL`), holds its pin on the option it is counted on ("US
     bilateral aid to Kenya as a share of total US ODA"). Under words naming only
     imputed multilateral aid, itself a count of total ODA, such a `measure` states
-    nothing, and alignment counts it as the other inputs are. A
-    `measure` no reading is held for answers `SURFACE_UNAVAILABLE`, since admission
-    reads no scope it was not given.
+    nothing, and alignment counts it as the other inputs are. A `measure` no reading
+    is held for answers `SURFACE_UNAVAILABLE`, since admission reads only the scope it
+    was given.
     """
     if record is None:
         return None
@@ -7275,13 +7276,13 @@ def _stated_claims(
     proposer: Proposer,
 ) -> dict[str, str]:
     """The provider option each pinned input is counted on as the user's words ask
-    (`_stated_reading`), by requirement id: alignment counts it there whatever
+    (`_stated_reading`), by requirement id. Alignment counts it there whatever
     calculation reads it, and moves its calculation's other inputs to it.
 
     A requirement stating an option its pin's choice offers (`bases`, other than
     unavailable) is counted on it, moved to the compile of its pin on it where its
-    pin is counted otherwise by default or by the planner: no refusal, since the pin
-    can count it. Words summing the bilateral and multilateral lines name the pin's
+    pin is counted otherwise by default or by the planner, with no refusal since the
+    pin can count it. Words summing the bilateral and multilateral lines name the pin's
     own summing option (`_stated_option_of`). A requirement asking for a total
     (`_StatedReading.totals`), and one whose pin the user kept as published
     (`KeepQuestion.kept`), are counted on the pin's own
@@ -7289,7 +7290,7 @@ def _stated_claims(
     in a DAC1 total kept, contrasts the two. Left alone are a pin with no provider
     choice (GNI, the imputed multilateral series) and one whose provider choice the
     user switched on the plan card (`_switched_by_user`), which is their later word.
-    A keep holds for the turn it was made in: a later turn whose words name the option
+    A keep holds for the turn it was made in. A later turn whose words name the option
     again asks again.
 
     A pin that cannot count the option, each pair of pin and option on its own
@@ -7414,14 +7415,15 @@ def _stated_unattributed(
     planned as bilateral aid on every side. Words summing the bilateral and
     multilateral lines are read on each pin as its own summing option (`_stated_option_of`).
     A pin the user switched on the plan card offers nothing here
-    (`_switched_by_user`): the switch is their later word. The refusal asks the planner to carry
-    the user's words to the `measure` of each requirement they qualify. A plan whose
-    requirements pinned to a dataset offering the option are those the refusal named,
-    each with the `measure` it had (`planner.stated_scope.unattributed_refused`), is
-    the planner's word that the words qualify none of them, and is admitted, whatever
-    else it changed: a repin of another requirement carries no attribution. A plan
-    changing those requirements or their measures is judged again. A turn whose words state no one option and a plan no pin of which can
-    count it, as a debt question about bilateral creditors, pass.
+    (`_switched_by_user`), since the switch is their later word. The refusal asks the
+    planner to carry the user's words to the `measure` of each requirement they
+    qualify. A plan whose requirements pinned to a dataset offering the option are
+    those the refusal named, each with the `measure` it had
+    (`planner.stated_scope.unattributed_refused`), is the planner's word that the words
+    qualify none of them, and is admitted, whatever else it changed. A repin of
+    another requirement carries no attribution. A plan changing those requirements or
+    their measures is judged again. A turn whose words state no one option, and a plan
+    no pin of which can count it, as a debt question about bilateral creditors, pass.
 
     Raises:
         _Unservable: `STATED_SCOPE_UNATTRIBUTED`, recorded for the option with the
@@ -7559,7 +7561,7 @@ def _stated_serving(
     """The `STATED_PROVIDER_DROPPED` problem for `unserved`, each a requirement whose
     pin cannot count the provider option the user's words ask for, listing `serving`,
     the datasets on record that count it (`_serving_stated`). It is given once for
-    each pin and option (`KeepQuestion.offered`): the planner pins a listed one
+    each pin and option (`KeepQuestion.offered`). The planner pins a listed one
     where it measures what the requirement asks for, removes the figure, or proposes
     the pin again, which puts the question whether to keep it to the user."""
     listed = "; ".join(f"{spec_id} ({sentence})" for spec_id, sentence in serving)
@@ -7585,8 +7587,8 @@ def _stated_unserved(
 ) -> dict[str, object]:
     """The `STATED_PROVIDER_DROPPED` problem for `unserved`, each a requirement whose
     pin cannot count the provider option the user's words ask for, carrying the
-    question whether to keep the pins counted as published under `detail.ask`:
-    only the user keeps a dataset that cannot count the scope they asked for.
+    question whether to keep the pins counted as published under `detail.ask`.
+    Only the user keeps a dataset that cannot count the scope they asked for.
     `propose_plan` puts it to the user (`planner.tools.pause_on_keep_question`), and
     the entry their answer resumes records it (`planner.stated_scope.record_keep_answer`).
     The question is built here, from each pin's title (`_title`), the option's label
@@ -7655,10 +7657,11 @@ def _stated_declined(
 ) -> dict[str, object]:
     """The `STATED_PROVIDER_DROPPED` problem for `declined`, pins the user did not keep
     as published this turn, answering the question `_stated_unserved` carries with
-    anything but `KEEP_PUBLISHED_OPTION`. The user has answered, so it carries no ask: the planner pins a dataset on record
-    counting the option where one measures the figure (`_serving_stated`, as
-    `_stated_unserved` lists them), or removes the figure and records the part of the
-    question asking for it in `declined`, which `permit` allows as optional."""
+    anything but `KEEP_PUBLISHED_OPTION`. The user has answered, so it carries no ask.
+    The planner pins a dataset on record counting the option where one measures the
+    figure (`_serving_stated`, as `_stated_unserved` lists them), or removes the figure
+    and records the part of the question asking for it in `declined`, which `permit`
+    allows as optional."""
     permit(UnsupportedOperation.UNSUPPORTED_ASK)
     serving = _serving_stated(declined, shown=shown, sources=sources, besides=besides)
     faults = "; ".join(
@@ -7700,8 +7703,8 @@ def stated_compile_unanswered(
 ) -> dict[str, object]:
     """The `SURFACE_UNAVAILABLE` refusal for a pin Search did not compile, and can
     later, on the provider option its requirement's `measure` states in the user's
-    words (`Realignment.stated`), `cause` the code Search answered, kept in `detail` only. The same plan
-    proposed again can be served. A compile Search refuses for good is recorded
+    words (`Realignment.stated`). `cause` is the code Search answered, kept in `detail`
+    only. The same plan proposed again can be served. A compile Search refuses for good is recorded
     instead (`planner.stated_scope.record_stated_uncompiled`), and `_stated_claims`
     refuses the pin as one that cannot count the option."""
     (option_id,) = [o for o in realignment.option_ids if option_axis(o) == PROVIDER_AXIS]

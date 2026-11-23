@@ -230,7 +230,7 @@ class StatedScopeReading:
     `entries` hold one option per axis the text states one option on. `total` says the
     text asks for a total. `sums_providers` says its provider entry sums the bilateral
     and multilateral lines naming no imputed share ("bilateral plus multilateral"),
-    which a dataset reads as its own summing option: `provider:contributions` on DAC1.
+    which a dataset reads as its own summing option (`provider:contributions` on DAC1).
     `mentions` are the provider options the text names, in order of first mention,
     both options of a text naming two, which therefore has no provider entry,
     included."""

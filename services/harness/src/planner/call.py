@@ -5,8 +5,8 @@ was asked and answered in its session, in order (`Step`). The readers here
 answer from those steps: the spec_ids the user elected (`elected_spec_ids`),
 what they answered since the translator's referral
 (`answers_since_referral`), the combinations they were asked to add up
-(`combination_picks`), whether they spoke since a plan version was recorded (`user_spoke_since_recorded`), and the prices
-they chose (`prices_chosen`).
+(`combination_picks`), whether they spoke since a plan version was recorded
+(`user_spoke_since_recorded`), and the prices they chose (`prices_chosen`).
 `CallSession` is the `submission.service.SessionView` over a call, through
 those readers. `planner.session.SessionCall` is the call the planner serves a
 tool with.

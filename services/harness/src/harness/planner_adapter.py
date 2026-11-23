@@ -470,9 +470,9 @@ class PlannerAdapter:
                 asked,
                 answer,
                 ctx.state.get(_ASKED_REFERRAL_STATE_KEY),
-                # The question whether to keep a dataset counted as published is
-                # `propose_plan`'s own (`planner.tools.pause_on_keep_question`):
-                # the user's answer is recorded here, and admission reads it.
+                # `propose_plan` raises the question whether to keep a dataset counted
+                # as published itself (`planner.tools.pause_on_keep_question`). The
+                # user's answer is recorded here, and admission reads it.
                 keep=record_keep_answer(
                     state, call_id=asked.call_id, keep=_kept_as_published(answer)
                 ),
@@ -1001,7 +1001,7 @@ class PlannerAdapter:
         (`submission.service.stated_scope_line`), read at entry through the
         stated-scope reader, each text once a turn (`read_stated_scope`). A read
         Search does not answer, and any fault reading or rendering it, renders
-        nothing: `propose_plan` reads again, and its admission refuses a plan that
+        nothing. `propose_plan` reads again, and its admission refuses a plan that
         leaves the option out."""
         if self._stated_scope is None:
             return ""
@@ -1010,8 +1010,8 @@ class PlannerAdapter:
                 return ""
             return stated_scope_line(stated_scope_record(state), shown)
         except Exception:
-            # The line is a hint: `propose_plan` reads the words again and refuses
-            # where it must, so a fault here costs the line, never the entry.
+            # The line is a hint. `propose_plan` reads the words again and refuses
+            # where it must, so a fault here costs only the line.
             logger.exception("stated scope line not rendered")
             return ""
 
@@ -1042,8 +1042,8 @@ class PlannerAdapter:
 
         `ledger` is the rendered search readings (`_readings_ledger`), the
         brief's opening section, closed by `stated_line`, the line on the provider
-        scope the turn's words state (`_stated_scope_line`). `skills` holds the skill pages read on
-        earlier calls (`planner.skills.SKILLS_READ_STATE_KEY`), which follow
+        scope the turn's words state (`_stated_scope_line`). `skills` holds the
+        skill pages read on earlier calls (`planner.skills.SKILLS_READ_STATE_KEY`), which follow
         it verbatim (`_skills_section`). A compiled source of the plan being
         changed states no measure choice the ledger already names
         (`_plan_context`). `asks`, the outputs the orchestrator's brief lists

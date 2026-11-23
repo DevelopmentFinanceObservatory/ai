@@ -48,7 +48,7 @@ def build_planner(
 def build_stated_scope_reader(settings: Settings) -> ApisStatedScopeReader | None:
     """The reader of dfo-apis' stated-scope route (`DFO_APIS_URL`, as presentation-mcp's
     settings hold it), or `None` where `planner_stated_scope` is off. Build it once for the
-    process and close it at shutdown (`ApisStatedScopeReader.aclose`): it holds a
+    process and close it at shutdown (`ApisStatedScopeReader.aclose`), since it holds a
     connection pool."""
     if not settings.planner_stated_scope:
         return None

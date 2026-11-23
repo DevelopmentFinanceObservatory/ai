@@ -232,9 +232,9 @@ _GROUPS_UNREADABLE = "groups_unreadable"
 
 class _Uncompiled(NamedTuple):
     """Why Search answered no compile of a pin (`compile_on_basis`): its answer in
-    words (`cause`) and as a code (`code`), whether it can answer later, and the
-    refusal's reason, and whether the call cannot reach Search for good, which is no
-    answer of Search's about the pin (`unreachable`)."""
+    words (`cause`) and as a code (`code`), whether it can answer later (`retryable`),
+    the refusal's reason (`reason`), and whether the call cannot reach Search for good,
+    which is no answer of Search's about the pin (`unreachable`)."""
 
     cause: str
     code: str
@@ -314,10 +314,10 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     (`planner.stated_scope.record_combined_refused`), and the pin is compiled on the
     stated option alone, since Search may refuse either move. A later proposal posts
     only that second compile. Where Search refuses it for good too, its code is
-    recorded as above: the pin cannot count what the user asked for. Where Search
-    does not answer it, the proposal answers `stated_alone_unanswered`, to propose
-    again, once: a second time, and where it compiles, the first compile's refusal
-    stands (`OPERATION_UNSUPPORTED`).
+    recorded as above, since the pin cannot count what the user asked for. Where
+    Search does not answer it, the proposal answers `stated_alone_unanswered`, asking
+    to propose again once. A second non-answer, or an alone compile that succeeds,
+    leaves the first compile's refusal standing (`OPERATION_UNSUPPORTED`).
 
     A compile carrying a stated option that cannot reach Search for good, either of
     the two, is a fault of the system and no answer about the pin: it records
@@ -449,7 +449,7 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
             return _refusing(_basis_uncompiled(realignment, compiled.cause))
         if stated_option is None:
             return unservable(compiled.reason, code=compiled.code)
-        # The compile also carries a calculation's move: Search may refuse either.
+        # The compile also carries a calculation's move, and Search may refuse either.
         # The stated option alone decides whether the pin can count what the user
         # asked for. The refused compile is held for the turn, so proposing again
         # posts only the stated option's.
