@@ -432,7 +432,7 @@ def _donor_mint_response(*, spec_id: str, values: dict[str, float]) -> dict[str,
             "identity": {
                 "identity_version": "spec1",
                 "shape": {"id": stat_var, "kind": "stat_var"},
-                "entities": {"donor": [f"country/{code}" for code in ("USA", "GBR", "FRA")]},
+                "entities": {"origin": [f"country/{code}" for code in ("USA", "GBR", "FRA")]},
                 "facets": {"unit": {"ref": "USD", "state": "value"}},
                 "requested_window": {"kind": "all"},
                 "slots": [],
@@ -963,7 +963,7 @@ TOP_DONORS = (
 TOP_DONOR_IDENTITY: dict[str, Any] = {
     "identity_version": "spec1",
     "shape": {"id": "OdaDisbursed", "kind": "stat_var"},
-    "entities": {"donor": [donor.ref for donor in TOP_DONORS]},
+    "entities": {"origin": [donor.ref for donor in TOP_DONORS]},
     "facets": {"unit": {"ref": "USD", "state": "value"}},
     "requested_window": {"kind": "all"},
     "slots": [],

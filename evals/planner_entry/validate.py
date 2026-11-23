@@ -49,6 +49,7 @@ from entry import (
     EntryRun,
     ModelRequest,
     PeriodReduction,
+    RecordedSurface,
     Task,
     TranslationCalls,
     first_year_gaps,
@@ -194,11 +195,12 @@ async def accepted_run(
     translation: TranslationCalls | None = None,
     *,
     timeout_s: float = 60.0,
+    surface: RecordedSurface | None = None,
 ) -> EntryRun:
     """The entry over `recording` in which a scripted model proposes `payload` and, when
     it is refused first, asks the user and proposes it again once they answer, cut
     after `timeout_s`. With `translation`, the recorded plan is translated over those
-    calls."""
+    calls. With `surface`, the planner's tool calls go to it (`entry.run_entry`)."""
     propose_call = ("propose_plan", dict(payload.body))
     if payload.refusal is None:
         script: list[Step] = [[propose_call]]
@@ -222,6 +224,7 @@ async def accepted_run(
         timeout_s=timeout_s,
         answers=answers,
         translation=translation,
+        surface=surface,
     )
 
 

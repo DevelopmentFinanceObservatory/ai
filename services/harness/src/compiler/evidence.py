@@ -110,7 +110,11 @@ from planner.workflow import (
 from pydantic import ConfigDict, Field, JsonValue, ValidationError, field_validator
 
 from compiler.frame_columns import columns_on_axes
-from compiler.sources import pinned_stat_var, source_constraint_matches
+from compiler.sources import (
+    identity_side,
+    pinned_stat_var,
+    source_constraint_matches,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1437,41 +1441,103 @@ def _scope_issues(
 
     The identity is what `spec_id` hashes, so what it binds is what a
     retrieval against that spec can return. Only what it actually states is
-    compared: a member it omits says nothing.
+    compared: a member it omits, or an axis its `entities` leaves unbound
+    (`_identity_entities`), says nothing. An entity the requirement names is
+    compared with the refs the identity binds on the entity's own axis, the
+    axis its resolved role names (`compiler.sources.identity_side`), and with
+    no other axis's. A named entity on an axis the identity leaves unbound,
+    such as a recipient beside a donor the identity binds, is checked against
+    the source's entities alone (`_entity_findings`). Once a named entity
+    resolves, the refs the identity binds on axes where the requirement names
+    no one, such as the recipients beside a donor it names, are bound wider
+    than the requirement (`SCOPE_ENTITIES_WIDER`). With no name resolved, as
+    at run time when a manifest's entities carry no label, nothing is compared.
     """
     if not evidence.identity:
         return []
     issues: list[EvidenceIssue] = []
-    bound = _identity_refs(evidence.identity.get("entities"))
+    bound = _identity_entities(evidence.identity.get("entities"))
     if bound is not None:
-        named = named_refs(requirement.entities, evidence)
-        issues.extend(_scope_entity_issues(requirement, named, bound))
+        named = _named_axes(requirement, evidence)
+        for axis in sorted(named.keys() & bound.keys()):
+            issues.extend(_scope_entity_issues(requirement, named[axis], bound[axis]))
+        unnamed = sorted(bound.keys() - named.keys())
+        if named and unnamed:
+            issues.append(_unnamed_axes_issue(requirement, {axis: bound[axis] for axis in unnamed}))
     requested = evidence.identity.get("requested_window")
     if isinstance(requested, dict):
         issues.extend(_scope_window_issues(requirement, requested))
     return issues
 
 
-def _identity_refs(entities: JsonValue) -> set[str] | None:
-    """The refs an identity's `entities` binds, across every role; `None` when it states none.
+def _named_axes(
+    requirement: DatasetRequirement, evidence: RetrievalEvidence
+) -> dict[str, set[str]]:
+    """The refs `requirement` names on each identity axis, read off the axis of each
+    member of the source an entity names (`named_members`, `compiler.sources.identity_side`)."""
+    named: dict[str, set[str]] = {}
+    for entity in requirement.entities:
+        for one in named_members(entity, evidence):
+            named.setdefault(identity_side(one.role), set()).add(one.ref)
+    return named
 
-    The identity's keys are graph properties, not the source's role columns,
-    so only the refs are compared and never the roles. An empty map, or one
-    with no list under any key, states none exactly as an absent member
-    does: data-mcp writes `entities: {}` to clear the filter, which is an
-    unfiltered definition wider than the requirement, not one binding nothing.
+
+def _identity_entities(entities: JsonValue) -> dict[str, set[str]] | None:
+    """The refs an identity's `entities` binds, by the axis each key names
+    (`compiler.sources.identity_side`); `None` when it states none.
+
+    Search keys an identity by axis (`observationAbout`, `origin`,
+    `destination`) and the mint by the caller's graph role (`creditor`,
+    `financingRecipient`), so each key is read as the axis it names, and a
+    key outside that set, such as a declared `reporter` role, as an axis of
+    its own. An axis no key binds a ref on is one the definition does not
+    bind, and the source states among its entities what Search reads the
+    side as. A required entity sitting on such an axis is checked against
+    those entities (`_entity_findings`), so the scope check says nothing
+    about it. An empty map, or one with no ref under any key, states none
+    exactly as an absent member does: data-mcp writes `entities: {}` to clear
+    the filter, which is an unfiltered definition wider than the requirement,
+    not one binding nothing. dfo-apis refuses a role with an empty list at
+    Search and at the mint alike, so a key with no ref binds nothing.
     """
     if not isinstance(entities, dict):
         return None
-    lists = [values for values in entities.values() if isinstance(values, list)]
-    if not lists:
-        return None
-    return {value for values in lists for value in values if isinstance(value, str)}
+    bound: dict[str, set[str]] = {}
+    for key, values in entities.items():
+        refs = (
+            {value for value in values if isinstance(value, str)}
+            if isinstance(values, list)
+            else set()
+        )
+        if refs:
+            bound.setdefault(identity_side(key), set()).update(refs)
+    return bound or None
+
+
+def _unnamed_axes_issue(
+    requirement: DatasetRequirement, bound: Mapping[str, set[str]]
+) -> EvidenceIssue:
+    """The finding on the refs `bound` an identity binds on each axis where the
+    requirement names no one. The definition is bound wider than the requirement."""
+    refs = sorted({ref for refs in bound.values() for ref in refs})
+    return EvidenceIssue(
+        code=EvidenceIssueCode.SCOPE_ENTITIES_WIDER,
+        severity=Severity.WARNING,
+        requirement_id=requirement.id,
+        detail=(
+            f"the definition also binds {refs!r} on {sorted(bound)!r}, "
+            "where the requirement names no one"
+        ),
+        found=refs,
+        required=[],
+    )
 
 
 def _scope_entity_issues(
     requirement: DatasetRequirement, wanted: set[str], bound: set[str]
 ) -> list[EvidenceIssue]:
+    """The findings on the refs `wanted` the requirement names on one axis, against
+    the refs `bound` the identity binds there."""
     # A required entity is known by name; the refs it binds to are the ones
     # it names (`named_members`), a set's members included. One naming none
     # is already reported as missing or ambiguous, and has no ref to compare.

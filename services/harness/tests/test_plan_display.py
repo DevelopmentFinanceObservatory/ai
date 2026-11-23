@@ -22,6 +22,7 @@ import pytest
 from compiler.sources import source_from_spec_block
 from harness import plan_display
 from harness.decision_pick import DecisionPick, decision_pick
+from harness.graph.plan_done import _stop_causes
 from harness.plan_display import (
     _card_label,
     _concepts,
@@ -92,6 +93,7 @@ from planner.plan import (
     SumOfRequirement,
     Unit,
     WholeOf,
+    covered,
     frame_shapes,
     scope_choice_slot,
     search_pin_slot,
@@ -3940,18 +3942,29 @@ def test_a_declared_whole_is_named_by_the_axis_it_opens_and_never_the_planners_m
 
 
 @pytest.mark.parametrize(
-    ("whole", "population"),
-    [(DAC_DONORS, "official donors (DAC)"), (ALL_DONORS, "140 donors")],
+    ("whole", "population", "divided_by"),
+    [
+        (DAC_DONORS, "official donors (DAC)", "from official donors (DAC)"),
+        (ALL_DONORS, "140 donors", "from every donor"),
+    ],
     ids=["dac_donors", "all_donors"],
 )
+@pytest.mark.parametrize("states_coverage", [True, False], ids=["stored", "as-written"])
 def test_a_declared_donor_whole_is_named_by_its_parts_concept_and_the_donors_its_source_holds(
-    decision: DecisionFactory, whole: dict[str, Any], population: str
+    decision: DecisionFactory,
+    whole: dict[str, Any],
+    population: str,
+    divided_by: str,
+    states_coverage: bool,
 ) -> None:
     """The United States' share of ODA to Kenya with the total declared the US part
     over every donor, under the planner's measure "Total aid to Kenya": the whole
     counts the part's concept, so the card names it so, with the donors its source
-    holds, the total of official donors (DAC) or the 140 left open."""
+    holds, the total of official donors (DAC) or the 140 left open. A whole stating
+    no entities or `across`, as the planner writes one, covers its part's parties,
+    so its card reads the same as one a stored plan states them on."""
     plan = us_share_of_kenya_oda(decision, whole=whole, numerator=US_DONOR)
+    coverage = {} if states_coverage else {"entities": (), "across": ()}
     plan = Plan.model_validate(
         {
             **plan.model_dump(),
@@ -3960,6 +3973,7 @@ def test_a_declared_donor_whole_is_named_by_its_parts_concept_and_the_donors_its
                     update={
                         "measure": "Total aid to Kenya",
                         "whole_of": WholeOf(part="us", axis="donor"),
+                        **coverage,
                     }
                 )
                 if r.id == "all_oda"
@@ -3978,6 +3992,126 @@ def test_a_declared_donor_whole_is_named_by_its_parts_concept_and_the_donors_its
         f"Total {whole_name} by year",
         f"ODA gross disbursements from United States to Kenya as a share of {whole_name}",
     ]
+    assert share_wholes(plan) == {"share": divided_by}
+
+
+@pytest.mark.parametrize(
+    ("whole", "population", "summed"),
+    [(DAC_DONORS, "official donors (DAC)", False), (ALL_DONORS, "140 donors", True)],
+    ids=["donors-bound", "donors-open"],
+)
+def test_the_sum_over_a_whole_s_open_side_is_a_card_row_of_its_own(
+    decision: DecisionFactory, whole: dict[str, Any], population: str, summed: bool
+) -> None:
+    """The United States' share of ODA to Kenya over every donor, the share reading
+    the whole. Where the whole's source leaves the donors open, the sum
+    `propose_plan` adds over them is a step with a row of its own, worded as a
+    total by year, which a stop names as itself, and the share divides by the
+    whole of every donor. Where the source binds the donors' total there is no
+    such row."""
+    plan = us_share_of_kenya_oda(
+        decision, whole=whole, numerator=US_DONOR, whole_of=True, group_by=None
+    )
+
+    labels = [row["label"] for row in card_rows(plan)]
+
+    whole_name = f"ODA gross disbursements from {population} to Kenya"
+    assert labels == [
+        "Fetch ODA gross disbursements from United States to Kenya",
+        f"Fetch {whole_name}",
+        *([f"Total {whole_name} by year"] if summed else []),
+        f"ODA gross disbursements from United States to Kenya as a share of {whole_name}",
+    ]
+    assert [row["id"] for row in step_rows(plan)] == [
+        "us",
+        "all_oda",
+        *(["all_oda_sum"] if summed else []),
+        "share",
+    ]
+    assert share_wholes(plan) == {
+        "share": "from every donor" if summed else "from official donors (DAC)"
+    }
+    if summed:
+        # A stop in the sum is reported as the sum's own, and stops the share.
+        assert _stop_causes(plan, "all_oda_sum") == {
+            "all_oda_sum": "all_oda_sum",
+            "share": "all_oda_sum",
+        }
+
+
+@pytest.mark.parametrize(
+    ("whole", "donors", "across"),
+    [
+        (DAC_DONORS, [("official donors (DAC)", "DACOfficialDonors")], ()),
+        (ALL_DONORS, [], ("donor",)),
+        # The donors bound with no entity stated for them. The whole names no donor
+        # and leaves no side open, so compile reads no open axis it cannot resolve.
+        ({"entities": DAC_DONORS["entities"][:1]}, [], ()),
+    ],
+    ids=["donors-bound", "donors-open", "donors-bound-unstated"],
+)
+def test_a_whole_covers_the_side_it_opens_as_its_compiled_source_serves_it(
+    decision: DecisionFactory,
+    whole: dict[str, Any],
+    donors: list[tuple[str, str]],
+    across: tuple[str, ...],
+) -> None:
+    """The United States' share of ODA to Kenya over every donor, compiled. Where
+    the whole's source binds the donors' total, the whole covers that total by its
+    ref. Where it leaves the donors open, which the plan sums, it covers every
+    donor."""
+    plan = us_share_of_kenya_oda(
+        decision, whole=whole, numerator=US_DONOR, whole_of=True, group_by=None
+    )
+    stated = plan.requirement("all_oda")
+    assert isinstance(stated, DatasetRequirement)
+
+    read = covered(stated, plan)
+
+    assert [(e.name, e.dcid) for e in read.entities if e.role == "donor"] == donors
+    assert read.across == across
+
+
+def test_a_whole_keeps_apart_the_parties_its_part_names_several_of(
+    decision: DecisionFactory,
+) -> None:
+    """US ODA to Kenya and Uganda over every donor, each recipient's share of its own
+    total: the whole states no entity, as the planner writes one, and covers its
+    part's two recipients, so its result reads one figure per recipient."""
+    period = Period(start=2015, end=2020)
+    part = DatasetRequirement(
+        id="us",
+        decision_ids=["measure"],
+        measure="ODA",
+        entities=[
+            Entity(name="United States", role="donor"),
+            Entity(name="Kenya", role="recipient"),
+            Entity(name="Uganda", role="recipient"),
+        ],
+        period=period,
+    )
+    whole = DatasetRequirement(
+        id="all_oda",
+        decision_ids=["measure"],
+        measure="ODA",
+        whole_of=WholeOf(part="us", axis="donor"),
+        period=period,
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="us"),
+        denominator=RequirementSide(input_id="all_oda"),
+        axis="recipient",
+        denominator_scope=DenominatorScope.PER_AXIS,
+    )
+    plan = Plan(
+        question="What share of ODA to Kenya and Uganda does the United States give?",
+        decisions=[decision()],
+        evidence_requirements=[part, whole, share],
+    )
+
+    assert _kept_words(frame_shapes(plan)["all_oda"], plan) == ["recipient", "year"]
 
 
 _ODA = "official development assistance"
