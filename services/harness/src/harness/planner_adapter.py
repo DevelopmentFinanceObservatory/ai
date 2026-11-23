@@ -1265,6 +1265,10 @@ def _answer_text(answered: _Answered) -> str:
         said = f"They picked {offered.get(picked, picked)!r}, id `{picked}`."
     elif text is not None:
         said = f"They answered in their own words: {cut_user_text(text, MAX_QUESTION_CHARS)}"
+    elif answered.keep is not None:
+        # Leaving the keep question unanswered settles it: the dataset is not kept,
+        # which `_keep_text` says.
+        said = "They left the question unanswered."
     else:
         said = "They left the question unanswered, so nothing it asked is settled by them."
     question = cut_user_text(str(args.get("message", "")), MAX_QUESTION_CHARS)
@@ -1279,10 +1283,14 @@ def _answer_text(answered: _Answered) -> str:
         else f"you asked through `{PLANNER_ASK}`"
     )
     settled = _keep_text(answered.keep) if answered.keep is not None else ""
+    chose = (
+        "What they chose is the user's decision. "
+        if picked is not None or text is not None or answered.keep is None
+        else ""
+    )
     return (
         f"{referral}\nThe user answered the question {asker}: "
-        f"{question}\n{said}\n{settled}What they chose is the user's decision. Carry on "
-        "from it.\n"
+        f"{question}\n{said}\n{settled}{chose}Carry on from it.\n"
     )
 
 
@@ -1292,15 +1300,22 @@ def _keep_text(keep: KeepAnswer) -> str:
     the plan to propose again; a pin not kept, after a skip or a dismissal too,
     cannot be proposed again for the figures it counts, so each is pinned again or
     declined. The resumed run saw none of the asking run's calls, so the paused
-    proposal's arguments render as `propose_plan` was given them."""
+    proposal's requirements and decisions render as `propose_plan` was given them."""
     pins = ", ".join(dict.fromkeys(pin for pin, _ in keep.pairs))
-    proposal = json.dumps(keep.proposal) if keep.proposal is not None else None
+    held = {
+        key: keep.proposal[key]
+        for key in ("evidence_requirements", "decisions")
+        if keep.proposal is not None and keep.proposal.get(key)
+    }
+    proposal = json.dumps(held, ensure_ascii=False) if held else None
     if keep.kept:
         paused = (
-            f" Propose this plan again, as the question paused it: {proposal}" if proposal else ""
+            f" Propose them again as the question paused the proposal: {proposal}"
+            if proposal
+            else ""
         )
         return f"They kept {pins} counted as published, so it is admitted as it is.{paused}\n"
-    paused = f" The plan the question paused, to change as above: {proposal}" if proposal else ""
+    paused = f" The paused proposal held these, to change as above: {proposal}" if proposal else ""
     return (
         f"They did not keep {pins} counted as published, so do not propose it again for the "
         "figures it counts: pin each such figure on a dataset counted the way they asked, "

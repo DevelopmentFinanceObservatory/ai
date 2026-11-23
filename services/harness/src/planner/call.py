@@ -859,8 +859,9 @@ class CallSession:
     def record_scope_unattributed(
         self, option_id: str, refused: Iterable[RefusedRequirement]
     ) -> None:
-        """Record a `STATED_SCOPE_UNATTRIBUTED` refusal for `option_id`, given to a plan
-        whose dataset requirements are `refused`, in the call's state."""
+        """Record a `STATED_SCOPE_UNATTRIBUTED` refusal for `option_id` in the call's
+        state, with `refused`: the id and `measure` of each dataset requirement whose pin
+        offers the option."""
         record_unattributed(self.call.state, option_id, refused)
 
     def record_keep_offered(self, pairs: Iterable[Pair]) -> None:

@@ -155,6 +155,43 @@
     },
     {
       "agent": "planner",
+      "scenario": "keep-resumed",
+      "call_index": 0,
+      "total_chars": 62389,
+      "system_instruction_chars": 20497,
+      "declaration_total_chars": 40874,
+      "declarations": [
+        {
+          "name": "propose_plan",
+          "chars": 38748
+        },
+        {
+          "name": "ask_user_question",
+          "chars": 1908
+        },
+        {
+          "name": "reject_plan",
+          "chars": 218
+        }
+      ],
+      "contents": {
+        "total_chars": 2057,
+        "buckets": [
+          {
+            "bucket": "text(planner-brief)",
+            "count": 1,
+            "chars": 2052
+          },
+          {
+            "bucket": "text",
+            "count": 1,
+            "chars": 5
+          }
+        ]
+      }
+    },
+    {
+      "agent": "planner",
       "scenario": "realistic",
       "call_index": 0,
       "total_chars": 69295,

@@ -552,6 +552,25 @@
     "provider:multilateral"
    ],
    "sums_providers": false
+  },
+  "G7 bilateral plus multilateral ODA": {
+   "entries": [
+    {
+     "axis": "provider",
+     "option_id": "provider:inclusive",
+     "origin": {
+      "kind": "text",
+      "text": "bilateral plus multilateral",
+      "start": 3,
+      "end": 30
+     }
+    }
+   ],
+   "total": false,
+   "mentions": [
+    "provider:inclusive"
+   ],
+   "sums_providers": true
   }
  }
 }

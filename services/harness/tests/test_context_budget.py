@@ -168,6 +168,10 @@ from .context_probe import (
 )
 from .planner_host import PlannerHarness
 from .scripted_genai import Reply, Request, ScriptedGenai, call_part, reply, text_part
+from .session_events import one_answer
+from .test_keep_question import _calls as _keep_calls
+from .test_keep_question import _propose as _keep_propose
+from .test_keep_question import _Turn as _KeepTurn
 from .test_planner_adapter import _NO_DATA_SEARCH_RESPONSE, _gdp_plan
 
 # The root conftest.py chdirs every test into a tmp_path, so this must be absolute.
@@ -275,6 +279,26 @@ _STATED_WORDS = (
     "1970 to 2024, including imputed multilateral aid."
 )
 _STATED_READINGS = Path(__file__).resolve().parent / "fixtures" / "stated_scope_readings.json"
+
+# The fourth: the entry the user's dismissal of the keep question resumes, whose
+# brief says DAC1 was not kept and carries the paused proposal's requirements
+# (`harness.planner_adapter._keep_text`), over the G7 question with DAC1 on record.
+KEEP_RESUMED = "keep-resumed"
+
+
+async def _keep_resumed_round() -> tuple[list[dict[str, Any]], list[Any]]:
+    """The requests of the entry a dismissed keep question resumes, as
+    `context_probe.compose` records and as `ModelRequest` objects: the first run
+    proposes DAC1 and pauses on the question, and the resumed one answers in text."""
+    turn = _KeepTurn("dac1", replies=[_keep_calls(_keep_propose()), reply(text_part("done"))])
+    await turn.run()
+    await turn.run(answer=one_answer({"skip": True}))
+    requests = [_as_model_request(request) for request in turn.scripted.requests[1:]]
+    records = [
+        compose(request, agent="planner", scenario=KEEP_RESUMED, call_index=index)
+        for index, request in enumerate(requests)
+    ]
+    return records, requests
 
 
 def _adapter(
@@ -519,6 +543,7 @@ async def measured(
             stated_words=stated_words,
         )
         measured[(scenario, "planner")] = round_measured["planner"]
+    measured[(KEEP_RESUMED, "planner")] = await _keep_resumed_round()
 
     if os.environ.get("CONTEXT_BASELINE_UPDATE") == "1":
         _write_baseline(
@@ -717,6 +742,17 @@ def test_the_stated_scope_line_stays_under_its_ceiling(records: list[dict[str, A
         f"(0, {STATED_SCOPE_LINE_CEILING}]. A deliberate change means {_REGENERATE}, then "
         "this file's ceiling constant."
     )
+
+
+def test_the_keep_resumed_round_measures_the_keep_outcome(measured: Any) -> None:
+    """The `KEEP_RESUMED` request carries the line on the dataset the user did not
+    keep, so its row measures that line and the paused requirements."""
+    _records, requests = measured[(KEEP_RESUMED, "planner")]
+    text = "".join(
+        part.text or "" for content in requests[0].contents for part in content.parts or []
+    )
+    assert "They did not keep" in text
+    assert "evidence_requirements" in text
 
 
 def test_no_relayed_foreign_agent_text_reaches_the_planner(

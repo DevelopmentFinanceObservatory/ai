@@ -393,9 +393,9 @@ class SessionView(Protocol):
         ...
 
     def record_scope_unattributed(self, option_id: str, refused: Iterable[tuple[str, str]]) -> None:
-        """Record a `STATED_SCOPE_UNATTRIBUTED` refusal given for `option_id` this turn
-        naming `refused`, the dataset requirements pinned to a dataset offering it, each
-        its id and `measure`."""
+        """Record a `STATED_SCOPE_UNATTRIBUTED` refusal given for `option_id` this turn,
+        with `refused`: the id and `measure` of each dataset requirement whose pin offers
+        the option."""
         ...
 
     def record_keep_offered(self, pairs: Iterable[tuple[str, str]]) -> None:
@@ -7109,8 +7109,16 @@ _PROVIDER_OPTION_LABELS: Mapping[str, str] = {
 def _stated_label(option_id: str, *, words: str, offered: str | None = None) -> str:
     """How text the user or the planner reads names the provider option `option_id`,
     stated in the user's `words`: by `_PROVIDER_OPTION_LABELS`, else by `offered`, the
-    label a pin's provider choice gives it, else by the words."""
-    return _PROVIDER_OPTION_LABELS.get(option_id) or offered or words
+    label a pin's provider choice gives it, else by the words, else by the option's
+    provider scope in words ("pooled total spending" for `provider:pooled_total`).
+    Never empty."""
+    scope = option_id.partition(":")[2].replace("_", " ").strip()
+    return (
+        _PROVIDER_OPTION_LABELS.get(option_id)
+        or offered
+        or words.strip()
+        or (f"{scope} spending" if scope else "the providers' spending asked for")
+    )
 
 
 # The provider options counting part of a donor's total ODA, which a "total" in the
@@ -7211,7 +7219,7 @@ def stated_scope_line(record: StatedScopeRecord | None, shown: Mapping[str, PinS
     if stated is None:
         return ""
     sources = SourceReadings.of_shown(shown)
-    offering: dict[str, str] = {}
+    offering: dict[str, Option] = {}
     for spec_id in shown:
         choice = _provider_choice(part_scope(spec_id, sources.block(spec_id)))
         available = [
@@ -7224,9 +7232,14 @@ def stated_scope_line(record: StatedScopeRecord | None, shown: Mapping[str, PinS
         ]
         named = summing or [o for o in available if o.option_id == stated.option_id]
         if named:
-            offering[spec_id] = named[0].label
+            offering[spec_id] = named[0]
+    # Words summing the lines name the summing option a dataset on record offers,
+    # which is the option the line labels, not the one Search read.
+    first = next(iter(offering.values()), None)
     label = _stated_label(
-        stated.option_id, words=stated.words, offered=next(iter(offering.values()), None)
+        first.option_id if first is not None else stated.option_id,
+        words=stated.words,
+        offered=first.label if first is not None else None,
     )
     pins = (
         f"which {', '.join(offering)} on record can be counted as"
@@ -7426,8 +7439,9 @@ def _stated_unattributed(
     no pin of which can count it, as a debt question about bilateral creditors, pass.
 
     Raises:
-        _Unservable: `STATED_SCOPE_UNATTRIBUTED`, recorded for the option with the
-            plan's dataset requirements (`SessionView.record_scope_unattributed`).
+        _Unservable: `STATED_SCOPE_UNATTRIBUTED`, recorded for the option with the id
+            and `measure` of each requirement whose pin offers it
+            (`SessionView.record_scope_unattributed`).
     """
     sole = stated.sole
     if sole is None:
@@ -7591,14 +7605,25 @@ def _stated_unserved(
     Only the user keeps a dataset that cannot count the scope they asked for.
     `propose_plan` puts it to the user (`planner.tools.pause_on_keep_question`), and
     the entry their answer resumes records it (`planner.stated_scope.record_keep_answer`).
-    The question is built here, from each pin's title (`_title`), the option's label
-    (`_stated_label`) and the user's words, none of them an id; its options are
-    `STATED_SCOPE_OPTIONS`, so it takes no free text.
+    The question is built here, from each pin's dataset title as the catalogue gives
+    it ("OECD DAC1"), the option's label (`_stated_label`) and the user's words, none
+    of them an id; a pin with no title is "the dataset chosen", numbered where two or
+    more are. Its options are `STATED_SCOPE_OPTIONS`, so it takes no free text.
     """
+    chosen = list(dict.fromkeys(item.pin for item in unserved))
+    titles = {pin: block_dataset(sources.block(pin)).title for pin in chosen}
+    untitled = [pin for pin in chosen if titles[pin] is None]
+    named = {
+        **{pin: title for pin, title in titles.items() if title is not None},
+        **{
+            pin: f"the {_ordinal(n)} dataset chosen" if len(untitled) > 1 else "the dataset chosen"
+            for n, pin in enumerate(untitled, start=1)
+        },
+    }
     asked = " ".join(
         f"You asked for {item.label}"
         + (f" (\u201c{item.words}\u201d)" if item.words else "")
-        + f", and {_title(item.pin, sources)} is not counted that way."
+        + f", and {named[item.pin]} is not counted that way."
         for item in unserved
     )
     pins = ", ".join(dict.fromkeys(item.pin for item in unserved))
@@ -7758,16 +7783,6 @@ def _provider_choice(scope: PartScope | None) -> ScopeChoice | None:
     return next((choice for choice in scope.choices if choice.axis == PROVIDER_AXIS), None)
 
 
-def _title(spec_id: str, sources: SourceReadings) -> str:
-    """`spec_id`'s dataset as the user reads it: its sentence as Search renders it,
-    else its dataset's name, else a phrase naming no id."""
-    block = sources.block(spec_id)
-    rendered = ((block or {}).get("resolved") or {}).get("rendered_sentence")
-    if isinstance(rendered, str) and rendered:
-        return rendered
-    return block_dataset(block).name or "the data chosen for it"
-
-
 def _sentence(spec_id: str, sources: SourceReadings) -> str:
     """`spec_id`'s sentence as Search renders it (`resolved.rendered_sentence`), else
     its dataset's name, else the spec_id."""
@@ -7776,6 +7791,14 @@ def _sentence(spec_id: str, sources: SourceReadings) -> str:
     if isinstance(rendered, str) and rendered:
         return rendered
     return block_dataset(block).name or spec_id
+
+
+_ORDINALS = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth")
+
+
+def _ordinal(n: int) -> str:
+    """`n`, counted from 1, as an ordinal in words, in figures past `_ORDINALS`."""
+    return _ORDINALS[n - 1] if n <= len(_ORDINALS) else f"{n}th"
 
 
 def _whole_parts(

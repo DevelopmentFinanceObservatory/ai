@@ -50,7 +50,8 @@ STATED_SCOPE_STATE_KEY = "planner:stated_scope"
 # The session-state slot holding where the question whether to keep a dataset
 # counted as published stands this turn (`KeepQuestion`). A paused turn's state
 # outlives a deploy, so a slot whose shape changes takes a new key, and a value an
-# earlier release wrote under the old one is never read.
+# earlier release wrote under the old one is never read: a keep question paused
+# across a release that renamed this key is asked again when the turn resumes.
 KEEP_STATE_KEY = "planner:stated_scope_keep_question"
 
 # The session-state slot holding, by provider option, the dataset requirements a

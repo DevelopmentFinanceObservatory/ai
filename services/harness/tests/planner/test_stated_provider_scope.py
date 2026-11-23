@@ -67,6 +67,10 @@ from planner.tools import load_pending_ask
 from planner.workflow import ToolId
 from submission.service import (
     STATED_SCOPE_OPTIONS,
+    SourceReadings,
+    _stated_label,
+    _stated_unserved,
+    _Unserved,
     save_aligned_pin,
 )
 
@@ -1767,3 +1771,37 @@ async def test_a_sum_stating_the_scope_nowhere_is_refused_once_a_turn() -> None:
 
     assert first["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, first
     assert again["outcome"] == Outcome.OK.value, again
+
+
+def test_an_option_with_no_label_and_no_words_is_named_by_its_scope() -> None:
+    """An option no table names, no pin labels and no words state is still named, by
+    its provider scope in words, and never by its id."""
+    label = _stated_label("provider:pooled_total", words="")
+
+    assert label.strip()
+    assert "provider:" not in label
+    assert "_" not in label
+
+
+def test_the_question_tells_untitled_datasets_apart() -> None:
+    """Two pins with no sentence or name of Search's: the question numbers them, and
+    names neither by its id."""
+    unserved = [
+        _Unserved(
+            requirement_id=requirement_id,
+            pin=pin,
+            option_id=_INCLUSIVE,
+            label="bilateral aid plus imputed multilateral aid",
+            words="including imputed multilateral aid",
+            cause="the dataset has no option counting it that way",
+            code="not_offered",
+        )
+        for requirement_id, pin in (("first", "spec_untitled_one"), ("second", "spec_untitled_two"))
+    ]
+
+    refused = _stated_unserved(unserved, [], sources=SourceReadings.of_shown({}))
+
+    message = refused["detail"]["ask"]["message"]
+    assert "the first dataset chosen" in message
+    assert "the second dataset chosen" in message
+    assert "spec_untitled" not in message

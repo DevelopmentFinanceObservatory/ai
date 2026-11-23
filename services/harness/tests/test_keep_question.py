@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 from harness.conversation import current_user_message
 from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, ORCHESTRATOR_SPECS_KEY
-from harness.planner_adapter import PlannerAdapter
+from harness.planner_adapter import PlannerAdapter, _keep_text
 from harness.sentences import TERMINAL_PROPOSE_CODES, refusal_sentence
 from harness.settings import Settings
 from harness.studio_translate import _planner_question
@@ -25,7 +25,7 @@ from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from planner.plan import DatasetRequirement, load_plan, windowed_pins
 from planner.specs import PROPOSE_PLAN, REJECT_PLAN, planner_tool_specs
-from planner.stated_scope import StatedScopeReader, TextReading, keep_question
+from planner.stated_scope import KeepAnswer, StatedScopeReader, TextReading, keep_question
 from planner.tool_results import Outcome, ProblemCode
 from submission.service import COUNT_AS_ASKED_OPTION, KEEP_PUBLISHED_OPTION, STATED_SCOPE_OPTIONS
 
@@ -80,14 +80,12 @@ _OPEN_ASK = (PLANNER_ASK, {"message": "Which years should the chart cover?"})
 
 def _not_offering(*, titled: bool = True) -> dict[str, Any]:
     """The recorded DAC1 total with no option counting imputed multilateral aid in its
-    provider choice and no sentence of Search's, so its title is its dataset's name,
-    which it lacks too unless `titled`."""
+    provider choice, and with no dataset title unless `titled`."""
     block = _block("dac1")
     (choice,) = [
         c for c in block["resolved"]["scope_choices"]["choices"] if c["axis"] == "provider"
     ]
     choice["options"] = [o for o in choice["options"] if o["option_id"] != _INCLUSIVE]
-    block["resolved"].pop("rendered_sentence", None)
     if not titled:
         del block["resolved"]["facets"]["provenance"]
     return block
@@ -178,7 +176,8 @@ def _calls(*calls: tuple[str, dict[str, Any]]) -> Any:
 
 async def test_the_question_reaches_the_user_closed_with_two_options() -> None:
     """DAC1 alone on record: `propose_plan` pauses the run on the question, which
-    Studio shows with the two options and no free text, under the call's own id."""
+    names DAC1 by its catalogue title in one clean sentence and Studio shows with the
+    two options and no free text, under the call's own id."""
     turn = _Turn("dac1", replies=[_calls(_propose())])
 
     paused = await turn.run()
@@ -186,6 +185,10 @@ async def test_the_question_reaches_the_user_closed_with_two_options() -> None:
     assert paused is None
     pause = turn.harness.pause
     assert pause is not None
+    message = str(pause.payload["message"])
+    assert ", and OECD DAC1 is not counted that way." in message
+    assert "\u00b7" not in message
+    assert ". is" not in message
     question = _planner_question(dict(pause.payload))
     assert [(o.id, o.label) for o in question.options] == [
         (option["id"], option["label"]) for option in STATED_SCOPE_OPTIONS
@@ -257,6 +260,7 @@ async def test_any_other_answer_releases_and_the_next_proposal_asks_nothing(said
     resumed = await turn.run(answer=one_answer(said))
 
     brief = turn.brief(1)
+    assert "nothing it asked is settled" not in brief
     assert f"They did not keep {DAC1} counted as published" in brief
     assert "`declined`" in brief
     assert _paused(brief, "They did not keep") == _propose()[1]["evidence_requirements"]
@@ -340,7 +344,7 @@ async def test_the_question_names_the_option_and_the_dataset_in_words(titled: bo
     assert pause is not None
     message = str(pause.payload["message"])
     assert "bilateral aid plus imputed multilateral aid" in message
-    assert ("DAC1" in message) is titled
+    assert ("OECD DAC1" in message) is titled
     assert _INCLUSIVE not in message
     assert DAC1 not in message
     assert "provider:" not in message
@@ -404,3 +408,35 @@ async def test_a_stated_compile_that_cannot_reach_search_ends_the_entry_as_final
     assert sentence != refusal_sentence(
         {"code": ProblemCode.STATED_SCOPE_UNREADABLE.value, "detail": {}}
     )
+
+
+async def test_the_brief_names_the_summing_option_for_summed_words() -> None:
+    """Words summing the bilateral and multilateral lines, with DAC1 on record: the
+    brief's line names the option DAC1 sums them on, core contributions, which is not
+    the imputed count Search read the words as."""
+    turn = _Turn("dac1", replies=[reply(text_part("done"))])
+
+    await turn.run(words="G7 bilateral plus multilateral ODA")
+
+    (line,) = [t for t in turn.brief(0).splitlines() if t.startswith("The user's words")]
+    assert DAC1 in line
+    assert "core contributions" in line
+    assert "imputed" not in line
+
+
+def test_the_paused_proposal_renders_its_requirements_and_decisions_as_written() -> None:
+    """The resumed brief carries the paused proposal's requirements and decisions, and
+    nothing else of its arguments, with the user's characters as written."""
+    proposal = {
+        "question": "Aide du G7",
+        "evidence_requirements": [{"id": "aid", "measure": "aide à l'Afrique"}],
+        "decisions": [],
+        "removed_asks": [],
+    }
+
+    text = _keep_text(KeepAnswer(pairs=((DAC1, _INCLUSIVE),), kept=False, proposal=proposal))
+
+    assert "aide à l'Afrique" in text
+    assert json.loads(text[text.index("{") :]) == {
+        "evidence_requirements": proposal["evidence_requirements"]
+    }
