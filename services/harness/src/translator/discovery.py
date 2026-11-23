@@ -2062,7 +2062,8 @@ class DefinitionNotResolvedError(RuntimeError):
     so in words a user reads, naming the refusal's code when it states one.
     `code` is that code, `None` when the refusal states none or nothing was
     refused. `not_issued` is whether the call was never made, the planner
-    entry having no time left for it (`NoTimeLeftError`).
+    entry having no time left for it (`NoTimeLeftError`). `no_part` is whether
+    Search answered with no part.
     """
 
     def __init__(
@@ -2073,12 +2074,14 @@ class DefinitionNotResolvedError(RuntimeError):
         refused: bool = False,
         code: str | None = None,
         not_issued: bool = False,
+        no_part: bool = False,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.refused = refused
         self.code = code
         self.not_issued = not_issued
+        self.no_part = no_part
 
 
 class CutCalls:
@@ -2480,7 +2483,9 @@ async def resolve_definition_at(
         )
     part = _answered_part(answer)
     if part is None:
-        raise DefinitionNotResolvedError("Search returns nothing for it", retryable=False)
+        raise DefinitionNotResolvedError(
+            "Search returns nothing for it", retryable=False, no_part=True
+        )
     return part, at
 
 

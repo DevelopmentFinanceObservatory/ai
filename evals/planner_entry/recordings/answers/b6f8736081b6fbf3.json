@@ -1,0 +1,32 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "frontmatter": {
+        "description": "Context for how ODA is channelled from donors to recipients. Covers the OECD distinction between bilateral and multilateral ODA, earmarked (bi-multi) funding through multilaterals, the OECD List of ODA-eligible international organisations, channel of delivery codes, multilateral outflows, and how a donor's core multilateral contributions are attributed to sectors through imputations.",
+        "license": "CC-BY-4.0",
+        "name": "oda-channels"
+      },
+      "resources": [
+        {
+          "digest": "sha256:cf45bceed5ad28173cc43af001104d31609ebf3b600d8f1d83a46f9a34d1ec8c",
+          "size": 1155,
+          "uri": "skill://oda-channels/SKILL.md"
+        },
+        {
+          "digest": "sha256:36217effc64105d86b5bf76608ff582677035a033c39bca1795c40cbd6127935",
+          "size": 4298,
+          "uri": "skill://oda-channels/references/bilateral-multilateral.md"
+        },
+        {
+          "digest": "sha256:bede634dcaa03d640115c9f3db2d1fac117a4c8506d0e1fcddfb1ab581211bd1",
+          "size": 1928,
+          "uri": "skill://oda-channels/references/sector-imputations.md"
+        }
+      ],
+      "uri": "skill://oda-channels/SKILL.md"
+    },
+    "text": "---\nname: oda-channels\ndescription: >-\n  Context for how ODA is channelled from donors to recipients. Covers the OECD distinction between bilateral and multilateral ODA, earmarked (bi-multi) funding through multilaterals, the OECD List of ODA-eligible international organisations, channel of delivery codes, multilateral outflows, and how a donor's core multilateral contributions are attributed to sectors through imputations.\nlicense: CC-BY-4.0\n---\n\n# ODA channels\n\n## Overview\n\nThis skill covers how the OECD classifies ODA by channel, where each kind of flow is reported, and how imputed multilateral sector estimates combine with bilateral sector ODA.\n\n## References\n\n- [references/bilateral-multilateral.md](references/bilateral-multilateral.md): definitions of bilateral, bi-multi and core multilateral ODA, the OECD List of ODA-eligible international organisations, channel of delivery, where each flow is reported, and the pitfalls of each.\n- [references/sector-imputations.md](references/sector-imputations.md): why core contributions are imputed to sectors, how imputed figures combine with bilateral sector ODA, and the double-counting traps.\n\nFiles in this skill; read one with get_skill(skill_id=\"oda-channels\", path=\u2026):\n- references/bilateral-multilateral.md (4.2 KB)\n- references/sector-imputations.md (1.9 KB)"
+  },
+  "call": "get_skill {\"skill_id\":\"oda-channels\"}"
+}

@@ -17,7 +17,8 @@ from google.genai import Client, types
 from harness import planner_adapter
 from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
-from harness.wiring import build_planner
+from harness.wiring import build_planner, build_stated_scope_reader
+from planner.stated_scope import ApisStatedScopeReader
 
 from .planner_host import PlannerHarness
 from .scripted_genai import ScriptedGenai, reply, text_part
@@ -72,3 +73,21 @@ async def test_the_planner_looks_up_each_request_in_the_prefix_cache_it_is_given
 
     (request,) = scripted.requests
     assert prefix_cache.lookups == [(scripted.client, request.model, request.config)]
+
+
+def test_the_stated_scope_reader_is_built_only_while_the_setting_is_on() -> None:
+    assert build_stated_scope_reader(Settings(planner_stated_scope=False)) is None
+    assert build_stated_scope_reader(Settings(planner_stated_scope=True)) is not None
+
+
+async def test_closing_the_stated_scope_reader_closes_its_client() -> None:
+    """The reader holds the connection pool the app closes at shutdown."""
+    closed: list[bool] = []
+
+    class _Client:
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    await ApisStatedScopeReader(_Client()).aclose()  # ty: ignore[invalid-argument-type] -- a stub client
+
+    assert closed == [True]
