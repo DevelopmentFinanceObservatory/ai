@@ -68,6 +68,11 @@ _SPEC_ID = re.compile(r"spec_[0-9a-f]{32}")
 
 # What the decision for a part's prices is recorded under, the part's spec_id after it.
 PRICES_SLOT_PREFIX = "user_prices_"
+# What the decision for the whole unit a unit question's answer holds its
+# parts to is recorded under, the question's lead part after it (`unit_slot`).
+UNIT_SLOT_PREFIX = "user_unit_"
+# The prefixes of every decision recording the prices the user chose, which code alone writes.
+USER_PRICES_SLOT_PREFIXES = (PRICES_SLOT_PREFIX, UNIT_SLOT_PREFIX)
 
 # The fixed choices of the planner's ask a prices refusal sends it to, by
 # the prices each picks. A pick sets the part's prices
@@ -87,6 +92,41 @@ def prices_slot(part: str) -> str:
     return f"{PRICES_SLOT_PREFIX}{part}"
 
 
+def unit_slot(group: str) -> str:
+    """The `Decision.slot` of the whole unit a unit question's answer holds
+    its parts to, the question led by part `group` (`PricesChoice.group`)."""
+    return f"{UNIT_SLOT_PREFIX}{group}"
+
+
+def decision_slots(choices: Mapping[str, PricesChoice]) -> dict[str, str]:
+    """The slot of the decision recording each part's choice in `choices`, by the part.
+
+    The parts one unit question covered (`PricesChoice.group`) share one
+    decision under `unit_slot`, the question's whole unit: the lead part's
+    unit, or the first priced member's when the lead holds no whole unit. A
+    member served in another unit, as when Search refused to re-read it in
+    the one chosen, keeps a decision of its own under `prices_slot`, as does
+    every choice naming no whole unit or no group.
+    """
+    units: dict[str, Unit] = {}
+    for choice in choices.values():
+        if choice.unit is None or choice.group is None:
+            continue
+        lead = choices.get(choice.group)
+        held = lead.unit if lead is not None and lead.group == choice.group else None
+        units.setdefault(choice.group, held or choice.unit)
+    return {
+        part: (
+            unit_slot(choice.group)
+            if choice.group is not None
+            and choice.unit is not None
+            and units.get(choice.group) == choice.unit
+            else prices_slot(part)
+        )
+        for part, choice in choices.items()
+    }
+
+
 class PricesChoice(NamedTuple):
     """The prices the user picked for a part, the spec_id of the series they
     picked, when the option carried one, and whether they answered the
@@ -95,12 +135,15 @@ class PricesChoice(NamedTuple):
 
     A unit question's answer also names the whole `unit`, currency and base
     year with the prices, that the series `spec_id` is served in: the series
-    the agent fetches for the part (`harness.graph.state.units_served`)."""
+    the agent fetches for the part (`harness.graph.state.units_served`), and
+    the `group`, the question's lead part (`harness.graph.state.ServedUnit.group`),
+    `None` when the record names none."""
 
     prices: PriceBasis
     spec_id: str | None = None
     asked: bool = False
     unit: Unit | None = None
+    group: str | None = None
 
     @classmethod
     def of_candidate(cls, candidate: Mapping[str, Any]) -> PricesChoice | None:
@@ -557,6 +600,7 @@ def _refusal(
     code: ProblemCode,
     lead: str,
     *,
+    slot: str,
     part: str,
     reading: object,
     choice: PricesChoice,
@@ -567,7 +611,7 @@ def _refusal(
 ) -> dict[str, object]:
     """The refusal naming what a requirement reading `part` states to honour `choice`.
 
-    `detail` names the decision's `slot`, what the user `chose`, the `part`
+    `detail` names the decision's `slot` (`decision_slots`), what the user `chose`, the `part`
     and the `requirement_id`, and the `unit` to state and the series to
     `pin`, when one is named. With no unit to state, no series shown serves
     the prices, and the planner asks the user which prices to go on in,
@@ -578,7 +622,7 @@ def _refusal(
     orchestrator reads why (`harness.sentences`).
     """
     detail: dict[str, Any] = {
-        "slot": prices_slot(part),
+        "slot": slot,
         "chosen": choice.label,
         "part": part,
         "requirement_id": requirement_id,
@@ -635,9 +679,11 @@ def prices_decisions(
     whose dataset admission compiles the whole from, is the part's series
     or one the part offers in its place (`Parts.series`). Each part that some requirement reads states
     one decision fixing `prices`, which each of those cites, its `chosen`
-    what the user chose in words (`PricesChoice.words`). A requirement
-    citing one that `patch` does not state is appended, so `Plan.amend`
-    replaces it. A part no requirement reads states nothing.
+    what the user chose in words (`PricesChoice.words`). The parts one unit
+    question covered in one whole unit state one decision between them
+    (`decision_slots`), cited by every requirement reading any of them. A
+    requirement citing one that `patch` does not state is appended, so
+    `Plan.amend` replaces it. A part no requirement reads states nothing.
 
     The refusal is `USER_DECISION_DROPPED` when such a requirement states no
     unit, and `USER_DECISION_CONTRADICTED` when it states other prices,
@@ -647,6 +693,7 @@ def prices_decisions(
     is the tool a refusal naming a unit calls.
     """
     parts = parts.priced_by(choices)
+    slot_of = decision_slots(choices)
     by_id = {requirement.id: requirement for requirement in requirements}
 
     def read_pin(requirement: DatasetRequirement) -> str | None:
@@ -657,9 +704,10 @@ def prices_decisions(
             else requirement.source_spec_id
         )
 
-    decisions: list[Decision] = []
+    decisions: dict[str, Decision] = {}
     slots: dict[str, list[str]] = {}
     for part, choice in choices.items():
+        slot = slot_of[part]
         series = parts.series(part)
         reading = [
             requirement
@@ -696,6 +744,7 @@ def prices_decisions(
                 code,
                 f"The user chose {choice.words} for part {part} answering an ask, and "
                 f"{requirement.id!r} {opening}.",
+                slot=slot,
                 part=part,
                 reading=read_pin(requirement),
                 choice=choice,
@@ -706,8 +755,8 @@ def prices_decisions(
             )
         if not reading:
             continue
-        slot = prices_slot(part)
-        decisions.append(
+        decisions.setdefault(
+            slot,
             Decision(
                 slot=slot,
                 description="Which prices the figures are in.",
@@ -719,10 +768,10 @@ def prices_decisions(
                 resolved_by=ResolvedBy.USER,
                 rationale=f"The user chose {choice.words}.",
                 fixes=DecisionFixes(prices=choice.prices),
-            )
+            ),
         )
         for requirement in reading:
-            if slot not in requirement.decision_ids:
+            if slot not in (*requirement.decision_ids, *slots.get(requirement.id, ())):
                 slots.setdefault(requirement.id, []).append(slot)
     citing = {
         requirement.id: requirement.model_copy(
@@ -732,7 +781,7 @@ def prices_decisions(
         if requirement.id in slots
     }
     stated = {requirement.id for requirement in patch}
-    return decisions, [
+    return list(decisions.values()), [
         *(citing.get(requirement.id, requirement) for requirement in patch),
         *(requirement for rid, requirement in citing.items() if rid not in stated),
     ]
@@ -778,6 +827,7 @@ def base_year_refusal(
             ProblemCode.INVALID_PLAN,
             f"The user chose {choice.words} for part {part} answering an ask, and "
             f"{raw.get('id')!r} states constant prices with no `base_year`.",
+            slot=decision_slots(choices)[part],
             part=part,
             reading=pin,
             choice=choice,

@@ -351,7 +351,9 @@ async def _unit_reply(
             None,
         )
         sentences.append(
-            await _part_in_unit(state, surface, part, unit, offer=ask.offer, count=count)
+            await _part_in_unit(
+                state, surface, part, unit, offer=ask.offer, group=ask.parts[0], count=count
+            )
         )
     return " ".join(sentences)
 
@@ -398,9 +400,11 @@ async def read_part_in_unit(
     part: str,
     unit: UnitChoice,
     *,
+    group: str,
     count: str | None = None,
 ) -> UnitRead:
-    """Settle `part` in `unit`: the part as it stands when served in that
+    """Settle `part`, which the unit question led by `group` covers, in
+    `unit`: the part as it stands when served in that
     unit, else the part Search re-reads in it
     (`harness.unit_switch.resubmit_unit`), stored as the turn's newest reading
     of it. With `count`, another count of the part the user picked in the same
@@ -410,8 +414,8 @@ async def read_part_in_unit(
 
     The part, and the count, are settled on every path, so the question is
     not asked of them again, and the series fetched for the part is recorded
-    with the unit it is served in and the count read in the part's place
-    (`record_unit_served`): `unit`, unless Search refuses it, when the series
+    with the unit it is served in, the count read in the part's place and
+    `group` (`record_unit_served`): `unit`, unless Search refuses it, when the series
     keeps the unit it is served in."""
     block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(part) or {}
     reading = _latest_reading(state, part)
@@ -425,7 +429,7 @@ async def read_part_in_unit(
     served = served_unit(target_block)
     read_count = target if target != part else None
     if count is None and served == unit:
-        record_unit_served(state, part, part, unit)
+        record_unit_served(state, part, part, unit, group=group)
         return UnitRead(label, target, served, None)
     result = await resubmit_unit(
         surface,
@@ -435,11 +439,11 @@ async def read_part_in_unit(
         label=label,
     )
     if isinstance(result, UnitRefused):
-        record_unit_served(state, part, target, served, count=read_count)
+        record_unit_served(state, part, target, served, group=group, count=read_count)
         return UnitRead(label, target, served, result)
     settle_unit(state, result.spec_id)
     record_unit_read(state, part, result.spec_id)
-    record_unit_served(state, part, result.spec_id, unit, count=read_count)
+    record_unit_served(state, part, result.spec_id, unit, group=group, count=read_count)
     digest = resolver_digest({"parts": [dict(result.part)]})
     for read in digest.get("part_digests") or ():
         read["variable"] = label
@@ -462,13 +466,14 @@ async def _part_in_unit(
     unit: UnitChoice,
     *,
     offer: UnitOffer,
+    group: str,
     count: str | None,
 ) -> str:
     """What the agent fetches for `part` in `unit`, in a sentence: the part
     as it stands, the series Search re-read it as (`read_part_in_unit`), or,
     for a unit Search does not serve, the part as served, said so."""
     words = _in_sentence(unit_words(unit, offer))
-    read = await read_part_in_unit(state, surface, part, unit, count=count)
+    read = await read_part_in_unit(state, surface, part, unit, group=group, count=count)
     if read.result is None:
         return f"{read.label} ({part}) is served in {words}: fetch it as it stands."
     if isinstance(read.result, UnitRefused):

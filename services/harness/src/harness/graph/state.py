@@ -326,11 +326,15 @@ class ServedUnit(BaseModel):
     that series is served in, `None` when its unit cannot be read as one a
     plan states (`stated_unit`), and `count`, the other count of the part
     the user picked in the same pause and Search read in the part's place,
-    `None` when the part's own count was read or the record names no count."""
+    `None` when the part's own count was read or the record names no count.
+    `group` is the lead part of the unit question that covered the part
+    (`UnitAsk.parts[0]`), which every part that question covered shares;
+    `None` on a record that names no group."""
 
     spec_id: str
     unit: Unit | None
     count: str | None = None
+    group: str | None = None
 
 
 def units_served(state: SessionState) -> dict[str, ServedUnit]:
@@ -358,15 +362,18 @@ def record_unit_served(
     spec_id: str,
     unit: UnitChoice | None,
     *,
+    group: str,
     count: str | None = None,
 ) -> None:
-    """Record that `part`, which a unit question covered, is fetched as
-    `spec_id`, served in `unit`, read as `count`, another count of the part,
-    when one was read in its place. A unit no plan can state is recorded as
-    none (`stated_unit`)."""
+    """Record that `part`, which the unit question led by `group` covered, is
+    fetched as `spec_id`, served in `unit`, read as `count`, another count of
+    the part, when one was read in its place. A unit no plan can state is
+    recorded as none (`stated_unit`)."""
     stated = stated_unit(unit) if unit is not None else None
     served = {name: one.model_dump(mode="json") for name, one in units_served(state).items()}
-    served[part] = ServedUnit(spec_id=spec_id, unit=stated, count=count).model_dump(mode="json")
+    served[part] = ServedUnit(spec_id=spec_id, unit=stated, count=count, group=group).model_dump(
+        mode="json"
+    )
     state[ORCHESTRATOR_UNIT_SERVED_KEY] = served
 
 

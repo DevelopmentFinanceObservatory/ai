@@ -36,6 +36,7 @@ from submission.prices_choice import (
     PRICES_OPTIONS,
     PRICES_PICKS,
     PRICES_SLOT_PREFIX,
+    USER_PRICES_SLOT_PREFIXES,
     PricesChoice,
     measure_key,
     prices_slot,
@@ -308,7 +309,7 @@ def _prices_refused(body: Mapping[str, Any]) -> str | None:
         isinstance(detail, dict)
         and isinstance(action, dict)
         and action.get("call") == PLANNER_ASK
-        and str(detail.get("slot")).startswith(PRICES_SLOT_PREFIX)
+        and str(detail.get("slot")).startswith(USER_PRICES_SLOT_PREFIXES)
     ):
         return None
     part = detail.get("part")
@@ -332,7 +333,8 @@ def _priced_answers(
     it is served in (`served`, `harness.graph.state.units_served`): the unit
     the user chose, or the one its chips started on for a skip, unless
     Search refused it, when the part keeps the unit it is served in. The
-    choice is keyed by the part alone and names that series (`spec_id`),
+    choice is keyed by the part alone, names that series (`spec_id`) and
+    the question's lead part the record holds (`ServedUnit.group`),
     whose currency may differ from the part's; the series reaches the part
     through `submission.prices_choice.Parts.fetched`. A part whose
     served unit cannot be stated takes no choice. A part with no served unit
@@ -357,7 +359,10 @@ def _priced_answers(
             if (fetched := served.get(part)) is not None:
                 if fetched.unit is not None:
                     chosen[part] = PricesChoice(
-                        fetched.unit.prices, fetched.spec_id, unit=fetched.unit
+                        fetched.unit.prices,
+                        fetched.spec_id,
+                        unit=fetched.unit,
+                        group=fetched.group,
                     )
             elif prices is not None:
                 for priced in (part, *reads.get(part, ())):

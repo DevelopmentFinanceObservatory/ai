@@ -265,7 +265,7 @@ from translator.referral import USER_DECIDES, Referral, ReferralKind, load_refer
 from translator.tool import authored_answer
 
 from submission.prices_choice import (
-    PRICES_SLOT_PREFIX,
+    USER_PRICES_SLOT_PREFIXES,
     Parts,
     PricesChoice,
     base_year_refusal,
@@ -927,13 +927,13 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
 
 
 def _without_user_prices(drafts: Sequence[DecisionDraft]) -> list[DecisionDraft]:
-    """`drafts` less any under a slot of the prices the user chose (`PRICES_SLOT_PREFIX`).
+    """`drafts` less any under a slot of the prices the user chose (`USER_PRICES_SLOT_PREFIXES`).
 
     Code alone writes those (`prices_decisions`). A draft there can only copy
     the user's decision or change it, and none may change it, so the user's
     decision stands as code derives or carries it, whatever a draft restates.
     """
-    return [draft for draft in drafts if not draft.slot.startswith(PRICES_SLOT_PREFIX)]
+    return [draft for draft in drafts if not draft.slot.startswith(USER_PRICES_SLOT_PREFIXES)]
 
 
 def _unmade_prices_citations(
@@ -953,7 +953,7 @@ def _unmade_prices_citations(
         slot
         for requirement in requirements
         for slot in requirement.decision_ids
-        if slot.startswith(PRICES_SLOT_PREFIX) and slot not in made
+        if slot.startswith(USER_PRICES_SLOT_PREFIXES) and slot not in made
     )
 
 
@@ -1030,7 +1030,7 @@ def _slot_code_writes(slot: str) -> bool:
     Those are a pin's measure and scope decisions (`search_pin_slot`,
     `scope_choice_slot`), the decisions a compiled whole or a calculation
     whose inputs differ on an aligned axis states (`_whole_slot`, `_DIFFERENCES`),
-    and the prices the user chose for a part (`submission.prices_choice.prices_slot`).
+    and the prices the user chose (`submission.prices_choice.decision_slots`).
     """
     return slot.startswith(
         (
@@ -1038,7 +1038,7 @@ def _slot_code_writes(slot: str) -> bool:
             *(scope_choice_slot("", axis) for axis in get_args(ScopeAxis)),
             _whole_slot(""),
             *(difference.prefix for difference in _DIFFERENCES.values()),
-            PRICES_SLOT_PREFIX,
+            *USER_PRICES_SLOT_PREFIXES,
         )
     )
 

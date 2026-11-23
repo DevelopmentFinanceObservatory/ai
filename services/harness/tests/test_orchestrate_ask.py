@@ -761,7 +761,10 @@ async def test_a_count_refused_a_unit_is_fetched_in_the_unit_the_count_is_served
     handed = await node.resume(ctx, {"questions": questions}, answer)
 
     assert units_served(state)[_FK_GROSS] == ServedUnit(
-        spec_id=_FK_NET, unit=Unit(currency="EUR", prices="current"), count=_FK_NET
+        spec_id=_FK_NET,
+        unit=Unit(currency="EUR", prices="current"),
+        count=_FK_NET,
+        group=_FK_GROSS,
     )
     assert f"Fetch {_FK_NET} as served, in current EUR, and say so." in handed.output["text"]
 
@@ -815,12 +818,47 @@ async def test_a_unit_answer_records_the_series_fetched_and_the_unit_it_is_serve
 
     fetched = search.posted[0]["spec_id"] if search.posted and refusal is None else _FK_GROSS
     assert units_served(state) == {
-        _FK_GROSS: ServedUnit(spec_id=fetched, unit=Unit.model_validate(served))
+        _FK_GROSS: ServedUnit(spec_id=fetched, unit=Unit.model_validate(served), group=_FK_GROSS)
     }
     # The series fetched is a reading on record with its block, which the
     # planner's entry shows it (`harness.planner_adapter`'s pin sources).
     assert fetched in state[ORCHESTRATOR_SPECS_KEY]
     assert fetched in [reading["spec_id"] for reading in state[ORCHESTRATOR_SEARCHES_KEY]]
+
+
+async def test_a_unit_answer_records_each_part_under_the_question_s_lead_part() -> None:
+    """A unit question covers its part and the part measuring the same thing
+    over other years. Each part's record names the question's lead part as
+    its group, so the parts' prices are one decision on the plan."""
+    search = _UnitSearch()
+    state: dict[str, Any] = {
+        ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: _FRANCE_KENYA, _OTHER: _other_window()},
+        ORCHESTRATOR_SEARCHES_KEY: [
+            _open_reading(_FK_GROSS, text=_AID),
+            _open_reading(_OTHER, text=_AID),
+        ],
+    }
+    ctx = NodeCtx(
+        key=TurnKey("user-1", "conv", 1),
+        inputs={"message": "Aid to Kenya to 2014 and since 2018?"},
+        state=state,
+        transcript=Transcript(),
+        emit=lambda event: None,
+        stop=StopScope(),
+    )
+    node = ask_node(definition_surface=search)
+    assert node.resume is not None
+
+    await node.resume(
+        ctx,
+        {"questions": [{"question": "In which prices?", "unit_of": _FK_GROSS}]},
+        _answers(q1={"kind": "unit", "currency": "USD", "prices": "constant", "base_year": 2020}),
+    )
+
+    assert {part: served.group for part, served in units_served(state).items()} == {
+        _FK_GROSS: _FK_GROSS,
+        _OTHER: _FK_GROSS,
+    }
 
 
 def _ask_user_answer(run: SegmentRun) -> dict[str, Any]:
