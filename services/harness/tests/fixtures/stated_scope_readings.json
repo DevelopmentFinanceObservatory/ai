@@ -508,6 +508,15 @@
     "provider:inclusive"
    ],
    "sums_providers": false
+  },
+  "Show G7 aid to Africa as a share of G7 aid to all developing countries each year from 1970 to 2024, including imputed multilateral aid.\n(then: What share of G7 ODA is bilateral?)": {
+   "entries": [],
+   "total": false,
+   "mentions": [
+    "provider:inclusive",
+    "provider:bilateral"
+   ],
+   "sums_providers": false
   }
  }
 }

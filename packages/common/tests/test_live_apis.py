@@ -77,9 +77,11 @@ def make_client(
     auth: AuthProvider | None = None,
     max_attempts: int = 1,
     clock: Callable[[], float] | None = None,
+    slept: list[float] | None = None,
 ) -> LiveApisClient:
-    async def no_sleep(_: float) -> None:
-        return None
+    async def sleep(seconds: float) -> None:
+        if slept is not None:
+            slept.append(seconds)
 
     return LiveApisClient(
         base_url="http://apis.test",
@@ -88,7 +90,8 @@ def make_client(
         auth=auth,
         transport=httpx2.MockTransport(handler),
         max_attempts=max_attempts,
-        sleep=no_sleep,
+        read_timeout_s=50.0,
+        sleep=sleep,
         **({} if clock is None else {"clock": clock}),
     )
 
@@ -1102,6 +1105,36 @@ async def test_a_retryable_5xx_is_retried_until_it_succeeds() -> None:
 
     assert result == Current(FRAME)
     assert len(calls.requests) == 2
+
+
+@pytest.mark.parametrize(
+    ("answer", "waits"),
+    [
+        (httpx2.Response(429, headers={"Retry-After": "7"}, text="slow down"), 7.0),
+        (httpx2.Response(408, headers={"Retry-After": "120"}, text="timeout"), 50.0),
+        (problem(429, "rate_limited", retryable=True), None),
+        (httpx2.Response(425, text="too early"), None),
+    ],
+    ids=["429-waits-its-retry-after", "408-waits-at-most-the-read-deadline", "429-problem", "425"],
+)
+async def test_a_transient_4xx_is_retried_after_its_retry_after(
+    answer: httpx2.Response, waits: float | None
+) -> None:
+    """A 408, 425 or 429 that can pass is retried in place, as a 5xx is, waiting the
+    `Retry-After` it names up to the read deadline (50 s here), else the backoff."""
+    calls = Calls(answer, ok({"status": "current", "frame": FRAME.as_json()}))
+    slept: list[float] = []
+
+    async with make_client(calls, max_attempts=3, slept=slept) as client:
+        result = await client.refresh_frame(spec_id=SPEC, content_version=CV)
+
+    assert result == Current(FRAME)
+    assert len(calls.requests) == 2
+    assert len(slept) == 1
+    if waits is None:
+        assert 0 <= slept[0] <= 1.0
+    else:
+        assert slept == [waits]
 
 
 @pytest.mark.parametrize(

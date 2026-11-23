@@ -60,7 +60,12 @@ from planner.stated_scope import (
 )
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
-from submission.service import KEEP_PUBLISHED_OPTION, STATED_SCOPE_OPTIONS, save_aligned_pin
+from submission.service import (
+    COUNT_AS_ASKED_OPTION,
+    KEEP_PUBLISHED_OPTION,
+    STATED_SCOPE_OPTIONS,
+    save_aligned_pin,
+)
 
 from ..basis_alignment import (
     HEALTH,
@@ -200,17 +205,20 @@ class _Search:
     provider option posted: a recorded DAC2a part on provider:inclusive as dev Search
     did (`_RECORDED_COMPILES`), any other as `_switched` makes it. With `refusal`, it
     refuses every compile, or, with `refusing` too, each compile posting that option.
-    Each call's arguments are recorded in `calls`."""
+    With `then`, every compile after the first answers that refusal instead. Each
+    call's arguments are recorded in `calls`."""
 
     def __init__(
         self,
         *blocks: Mapping[str, Any],
         refusal: Mapping[str, Any] | None = None,
         refusing: str | None = None,
+        then: Mapping[str, Any] | None = None,
     ):
         self.blocks = blocks
         self.refusal = refusal
         self.refusing = refusing
+        self.then = then
         self.calls: list[Mapping[str, Any]] = []
 
     async def list_tools(self) -> list[Any]:
@@ -222,6 +230,8 @@ class _Search:
         del on_progress
         assert tool.name == "resolve_definition", tool
         self.calls.append(arguments)
+        if self.then is not None and len(self.calls) > 1:
+            return ToolCallResult(is_error=True, structured_content=dict(self.then))
         posted = {entry["option_id"] for entry in arguments["scope_entries"]}
         if self.refusal is not None and (self.refusing is None or self.refusing in posted):
             return ToolCallResult(is_error=True, structured_content=dict(self.refusal))
@@ -1077,7 +1087,7 @@ async def test_a_pin_that_cannot_count_the_stated_scope_is_refused_with_the_ask(
     ("answer", "admitted"),
     [
         pytest.param(KEEP_PUBLISHED_OPTION, True, id="kept"),
-        pytest.param("count it as asked", False, id="not-kept"),
+        pytest.param(COUNT_AS_ASKED_OPTION, False, id="not-kept"),
     ],
 )
 async def test_the_users_keep_holds_through_an_amendment(answer: str, admitted: bool) -> None:
@@ -1126,7 +1136,7 @@ def _dac1_without_bilateral() -> dict[str, Any]:
 def _next_turn(ctx: _Context) -> _Context:
     """The planner context of the conversation's next turn, after the turn `ctx`
     ran: the conversation keeps the turn's records (`keep_turn_records`) and the next
-    turn opens on what Studio seeds it with (`harness.studio._turn_opening`)."""
+    turn opens on the state Studio builds for it (`harness.studio._turn_opening`)."""
     conversation = ConversationState(conversation_id="conv_01keep")
     keep_turn_records(conversation, ctx.state)
     body = TurnRequest.model_validate(
@@ -1147,12 +1157,12 @@ _FRANCE_NEXT = "now for France"
 _ASKED_AGAIN = "Actually, count it including imputed multilateral aid"
 
 
-async def test_a_keep_lasts_the_conversation_until_the_words_name_its_option() -> None:
+async def test_a_keep_holds_for_its_turn_only() -> None:
     """The user kept DAC1 as published in turn 1. Turn 2, "now for France", names no
-    provider scope, so it states nothing and the keep stands. Turn 3, "Actually, count
-    it including imputed multilateral aid", names the option kept again, so the keep does not
-    hold there: DAC1 is refused with the ask, and the user's new answer decides:
-    kept again, DAC1 is admitted; counted as asked, it is refused with no ask."""
+    provider scope, so it states nothing and DAC1 is admitted, and the turn holds no
+    keep. Turn 3, "Actually, count it including imputed multilateral aid", states the
+    option again: DAC1 is refused with the ask, and the user's new answer decides:
+    kept, DAC1 is admitted; counted as asked, it is refused with no ask."""
     first = _Context(*_kept(KEEP_PUBLISHED_OPTION))
     _show(first, _block("dac1"))
     kept = await _propose(first, [_dac1_total(_DAC1_STATED)], words=_G7)
@@ -1162,7 +1172,7 @@ async def test_a_keep_lasts_the_conversation_until_the_words_name_its_option() -
     _show(second, _block("dac1"))
     france = await _propose(second, [_dac1_total(_DAC1_STATED)], words=_FRANCE_NEXT, question=_G7)
     assert france["outcome"] == Outcome.OK.value, france
-    assert stated_scope_kept(second.state) == {(DAC1, _INCLUSIVE)}
+    assert stated_scope_kept(second.state) == frozenset()
 
     third = _next_turn(second)
     _show(third, _block("dac1"))
@@ -1170,7 +1180,7 @@ async def test_a_keep_lasts_the_conversation_until_the_words_name_its_option() -
     assert again["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, again
     assert again["action"]["call"] == PLANNER_ASK
 
-    for answer, admitted in ((KEEP_PUBLISHED_OPTION, True), ("count it as asked", False)):
+    for answer, admitted in ((KEEP_PUBLISHED_OPTION, True), (COUNT_AS_ASKED_OPTION, False)):
         answered = _next_turn(second)
         answered.records = _kept(answer)
         _show(answered, _block("dac1"))
@@ -1180,25 +1190,30 @@ async def test_a_keep_lasts_the_conversation_until_the_words_name_its_option() -
         if admitted:
             assert result["outcome"] == Outcome.OK.value, result
         else:
+            assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
             assert result["action"]["call"] == "propose_plan", result
 
 
 async def test_a_keep_holds_for_its_own_option_only() -> None:
-    """The user kept DAC1 as published for imputed multilateral aid. A later turn
-    asking for bilateral flows, which this DAC1 cannot count either, is refused with
-    the ask: the keep was for the other option."""
-    first = _Context(*_kept(KEEP_PUBLISHED_OPTION))
-    _show(first, _block("dac1"))
-    kept = await _propose(first, [_dac1_total(_DAC1_STATED)], words=_G7)
+    """The user kept DAC1 as published for imputed multilateral aid. An amendment
+    in the same turn asking for bilateral flows, which this DAC1 cannot count either,
+    is refused with the ask: the keep was for the other option."""
+    ctx = _Context(*_kept(KEEP_PUBLISHED_OPTION))
+    _show(ctx, _dac1_without_bilateral())
+    kept = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
     assert kept["outcome"] == Outcome.OK.value, kept
 
-    ctx = _next_turn(first)
-    _show(ctx, _dac1_without_bilateral())
+    ctx.records = []
     result = await _propose(
-        ctx, [_dac1_total("bilateral ODA")], words=_G7_BILATERAL, question=_G7_BILATERAL
+        ctx,
+        [_dac1_total("bilateral ODA")],
+        words=f"{_G7}\n(then: {_G7_BILATERAL})",
+        amends_version=1,
+        question=_G7,
     )
 
     assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
+    assert result["action"]["call"] == PLANNER_ASK
     assert result["detail"]["unserved"] == [
         {"requirement_id": "g7_total", "spec_id": DAC1, "option_id": _BILATERAL}
     ]
@@ -1262,6 +1277,9 @@ async def test_a_stated_compile_search_refuses_cannot_count_the_scope(
         assert result["detail"]["unserved"] == [
             {"requirement_id": "aid", "spec_id": africa["spec_id"], "option_id": _INCLUSIVE}
         ]
+        assert result["detail"]["causes"] == {"aid": refusal["code"]}
+    else:
+        assert result["detail"]["cause"] == "unanswered"
 
 
 async def test_a_compile_held_from_an_earlier_proposal_is_reused() -> None:
@@ -1361,17 +1379,26 @@ async def test_bilateral_plus_multilateral_words_name_dac1s_own_total() -> None:
 
 
 def _released() -> list[AgentRecord]:
-    """The ask for DAC1 counting imputed multilateral aid, answered "count it as
-    asked" (`_kept`)."""
-    return _kept("count it as asked")
+    """The ask for DAC1 counting imputed multilateral aid, answered
+    `COUNT_AS_ASKED_OPTION` (`_kept`)."""
+    return _kept(COUNT_AS_ASKED_OPTION)
 
 
-async def test_an_answer_not_to_keep_is_not_asked_again_in_the_turn() -> None:
-    """The user answered the ask for DAC1 with "count it as asked". The planner
-    proposing DAC1 again is refused with no ask: the user has answered, so the
-    refusal asks the planner to remove the figure or repin it to the DAC2a total on
-    record that counts the option."""
-    ctx = _Context(*_released())
+@pytest.mark.parametrize(
+    "said",
+    [
+        pytest.param({"spec_id": COUNT_AS_ASKED_OPTION}, id="count-as-asked"),
+        pytest.param("whichever is fine", id="free-text"),
+        pytest.param({"skip": True}, id="skip"),
+    ],
+)
+async def test_an_answer_not_to_keep_is_not_asked_again_in_the_turn(said: Any) -> None:
+    """The user answered the ask for DAC1 with anything but keeping it as published:
+    counting it as asked, their own words, or a skip. The answer is final for the
+    turn: the planner proposing DAC1 again is refused with no ask, asking it to
+    remove the figure or repin it to the DAC2a total on record that counts the
+    option."""
+    ctx = _Context(*_asked(said))
     _show(ctx, _block("dac1"), _block("g7_bilateral"))
 
     result = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
@@ -1384,15 +1411,13 @@ async def test_an_answer_not_to_keep_is_not_asked_again_in_the_turn() -> None:
     ]
 
 
-async def test_an_answer_not_to_keep_releases_a_keep_the_conversation_held() -> None:
-    """A turn opening with DAC1 kept for imputed multilateral aid, whose transcript
-    holds the user's answer not to keep it: DAC1 is refused again, and the plan
-    repinned to the DAC2a total counted that way is admitted, holding no keep in the
-    turn's state or the conversation's."""
-    seeded = _Context()
-    seeded.state[STATED_SCOPE_KEPT_STATE_KEY] = [[DAC1, _INCLUSIVE]]
-    ctx = _next_turn(seeded)
-    ctx.records = _released()
+async def test_an_answer_not_to_keep_releases_a_keep_made_earlier_in_the_turn() -> None:
+    """A turn holding DAC1 kept for imputed multilateral aid by a plan admitted
+    earlier, whose transcript holds the user's later answer not to keep it: DAC1 is
+    refused again, and the plan repinned to the DAC2a total counted that way is
+    admitted, holding no keep."""
+    ctx = _Context(*_released())
+    ctx.state[STATED_SCOPE_KEPT_STATE_KEY] = [[DAC1, _INCLUSIVE]]
     g7 = _block("g7_bilateral")
     _show(ctx, _block("dac1"), g7)
     surface = _Search(g7)
@@ -1409,11 +1434,6 @@ async def test_an_answer_not_to_keep_releases_a_keep_the_conversation_held() -> 
     assert repinned["outcome"] == Outcome.OK.value, repinned
     assert _pins(ctx) == {"g7_total": _spec("g7_inclusive")}
     assert stated_scope_kept(ctx.state) == frozenset()
-    conversation = ConversationState(
-        conversation_id="conv_01keep", stated_scope_kept=frozenset({(DAC1, _INCLUSIVE)})
-    )
-    keep_turn_records(conversation, ctx.state)
-    assert conversation.stated_scope_kept == frozenset()
 
 
 _G7_TOTAL_INCLUSIVE = (
@@ -1483,24 +1503,38 @@ async def test_a_pin_switched_on_the_plan_card_offers_no_omitted_scope() -> None
     assert result["outcome"] == Outcome.OK.value, result
 
 
+_UNANSWERED = {"code": "upstream_unavailable", "retry_mode": "retry_after_delay"}
+
+
 @pytest.mark.parametrize(
-    ("refusing", "code"),
+    ("refusing", "then", "code"),
     [
-        pytest.param(None, ProblemCode.STATED_PROVIDER_DROPPED, id="the-stated-scope-refused"),
         pytest.param(
-            "measure_basis:net", ProblemCode.OPERATION_UNSUPPORTED, id="the-calculations-refused"
+            None, None, ProblemCode.STATED_PROVIDER_DROPPED, id="the-stated-scope-refused"
+        ),
+        pytest.param(
+            "measure_basis:net",
+            None,
+            ProblemCode.OPERATION_UNSUPPORTED,
+            id="the-calculations-refused",
+        ),
+        pytest.param(
+            None,
+            _UNANSWERED,
+            ProblemCode.OPERATION_UNSUPPORTED,
+            id="the-stated-scope-unanswered",
         ),
     ],
 )
 async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_what_search_refuses(
-    refusing: str | None, code: ProblemCode
+    refusing: str | None, then: dict[str, str] | None, code: ProblemCode
 ) -> None:
     """US aid to Kenya stating imputed multilateral aid, over a net total its share
     counts it on: one compile moves it on both axes. Where Search refuses it, the
     pin is compiled on the stated scope alone to find which move Search refuses. That
     refused too, the pin cannot count what the user asked for and is refused with the
-    ask; served, the calculation's move is what Search refuses, and the refusal names
-    the share, recording nothing against the stated scope."""
+    ask; served, or not answered, the combined refusal stands: it names the share
+    and records nothing against the stated scope."""
     ctx = _Context()
     aid = provider_block(HEALTH, narrow=True, active=_BILATERAL)
     total = basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance="explicit")
@@ -1509,6 +1543,7 @@ async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_what_s
         aid,
         refusal={"code": "requested_option_unavailable", "retry_mode": "do_not_retry"},
         refusing=refusing,
+        then=then,
     )
     requirements = [
         _dataset("aid", HEALTH, _STATED_INCLUSIVE, donor="United States", recipient="Kenya"),
@@ -1524,7 +1559,10 @@ async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_what_s
     assert "measure_basis:net" not in {e["option_id"] for e in alone["scope_entries"]}
     if code is ProblemCode.STATED_PROVIDER_DROPPED:
         assert result["action"]["call"] == PLANNER_ASK
-        assert list(stated_uncompiled(ctx.state)) == [(HEALTH, _INCLUSIVE)]
+        assert stated_uncompiled(ctx.state) == {
+            (HEALTH, _INCLUSIVE): "requested_option_unavailable"
+        }
+        assert result["detail"]["causes"] == {"aid": "requested_option_unavailable"}
     else:
         assert (
             result["detail"]["basis"]["requirement_id"],
@@ -1550,26 +1588,3 @@ async def test_a_sum_stating_the_scope_nowhere_is_refused_once_a_turn() -> None:
 
     assert first["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, first
     assert again["outcome"] == Outcome.OK.value, again
-
-
-@pytest.mark.parametrize(
-    "said",
-    [pytest.param("whichever is fine", id="free-text"), pytest.param({"skip": True}, id="skip")],
-)
-async def test_an_answer_outside_the_options_neither_keeps_nor_releases(said: Any) -> None:
-    """The user answered the ask for DAC1 in their own words, or skipped it. That is
-    no pick: DAC1 is refused with the ask again, and a keep the turn opened holding
-    stands."""
-    ctx = _Context(*_asked(said))
-    _show(ctx, _block("dac1"))
-
-    again = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
-
-    assert again["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, again
-    assert again["action"]["call"] == PLANNER_ASK
-
-    held = _Context(*_asked(said))
-    held.state[STATED_SCOPE_KEPT_STATE_KEY] = [[DAC1, _INCLUSIVE]]
-    _show(held, _block("dac1"))
-    kept = await _propose(held, [_dac1_total(_DAC1_STATED)], words=_G7)
-    assert kept["outcome"] == Outcome.OK.value, kept

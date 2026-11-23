@@ -72,7 +72,6 @@ from planner.plan import (
     plan_revision,
     stored_plan,
 )
-from planner.stated_scope import seed_stated_scope_kept
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -706,9 +705,6 @@ def _turn_opening(
     ledger = conversation.prior_ledger_state()
     if ledger:
         state[ORCHESTRATOR_PRIOR_LEDGER_KEY] = ledger
-    if conversation.stated_scope_kept:
-        # The planner's admission reads the user's keeps from its state.
-        seed_stated_scope_kept(state, conversation.stated_scope_kept)
     if body.apply_choice is not None:
         # `graph.seed` applies the chip, and the turn neither searches nor plans.
         state[APPLY_CHOICE_STATE_KEY] = body.apply_choice.model_dump(mode="json")

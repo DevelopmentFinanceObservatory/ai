@@ -2059,7 +2059,6 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
     state.turn_plans = [_PLAN_JSON]
     state.turn_readings = [_READING_JSON]
     state.timed_out_calls = {"get_data:call_a", "get_data:call_b"}
-    state.stated_scope_kept = frozenset({("spec_a", "provider:inclusive")})
     state.plan_version_ids = {1: "plan_a", 2: "plan_b"}
     state.latest_plan_version = 2
     state.pending["int_1"] = _PendingInterrupt(
@@ -2116,7 +2115,6 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
     assert loaded.turn_plans == [_PLAN_JSON]
     assert loaded.turn_readings == [_READING_JSON]
     assert loaded.timed_out_calls == state.timed_out_calls
-    assert loaded.stated_scope_kept == {("spec_a", "provider:inclusive")}
     assert loaded.plan_version_ids == {1: "plan_a", 2: "plan_b"}
     assert loaded.latest_plan_version == 2
     pending = loaded.pending["int_1"]

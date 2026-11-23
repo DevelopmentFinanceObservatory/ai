@@ -18,8 +18,7 @@ chip's or one outside Studio, holds no reading, and admission applies no stated 
 
 Three more slots belong to the rule: the datasets the user chose to keep as published
 although they cannot count the provider scope their words asked for
-(`STATED_SCOPE_KEPT_STATE_KEY`), which the conversation keeps across turns
-(`harness.studio_state.ConversationState.stated_scope_kept`), the options a
+(`STATED_SCOPE_KEPT_STATE_KEY`), which holds for the turn, the options a
 `STATED_SCOPE_UNATTRIBUTED` refusal was given for (`UNATTRIBUTED_STATE_KEY`), which is
 given once a turn, and the pins Search refused to compile on a stated option
 (`UNCOMPILED_STATE_KEY`).
@@ -50,12 +49,6 @@ STATED_SCOPE_STATE_KEY = "planner:stated_scope"
 # although it cannot count the provider option their words asked for, as
 # `[spec_id, option_id]` pairs (`stated_scope_kept`).
 STATED_SCOPE_KEPT_STATE_KEY = "planner:stated_scope_kept"
-
-# The session-state slot holding the keeps the turn opened with, made in the
-# conversation's earlier turns, as `STATED_SCOPE_KEPT_STATE_KEY` holds them
-# (`seed_stated_scope_kept`). A turn whose own words name a kept option again asks
-# again (`submission.service._stated_claims`).
-EARLIER_KEPT_STATE_KEY = "planner:stated_scope_kept_earlier"
 
 # The session-state slot holding the provider options a `STATED_SCOPE_UNATTRIBUTED`
 # refusal was given for this turn (`unattributed_refused`).
@@ -285,30 +278,12 @@ def _stated_scope_unreadable(*, status: int | None, code: str | None) -> dict[st
     )
 
 
-def stated_scope_kept(state: SessionState | Mapping[str, Any]) -> frozenset[tuple[str, str]]:
+def stated_scope_kept(state: SessionState) -> frozenset[tuple[str, str]]:
     """Each dataset the user kept as published, with the provider option it cannot
     count (`STATED_SCOPE_KEPT_STATE_KEY`)."""
     return frozenset(
         (str(spec_id), str(option_id))
         for spec_id, option_id in state.get(STATED_SCOPE_KEPT_STATE_KEY) or ()
-    )
-
-
-def seed_stated_scope_kept(state: SessionState, kept: Iterable[tuple[str, str]]) -> None:
-    """Open a turn holding `kept`, the keeps of the conversation's earlier turns, in
-    `STATED_SCOPE_KEPT_STATE_KEY` and, apart, in `EARLIER_KEPT_STATE_KEY`, which the
-    turn never changes."""
-    pairs = [list(pair) for pair in sorted(set(kept))]
-    state[STATED_SCOPE_KEPT_STATE_KEY] = pairs
-    state[EARLIER_KEPT_STATE_KEY] = [list(pair) for pair in pairs]
-
-
-def stated_scope_kept_earlier(state: SessionState) -> frozenset[tuple[str, str]]:
-    """The keeps the turn opened holding, made in the conversation's earlier turns
-    (`EARLIER_KEPT_STATE_KEY`)."""
-    return frozenset(
-        (str(spec_id), str(option_id))
-        for spec_id, option_id in state.get(EARLIER_KEPT_STATE_KEY) or ()
     )
 
 

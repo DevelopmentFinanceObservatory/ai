@@ -105,10 +105,15 @@ def _reading(answer: dict[str, Any]) -> StatedScopeReading:
 @pytest.fixture(autouse=True)
 def stated_scope(monkeypatch: pytest.MonkeyPatch) -> _CannedStatedScope:
     """The reader every studio the eval builds reads the stated scope through, in place
-    of the live route production's planner reads (`build_stated_scope_reader`)."""
+    of the live route production's planner reads (`build_stated_scope_reader`).
+
+    Patched on the module `run.py` imports, the one `sys.modules` holds: `_load`
+    executes a fresh copy on every call and registers only the first."""
     canned = _CannedStatedScope()
-    scripted = _load("orchestrator_scripted")
-    monkeypatch.setattr(scripted, "build_stated_scope_reader", lambda settings: canned)
+    _load("orchestrator_scripted")
+    monkeypatch.setattr(
+        sys.modules["orchestrator_scripted"], "build_stated_scope_reader", lambda settings: canned
+    )
     return canned
 
 

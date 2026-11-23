@@ -365,14 +365,9 @@ class SessionView(Protocol):
         count, less each they chose since not to keep."""
         ...
 
-    def stated_scope_kept_earlier(self) -> frozenset[tuple[str, str]]:
-        """Each keep of `stated_scope_kept` made in an earlier turn of the conversation
-        and not made again this turn."""
-        ...
-
     def stated_scope_released(self) -> frozenset[tuple[str, str]]:
-        """Each dataset and provider option the user chose not to keep as published,
-        answering that ask this turn."""
+        """Each dataset and provider option the user answered that ask for this turn
+        with anything but `KEEP_PUBLISHED_OPTION`."""
         ...
 
     def prices_answers(self) -> PricesAnswers:
@@ -715,7 +710,6 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         pick=pick,
         stated=stated_scope,
         kept=kept,
-        earlier=view.stated_scope_kept_earlier(),
         released=view.stated_scope_released(),
         view=view,
         proposer=proposer,
@@ -5503,7 +5497,6 @@ def _aligned_bases(
     pick: DecisionPick | None,
     stated: _StatedReading | None,
     kept: Collection[tuple[str, str]],
-    earlier: Collection[tuple[str, str]],
     released: Collection[tuple[str, str]],
     view: SessionView,
     proposer: Proposer,
@@ -5704,7 +5697,6 @@ def _aligned_bases(
                 requirements=requirements,
                 compiled=aligned,
                 kept=kept,
-                earlier=earlier,
                 released=released,
                 shown=shown,
                 sources=sources,
@@ -7123,14 +7115,12 @@ class _StatedReading(NamedTuple):
     requirement's `measure` states where the turn's words name it too. `totals`
     holds each one whose `measure` asks for a total and states no provider option,
     where the turn's words ask for a total. `sole` is the one provider option the
-    turn's words state, `None` where they state none or two. `mentions` are the
-    provider options the turn's words name.
+    turn's words state, `None` where they state none or two.
     """
 
     options: Mapping[str, StatedOption]
     totals: frozenset[str]
     sole: StatedOption | None
-    mentions: frozenset[str]
 
 
 def _stated_reading(
@@ -7179,7 +7169,6 @@ def _stated_reading(
         options=options,
         totals=frozenset(totals),
         sole=turn.stated,
-        mentions=frozenset(turn.mentions),
     )
 
 
@@ -7213,7 +7202,6 @@ def _stated_claims(
     requirements: Sequence[EvidenceRequirement],
     compiled: Iterable[AlignedPin],
     kept: Collection[tuple[str, str]],
-    earlier: Collection[tuple[str, str]],
     released: Collection[tuple[str, str]],
     shown: Mapping[str, PinSource],
     sources: SourceReadings,
@@ -7235,10 +7223,8 @@ def _stated_claims(
     in a DAC1 total kept, contrasts the two. Left alone are a pin with no provider
     choice (GNI, the imputed multilateral series) and one whose provider choice the
     user switched on the plan card (`_switched_by_user`), which is their later word.
-    A keep made in an earlier turn (`earlier`) does not hold in a turn whose own words
-    name the option again (`_StatedReading.mentions`): the user is asked again, and
-    their answer replaces it. A turn whose words name no provider option states
-    nothing, so the keep stands.
+    A keep holds for the turn it was made in: a later turn whose words name the option
+    again asks again.
 
     A pin Search refused to compile on the option (`planner.stated_scope.stated_uncompiled`)
     cannot count it, whatever its choice offers. The datasets `requirements` pin, and
@@ -7260,7 +7246,7 @@ def _stated_claims(
             continue
         option_id = _stated_option_of(basis, option)
         pair = (basis.pin, option_id)
-        if pair in kept and not (pair in earlier and option.option_id in stated.mentions):
+        if pair in kept:
             # Kept as published, the pin holds its own option, as a total does.
             claims[requirement_id] = basis.choice.active
             continue
@@ -7591,7 +7577,7 @@ def stated_compile_unanswered(
 ) -> dict[str, object]:
     """The `SURFACE_UNAVAILABLE` refusal for a pin Search did not compile, and can
     later, on the provider option its requirement's `measure` states in the user's
-    words (`Realignment.stated`), `cause` what Search answered, kept in `detail` only. The same plan
+    words (`Realignment.stated`), `cause` the code Search answered, kept in `detail` only. The same plan
     proposed again can be served. A compile Search refuses for good is recorded
     instead (`planner.stated_scope.record_stated_uncompiled`), and `_stated_claims`
     refuses the pin as one that cannot count the option."""

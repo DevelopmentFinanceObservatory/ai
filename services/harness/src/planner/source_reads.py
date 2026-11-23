@@ -211,11 +211,24 @@ class _Compiled(NamedTuple):
     resolved_at: datetime | None
 
 
+# The cause `compile_on_basis` gives for a stated option where Search refuses stating
+# no code, where it does not answer (which states none), where it answers with no
+# one dataset, and where the pin's record cannot be posted (no choice on the axis,
+# unreadable named sets).
+_REFUSED = "refused"
+_UNANSWERED = "unanswered"
+_NO_ONE_DATASET = "no_one_dataset"
+_NO_CHOICE = "no_choice_on_record"
+_GROUPS_UNREADABLE = "groups_unreadable"
+
+
 class _Uncompiled(NamedTuple):
-    """Why Search answered no compile of a pin (`compile_on_basis`): its answer
-    (`cause`), whether it can answer later, and the refusal's reason."""
+    """Why Search answered no compile of a pin (`compile_on_basis`): its answer in
+    words (`cause`) and as a code (`code`), whether it can answer later, and the
+    refusal's reason."""
 
     cause: str
+    code: str
     retryable: bool
     reason: str
 
@@ -272,11 +285,18 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     answers with no one dataset, or when what it posts of the part's entity
     groups is not readable, since a resubmit posted without them can bind
     another population. A pin compiled on the provider option its
-    requirement's `measure` states in the user's words (`Realignment.stated`)
-    answers `submission.service.stated_compile_unanswered` where Search can
-    answer later, and otherwise records the refusal
+    requirement's `measure` states in the user's words, and nothing else
+    (`Realignment.stated`), answers `submission.service.stated_compile_unanswered`
+    where Search can answer later, and otherwise records Search's code
     (`planner.stated_scope.record_stated_uncompiled`), so the next proposal is
     refused for a pin that cannot count the option, with the ask that keeps it.
+
+    A compile moving a calculation's axis beside the stated option
+    (`Realignment.stated_option`) that Search refuses for good is posted a second
+    time, on the stated option alone, since Search may refuse either move. Where
+    Search refuses that one for good too, its code is recorded as above: the pin
+    cannot count what the user asked for. Where it compiles, or does not answer,
+    the first compile's refusal stands (`OPERATION_UNSUPPORTED`).
 
     A declared whole (`Realignment.whole_axis`) is compiled by `compile_whole`.
     """
@@ -290,9 +310,9 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     )
     axes = [option_axis(option_id) for option_id in realignment.option_ids]
 
-    def unservable(reason: str) -> SourceRead:
+    def unservable(reason: str, *, code: str) -> SourceRead:
         if realignment.stated:
-            return stated_uncompiled(reason, retryable=False)
+            return stated_uncompiled(code, retryable=False)
         return lambda into: basis_unservable(
             spec_id=realignment.spec_id,
             option_ids=realignment.option_ids,
@@ -315,12 +335,14 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     if block is None or scope is None or missing:
         return unservable(
             f"{realignment.requirement_id!r}'s dataset has no "
-            f"{' or '.join(missing or axes)} choice on record"
+            f"{' or '.join(missing or axes)} choice on record",
+            code=_NO_CHOICE,
         )
     groups = readable_wire_groups(block)
     if groups is None:
         return unservable(
-            f"Search's named sets for {realignment.requirement_id!r}'s dataset are not readable"
+            f"Search's named sets for {realignment.requirement_id!r}'s dataset are not readable",
+            code=_GROUPS_UNREADABLE,
         )
     wire_groups = groups
 
@@ -346,16 +368,18 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
         except DefinitionNotResolvedError as exc:
             return _Uncompiled(
                 cause=str(exc),
+                code=exc.code or (_UNANSWERED if exc.retryable else _REFUSED),
                 retryable=exc.retryable,
                 reason=(
                     f"Search does not count {realignment.requirement_id!r}'s dataset the way "
-                    f"its calculation's other inputs share ({exc.code or 'refused'})"
+                    f"its calculation's other inputs share ({exc.code or _REFUSED})"
                 ),
             )
         spec = part.get("spec") if part.get("status") == "definite" else None
         if not isinstance(spec, Mapping) or not isinstance(spec.get("spec_id"), str):
             return _Uncompiled(
                 cause="no one dataset",
+                code=_NO_ONE_DATASET,
                 retryable=False,
                 reason=(
                     f"Search holds no one dataset counting {realignment.requirement_id!r} the "
@@ -367,22 +391,19 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     compiled = await attempt(realignment.option_ids)
     if isinstance(compiled, _Uncompiled):
         if compiled.retryable and realignment.stated:
-            return stated_uncompiled(compiled.cause, retryable=True)
+            return stated_uncompiled(compiled.code, retryable=True)
         if compiled.retryable:
             return _refusing(_basis_uncompiled(realignment, compiled.cause))
         stated_option = realignment.stated_option
         if stated_option is not None and not realignment.stated:
             # The compile also carries a calculation's move: Search may refuse either.
             # The stated option alone decides whether the pin can count what the user
-            # asked for; where it can, the calculation's refusal stands.
+            # asked for; where it can, or Search did not answer, the calculation's
+            # refusal stands.
             alone = await attempt((stated_option,))
-            if isinstance(alone, _Uncompiled):
-                if alone.retryable:
-                    return lambda into: stated_compile_unanswered(
-                        realignment, shown=held_sources(into), cause=alone.cause
-                    )
-                return _stated_refused(realignment.spec_id, stated_option, alone.cause)
-        return unservable(compiled.reason)
+            if isinstance(alone, _Uncompiled) and not alone.retryable:
+                return _stated_refused(realignment.spec_id, stated_option, alone.code)
+        return unservable(compiled.reason, code=compiled.code)
     part, spec_id, resolved_at = compiled.part, compiled.spec_id, compiled.resolved_at
     digest = resolver_digest({"parts": [dict(part)]})
     mark_planner_axes(digest, planner_axes(block) | set(axes))

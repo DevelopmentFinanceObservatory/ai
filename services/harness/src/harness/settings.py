@@ -270,7 +270,7 @@ class Settings(BaseServiceSettings):
     # dfo-apis' stated-scope route (`PLANNER_STATED_SCOPE`,
     # `planner.stated_scope.read_stated_scope`). Off, admission applies none, and
     # a plan needs no answer from the route. On, in a turn with words of the user's,
-    # a read that can pass later (a timeout, a 5xx, a 408 or 429) refuses the
+    # a read that can pass later (a timeout, a 5xx, a 408, 425 or 429) refuses the
     # proposal and asks the planner to propose again; one no retry changes (a 404,
     # a refused request) ends the planner entry on `stated_scope_unreadable`.
     planner_stated_scope: bool = True
