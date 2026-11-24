@@ -72,6 +72,7 @@ from harness.scope_choices import (
     ServedScope,
     ShapeBinding,
     block_dataset,
+    dropped_changed_nothing,
 )
 from harness.tool_contracts import reading_facts, requested_range, series_description
 
@@ -1793,7 +1794,12 @@ def _scope_clauses(
     clauses = [clause for clause in clauses if clause is not None]
     if composite is not None and all(choice.axis != composite[0] for choice in scope.choices):
         clauses.append(composite[1])
+    active = {choice.axis: choice.active for choice in scope.choices}
     for dropped in scope.dropped_entries:
+        if dropped.code == "carried_choice_not_applied" and dropped_changed_nothing(
+            dropped.cause, dropped.entry.option_id, active.get(dropped.entry.axis)
+        ):
+            continue
         stood_in = (
             _stood_in(dropped.entry, narrowed)
             if dropped.code == "stated_choice_not_applied"

@@ -2855,11 +2855,27 @@ def _reading_clause(source: SelectedSource) -> str | None:
 
 def _sentence_aggregate(requirement: AggregateRequirement, plan: Plan) -> str:
     upstream = plan.requirement(requirement.input_id)
+    sentence = _aggregate_wording(requirement, plan)
+    # Two aggregates over series of one measure read alike, so each names the step it reads.
+    alike = [
+        other
+        for other in _card_order(plan)
+        if isinstance(other, AggregateRequirement)
+        and other.id != requirement.id
+        and _aggregate_wording(other, plan) == sentence
+    ]
+    if alike:
+        return f'{sentence}, read from "{_label(upstream, plan)}".'
+    return f"{sentence}."
+
+
+def _aggregate_wording(requirement: AggregateRequirement, plan: Plan) -> str:
+    """`_sentence_aggregate`'s wording before it names its input."""
     word = _REDUCTION_WORDS[requirement.reduction]
     group = _group_by_phrase(
         requirement.group_by, breakdown=_breakdown_of(requirement, plan), grouped=True
     )
-    return f"The {word} of {_measure_of(upstream, plan)}, {group}."
+    return f"The {word} of {_measure_of(plan.requirement(requirement.input_id), plan)}, {group}"
 
 
 def _sentence_growth(requirement: GrowthRequirement, plan: Plan) -> str:
@@ -2951,6 +2967,8 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
         )
         return f"Share of {measure} per {requirement.axis}, {scope_text}."
     divisor = _measure_of(denominator, plan)
+    shape = frame_shapes(plan)[requirement.id]
+    time_shape = "for each year" if "year" in _kept_words(shape, plan) else "as one figure overall"
     # A denominator narrowed to fewer members than its sources hold names the
     # step that narrows it, whose own line states the filter or limit, in
     # place of the parties its sources hold. A filter keeping a level of place
@@ -2963,7 +2981,7 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
         )
     ):
         return (
-            f"Share of {measure} as one figure overall, divided by one total of {divisor} "
+            f"Share of {measure} {time_shape}, divided by one total of {divisor} "
             f'over the rows "{_label(narrowing, plan)}" keeps.'
         )
     # A pooled share over a frame that names no place reads one level of it, which
@@ -2974,7 +2992,7 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
             _parties(dataset, plan, level=level) for dataset in datasets_of(denominator, plan)
         )
     )
-    return f"Share of {measure} as one figure overall, divided by {divisor} ({parties})."
+    return f"Share of {measure} {time_shape}, divided by {divisor} ({parties})."
 
 
 def _sentence_quotient_of(requirement: QuotientRequirement, plan: Plan) -> str:

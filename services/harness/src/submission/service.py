@@ -7337,6 +7337,7 @@ def _scope_words(record: StatedScopeRecord | None, previous: Plan | None) -> Sco
     return ScopeWords(
         mentions=turn.mentions,
         summing=stated.option_id if stated is not None and stated.sums_providers else None,
+        total=turn.total,
     )
 
 
@@ -7398,7 +7399,10 @@ def _provider_records(
     the user's words name (`_scope_words`); words summing the bilateral and
     multilateral lines name a choice's option counting core contributions, which
     stands for the option Search read, as the brief reads them
-    (`stated_scope_line`). An option is held
+    (`stated_scope_line`). Words asking for a total (`ScopeWords.total`) read as
+    naming the option a row is counted on that counts core contributions, in
+    `words` only: no option is wanted for it, since a dataset that does not publish
+    one would then read as one the words name and it lacks. An option is held
     when some figure is counted on it. An input a sum adds to a series with no
     provider choice, bilateral aid plus imputed multilateral aid, counts the words'
     option through the sum (`_summed_beside_unchosen`), so it is offered none.
@@ -7413,6 +7417,7 @@ def _provider_records(
     own = {r.id: counted.get(r.id, bases[r.id].choice.active) for r in dataset}
     mentions = frozenset(words.mentions) if words is not None else frozenset()
     summing = words.summing if words is not None else None
+    total = words is not None and words.total
 
     def summing_options(basis: _InputBasis) -> frozenset[str]:
         return frozenset(
@@ -7466,7 +7471,7 @@ def _provider_records(
                 "not_read"
                 if words is None
                 else "named"
-                if counted_on in named(basis)
+                if counted_on in named(basis) or (total and counted_on in summing_options(basis))
                 else "not_named"
             ),
             offered=tuple(sorted(o.option_id for o in wanted if _reachable(o))),

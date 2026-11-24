@@ -4871,12 +4871,17 @@ class ScopeWords(StrictModel):
     `summing` is the option Search read where those words sum the bilateral and
     multilateral lines (`planner.stated_scope.StatedOption.sums_providers`), which a
     dataset reads as its own option counting core contributions; `None` otherwise.
+
+    `total` is set where those words ask for a total (`TextReading.total`, "total US
+    ODA"), which names a dataset's option counting core contributions as the figure's
+    denominator, though Search reads no option from it.
     """
 
     mentions: tuple[Annotated[str, Field(max_length=MAX_SCOPE_ID_CHARS)], ...] = Field(
         default=(), max_length=MAX_SCOPE_MENTIONS
     )
     summing: str | None = Field(default=None, max_length=MAX_SCOPE_ID_CHARS)
+    total: bool = False
 
 
 class Plan(StrictModel):

@@ -1280,6 +1280,9 @@ async def test_a_total_beside_a_declared_part_declares_its_own_option(
         assert result["outcome"] == Outcome.OK.value, result
         assert _pins(ctx)["total"] == total["spec_id"]
         assert surface.calls == []
+        # "total" names the denominator's contributions option, and the numerator's
+        # bilateral option is named outright, so neither row reads a line.
+        assert _notes(ctx) == {}
     else:
         assert result["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, result
         assert f"'total' {_CONTRIBUTIONS!r}" in result["message"]
