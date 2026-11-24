@@ -421,7 +421,8 @@ Concurrency and atomicity:
   time reconciles its own composition changes on top of whatever
   `/composition` landed, so a canvas edit and a turn's own card both
   survive when they collide.
-- A body past 1,048,576 bytes gets a 413 `resource_exhausted` before it is parsed. Removing and pinning every block of a 4,096-block canvas in one request fits.
+
+A body past 1,048,576 bytes gets a 413 `resource_exhausted` before it is parsed. A `remove` or `pin` operation takes about 60 bytes, so one request holds about 17,000 of them.
 
 ### 4.4 `turn.cancel` → POST `/api/studio/cancel`
 
@@ -744,7 +745,7 @@ decision, payload or answers than the one that actually resumed answers 409
 ## 7. Errors
 
 The `error` field of an `error` frame, and the body of every non-200
-response FROM THE STUDIO ROUTES' OWN CHECKS (404, 409, and the 422s in
+response FROM THE STUDIO ROUTES' OWN CHECKS (404, 409, 413, and the 422s in
 section 4), is a ToolError: `{error, retry, detail, constraint_id?, pointer?, fix?, retry_after_seconds?}`; the 409 `plan_revision_stale` body adds `current_plan` (section 4.2). Two framework responses have a
 different shape: 401 is `{"detail": "..."}`, and a request body that fails
 schema validation gets a 422 with `{"detail": [...]}` (FastAPI's format).

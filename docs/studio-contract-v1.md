@@ -153,7 +153,7 @@ union). `GET /api/studio/state` takes query parameters and no body.
   re-render from the current manifest and retry. Removing a block does not
   delete the component; it stays addressable.
 
-Each request body is read up to a cap and refused past it with 413 `resource_exhausted` before it is parsed: `/turn` 6,356,992 bytes, `/composition` 1,048,576 bytes, `/cancel` and `/resume` 4,096 bytes each. A `/composition` body that removes and pins every block of a 4,096-block canvas fits.
+`/turn` reads at most 6,356,992 bytes of body, `/composition` 1,048,576 bytes, and `/cancel` and `/resume` 4,096 bytes each. A longer body is refused with 413 `resource_exhausted` before it is parsed. A `remove` or `pin` operation takes about 60 bytes, so a `/composition` body holds about 17,000 of them.
 
 ## The SSE stream
 

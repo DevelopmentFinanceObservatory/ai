@@ -27,7 +27,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, tzinfo
@@ -134,6 +134,7 @@ from harness.turn_records import SearchReading
 from harness.wire import (
     MAX_CANCEL_REQUEST_BYTES,
     MAX_COMPOSITION_REQUEST_BYTES,
+    MAX_RESUME_REQUEST_BYTES,
     MAX_SEED_SPEC_BYTES,
     MAX_TURN_REQUEST_BYTES,
     ComponentType,
@@ -12254,56 +12255,94 @@ async def test_a_seed_the_harness_or_search_cannot_take_fails_its_step_and_the_o
     assert _events(frames)[-1] == "done"
 
 
-def _past_the_cap(route: str) -> dict[str, Any]:
-    """A request to Studio's `route` one byte or more past its body cap, valid in shape
-    otherwise."""
-    if route == "turn":
-        body = _seeded_turn_body("top 5 donors for education aid")
-        body["seed_spec"][0]["spec"]["trace"] = {"padding": "x" * MAX_TURN_REQUEST_BYTES}
-        return body
-    if route == "composition":
-        return {
-            "kind": "composition.mutate",
-            "schema_version": 1,
-            "conversation_id": CONVERSATION,
-            "operations": [
-                {"op": "remove", "component_id": "cmp_" + "x" * MAX_COMPOSITION_REQUEST_BYTES}
-            ],
-        }
-    padded = "conv_" + "x" * MAX_CANCEL_REQUEST_BYTES
-    if route == "cancel":
-        return {"kind": "turn.cancel", "schema_version": 1, "conversation_id": padded}
-    return {"kind": "turn.resume", "schema_version": 1, "conversation_id": padded, "turn_index": 1}
-
-
-@pytest.mark.parametrize(
-    ("route", "cap"),
-    [
-        ("turn", "6,356,992"),
-        ("composition", "1,048,576"),
-        ("cancel", "4,096"),
-        ("resume", "4,096"),
-    ],
-)
-async def test_a_request_past_the_body_cap_is_refused_before_it_is_parsed(
-    route: str, cap: str
-) -> None:
-    """Each Studio route that takes a body reads at most its cap and refuses more 413
-    `resource_exhausted` before parsing it, touching no conversation."""
+async def test_a_request_past_the_body_cap_is_refused_before_it_is_parsed() -> None:
     search = CannedSearch()
     executor = ScriptedExecutor()
-    app = _app(resolver=search, executor=executor)
-    async with _client(app) as client:
-        response = await client.post(
-            f"/api/studio/{route}", json=_past_the_cap(route), headers=AUTH
-        )
+    body = _seeded_turn_body("top 5 donors for education aid")
+    body["seed_spec"][0]["spec"]["trace"] = {"padding": "x" * MAX_TURN_REQUEST_BYTES}
+    async with _client(_app(resolver=search, executor=executor)) as client:
+        response = await client.post("/api/studio/turn", json=body, headers=AUTH)
 
     assert response.status_code == 413
     assert response.json()["error"] == "resource_exhausted"
-    assert f"{cap}-byte cap" in response.json()["detail"]
+    assert "6,356,992-byte cap" in response.json()["detail"]
     assert executor.calls == []
     assert search.calls == []
-    assert app.state.studio.store.current(PRINCIPAL, CONVERSATION) is None
+
+
+# Each bounded route's cap, a request to it, valid in shape, and the status the route
+# answers it with for a conversation the store does not hold.
+_BOUNDED_BODIES: dict[str, tuple[int, dict[str, Any], int]] = {
+    "composition": (
+        MAX_COMPOSITION_REQUEST_BYTES,
+        {
+            "kind": "composition.mutate",
+            "schema_version": 1,
+            "conversation_id": CONVERSATION,
+            "operations": [{"op": "remove", "component_id": "cmp_01"}],
+        },
+        404,
+    ),
+    "cancel": (
+        MAX_CANCEL_REQUEST_BYTES,
+        {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
+        204,
+    ),
+    "resume": (
+        MAX_RESUME_REQUEST_BYTES,
+        {
+            "kind": "turn.resume",
+            "schema_version": 1,
+            "conversation_id": CONVERSATION,
+            "turn_index": 1,
+        },
+        404,
+    ),
+}
+
+
+# `AUTH` with the JSON content type a raw body needs.
+_JSON_AUTH = {**AUTH, "Content-Type": "application/json"}
+
+
+async def _chunks(body: bytes) -> AsyncIterator[bytes]:
+    """`body` in 4 KiB chunks, which a client sends with no `Content-Length`."""
+    for start in range(0, len(body), 4_096):
+        yield body[start : start + 4_096]
+
+
+@pytest.mark.parametrize("chunked", [False, True], ids=["content-length", "chunked"])
+@pytest.mark.parametrize("past", [0, 1], ids=["at-the-cap", "a-byte-past"])
+@pytest.mark.parametrize("route", sorted(_BOUNDED_BODIES))
+async def test_a_body_past_its_routes_cap_is_refused_and_one_at_the_cap_is_read(
+    route: str,
+    past: int,
+    chunked: bool,
+) -> None:
+    """`/composition`, `/cancel` and `/resume` each read a body of up to their cap,
+    whether the client declares its length or streams it in chunks, and refuse one a
+    byte longer 413 `resource_exhausted`. The bodies differ only in trailing JSON
+    whitespace, so the route answers the one at the cap as it answers the request
+    unpadded."""
+    cap, request, answered = _BOUNDED_BODIES[route]
+    compact = json.dumps(request, separators=(",", ":")).encode()
+    body = compact + b" " * (cap + past - len(compact))
+    app = _app()
+    async with _client(app) as client:
+        unpadded = await client.post(f"/api/studio/{route}", content=compact, headers=_JSON_AUTH)
+        response = await client.post(
+            f"/api/studio/{route}",
+            content=_chunks(body) if chunked else body,
+            headers=_JSON_AUTH,
+        )
+
+    assert unpadded.status_code == answered
+    if past:
+        assert response.status_code == 413
+        assert response.json()["error"] == "resource_exhausted"
+        return
+    assert response.status_code == unpadded.status_code
+    assert response.content == unpadded.content
 
 
 async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block(

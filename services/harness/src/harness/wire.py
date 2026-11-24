@@ -1224,10 +1224,9 @@ MutationOperation = Annotated[
 
 
 # The largest `/api/studio/composition` body the route reads (`harness.studio`'s
-# `_BoundedCompositionRoute`): 1 MiB. The largest request a client sends, a
-# legacy canvas brought to the harness, removes and pins each block by its
-# component id at under 128 bytes an operation, so the cap holds both for 4,096
-# blocks, and a card's meta of some kilobytes beside them.
+# `_BoundedCompositionRoute`): 1 MiB. The largest request a client sends removes or
+# pins blocks of one canvas, an operation per block. A `remove` or `pin` names one
+# component id in about 60 bytes of JSON, so the cap holds about 17,000 of them.
 MAX_COMPOSITION_REQUEST_BYTES = 1_048_576
 
 
