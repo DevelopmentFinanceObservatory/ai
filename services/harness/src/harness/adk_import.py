@@ -150,18 +150,23 @@ Verbs:
   answer 409 until its index passed them. It also deletes every turn
   session of a conversation with no ledger session, one started on this
   release, which the previous release reads as new and numbers from 1.
-  `--apply` refuses (`ReleaseStreaming`) while any conversation's lease is
-  live on the database's clock, since a stream of this release still runs
-  on a turn session it would delete; nothing is deleted then. Under
-  `--apply` each conversation's ledger session is locked `FOR UPDATE`
-  first, so a turn
-  the previous release claims commits its index before or after the read,
-  and the session it creates after its claim is never above the index
-  read. ADK's `events` rows go with their session (`ON DELETE CASCADE`).
+  It clears the pending interrupts of a ledger session paused on a turn
+  this release resumed (its conversation's row holds another turn index or
+  other pending interrupts), so the previous release shows no card for it
+  and its answer cannot resume that turn's ADK session a second time; the
+  previous release closes that turn as `abandoned` on the next turn. Each
+  conversation runs in a transaction of its own. Under `--apply` it locks
+  the ledger session `FOR UPDATE` first, so a turn the previous release
+  claims commits its index before or after the read, and the session it
+  creates after its claim is never above the index read; then it locks the
+  conversation's row `FOR UPDATE` and leaves the conversation alone, listed
+  as live, while a stream of this release holds its lease, live on the
+  database's clock, so no running stream loses its turn session and a
+  stream that claims the lease later waits for the deletes to commit. ADK's `events` rows go with their session (`ON DELETE CASCADE`).
   A ledger session whose `studio:turn_index` is not a whole number is
   listed and left alone, without failing the run, since a rerun cannot
-  change it. The run fails while it finds any session to delete, and is
-  repeated until it finds none.
+  change it. The run fails while it finds anything to do, with status 5
+  while a stream holds a conversation, and is repeated until it exits 0.
 - `gate`: the cutover predicate (`CUTOVER_PREDICATE`), read only. It fails
   while any ledger session is not cleared: its import record must be
   current (recorded at the session's `update_time`) and either imported
@@ -217,8 +222,11 @@ conversation no ledger session holds or two of them name one; 3 when
 `close-open-turns --apply` finds no `turn_cursors` table, so the next
 release has not started (`NextReleaseMissing`); 4 when a later release has
 archived ADK's tables, so no verb but `gate --adk-archived` runs again
-(`AdkArchived`); and 5 when `rollback-turn-sessions --apply` finds a stream
-of this release still holding a conversation's lease (`ReleaseStreaming`).
+(`AdkArchived`); and 5 when `rollback-turn-sessions` leaves a conversation
+alone because a stream of this release holds its lease
+(`ROLLBACK_STREAMING_EXIT`). `gcloud run jobs execute --wait` exits 1 for
+any non-zero status; the execution's task records the job's own
+(`status.lastAttemptResult.exitCode`).
 """
 
 from __future__ import annotations
@@ -242,6 +250,7 @@ from compiler.sources import bound_rows, source_from_spec_block
 from executor.ledger import RunStatus, stored_run
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import Row, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
@@ -351,17 +360,20 @@ class NextReleaseMissing(RuntimeError):  # noqa: N818 -- names the state it repo
     turn. Exit status 3: rerun once the next release has started."""
 
 
+class TableBusy(RuntimeError):  # noqa: N818 -- names the state it reports
+    """`adk_ledger_imports` stayed locked past the bound the job waits for
+    while it added a column. Exit status 2."""
+
+
 class AdkArchived(RuntimeError):  # noqa: N818 -- names the state it reports
     """`adk_archive_adk_ledger_imports` resolves: the release that archives
     ADK's tables (`0005_rename_adk_tables.sql`) has started, so no verb that
     reads ADK's tables or the import records can run again. Exit status 4."""
 
 
-class ReleaseStreaming(RuntimeError):  # noqa: N818 -- names the state it reports
-    """`rollback-turn-sessions --apply` found a conversation whose lease is
-    live on the database's clock: a stream of this release still runs, and
-    deleting its turn session would cut it. Exit status 5: rerun once the
-    streams end."""
+# The exit status of a `rollback-turn-sessions` run that left a conversation
+# alone because a stream of this release holds its lease.
+ROLLBACK_STREAMING_EXIT = 5
 
 
 class UnknownConversation(ValueError):  # noqa: N818 -- names the state it reports
@@ -868,6 +880,8 @@ _HAS_DISCARDED_COLUMN = text(
     "AND NOT attisdropped)"
 )
 _COLUMN_LOCK_TIMEOUT = "10s"
+# SQLSTATE lock_not_available, raised once `lock_timeout` passes.
+_LOCK_NOT_AVAILABLE = "55P03"
 _MARK_DISCARDED = text(
     "UPDATE adk_ledger_imports SET discarded = :discarded "
     "WHERE principal = :principal AND conversation_id = :conversation_id"
@@ -1477,9 +1491,12 @@ async def import_conversations(
     operator gives up.
 
     Raises:
+        AdkArchived: a later release archived ADK's tables.
         AdkSchemaError: ADK's schema is not the one the job reads.
         NamedTwice: two of `prefer_adk`, `keep_tables` and `discard` share a
             name.
+        TableBusy: under `apply`, adding the `discarded` column waited past
+            its lock bound. Nothing is written.
         UnknownConversation: `prefer_adk`, `keep_tables` or `discard` names
             a conversation ADK holds no ledger session for. Nothing is
             written.
@@ -1501,7 +1518,16 @@ async def import_conversations(
         async with engine.begin() as conn:
             if not (await conn.execute(_HAS_DISCARDED_COLUMN)).scalar_one():
                 await conn.execute(text(f"SET LOCAL lock_timeout = '{_COLUMN_LOCK_TIMEOUT}'"))
-                await conn.execute(_DISCARDED_COLUMN)
+                try:
+                    await conn.execute(_DISCARDED_COLUMN)
+                except DBAPIError as exc:
+                    if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+                        raise
+                    raise TableBusy(
+                        "adk_ledger_imports stayed locked past "
+                        f"{_COLUMN_LOCK_TIMEOUT} while the job added its discarded column; "
+                        "nothing is written, so rerun once the serving release's reads let go"
+                    ) from exc
     report = ImportReport(apply=apply)
     for key in keys:
         try:
@@ -1672,7 +1698,7 @@ class _AdkOnAccess:
             raise _diverged(principal, conversation_id)
         if copy.outcome != "refused":
             self._refused.pop(key, None)
-            if copy.outcome not in ("unchanged", "kept"):
+            if copy.outcome not in ("unchanged", "kept", "discarded"):
                 logger.info("adk import: %s %s on access", copy.session.name, copy.outcome)
             return
         self._refused[key] = copy.session.updated_at
@@ -2000,7 +2026,9 @@ class VerifyReport:
                 f"{count} {'stream holds its' if count == 1 else 'streams hold their'} lease on ADK"
             )
         if self.checked == 0 and self.total > 0:
-            lines.append(f"none of the {self.total} ledger sessions compared, written or kept")
+            lines.append(
+                f"none of the {self.total} ledger sessions compared, written, kept or discarded"
+            )
         lines.append(f"{compared - len(self.differences)} of {compared} equal")
         return "\n".join(lines)
 
@@ -2042,7 +2070,14 @@ async def _tables_side(
 
 
 async def verify(engine: AsyncEngine) -> VerifyReport:
-    """Compare every ledger session's load with the tables' (module docstring)."""
+    """Compare every ledger session's load with the tables' (module
+    docstring).
+
+    Raises:
+        AdkArchived: a later release archived ADK's tables.
+        AdkSchemaError: ADK's schema is not the one the job reads.
+        TablesMissing: the harness's tables do not exist.
+    """
     await _check_tables(engine)
     report = VerifyReport()
     async with engine.connect() as conn:
@@ -2179,6 +2214,7 @@ async def close_open_turns(engine: AsyncEngine, *, apply: bool) -> CloseReport:
     open (`CloseReport`).
 
     Raises:
+        AdkArchived: a later release archived ADK's tables.
         NextReleaseMissing: `apply` while no `turn_cursors` table exists.
             The next release's first migration creates it, and until that
             release serves, this release answers a turn paused on ADK, which
@@ -2367,20 +2403,32 @@ async def _close_refusal(conn: AsyncConnection, pk: int, turn_index: int) -> _Re
     return "in_turn_cursors" if found.first() is not None else None
 
 
-# A ledger session's `studio:turn_index`, locked under `--apply`: the
-# previous release's claim of a turn writes the index to this row before it
-# creates the turn's session.
+# A ledger session's `studio:turn_index` and `studio:pending`, locked under
+# `--apply`: the previous release's claim of a turn writes the index to this
+# row before it creates the turn's session.
 _LEDGER_TURN_INDEX = (
-    "SELECT state -> 'studio:turn_index' AS turn_index FROM sessions "
-    "WHERE app_name = :app AND user_id = :principal AND id = :id"
+    "SELECT state -> 'studio:turn_index' AS turn_index, state -> 'studio:pending' AS pending "
+    "FROM sessions WHERE app_name = :app AND user_id = :principal AND id = :id"
 )
 
-# Each conversation a stream of this release holds: its lease is live on the
-# database's clock. The previous release writes its leases to ADK's ledger
-# sessions, so a live lease here is this release's.
-_RELEASE_STREAMING = text(
-    "SELECT principal, conversation_id FROM conversations "
-    f"WHERE lease_expires_at > {DATABASE_NOW} ORDER BY principal, conversation_id"
+# The conversation's row as this release holds it: whether a stream of this
+# release holds its lease, live on the database's clock (the previous release
+# writes its leases to ADK's ledger sessions), and its turn index and pending
+# interrupts. Locked under `--apply`, so a stream that claims the lease
+# after the read waits for the run's deletes to commit, and one that holds
+# it keeps its turn session.
+_CONVERSATION_LEASE = (
+    f"SELECT coalesce(lease_expires_at > {DATABASE_NOW}, false) AS live, "
+    "turn_state -> 'turn_index' AS turn_index, turn_state -> 'pending' AS pending "
+    "FROM conversations WHERE principal = :principal AND conversation_id = :id"
+)
+
+# Clears the pending interrupts of a ledger session, so the previous release
+# shows no card for a pause this release resumed and closes that turn as
+# `abandoned` on the conversation's next turn, as it closes any open turn.
+_CLEAR_LEDGER_PENDING = text(
+    "UPDATE sessions SET state = jsonb_set(state, '{studio:pending}', '{}'::jsonb), "
+    "update_time = now() WHERE app_name = :app AND user_id = :principal AND id = :id"
 )
 
 
@@ -2407,41 +2455,55 @@ _TURN_CONVERSATION = "substring(t.id FROM '^(.*)#t[0-9]{1,9}$')"
 # conversation started on this release, which writes its ledger to the
 # tables and runs its turns on ADK. The previous release reads such a
 # conversation as new and numbers its turns from 1, so every one of these
-# sessions is ahead of it. Under `--apply` the same predicate deletes them in
-# one statement (`_DELETE_TURN_SESSIONS_UNLEDGERED`), so a ledger session the
-# previous release creates first is seen by the next run.
-_UNLEDGERED = (
-    "FROM sessions t WHERE t.app_name = :app "
-    f"AND {_TURN_CONVERSATION} IS NOT NULL "
-    "AND NOT EXISTS (SELECT 1 FROM sessions l WHERE l.app_name = :ledger_app "
+# sessions is ahead of it. Under `--apply` each conversation's sessions are
+# deleted with the same `NOT EXISTS` (`_DELETE_TURN_SESSIONS_UNLEDGERED`), so
+# a ledger session the previous release creates first is seen by the next
+# run.
+_NO_LEDGER = (
+    "NOT EXISTS (SELECT 1 FROM sessions l WHERE l.app_name = :ledger_app "
     f"AND l.user_id = t.user_id AND l.id = {_TURN_CONVERSATION})"
 )
 _TURN_SESSIONS_UNLEDGERED = text(
-    f"SELECT t.user_id, {_TURN_CONVERSATION} AS conversation_id, t.id {_UNLEDGERED}"
+    f"SELECT t.user_id, {_TURN_CONVERSATION} AS conversation_id, t.id FROM sessions t "
+    f"WHERE t.app_name = :app AND {_TURN_CONVERSATION} IS NOT NULL AND {_NO_LEDGER}"
 )
 _DELETE_TURN_SESSIONS_UNLEDGERED = text(
-    f"DELETE {_UNLEDGERED} RETURNING t.user_id, {_TURN_CONVERSATION} AS conversation_id, t.id"
+    "DELETE FROM sessions t WHERE t.app_name = :app AND t.user_id = :principal "
+    f"AND t.id = ANY(:ids) AND {_NO_LEDGER} RETURNING t.id"
 )
 
 
 @dataclass
 class RollbackReport:
-    """What `rollback_turn_sessions` deleted, or would delete: each
-    conversation's ADK turn sessions numbered above its ledger session's
-    `studio:turn_index`, or every one of them for a conversation with no
-    ledger session, by `principal/conversation_id`, and each ledger session
-    whose index is not a whole number, left alone. Clean when it found
-    nothing to delete. A ledger session left alone does not fail the run,
-    since a rerun cannot change it; the report names it for a check by
-    hand."""
+    """What `rollback_turn_sessions` did, or would do, by
+    `principal/conversation_id`: `ahead`, each conversation's ADK turn
+    sessions numbered above its ledger session's `studio:turn_index`, or
+    every one of them for a conversation with no ledger session, deleted;
+    `cleared`, the turn index of each ledger session paused on a turn this
+    release resumed, whose pending interrupts are cleared; `live`, each
+    conversation a stream of this release holds the lease of, left alone;
+    and `unreadable`, each ledger session whose index is not a whole number,
+    left alone. Clean when it found nothing to do. `exit_status` is 5 while
+    a stream holds a conversation (`ROLLBACK_STREAMING_EXIT`), 1 while it
+    found anything else to do, and 0 otherwise. A ledger session left alone
+    as unreadable does not fail the run, since a rerun cannot change it; the
+    report names it for a check by hand."""
 
     apply: bool
     ahead: dict[str, list[str]] = field(default_factory=dict)
+    cleared: dict[str, int] = field(default_factory=dict)
+    live: list[str] = field(default_factory=list)
     unreadable: list[str] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
-        return not self.ahead
+        return not (self.ahead or self.cleared or self.live)
+
+    @property
+    def exit_status(self) -> int:
+        if self.live:
+            return ROLLBACK_STREAMING_EXIT
+        return 0 if self.clean else 1
 
     def render(self) -> str:
         would = "" if self.apply else "would be "
@@ -2450,6 +2512,15 @@ class RollbackReport:
             lines.append(f"{would}deleted, above the ledger's turn index or with no ledger: {name}")
             lines += [f"  {session}" for session in sessions]
         lines += [
+            f"pending interrupts {would}cleared on ADK, turn {index} resumed by this release: "
+            f"{name}"
+            for name, index in self.cleared.items()
+        ]
+        lines += [
+            f"left alone, a stream of this release holds its lease; run again once it ends: {name}"
+            for name in self.live
+        ]
+        lines += [
             f"left alone, studio:turn_index is not a whole number; check its turn sessions "
             f"by hand: {name}"
             for name in self.unreadable
@@ -2457,8 +2528,9 @@ class RollbackReport:
         count = sum(len(sessions) for sessions in self.ahead.values())
         lines.append(
             f"{count} turn sessions of {len(self.ahead)} conversations {would}deleted, "
-            f"{len(self.unreadable)} ledger sessions left alone"
-            + ("; run again until none is found" if count else "")
+            f"{len(self.cleared)} pauses {would}cleared, {len(self.live)} conversations "
+            f"streaming, {len(self.unreadable)} ledger sessions left alone"
+            + ("; run again until none is found" if not self.clean else "")
         )
         return "\n".join(lines)
 
@@ -2466,32 +2538,29 @@ class RollbackReport:
 async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> RollbackReport:
     """Delete, for each ledger session, the conversation's ADK turn sessions
     numbered above its `studio:turn_index`, and every turn session of a
-    conversation with no ledger session (`_UNLEDGERED`) (module docstring).
-    With `apply` false, list them only, without locking.
+    conversation with no ledger session (`_UNLEDGERED`), and clear the
+    pending interrupts of a ledger session paused on a turn this release
+    resumed (`_resumed_here`) (module docstring). Each conversation runs in
+    a transaction of its own, which under `apply` locks its ledger session
+    and its `conversations` row first, and leaves alone, listed as live, a
+    conversation whose lease a stream of this release holds. With `apply`
+    false, list them only, without locking.
 
     Raises:
         AdkArchived: a later release archived ADK's tables.
         AdkSchemaError: ADK's schema is not the one the job reads.
-        ReleaseStreaming: under `apply`, a conversation's lease is live on
-            the database's clock (`_RELEASE_STREAMING`): a stream of this
-            release still runs on an ADK turn session the run would delete.
-            Nothing is deleted.
     """
     async with engine.connect() as conn:
         await _check_adk_schema(conn)
-        conversations = (await conn.execute(text("SELECT to_regclass('conversations')"))).scalar()
-        if apply and conversations is not None:
-            live = (await conn.execute(_RELEASE_STREAMING)).all()
-            if live:
-                raise ReleaseStreaming(
-                    f"{len(live)} conversations hold a live lease of this release's streams: "
-                    + ", ".join(f"{row.principal}/{row.conversation_id}" for row in live[:10])
-                    + ("" if len(live) <= 10 else ", ...")
-                    + ". Rerun once they end; a lease lapses 45 s after its stream last "
-                    "renewed it, and a stream ends within the 900 s request timeout"
-                )
+        tables = (await conn.execute(text("SELECT to_regclass('conversations')"))).scalar()
     report = RollbackReport(apply=apply)
     lock = " FOR UPDATE" if apply else ""
+
+    async def held(conn: AsyncConnection, names: dict[str, str]) -> Any:
+        if tables is None:
+            return None
+        return (await conn.execute(text(_CONVERSATION_LEASE + lock), names)).first()
+
     for key in await _ledger_keys(engine):
         names = {"principal": key.principal, "id": key.conversation_id}
         async with engine.begin() as conn:
@@ -2504,6 +2573,10 @@ async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> Rollbac
             if not isinstance(index, int) or isinstance(index, bool) or index < 0:
                 report.unreadable.append(key.name)
                 continue
+            here = await held(conn, names)
+            if here is not None and here.live:
+                report.live.append(key.name)
+                continue
             ahead = (
                 (
                     await conn.execute(
@@ -2513,28 +2586,65 @@ async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> Rollbac
                 .scalars()
                 .all()
             )
-            if not ahead:
+            if ahead:
+                report.ahead[key.name] = list(ahead)
+                if apply:
+                    await conn.execute(
+                        text(
+                            "DELETE FROM sessions WHERE app_name = :app AND user_id = :principal "
+                            "AND id = ANY(:ids)"
+                        ),
+                        {"app": TURN_APP, "principal": key.principal, "ids": list(ahead)},
+                    )
+            if _resumed_here(row.pending, index, here):
+                report.cleared[key.name] = index
+                if apply:
+                    await conn.execute(_CLEAR_LEDGER_PENDING, {**names, "app": LEDGER_APP})
+    async with engine.connect() as conn:
+        candidates = (
+            await conn.execute(
+                _TURN_SESSIONS_UNLEDGERED, {"app": TURN_APP, "ledger_app": LEDGER_APP}
+            )
+        ).all()
+    found: dict[tuple[str, str], list[str]] = {}
+    for principal, conversation_id, session_id in candidates:
+        found.setdefault((principal, conversation_id), []).append(session_id)
+    for principal, conversation_id in sorted(found):
+        name = f"{principal}/{conversation_id}"
+        names = {"principal": principal, "id": conversation_id}
+        async with engine.begin() as conn:
+            here = await held(conn, names)
+            if here is not None and here.live:
+                report.live.append(name)
                 continue
-            report.ahead[key.name] = list(ahead)
+            ids = found[(principal, conversation_id)]
             if apply:
-                await conn.execute(
-                    text(
-                        "DELETE FROM sessions WHERE app_name = :app AND user_id = :principal "
-                        "AND id = ANY(:ids)"
-                    ),
-                    {"app": TURN_APP, "principal": key.principal, "ids": list(ahead)},
+                ids = list(
+                    (
+                        await conn.execute(
+                            _DELETE_TURN_SESSIONS_UNLEDGERED,
+                            {**names, "app": TURN_APP, "ledger_app": LEDGER_APP, "ids": ids},
+                        )
+                    )
+                    .scalars()
+                    .all()
                 )
-    async with engine.begin() as conn:
-        unledgered = await conn.execute(
-            _DELETE_TURN_SESSIONS_UNLEDGERED if apply else _TURN_SESSIONS_UNLEDGERED,
-            {"app": TURN_APP, "ledger_app": LEDGER_APP},
-        )
-        found: dict[str, list[str]] = {}
-        for principal, conversation_id, session_id in unledgered:
-            found.setdefault(f"{principal}/{conversation_id}", []).append(session_id)
-    for name in sorted(found):
-        report.ahead[name] = sorted(found[name], key=_turn_number)
+            if ids:
+                report.ahead[name] = sorted(ids, key=_turn_number)
     return report
+
+
+def _resumed_here(pending: object, turn_index: int, here: Any) -> bool:
+    """Whether the ledger session is paused (its `studio:pending` holds an
+    interrupt) on turn `turn_index` and this release has moved past that
+    pause: the conversation's row, imported from that state, now holds
+    another turn index or other pending interrupts. The previous release
+    would show the card again, and an answer would resume the turn's ADK
+    session, whose events already hold this release's resume."""
+    if not isinstance(pending, dict) or not pending or here is None:
+        return False
+    held_pending = here.pending if isinstance(here.pending, dict) else {}
+    return here.turn_index != turn_index or set(held_pending) != set(pending)
 
 
 def _turn_number(session_id: str) -> int:
@@ -2832,7 +2942,6 @@ async def _run(arguments: argparse.Namespace, engine: AsyncEngine) -> _Report:
 _WAIT_EXIT: dict[type[Exception], int] = {
     NextReleaseMissing: 3,
     AdkArchived: 4,
-    ReleaseStreaming: 5,
 }
 
 
@@ -2862,12 +2971,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         report = asyncio.run(go())
-    except (NextReleaseMissing, AdkArchived, ReleaseStreaming) as exc:
+    except (NextReleaseMissing, AdkArchived) as exc:
         print(f"adk_import: {exc}", file=sys.stderr)
         return _WAIT_EXIT[type(exc)]
     except (
         AdkSchemaError,
         AdkTablesMissing,
+        TableBusy,
         TablesMissing,
         MigrationChecksumError,
         UnknownConversation,
@@ -2878,6 +2988,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         flush_telemetry_before_exit()
     print(report.render())
+    if isinstance(report, RollbackReport):
+        return report.exit_status
     return 0 if report.clean else 1
 
 
