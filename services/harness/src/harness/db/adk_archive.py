@@ -7,8 +7,9 @@ run checks everything the verb would do, the database's own refusals
 included, and changes nothing. With `--apply` it commits.
 
 - `archive` runs `0005_rename_adk_tables.sql`, the migration that renames
-  ADK's five tables and `adk_ledger_imports` to `adk_archive_<name>`, so its
-  checks and its rename are the migration's own, and records the file in
+  ADK's five tables and `adk_ledger_imports` to `adk_archive_<name>`, after
+  the check startup runs before it (`harness.db.cutover_gates.BEFORE`, DFA07),
+  so its checks and its rename are the migration's own, and records the file in
   `harness_schema_migrations` as applied when it is not recorded yet. The
   file is one `DO` block and renames nothing a second time, so a rerun
   finds nothing to do.
@@ -78,6 +79,7 @@ import asyncpg
 import pydantic
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from harness.db.cutover_gates import BEFORE
 from harness.db.engine import build_database
 from harness.db.migrate import MIGRATIONS_DIR, bound_and_lock, record_applied, sha256
 from harness.settings import Settings
@@ -266,6 +268,8 @@ async def _archive(conn: Any) -> list[str]:
             "the harness's database."
         )
     before = await _relations(conn, ARCHIVED)
+    # The migration's own check, as `apply_pending` runs it (`BEFORE`).
+    await conn.execute(BEFORE[ARCHIVE_MIGRATION.name])
     await conn.execute(ARCHIVE_MIGRATION.read_text())
     after = {
         row["oid"]: row["relname"] for row in await conn.fetch(_DESCRIBE, [r.oid for r in before])

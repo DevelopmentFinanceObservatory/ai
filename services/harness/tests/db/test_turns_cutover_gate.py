@@ -19,6 +19,7 @@ from pathlib import Path
 import asyncpg
 import pytest
 from harness import server
+from harness.db.cutover_gates import LAPSED_LEDGER_LEASES
 from harness.db.migrate import MIGRATIONS_DIR, apply_pending
 from harness.server import _apply_migrations_with_retries, _MigrationRefusedError
 from sqlalchemy import text
@@ -367,3 +368,22 @@ async def test_the_lease_gate_refuses_a_lease_it_cannot_read_until_the_operator_
     )
 
     assert _MIGRATION in await _applied(pg_empty_engine)
+
+
+async def test_lapsed_ledger_leases_clears_a_live_lease_the_operator_names(
+    pg_empty_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """A numeric `expires_at` far in the future refuses with DFR02 on every
+    attempt; naming the session in the check settings clears it."""
+    await _migrate_before_0003(pg_empty_engine, tmp_path)
+    leased = _session("c1", state=_leased(10**9))
+    await _execute(pg_empty_engine, _ADK_SESSIONS, leased, _imported("c1"), _conversation("c1"))
+    await _refused(pg_empty_engine, "DFR02")
+
+    applied = await apply_pending(
+        pg_empty_engine,
+        directory=_through_0004(tmp_path),
+        check_settings={LAPSED_LEDGER_LEASES: json.dumps(["p/c1"])},
+    )
+
+    assert applied[0] == _MIGRATION

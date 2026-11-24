@@ -579,31 +579,76 @@ def test_drop_adk_checks_the_column_signature_the_migration_checks() -> None:
     )
 
 
-async def test_a_start_that_would_apply_0003_and_0005_together_refuses_beside_adk_history(
-    pg_empty_engine: AsyncEngine, tmp_path: Path
-) -> None:
-    """A database at 0002 holding an imported ADK ledger session: a start
-    of this image refuses with DFA07 and applies nothing, since the release
-    that applies 0003 never ran `close-open-turns`. Once that release's
-    files are applied, the same start applies 0005 alone."""
-    before_0003 = tmp_path / "before_0003"
-    through_0004 = tmp_path / "through_0004"
-    for directory, last in ((before_0003, "0002"), (through_0004, "0004")):
+def _migration_dirs(tmp_path: Path) -> tuple[Path, Path]:
+    """Directories of the files through 0002 and through 0004."""
+    dirs = (tmp_path / "through_0002", tmp_path / "through_0004")
+    for directory, last in zip(dirs, ("0002", "0004"), strict=True):
         directory.mkdir()
         for path in MIGRATIONS_DIR.glob("*.sql"):
             if path.name[:4] <= last:
                 shutil.copy(path, directory / path.name)
-    await apply_pending(pg_empty_engine, directory=before_0003)
-    await _execute(pg_empty_engine, *_ADK_V1_DDL, _session("c1"), _imported("c1"))
-    async with pg_empty_engine.begin() as conn:
-        await conn.execute(
-            text("INSERT INTO conversations (principal, conversation_id) VALUES ('p', 'c1')")
-        )
+    return dirs
+
+
+async def _open_on_adk(engine: AsyncEngine) -> None:
+    """Conversation c1, imported, with turn 1 open on its ADK turn session
+    `c1#t1`, as the release that runs turns on ADK leaves a paused turn."""
+    await _execute(
+        engine,
+        *_ADK_V1_DDL,
+        _session("c1"),
+        _session("c1#t1", app="dfo_analyst_graph"),
+        _imported("c1"),
+        "INSERT INTO conversations (principal, conversation_id, turn_state) "
+        """VALUES ('p', 'c1', '{"turn_index": 1}')""",
+    )
+
+
+async def test_a_start_refuses_to_archive_adk_while_a_turn_is_open_on_it(
+    pg_empty_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """At 0002, with turn 1 open on ADK, a start of this image refuses with
+    DFA07 and applies nothing, and so does `archive`. Once the turn is
+    closed, as `close-open-turns` closes it, the same start applies 0003 to
+    0005."""
+    through_0002, _ = _migration_dirs(tmp_path)
+    await apply_pending(pg_empty_engine, directory=through_0002)
+    await _open_on_adk(pg_empty_engine)
 
     with pytest.raises(asyncpg.PostgresError) as refusal:
         await apply_pending(pg_empty_engine)
 
     assert refusal.value.sqlstate == "DFA07"
     assert "turn_cursors" not in await _tables(pg_empty_engine)
+    await _execute(
+        pg_empty_engine,
+        """UPDATE conversations SET turn_state = '{"turn_index": 1, "turn_recorded": true}'""",
+    )
+    assert await apply_pending(pg_empty_engine) == [
+        "0003_turns.sql",
+        "0004_card_lineage.sql",
+        "0005_rename_adk_tables.sql",
+    ]
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["not in turn_cursors", "in turn_cursors"])
+async def test_archive_refuses_a_turn_open_on_adk_that_turn_cursors_does_not_hold(
+    pg_empty_engine: AsyncEngine, tmp_path: Path, capsys: pytest.CaptureFixture[str], held: bool
+) -> None:
+    """At 0004, a turn open on ADK refuses the start and `archive` with
+    DFA07 unless `turn_cursors` holds the turn, opened there under the
+    number of a leftover ADK turn session."""
+    through_0002, through_0004 = _migration_dirs(tmp_path)
+    await apply_pending(pg_empty_engine, directory=through_0002)
+    await _open_on_adk(pg_empty_engine)
     await apply_pending(pg_empty_engine, directory=through_0004)
-    assert await apply_pending(pg_empty_engine) == ["0005_rename_adk_tables.sql"]
+    if held:
+        await _execute(
+            pg_empty_engine,
+            "INSERT INTO turn_cursors (conversation, turn_index, node, status, inputs, state) "
+            "SELECT id, 1, 'plan', 'running', '{}', '{}' FROM conversations",
+        )
+    capsys.readouterr()
+
+    assert await _verb(pg_empty_engine, "archive") == (0 if held else 1)
+    assert ("SQLSTATE DFA07" in capsys.readouterr().err) is not held

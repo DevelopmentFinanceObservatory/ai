@@ -122,7 +122,7 @@ async def apply_pending(
 ) -> list[str]:
     """Apply every file in `directory` not yet recorded, in filename order, in
     one transaction, and return their names. `check_settings` sets each
-    transaction setting (`harness.db.cutover_gates.CHECK_SETTINGS`) the
+    transaction setting (`harness.db.cutover_gates.LAPSED_LEDGER_LEASES`) the
     checks in `BEFORE` read. `timeout_s` bounds each
     statement (`statement_timeout`) and `lock_timeout_s` each wait for a
     lock (`lock_timeout`). The client waits on each call up to
