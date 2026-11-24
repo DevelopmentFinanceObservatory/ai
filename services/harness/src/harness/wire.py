@@ -378,6 +378,16 @@ MAX_SEED_SPEC_BYTES = 1_048_576
 # request.
 MAX_TURN_REQUEST_BYTES = MAX_SEEDS * MAX_SEED_SPEC_BYTES + 65_536
 
+# The largest `/api/studio/interrupt` body the route reads (`harness.studio`'s
+# `_BoundedInterruptRoute`). An interrupt carries no seeds, so it gets the room a
+# turn keeps for everything beside them.
+MAX_INTERRUPT_REQUEST_BYTES = 65_536
+
+# The most `client_features` values a request may declare. A client names the
+# question forms it renders, a handful; one this release does not know is ignored
+# (`declared_features`), so the cap leaves room for later forms.
+MAX_CLIENT_FEATURES = 16
+
 # The bounds on what the harness reads of a seed and of Search's answer for
 # it. A seed comes from a browser, and Search's answer for its identity goes
 # on into session state, tool results and the planner's brief, so each member
@@ -980,7 +990,7 @@ class TurnRequest(_WireModel):
     apply_choice: ApplyChoice | None = None
     apply_unit: ApplyUnit | None = None
     after_turn: int | None = Field(default=None, ge=0)
-    client_features: list[str] | None = None
+    client_features: list[str] | None = Field(default=None, max_length=MAX_CLIENT_FEATURES)
 
     @model_validator(mode="after")
     def _a_chip_comes_alone(self) -> TurnRequest:
@@ -1135,7 +1145,7 @@ class InterruptResponse(_WireModel):
     plan_revision: str | None = Field(default=None, min_length=1)
     # A `switch` of a row offering a unit: the unit the user picked.
     unit: UnitChoice | None = None
-    client_features: list[str] | None = None
+    client_features: list[str] | None = Field(default=None, max_length=MAX_CLIENT_FEATURES)
 
     @model_validator(mode="after")
     def _switch_members_come_with_switch(self) -> InterruptResponse:

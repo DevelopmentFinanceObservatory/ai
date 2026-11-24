@@ -132,6 +132,7 @@ from harness.turn.store import CursorStale, TurnStatus, TurnStore
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wire import (
+    MAX_CLIENT_FEATURES,
     MAX_SEED_SPEC_BYTES,
     MAX_TURN_REQUEST_BYTES,
     ComponentType,
@@ -12265,6 +12266,52 @@ async def test_a_request_past_the_body_cap_is_refused_before_it_is_parsed() -> N
     assert "6,356,992-byte cap" in response.json()["detail"]
     assert executor.calls == []
     assert search.calls == []
+
+
+@pytest.mark.parametrize(
+    ("change", "status"),
+    [
+        pytest.param(
+            {
+                "answers": {
+                    "q1": {"kind": "options", "option_ids": [f"o{i}" for i in range(20_000)]}
+                }
+            },
+            413,
+            id="option-ids-past-the-body-cap",
+        ),
+        pytest.param(
+            {"client_features": [f"f{i}" for i in range(MAX_CLIENT_FEATURES + 1)]},
+            422,
+            id="client-features-past-their-cap",
+        ),
+    ],
+)
+async def test_an_interrupt_past_its_bounds_is_refused_before_it_touches_the_conversation(
+    change: dict[str, Any], status: int
+) -> None:
+    """`/interrupt` reads at most `MAX_INTERRUPT_REQUEST_BYTES`, so a client cannot post
+    lists of any length, and declares at most `MAX_CLIENT_FEATURES` features."""
+    app = _app(*_ask_questions(("Count?", ("A", "B"))))
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        elicitation = _frame(first, "elicitation.request")
+        picked = {"q1": _pick(elicitation["questions"][0]["options"][0]["id"])}
+        body = {
+            **_interrupt_body(elicitation["interrupt_id"], "answer", answers=picked),
+            **change,
+        }
+        response = await client.post("/api/studio/interrupt", json=body, headers=AUTH)
+
+    assert response.status_code == status, response.text
+    if status == 413:
+        assert response.json()["error"] == "resource_exhausted"
+    else:
+        assert [error["type"] for error in response.json()["detail"]] == ["too_long"]
+    assert (
+        elicitation["interrupt_id"]
+        in app.state.studio.store.current(PRINCIPAL, CONVERSATION).pending
+    )
 
 
 async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block(
