@@ -18,7 +18,8 @@ they happen:
 A response with neither answer text nor a function call
 (`harness.gemini_agent.holds_no_answer`) is not sent back for another try.
 It ends the run `Answered`, with no text, when the run drew a card itself
-(`run_drew_a_card`), and raises `EmptyResponseError` otherwise.
+(`run_drew_a_card`), on the reply of its `remove_cards` calls when it took a card off
+the canvas instead, and raises `EmptyResponseError` otherwise.
 
 A turn whose first response makes one `remove_cards` call and holds no
 answer text ends after that call: the harness writes the reply from the
@@ -254,12 +255,13 @@ async def run_orchestrator(
     The first request opens with the date and the digests as one user content,
     then the user's message as its own, then the seed hand-back when there is
     one. A response with neither answer text nor a function call ends the run
-    `Answered`, with no text, where the run drew a card itself (`run_drew_a_card`).
-    Any other exception the model or Pydantic AI raises propagates.
+    `Answered`, with no text, where the run drew a card itself (`run_drew_a_card`), and
+    on the reply of its `remove_cards` calls where it took a card off the canvas
+    instead. Any other exception the model or Pydantic AI raises propagates.
 
     Raises:
         EmptyResponseError: A model response held neither answer text nor a
-            function call, and the run drew no card.
+            function call, and the run drew and removed no card.
         StreamResumedError: google-genai resumed a stream over output no
             continuation token covers (`harness.gemini_wire.resumed_over_output`),
             a dropped connection a later attempt may not meet.
@@ -307,9 +309,12 @@ async def run_orchestrator(
             # run once the agent's run has closed.
             removal: str | None = None
             # Whether the run ended on a response with no answer after it drew a
-            # card itself (`run_drew_a_card`), and the cards drawn before it.
+            # card itself (`run_drew_a_card`), the cards drawn before it, and the
+            # reply of each `remove_cards` call it made that took a card off or
+            # kept a pinned one (`removal_reply`).
             ended_empty = False
             drawn_before = drawn_cards(deps.state, turn_id)
+            removals: list[str] = []
             async for node in run:
                 if Agent.is_model_request_node(node):
                     deps.view = RecordingState(deps.state)
@@ -320,19 +325,28 @@ async def run_orchestrator(
                                 yield TextDelta(text)
                         response = stream.response
                     if holds_no_answer(response):
-                        if not run_drew_a_card(deps.state, turn_id, drawn_before):
-                            raise EmptyResponseError(
-                                "the model's response held neither answer text nor a "
-                                "function call, and the run drew no card"
+                        if run_drew_a_card(deps.state, turn_id, drawn_before):
+                            logger.warning(
+                                "orchestrator response held no answer; the run ends on the "
+                                "cards it drew turn_id=%s cards=%d",
+                                turn_id,
+                                len(drawn_cards(deps.state, turn_id) - drawn_before),
                             )
-                        logger.warning(
-                            "orchestrator response held no answer; the run ends on the "
-                            "cards it drew turn_id=%s cards=%d",
-                            turn_id,
-                            len(drawn_cards(deps.state, turn_id) - drawn_before),
+                            ended_empty = True
+                            break
+                        if removals:
+                            logger.warning(
+                                "orchestrator response held no answer; the run ends on the "
+                                "cards it removed turn_id=%s removals=%d",
+                                turn_id,
+                                len(removals),
+                            )
+                            removal = " ".join(removals)
+                            break
+                        raise EmptyResponseError(
+                            "the model's response held neither answer text nor a "
+                            "function call, and the run drew and removed no card"
                         )
-                        ended_empty = True
-                        break
                     yield ModelResponded(parts=response_parts(without_unsigned_thoughts(response)))
                     lone_removal, first = first and _lone_removal(response), False
                 elif Agent.is_call_tools_node(node):
@@ -347,6 +361,12 @@ async def run_orchestrator(
                             answers=tuple(answered),
                             state=_written_state(deps, held),
                         )
+                    removals.extend(
+                        reply
+                        for answer in answered
+                        if answer.name == "remove_cards"
+                        and (reply := removal_reply(answer.response or {})) is not None
+                    )
                     if lone_removal and (removal := _removal_reply(answered)) is not None:
                         break
             result = run.result
@@ -390,8 +410,9 @@ def run_drew_a_card(
     A run answers the user it runs for, on the turn's message, an `ask_user` answer
     or a plan's approval, when its final response holds text, or, where that
     response holds no answer (`harness.gemini_agent.holds_no_answer`), when the run
-    drew a card. A card drawn before a hand-back answered the run that drew it, not
-    the user's reply. Every card a turn shows is drawn by `make_charts`: the execute
+    drew a card, or else took a card off the canvas, which the reply of its
+    `remove_cards` calls then reports (`harness.orchestrator_tools.removal_reply`). A
+    card drawn before a hand-back answered the run that drew it, not the user's reply. Every card a turn shows is drawn by `make_charts`: the execute
     node of an approved plan publishes frames, which the agent then draws. Text a
     response streamed beside its calls ("Looking it up.") is narration, which
     answers nothing."""

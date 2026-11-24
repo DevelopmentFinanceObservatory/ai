@@ -885,6 +885,65 @@ async def test_a_removal_after_another_call_keeps_the_model_reply() -> None:
     assert events[-1] == Answered(text="Done.")
 
 
+_KENYA_OFF = 'I took "Aid to Kenya" off the canvas.'
+
+
+@pytest.mark.parametrize(
+    ("replies", "answer"),
+    [
+        pytest.param(
+            [reply(text_part("Taking it off."), _REMOVE_FIRST), empty_reply()],
+            _KENYA_OFF,
+            id="removal-beside-narration",
+        ),
+        pytest.param(
+            [reply(_SEARCH), reply(_REMOVE_FIRST), empty_reply()],
+            _KENYA_OFF,
+            id="removal-after-another-call",
+        ),
+        pytest.param(
+            [
+                reply(text_part("Taking them off."), _REMOVE_FIRST),
+                reply(call_part("remove_cards", {"component_ids": ["cmp_02"]})),
+                empty_reply(),
+            ],
+            f'{_KENYA_OFF} I took "Aid to Ghana" off the canvas.',
+            id="two-removals",
+        ),
+        pytest.param(
+            [
+                reply(
+                    text_part("Taking it off."),
+                    call_part("remove_cards", {"component_ids": ["cmp_99"]}),
+                ),
+                empty_reply(),
+            ],
+            None,
+            id="refused-removal",
+        ),
+    ],
+)
+async def test_a_response_with_no_answer_after_a_removal_ends_on_the_removal_reply(
+    replies: list[Any], answer: str | None
+) -> None:
+    """A response with no answer after the run took a card off the canvas ends the run
+    answered on the harness's reply for each removal, and sends no further request. A
+    removal the reply cannot name took nothing off, so the turn fails as one that
+    showed the user nothing."""
+    canvas = _canvas_of_two()
+    scripted = ScriptedGenai(replies)
+
+    if answer is None:
+        with pytest.raises(EmptyResponseError):
+            await _run(scripted, tools=_removing_tools(canvas))
+        return
+    events, _ = await _run(scripted, tools=_removing_tools(canvas))
+
+    assert len(scripted.requests) == len(replies)
+    assert events[-1] == Answered(text=answer)
+    assert _texts(events)[-1] == answer
+
+
 @pytest.mark.parametrize(
     "args",
     [

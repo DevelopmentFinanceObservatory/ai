@@ -120,7 +120,7 @@ class RecordingState:
 
 class EmptyResponseError(UnexpectedModelBehavior, TransientFaultError):
     """The model's response held neither answer text nor a function call
-    (`holds_no_answer`), and the run drew no card
+    (`holds_no_answer`), and the run drew and removed no card
     (`orchestrator.run.run_drew_a_card`), so it has nothing to go on with. The same
     request samples again on a later attempt, so the fault is transient
     (`compiler.surface.TransientFaultError`)."""
