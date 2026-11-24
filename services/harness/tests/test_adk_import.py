@@ -30,6 +30,7 @@ from typing import Any
 import common.logging as common_logging
 import pytest
 from compiler.sources import source_from_spec_block
+from executor.ledger import RunRecord
 from google.adk.events import Event, EventActions
 from google.adk.sessions import DatabaseSessionService
 from harness import adk_import
@@ -235,7 +236,10 @@ async def _assert_runs_equal(engine: AsyncEngine, conversation_id: str) -> None:
             kind, _, ident = key.removeprefix("studio:").partition(":")
             if kind == "run":
                 run = await ledger.get(ident)
-                assert run is not None and run.model_dump(mode="json") == raw
+                # The tables' copy loads as the previous release's record loads,
+                # with the defaults of fields a later release added.
+                expected = RunRecord.model_validate(raw).model_dump(mode="json")
+                assert run is not None and run.model_dump(mode="json") == expected
             elif kind == "run_submission":
                 assert await ledger.submission(ident) == raw
             elif kind == "run_retrievals":
