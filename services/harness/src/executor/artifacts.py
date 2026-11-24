@@ -17,6 +17,8 @@ from data_mcp.manifest import Manifest
 from dfo_frame_grammar.grammar import FrameError, normalize_role_keys
 from pydantic import ValidationError
 
+from executor.outcomes import SummedRead
+
 
 class ArtifactError(ValueError):
     """The structured result does not carry the value its capability declares."""
@@ -157,6 +159,25 @@ def declared_ranked_before_limit(structured_content: Mapping[str, object] | None
     if isinstance(count, bool) or not isinstance(count, int):
         return None
     return count
+
+
+def declared_stat_vars_summed(
+    structured_content: Mapping[str, object] | None,
+) -> tuple[SummedRead, ...]:
+    """The dataset versions a successful call declared it read summed over several
+    StatVars (`analysis_mcp.result.VerbResult.stat_vars_summed`), or `()` when it
+    declared none. An entry that is not a pair with a count of at least one is
+    left out."""
+    entries = (structured_content or {}).get("stat_vars_summed")
+    if not isinstance(entries, list | tuple):
+        return ()
+    reads: list[SummedRead] = []
+    for entry in entries:
+        try:
+            reads.append(SummedRead.model_validate(entry))
+        except ValidationError:
+            continue
+    return tuple(reads)
 
 
 def retrieved_frame_columns(

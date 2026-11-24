@@ -129,3 +129,29 @@ async def test_a_retrieval_that_does_not_sum_declares_whatever_its_frame_holds(
     outcome = await _run_with_declared_count(plan, manifest(), real_schemas, {})
 
     assert isinstance(outcome, Accepted), outcome
+
+
+async def test_a_step_record_carries_the_stat_vars_an_analysis_call_summed(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+) -> None:
+    """An `aggregate` over an unsummed retrieval declares one StatVar for its
+    frame and names the dataset version it added up, and the record keeps both."""
+    read = {"spec_id": "spec_" + "1" * 32, "content_version": "ocv_" + "1" * 32, "count": 2}
+    surface = ScriptedSurface(
+        schemas=real_schemas,
+        responses={
+            "get_data": [ok(manifest())],
+            "aggregate": [ok(RESULT_FRAME | {"stat_vars_summed": [read, {"count": "x"}]})],
+        },
+    )
+
+    _finished, outcome = await execute_approved_plan(approved_plan(), surface=surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    assert outcome.steps[-1].stat_var_count == 1
+    assert [step.model_dump(mode="json")["stat_vars_summed"] for step in outcome.steps] == [
+        [],
+        [read],
+    ]

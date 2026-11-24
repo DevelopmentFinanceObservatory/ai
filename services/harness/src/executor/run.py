@@ -266,6 +266,7 @@ from executor.artifacts import (
     declared_dropped_key_counts,
     declared_ranked_before_limit,
     declared_shape,
+    declared_stat_vars_summed,
     extract_frame_ref,
     manifest_frame_ref,
     parse_manifest,
@@ -2445,6 +2446,7 @@ class _Run:
                         dropped_key_count=self.dropped_key_counts[step.id][0],
                         right_dropped_key_count=self.dropped_key_counts[step.id][1],
                         ranked_before_limit=self.ranked_before_limit[step.id],
+                        stat_vars_summed=declared_stat_vars_summed(result.structured_content),
                     )
                     evidence = (
                         await self._check_evidence(step, result)

@@ -93,6 +93,15 @@ class AnchorResult(StrictModel):
     populations: tuple[JsonValue, ...] = ()
 
 
+class SummedRead(StrictModel):
+    """A dataset version an analysis call read summed over more than one StatVar,
+    and how many StatVars the sum added (`analysis_mcp.result.StatVarsSummed`)."""
+
+    spec_id: SpecId
+    content_version: str
+    count: int = Field(ge=1)
+
+
 class StepRecord(StrictModel):
     """One step that ran: what it called, how many attempts it took, what it produced.
 
@@ -110,6 +119,9 @@ class StepRecord(StrictModel):
     `ranked_before_limit` is how many entries a `rank` call ranked before its
     `limit` cut them (`executor.artifacts.declared_ranked_before_limit`),
     `None` when the call set no limit.
+    `stat_vars_summed` is each dataset version the call read summed over several
+    StatVars (`executor.artifacts.declared_stat_vars_summed`), which the frame's
+    own `stat_var_count` of one does not show.
 
     `frame_ref` is the pair later steps read the frame by. `manifest_ref` is
     the manifest's own pair for a `get_data` step whose `frame_ref` differs
@@ -129,6 +141,7 @@ class StepRecord(StrictModel):
     dropped_key_count: int = Field(default=0, ge=0)
     right_dropped_key_count: int = Field(default=0, ge=0)
     ranked_before_limit: int | None = Field(default=None, ge=0)
+    stat_vars_summed: tuple[SummedRead, ...] = ()
 
     @property
     def presented_ref(self) -> FrameRef:

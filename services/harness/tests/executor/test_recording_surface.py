@@ -38,7 +38,7 @@ from data_mcp.client import UpstreamClient
 from data_mcp.frame_materialisation import frame_ref_for
 from data_mcp.settings import Settings as DataMcpSettings
 from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
-from executor.outcomes import Accepted, RefusalKind, Refused
+from executor.outcomes import Accepted, RefusalKind, Refused, SummedRead
 from executor.run import execute_approved_plan
 from harness.conversation import current_conversation_id
 from harness.graph import answer as answer_module
@@ -1007,8 +1007,62 @@ async def test_the_linked_retrievals_follow_workflow_order_whatever_the_set_iter
             "stat_var_count": _TERMINAL_FRAMES["join"]["stat_var_count"],
             "carried_frame_refs": [_DEBT_FRAME, _GDP_FRAME],
             "summed_frame_refs": [],
+            "summed_reads": [],
         }
     ]
+
+
+async def test_the_link_carries_the_stat_vars_a_step_of_the_frame_summed(
+    join_plan: PlanFactory,
+    manifest_for: Callable[..., dict[str, Any]],
+    source: Callable[..., Any],
+    gdp_source: Callable[..., Any],
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A step the terminal frame rests on read the debt retrieval summed over two
+    StatVars. The link hands the pair and the count on, as the retrieval's frame
+    is named in `carried_frame_refs`."""
+    debt = _stated(
+        manifest_for,
+        source(),
+        text="World Bank",
+        ref="worldbank",
+        label="World Bank",
+        created_at="2019-05-01T00:00:00+00:00",
+        end_year=2024,
+    )
+    gdp = _stated(
+        manifest_for,
+        gdp_source(),
+        text="IMF",
+        ref="imf",
+        label="IMF",
+        created_at="2021-11-20T00:00:00+00:00",
+        end_year=2022,
+        content_version=_GDP_CONTENT_VERSION,
+    )
+    run = await _run_two_input_plan(join_plan(), schemas=real_schemas, debt=debt, gdp=gdp)
+    read = SummedRead(count=2, **_DEBT_FRAME)
+    summed = run.outcome.model_copy(
+        update={
+            "steps": tuple(
+                record.model_copy(update={"stat_vars_summed": (read,)})
+                if record.frame_ref.model_dump() == run.terminal_frame
+                else record
+                for record in run.outcome.steps
+            )
+        }
+    )
+    calls: list[dict[str, Any]] = []
+
+    class _Spy:
+        def link_evidence(self, **kwargs: Any) -> None:
+            calls.append(kwargs)
+
+    spy: Any = _Spy()
+    link_evidence_to_terminal_frames(spy, summed, workflow=run.workflow)
+
+    assert [call["summed_reads"] for call in calls] == [[{**_DEBT_FRAME, "count": 2}]]
 
 
 async def test_a_join_whose_two_retrievals_overlap_still_states_both_in_workflow_order(

@@ -24,7 +24,7 @@ from common.materialisation import FrameRef
 from common.period_note import period_note
 from common.place_type import FLOW_ROLE_COLUMNS, enrichment_role
 from common.rolling import flat_populations
-from compiler.evidence import series_rank
+from compiler.evidence import series_entity_name, series_rank
 from compiler.frame_columns import FRAME_PARAMETER
 from compiler.sources import MembersAnswer, members_reading, total_reading
 from compiler.surface import ToolSurface
@@ -140,6 +140,40 @@ def _carried_retrievals(
                 binding.from_step, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
             )
     return frozenset(carried)
+
+
+def _summed_reads(
+    step_id: str,
+    *,
+    steps_by_id: dict[str, WorkflowStep],
+    records: Mapping[str, StepRecord],
+) -> list[dict[str, str | int]]:
+    """The dataset versions the steps feeding `step_id`, itself included, added up
+    over several StatVars (`StepRecord.stat_vars_summed`), each with the most any
+    of them added, in the order they were found.
+
+    A read names the pair of the frame the call was given, which a retrieval
+    minted with extra columns holds under another pair than the one it is
+    described by, so each pair is named as `StepRecord.presented_ref` has it.
+    """
+    presented = {
+        (record.frame_ref.spec_id, record.frame_ref.content_version): record.presented_ref
+        for record in records.values()
+    }
+    counts: dict[tuple[str, str], int] = {}
+    for name in _upstream_steps(step_id, steps_by_id=steps_by_id):
+        if (record := records.get(name)) is None:
+            continue
+        for read in record.stat_vars_summed:
+            ref = presented.get((read.spec_id, read.content_version))
+            key = (
+                (ref.spec_id, ref.content_version) if ref else (read.spec_id, read.content_version)
+            )
+            counts[key] = max(counts.get(key, 0), read.count)
+    return [
+        {"spec_id": spec_id, "content_version": content_version, "count": count}
+        for (spec_id, content_version), count in counts.items()
+    ]
 
 
 def _carried_parts(
@@ -282,6 +316,7 @@ def link_evidence_to_terminal_frames(
     step_order = {step.id: index for index, step in enumerate(workflow.steps)}
     evidence_by_step = {record.step_id: record for record in outcome.evidence}
     stat_var_counts = {record.step_id: record.stat_var_count for record in _ran(outcome)}
+    records = {record.step_id: record for record in _ran(outcome)}
     memo: dict[str, frozenset[str]] = {}
     for step_id, frame in answer_frames(outcome, published=published).items():
         frame_ref = frame.presented
@@ -330,6 +365,7 @@ def link_evidence_to_terminal_frames(
                     for writer in sorted(writers, key=step_order.__getitem__)
                 )
             ],
+            summed_reads=_summed_reads(step_id, steps_by_id=steps_by_id, records=records),
         )
 
 
@@ -961,8 +997,8 @@ def _short_reach(reach: Period, window: Period) -> tuple[str, tuple[str, str]] |
 
 def _owner_of(entities: Sequence[SeriesEntity]) -> str | None:
     """Whose series `entities` hold, as a sentence names them ("Germany's"),
-    or `None` where one of them has no label."""
-    labels = [entity.label for entity in entities]
+    or `None` where one of them has no name (`series_entity_name`)."""
+    labels = [series_entity_name(entity) for entity in entities]
     if None in labels:
         return None
     name = " and ".join(label for label in labels if label is not None)

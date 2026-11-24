@@ -2454,6 +2454,14 @@ def _names_itself(entity: SeriesEntity) -> bool:
     return entity.role.startswith(_LABEL_ROLE_PREFIX)
 
 
+def series_entity_name(entity: SeriesEntity) -> str | None:
+    """What a note calls `entity`: its label, else its ref where that is its own
+    label (`_names_itself`), else `None`."""
+    if entity.label is not None:
+        return entity.label
+    return entity.ref if _names_itself(entity) else None
+
+
 _SERIES_CODES = frozenset({EvidenceIssueCode.WINDOW_SHORT, EvidenceIssueCode.COVERAGE_GAPS})
 
 
