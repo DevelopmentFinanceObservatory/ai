@@ -3,6 +3,7 @@ frame itself never leaks into the rendered text."""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -740,6 +741,43 @@ def test_a_partitioned_rank_digest_names_the_partitions_past_the_cap() -> None:
     assert f"destination=country/R{LIST_CAP - 1} (1 of 3 shown)" in digest
     assert f"#1 origin=donor/D{LIST_CAP}0" not in digest
     assert f"2 partitions not shown: destination=country/R{LIST_CAP} (3)" in digest
+
+
+@pytest.mark.parametrize(
+    ("private", "tagged"),
+    [
+        ((("destination", "country/R0"),), ["destination=country/R0"]),
+        ((("origin", "donor/D01"),), ["origin=donor/D01"]),
+        (
+            (("destination", "country/R0"), ("origin", "donor/D01")),
+            ["destination=country/R0", "origin=donor/D01"],
+        ),
+    ],
+    ids=["private partition", "private entity", "both private"],
+)
+def test_a_partitioned_rank_digest_tags_a_party_only_where_it_is_named(
+    private: tuple[tuple[str, str], ...], tagged: list[str]
+) -> None:
+    """The private tag sits on the partition heading for a private partition and on
+    an entity line only for a private entity, never on every entity of a partition."""
+    result = _partitioned_ranks(2, 3)
+    result = result.model_copy(update={"private_parties": private})
+
+    digest = render_rank_digest(
+        rank_by=("origin",),
+        partition_by=("destination",),
+        result=result,
+        op_spec_hash="ops_" + "a" * 32,
+        content_version="ocv_" + "b" * 32,
+        execution_identity=_EI,
+    )
+
+    names = [
+        match[1]
+        for line in digest.splitlines()
+        if (match := re.match(r"\s*(?:#\d+ )?(\S+) \(private\)", line))
+    ]
+    assert names == tagged
 
 
 def _zero_denominator_digest(keys: int) -> str:

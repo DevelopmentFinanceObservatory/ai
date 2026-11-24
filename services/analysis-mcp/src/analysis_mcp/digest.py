@@ -910,7 +910,8 @@ def _rank_line(
     """One entity's rank, value, rows and coverage, its key less the `within`
     columns its partition's heading names."""
     key_text = _key_text(tuple(pair for pair in rank.entity_key if pair[0] not in within))
-    tag = " (private)" if any(pair in private for pair in rank.entity_key) else ""
+    own = tuple(pair for pair in rank.entity_key if pair[0] not in within)
+    tag = " (private)" if any(pair in private for pair in own) else ""
     return (
         f"  #{rank.rank} {key_text}{tag}: {_format_number(rank.value)} "
         f"[{_rows(rank.row_count)}, coverage={rank.coverage_fraction:.0%}]"
@@ -958,7 +959,8 @@ def _partitioned_rank_block(
         if not count:
             omitted.append((key, len(group)))
             continue
-        lines.append(f"  {_key_text(key)} ({count} of {len(group)} shown):")
+        tag = " (private)" if any(pair in private for pair in key) else ""
+        lines.append(f"  {_key_text(key)}{tag} ({count} of {len(group)} shown):")
         lines.extend(
             "  " + _rank_line(rank, private=private, within=within) for rank in group[:count]
         )
