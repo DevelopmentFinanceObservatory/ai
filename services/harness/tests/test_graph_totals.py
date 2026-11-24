@@ -1102,28 +1102,6 @@ async def test_a_pooled_share_states_the_year_a_recipients_series_ends(
     assert answer_notes(surface, outcome, plan=plan, terminals=[]) == []
 
 
-async def test_a_series_under_a_decoded_breakdown_is_named_by_its_labels(
-    schemas: dict[str, ToolSchema],
-) -> None:
-    """Uganda's series for the sector "Education" ends in 2021. The sector sits in a
-    decoded code column, so its ref is its label and the note names both."""
-    plan = _pooled_share(schemas)
-    surface, outcome = _run(plan, summed={}, role_keys={})
-    series = _short("Uganda", reach=(2015, 2021)).model_copy(
-        update={
-            "entities": (
-                SeriesEntity(role="recipient", ref="country/Uganda", label="Uganda"),
-                SeriesEntity(role="stat_var_crsPurpose", ref="Education", label=None),
-            )
-        }
-    )
-    outcome = _with_gaps(outcome, "aid_op", series, window=_ASKED)
-
-    (note,) = answer_notes(surface, outcome, plan=plan)
-
-    assert "Uganda and Education's" in note
-
-
 @pytest.mark.parametrize(
     ("gaps", "stated"),
     [

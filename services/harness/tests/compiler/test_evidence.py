@@ -1989,10 +1989,9 @@ def test_the_refs_a_short_series_lookup_names_are_the_largest_series_unlabelled_
 
 
 def test_a_series_lookup_asks_only_for_dcids_before_its_cap_and_strips_the_marker() -> None:
-    """Names ("humanitarian aid") are their own labels and take no slot; a `dcid:`
-    ref is asked for bare, and its answer labels the entity that carries the marker."""
-    # One of the labels is a held dcid, which only its role keeps out of the lookup.
-    text = ("CRSPurposeCode110", *(f"Sector{i}" for i in range(150)))
+    """Text that is no dcid ("humanitarian aid") takes no slot; a `dcid:` ref is
+    asked for bare, and its answer labels the entity that carries the marker."""
+    text = tuple(f"sector {i}" for i in range(150))
     findings = [_short_of("dcid:donor/B", "donor/A", size=1.0, breakdown=text)]
 
     refs = unlabelled_series_refs(findings, limit=100)
@@ -2002,30 +2001,36 @@ def test_a_series_lookup_asks_only_for_dcids_before_its_cap_and_strips_the_marke
     assert [entity.label for entity in labelled.entities if entity.ref.endswith("B")] == ["Beta"]
 
 
-def test_a_fetched_label_does_not_reach_a_sector_that_shares_its_bare_id() -> None:
-    """A recipient `dcid:110` is looked up and labelled; the sector `110` is its own label."""
-    findings = [_short_of("dcid:110", size=1.0, breakdown=("110",))]
+def test_a_decoded_sector_is_looked_up_and_labelled_by_its_code_dcid() -> None:
+    """A decoded code axis's cell holds the code's dcid (dfo-apis
+    `capabilities.decode_code_systems`), so the sector is asked for and labelled
+    like the recipient `dcid:110`, each by its own dcid."""
+    findings = [_short_of("dcid:110", size=1.0, breakdown=("CRSPurposeCode110",))]
 
-    (labelled,) = with_series_labels(findings, {"110": "Recipient"})
+    refs = unlabelled_series_refs(findings, limit=10)
+    (labelled,) = with_series_labels(
+        findings, {"110": "Recipient", "CRSPurposeCode110": "Education"}
+    )
 
+    assert refs == ["CRSPurposeCode110", "110"]
     assert [(entity.role, entity.label) for entity in labelled.entities] == [
-        ("stat_var_crsPurpose", None),
+        ("stat_var_crsPurpose", "Education"),
         ("donor", "Recipient"),
     ]
 
 
-def test_an_approved_label_does_not_reach_a_sector_that_shares_its_bare_id(
+def test_an_approved_label_reaches_only_the_entity_its_dcid_names(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
-    """The approved recipient `dcid:110` is labelled "Recipient"; a series' sector `110`
-    names itself and keeps no label."""
+    """The approved recipient `dcid:110` is labelled "Recipient"; a series' sector
+    `CRSPurposeCode110`, which the approval does not name, keeps no label."""
     evidence = evidence_from_manifest(
         _manifest(),
         series_stats=_series_stats(
             _stat(
                 "DebtServicePaid",
                 entities=[
-                    {"role": "stat_var_crsPurpose", "ref": "110"},
+                    {"role": "stat_var_crsPurpose", "ref": "CRSPurposeCode110"},
                     {"role": "recipient", "ref": "dcid:110"},
                 ],
                 observations=6,

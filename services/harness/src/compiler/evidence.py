@@ -2443,25 +2443,6 @@ def _membership_unverified(
 
 
 # The findings that name one retrieved series (`EvidenceIssue.entities`).
-# A frame's decoded code axis is a `stat_var_<code_system>` column holding the code's label, so
-# an entity under such a role has its label for a ref, not a dcid (dfo-apis
-# `materialise.render._KEPT_AXIS_PREFIX`; `decode_code_systems` in `datasets_api.capabilities`).
-_LABEL_ROLE_PREFIX = "stat_var_"
-
-
-def _names_itself(entity: SeriesEntity) -> bool:
-    """Whether `entity`'s ref is its own label: it sits in a decoded code axis's column."""
-    return entity.role.startswith(_LABEL_ROLE_PREFIX)
-
-
-def series_entity_name(entity: SeriesEntity) -> str | None:
-    """What a note calls `entity`: its label, else its ref where that is its own
-    label (`_names_itself`), else `None`."""
-    if entity.label is not None:
-        return entity.label
-    return entity.ref if _names_itself(entity) else None
-
-
 _SERIES_CODES = frozenset({EvidenceIssueCode.WINDOW_SHORT, EvidenceIssueCode.COVERAGE_GAPS})
 
 
@@ -2483,9 +2464,10 @@ def unlabelled_series_refs(findings: Iterable[EvidenceIssue], *, limit: int) -> 
     """The dcids, at most `limit`, of the entities the series findings among
     `findings` name with no label, the largest series' first (`series_rank`).
 
-    An entity under a label column (`_names_itself`, a breakdown's sector) keeps its ref as
-    its label and takes no slot, even where that label equals a held dcid. Any other ref is
-    looked up only if the nodes route accepts it once its `dcid:` marker is stripped.
+    A ref is looked up only if the nodes route accepts it once its `dcid:` marker is
+    stripped. A decoded code axis's cell, such as a breakdown's sector under
+    `stat_var_crsPurpose`, holds the code's dcid (dfo-apis `capabilities.decode_code_systems`)
+    and is looked up like a place's.
 
     An answer names the largest series that fall short
     (`harness.graph.answer`), so a lookup bounded this way still labels the
@@ -2498,11 +2480,7 @@ def unlabelled_series_refs(findings: Iterable[EvidenceIssue], *, limit: int) -> 
         for entity in finding.entities:
             if len(refs) == limit:
                 return list(refs)
-            if (
-                entity.label is None
-                and not _names_itself(entity)
-                and is_dcid(dcid := bare_dcid(entity.ref))
-            ):
+            if entity.label is None and is_dcid(dcid := bare_dcid(entity.ref)):
                 refs.setdefault(dcid)
     return list(refs)
 
@@ -2517,9 +2495,7 @@ def with_series_labels(
             update={
                 "entities": tuple(
                     entity
-                    if entity.label is not None
-                    or _names_itself(entity)
-                    or bare_dcid(entity.ref) not in labels
+                    if entity.label is not None or bare_dcid(entity.ref) not in labels
                     else entity.model_copy(update={"label": labels[bare_dcid(entity.ref)]})
                     for entity in finding.entities
                 )
@@ -2893,9 +2869,7 @@ def _series_off_period(
                 SeriesEntity(
                     role=entity["role"],
                     ref=entity["ref"],
-                    label=None
-                    if entity["role"].startswith(_LABEL_ROLE_PREFIX)
-                    else labels.get(bare_dcid(entity["ref"])),
+                    label=labels.get(bare_dcid(entity["ref"])),
                 )
                 for entity in row["entities"]
             ),

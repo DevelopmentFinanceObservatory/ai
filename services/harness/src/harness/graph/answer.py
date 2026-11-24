@@ -24,7 +24,7 @@ from common.materialisation import FrameRef
 from common.period_note import period_note
 from common.place_type import FLOW_ROLE_COLUMNS, enrichment_role
 from common.rolling import flat_populations
-from compiler.evidence import series_entity_name, series_rank
+from compiler.evidence import series_rank
 from compiler.frame_columns import FRAME_PARAMETER
 from compiler.sources import MembersAnswer, members_reading, total_reading
 from compiler.surface import ToolSurface
@@ -997,8 +997,8 @@ def _short_reach(reach: Period, window: Period) -> tuple[str, tuple[str, str]] |
 
 def _owner_of(entities: Sequence[SeriesEntity]) -> str | None:
     """Whose series `entities` hold, as a sentence names them ("Germany's"),
-    or `None` where one of them has no name (`series_entity_name`)."""
-    labels = [series_entity_name(entity) for entity in entities]
+    or `None` where one of them has no label."""
+    labels = [entity.label for entity in entities]
     if None in labels:
         return None
     name = " and ".join(label for label in labels if label is not None)

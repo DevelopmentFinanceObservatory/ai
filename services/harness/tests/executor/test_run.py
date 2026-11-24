@@ -37,7 +37,7 @@ from data_mcp import stat_var_list
 from data_mcp.client import UpstreamClient
 from data_mcp.deadline import CallDeadline
 from data_mcp.errors import UpstreamError
-from data_mcp.graph_wire import NotHeldEntry, OrganisationNode
+from data_mcp.graph_wire import CodeNode, NotHeldEntry, OrganisationNode
 from data_mcp.manifest import strip_manifest
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA
 from data_mcp.settings import Settings as DataMcpSettings
@@ -1573,28 +1573,49 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
     ]
 
 
-async def test_a_series_entity_that_is_a_name_is_not_looked_up_and_keeps_its_ref(
+@pytest.mark.parametrize(
+    ("cell", "asked", "label"),
+    [
+        # Text the nodes route refuses as a dcid is not asked for.
+        pytest.param("humanitarian aid", ["donor/DEU"], None, id="text"),
+        # A decoded code axis's cell holds the code's dcid (dfo-apis
+        # `capabilities.decode_code_systems`), which the graph names.
+        pytest.param(
+            "CRSPurposeCode11220", ["CRSPurposeCode11220", "donor/DEU"], "Education", id="code-dcid"
+        ),
+    ],
+)
+async def test_a_series_breakdown_cell_is_named_by_the_graph_only_when_it_is_a_dcid(
     approved_plan: PlanFactory,
     manifest: ManifestFactory,
     real_schemas: list[ToolSchema],
     requirement: RequirementFactory,
     monkeypatch: pytest.MonkeyPatch,
+    cell: str,
+    asked: list[str],
+    label: str | None,
 ) -> None:
-    """A breakdown's entity ref is its name, which the nodes route refuses as a dcid; the
-    donor in the same findings is still named by the graph."""
+    """Two series miss years: one from a donor, one under a breakdown's sector cell.
+    The donor is named by the graph in both cases, and the sector when its cell is a
+    dcid the graph holds."""
     sparse = manifest()
     (row,) = sparse["statistics"]
     row["observations"] = 7
     sparse["statistics"][:] = [
         {**row, "entities": [*row["entities"], {"role": role, "ref": ref}]}
-        for role, ref in (("donor", "donor/DEU"), ("stat_var_crsPurpose", "humanitarian aid"))
+        for role, ref in (("donor", "donor/DEU"), ("stat_var_crsPurpose", cell))
     ]
     sparse["series_count"] = 2
-    asked: list[list[str]] = []
+    lookups: list[list[str]] = []
 
     async def describe(dcids: list[str]) -> dict[str, Any]:
-        asked.append(list(dcids))
-        return {"donor/DEU": OrganisationNode.model_construct(ref="donor/DEU", label="Germany")}
+        lookups.append(list(dcids))
+        return {
+            "donor/DEU": OrganisationNode.model_construct(ref="donor/DEU", label="Germany"),
+            "CRSPurposeCode11220": CodeNode.model_construct(
+                ref="CRSPurposeCode11220", label="Education"
+            ),
+        }
 
     monkeypatch.setattr("executor.run.describe_nodes", describe)
     plan = approved_plan(requirement=requirement(coverage=Coverage(on_missing="report_gaps")))
@@ -1602,11 +1623,11 @@ async def test_a_series_entity_that_is_a_name_is_not_looked_up_and_keeps_its_ref
     outcome = await _run(plan, surface=_surface(real_schemas, sparse), sleep=_Sleeps())
 
     assert isinstance(outcome, Accepted), outcome
-    assert asked == [["donor/DEU"]]
+    assert lookups == [asked]
     gaps = [gap for gap in outcome.evidence[0].gaps if gap.code.value == "coverage_gaps"]
     named = {e.ref: e.label for gap in gaps for e in gap.entities}
     assert named["donor/DEU"] == "Germany"
-    assert named["humanitarian aid"] is None
+    assert named[cell] == label
 
 
 async def test_a_name_lookup_needs_more_step_budget_left_than_its_margin() -> None:
