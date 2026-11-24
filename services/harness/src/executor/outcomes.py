@@ -94,8 +94,13 @@ class AnchorResult(StrictModel):
 
 
 class SummedRead(StrictModel):
-    """A dataset version an analysis call read summed over more than one StatVar,
-    and how many StatVars the sum added (`analysis_mcp.result.StatVarsSummed`)."""
+    """A root an analysis call read summed over more than one StatVar, and how
+    many StatVars the sum added (`analysis_mcp.result.StatVarsSummed`).
+
+    dfo-apis names the root by the version it rendered for the sum, so
+    `spec_id` is the dataset's and `content_version` that rendering's, which no
+    retrieval holds (`harness.graph.answer._summed_input`).
+    """
 
     spec_id: SpecId
     content_version: str
@@ -119,9 +124,11 @@ class StepRecord(StrictModel):
     `ranked_before_limit` is how many entries a `rank` call ranked before its
     `limit` cut them (`executor.artifacts.declared_ranked_before_limit`),
     `None` when the call set no limit.
-    `stat_vars_summed` is each dataset version the call read summed over several
-    StatVars (`executor.artifacts.declared_stat_vars_summed`), which the frame's
-    own `stat_var_count` of one does not show.
+    `stat_vars_summed` is each root the call read summed over several StatVars
+    (`executor.artifacts.declared_stat_vars_summed`), which the frame's own
+    `stat_var_count` of one does not show. It is left out of the stored
+    outcome when empty, so a harness that predates it, whose `StrictModel`
+    rejects an unknown key, still loads every outcome with no such read.
 
     `frame_ref` is the pair later steps read the frame by. `manifest_ref` is
     the manifest's own pair for a `get_data` step whose `frame_ref` differs
@@ -141,7 +148,7 @@ class StepRecord(StrictModel):
     dropped_key_count: int = Field(default=0, ge=0)
     right_dropped_key_count: int = Field(default=0, ge=0)
     ranked_before_limit: int | None = Field(default=None, ge=0)
-    stat_vars_summed: tuple[SummedRead, ...] = ()
+    stat_vars_summed: tuple[SummedRead, ...] = Field(default=(), exclude_if=lambda reads: not reads)
 
     @property
     def presented_ref(self) -> FrameRef:

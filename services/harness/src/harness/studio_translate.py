@@ -992,10 +992,11 @@ class _RecordingSurface:
         StatVars it sums, and each ref a `sum_of`, `quotient_of` or
         `share_of` wrote for its own result that the frame carries as the
         distinct StatVars of its entry in `summed_frame_refs`, the
-        retrievals under that verb's sides. `summed_reads` holds each dataset version the frame's steps
-        added up over several StatVars (`StepRecord.stat_vars_summed`), which
-        counts a retrieval in `carried_frame_refs` of that pair as the StatVars
-        it added. Called once per terminal frame from
+        retrievals under that verb's sides. `summed_reads` names each
+        retrieval in `carried_frame_refs`, by its frame pair, that reaches the
+        frame only through an analysis call that added up its StatVars, with
+        how many it added (`harness.graph.answer._carried_parts`), and counts
+        it as that many. Called once per terminal frame from
         `harness.graph.answer.link_evidence_to_terminal_frames`.
 
         A no-op when `provenance` was never given. All-or-nothing: when any

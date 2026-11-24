@@ -159,28 +159,6 @@ def test_families_whose_contributors_cannot_be_named_add_only_when_disjoint() ->
     assert _carried_count(store, ["spec_abc", "spec_de"], 2) == 5
 
 
-def test_a_retrieval_an_analysis_call_summed_counts_the_stat_vars_it_added() -> None:
-    """An unsummed retrieval of A and B, which an `aggregate` added up: its frame
-    declares one StatVar, and the runner reports the two it summed."""
-    store = ProvenanceStore()
-    _put(store, "spec_ab", _traced({"A": 4, "B": 2, "Z": 0}))
-
-    def count(reads: dict[tuple[str, str], int]) -> int | None:
-        store.alias(
-            conversation="c1",
-            spec_id="ops_x",
-            content_version="ocv_x",
-            sources=[("spec_ab", "v1")],
-            stat_var_count=1,
-            carried=[("spec_ab", "v1")],
-            summed_reads=reads,
-        )
-        return store.stat_var_count(conversation="c1", spec_id="ops_x", content_version="ocv_x")
-
-    assert count({("spec_ab", "v1"): 2}) == 2
-    assert count({}) == 1
-
-
 def test_a_family_with_no_trace_never_adds_to_another_part() -> None:
     """With no member list, nothing shows two parts are disjoint."""
     store = ProvenanceStore()

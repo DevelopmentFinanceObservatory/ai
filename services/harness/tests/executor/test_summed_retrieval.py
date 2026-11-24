@@ -10,6 +10,7 @@ No count at all is a fetch that degraded, and runs on.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -135,10 +136,14 @@ async def test_a_step_record_carries_the_stat_vars_an_analysis_call_summed(
     approved_plan: PlanFactory,
     manifest: ManifestFactory,
     real_schemas: list[ToolSchema],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An `aggregate` over an unsummed retrieval declares one StatVar for its
-    frame and names the dataset version it added up, and the record keeps both."""
-    read = {"spec_id": "spec_" + "1" * 32, "content_version": "ocv_" + "1" * 32, "count": 2}
+    frame and names the root it read summed, as dfo-apis does, by the version it
+    rendered for the sum. The record keeps the read and leaves out, with a log
+    line, an entry it cannot read. A record with no read stores no key for it,
+    which a harness that predates the field rejects."""
+    read = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "5" * 32, "count": 2}
     surface = ScriptedSurface(
         schemas=real_schemas,
         responses={
@@ -147,11 +152,18 @@ async def test_a_step_record_carries_the_stat_vars_an_analysis_call_summed(
         },
     )
 
-    _finished, outcome = await execute_approved_plan(approved_plan(), surface=surface)
+    with caplog.at_level(logging.WARNING, logger="executor.artifacts"):
+        _finished, outcome = await execute_approved_plan(approved_plan(), surface=surface)
 
     assert isinstance(outcome, Accepted), outcome
     assert outcome.steps[-1].stat_var_count == 1
-    assert [step.model_dump(mode="json")["stat_vars_summed"] for step in outcome.steps] == [
-        [],
-        [read],
+    assert [
+        [summed.model_dump() for summed in step.stat_vars_summed] for step in outcome.steps
+    ] == [[], [read]]
+    assert [
+        record.getMessage().startswith("stat_vars_summed entry") for record in caplog.records
+    ] == [True]
+    assert ["stat_vars_summed" in step.model_dump(mode="json") for step in outcome.steps] == [
+        False,
+        True,
     ]

@@ -319,9 +319,10 @@ class ProvenanceStore:
         `share_of`'s) that the frame carries, the retrievals among `sources`
         under that verb's sides, and the count takes that ref as their
         distinct StatVars. `summed_reads` maps a retrieval among `carried` that
-        an analysis call added up over several StatVars to how many it added
-        (`executor.outcomes.StepRecord.stat_vars_summed`), so the count takes
-        that retrieval as a summed family of that size.
+        reaches the frame only through an analysis call that added up its
+        StatVars to how many that call added
+        (`harness.graph.answer._carried_parts`), so the count takes that
+        retrieval as a summed family of that size.
 
         The lineage is every `sources` lineage flattened in order, with a
         retrieval that appears twice kept once. All-or-nothing: when any
@@ -656,9 +657,10 @@ def summed_stat_var_count(manifest: dict[str, Any]) -> int | None:
 
 
 def _family_size(member: ProvenanceInput, summed_reads: Mapping[_FrameKey, int]) -> int | None:
-    """The StatVars a retrieval was added up over: apis' `summed_stat_var_count`
-    for a summed retrieval, else the count an analysis call reported adding up
-    its frame (`summed_reads`), or `None` for a retrieval nothing summed."""
+    """The StatVars a carried retrieval was added up over: apis'
+    `summed_stat_var_count` for a summed retrieval, else how many an analysis
+    call on the way to the frame added up (`summed_reads`), or `None` for a
+    retrieval carried as retrieved."""
     count = summed_stat_var_count(member.manifest)
     if count is not None:
         return count
@@ -707,15 +709,15 @@ def _carried_stat_var_count(
     unsummed = [member for member in carried if _family_size(member, summed_reads) is None]
     others = max(0, declared - len({member.spec_id for member, _ in families}) - len(summed))
     other_refs = frozenset[str]().union(*(_refs_with_rows(member.manifest) for member in unsummed))
-    named = [_named_stat_vars(member, summed_reads) for member, _ in families] + [
-        _named_union(under, summed_reads) for under in summed
+    named = [_named_stat_vars(member, count) for member, count in families] + [
+        _named_union(under) for under in summed
     ]
     if others == len(other_refs) and all(refs is not None for refs in named):
         return len(other_refs.union(*(refs for refs in named if refs is not None)))
     parts = [(count, _trace_refs(member.manifest)) for member, count in families]
     parts += [
         (
-            max((_family_size(member, summed_reads) or 1 for member in under), default=1),
+            max((summed_stat_var_count(member.manifest) or 1 for member in under), default=1),
             frozenset[str]().union(*(_trace_refs(member.manifest) for member in under)),
         )
         for under in summed
@@ -730,25 +732,21 @@ def _carried_stat_var_count(
     return max(count for count, _ in parts)
 
 
-def _named_stat_vars(
-    member: ProvenanceInput, summed_reads: Mapping[_FrameKey, int]
-) -> frozenset[str] | None:
+def _named_stat_vars(member: ProvenanceInput, count: int | None) -> frozenset[str] | None:
     """The StatVars a retrieval's frame carries, named from its trace: a
-    summed family's contributors when they number its summed count, an
-    unsummed retrieval's refs with rows when it lists any; else `None`."""
+    summed family's contributors when they number `count`, the StatVars it
+    was added up over, an unsummed retrieval's refs with rows when it lists
+    any; else `None`."""
     refs = _refs_with_rows(member.manifest)
-    count = _family_size(member, summed_reads)
     if count is not None:
         return refs if len(refs) == count else None
     return refs or None
 
 
-def _named_union(
-    under: Sequence[ProvenanceInput], summed_reads: Mapping[_FrameKey, int]
-) -> frozenset[str] | None:
+def _named_union(under: Sequence[ProvenanceInput]) -> frozenset[str] | None:
     """The distinct StatVars under a sum, or `None` when a retrieval under it
     cannot be named (`_named_stat_vars`)."""
-    named = [_named_stat_vars(member, summed_reads) for member in under]
+    named = [_named_stat_vars(member, summed_stat_var_count(member.manifest)) for member in under]
     if not named or any(refs is None for refs in named):
         return None
     return frozenset[str]().union(*(refs for refs in named if refs is not None))
