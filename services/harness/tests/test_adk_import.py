@@ -537,6 +537,27 @@ async def test_rollback_clears_a_pause_whose_resume_this_release_began(adk: Asyn
     assert (await rollback_turn_sessions(adk, apply=True)).cleared == {_name(PLAN_PAUSED): 1}
 
 
+async def test_rollback_leaves_a_pause_whose_resume_the_previous_release_began(
+    adk: AsyncEngine,
+) -> None:
+    """On the previous release a resume of PLAN_PAUSED's card recorded its
+    answer and segment and died, and the import copied the entry as it
+    was. The release never touched it, so the rollback leaves the pause for
+    the user's retry."""
+    card = await _ledger_pending(adk, PLAN_PAUSED)
+    key = next(iter(card))
+    await _set_adk_state(
+        adk,
+        PLAN_PAUSED,
+        {"studio:pending": {key: {**card[key], "answer": "approve", "resuming_segment": "seg"}}},
+    )
+    await import_conversations(adk, apply=True)
+
+    applied = await rollback_turn_sessions(adk, apply=True)
+
+    assert (applied.cleared, applied.exit_status) == ({}, 0)
+
+
 async def test_rollback_clears_a_resumed_pause_on_a_conversation_once_discarded(
     pg_empty_engine: AsyncEngine,
 ) -> None:
@@ -570,50 +591,66 @@ async def test_rollback_clears_a_resumed_pause_on_a_conversation_once_discarded(
     assert (await cutover_gate(pg_empty_engine)).discarded == []
 
 
-async def test_rollback_fails_on_a_ledger_session_that_appears_between_its_passes(
-    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The ledger pass reads its keys before the previous release creates
-    TEXT_ONLY's ledger session, and the unledgered read after it: the
-    conversation is in neither pass, so the run lists it and fails."""
+def _ledger_keys_without(monkeypatch: pytest.MonkeyPatch, conversation_id: str) -> None:
+    """The run's first read of the ledger keys misses `conversation_id`, as
+    a read before the previous release created its ledger session would."""
     read = adk_import._ledger_keys
     calls = 0
 
-    async def first_without_text_only(engine: AsyncEngine) -> list[Any]:
+    async def first_without(engine: AsyncEngine) -> list[Any]:
         nonlocal calls
         calls += 1
         keys = await read(engine)
-        return [k for k in keys if k.conversation_id != TEXT_ONLY] if calls == 1 else keys
+        return [k for k in keys if k.conversation_id != conversation_id] if calls == 1 else keys
 
-    monkeypatch.setattr(adk_import, "_ledger_keys", first_without_text_only)
+    monkeypatch.setattr(adk_import, "_ledger_keys", first_without)
+
+
+@pytest.mark.parametrize("ahead", [False, True], ids=["new conversation", "turn session ahead"])
+async def test_rollback_reads_a_ledger_session_that_appears_between_its_passes(
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch, ahead: bool
+) -> None:
+    """TEXT_ONLY's ledger session appears after the first read of the
+    ledger keys, so the unledgered pass skips it, and the ledger pass reads
+    it in the same run. A new conversation has nothing ahead and passes. A
+    conversation of this release has its turn session ahead deleted."""
+    if ahead:
+        await _add_turn_sessions(adk, PRINCIPAL, [f"{TEXT_ONLY}#t3"])
+    _ledger_keys_without(monkeypatch, TEXT_ONLY)
 
     applied = await rollback_turn_sessions(adk, apply=True)
 
-    assert (applied.moved, applied.exit_status) == ([_name(TEXT_ONLY)], 1)
+    expected = {_name(TEXT_ONLY): [f"{TEXT_ONLY}#t3"]} if ahead else {}
+    assert (applied.ahead, applied.exit_status) == (expected, 1 if ahead else 0)
+    assert (PRINCIPAL, f"{TEXT_ONLY}#t3") not in await _turn_session_ids(adk)
 
 
-async def test_rollback_reruns_a_conversation_whose_ledger_session_appears_mid_run(
+async def test_rollback_reads_a_conversation_whose_ledger_session_appears_before_its_delete(
     adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The previous release creates a conversation's ledger session between
-    the run's read of the turn sessions with no ledger session and their
-    delete: the delete takes none of them, and the run lists the
-    conversation and fails, so the next run reads it through its ledger."""
-    # Read TEXT_ONLY's turn 2 as unledgered, as a read before its ledger
-    # session appeared would.
+    """The previous release creates TEXT_ONLY's ledger session between the
+    run's read of the turn sessions with no ledger session and their
+    delete: the delete takes none of them, and the ledger pass that
+    follows deletes only the turn session above the ledger's index."""
+    await _add_turn_sessions(adk, PRINCIPAL, [f"{TEXT_ONLY}#t3"])
+    _ledger_keys_without(monkeypatch, TEXT_ONLY)
+    # Read TEXT_ONLY's turn sessions as unledgered, as a read before its
+    # ledger session appeared would.
     monkeypatch.setattr(
         adk_import,
         "_TURN_SESSIONS_UNLEDGERED",
         text(
             f"SELECT t.user_id, {adk_import._TURN_CONVERSATION} AS conversation_id, t.id "
-            f"FROM sessions t WHERE t.app_name = :app AND t.id = '{TEXT_ONLY}#t2'"
+            f"FROM sessions t WHERE t.app_name = :app AND t.id LIKE '{TEXT_ONLY}#t%'"
         ),
     )
 
     applied = await rollback_turn_sessions(adk, apply=True)
 
-    assert (applied.moved, applied.exit_status) == ([_name(TEXT_ONLY)], 1)
-    assert (PRINCIPAL, f"{TEXT_ONLY}#t2") in await _turn_session_ids(adk)
+    assert applied.ahead == {_name(TEXT_ONLY): [f"{TEXT_ONLY}#t3"]}
+    sessions = await _turn_session_ids(adk)
+    assert (PRINCIPAL, f"{TEXT_ONLY}#t2") in sessions
+    assert (PRINCIPAL, f"{TEXT_ONLY}#t3") not in sessions
 
 
 @_LATER_COLUMNS

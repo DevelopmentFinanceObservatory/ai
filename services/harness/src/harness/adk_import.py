@@ -152,8 +152,8 @@ Verbs:
   release, which the previous release reads as new and numbers from 1.
   It clears the pending interrupts of a ledger session paused on a turn
   this release resumed (its conversation's row holds another turn index,
-  other pending interrupts, or an entry carrying the answer or segment of a
-  resume it began), so the previous release shows no card for it
+  other pending interrupts, or an entry carrying an answer or a resuming
+  segment ADK's entry lacks, a resume it began), so the previous release shows no card for it
   and its answer cannot resume that turn's ADK session a second time; the
   previous release closes that turn as `abandoned` on the next turn. Each
   conversation runs in a transaction of its own. Under `--apply` it locks
@@ -168,7 +168,8 @@ Verbs:
   fails on it. Deleting this release's revision first closes that window.
   ADK's `events` rows go with their session (`ON DELETE CASCADE`). A
   ledger session the previous release creates after the run read the
-  ledger's keys is listed as appearing during the run, which fails it.
+  ledger's keys goes through the same pass at the end of the run, so a new
+  conversation, with no turn session ahead, does not fail it.
   A ledger session whose `studio:turn_index` is not a whole number is
   listed and left alone, without failing the run, since a rerun cannot
   change it. The run fails while it finds anything to do, with status 5
@@ -1986,7 +1987,7 @@ class VerifyReport:
     hold turns ADK never saw. The third is a conflict, where both moved,
     and it fails the verify. A conversation whose tables' copy the operator
     kept (`--keep-tables`) at ADK's state as it stands is listed apart too.
-    A compared, written or kept conversation counts as checked. The verify
+    A compared, written, kept or discarded conversation counts as checked. The verify
     fails on a difference or a conflict, and when the ledger holds sessions
     and none of them was checked.
 
@@ -2482,8 +2483,8 @@ _TURN_CONVERSATION = "substring(t.id FROM '^(.*)#t[0-9]{1,9}$')"
 # conversation as new and numbers its turns from 1, so every one of these
 # sessions is ahead of it. Under `--apply` each conversation's sessions are
 # deleted with the same `NOT EXISTS` (`_DELETE_TURN_SESSIONS_UNLEDGERED`), so
-# a ledger session the previous release creates first is seen by the next
-# run.
+# a conversation whose ledger session the previous release creates first is
+# left to the ledger pass that follows.
 _NO_LEDGER = (
     "NOT EXISTS (SELECT 1 FROM sessions l WHERE l.app_name = :ledger_app "
     f"AND l.user_id = t.user_id AND l.id = {_TURN_CONVERSATION})"
@@ -2507,10 +2508,7 @@ class RollbackReport:
     `cleared`, the turn index of each ledger session paused on a turn this
     release resumed, whose pending interrupts are cleared; `live`, each
     conversation a stream of this release holds the lease of, left alone;
-    `moved`, each conversation whose ledger session the previous release
-    created during the run, after the ledger pass read its keys, left for
-    the next run's ledger pass; and
-    `unreadable`, each ledger session whose index is not a whole number,
+    and `unreadable`, each ledger session whose index is not a whole number,
     left alone. Clean when it found nothing to do. `exit_status` is 5 while
     a stream holds a conversation (`ROLLBACK_STREAMING_EXIT`), 1 while it
     found anything else to do, and 0 otherwise. A ledger session left alone
@@ -2521,12 +2519,11 @@ class RollbackReport:
     ahead: dict[str, list[str]] = field(default_factory=dict)
     cleared: dict[str, int] = field(default_factory=dict)
     live: list[str] = field(default_factory=list)
-    moved: list[str] = field(default_factory=list)
     unreadable: list[str] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
-        return not (self.ahead or self.cleared or self.live or self.moved)
+        return not (self.ahead or self.cleared or self.live)
 
     @property
     def exit_status(self) -> int:
@@ -2550,10 +2547,6 @@ class RollbackReport:
             for name in self.live
         ]
         lines += [
-            f"its ledger session appeared during the run; run again to read it: {name}"
-            for name in self.moved
-        ]
-        lines += [
             f"left alone, studio:turn_index is not a whole number; check its turn sessions "
             f"by hand: {name}"
             for name in self.unreadable
@@ -2571,13 +2564,17 @@ class RollbackReport:
 async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> RollbackReport:
     """Delete, for each ledger session, the conversation's ADK turn sessions
     numbered above its `studio:turn_index`, and every turn session of a
-    conversation with no ledger session (`_UNLEDGERED`), and clear the
+    conversation with no ledger session (`_TURN_SESSIONS_UNLEDGERED`), and clear the
     pending interrupts of a ledger session paused on a turn this release
     resumed (`_resumed_here`) (module docstring). Each conversation runs in
     a transaction of its own, which under `apply` locks its ledger session
     and its `conversations` row first, and leaves alone, listed as live, a
-    conversation whose lease a stream of this release holds. With `apply`
-    false, list them only, without locking.
+    conversation whose lease a stream of this release holds. A ledger
+    session the previous release creates after the ledger pass read its
+    keys goes through the same pass once the unledgered pass is done, so a
+    conversation whose ledger session appears between the two reads, or
+    between the unledgered read and its delete, is in one of them. With
+    `apply` false, list them only, without locking.
 
     Raises:
         AdkArchived: a later release archived ADK's tables.
@@ -2602,21 +2599,20 @@ async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> Rollbac
             return None
         return (await conn.execute(text(_CONVERSATION_LEASE + lock), names)).first()
 
-    ledger_keys = await _ledger_keys(engine)
-    for key in ledger_keys:
+    async def ledger_pass(key: Any) -> None:
         names = {"principal": key.principal, "id": key.conversation_id}
         async with engine.begin() as conn:
             row = (await conn.execute(ledger_read, {**names, "app": LEDGER_APP})).first()
             if row is None:
-                continue
+                return
             index = 0 if row.turn_index is None else row.turn_index
             if not isinstance(index, int) or isinstance(index, bool) or index < 0:
                 report.unreadable.append(key.name)
-                continue
+                return
             here = await held(conn, names)
             if here is not None and here.live:
                 report.live.append(key.name)
-                continue
+                return
             ahead = (
                 (
                     await conn.execute(
@@ -2640,6 +2636,10 @@ async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> Rollbac
                 report.cleared[key.name] = index
                 if apply:
                     await conn.execute(_CLEAR_LEDGER_PENDING, {**names, "app": LEDGER_APP})
+
+    ledger_keys = await _ledger_keys(engine)
+    for key in ledger_keys:
+        await ledger_pass(key)
     async with engine.connect() as conn:
         candidates = (
             await conn.execute(
@@ -2659,7 +2659,6 @@ async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> Rollbac
                 continue
             ids = found[(principal, conversation_id)]
             if apply:
-                read = len(ids)
                 ids = list(
                     (
                         await conn.execute(
@@ -2670,19 +2669,16 @@ async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> Rollbac
                     .scalars()
                     .all()
                 )
-                if len(ids) < read:
-                    report.moved.append(name)
             if ids:
                 report.ahead[name] = sorted(ids, key=_turn_number)
-    # A ledger session the previous release created after the ledger pass
-    # read its keys and before the unledgered read is in neither pass; the
-    # run fails, and the next run reads it through its ledger.
+    # A ledger session the previous release created after the first read,
+    # a new conversation or one of this release the unledgered pass then
+    # skipped, goes through the ledger pass now. A new conversation has no
+    # turn session ahead of its ledger and passes.
     read = {key.name for key in ledger_keys}
-    report.moved += sorted(
-        key.name
-        for key in await _ledger_keys(engine)
-        if key.name not in read and key.name not in report.moved
-    )
+    for key in await _ledger_keys(engine):
+        if key.name not in read:
+            await ledger_pass(key)
     return report
 
 
@@ -2691,21 +2687,32 @@ def _resumed_here(pending: object, turn_index: int, here: Any) -> bool:
     (`_AS_IMPORTED`), is paused (its `studio:pending` holds an interrupt) on
     turn `turn_index` and this release has moved past that pause: the
     conversation's row, imported from that state, now holds another turn
-    index or other pending interrupts, or an entry carrying the answer or
-    the segment of a resume this release began. The previous release
+    index or other pending interrupts, or an entry carrying an answer or a
+    resuming segment that ADK's entry of the same id lacks, a resume this
+    release began. The previous release
     would show the card again, and an answer would resume the turn's ADK
     session, whose events already hold this release's resume."""
     if not isinstance(pending, dict) or not pending or here is None:
         return False
     held_pending = here.pending if isinstance(here.pending, dict) else {}
     # A resume this release began and did not finish leaves the entry in
-    # place, carrying the answer and the segment that resumed it.
-    begun = any(
-        isinstance(entry, dict)
-        and (entry.get("answer") is not None or entry.get("resuming_segment") is not None)
-        for entry in held_pending.values()
-    )
+    # place, carrying the answer and the segment that resumed it. A resume
+    # the previous release began and did not finish left the same fields in
+    # ADK's entry, which the import copied as they were.
+    begun = any(_resume_begun(entry, pending.get(key)) for key, entry in held_pending.items())
     return here.turn_index != turn_index or set(held_pending) != set(pending) or begun
+
+
+def _resume_begun(entry: object, imported: object) -> bool:
+    """Whether the tables' pending entry carries an answer or a resuming
+    segment that ADK's entry of the same id (`imported`) does not hold."""
+    if not isinstance(entry, dict):
+        return False
+    before = imported if isinstance(imported, dict) else {}
+    return any(
+        entry.get(name) is not None and entry.get(name) != before.get(name)
+        for name in ("answer", "resuming_segment")
+    )
 
 
 def _turn_number(session_id: str) -> int:
