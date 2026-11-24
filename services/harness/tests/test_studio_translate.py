@@ -396,10 +396,24 @@ def test_a_plan_proposed_ask_without_asks_leaves_them_unset() -> None:
     assert frame.asks is None
 
 
-def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> None:
+_LINE = "Your words name grant equivalents, and no figure in this plan is counted that way."
+
+
+@pytest.mark.parametrize(
+    ("line", "reason"),
+    [
+        pytest.param(None, "", id="search-default"),
+        pytest.param(_LINE, _LINE, id="scope-note"),
+    ],
+)
+def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option(
+    line: str | None, reason: str
+) -> None:
     """US health aid to Africa: each scope choice with another option to
     switch to is a card row naming the choice, its active option and every
-    option, with why one out of reach is; a planner decision carries none."""
+    option, with why one out of reach is; a planner decision carries none. A row
+    Search's default settled shows no reason, unless it reads a line where the
+    user's words and its option part (`submission.service._scope_notes`)."""
     plan = scripted_plan("kenya life expectancy", spec_id=None)
     dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
     pin = "spec_" + "e" * 32
@@ -413,6 +427,8 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
     }
     block = {"spec_id": pin, "resolved": {"scope_choices": scope}}
     scoped = scope_choice_decisions({pin: PinSource(block=block, settled=True)})[pin]
+    if line is not None:
+        scoped = (*scoped[:2], scoped[2].model_copy(update={"rationale": line}))
     cited = dataset.model_copy(
         update={
             "decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped)),
@@ -469,7 +485,7 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
         ),
     ]
     # A reason saying only that Search's default holds is left off the card.
-    assert (basis.reason, basis.resolved_by) == ("", "default")
+    assert (basis.reason, basis.resolved_by) == (reason, "default")
     assert frame.actions == ["approve", "amend", "reject", "switch"]
     assert frame.moved is None
     # What a switch on this card may name: every shown choice, with its

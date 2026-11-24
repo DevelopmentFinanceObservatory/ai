@@ -244,10 +244,9 @@ _SKILLS_BEFORE_ENTRY_STATE_KEY = "planner:skills_before_entry"
 # The last translation's referral the planner's run saw before it ended on an
 # ask, as `propose_plan` answered it, or None.
 _ASKED_REFERRAL_STATE_KEY = "planner:asked_referral"
-# Where `propose_plan` held the question whether to keep a dataset counted as published
-# that it paused a turn on, in releases before the planner declared each figure's
-# provider option. Nothing writes it now. A turn paused on the question across that
-# deploy is answered from it once (`_paused_keep`), and the slot is cleared.
+# A session slot holding a question whether to keep a dataset counted as published,
+# which a turn may be paused on. No code writes it. A turn paused on it is answered
+# from it once (`_paused_keep`), and the slot is cleared.
 _PAUSED_KEEP_STATE_KEY = "planner:stated_scope_keep_question"
 # The option of that question that kept the datasets as published.
 _KEEP_PUBLISHED_OPTION = "keep as published"
@@ -469,8 +468,8 @@ class PlannerAdapter:
                 asked,
                 answer,
                 ctx.state.get(_ASKED_REFERRAL_STATE_KEY),
-                # A turn paused on the keep question before the planner declared each
-                # figure's provider option resumes on the user's answer to it.
+                # A turn paused on the keep question (`_PAUSED_KEEP_STATE_KEY`) resumes
+                # on the user's answer to it.
                 keep=_paused_keep(state, call_id=asked.call_id, answer=answer),
             )
             if asked is not None and answer is not None
@@ -1214,7 +1213,7 @@ class _Answered(NamedTuple):
 
 
 class _KeepAnswer(NamedTuple):
-    """The user's answer to the keep question a turn paused on before the deploy
+    """The user's answer to the keep question a turn paused on
     (`_paused_keep`): the pins it asked about, whether they were kept as published, and
     the arguments of the `propose_plan` call it paused."""
 

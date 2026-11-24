@@ -740,6 +740,11 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     requirements_after = _requirements_after(
         previous, evidence_requirements, removed_evidence_requirements
     )
+    scope_notes = _placed_notes(
+        scope_notes,
+        requirements_after,
+        decisions=_decisions_after(previous, settled, removed=removed_decisions),
+    )
     answers = view.prices_answers()
     chosen = _user_prices(view, answers, previous)
     if left := _rows_left(view, answers, previous):
@@ -4629,8 +4634,8 @@ def _scope_decisions(
     states for each axis it moves on (`_moved_axis_decisions`) in place of
     its pin's on that axis, and every requirement drops a citation of such
     a decision it does not state. An input `notes` holds a line for reads it on its
-    provider row: the decision alignment moved it to on that axis, else a copy of its
-    pin's under the same slot, which it cites in place of the pin's. Each calculation
+    provider row: the decision alignment moved it to on that axis, else its pin's own
+    provider row, which a switch on the plan card moves. Each calculation
     of `calculations`, this call's or
     one `previous` carries, cites the decisions it states
     (`_difference_decisions`), restated where their words changed,
@@ -4702,43 +4707,34 @@ def _scope_decisions(
         ),
     ]
     aligned = _moved_axis_decisions(moved, stated=stated_moves, notes=notes)
-    # An input whose provider row reads a line and that alignment leaves on its pin's
-    # provider option reads it on a copy of its pin's row.
-    noted: set[str] = set()
+    # An input whose provider row reads a line and that alignment leaves on its pin
+    # reads it on its pin's own provider row, the one a switch on the card moves. A
+    # pin two such inputs state reads the first one's line.
+    scopes = dict(scopes)
+    lined: set[str] = set()
     for requirement in evidence_requirements:
         pin = requirement.source_spec_id if isinstance(requirement, DatasetRequirement) else None
         line = notes.get(requirement.id)
-        if pin is None or line is None:
+        if pin is None or line is None or pin in lined:
             continue
         if any(
             d.scope is not None and d.scope.axis == PROVIDER_AXIS
             for d in aligned.get(requirement.id, ())
         ):
             continue
-        own = next(
-            (
-                d
-                for d in scopes.get(pin, ())
-                if d.scope is not None and d.scope.axis == PROVIDER_AXIS
-            ),
-            None,
+        lined.add(pin)
+        scopes[pin] = tuple(
+            d.model_copy(update={"rationale": line})
+            if d.scope is not None
+            and d.scope.axis == PROVIDER_AXIS
+            and d.resolved_by is ResolvedBy.PLANNER_DEFAULT
+            else d
+            for d in scopes.get(pin, ())
         )
-        if own is not None:
-            noted.add(requirement.id)
-            aligned[requirement.id] = (
-                *aligned.get(requirement.id, ()),
-                own.model_copy(
-                    update={
-                        "slot": _moved_axis_slot(requirement.id, PROVIDER_AXIS),
-                        "rationale": line,
-                    }
-                ),
-            )
 
     def moved_axes(requirement: EvidenceRequirement) -> set[str]:
         pin = moved.get(requirement.id)
-        axes = {option_axis(option_id) for option_id in pin.option_ids} if pin else set()
-        return axes | ({PROVIDER_AXIS} if requirement.id in noted else set())
+        return {option_axis(option_id) for option_id in pin.option_ids} if pin else set()
 
     def stale(requirement: DatasetRequirement, decision: Decision) -> bool:
         if decision.scope is not None and not is_scope_choice(decision):
@@ -6794,8 +6790,8 @@ def _summed_input_moved(
     `_providers_unaligned`'s does."""
     moved, label = basis.requirement_id, basis.label(target)
     each = (
-        f"each as one dataset requirement whose `measure` names {label}, with no `sum_of`, "
-        f"{moved!r} pinning {basis.pin} in place of {summed.id!r} and its inputs"
+        f"each as one dataset requirement declaring {target!r} in `scope_options`, with no "
+        f"`sum_of`, {moved!r} pinning {basis.pin} in place of {summed.id!r} and its inputs"
         if stated
         else f"each as a `sum_of` as {summed.id!r} is, or each as one dataset requirement "
         f"counted as {label}, with no `sum_of`"
@@ -6838,8 +6834,8 @@ def _stated_summed(
         f"adds it to {unchosen!r}, whose dataset has no provider choice, so nothing on record "
         f"tells whether {moved!r} counted as {label} already holds what {unchosen!r} adds. "
         f"State {summed.id!r} as one dataset requirement under that id pinning {basis.pin} "
-        f"declaring {option_id!r}, in place of the sum and its inputs, and remove the "
-        "decisions only they cite.",
+        f"declaring {option_id!r} in `scope_options`, in place of the sum and its inputs, "
+        "and remove the decisions only they cite.",
         outcome=Outcome.INVALID_INPUT,
         detail={
             "requirement_id": moved,
@@ -7323,19 +7319,29 @@ def _scope_notes(
 
     `bases` holds each pinned input's provider choice, and `counted` the option each is
     counted on once alignment has moved it. The turn's words are read once
-    (`record`, `TextReading.mentions`). A requirement declaring an option
-    (`DatasetRequirement.scope_options`) the words do not name reads so; one declaring
-    none, whose choice offers an option the words name that no figure of the plan
-    declares or is counted on, reads that. A line is judged against the words of the
-    turn that set the declaration: a requirement declaring what the plan it amends
-    (`previous`) declares for it keeps the line it had there, and one declaring none
-    keeps it too where this turn's words name no option, so "Extend it to 2025" raises
-    no line of its own. A declared whole follows its part and reads none, and so does
-    an input a sum adds to a series with no provider choice, bilateral aid plus
+    (`record`, `TextReading.mentions`); words summing the bilateral and multilateral
+    lines (`StatedOption.sums_providers`) name a choice's option counting core
+    contributions in place of the option Search read, as the brief does
+    (`stated_scope_line`). A requirement declaring an option
+    (`DatasetRequirement.scope_options`) counted on one the words do not name reads so;
+    one declaring none, whose choice offers an option the words name that no figure of
+    the plan declares or is counted on, reads that.
+
+    A line is judged against the words of the turn that set it. A requirement declaring
+    what the plan it amends (`previous`) declares for it, in a turn whose words name no
+    option that no figure holds, keeps the line it had there while its pin and the
+    option it is counted on hold and no figure is counted on the option the line says
+    the words name, and gets none otherwise, so "Extend it to 2025" raises no line of
+    its own; words naming a new option judge it afresh. A pin the
+    user settled (`_InputBasis.stated`, a switch on the plan card among them) reads the
+    user's choice and no line. A declared whole follows its part and reads none, and so
+    does an input a sum adds to a series with no provider choice, bilateral aid plus
     imputed multilateral aid, which counts the words' option through the sum.
     """
     turn = record.readings.get(record.words) if record is not None else None
     mentions = frozenset(turn.mentions) if turn is not None else frozenset()
+    stated = turn.stated if turn is not None else None
+    summing = stated.option_id if stated is not None and stated.sums_providers else None
     before = (
         {
             requirement.id: requirement.scope_options
@@ -7358,40 +7364,100 @@ def _scope_notes(
     held = {option for requirement in dataset for option in requirement.scope_options} | {
         counted.get(requirement.id, bases[requirement.id].choice.active) for requirement in dataset
     }
+
+    def summing_options(basis: _InputBasis) -> frozenset[str]:
+        return frozenset(
+            option.option_id
+            for option in basis.choice.options
+            if option.provider_scope == "contributions"
+        )
+
+    contributions = frozenset().union(*(summing_options(bases[r.id]) for r in dataset))
+
+    def named(basis: _InputBasis) -> frozenset[str]:
+        own = summing_options(basis)
+        return (mentions - {summing}) | own if summing is not None and own else mentions
+
+    def holds(option_id: str) -> bool:
+        return option_id in held or (option_id == summing and bool(held & contributions))
+
+    quiet = all(holds(option_id) for option_id in mentions)
     # An input a sum adds to imputed multilateral aid counts the words' option
     # through the sum (`_summed_beside_unchosen`), so it reads no line of its own.
     summed = _summed_beside_unchosen(requirements, bases.keys())
     notes: list[ScopeNote] = []
     for requirement in dataset:
         basis = bases[requirement.id]
-        unchanged = before.get(requirement.id) == requirement.scope_options
+        if basis.stated or _switched_by_user(basis):
+            continue
+        own = counted.get(requirement.id, basis.choice.active)
         declared = requirement.provider_option
         line: str | None = None
-        if unchanged and (declared is not None or not mentions):
+        named_option: str | None = None
+        if before.get(requirement.id) == requirement.scope_options and quiet:
             note = carried.get(requirement.id)
-            line = note.line if note is not None else None
-        elif declared is not None and turn is not None and declared not in mentions:
+            if (
+                note is not None
+                and (note.pin, note.counted) == (basis.pin, own)
+                and (note.named is None or not holds(note.named))
+            ):
+                line, named_option = note.line, note.named
+        elif declared is not None and turn is not None and own not in named(basis):
             line = (
-                f"Counted as {_option_label(basis, declared)}, which your words do not name; "
+                f"Counted as {_option_label(basis, own)}, which your words do not name; "
                 "the planner chose it. Change it here if you did not mean it."
             )
         elif declared is None and requirement.id not in summed:
-            named = sorted(
+            offered = sorted(
                 option.option_id
                 for option in basis.choice.options
-                if option.option_id in mentions - held
+                if option.option_id in named(basis)
+                and not holds(option.option_id)
                 and option.availability.status != "unavailable"
             )
-            if named:
-                own = counted.get(requirement.id, basis.choice.active)
+            if offered:
+                named_option = offered[0]
                 line = (
-                    f"Your words name {_option_label(basis, named[0])}, and no figure in this "
-                    f"plan is counted that way; this one is counted as "
+                    f"Your words name {_option_label(basis, offered[0])}, and no figure in "
+                    f"this plan is counted that way; this one is counted as "
                     f"{_option_label(basis, own)}. Change it here if you meant it."
                 )
         if line is not None:
-            notes.append(ScopeNote(requirement_id=requirement.id, line=line))
+            notes.append(
+                ScopeNote(
+                    requirement_id=requirement.id,
+                    line=line,
+                    pin=basis.pin,
+                    counted=own,
+                    named=named_option,
+                )
+            )
     return tuple(notes)
+
+
+def _placed_notes(
+    notes: Sequence[ScopeNote],
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    decisions: Sequence[Decision],
+) -> tuple[ScopeNote, ...]:
+    """The notes of `notes` whose line a provider row its requirement cites reads
+    (`_scope_decisions`). A requirement whose pin states no provider row, or a row the
+    decision cap left unwritten, or the user's, holds no line."""
+    rows = {decision.slot: decision for decision in decisions}
+    by_id = {requirement.id: requirement for requirement in requirements}
+    return tuple(
+        note
+        for note in notes
+        if (requirement := by_id.get(note.requirement_id)) is not None
+        and any(
+            (row := rows.get(slot)) is not None
+            and row.scope is not None
+            and row.scope.axis == PROVIDER_AXIS
+            and row.rationale == note.line
+            for slot in requirement.decision_ids
+        )
+    )
 
 
 def _option_label(basis: _InputBasis, option_id: str) -> str:

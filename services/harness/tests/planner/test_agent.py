@@ -6874,7 +6874,9 @@ def _search_labelled(name: str) -> dict[str, Any]:
 
 
 def _stated_provider(block: dict[str, Any]) -> dict[str, Any]:
-    """`block` with its provider choice settled by the user's words, as an explicit entry."""
+    """A copy of `block` with its provider choice settled by the user's words, as an
+    explicit entry. `block` is often `US_2023`'s own, which later tests read."""
+    block = json.loads(json.dumps(block))
     scope = block["resolved"]["scope_choices"]
     choice = next(c for c in scope["choices"] if c["axis"] == "provider")
     choice["provenance"] = "explicit"

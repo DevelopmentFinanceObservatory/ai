@@ -279,8 +279,8 @@ _STATED_WORDS = (
 )
 _STATED_READINGS = Path(__file__).resolve().parent / "fixtures" / "stated_scope_readings.json"
 
-# The fourth: the entry the user's dismissal of a keep question an earlier release
-# paused the turn on resumes, whose brief says DAC1 was not kept and carries the
+# The fourth: the entry the user's dismissal of a keep question the turn is paused on
+# resumes (`paused_on_keep`), whose brief says DAC1 was not kept and carries the
 # paused proposal's requirements (`harness.planner_adapter._keep_text`), over the G7
 # question with DAC1 on record.
 KEEP_RESUMED = "keep-resumed"

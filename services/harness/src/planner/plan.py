@@ -744,7 +744,8 @@ class _Choice(StrictModel):
 MAX_SCOPE_ID_CHARS = 200
 
 # The provider options a dataset requirement may declare
-# (`DatasetRequirement.scope_options`).
+# (`DatasetRequirement.scope_options`): one per provider scope the harness reads
+# (`harness.scope_choices.ProviderScope`), which is every scope Search publishes.
 ProviderOptionId = Literal[
     "provider:bilateral", "provider:inclusive", "provider:contributions", "provider:multilateral"
 ]
@@ -1383,7 +1384,25 @@ class GrowthRequirement(TaggedModel):
         return self
 
 
-class ComparisonRequirement(TaggedModel):
+class _ProviderAligned(TaggedModel):
+    """A calculation whose inputs alignment counts on one provider scope.
+
+    A stored plan, or a proposal resent from one, may still carry
+    `accept_provider_difference`, a field these calculations no longer have; it is
+    dropped on read, so such a plan validates and its turn amends it.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_accept_provider_difference(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "accept_provider_difference" in data:
+            return {
+                key: value for key, value in data.items() if key != "accept_provider_difference"
+            }
+        return data
+
+
+class ComparisonRequirement(_ProviderAligned):
     """The difference between two requirements' results, at each common period.
 
     A comparison answers the question and feeds nothing further, so no other
@@ -1416,7 +1435,7 @@ class ComparisonRequirement(TaggedModel):
         return self
 
 
-class SumOfRequirement(TaggedModel):
+class SumOfRequirement(_ProviderAligned):
     """Two single-series results added together, at each period both report.
 
     Each side reads one series: one entity's, or a result holding one. A
@@ -1550,7 +1569,7 @@ class RankRequirement(TaggedModel):
         return self
 
 
-class ShareOfRequirement(TaggedModel):
+class ShareOfRequirement(_ProviderAligned):
     """The share `numerator` holds of `denominator`, at each period.
 
     Both sides cover the same years, because a period only one side covers
@@ -1615,7 +1634,7 @@ class ShareOfRequirement(TaggedModel):
         return self
 
 
-class QuotientRequirement(TaggedModel):
+class QuotientRequirement(_ProviderAligned):
     """One measure divided by another, at each period both report.
 
     For a per-head, per-capita or "divide one by the other" figure, in the
@@ -4836,10 +4855,18 @@ def _serialised_chars(value: Any) -> int:
 class ScopeNote(StrictModel):
     """The line the plan card's provider row for dataset requirement `requirement_id`
     reads where the provider option the figure is counted on and the words of the
-    turn that set it part (`submission.service._scope_notes`)."""
+    turn that set it part (`submission.service._scope_notes`).
+
+    `pin` is the spec_id the requirement states and `counted` the provider option it
+    is counted on when the line was written, and `named`, for a line saying the words
+    name an option no figure is counted on, that option. A later plan carries the line
+    only while `pin` and `counted` hold and no figure is counted on `named`."""
 
     requirement_id: Identifier
     line: str = Field(min_length=1, max_length=MAX_DECISION_RATIONALE_CHARS)
+    pin: SpecId
+    counted: str = Field(max_length=MAX_SCOPE_ID_CHARS)
+    named: str | None = Field(default=None, max_length=MAX_SCOPE_ID_CHARS)
 
 
 class Plan(StrictModel):

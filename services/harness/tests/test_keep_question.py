@@ -1,9 +1,9 @@
-"""The brief's stated-scope line, and a turn paused on the keep question before the deploy.
+"""The brief's stated-scope line, and a turn paused on the keep question.
 
 The planner reads the provider option the user's words state in its brief
 (`submission.service.stated_scope_line`), read through the stated-scope reader at
-entry. An earlier release paused `propose_plan` on a question whether to keep a dataset
-counted as published; a turn paused there across the deploy resumes on the user's
+entry. A turn paused on a `propose_plan` question whether to keep a dataset counted as
+published (`harness.planner_adapter._PAUSED_KEEP_STATE_KEY`) resumes on the user's
 answer (`harness.planner_adapter._paused_keep`), which the resumed brief states.
 """
 
@@ -145,12 +145,12 @@ def _words(words: str) -> Iterator[None]:
         current_user_message.reset(token)
 
 
-# The id of the `propose_plan` call an earlier release paused the turn on.
+# The id of the `propose_plan` call the turn is paused on.
 _PAUSED_CALL = f"{PROPOSE_PLAN}-0"
 
 
 def paused_on_keep(turn: _Turn) -> None:
-    """Leave `turn` as an earlier release paused it on the keep question about DAC1
+    """Leave `turn` paused on the keep question about DAC1
     counted as published: the ask waiting under the paused `propose_plan` call's id,
     and the question's record holding that call's arguments."""
     turn.harness.seed_state(
@@ -191,8 +191,8 @@ def _paused(brief: str, opening: str) -> list[dict[str, Any]]:
     return json.loads(line[line.index("{") :])["evidence_requirements"]
 
 
-async def test_a_keep_paused_before_the_deploy_resumes_on_its_answer() -> None:
-    """A turn paused on the keep question before the deploy, the user keeping DAC1:
+async def test_a_turn_paused_on_the_keep_question_resumes_on_its_answer() -> None:
+    """A turn paused on the keep question, the user keeping DAC1:
     the resumed brief says `propose_plan` asked, that DAC1 was kept, and carries the
     paused proposal to propose again; the question's record is cleared."""
     turn = _Turn("dac1", replies=[reply(text_part("done"))])
