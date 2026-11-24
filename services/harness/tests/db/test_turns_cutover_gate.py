@@ -1,11 +1,15 @@
-"""0003's cutover gate: the release that stops reading ADK refuses to start,
+"""The cutover gate: the release that stops reading ADK refuses to start,
 with SQLSTATE DFA02 and nothing applied, while an ADK ledger session is not
-cleared (imported or kept as of its last ADK write). The case table is the
-one release 1's `gate` verb and release 3's 0005 are pinned by."""
+cleared (imported or kept as of its last ADK write, 0003) or holds a live
+`studio:segment` lease (0002_live_ledger_lease_gate, which sorts before 0003
+and runs in its transaction). The case table is the one release 1's `gate`
+verb and release 3's 0005 are pinned by."""
 
 from __future__ import annotations
 
+import json
 import shutil
+import time
 from pathlib import Path
 
 import asyncpg
@@ -15,6 +19,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 _MIGRATION = "0003_turns.sql"
+# The migrations release 1 shipped.
+_RELEASE_1 = ("0001_conversations.sql", "0002_adk_ledger_imports.sql")
 
 # ADK's v1 `sessions` as google-adk 2.13 creates it on PostgreSQL
 # (`google/adk/sessions/schemas/v1.py`, StorageSession).
@@ -28,10 +34,20 @@ _UPDATED = "2026-11-01 10:05:00"
 _MOVED = "2026-11-02 09:00:00"
 
 
-def _session(cid: str, *, updated: str = _UPDATED, app: str = _LEDGER_APP) -> str:
+def _session(
+    cid: str, *, updated: str = _UPDATED, app: str = _LEDGER_APP, state: str = "{}"
+) -> str:
     return (
-        f"INSERT INTO sessions VALUES ('{app}', 'p', '{cid}', '{{}}', '2026-11-01 10:00:00', "
+        f"INSERT INTO sessions VALUES ('{app}', 'p', '{cid}', '{state}', '2026-11-01 10:00:00', "
         f"'{updated}')"
+    )
+
+
+def _leased(expires_at: object) -> str:
+    """A ledger state whose `studio:segment` lease expires at `expires_at`,
+    as the revision before the import wrote one."""
+    return json.dumps(
+        {"studio:segment": {"id": "seg", "owner": "old", "expires_at": expires_at, "cancel": False}}
     )
 
 
@@ -65,9 +81,8 @@ def _conversation(cid: str) -> str:
 
 async def _migrate_before_0003(engine: AsyncEngine, tmp_path: Path) -> None:
     """Apply the migrations release 1 shipped, 0001 and 0002."""
-    for path in MIGRATIONS_DIR.glob("*.sql"):
-        if path.name < _MIGRATION:
-            shutil.copy(path, tmp_path / path.name)
+    for name in _RELEASE_1:
+        shutil.copy(MIGRATIONS_DIR / name, tmp_path / name)
     await apply_pending(engine, directory=tmp_path)
 
 
@@ -139,6 +154,30 @@ async def _refused(engine: AsyncEngine) -> str:
             (_session("c1", updated=_MOVED), _kept("c1")),
             ["p/c1"],
             id="kept, ADK moved after it",
+        ),
+        pytest.param(
+            (_ADK_SESSIONS,),
+            (
+                _session("c1", state=_leased(time.time() + 600)),
+                *(_imported("c1"), _conversation("c1")),
+            ),
+            ["p/c1"],
+            id="imported, a live lease on ADK",
+        ),
+        pytest.param(
+            (_ADK_SESSIONS,),
+            (
+                _session("c1", state=_leased(time.time() - 60)),
+                *(_imported("c1"), _conversation("c1")),
+            ),
+            [],
+            id="imported, a lapsed lease on ADK",
+        ),
+        pytest.param(
+            (_ADK_SESSIONS,),
+            (_session("c1", state=_leased("soon")), _kept("c1")),
+            [],
+            id="kept, a lease expiry that is not a number",
         ),
         pytest.param((), (), [], id="no sessions table"),
         pytest.param(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -103,7 +104,8 @@ def _archived_split(schema: str, adk_schema: str) -> set[str]:
 
 
 async def _verb(engine: AsyncEngine, verb: str, *, apply: bool = True) -> int:
-    return await adk_archive.run(engine, verb=verb, apply=apply)
+    """Run `verb`, naming a backup, which an applied drop needs."""
+    return await adk_archive.run(engine, verb=verb, apply=apply, backup="before-drop")
 
 
 async def test_archive_dry_runs_then_renames_a_split_layout_and_a_rerun_finds_nothing(
@@ -307,14 +309,20 @@ async def test_startup_reports_no_archive_beside_a_foreign_table_of_an_archive_n
     assert refusal.ledger_present is True
 
 
-async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until_drop_adk(
-    pg_empty_engine: AsyncEngine, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+async def test_startup_warns_beside_a_fresh_adk_table_created_after_the_whole_archive(
+    pg_empty_engine: AsyncEngine,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An ADK-reading image started after the archive creates its tables and
-    writes a ledger session. `archive` refuses with 0005's DFA02, since no
-    `adk_ledger_imports` resolves to clear it, so the only remedy is
-    `drop-adk`, which prints the conversations it discards in a dry run and with
-    `--apply`. Startup proceeds once it has run."""
+    writes a ledger session. With the whole archive in place the tables are
+    fresh, so startup logs DFA05 and goes on, and the serving revision can
+    still scale out; with part of the archive gone it refuses. `archive`
+    refuses with 0005's DFA02, since no `adk_ledger_imports` resolves to clear
+    it, so the remedy is `drop-adk`, which prints the conversations it
+    discards in a dry run and with `--apply`, and refuses `--apply` without
+    `--backup`."""
     await _archived_by_startup(pg_empty_engine, tmp_path)
     await _start(pg_empty_engine)
     sessions = next(statement for statement in _ADK_V1_DDL if "TABLE sessions" in statement)
@@ -322,20 +330,34 @@ async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until
         pg_empty_engine, sessions, _session("c3"), _session("c3:turn1", app="dfo_analyst_graph")
     )
     archived = {f"adk_archive_{table}" for table in _ARCHIVED}
+    caplog.clear()
 
+    with caplog.at_level(logging.ERROR, logger=server_module.__name__):
+        await _start(pg_empty_engine)
+
+    (warned,) = [record.getMessage() for record in caplog.records if "DFA05" in record.getMessage()]
+    assert warned.startswith("DFA05: ") and ".sessions" in warned
+    await _execute(pg_empty_engine, "ALTER TABLE adk_archive_events RENAME TO events_elsewhere")
     refusal = await _start_refused(pg_empty_engine)
-
     assert _names(refusal.tables) == {"sessions"}
     assert refusal.archive_present is True
     assert refusal.ledger_present is False
+    await _execute(pg_empty_engine, "ALTER TABLE events_elsewhere RENAME TO adk_archive_events")
     capsys.readouterr()
     assert await _verb(pg_empty_engine, "archive") == 1
     assert "SQLSTATE DFA02" in capsys.readouterr().err
     assert await _verb(pg_empty_engine, "drop-adk", apply=False) == 0
     assert _drop_adk_rows(capsys.readouterr().out) == 1
+    assert await adk_archive.run(pg_empty_engine, verb="drop-adk", apply=True) == 2
+    assert "--backup BACKUP_ID" in capsys.readouterr().err
+    assert "sessions" in await _tables(pg_empty_engine)
     assert await _verb(pg_empty_engine, "drop-adk") == 0
-    assert _drop_adk_rows(capsys.readouterr().out) == 1
+    printed = capsys.readouterr().out
+    assert _drop_adk_rows(printed) == 1
+    assert "ran and committed, after backup before-drop:" in printed
+    caplog.clear()
     await _start(pg_empty_engine)
+    assert not [record for record in caplog.records if "DFA05" in record.getMessage()]
     tables = await _tables(pg_empty_engine)
     assert archived <= tables
     assert "sessions" not in tables
@@ -418,6 +440,11 @@ async def test_drop_archive_drops_every_archived_table_of_a_split_layout(
         assert await _verb(split, "archive") == 0
 
         assert await _verb(split, "drop-archive", apply=False) == 0
+        assert await _archive_relations(split, schema, adk_schema) == _archived_split(
+            schema, adk_schema
+        )
+        for backup in (None, " "):
+            assert await adk_archive.run(split, verb="drop-archive", apply=True, backup=backup) == 2
         assert await _archive_relations(split, schema, adk_schema) == _archived_split(
             schema, adk_schema
         )

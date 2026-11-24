@@ -16,7 +16,7 @@ commits.
   and owned sequences, for an image that reads ADK's tables. It leaves 0005
   recorded in `harness_schema_migrations`, so an image that holds 0005
   refuses to start beside the restored tables
-  (`harness.server._refuse_beside_adk_tables`); deploy/README.md's `DFA05`
+  (`harness.server._check_beside_adk_tables`); deploy/README.md's `DFA05`
   entry gives the step for each case. It prints which of ADK's five tables
   it restores and refuses when anything is archived but not all five, the
   import ledger alone included, unless `--allow-missing` is given. With
@@ -40,7 +40,12 @@ commits.
 
 Both drops name every table in one `DROP TABLE` without `CASCADE`, so a
 foreign key among the dropped tables resolves and PostgreSQL refuses the
-statement when anything else, such as a view, depends on one of them.
+statement when anything else, such as a view, depends on one of them. They
+cannot be undone, so with `--apply` each refuses, before it connects,
+unless `--backup BACKUP_ID` names the on-demand Cloud SQL backup taken for
+it, which it prints with the statements. The job cannot read Cloud SQL's
+backup list, so the name is the operator's record, checked by the runbook
+step that takes the backup.
 
 Each verb's transaction takes the advisory lock and the statement and lock
 timeouts of `harness.db.migrate`, so it never runs beside a starting
@@ -52,8 +57,8 @@ module connects as the harness does (`harness.settings.Settings`,
 `SESSION_STORE_*` settings over the Cloud SQL Connector with IAM auth.
 
 Exit status: 0 when the verb ran or found nothing to do, 1 when it or the
-database refused, and 2 on a usage error or with no or an invalid database
-configuration.
+database refused, and 2 on a usage error, a drop with `--apply` and no
+`--backup`, or with no or an invalid database configuration.
 """
 
 from __future__ import annotations
@@ -404,6 +409,9 @@ async def _drop_archive(conn: Any) -> list[str]:
     return await _drop(conn, tables)
 
 
+# The verbs that cannot be undone, which `--apply` runs only with `--backup`.
+DROPS = ("drop-adk", "drop-archive")
+
 _VERBS: dict[str, Callable[[Any], Awaitable[list[str]]]] = {
     "archive": _archive,
     "restore": _restore,
@@ -412,11 +420,27 @@ _VERBS: dict[str, Callable[[Any], Awaitable[list[str]]]] = {
 }
 
 
-async def run(engine: AsyncEngine, *, verb: str, apply: bool, allow_missing: bool = False) -> int:
+async def run(
+    engine: AsyncEngine,
+    *,
+    verb: str,
+    apply: bool,
+    allow_missing: bool = False,
+    backup: str | None = None,
+) -> int:
     """Run `verb` in one transaction on `engine`, commit it when `apply` and
     roll it back otherwise, print what it ran, and return the exit status.
     `allow_missing` lets `restore` run when the archive lacks some of ADK's
-    tables."""
+    tables. A drop (`DROPS`) with `apply` returns 2 without connecting unless
+    `backup` names the backup taken before it."""
+    if apply and verb in DROPS and not (backup or "").strip():
+        print(
+            f"adk_archive {verb}: --apply drops tables for good, so it needs --backup "
+            "BACKUP_ID, the on-demand Cloud SQL backup taken for it (deploy/README.md, The "
+            "archive job)",
+            file=sys.stderr,
+        )
+        return 2
     act = (
         functools.partial(_restore, allow_missing=allow_missing)
         if verb == "restore"
@@ -453,6 +477,8 @@ async def run(engine: AsyncEngine, *, verb: str, apply: bool, allow_missing: boo
         print(f"adk_archive {verb}: nothing to do")
         return 0
     outcome = "ran and committed" if apply else "dry run, rolled back; --apply commits"
+    if apply and verb in DROPS:
+        outcome += f", after backup {backup}"
     print(f"adk_archive {verb}: {outcome}:")
     for statement in statements:
         print(f"  {statement}")
@@ -481,6 +507,12 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
                 "--allow-missing",
                 action="store_true",
                 help="restore when the archive lacks some of ADK's five tables",
+            )
+        if verb in DROPS:
+            verb_parser.add_argument(
+                "--backup",
+                metavar="BACKUP_ID",
+                help="the on-demand Cloud SQL backup taken before this drop; --apply needs it",
             )
     return parser.parse_args(argv)
 
@@ -511,6 +543,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verb=arguments.verb,
                 apply=arguments.apply,
                 allow_missing=getattr(arguments, "allow_missing", False),
+                backup=getattr(arguments, "backup", None),
             )
         finally:
             await database.aclose()

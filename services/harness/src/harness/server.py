@@ -44,7 +44,7 @@ from starlette.websockets import WebSocketClose
 from harness import __version__
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
-from harness.db.adk_archive import archive_state, ledger_resolves, live_adk_tables
+from harness.db.adk_archive import ARCHIVED, archive_state, ledger_resolves, live_adk_tables
 from harness.db.engine import DatabaseHandle, build_database
 from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.early_mint import EarlyMints
@@ -245,8 +245,9 @@ async def _retry_startup_step(
 
 class _MigrationRefusedError(RuntimeError):
     """A migration raised a SQLSTATE beginning `DFA`, its own refusal to run
-    against this database (`0003_turns.sql` and `0005_rename_adk_tables.sql`),
-    or `_refuse_beside_adk_tables` refused with `DFA05`. The database does
+    against this database (`0002_live_ledger_lease_gate.sql`, `0003_turns.sql`
+    and `0005_rename_adk_tables.sql`), or `_check_beside_adk_tables` refused
+    with `DFA05`. The database does
     not change by waiting. The message leads with the SQLSTATE, which
     deploy/README.md lists with each refusal's manual step. A `DFA05`
     refusal also carries the `tables` it names and `archive_present`,
@@ -273,19 +274,40 @@ class _MigrationRefusedError(RuntimeError):
         self.ledger_present = ledger_present
 
 
-async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
-    """Raise `_MigrationRefusedError` with `DFA05` while any of ADK's tables
-    resolves on `search_path` under its own name with ADK's columns
-    (`harness.db.adk_archive.live_adk_tables`). This image does not start
-    beside them, since an image that reads them may be serving, as after a
-    rollback and `restore --apply`. The message says whether the archive
-    resolves and names each table of an archive name that resolves without the
-    archive's columns (`harness.db.adk_archive.archive_state`), and
+async def _check_beside_adk_tables(engine: AsyncEngine) -> None:
+    """Check for ADK's tables under their own names on `search_path`, with
+    ADK's columns (`harness.db.adk_archive.live_adk_tables`), and act on what
+    the archive (`harness.db.adk_archive.archive_state`) says they are.
+
+    With the whole archive in place, every table 0005 renamed still under its
+    `adk_archive_<name>`, nothing was restored, so the live tables are fresh
+    ones an ADK-reading image created after the archive. They hold only what
+    that image wrote since, which this image never reads. Refusing would stop
+    the serving revision scaling out or replacing an instance without
+    stopping that image, so this logs an error naming `DFA05` and the tables,
+    for an alert to match, and the start goes on.
+
+    Otherwise, with no archive or part of it, as after a rollback and
+    `restore --apply`, the live tables hold ADK's restored history and an
+    image that reads them may be serving, so this raises
+    `_MigrationRefusedError` with `DFA05` and the image does not start. The
+    message says whether the archive resolves and names each table of an
+    archive name that resolves without the archive's columns.
     deploy/README.md's `DFA05` entry gives the step for each case."""
     tables = await live_adk_tables(engine)
     if not tables:
         return
     archive, foreign = await archive_state(engine)
+    if len(archive) == len(ARCHIVED):
+        logger.error(
+            "DFA05: ADK's tables resolve on search_path under their own names beside the "
+            "whole archive: %s. An image that reads ADK's tables started after the archive "
+            "and created them, and what it writes there is in neither the harness tables nor "
+            "the archive. This image starts anyway. deploy/README.md's DFA05 entry gives the "
+            "step.",
+            ", ".join(tables),
+        )
+        return
     archived = f"The archive resolves: {', '.join(archive)}." if archive else "No archive resolves."
     for qualified in foreign:
         archived += f" {qualified} resolves but is not the archive."
@@ -322,7 +344,7 @@ async def _apply_migrations_with_retries(
     within it.
     A failed attempt leaves no lock behind, because `apply_pending` holds
     a transaction-level lock. Each attempt then runs
-    `_refuse_beside_adk_tables`. A `MigrationChecksumError` is a fault in the
+    `_check_beside_adk_tables`. A `MigrationChecksumError` is a fault in the
     files, and a refusal (a SQLSTATE beginning `DFA`) a fact about the
     database, so each propagates at once."""
 
@@ -334,7 +356,7 @@ async def _apply_migrations_with_retries(
             if sqlstate.startswith("DFA"):
                 raise _MigrationRefusedError(sqlstate, str(exc)) from exc
             raise
-        await _refuse_beside_adk_tables(engine)
+        await _check_beside_adk_tables(engine)
 
     await _retry_startup_step(
         "apply_pending",
