@@ -53,15 +53,20 @@ Verbs:
   builds every row the write would write, so it reports the refusals the
   write would raise.
 
-  `--keep-tables`, naming a refused or diverged conversation, keeps the
-  tables' copy and gives up ADK's: its import record is marked
-  `kept_tables` at the ledger session's `update_time` and state, the rows
-  are left as they are, and the serving release serves them. Once the
+  `--keep-tables`, naming a refused or diverged conversation the tables
+  hold, keeps the tables' copy and gives up ADK's: its import record is
+  marked `kept_tables` at the ledger session's `update_time` and state, the
+  rows are left as they are, and the serving release serves them. Once the
   ledger session moves again the record is no longer current, the
   conversation is refused or in conflict again, and the cutover gate fails
-  on it. A name `--keep-tables` gives to any other conversation refuses it,
-  and one name given to both `--prefer-adk` and `--keep-tables` stops the
-  job before it writes.
+  on it. `--discard`, naming a refused conversation the tables do not hold,
+  records it the same way and gives the conversation up: the release
+  starts it afresh on its next turn, and the report and the gate list it
+  as discarded. A name `--keep-tables` gives to a conversation the tables
+  do not hold, or to one that is neither refused nor diverged, refuses it,
+  and so does a name `--discard` gives to any conversation but a refused
+  one the tables do not hold. One name given to two of `--prefer-adk`,
+  `--keep-tables` and `--discard` stops the job before it writes.
 
   The report counts the spec blocks converted and those that do not
   convert, in the ledger sessions and, on a line of their own, in the open
@@ -73,9 +78,14 @@ Verbs:
   `orchestrator:specs`.
 
   `--verify` writes nothing and compares, for every ledger session, the
-  conversation as ADK's state loads (`_apply_delta` over the mapped keys)
-  with `StudioStore.load` from the tables, the canvas included, and the
-  run-ledger items with the run rows, leaving out the lease's cancel flag.
+  conversation as the previous release loaded ADK's state
+  (`_previous_release_load`, that release's own key mapping, kept apart
+  from `read_ledger`, over the state with its spec blocks converted) with
+  `StudioStore.load` from the tables, the canvas included, and the
+  run-ledger items as that release read them (`_previous_release_runs`)
+  with the run rows, leaving out the lease's cancel flag. A key
+  `read_ledger` maps to the wrong field, or a value it changes, therefore
+  shows as a difference.
   Both sides take the open turn's spec blocks from its turn session
   through the reader the server serves (`open_turn_specs`), converted as
   `StudioStore.load` converts them. A conversation whose ADK state moved
@@ -127,17 +137,36 @@ Verbs:
   left alone and listed, and fails the run: its rows lack the turns ADK
   holds, so `--prefer-adk` must take ADK's copy first. A conversation
   whose close fails is refused and left open, and the run goes on with
-  the rest.
+  the rest. `--apply` refuses to start (`NextReleaseMissing`) until the
+  `turn_cursors` table exists: the next release's first migration creates
+  it, and until that release serves, this release can still answer a turn
+  paused on ADK, which a close would end.
+- `rollback-turn-sessions`: for a rollback to the previous release, deletes
+  each ADK turn session `{conversation_id}#t{n}` (app `dfo_analyst_graph`)
+  numbered above its ledger session's `studio:turn_index`. This release
+  creates such sessions for the turns it serves, and never writes the
+  ledger session, so the previous release would claim the same numbers and
+  answer 409 until its index passed them. Under `--apply` each
+  conversation's ledger session is locked `FOR UPDATE` first, so a turn
+  the previous release claims commits its index before or after the read,
+  and the session it creates after its claim is never above the index
+  read. ADK's `events` rows go with their session (`ON DELETE CASCADE`).
+  A ledger session whose `studio:turn_index` is not a whole number is
+  listed and left alone. The run fails while it finds any session to
+  delete, and is repeated until it finds none.
 - `gate`: the cutover predicate (`CUTOVER_PREDICATE`), read only. It fails
   while any ledger session is not cleared: its import record must be
   current (recorded at the session's `update_time`) and either imported
-  (not diverged, with its rows) or kept (`--keep-tables`). It prints the
-  count, the first ten, and the commands that clear them. It also fails
-  while a ledger session's `studio:segment` lease is live on the database's
-  clock (`_STREAMING_ON_ADK`): a stream of the previous revision still runs
-  on it, and deleting that revision would cut it. It lists them, and is
-  rerun once they end. Where no table named `sessions` carries ADK's
-  columns it passes.
+  (not diverged, with its rows) or kept (`--keep-tables`, `--discard`). It
+  prints the count, the first ten, and the commands that clear them. It
+  also fails while a ledger session's `studio:segment` lease is live on
+  the database's clock (`_STREAMING_ON_ADK`): a stream of the previous
+  revision still runs on it, and deleting that revision would cut it. It
+  lists them, and is rerun once they end. It lists apart each cleared ledger session the
+  operator discarded (`--discard`), so the count of conversations given up
+  is in its output. Where no table named `sessions` carries ADK's columns
+  it cannot check anything and stops (`AdkTablesMissing`), unless
+  `--adk-archived` says the tables were archived on purpose.
 
 The serving release reads conversations from the tables while the previous
 release may finish turns on ADK. `reimport_on_access` is the
@@ -153,24 +182,28 @@ turn's spec blocks as stored, and `StudioStore.load` converts them, as
 `import` does, through the bridge's `convert_specs`, which logs a block that
 does not convert.
 
-Without `--apply` nothing is written to the conversation tables. Only
-`import` migrates, so `--verify` and `close-open-turns` also run from an
-image older than the database's schema. They refuse to start when the
-tables do not exist.
+Without `--apply` nothing is written to the conversation tables or to
+ADK's. Only `import` migrates, its dry run included, so
+`--verify` and `close-open-turns` also run from an image older than the
+database's schema. They refuse to start when the tables do not exist.
 
 The database comes from the settings the service uses
 (`harness.settings.Settings`).
 
-Exit status: 0 when every conversation imported, was unchanged, kept or
-verified equal, every open turn eligible was closed, and the gate found
-every ledger session cleared; 1 on a refusal, a conflict, a difference, a
-stream live on ADK, a diverged conversation `close-open-turns` left alone, a
+Exit status: 0 when every conversation imported, was unchanged, kept,
+discarded or verified equal, every open turn eligible was closed, the gate
+found every ledger session cleared, and `rollback-turn-sessions` found no
+turn session to delete; 1 on a refusal, a conflict, a difference, a stream
+live on ADK, a diverged conversation `close-open-turns` left alone, a
 conversation it left open because ADK wrote since the import, a
-conversation that changed during the run, or a ledger session the gate did
-not clear; 2 when no database is configured, ADK's schema is not the one the
-job reads, the harness's tables are missing, a migration file is refused, or
-`--prefer-adk` or `--keep-tables` names a conversation no ledger session
-holds or both name one.
+conversation that changed during the run, a ledger session the gate did
+not clear, or a turn session `rollback-turn-sessions` found; 2 when no
+database is configured, ADK's schema is not the one the job reads, the
+gate finds no ADK `sessions` table without `--adk-archived`,
+`close-open-turns --apply` finds no `turn_cursors` table, the harness's
+tables are missing, a migration file is refused, or `--prefer-adk`,
+`--keep-tables` or `--discard` names a conversation no ledger session holds
+or two of them name one.
 """
 
 from __future__ import annotations
@@ -202,7 +235,7 @@ from harness.db.jsonb import to_json_param
 from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.graph.state import AGENT_NAME, ORCHESTRATOR_SPECS_KEY
 from harness.settings import Settings
-from harness.studio_state import ConversationState
+from harness.studio_state import ConversationState, TurnUsage
 from harness.studio_store import (
     _APPROVAL_ITEM_PREFIX,
     _COMPONENT_ITEM_PREFIX,
@@ -221,12 +254,14 @@ from harness.studio_store import (
     SaveRefusedError,
     StudioStore,
     TurnSpecs,
-    _apply_delta,
     _delta_write,
     _DeltaWrite,
     _deserialize_pending,
+    _deserialize_segment,
     _run_delta_write,
     _serialize_durable,
+    _set_list_item,
+    _turn_usage,
 )
 from harness.tool_contracts import HarnessCode
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
@@ -290,13 +325,25 @@ class TablesMissing(RuntimeError):  # noqa: N818 -- names the state it reports
     """The harness's tables do not exist: `import` has not run."""
 
 
+class AdkTablesMissing(RuntimeError):  # noqa: N818 -- names the state it reports
+    """No table named `sessions` carries ADK's columns, so the gate has
+    nothing to check, and `--adk-archived` does not say that is intended."""
+
+
+class NextReleaseMissing(RuntimeError):  # noqa: N818 -- names the state it reports
+    """`close-open-turns --apply` found no `turn_cursors` table: the next
+    release has not started, so this release may still answer a paused
+    turn."""
+
+
 class UnknownConversation(ValueError):  # noqa: N818 -- names the state it reports
-    """`--prefer-adk` or `--keep-tables` names a conversation ADK holds no
-    ledger session for."""
+    """`--prefer-adk`, `--keep-tables` or `--discard` names a conversation ADK
+    holds no ledger session for."""
 
 
 class NamedTwice(ValueError):  # noqa: N818 -- names the state it reports
-    """`--prefer-adk` and `--keep-tables` name the same conversation."""
+    """Two of `--prefer-adk`, `--keep-tables` and `--discard` name the same
+    conversation."""
 
 
 @dataclass
@@ -972,6 +1019,7 @@ class ImportReport:
     unchanged: list[str] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
     kept: list[str] = field(default_factory=list)
+    discarded: list[str] = field(default_factory=list)
     refused: dict[str, list[str]] = field(default_factory=dict)
     findings: dict[str, list[str]] = field(default_factory=dict)
     open_turn_findings: dict[str, list[str]] = field(default_factory=dict)
@@ -1000,6 +1048,11 @@ class ImportReport:
                     self.conflicts,
                 ),
                 (f"tables' copy {would}kept (--keep-tables)", self.kept),
+                (
+                    f"{would}discarded (--discard): the tables hold none of it, and its next "
+                    "turn starts it afresh",
+                    self.discarded,
+                ),
             )
             for name in names
         ]
@@ -1022,14 +1075,25 @@ class ImportReport:
             _distribution("open turn orchestrator:specs", self.open_turn_spec_sizes),
             f"{len(self.imported)} {would}imported, {len(self.reimported)} {would}re-imported, "
             f"{len(self.unchanged)} unchanged, {len(self.conflicts)} conflicts, "
-            f"{len(self.kept)} kept, {len(self.refused)} refused",
+            f"{len(self.kept)} kept, {len(self.discarded)} discarded, "
+            f"{len(self.refused)} refused",
         ]
         return "\n".join(lines)
 
 
 type _Outcome = Literal[
-    "imported", "reimported", "unchanged", "conflict", "live", "kept", "refused"
+    "imported", "reimported", "unchanged", "conflict", "live", "kept", "discarded", "refused"
 ]
+
+# Why `--keep-tables` or `--discard` refuses a conversation it names.
+_KEEP_ABSENT = (
+    "--keep-tables keeps the tables' copy, and the tables hold none of this conversation, "
+    "so keeping it would discard it: --discard gives it up and the report and the gate count it"
+)
+_DISCARD_HELD = (
+    "--discard gives up a refused conversation the tables do not hold, and the tables hold "
+    "this one: --keep-tables keeps their copy"
+)
 
 
 @dataclass(frozen=True)
@@ -1084,6 +1148,7 @@ async def _import_one(
     apply: bool,
     prefer_adk: frozenset[str] = frozenset(),
     keep_tables: frozenset[str] = frozenset(),
+    discard: frozenset[str] = frozenset(),
     force: bool = False,
     open_turn: bool = False,
 ) -> _Copy | None:
@@ -1099,11 +1164,14 @@ async def _import_one(
     it, `live` when `prefer_adk` names it and a stream holds its lease
     (unless `force`), and `conflict` otherwise. It is `kept` when the import
     record keeps the tables' copy of this ADK state and `prefer_adk` does
-    not name it, and when `keep_tables`
-    names a conversation that would be refused or in conflict: the record
-    then keeps the tables' copy (`_KEEP`) and the rows are left as they are.
-    `keep_tables` naming any other conversation refuses it, with nothing
-    written.
+    not name it, and when `keep_tables` names a conversation the tables
+    hold that would be refused or in conflict: the record then keeps the
+    tables' copy (`_KEEP`) and the rows are left as they are. It is
+    `discarded` where `kept` would be but the tables do not hold the
+    conversation, when `discard` names a refused conversation the tables do
+    not hold, or the record kept one. `keep_tables` naming a conversation the
+    tables do not hold or any other conversation, or `discard` naming any
+    other conversation, refuses it, with nothing written.
 
     Under `apply` the conversation's row is locked, or inserted, before the
     ledger session, the import record and the rows' digest are read, so a
@@ -1143,14 +1211,21 @@ async def _import_one(
             updated = {**names, "updated": session.updated_at}
             kept = {**updated, "source": source}
             keep = session.name in keep_tables
+            drop = session.name in discard
             prefer = session.name in prefer_adk
+            # The tables hold no row of the conversation but the one this
+            # transaction inserted to lock.
+            absent = pk is None or created
             previous = await _import_record(conn, names)
             kept_here = (
                 previous is not None and previous.kept_tables and previous.source_digest == source
             )
             if kept_here and not prefer:
+                if drop and not absent:
+                    reasons = [_DISCARD_HELD]
+                    raise _Undo
                 # The kept copy stands while ADK's state is the one kept.
-                outcome = "kept"
+                outcome = "discarded" if absent else "kept"
                 if apply:
                     await _keep(conn, pk, created=created, params=kept)
                 return _Copy(session, ledger, outcome, reasons, held, turn)
@@ -1166,9 +1241,13 @@ async def _import_one(
                 except Exception as exc:
                     reasons = [f"the import failed: {type(exc).__name__}: {exc}"]
             if rows is None:
-                if not keep:
+                if keep and absent:
+                    reasons = [*reasons, _KEEP_ABSENT]
+                elif drop and not absent:
+                    reasons = [*reasons, _DISCARD_HELD]
+                if not (keep and not absent) and not (drop and absent):
                     raise _Undo
-                outcome, reasons = "kept", []
+                outcome, reasons = ("discarded" if drop else "kept"), []
                 if apply:
                     await _keep(conn, pk, created=created, params=kept)
                 return _Copy(session, ledger, outcome, reasons, held, turn)
@@ -1221,6 +1300,13 @@ async def _import_one(
                 reasons = [
                     "--keep-tables keeps the tables' copy of a refused or diverged "
                     f"conversation, and this one is {outcome}"
+                ]
+                outcome = "refused"
+                raise _Undo
+            if drop:
+                reasons = [
+                    "--discard gives up a refused conversation the tables do not hold, "
+                    f"and this one is {outcome}"
                 ]
                 outcome = "refused"
                 raise _Undo
@@ -1284,27 +1370,35 @@ async def import_conversations(
     apply: bool,
     prefer_adk: frozenset[str] = frozenset(),
     keep_tables: frozenset[str] = frozenset(),
+    discard: frozenset[str] = frozenset(),
     force: bool = False,
 ) -> ImportReport:
     """Import every ledger session (module docstring). With `apply` false,
     read and decide only. `prefer_adk` holds `principal/conversation_id`
     names to re-import over rows changed on both sides. One a stream holds
     is refused unless `force`. `keep_tables` holds names of refused or
-    diverged conversations whose tables' copy the operator keeps.
+    diverged conversations whose tables' copy the operator keeps, and
+    `discard` names of refused conversations the tables do not hold that the
+    operator gives up.
 
     Raises:
         AdkSchemaError: ADK's schema is not the one the job reads.
-        NamedTwice: `prefer_adk` and `keep_tables` share a name.
-        UnknownConversation: `prefer_adk` or `keep_tables` names a
-            conversation ADK holds no ledger session for. Nothing is written.
+        NamedTwice: two of `prefer_adk`, `keep_tables` and `discard` share a
+            name.
+        UnknownConversation: `prefer_adk`, `keep_tables` or `discard` names
+            a conversation ADK holds no ledger session for. Nothing is
+            written.
     """
-    if twice := sorted(prefer_adk & keep_tables):
-        raise NamedTwice(f"--prefer-adk and --keep-tables both name: {', '.join(twice)}")
+    flags = (("--prefer-adk", prefer_adk), ("--keep-tables", keep_tables), ("--discard", discard))
+    for index, (flag, names) in enumerate(flags):
+        for other, other_names in flags[index + 1 :]:
+            if twice := sorted(names & other_names):
+                raise NamedTwice(f"{flag} and {other} both name: {', '.join(twice)}")
     async with engine.connect() as conn:
         await _check_adk_schema(conn)
     keys = await _ledger_keys(engine)
     known = {key.name for key in keys}
-    for flag, names in (("--prefer-adk", prefer_adk), ("--keep-tables", keep_tables)):
+    for flag, names in flags:
         if unknown := sorted(names - known):
             raise UnknownConversation(f"{flag} names no ledger session: {', '.join(unknown)}")
     await apply_pending(engine)
@@ -1318,6 +1412,7 @@ async def import_conversations(
                 apply=apply,
                 prefer_adk=prefer_adk,
                 keep_tables=keep_tables,
+                discard=discard,
                 force=force,
                 open_turn=True,
             )
@@ -1343,7 +1438,7 @@ async def import_conversations(
                 "stream has ended, or add --force"
             ]
         else:
-            if copy.outcome == "kept":
+            if copy.outcome in ("kept", "discarded"):
                 # Nothing is copied, so nothing is copied as stored.
                 report.findings.pop(key.name, None)
             {
@@ -1352,6 +1447,7 @@ async def import_conversations(
                 "unchanged": report.unchanged,
                 "conflict": report.conflicts,
                 "kept": report.kept,
+                "discarded": report.discarded,
             }[copy.outcome].append(key.name)
     return report
 
@@ -1601,14 +1697,108 @@ async def _read_turn_specs(engine: AsyncEngine, principal: str, state: Conversat
         state.turn_specs = _NoAdk().convert_specs(session_id, stored)
 
 
+# The previous release's run-ledger prefixes, each with the `RunItems` field
+# its `StudioStore.run_items` read it into.
+_PREVIOUS_RUN_PREFIXES = (
+    ("studio:run:", "records"),
+    ("studio:run_key:", "keys"),
+    ("studio:run_submission:", "submissions"),
+    ("studio:run_retrievals:", "retrievals"),
+    ("studio:run_plan:", "plans"),
+)
+
+
+def _previous_release_load(conversation_id: str, state: dict[str, Any]) -> ConversationState:
+    """The conversation as the previous release loaded its ledger session's
+    `state` (its `studio_state._deserialize_durable` and `_apply_delta`),
+    with each value's spec blocks converted as the import converts them.
+    The key mapping is that release's own, kept here apart from
+    `read_ledger`, so `verify` compares the import's mapping against it. A
+    `studio:` key it does not name is ignored, as that release ignored one.
+    The value parsers are this release's, which read the same shapes."""
+    loaded = ConversationState(conversation_id=conversation_id)
+    blocks = Blocks()
+    delta = {
+        key: _convert_blocks(value, key, blocks)
+        for key, value in state.items()
+        if key.startswith(_ADK_PREFIX)
+    }
+    for key, value in delta.items():
+        if key == "studio:turn_index":
+            loaded.turn_index = value
+        elif key == "studio:seq":
+            loaded.seq = value
+        elif key == "studio:trace_id":
+            loaded.trace_id = value
+        elif key == "studio:pending":
+            loaded.pending = _deserialize_pending(value)
+        elif key == "studio:plan_version_ids":
+            loaded.plan_version_ids = {int(version): v for version, v in value.items()}
+        elif key == "studio:latest_plan_version":
+            loaded.latest_plan_version = value
+        elif key == "studio:composition":
+            loaded.composition = (
+                CompositionManifest.model_validate(value) if value is not None else None
+            )
+        elif key == "studio:segment":
+            loaded.segment = _deserialize_segment(value)
+        elif key == "studio:auto_add":
+            loaded.auto_add = value
+        elif key == "studio:timed_out_calls":
+            loaded.timed_out_calls = set(value)
+        elif key == "studio:turn_user_message":
+            loaded.turn_user_message = value
+        elif key == "studio:turn_user_words":
+            loaded.turn_user_words = value
+        elif key == "studio:turn_final_text":
+            loaded.turn_final_text = value
+        elif key == "studio:turn_components":
+            loaded.turn_components = list(value)
+        elif key == "studio:turn_recorded":
+            loaded.turn_recorded = value
+        elif key == "studio:turn_plans":
+            loaded.turn_plans = list(value)
+        elif key == "studio:turn_readings":
+            loaded.turn_readings = list(value)
+        elif key == "studio:turn_applied_choice":
+            loaded.turn_applied_choice = dict(value) if value else None
+        elif key == "studio:turn_choice_baseline":
+            loaded.turn_choice_baseline = dict(value or {})
+        elif key.startswith("studio:turn:"):
+            _set_list_item(loaded.turns, int(key.removeprefix("studio:turn:")), value)
+        elif key.startswith("studio:component:"):
+            loaded.components[key.removeprefix("studio:component:")] = value
+        elif key.startswith("studio:write_token:"):
+            loaded.write_tokens[key.removeprefix("studio:write_token:")] = value
+        elif key.startswith("studio:approval:"):
+            index = int(key.removeprefix("studio:approval:"))
+            _set_list_item(loaded.approvals, index, ApprovalRecord.model_validate(value))
+    if "studio:turn_usage" in delta:
+        loaded.turn_usage = _turn_usage(delta["studio:turn_usage"], trace_id=loaded.trace_id)
+    elif loaded.turn_usage.trace_id != loaded.trace_id:
+        loaded.turn_usage = TurnUsage(trace_id=loaded.trace_id)
+    return loaded
+
+
+def _previous_release_runs(state: dict[str, Any]) -> RunItems:
+    """The run-ledger items of a ledger session's `state` as the previous
+    release's `StudioStore.run_items` read them, by prefix."""
+    runs = RunItems()
+    for key, value in state.items():
+        for prefix, items in _PREVIOUS_RUN_PREFIXES:
+            if key.startswith(prefix):
+                getattr(runs, items)[key.removeprefix(prefix)] = value
+                break
+    return runs
+
+
 async def _adk_view(engine: AsyncEngine, session: _Session) -> dict[str, Any]:
-    """The conversation and its run items as ADK's ledger session loads, its
+    """The conversation and its run items as the previous release loaded the
+    ledger session (`_previous_release_load`, `_previous_release_runs`), its
     spec blocks converted as the import converts them."""
-    ledger = read_ledger(session.state)
-    state = ConversationState(conversation_id=session.conversation_id)
-    _apply_delta(state, ledger.flat)
+    state = _previous_release_load(session.conversation_id, session.state)
     await _read_turn_specs(engine, session.principal, state)
-    return _conversation_view(state) | _run_view(ledger.runs)
+    return _conversation_view(state) | _run_view(_previous_release_runs(session.state))
 
 
 async def _table_view(engine: AsyncEngine, session: _Session) -> dict[str, Any] | None:
@@ -1876,8 +2066,25 @@ async def close_open_turns(engine: AsyncEngine, *, apply: bool) -> CloseReport:
     listed, since its rows lack what ADK holds. A conversation whose close
     fails is refused, and the run goes on with the rest. A conversation
     a stream holds on ADK's ledger, or whose import is not current, is left
-    open (`CloseReport`)."""
+    open (`CloseReport`).
+
+    Raises:
+        NextReleaseMissing: `apply` while no `turn_cursors` table exists.
+            The next release's first migration creates it, and until that
+            release serves, this release answers a turn paused on ADK, which
+            the close would end, so a user's answer to it would find no
+            pause.
+    """
     await _check_tables(engine)
+    if apply:
+        async with engine.connect() as conn:
+            if (await conn.execute(text("SELECT to_regclass('turn_cursors')"))).scalar() is None:
+                raise NextReleaseMissing(
+                    "close-open-turns --apply runs once the next release serves: no "
+                    "turn_cursors table, which that release's first migration creates. Until "
+                    "then this release can still answer a turn paused on ADK, and closing it "
+                    "would refuse the user's answer. Run the dry run instead."
+                )
     report = CloseReport(apply=apply)
     streaming: set[tuple[str, str]] = set()
     stale: set[tuple[str, str]] = set()
@@ -2050,6 +2257,107 @@ async def _close_refusal(conn: AsyncConnection, pk: int, turn_index: int) -> _Re
     return "in_turn_cursors" if found.first() is not None else None
 
 
+# A ledger session's `studio:turn_index`, locked under `--apply`: the
+# previous release's claim of a turn writes the index to this row before it
+# creates the turn's session.
+_LEDGER_TURN_INDEX = (
+    "SELECT state -> 'studio:turn_index' AS turn_index FROM sessions "
+    "WHERE app_name = :app AND user_id = :principal AND id = :id"
+)
+
+# Each of a conversation's ADK turn sessions `{conversation_id}#t{n}`
+# numbered above `:turn_index`.
+_TURN_SESSIONS_AHEAD = text(
+    "SELECT id FROM sessions WHERE app_name = :app AND user_id = :principal "
+    "AND left(id, length(:id) + 2) = :id || '#t' "
+    "AND substr(id, length(:id) + 3) ~ '^[0-9]{1,9}$' "
+    "AND substr(id, length(:id) + 3)::integer > :turn_index "
+    "ORDER BY substr(id, length(:id) + 3)::integer"
+)
+
+
+@dataclass
+class RollbackReport:
+    """What `rollback_turn_sessions` deleted, or would delete: each
+    conversation's ADK turn sessions numbered above its ledger session's
+    `studio:turn_index`, by `principal/conversation_id`, and each ledger
+    session whose index is not a whole number, left alone. Clean when it
+    found nothing to delete and no index it cannot read."""
+
+    apply: bool
+    ahead: dict[str, list[str]] = field(default_factory=dict)
+    unreadable: list[str] = field(default_factory=list)
+
+    @property
+    def clean(self) -> bool:
+        return not self.ahead and not self.unreadable
+
+    def render(self) -> str:
+        would = "" if self.apply else "would be "
+        lines: list[str] = []
+        for name, sessions in self.ahead.items():
+            lines.append(f"{would}deleted, above the ledger's turn index: {name}")
+            lines += [f"  {session}" for session in sessions]
+        lines += [
+            f"left alone, studio:turn_index is not a whole number: {name}"
+            for name in self.unreadable
+        ]
+        count = sum(len(sessions) for sessions in self.ahead.values())
+        lines.append(
+            f"{count} turn sessions of {len(self.ahead)} conversations {would}deleted, "
+            f"{len(self.unreadable)} ledger sessions left alone"
+            + ("; run again until none is found" if count else "")
+        )
+        return "\n".join(lines)
+
+
+async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> RollbackReport:
+    """Delete, for each ledger session, the conversation's ADK turn sessions
+    numbered above its `studio:turn_index` (module docstring). With `apply`
+    false, list them only, without locking.
+
+    Raises:
+        AdkSchemaError: ADK's schema is not the one the job reads.
+    """
+    async with engine.connect() as conn:
+        await _check_adk_schema(conn)
+    report = RollbackReport(apply=apply)
+    lock = " FOR UPDATE" if apply else ""
+    for key in await _ledger_keys(engine):
+        names = {"principal": key.principal, "id": key.conversation_id}
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(text(_LEDGER_TURN_INDEX + lock), {**names, "app": LEDGER_APP})
+            ).first()
+            if row is None:
+                continue
+            index = 0 if row.turn_index is None else row.turn_index
+            if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+                report.unreadable.append(key.name)
+                continue
+            ahead = (
+                (
+                    await conn.execute(
+                        _TURN_SESSIONS_AHEAD, {**names, "app": TURN_APP, "turn_index": index}
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not ahead:
+                continue
+            report.ahead[key.name] = list(ahead)
+            if apply:
+                await conn.execute(
+                    text(
+                        "DELETE FROM sessions WHERE app_name = :app AND user_id = :principal "
+                        "AND id = ANY(:ids)"
+                    ),
+                    {"app": TURN_APP, "principal": key.principal, "ids": list(ahead)},
+                )
+    return report
+
+
 # Whether a table named `sessions` resolves through `search_path` with the
 # columns of ADK's `sessions` (v0 and v1), as 0005 reads ADK's tables. When
 # it does not, there are no ledger sessions to check.
@@ -2101,28 +2409,54 @@ _GATE_COMMANDS = (
     "python -m harness.adk_import import --apply",
     "python -m harness.adk_import import --apply --prefer-adk PRINCIPAL/CONVERSATION_ID ...",
     "python -m harness.adk_import import --apply --keep-tables PRINCIPAL/CONVERSATION_ID ...",
+    "python -m harness.adk_import import --apply --discard PRINCIPAL/CONVERSATION_ID ...",
+)
+
+
+# Each cleared ledger session the operator discarded: its current import
+# record keeps the tables' copy, and the tables hold none of it.
+_DISCARDED = text(
+    "SELECT s.user_id, s.id FROM sessions s JOIN adk_ledger_imports i "
+    "ON i.principal = s.user_id AND i.conversation_id = s.id "
+    f"WHERE s.app_name = :app AND {_IMPORT_CURRENT} AND i.kept_tables "
+    "AND NOT EXISTS (SELECT 1 FROM conversations c "
+    "WHERE c.principal = s.user_id AND c.conversation_id = s.id) "
+    "ORDER BY s.user_id, s.id"
 )
 
 
 @dataclass
 class GateReport:
     """What `cutover_gate` found: how many ledger sessions are not cleared
-    and the first ten of them, and each ledger session a stream of the
-    previous revision holds a live lease on, by
-    `principal/conversation_id`."""
+    and the first ten of them, each ledger session a stream of the previous
+    revision holds a live lease on, and each cleared ledger session the
+    operator discarded, by `principal/conversation_id`. `archived` is set
+    when no ADK `sessions` table resolves and `--adk-archived` said that is
+    intended."""
 
     uncleared: int = 0
     first: list[str] = field(default_factory=list)
     streaming_on_adk: list[str] = field(default_factory=list)
+    discarded: list[str] = field(default_factory=list)
+    archived: bool = False
 
     @property
     def clean(self) -> bool:
         return self.uncleared == 0 and not self.streaming_on_adk
 
     def render(self) -> str:
+        if self.archived:
+            return "cutover gate: no ADK sessions table, archived as --adk-archived says"
         if self.clean:
-            return "cutover gate: every ledger session is cleared"
-        lines: list[str] = []
+            lines = ["cutover gate: every ledger session is cleared"]
+            if self.discarded:
+                lines.append(
+                    f"cutover gate: {len(self.discarded)} of them discarded (--discard): the "
+                    "tables hold none of each, and its next turn starts it afresh:"
+                )
+                lines += [f"  {name}" for name in self.discarded]
+            return "\n".join(lines)
+        lines = []
         if self.streaming_on_adk:
             lines.append(
                 f"cutover gate: {len(self.streaming_on_adk)} ledger sessions hold a live "
@@ -2137,23 +2471,37 @@ class GateReport:
             lines.append(f"  and {self.uncleared - len(self.first)} more")
         lines.append(
             "clear them with: an import (copies each one ADK moved since its copy), "
-            "--prefer-adk (takes ADK's copy of a conflict) or --keep-tables (keeps the "
-            "tables' copy of a refused or diverged conversation), then run the gate again:"
+            "--prefer-adk (takes ADK's copy of a conflict), --keep-tables (keeps the "
+            "tables' copy of a refused or diverged conversation they hold) or --discard "
+            "(gives up a refused conversation they do not hold), then run the gate again:"
         )
         lines += [f"  {command}" for command in _GATE_COMMANDS]
         return "\n".join(lines)
 
 
-async def cutover_gate(engine: AsyncEngine) -> GateReport:
-    """Run the cutover predicate (`CUTOVER_PREDICATE`) and list the ledger
-    sessions whose stream lease is live (`_STREAMING_ON_ADK`): clean when
-    every ledger session is cleared and none holds a live lease, or when no
-    table named `sessions` carries ADK's columns (`CUTOVER_ADK_SESSIONS`).
-    Columns and tables a later release adds do not change what it reads.
-    Before `import` has created the tables, no ledger session is cleared."""
+async def cutover_gate(engine: AsyncEngine, *, adk_archived: bool = False) -> GateReport:
+    """Run the cutover predicate (`CUTOVER_PREDICATE`), list the ledger
+    sessions whose stream lease is live (`_STREAMING_ON_ADK`) and those the
+    operator discarded (`_DISCARDED`): clean when every ledger session is
+    cleared and none holds a live lease. Columns and tables a later release
+    adds do not change what it reads. Before `import` has created the
+    tables, no ledger session is cleared.
+
+    Raises:
+        AdkTablesMissing: no table named `sessions` carries ADK's columns
+            (`CUTOVER_ADK_SESSIONS`), as on a database the job was not meant
+            to read, unless `adk_archived` says the tables were archived on
+            purpose, which returns a clean report.
+    """
     async with engine.connect() as conn:
         if not (await conn.execute(text(CUTOVER_ADK_SESSIONS))).scalar_one():
-            return GateReport()
+            if adk_archived:
+                return GateReport(archived=True)
+            raise AdkTablesMissing(
+                "no table named sessions carries ADK's columns, so the gate has nothing to "
+                "check: the job may be reading the wrong database. Pass --adk-archived only "
+                "when ADK's tables were archived on purpose."
+            )
         streaming = [
             f"{principal}/{cid}"
             for principal, cid in await conn.execute(_STREAMING_ON_ADK, {"app": LEDGER_APP})
@@ -2169,12 +2517,21 @@ async def cutover_gate(engine: AsyncEngine) -> GateReport:
         rows = (
             await conn.execute(text(CUTOVER_PREDICATE if imported else _CUTOVER_NO_TABLES))
         ).all()
+        discarded = (
+            [
+                f"{principal}/{cid}"
+                for principal, cid in await conn.execute(_DISCARDED, {"app": LEDGER_APP})
+            ]
+            if imported
+            else []
+        )
     if not rows:
-        return GateReport(streaming_on_adk=streaming)
+        return GateReport(streaming_on_adk=streaming, discarded=discarded)
     return GateReport(
         uncleared=rows[0].uncleared,
         first=[f"{row.principal}/{row.conversation_id}" for row in rows],
         streaming_on_adk=streaming,
+        discarded=discarded,
     )
 
 
@@ -2182,7 +2539,8 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m harness.adk_import",
         description="Copy Studio conversations from ADK ledger sessions into the harness's "
-        "tables. Reads only, unless --apply is given.",
+        "tables. Writes nothing to the conversations unless --apply is given; the import's "
+        "dry run applies the harness's migrations.",
     )
     verbs = parser.add_subparsers(dest="verb", required=True)
     imports = verbs.add_parser("import", help="copy every ledger session into the tables")
@@ -2208,8 +2566,17 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
         action="extend",
         default=[],
         metavar="PRINCIPAL/CONVERSATION_ID",
-        help="keep the tables' copy of these refused or diverged conversations and give up "
-        "ADK's, until ADK's ledger session moves again",
+        help="keep the tables' copy of these refused or diverged conversations the tables "
+        "hold and give up ADK's, until ADK's ledger session moves again",
+    )
+    imports.add_argument(
+        "--discard",
+        nargs="+",
+        action="extend",
+        default=[],
+        metavar="PRINCIPAL/CONVERSATION_ID",
+        help="give up these refused conversations the tables do not hold: each starts afresh "
+        "on its next turn, and the report and the gate count it",
     )
     imports.add_argument(
         "--force",
@@ -2220,23 +2587,40 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     closes = verbs.add_parser(
         "close-open-turns", help="close every open ADK turn with no live lease as abandoned"
     )
-    closes.add_argument("--apply", action="store_true", help="write the closed turns")
-    verbs.add_parser(
+    closes.add_argument(
+        "--apply",
+        action="store_true",
+        help="write the closed turns; refused until the next release's turn_cursors table exists",
+    )
+    rollback = verbs.add_parser(
+        "rollback-turn-sessions",
+        help="delete each ADK turn session numbered above its ledger session's turn index, "
+        "for a rollback to the previous release",
+    )
+    rollback.add_argument("--apply", action="store_true", help="delete the turn sessions")
+    gate = verbs.add_parser(
         "gate",
         help="check that every ledger session is imported or kept as ADK holds it now and "
         "that no stream holds a live lease on one; reads only",
     )
+    gate.add_argument(
+        "--adk-archived",
+        action="store_true",
+        help="pass when no ADK sessions table resolves, because ADK's tables were archived",
+    )
     return parser.parse_args(argv)
 
 
-type _Report = ImportReport | VerifyReport | CloseReport | GateReport
+type _Report = ImportReport | VerifyReport | CloseReport | RollbackReport | GateReport
 
 
 async def _run(arguments: argparse.Namespace, engine: AsyncEngine) -> _Report:
     if arguments.verb == "gate":
-        return await cutover_gate(engine)
+        return await cutover_gate(engine, adk_archived=arguments.adk_archived)
     if arguments.verb == "close-open-turns":
         return await close_open_turns(engine, apply=arguments.apply)
+    if arguments.verb == "rollback-turn-sessions":
+        return await rollback_turn_sessions(engine, apply=arguments.apply)
     if arguments.verify:
         return await verify(engine)
     return await import_conversations(
@@ -2244,6 +2628,7 @@ async def _run(arguments: argparse.Namespace, engine: AsyncEngine) -> _Report:
         apply=arguments.apply,
         prefer_adk=frozenset(arguments.prefer_adk),
         keep_tables=frozenset(arguments.keep_tables),
+        discard=frozenset(arguments.discard),
         force=arguments.force,
     )
 
@@ -2276,6 +2661,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = asyncio.run(go())
     except (
         AdkSchemaError,
+        AdkTablesMissing,
+        NextReleaseMissing,
         TablesMissing,
         MigrationChecksumError,
         UnknownConversation,
