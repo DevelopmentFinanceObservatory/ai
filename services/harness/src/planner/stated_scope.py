@@ -54,6 +54,11 @@ logger = logging.getLogger(__name__)
 # text read this turn (`StatedScopeRecord`).
 STATED_SCOPE_STATE_KEY = "planner:stated_scope"
 
+# The session-state slot listing the texts held as stating nothing because Search
+# served no stated-scope route when they were asked for. Each is read again on the
+# next read, so a route served again later in the turn reads it.
+STATED_SCOPE_UNREAD_KEY = "planner:stated_scope_unread"
+
 # The session-state slot holding where the question whether to keep a dataset
 # counted as published stands this turn (`KeepQuestion`). A paused turn's state
 # outlives a deploy, so a slot whose shape changes takes a new key, and a value an
@@ -305,7 +310,8 @@ async def read_stated_scope(
     A turn with no words of the user's holds nothing, so admission applies no stated
     scope. An apis that serves no stated-scope route (`StatedScopeNotServedError`) reads
     no text: a reading of the turn's words held from earlier in the turn stays, each text
-    asked for reads as stating nothing, and with no such reading nothing is held. Returns
+    asked for reads as stating nothing for this admission and is read again on the next
+    read (`STATED_SCOPE_UNREAD_KEY`), and with no such reading nothing is held. Returns
     `None` once every reading is held. A read Search did not answer, after the reader's
     own retries, holds nothing new and returns the `STATED_SCOPE_UNAVAILABLE` refusal
     where the failure can pass (`LiveApisError.retryable`) and the
@@ -316,18 +322,26 @@ async def read_stated_scope(
         state[STATED_SCOPE_STATE_KEY] = None
         return None
     held = stated_scope_record(state)
-    readings = dict(held.readings) if held is not None else {}
+    unread = set(state.get(STATED_SCOPE_UNREAD_KEY) or ())
+    readings = {
+        text: reading
+        for text, reading in (held.readings if held is not None else {}).items()
+        if text not in unread
+    }
     wanted = list(dict.fromkeys(text for text in (words, *measures) if text not in readings))
     try:
         for start in range(0, len(wanted), _MAX_TEXTS):
             texts = wanted[start : start + _MAX_TEXTS]
             read = await reader(texts)
             readings.update(zip(texts, read, strict=True))
+        unread.clear()
     except StatedScopeNotServedError:
         if words not in readings:
             state[STATED_SCOPE_STATE_KEY] = None
+            state[STATED_SCOPE_UNREAD_KEY] = None
             return None
-        readings.update((text, TextReading()) for text in wanted if text not in readings)
+        unread = {text for text in wanted if text not in readings}
+        readings.update((text, TextReading()) for text in unread)
     except LiveApisError as exc:
         logger.warning(
             "stated scope not read: status=%s code=%s retryable=%s texts=%d",
@@ -342,6 +356,7 @@ async def read_stated_scope(
     state[STATED_SCOPE_STATE_KEY] = StatedScopeRecord(words=words, readings=readings).model_dump(
         mode="json"
     )
+    state[STATED_SCOPE_UNREAD_KEY] = sorted(unread) or None
     return None
 
 

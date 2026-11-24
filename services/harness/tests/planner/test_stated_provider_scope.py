@@ -557,22 +557,31 @@ async def test_a_404_the_capabilities_document_does_not_explain_ends_the_entry(
 
 async def test_a_route_gone_mid_turn_keeps_the_readings_held() -> None:
     """An apis rolled back past the route mid-turn keeps the reading of the turn's
-    words held earlier: a new text reads as stating nothing, and the turn's words
-    still hold the plan to the scope they state."""
+    words held earlier: a new text reads as stating nothing for that admission, and
+    the turn's words still hold the plan to the scope they state. Once the route is
+    served again, the next read reads that text for real."""
     ctx = _Context()
     _show(ctx, _block("africa_bilateral"))
+    served = _Reader()
     token = current_user_message.set(_G7)
     try:
-        assert await read_stated_scope(ctx.state, _Reader().reader(), measures=()) is None
+        assert await read_stated_scope(ctx.state, served.reader(), measures=()) is None
         gone = _Reader(refusing=_NOT_FOUND, doors=("options",))
-        assert await read_stated_scope(ctx.state, gone.reader(), measures=["net ODA"]) is None
+        assert await read_stated_scope(ctx.state, gone.reader(), measures=["bilateral ODA"]) is None
+        gone_record = stated_scope_record(ctx.state)
+        assert (
+            await read_stated_scope(ctx.state, served.reader(), measures=["bilateral ODA"]) is None
+        )
     finally:
         current_user_message.reset(token)
 
+    assert gone_record is not None
+    assert gone_record.readings[_G7].mentions
+    assert gone_record.readings["bilateral ODA"] == TextReading()
     record = stated_scope_record(ctx.state)
     assert record is not None
-    assert record.readings[_G7].mentions
-    assert record.readings["net ODA"] == TextReading()
+    assert served.calls == [[_G7], ["bilateral ODA"]]
+    assert record.readings["bilateral ODA"].mentions
 
 
 @pytest.mark.parametrize(
