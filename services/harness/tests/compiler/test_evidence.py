@@ -27,7 +27,7 @@ from compiler.evidence import (
     opens_place_axis,
     resolve_entity,
     resolve_name,
-    unlabelled_series_refs,
+    unlabelled_series_cells,
     with_series_labels,
 )
 from compiler.sources import bound_refs, member_digest, source_from_spec_block, stat_var_reading
@@ -1676,7 +1676,7 @@ def _short_of(
         pytest.param(2, ["donor/C", "donor/A"], id="bounded"),
     ],
 )
-def test_the_refs_a_short_series_lookup_names_are_the_largest_series_unlabelled_ones(
+def test_the_cells_a_short_series_lookup_names_are_the_largest_series_unlabelled_ones(
     limit: int, refs: list[str]
 ) -> None:
     findings = [
@@ -1692,47 +1692,62 @@ def test_the_refs_a_short_series_lookup_names_are_the_largest_series_unlabelled_
         ),
     ]
 
-    assert unlabelled_series_refs(findings, limit=limit) == refs
+    assert unlabelled_series_cells(findings, limit=limit) == [("donor", ref) for ref in refs]
 
 
 def test_a_series_lookup_asks_only_for_dcids_before_its_cap_and_strips_the_marker() -> None:
-    """Names ("humanitarian aid") are their own labels and take no slot; a `dcid:`
-    ref is asked for bare, and its answer labels the entity that carries the marker."""
-    # One of the labels is a held dcid, which only its role keeps out of the lookup.
-    text = ("CRSPurposeCode110", *(f"Sector{i}" for i in range(150)))
+    """Text that is no dcid ("humanitarian aid") takes no slot; a `dcid:` ref is
+    asked for bare, and its answer labels the entity that carries the marker."""
+    text = tuple(f"sector {i}" for i in range(150))
     findings = [_short_of("dcid:donor/B", "donor/A", size=1.0, breakdown=text)]
 
-    refs = unlabelled_series_refs(findings, limit=100)
-    (labelled,) = with_series_labels(findings, {"donor/B": "Beta"})
+    cells = unlabelled_series_cells(findings, limit=100)
+    (labelled,) = with_series_labels(findings, {("donor", "donor/B"): "Beta"})
 
-    assert refs == ["donor/B", "donor/A"]
+    assert cells == [("donor", "donor/B"), ("donor", "donor/A")]
     assert [entity.label for entity in labelled.entities if entity.ref.endswith("B")] == ["Beta"]
 
 
-def test_a_fetched_label_does_not_reach_a_sector_that_shares_its_bare_id() -> None:
-    """A recipient `dcid:110` is looked up and labelled; the sector `110` is its own label."""
-    findings = [_short_of("dcid:110", size=1.0, breakdown=("110",))]
+def test_a_decoded_sector_is_looked_up_and_labelled_by_its_code_dcid() -> None:
+    """A breakdown cell holds the code's dcid (dfo-apis `datasets_api.decode`), so
+    the sector is asked for and labelled like the recipient `dcid:110`, each by
+    its own role and dcid."""
+    findings = [_short_of("dcid:110", size=1.0, breakdown=("CRSPurposeCode110",))]
+    sector = ("stat_var_crsPurpose", "CRSPurposeCode110")
 
-    (labelled,) = with_series_labels(findings, {"110": "Recipient"})
+    cells = unlabelled_series_cells(findings, limit=10)
+    (labelled,) = with_series_labels(findings, {("donor", "110"): "Recipient", sector: "Education"})
 
+    assert cells == [sector, ("donor", "110")]
     assert [(entity.role, entity.label) for entity in labelled.entities] == [
-        ("stat_var_crsPurpose", None),
+        ("stat_var_crsPurpose", "Education"),
         ("donor", "Recipient"),
     ]
 
 
-def test_an_approved_label_does_not_reach_a_sector_that_shares_its_bare_id(
-    requirement: RequirementFactory, source: SourceFactory
+@pytest.mark.parametrize(
+    ("approved_sector", "sector_label"),
+    [
+        pytest.param(None, None, id="sector-not-approved"),
+        pytest.param("Education", "Education", id="sector-approved"),
+    ],
+)
+def test_an_approved_label_reaches_only_the_entity_its_dcid_names(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    approved_sector: str | None,
+    sector_label: str | None,
 ) -> None:
-    """The approved recipient `dcid:110` is labelled "Recipient"; a series' sector `110`
-    names itself and keeps no label."""
+    """The approved recipient `dcid:110` is labelled "Recipient". A series'
+    sector `CRSPurposeCode110` takes the label the approval gives its dcid, and
+    none where the approval does not name it."""
     evidence = evidence_from_manifest(
         _manifest(),
         series_stats=_series_stats(
             _stat(
                 "DebtServicePaid",
                 entities=[
-                    {"role": "stat_var_crsPurpose", "ref": "110"},
+                    {"role": "stat_var_crsPurpose", "ref": "CRSPurposeCode110"},
                     {"role": "recipient", "ref": "dcid:110"},
                 ],
                 observations=6,
@@ -1740,13 +1755,20 @@ def test_an_approved_label_does_not_reach_a_sector_that_shares_its_bare_id(
             )
         ),
     )
-    approved = source(entities=(ResolvedEntity(role="recipient", ref="110", label="Recipient"),))
+    sector = (
+        ()
+        if approved_sector is None
+        else (ResolvedEntity(role="sector", ref="CRSPurposeCode110", label=approved_sector),)
+    )
+    approved = source(
+        entities=(ResolvedEntity(role="recipient", ref="110", label="Recipient"), *sector)
+    )
 
     issues = check_evidence(requirement(), evidence, approved=approved)
 
     (short,) = (issue for issue in issues if issue.code is EvidenceIssueCode.WINDOW_SHORT)
     assert [(entity.role, entity.label) for entity in short.entities] == [
-        ("stat_var_crsPurpose", None),
+        ("stat_var_crsPurpose", sector_label),
         ("recipient", "Recipient"),
     ]
 
@@ -1754,7 +1776,9 @@ def test_an_approved_label_does_not_reach_a_sector_that_shares_its_bare_id(
 def test_a_short_series_lookup_labels_only_the_entities_it_named() -> None:
     finding = _short_of("donor/A", "donor/B", "donor/K", size=1.0, labelled="donor/K")
 
-    (labelled,) = with_series_labels([finding], {"donor/A": "Austria", "donor/K": "Kenya"})
+    (labelled,) = with_series_labels(
+        [finding], {("donor", "donor/A"): "Austria", ("donor", "donor/K"): "Kenya"}
+    )
 
     assert [entity.label for entity in labelled.entities] == ["Austria", None, "donor/K"]
 
@@ -1790,7 +1814,10 @@ def test_a_series_negative_throughout_ranks_by_how_far_below_zero_it_reaches(
     issues = check_evidence(requirement(), evidence, approved=source())
 
     assert {issue.magnitude for issue in issues if issue.entities} == {1.0, 50.0}
-    assert unlabelled_series_refs(issues, limit=10) == ["donor/REPAYS", "donor/GRANTS"]
+    assert unlabelled_series_cells(issues, limit=10) == [
+        ("donor", "donor/REPAYS"),
+        ("donor", "donor/GRANTS"),
+    ]
 
 
 @pytest.mark.parametrize(
