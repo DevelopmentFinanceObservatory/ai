@@ -1040,9 +1040,10 @@ class PlatformAssembler:
         A first-party write, Studio's, carries the publish principal, which
         dfo-apis exempts. An external write carries the caller principal and
         the caller the website named, when this process holds the principal
-        and the request's `x-dfo-caller` is an `ip:` or `user:` digest
-        (`vouched_caller_headers`, with the surface, user agent and MCP client name), so dfo-apis
-        counts that client or account. Any other external write carries neither, and
+        and the request's `x-dfo-caller` is an `ip:` digest, or a `user:` one,
+        which nothing sends yet (`vouched_caller_headers`, with the surface,
+        user agent and MCP client name), so dfo-apis counts that client or
+        account. Any other external write carries neither, and
         dfo-apis counts it against the address it sees for this service.
         """
         if caller is Caller.FIRST_PARTY:

@@ -3,9 +3,10 @@
 A caller is an opaque string with a kind prefix, carried in the
 `x-dfo-caller` request header: `conversation:<digest>` from the harness
 (`conversation_caller`), and
-`ip:` or `user:` from the website's edge: the client's address, or the
-account an API key belongs to (limits are per account), each as 32 hex digits
-of an HMAC digest, never the address or account id itself. A request without the
+`ip:` from the website's edge: 32 hex digits of an HMAC digest of the
+client's address, never the address itself. `user:` names the account an API
+key belongs to in the same shape; dfo-ai accepts it ahead of any website
+change, and nothing sends one yet (`WEBSITE_CALLER`). A request without the
 header has no caller, and `current_caller` returns `None` for it. Nothing
 here generates an identity in its place.
 
@@ -61,11 +62,12 @@ TURN = re.compile(r"tr_[0-9a-f]{16}")
 # The form of a caller the website named by its client's address.
 ADDRESS_CALLER = re.compile(r"ip:[0-9a-f]{32}")
 
-# The forms of a caller the website names: `ip:` for its client's address
+# The forms of a caller the website may name: `ip:` for its client's address
 # (`ADDRESS_CALLER`) and `user:` for the account behind an API key, each 32
 # lowercase hex digits. dfo-apis accepts no other external form beside
 # `CALLER_PRINCIPAL_HEADER`, so `vouched_caller_headers` forwards a website
-# caller only when it matches.
+# caller only when it matches. `user:` is accepted ahead of any website change:
+# `/mcp` names every caller by address today, so nothing sends one yet.
 WEBSITE_CALLER = re.compile(r"(?:ip|user):[0-9a-f]{32}")
 
 # The form of the caller `conversation_caller` builds for a Studio conversation.
@@ -293,7 +295,8 @@ def vouched_caller_headers(
     Sent when this process holds `principal`, the secret dfo-apis shares with
     its first-party callers, and the caller has a form dfo-apis accepts beside
     it. For a `WEBSITE_CALLER`, an MCP client the website named by address
-    (`ip:`) or by the account behind its API key (`user:`):
+    (`ip:`), or by the account behind its API key (`user:`, which nothing
+    sends yet):
     `CALLER_PRINCIPAL_HEADER`, `CALLER_HEADER`, `SURFACE_HEADER` as
     `MCP_SURFACE`, `USER_AGENT_HEADER` when `current_user_agent` finds one, and
     `MCP_CLIENT_HEADER` when `current_mcp_client` finds the client's name (or
