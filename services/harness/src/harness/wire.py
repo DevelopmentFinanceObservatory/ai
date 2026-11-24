@@ -1223,6 +1223,14 @@ MutationOperation = Annotated[
 ]
 
 
+# The largest `/api/studio/composition` body the route reads (`harness.studio`'s
+# `_BoundedCompositionRoute`): 1 MiB. The largest request a client sends, a
+# legacy canvas brought to the harness, removes and pins each block by its
+# component id at under 128 bytes an operation, so the cap holds both for 4,096
+# blocks, and a card's meta of some kilobytes beside them.
+MAX_COMPOSITION_REQUEST_BYTES = 1_048_576
+
+
 class CompositionMutation(_WireModel):
     """POST /api/studio/composition -- Pin to Canvas, Reorder, Remove.
     Returns the new manifest. Removing a block does not delete the component.
@@ -1243,6 +1251,14 @@ class CompositionMutation(_WireModel):
     composition_id: str | None = None
     operations: list[MutationOperation] = Field(min_length=1)
     expected_revision: int | None = Field(default=None, ge=1)
+
+
+# The largest `/api/studio/cancel` and `/api/studio/resume` bodies the routes read
+# (`harness.studio`'s `_BoundedCancelRoute` and `_BoundedResumeRoute`): 4 KiB. Each
+# request is its kind, its schema version, a conversation id and, for a resume, a
+# turn index, about 100 bytes.
+MAX_CANCEL_REQUEST_BYTES = 4_096
+MAX_RESUME_REQUEST_BYTES = 4_096
 
 
 class CancelRequest(_WireModel):

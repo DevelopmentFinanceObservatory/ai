@@ -132,6 +132,8 @@ from harness.turn.store import CursorStale, TurnStatus, TurnStore
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wire import (
+    MAX_CANCEL_REQUEST_BYTES,
+    MAX_COMPOSITION_REQUEST_BYTES,
     MAX_SEED_SPEC_BYTES,
     MAX_TURN_REQUEST_BYTES,
     ComponentType,
@@ -12252,19 +12254,56 @@ async def test_a_seed_the_harness_or_search_cannot_take_fails_its_step_and_the_o
     assert _events(frames)[-1] == "done"
 
 
-async def test_a_request_past_the_body_cap_is_refused_before_it_is_parsed() -> None:
+def _past_the_cap(route: str) -> dict[str, Any]:
+    """A request to Studio's `route` one byte or more past its body cap, valid in shape
+    otherwise."""
+    if route == "turn":
+        body = _seeded_turn_body("top 5 donors for education aid")
+        body["seed_spec"][0]["spec"]["trace"] = {"padding": "x" * MAX_TURN_REQUEST_BYTES}
+        return body
+    if route == "composition":
+        return {
+            "kind": "composition.mutate",
+            "schema_version": 1,
+            "conversation_id": CONVERSATION,
+            "operations": [
+                {"op": "remove", "component_id": "cmp_" + "x" * MAX_COMPOSITION_REQUEST_BYTES}
+            ],
+        }
+    padded = "conv_" + "x" * MAX_CANCEL_REQUEST_BYTES
+    if route == "cancel":
+        return {"kind": "turn.cancel", "schema_version": 1, "conversation_id": padded}
+    return {"kind": "turn.resume", "schema_version": 1, "conversation_id": padded, "turn_index": 1}
+
+
+@pytest.mark.parametrize(
+    ("route", "cap"),
+    [
+        ("turn", "6,356,992"),
+        ("composition", "1,048,576"),
+        ("cancel", "4,096"),
+        ("resume", "4,096"),
+    ],
+)
+async def test_a_request_past_the_body_cap_is_refused_before_it_is_parsed(
+    route: str, cap: str
+) -> None:
+    """Each Studio route that takes a body reads at most its cap and refuses more 413
+    `resource_exhausted` before parsing it, touching no conversation."""
     search = CannedSearch()
     executor = ScriptedExecutor()
-    body = _seeded_turn_body("top 5 donors for education aid")
-    body["seed_spec"][0]["spec"]["trace"] = {"padding": "x" * MAX_TURN_REQUEST_BYTES}
-    async with _client(_app(resolver=search, executor=executor)) as client:
-        response = await client.post("/api/studio/turn", json=body, headers=AUTH)
+    app = _app(resolver=search, executor=executor)
+    async with _client(app) as client:
+        response = await client.post(
+            f"/api/studio/{route}", json=_past_the_cap(route), headers=AUTH
+        )
 
     assert response.status_code == 413
     assert response.json()["error"] == "resource_exhausted"
-    assert "6,356,992-byte cap" in response.json()["detail"]
+    assert f"{cap}-byte cap" in response.json()["detail"]
     assert executor.calls == []
     assert search.calls == []
+    assert app.state.studio.store.current(PRINCIPAL, CONVERSATION) is None
 
 
 async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block(

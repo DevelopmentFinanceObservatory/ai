@@ -55,7 +55,7 @@ from contextlib import (
     suppress,
 )
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from common.caller import ADDRESS_CALLER, set_supplied_caller, set_supplied_turn
 from common.telemetry import flush_telemetry
@@ -74,6 +74,7 @@ from planner.plan import (
 )
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
+from starlette.types import Receive, Scope
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
@@ -187,7 +188,10 @@ from harness.unit_offer import (
     whole_units,
 )
 from harness.wire import (
+    MAX_CANCEL_REQUEST_BYTES,
     MAX_CLOSED_SINCE,
+    MAX_COMPOSITION_REQUEST_BYTES,
+    MAX_RESUME_REQUEST_BYTES,
     MAX_TURN_REQUEST_BYTES,
     AddOp,
     ApplyChoice,
@@ -1375,54 +1379,58 @@ def _streaming_conflict_response(detail: str, *, retry_after_seconds: int = 5) -
 
 
 class _BodyTooLarge(HTTPException):
-    """A `/turn` body past `MAX_TURN_REQUEST_BYTES`. An `HTTPException`, since
-    FastAPI re-raises those from its body read and turns any other exception
-    there into a 400."""
+    """A body past its route's cap (`_BoundedRoute.max_body_bytes`). An
+    `HTTPException`, since FastAPI re-raises those from its body read and turns
+    any other exception there into a 400."""
 
-    def __init__(self, size: str) -> None:
+    def __init__(self, size: str, cap: int) -> None:
         super().__init__(
             status_code=413,
-            detail=f"the request body is {size} bytes, past the {MAX_TURN_REQUEST_BYTES:,}-byte cap",
+            detail=f"the request body is {size} bytes, past the {cap:,}-byte cap",
         )
 
 
 class _BoundedRequest(Request):
-    """A request whose body read stops at `MAX_TURN_REQUEST_BYTES`.
+    """A request whose body read stops at `cap` bytes.
 
     A declared `Content-Length` past the cap is refused before anything is
     read; a body sent without one is refused as soon as it crosses the cap.
     """
 
+    def __init__(self, scope: Scope, receive: Receive, *, cap: int) -> None:
+        super().__init__(scope, receive)
+        self._cap = cap
+
     async def body(self) -> bytes:
         if not hasattr(self, "_body"):
             declared = self.headers.get("content-length", "")
-            if declared.isdigit() and int(declared) > MAX_TURN_REQUEST_BYTES:
-                raise _BodyTooLarge(f"{int(declared):,}")
+            if declared.isdigit() and int(declared) > self._cap:
+                raise _BodyTooLarge(f"{int(declared):,}", self._cap)
             chunks: list[bytes] = []
             size = 0
             async for chunk in self.stream():
                 size += len(chunk)
-                if size > MAX_TURN_REQUEST_BYTES:
-                    raise _BodyTooLarge(f"more than {MAX_TURN_REQUEST_BYTES:,}")
+                if size > self._cap:
+                    raise _BodyTooLarge(f"more than {self._cap:,}", self._cap)
                 chunks.append(chunk)
             # Starlette's own cache for the body, which `Request.body` reads back.
             self._body = b"".join(chunks)
         return self._body
 
 
-class _BoundedTurnRoute(APIRoute):
-    """The `/turn` route, whose body is read through `_BoundedRequest`, so a
-    request past the size cap is refused before FastAPI parses it. Each seed
-    is checked on its own (`harness.seeds.seeds_slot`) and refused in its own
-    step; this bound is what keeps an oversized request from being parsed at
-    all."""
+class _BoundedRoute(APIRoute):
+    """A route whose body is read through `_BoundedRequest`, so a request past
+    `max_body_bytes` is refused 413 `resource_exhausted` before FastAPI parses it."""
+
+    max_body_bytes: ClassVar[int]
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         handler = super().get_route_handler()
+        cap = self.max_body_bytes
 
         async def bounded(request: Request) -> Response:
             try:
-                return await handler(_BoundedRequest(request.scope, request.receive))
+                return await handler(_BoundedRequest(request.scope, request.receive, cap=cap))
             except _BodyTooLarge as exc:
                 return _tool_error_response(
                     ToolError(
@@ -1434,6 +1442,15 @@ class _BoundedTurnRoute(APIRoute):
                 )
 
         return bounded
+
+
+class _BoundedTurnRoute(_BoundedRoute):
+    """The `/turn` route, bounded at `MAX_TURN_REQUEST_BYTES`. Each seed is
+    checked on its own (`harness.seeds.seeds_slot`) and refused in its own
+    step; this bound is what keeps an oversized request from being parsed at
+    all."""
+
+    max_body_bytes = MAX_TURN_REQUEST_BYTES
 
 
 def _resume_refusal(standing: TurnStanding, turn_index: int) -> JSONResponse | None:
@@ -2371,6 +2388,25 @@ async def _stop_under_lock(studio: StudioRunner, principal: str, conversation_id
     return refused or Response(status_code=204)
 
 
+class _BoundedCancelRoute(_BoundedRoute):
+    """The `/cancel` route, bounded at `MAX_CANCEL_REQUEST_BYTES`."""
+
+    max_body_bytes = MAX_CANCEL_REQUEST_BYTES
+
+
+class _BoundedResumeRoute(_BoundedRoute):
+    """The `/resume` route, bounded at `MAX_RESUME_REQUEST_BYTES`."""
+
+    max_body_bytes = MAX_RESUME_REQUEST_BYTES
+
+
+class _BoundedCompositionRoute(_BoundedRoute):
+    """The `/composition` route, bounded at `MAX_COMPOSITION_REQUEST_BYTES`, so the
+    operations a client posts are bounded before they are parsed."""
+
+    max_body_bytes = MAX_COMPOSITION_REQUEST_BYTES
+
+
 def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRouter:
     router = APIRouter(prefix="/api/studio")
 
@@ -2751,7 +2787,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
 
     router.add_api_route("/turn", turn, methods=["POST"], route_class_override=_BoundedTurnRoute)
 
-    @router.post("/cancel")
     async def cancel(
         body: CancelRequest, authorization: str | None = Header(default=None)
     ) -> Response:
@@ -3404,7 +3439,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
             raise
 
-    @router.post("/resume")
     async def resume(  # noqa: PLR0911 -- one distinct refusal per claim guard the route enforces
         body: ResumeRequest,
         authorization: str | None = Header(default=None),
@@ -3693,7 +3727,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
             raise
 
-    @router.post("/composition")
     async def composition(
         body: CompositionMutation, authorization: str | None = Header(default=None)
     ) -> Response:
@@ -3769,5 +3802,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             return _unknown_conversation_response(conversation_id)
         read = _conversation_read(stored, since=since)
         return JSONResponse(content=json.loads(read.model_dump_json(exclude_none=True)))
+
+    # Each body is bounded before it is parsed (`_BoundedRoute`).
+    router.add_api_route(
+        "/cancel", cancel, methods=["POST"], route_class_override=_BoundedCancelRoute
+    )
+    router.add_api_route(
+        "/resume", resume, methods=["POST"], route_class_override=_BoundedResumeRoute
+    )
+    router.add_api_route(
+        "/composition", composition, methods=["POST"], route_class_override=_BoundedCompositionRoute
+    )
 
     return router

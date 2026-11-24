@@ -421,10 +421,12 @@ Concurrency and atomicity:
   time reconciles its own composition changes on top of whatever
   `/composition` landed, so a canvas edit and a turn's own card both
   survive when they collide.
+- A body past 1,048,576 bytes gets a 413 `resource_exhausted` before it is parsed. Removing and pinning every block of a 4,096-block canvas in one request fits.
 
 ### 4.4 `turn.cancel` → POST `/api/studio/cancel`
 
 Fields: `kind: "turn.cancel"`, `schema_version: 1`, `conversation_id`.
+A body past 4,096 bytes gets a 413 `resource_exhausted` before it is parsed.
 The server stops the conversation's active stream and returns HTTP 204.
 The active stream may be running on a different server instance than the
 one that answers this request; the server finds it there too and stops
@@ -444,7 +446,7 @@ connection. Use `/cancel` for the Stop button.
 
 ### 4.5 `turn.resume` → POST `/api/studio/resume`
 
-Fields: `kind: "turn.resume"`, `schema_version: 1`, `conversation_id`, `turn_index` (the `turn.index` a state read returned, §4.6).
+Fields: `kind: "turn.resume"`, `schema_version: 1`, `conversation_id`, `turn_index` (the `turn.index` a state read returned, §4.6). A body past 4,096 bytes gets a 413 `resource_exhausted` before it is parsed.
 
 The server carries on the turn on a new stream, which you read as any other. Send it when the state read shows `status: "running"` and `lease_live: false`. The turn's last stream lost its client, a reload say, and the turn makes no progress until a client resumes it. The turn runs the step it stopped in again from its start, so the new stream carries no `activity.step` lines for earlier steps. A `plan.approved` the turn never sent goes out once. The stream opens with a `plan.approved` for each plan the turn already approved, since the page may have read none of them, so key them by `revision` and ignore one the page holds. The stream ends with `done`, a pause or an `error` frame.
 
