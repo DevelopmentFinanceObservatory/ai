@@ -930,32 +930,14 @@
       ]
     },
     {
-      "id": "orchestrator-hand-back-reaches-the-agent-unfenced",
-      "modes": [
-        "scripted"
-      ],
-      "scenario": "approved-plan",
-      "checks": [
-        "no_relay_marker"
-      ],
-      "turns": [
-        {
-          "message": "How fast did life expectancy grow in Kenya since 2000?",
-          "plan_decision": "approve",
-          "expect": {
-            "terminal": "done"
-          }
-        }
-      ]
-    },
-    {
-      "id": "orchestrator-second-plan-entry-sees-no-fenced-hand-back",
+      "id": "orchestrator-refused-step-reaches-the-second-plan",
       "modes": [
         "scripted"
       ],
       "scenario": "refused-step-then-second-plan",
       "checks": [
-        "planner_sees_no_relay_marker"
+        "refused_step_reaches_the_next_plan",
+        "approval_payload_absent_after_approval"
       ],
       "turns": [
         {
@@ -963,25 +945,6 @@
           "plan_decision": "approve",
           "expect": {
             "terminal": "done"
-          }
-        }
-      ]
-    },
-    {
-      "id": "orchestrator-an-answered-turn-holds-no-fenced-block",
-      "modes": [
-        "scripted"
-      ],
-      "scenario": "answer-only",
-      "checks": [
-        "no_relay_marker"
-      ],
-      "turns": [
-        {
-          "message": "Life expectancy in Kenya?",
-          "expect": {
-            "terminal": "done",
-            "no_plan": true
           }
         }
       ]

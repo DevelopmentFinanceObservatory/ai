@@ -3,18 +3,14 @@
 
 `fixtures/resolved_revision/<member>.json` are dfo-spec-kit's catalogue
 fixtures (`catalogue/fixtures/<member>/payload.json`), copied verbatim.
-`resolved_revision` loads one and restamps the ids a test pins, and
-`component_for` builds the wire card an executor assembles from one.
+`resolved_revision` loads one and restamps the ids a test pins.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from harness.mcp_client import McpExecutor
+from typing import Any
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "resolved_revision"
 
@@ -39,16 +35,3 @@ def resolved_revision(
     if title is not None:
         envelope["component"]["title"]["text"] = title
     return envelope
-
-
-def component_for(
-    executor: McpExecutor, *, reply: dict[str, Any], envelope: dict[str, Any]
-) -> dict[str, Any] | None:
-    """The wire `component.created` body `executor` builds for a
-    `write_component` result: `reply` resolved against the lineage the
-    store holds for `envelope`'s frame (`McpExecutor._frame_lineage`,
-    `McpExecutor._component_from_lineage`)."""
-    frame_ref, lineage = executor._frame_lineage(envelope)
-    return executor._component_from_lineage(
-        reply=reply, envelope=envelope, frame_ref=frame_ref, lineage=lineage
-    )

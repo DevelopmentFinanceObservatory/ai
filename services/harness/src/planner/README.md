@@ -20,9 +20,10 @@ Four tools, each declared in `planner.specs` (`planner_tool_specs()` and
 `skill_tool_spec()`) with its body in `planner.tools` or `planner.skills`.
 `harness.planner_adapter.PlannerAdapter` builds the set of specs and the instruction
 the planner serves, on a Pydantic AI agent built by
-`planner.pydantic_agent.planner_agent()`, which `harness.planner_node` runs as a
-function node that yields ADK session events. A tool call reads its steps from
-the session's events through `planner.session.SessionCall`.
+`planner.pydantic_agent.planner_agent()`, which the adapter runs in the turn's
+`planner` node, writing each response and its answers to the turn's transcript.
+A tool call reads its steps from that transcript through
+`planner.session.SessionCall`.
 The tools:
 
 | Tool                | Behaviour                                                                                                                                                                                                                |
@@ -405,7 +406,7 @@ to, is the harness workflow's business.
 proposes and `REJECTED` when the user declines. The status that says a plan is
 ready to approve is the translator's alone, minted by `Plan.with_translation`,
 which refuses anything but a `DRAFT`; `APPROVED` is the harness workflow's to
-write, once the user answers. ADK has no per-key owner for session state, so
+write, once the user answers. Session state has no per-key owner, so
 this is an invariant a test holds rather than the framework.
 
 **An amendment mints a new version.** Calling `propose_plan` again with

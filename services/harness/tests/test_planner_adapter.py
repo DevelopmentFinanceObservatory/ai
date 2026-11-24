@@ -1,5 +1,5 @@
 """Tests for `harness.planner_adapter`, the adapter over the planner
-(`harness.planner_node`) with translation attached to its `propose_plan`.
+(`harness.planner_adapter`) with translation attached to its `propose_plan`.
 
 Model-free. A scripted google-genai client (`tests.scripted_genai.ScriptedGenai`)
 answers the planner's model calls (`tests.scripted_planner.scripted_planner`). Most
@@ -12,10 +12,10 @@ script a bare `propose_plan` amendment, whose translation runs the real
 translation loop against a canned surface. Whether the real model plans WELL is the eval sets' question
 (`evals/README.md`).
 
-`PlannerAdapter` runs the planner through `ctx.run_node`, in the graph's own
-session, so every test below needs a real `Context`, not a bare call.
-`_run_adapter` drives one, through a minimal one-node `Workflow`, the same
-primitive `harness.graph`'s own planner node uses.
+`PlannerAdapter` runs the planner in the `planner` node's task, over the
+turn's state and transcript, so every test below calls it on a `NodeCtx`.
+`tests.planner_host.PlannerHarness` runs one turn's
+`planner` node segment by segment, as the turn loop would.
 """
 
 from __future__ import annotations
@@ -26,10 +26,9 @@ import itertools
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, NamedTuple, cast, override
 
 import pytest
@@ -42,19 +41,11 @@ from data_mcp.definition_writes import windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from executor.classify import ToolFailure
 from executor.outcomes import RediscoveryNeeded, Refused
-from google.adk import Context, Event
-from google.adk.agents.run_config import RunConfig
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.adk.sessions.state import State
-from google.adk.workflow import START, Workflow, node
-from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import types
-from harness import plan_display, planner_adapter, planner_node, planner_run
+from harness import plan_display, planner_adapter, planner_run
 from harness.decision_pick import DecisionPick
 from harness.graph import switch
 from harness.graph.execute import _refusal_shape
-from harness.graph.planning import planner_ask_interrupt
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -64,11 +55,9 @@ from harness.graph.state import (
 from harness.orchestrator_tools import _search_context
 from harness.planner_adapter import (
     _ASKED_REFERRAL_INTRO,
-    _PLANNER_BRANCH,
     _SHARE_UNIT_CODES,
     PlannerAdapter,
     PlannerAdapterError,
-    _check_branches,
     _plan_context,
     _skills_section,
 )
@@ -91,8 +80,10 @@ from harness.sentences import (
 )
 from harness.studio_state import ConversationState
 from harness.tool_contracts import reading_facts, resolver_digest
+from harness.turn.node import NodeCtx
+from harness.turn.store import AgentRecord
 from harness.turn_budget import TurnBudget, current_turn_budget
-from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import PLANNER_ASK
 from harness.turn_records import RecordedIdentity, SearchReading
 from harness.wiring import handing_back_planner_failures
 from planner.call import elected_spec_ids
@@ -152,10 +143,10 @@ from planner.plan import (
     save_plan,
     save_refused_specs,
 )
+from planner.pydantic_agent import PlannerAnswers
 from planner.records import GroupBy, Reduction, RelativePeriod, RollingWindow, StatVarReading
 from planner.session import SessionCall
 from planner.settings import (
-    AGENT_NAME,
     AGENT_THINKING_CONFIG,
 )
 from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key
@@ -191,6 +182,7 @@ from .basis_alignment import (
     basis_block,
 )
 from .compiler.test_evidence import _manifest, _series_stats, _stat
+from .planner_host import PlannerHarness, in_node, node_ctx, pauses, planner_answers, planner_calls
 from .scripted_genai import (
     Reply,
     Request,
@@ -201,8 +193,9 @@ from .scripted_genai import (
     reply,
     text_part,
 )
-from .scripted_planner import SIGNED, SSE, scripted_planner
+from .scripted_planner import SIGNED, scripted_planner
 from .search_results import search_result_parts
+from .session_events import one_answer
 from .split_plan import SPEC_DEBT, SPEC_DEBT_HISTORY, stored_split_plan
 from .test_turn_records import _switchable_scope
 
@@ -213,9 +206,6 @@ SPEC_B = "spec_" + "b" * 32
 # The call a scripted planner makes to have the plan on record declared ready,
 # through the `propose_plan` `use_compiled_proposals` installs.
 _DECLARE = [("propose_plan", {})]
-
-_APP = "planner_adapter_test"
-_USER = "u"
 
 
 def _contents(request: Request) -> list[types.Content]:
@@ -332,138 +322,11 @@ def _computed(step: Callable[[Request], Sequence[tuple[str, Mapping[str, Any]]] 
     return answer
 
 
-class _AdapterHarness:
-    """Drives `PlannerAdapter.__call__` through a real, dynamically-scheduled
-    `Context` -- the same primitive `harness.graph`'s own planner node
-    drives `PlannerAdapter` through, and the only way to get a `Context`
-    `ctx.run_node` will accept, since this adapter has no `Runner` of its
-    own to call directly.
-
-    One `_AdapterHarness` reuses the same session across every `run` call,
-    the way the graph's own session persists across a turn's several
-    entries and across separate turns of one conversation alike -- so a
-    test can inspect `ctx.state` (`state()`) after a call, without losing
-    what it left behind.
-    """
-
-    def __init__(self, state: Mapping[str, Any] | None = None) -> None:
-        self._sessions = InMemorySessionService()
-        self._session_id: str | None = None
-        self._initial_state = dict(state or {})
-        self._live_state: Mapping[str, Any] = {}
-
-    async def run(
-        self,
-        adapter: PlannerAdapter,
-        *,
-        resume_inputs: dict[str, Any] | None = None,
-        new_message: types.Content | None = None,
-        stoppable: bool = False,
-        run_config: RunConfig = SSE,
-        **kwargs: Any,
-    ) -> dict[str, Any] | None:
-        """Run `adapter` once in this harness's session, under the switch's
-        `_unless_stopped` when `stoppable`, as the planner node runs a pick's
-        replan, and with `run_config`, Studio's streaming one by default, which
-        a model on `ScriptedGenai` needs."""
-
-        async def _node(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
-            del node_input
-            self._live_state = ctx.session.state
-            if resume_inputs is not None:
-                # `ctx.resume_inputs` reflects a genuine pause-and-resume of
-                # THIS node's own interrupt, the planner's ask this node
-                # pauses on (below) included. Setting it directly here is
-                # only for a test that needs the OTHER resume condition --
-                # "has `__call__` already been through this session once" --
-                # without paying for a real interrupt round trip, the same
-                # way a hand-built `Context` elsewhere in this suite stands
-                # in for one the framework would otherwise build.
-                ctx._resume_inputs = resume_inputs
-            drafting = adapter(ctx=ctx, **kwargs)
-            drafted = await (switch._unless_stopped(ctx, drafting) if stoppable else drafting)
-            # The pause the graph's planner node makes on an accepted ask.
-            if isinstance(drafted, dict) and "asked" in drafted:
-                yield planner_ask_interrupt(drafted["asked"])
-                return
-            yield Event(output=drafted)
-
-        node_fn = node(_node, name="adapter_under_test", rerun_on_resume=True)
-        wf = Workflow(name="adapter_test_wf", edges=[(START, node_fn)])
-        runner = Runner(node=wf, app_name=_APP, session_service=self._sessions)
-        if self._session_id is None:
-            session = await self._sessions.create_session(
-                app_name=_APP, user_id=_USER, state=self._initial_state
-            )
-            self._session_id = session.id
-        content = new_message or types.Content(role="user", parts=[types.Part(text="probe")])
-        output: Any = None
-        async for event in runner.run_async(
-            user_id=_USER, session_id=self._session_id, new_message=content, run_config=run_config
-        ):
-            assert isinstance(event, Event)
-            if event.output is not None:
-                output = event.output
-        return cast(dict[str, Any] | None, output)
-
-    async def restore(self, events: Sequence[Event], state: Mapping[str, Any]) -> None:
-        """Make `events`, on `state`, this harness's session, for a test that
-        resumes a session another build stored."""
-        assert self._session_id is None, "run() has been called already"
-        session = await self._sessions.create_session(
-            app_name=_APP, user_id=_USER, state=dict(state)
-        )
-        self._session_id = session.id
-        for event in events:
-            await self._sessions.append_event(session, event)
-
-    async def state(self) -> SessionState:
-        assert self._session_id is not None, "run() has not been called yet"
-        session = await self._sessions.get_session(
-            app_name=_APP, user_id=_USER, session_id=self._session_id
-        )
-        assert session is not None
-        return cast(SessionState, session.state)
-
-    async def events(self) -> list[Event]:
-        """This session's own event history -- what `planner.call.
-        elected_spec_ids` reads to find what the user actually chose
-        answering the planner's asks, and what `ctx.run_node`'s own
-        pause-and-resume depends on surviving (`harness.planner_adapter`'s
-        module docstring)."""
-        assert self._session_id is not None, "run() has not been called yet"
-        session = await self._sessions.get_session(
-            app_name=_APP, user_id=_USER, session_id=self._session_id
-        )
-        assert session is not None
-        return session.events
-
-    def live_state(self) -> Mapping[str, Any]:
-        """The session state the last `run()` read and wrote in process, which
-        holds writes no event carried to the store."""
-        return self._live_state
-
-    async def append_event(self, ctx: Context, event: Event) -> None:
-        """Append `event` to the session a running `ctx` holds, for a test that
-        needs an event on record no planner builds."""
-        await self._sessions.append_event(ctx.session, event)
-
-    def seed_state(self, key: str, value: Any) -> None:
-        """Write directly into the canonical stored session, for a test that
-        needs to set up state no real call would produce -- `get_session`
-        (`state`, above) hands back a shallow copy (`InMemorySessionService`'s
-        own `_copy_session`), so a write through it is invisible to every
-        later `run()`.
-        """
-        assert self._session_id is not None, "run() has not been called yet"
-        self._sessions.sessions[_APP][_USER][self._session_id].state[key] = value
-
-
 async def _run_adapter(adapter: PlannerAdapter, **kwargs: Any) -> dict[str, Any]:
-    """One-shot `_AdapterHarness.run`, for a test that only makes one call and
-    does not need to inspect `ctx.state` afterward."""
-    output = await _AdapterHarness().run(adapter, **kwargs)
-    assert output is not None, "the adapter's node produced no output: did it raise silently?"
+    """One-shot `PlannerHarness.run`, for a test that only makes one call and
+    does not need to inspect the state afterward."""
+    output = await PlannerHarness().run(adapter, **kwargs)
+    assert output is not None, "the adapter answered nothing: did the planner ask?"
     return output
 
 
@@ -544,34 +407,6 @@ async def test_the_adapter_returns_a_plan_a_graph_node_can_validate(
     assert drafted["summary"]["version"] == plan.version
 
 
-async def test_on_progress_reports_the_time_since_the_previous_round_trip(
-    decision: Any, requirement: Any, derived_requirement: Any
-) -> None:
-    """Each `on_progress` report's `duration_ms` covers everything since the
-    previous report (or since the run started, for the first) -- the
-    number that lets a ten-thousand-token thinking round read differently
-    from a one-second lookup on a feed where every line otherwise prints
-    the same way the instant it arrives."""
-    plan = _translated_plan(decision, requirement, derived_requirement)
-    scripted = ScriptedGenai([_calls(*_DECLARE)])
-    adapter = _scripted_planner(scripted, compiled_proposals=True)
-    reports: list[dict[str, Any]] = []
-
-    await _run_adapter(
-        adapter,
-        question=plan.question,
-        readings=[],
-        prior_plan=plan.model_dump(mode="json"),
-        on_progress=reports.append,
-    )
-
-    assert [(report["agent"], report["tools"]) for report in reports] == [
-        ("dfo_planner", ["propose_plan"])
-    ]
-    assert isinstance(reports[0]["duration_ms"], int)
-    assert reports[0]["duration_ms"] >= 0
-
-
 async def test_a_prior_plan_is_what_propose_plan_amends_from(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
@@ -588,7 +423,7 @@ async def test_a_prior_plan_is_what_propose_plan_amends_from(
     as amending the wrong version. What records version 6 is therefore the
     graph's own seeded record, not what this adapter left in the session.
     """
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     made_decision = decision()
     requirements = [requirement(), derived_requirement()]
     proposal = {
@@ -663,7 +498,7 @@ async def test_a_planner_tool_that_raises_ends_the_entry_on_a_final_refusal(
     scripted = ScriptedGenai([_calls(("get_skill", {"skill_id": "aid"})), _says("unreachable")])
     adapter = _scripted_planner(scripted, surface=_FailingSkillSurface(schemas=[]))
 
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     with caplog.at_level(logging.ERROR):
         output = await harness.run(
@@ -677,16 +512,15 @@ async def test_a_planner_tool_that_raises_ends_the_entry_on_a_final_refusal(
     assert "get_skill" in output["refused"]["text"]
     assert len(scripted.requests) == 1
     (response,) = [
-        part.function_response.response
-        for event in await harness.events()
-        for part in (event.content.parts if event.content else None) or []
-        if part.function_response is not None and part.function_response.name == "get_skill"
+        answer["response"]
+        for answer in planner_answers(await harness.records())
+        if answer["name"] == "get_skill"
     ]
     assert "internal.example" not in json.dumps(response)
     (record,) = [
         r
         for r in caplog.records
-        if r.name == planner_node.logger.name and r.levelno == logging.ERROR
+        if r.name == planner_adapter.logger.name and r.levelno == logging.ERROR
     ]
     assert record.exc_info is not None and record.exc_info[0] is RuntimeError
     assert record.args is not None and record.args[:2] == ("get_skill", "RuntimeError")
@@ -708,7 +542,7 @@ async def test_an_unknown_tool_name_is_answered_with_the_tools_the_model_can_cal
     assert not [
         r
         for r in caplog.records
-        if r.name == planner_node.logger.name and r.levelno == logging.ERROR
+        if r.name == planner_adapter.logger.name and r.levelno == logging.ERROR
     ]
 
 
@@ -724,7 +558,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         COMPILE_FAILURES_STATE_KEY: ["fingerprint"],
         REFUSED_SPECS_STATE_KEY: [SPEC],
     }
-    harness = _AdapterHarness(state=stale)
+    harness = PlannerHarness(state=stale)
     adapter = _scripted_planner(ScriptedGenai([_says("Which years did you have in mind?")]))
     kwargs: dict[str, Any] = {}
     if entry == "amendment":
@@ -736,7 +570,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         adapter,
         question="kenya debt",
         readings=[],
-        resume_inputs={"ask": {"result": "since 2015"}} if resumed else None,
+        answer=one_answer({"text": "since 2015"}) if resumed else None,
         **kwargs,
     )
 
@@ -803,7 +637,7 @@ async def test_a_question_with_nothing_left_after_a_decline_ends_on_the_decline(
         ]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(adapter, question="total aid", readings=[])
 
@@ -863,7 +697,7 @@ async def test_the_brief_lists_the_asks_and_propose_plan_holds_the_plan_to_them(
         ]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness(state={ASKS_STATE_KEY: asks})
+    harness = PlannerHarness(state={ASKS_STATE_KEY: asks})
 
     output = await harness.run(adapter, question="total aid", readings=[])
 
@@ -979,7 +813,7 @@ async def test_a_replan_over_a_refusal_no_operation_covers_earns_the_decline(
     }
     scripted = ScriptedGenai([_calls(("propose_plan", draft)), _says("Planned.")])
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness(state={ASKS_STATE_KEY: asks})
+    harness = PlannerHarness(state={ASKS_STATE_KEY: asks})
 
     await harness.run(adapter, question="GDP per person", readings=[], refusal=refusal)
 
@@ -1025,7 +859,7 @@ async def test_a_first_draft_may_decline_an_ask_no_requirement_kind_states(
         }
     scripted = ScriptedGenai([_calls(("propose_plan", draft)), _says("Planned.")])
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness(state={ASKS_STATE_KEY: asks})
+    harness = PlannerHarness(state={ASKS_STATE_KEY: asks})
 
     await harness.run(adapter, question="donors whose aid rose every year", readings=[], **kwargs)
 
@@ -1058,20 +892,16 @@ async def test_a_first_draft_with_only_declines_ends_on_the_declined_asks(paused
         script.insert(0, _calls((PLANNER_ASK, {"message": "Which period?"})))
     scripted = ScriptedGenai(script)
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness(state={ASKS_STATE_KEY: asks})
+    harness = PlannerHarness(state={ASKS_STATE_KEY: asks})
 
     result = await harness.run(adapter, question=draft["question"], readings=[])
     if paused:
         assert result is None
-        interrupt_id = _pending_ask_interrupt_id(await harness.events())
         result = await harness.run(
             adapter,
             question=draft["question"],
             readings=[],
-            new_message=types.Content(
-                role="user",
-                parts=[create_request_input_response(interrupt_id, {"result": "last five years"})],
-            ),
+            answer=one_answer({"text": "last five years"}),
         )
 
     assert result is not None
@@ -1112,16 +942,13 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
         ]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     output = await harness.run(adapter, question="kenya debt", readings=[])
 
     assert output is None, "a pausing turn resolves no output -- the run is suspended, not done"
-    events = await harness.events()
-    fake_tool_context = SimpleNamespace(
-        state={}, function_call_id=None, session=SimpleNamespace(events=events)
-    )
-    assert elected_spec_ids(SessionCall.of(fake_tool_context)) == frozenset()
+    records = await harness.records()
+    assert elected_spec_ids(SessionCall(records, {}, None)) == frozenset()
 
 
 async def test_a_slow_call_beside_an_accepted_ask_answers_before_the_pause_and_runs_once() -> None:
@@ -1147,35 +974,24 @@ async def test_a_slow_call_beside_an_accepted_ask_answers_before_the_pause_and_r
         [_calls((PLANNER_ASK, {"message": "Which years?"}), ("propose_plan", {})), _says("stop")]
     )
     adapter = scripted_planner(scripted, tools=slow_proposals)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     assert await harness.run(adapter, question="kenya debt", readings=[]) is None
     assert len(scripted.requests) == 1
-    events = await harness.events()
+    records = await harness.records()
     answered = [
         at
-        for at, event in enumerate(events)
-        for response in event.get_function_responses()
-        if response.name == "propose_plan"
+        for at, record in enumerate(records)
+        for response in planner_answers([record])
+        if response["name"] == "propose_plan"
     ]
-    (paused,) = [
-        at
-        for at, event in enumerate(events)
-        for call in event.get_function_calls()
-        if call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
-    ]
+    (paused,) = [at for at, record in enumerate(records) if pauses([record])]
     assert proposals == [1]
     assert len(answered) == 1 and answered[0] < paused
 
-    answer = types.Content(
-        role="user",
-        parts=[
-            create_request_input_response(
-                _pending_ask_interrupt_id(events), {"result": {"text": "since 2015"}}
-            )
-        ],
+    await harness.run(
+        adapter, question="kenya debt", readings=[], answer=one_answer({"text": "since 2015"})
     )
-    await harness.run(adapter, question="kenya debt", readings=[], new_message=answer)
 
     assert proposals == [1]
     assert len(scripted.requests) == 2
@@ -1197,7 +1013,7 @@ async def test_a_terminal_refusal_beside_an_accepted_ask_ends_the_entry_on_the_r
         ]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(
         adapter,
@@ -1227,7 +1043,7 @@ async def test_an_ask_after_a_refused_ask_in_the_same_response_is_refused_too() 
         ]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(adapter, question="kenya debt", readings=[])
 
@@ -1235,10 +1051,9 @@ async def test_an_ask_after_a_refused_ask_in_the_same_response_is_refused_too() 
     assert result["refused"]["code"] == StopCode.PLAN_NOT_READY
     assert load_pending_ask(await harness.state()) is None
     answers = [
-        (response.response or {}).get("code", (response.response or {}).get("status"))
-        for event in await harness.events()
-        for response in event.get_function_responses()
-        if response.name == PLANNER_ASK
+        response["response"].get("code", response["response"].get("status"))
+        for response in planner_answers(await harness.records())
+        if response["name"] == PLANNER_ASK
     ]
     assert answers == [ProblemCode.INVALID_ARGUMENTS, ProblemCode.INVALID_ARGUMENTS]
 
@@ -1253,7 +1068,7 @@ async def test_a_response_that_passes_the_event_cap_ends_the_entry_on_plan_not_r
     refused = {"message": "Constant or current dollars?", "options": [{"label": "unpinned"}]}
     scripted = ScriptedGenai([_calls((PLANNER_ASK, refused), (PLANNER_ASK, refused))])
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(adapter, question="kenya debt", readings=[])
 
@@ -1261,10 +1076,9 @@ async def test_a_response_that_passes_the_event_cap_ends_the_entry_on_plan_not_r
     assert result["refused"]["code"] == StopCode.PLAN_NOT_READY
     assert len(scripted.requests) == 1
     stored = [
-        response.id
-        for event in await harness.events()
-        for response in event.get_function_responses()
-        if response.name == PLANNER_ASK
+        response["id"]
+        for response in planner_answers(await harness.records())
+        if response["name"] == PLANNER_ASK
     ]
     assert len(stored) == 2
 
@@ -1280,7 +1094,7 @@ async def test_an_accepted_ask_on_the_answer_past_the_event_cap_still_pauses_the
         [_calls((PLANNER_ASK, refused)), _calls((PLANNER_ASK, {"message": "Which years?"}))]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(adapter, question="kenya debt", readings=[])
 
@@ -1299,7 +1113,7 @@ async def test_a_plan_declared_ready_on_the_answer_past_the_event_cap_answers_th
     refused = {"message": "Constant or current dollars?", "options": [{"label": "unpinned"}]}
     scripted = ScriptedGenai([_calls((PLANNER_ASK, refused)), _calls(*_DECLARE)])
     adapter = _scripted_planner(scripted, compiled_proposals=True)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(
         adapter, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
@@ -1313,20 +1127,21 @@ async def test_a_plan_declared_ready_on_the_answer_past_the_event_cap_answers_th
 async def test_an_entry_that_raises_after_an_accepted_ask_leaves_no_ask_waiting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The planner's run accepts an ask, and the branch check on its events
-    then raises, which the served planner hands back as a refusal
+    """The planner's run accepts an ask, and the entry then raises, which the
+    served planner hands back as a refusal
     (`harness.wiring.handing_back_planner_failures`). The entry ends on it, so
     the state it leaves holds no ask for a resume or a reader of the state to
     find."""
+    propose = PlannerAdapter._propose
 
-    def stray(events: Any, **kwargs: Any) -> None:
-        del events, kwargs
-        raise PlannerAdapterError("a planner event carries another branch")
+    async def raising(self: PlannerAdapter, **kwargs: Any) -> Any:
+        await propose(self, **kwargs)
+        raise PlannerAdapterError("the entry failed after its run")
 
-    monkeypatch.setattr(planner_adapter, "_check_branches", stray)
+    monkeypatch.setattr(PlannerAdapter, "_propose", raising)
     scripted = ScriptedGenai([_calls((PLANNER_ASK, {"message": "Which years?"}))])
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(
         cast(PlannerAdapter, handing_back_planner_failures(adapter)),
@@ -1336,86 +1151,6 @@ async def test_an_entry_that_raises_after_an_accepted_ask_leaves_no_ask_waiting(
 
     assert result is not None and "refused" in result
     assert load_pending_ask(await harness.state()) is None
-
-
-async def _pause_on_a_legacy_ask(harness: _AdapterHarness, question: dict[str, Any]) -> None:
-    """Leave `harness`'s session paused on a long-running
-    `REQUEST_INPUT_FUNCTION_CALL_NAME` call asking `question`, with no pending
-    ask recorded. No planner builds that call, so this helper stands in for the
-    adapter and appends the call to the stored session."""
-    call_id = "legacy-ask"
-    call = types.FunctionCall(id=call_id, name=REQUEST_INPUT_FUNCTION_CALL_NAME, args=question)
-
-    async def paused(*, ctx: Context, **kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        await harness.append_event(
-            ctx,
-            Event(
-                author=AGENT_NAME,
-                content=types.Content(role="model", parts=[types.Part(function_call=call)]),
-                long_running_tool_ids={call_id},
-            ),
-        )
-        return {"asked": {"call_id": call_id, "args": question}}
-
-    assert (
-        await harness.run(cast(PlannerAdapter, paused), question="kenya debt", readings=[]) is None
-    )
-
-
-async def test_an_answer_to_a_pause_from_before_the_node_level_ask_re_enters_the_planner() -> None:
-    """A turn paused on a long-running `REQUEST_INPUT_FUNCTION_CALL_NAME` call
-    holds no pending ask. The answer re-enters the planner in a fresh run with
-    the question and the pick in its brief, as a node-level ask's does."""
-    question = {
-        "message": "Which source did you mean?",
-        "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
-    }
-    harness = _AdapterHarness()
-    await _pause_on_a_legacy_ask(harness, question)
-    assert load_pending_ask(await harness.state()) is None
-
-    scripted = ScriptedGenai([_says("stop")])
-    adapter = _scripted_planner(scripted)
-    answer = types.Content(
-        role="user",
-        parts=[
-            create_request_input_response(
-                _pending_ask_interrupt_id(await harness.events()), {"result": {"spec_id": SPEC}}
-            )
-        ],
-    )
-    result = await harness.run(adapter, question="kenya debt", readings=[], new_message=answer)
-
-    assert result is not None
-    (request,) = scripted.requests
-    assert _call_and_response_names(request) == []
-    brief = _brief_follows_the_question(request)
-    assert question["message"] in brief
-    assert f"They picked 'a candidate', id `{SPEC}`." in brief
-
-
-async def test_the_branch_check_runs_on_the_events_a_run_left_before_pausing_for_an_ask(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A run that ends on a planner-side ask has the events it appended
-    checked, as a run that ends on a plan does."""
-    checked: list[list[Event]] = []
-    real_check = planner_adapter._check_branches
-
-    def spy(events: Any, **kwargs: Any) -> None:
-        checked.append(list(events))
-        real_check(events, **kwargs)
-
-    monkeypatch.setattr(planner_adapter, "_check_branches", spy)
-    scripted = ScriptedGenai([_calls((PLANNER_ASK, {"message": "Which source did you mean?"}))])
-    adapter = _scripted_planner(scripted)
-
-    output = await _AdapterHarness().run(adapter, question="kenya debt", readings=[])
-
-    assert output is None
-    assert len(checked) == 1, "the branch check did not run on the run that paused"
-    assert {event.author for event in checked[0]} >= {AGENT_NAME}
 
 
 def _referring_proposals(referral: dict[str, Any]) -> Callable[[Sequence[Any]], list[Any]]:
@@ -1487,17 +1222,16 @@ async def test_a_referral_the_user_decides_ends_the_run_on_the_adapters_own_ask(
     model turn composes it."""
     scripted = ScriptedGenai([_calls(*_DECLARE), _says("never sent")])
     adapter = scripted_planner(scripted, tools=_referring_proposals(referral))
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     output = await harness.run(adapter, question="kenya debt", readings=[])
 
     assert output is None, "the ask should pause this call, not resolve it"
     assert len(scripted.requests) == 1
     asks = [
-        part.function_call.args
-        for event in await harness.events()
-        for part in (event.content.parts if event.content and event.content.parts else [])
-        if part.function_call is not None and part.function_call.name == PLANNER_ASK
+        call["args"]
+        for call in planner_calls(await harness.records())
+        if call["name"] == PLANNER_ASK
     ]
     mismatch = referral.get("source_mismatch", False)
     lead = referral_sentence(referral["kind"], source_mismatch=mismatch)
@@ -1505,45 +1239,30 @@ async def test_a_referral_the_user_decides_ends_the_run_on_the_adapters_own_ask(
     assert asks == [{"message": f"{lead} {question}", "candidates": candidates}]
 
 
-def _pending_ask_interrupt_id(events: list[Event]) -> str:
-    """The `interrupt_id` (the function call's own `id`) of the most recent
-    `REQUEST_INPUT_FUNCTION_CALL_NAME` call on record, the pause the planner node makes on
-    the planner's ask under the ask's call id -- what a real resume answers
-    with `create_request_input_response`, the same way `harness.studio`'s own
-    `/interrupt` route builds one for the wire equivalent."""
-    for event in reversed(events):
-        if not event.content or not event.content.parts:
-            continue
-        for part in event.content.parts:
-            call = part.function_call
-            if call is not None and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
-                assert call.id is not None
-                return call.id
-    raise AssertionError("no request-input call on record")
-
-
 async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """The planner node runs a pick's replan under the switch's
     `_unless_stopped`, which runs the adapter as a task so a Stop can reach it.
-    A planner-side ask pauses the run through a real `ctx.run_node`,
-    the pick survives the pause in durable state, the answer resumes and
-    finishes the draft, and the run reports its proposal from inside the
-    task."""
+    A planner-side ask pauses the run, the pick survives the pause in the
+    stored state, the answer resumes and finishes the draft, and the run
+    reports its proposal from inside the task."""
     plan = _translated_plan(decision, requirement, derived_requirement)
     scripted = ScriptedGenai(
         [_calls((PLANNER_ASK, {"message": "Which source did you mean?"})), _calls(*_DECLARE)]
     )
-    adapter = _scripted_planner(scripted, compiled_proposals=True)
-    harness = _AdapterHarness()
-    reports: list[dict[str, Any]] = []
+    answered: list[str] = []
+    adapter = scripted_planner(
+        scripted,
+        tools=use_compiled_proposals,
+        on_tool_answered=lambda name, answer: answered.append(name),
+    )
+    harness = PlannerHarness()
     entry: dict[str, Any] = {
         "question": plan.question,
         "readings": [],
         "prior_plan": plan.model_dump(mode="json"),
         "pick": _PICKED,
-        "on_progress": reports.append,
         "stoppable": True,
     }
 
@@ -1551,14 +1270,10 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
 
     assert paused is None, "the ask should pause the replan, not resolve it"
     assert decision_pick(await harness.state()) == _PICKED
-    interrupt_id = _pending_ask_interrupt_id(await harness.events())
-    resume = types.Content(
-        role="user", parts=[create_request_input_response(interrupt_id, {"result": "2020"})]
-    )
-    resumed = await harness.run(adapter, new_message=resume, **entry)
+    resumed = await harness.run(adapter, answer=one_answer({"text": "2020"}), **entry)
     assert resumed is not None and resumed["plan"]["version"] == plan.version
     assert decision_pick(await harness.state()) == _PICKED
-    assert [report["tools"] for report in reports] == [[PLANNER_ASK], ["propose_plan"]]
+    assert answered == [PLANNER_ASK, "propose_plan"]
 
 
 _BRIEF_MARKER = "Context for this question."
@@ -1566,7 +1281,7 @@ _BRIEF_MARKER = "Context for this question."
 
 def _brief_follows_the_question(request: Any) -> str:
     """The one brief in `request`, after checking it directly follows the
-    turn's question. That is the latest "probe", the message `_AdapterHarness`
+    turn's question. That is the latest "probe", the message `PlannerHarness`
     opens every run on."""
     texts = [
         "".join(part.text or "" for part in content.parts or []) for content in _contents(request)
@@ -1580,11 +1295,9 @@ def _brief_follows_the_question(request: Any) -> str:
 async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """ADK hands a node its input only on a live run, so a planner-side ask's
-    resume would send the model no brief if the brief travelled as node
-    input. The adapter gives the brief to the planner's node
-    (`harness.planner_node.planner_node`), which puts it after the turn's
-    question on every request: the first request after the answer,
+    """The adapter puts the brief after the turn's question on every
+    request (`PlannerAdapter._run_planner`): the first request after the
+    answer to a planner-side ask,
     which runs the planner again with the user's pick in its brief, and the
     amend call's, which renders the plan it changes and the amendment after
     the readings. No request carries a brief twice."""
@@ -1607,7 +1320,7 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
         ]
     )
     adapter = _scripted_planner(scripted, compiled_proposals=True)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     paused = await harness.run(
         adapter, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
@@ -1615,17 +1328,12 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
     assert paused is None, "the ask should pause this call, not resolve it"
     asked = len(scripted.requests)
 
-    interrupt_id = _pending_ask_interrupt_id(await harness.events())
-    resume_message = types.Content(
-        role="user",
-        parts=[create_request_input_response(interrupt_id, {"result": {"spec_id": SPEC}})],
-    )
     resumed = await harness.run(
         adapter,
         question=plan.question,
         readings=[],
         prior_plan=plan.model_dump(mode="json"),
-        new_message=resume_message,
+        answer=one_answer({"spec_id": SPEC}),
     )
     assert resumed is not None, "a real answer should let the same turn finish"
     assert resumed["plan"]["version"] == plan.version
@@ -1835,7 +1543,7 @@ async def test_a_refusal_on_a_windowed_copy_holds_what_the_fault_names(
     holds nothing, and a `RediscoveryNeeded` holds its spec_id as it names it.
     The payload is the one the executor's `_refusal_shape` builds."""
     scripted = ScriptedGenai([_says("still nothing")])
-    harness = _AdapterHarness(
+    harness = PlannerHarness(
         {
             WINDOWED_PINS_STATE_KEY: [
                 {"spec_id": _WINDOWED_ID, "identity": {}, "windowed_from": SPEC}
@@ -2066,7 +1774,7 @@ async def _first_request_with_readings(
     `refusal` or the user's `amendment`."""
     scripted = ScriptedGenai([_calls(*_DECLARE)])
     adapter = _scripted_planner(scripted, compiled_proposals=True)
-    harness = _AdapterHarness(stored)
+    harness = PlannerHarness(stored)
     await harness.run(
         adapter,
         question=plan.question,
@@ -2219,7 +1927,7 @@ async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lift
     runs = 3 if between is not None else 2
     scripted = ScriptedGenai([_says("still nothing")] * runs)
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     refusal = _rediscovery_refusal(SPEC, code)
     if also is not None:
         refusal["also_stopped"] = [_rediscovery_refusal(SPEC, also)]
@@ -2240,7 +1948,7 @@ async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lift
             question="aid to guatemala",
             readings=_turn_readings(),
             refusal=refusal,
-            resume_inputs={"ask": {"result": "since 2015"}} if between == "resumed" else None,
+            answer=one_answer({"text": "since 2015"}) if between == "resumed" else None,
         )
     readings = _turn_readings()
     readings[0]["observed_at"] = (before if observed == "before" else after).isoformat()
@@ -2312,26 +2020,14 @@ async def test_every_spec_refused_since_the_first_draft_is_named_and_unpinnable(
     pinnable: list[list[str]] = []
     briefs: list[str] = []
 
-    async def _node(ctx: Context, node_input: Any) -> Any:
-        del node_input
+    async def _node(ctx: NodeCtx[Any]) -> Any:
         for call in calls:
             before = len(scripted.requests)
             await adapter(ctx=ctx, question="aid to guatemala", readings=readings, **call)
-            pinnable.append(list(pin_sources(cast(SessionState, ctx.session.state))))
+            pinnable.append(list(pin_sources(cast(SessionState, ctx.state))))
             briefs.append(_brief_follows_the_question(scripted.requests[before]))
 
-    wf = Workflow(
-        name="adapter_test_wf",
-        edges=[(START, node(_node, name="adapter_under_test", rerun_on_resume=True))],
-    )
-    sessions = InMemorySessionService()
-    runner = Runner(node=wf, app_name=_APP, session_service=sessions)
-    session = await sessions.create_session(app_name=_APP, user_id=_USER)
-    content = types.Content(role="user", parts=[types.Part(text="probe")])
-    async for _ in runner.run_async(
-        user_id=_USER, session_id=session.id, new_message=content, run_config=SSE
-    ):
-        pass
+    await in_node(_node)
 
     shown = [SPEC, SPEC_B, SPEC_C, *([_SIBLING] if siblings == "fetched" else [])]
     refused_by_call = [(), (SPEC,), (SPEC, SPEC_C), (SPEC, SPEC_C), ()]
@@ -2401,8 +2097,7 @@ async def test_a_replan_admits_a_pin_of_another_count_the_refused_reading_offere
     adapter = _scripted_planner(scripted)
     after: dict[str, Any] = {}
 
-    async def _node(ctx: Context, node_input: Any) -> Any:
-        del node_input
+    async def _node(ctx: NodeCtx[Any]) -> Any:
         await adapter(ctx=ctx, question="aid", readings=dumped)
         first = load_plan(ctx.state)
         assert first is not None
@@ -2415,22 +2110,9 @@ async def test_a_replan_admits_a_pin_of_another_count_the_refused_reading_offere
             refusal=_rediscovery_refusal(gross),
         )
         after["plan"] = load_plan(ctx.state)
-        after["pinnable"] = list(pin_sources(cast(SessionState, ctx.session.state)))
+        after["pinnable"] = list(pin_sources(cast(SessionState, ctx.state)))
 
-    wf = Workflow(
-        name="adapter_test_wf",
-        edges=[(START, node(_node, name="adapter_under_test", rerun_on_resume=True))],
-    )
-    sessions = InMemorySessionService()
-    runner = Runner(node=wf, app_name=_APP, session_service=sessions)
-    session = await sessions.create_session(
-        app_name=_APP, user_id=_USER, state={ORCHESTRATOR_SPECS_KEY: {gross: block}}
-    )
-    content = types.Content(role="user", parts=[types.Part(text="probe")])
-    async for _ in runner.run_async(
-        user_id=_USER, session_id=session.id, new_message=content, run_config=SSE
-    ):
-        pass
+    await in_node(_node, state={ORCHESTRATOR_SPECS_KEY: {gross: block}})
 
     replanning = scripted.requests[after["replanned_from"] :]
     (answered,) = _answers(replanning[-1], "propose_plan")
@@ -2942,8 +2624,7 @@ async def test_an_amend_call_shows_the_other_count_and_the_plan_pins_it(
     # Both entries run in one node, as the graph's planner node re-enters the
     # adapter over the `amend` edge in the same session. No translation
     # compiles, so each ends with no plan ready, leaving its draft on record.
-    async def _node(ctx: Context, node_input: Any) -> Any:
-        del node_input
+    async def _node(ctx: NodeCtx[Any]) -> Any:
         await adapter(ctx=ctx, question="aid", readings=readings)
         first = load_plan(ctx.state)
         assert first is not None
@@ -2957,20 +2638,7 @@ async def test_an_amend_call_shows_the_other_count_and_the_plan_pins_it(
         )
         plans.append(load_plan(ctx.state))
 
-    wf = Workflow(
-        name="adapter_test_wf",
-        edges=[(START, node(_node, name="adapter_under_test", rerun_on_resume=True))],
-    )
-    sessions = InMemorySessionService()
-    runner = Runner(node=wf, app_name=_APP, session_service=sessions)
-    session = await sessions.create_session(
-        app_name=_APP, user_id=_USER, state={ORCHESTRATOR_SPECS_KEY: {gross: block}}
-    )
-    content = types.Content(role="user", parts=[types.Part(text="probe")])
-    async for _ in runner.run_async(
-        user_id=_USER, session_id=session.id, new_message=content, run_config=SSE
-    ):
-        pass
+    await in_node(_node, state={ORCHESTRATOR_SPECS_KEY: {gross: block}})
 
     net = block["resolved"]["alternative_measures"][0]["definition"]["spec_id"]
     assert f"other counts: net disbursements [{net}]" in _prompt_text(
@@ -2991,7 +2659,7 @@ async def test_an_entry_records_whether_the_users_amendment_opened_it() -> None:
     """An entry carrying the user's amendment says so in state, for `propose_plan`
     to honour a decision they make in it. The next entry without one, a replan
     here, clears it, and a resume inside an entry keeps what the entry recorded."""
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     scripted = ScriptedGenai([_says("Planned.")] * 4)
     adapter = _scripted_planner(scripted)
     recorded = []
@@ -3000,7 +2668,7 @@ async def test_an_entry_records_whether_the_users_amendment_opened_it() -> None:
     recorded.append(amendment_entry(await harness.state()))
     await harness.run(adapter, question="kenya debt", readings=[], amendment="one total")
     recorded.append(amendment_entry(await harness.state()))
-    await harness.run(adapter, question="kenya debt", readings=[], resume_inputs={"ask": {}})
+    await harness.run(adapter, question="kenya debt", readings=[], answer={})
     recorded.append(amendment_entry(await harness.state()))
     await harness.run(
         adapter, question="kenya debt", readings=[], refusal=_rediscovery_refusal(SPEC)
@@ -3029,7 +2697,7 @@ async def test_an_entry_records_the_pick_it_replans_for_and_says_it_on_its_own_l
     from the user's amendment. Its refusal carries the sentence the card shows
     under the decision. A resume inside the entry keeps the pick, and the
     next entry without one clears it."""
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     scripted = ScriptedGenai([_says("Planned.")] * 3)
     adapter = _scripted_planner(scripted)
     pick = _PICKED
@@ -3040,9 +2708,7 @@ async def test_an_entry_records_the_pick_it_replans_for_and_says_it_on_its_own_l
     recorded.append((decision_pick(state), amendment_entry(state)))
     (last,) = scripted.requests[-1].content_list[-1:]
     asked = "\n".join(part.text or "" for part in last.parts or [])
-    await harness.run(
-        adapter, question="kenya aid", readings=[], pick=pick, resume_inputs={"ask": {}}
-    )
+    await harness.run(adapter, question="kenya aid", readings=[], pick=pick, answer={})
     recorded.append(decision_pick(await harness.state()))
     amended = await harness.run(adapter, question="kenya aid", readings=[], amendment="one total")
     recorded.append(decision_pick(await harness.state()))
@@ -3085,7 +2751,7 @@ async def test_an_amendment_still_works_through_the_adapter(
     digest this brief rendered. A brief that lost the prior plan would leave
     the model with no version to name.
     """
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     seeded = _translated_plan(decision, requirement, derived_requirement, version=5).model_dump(
         mode="json"
     )
@@ -3544,7 +3210,7 @@ def test_a_stalled_referral_ends_the_entry_on_plan_not_ready_carrying_its_constr
     """The second identical repair referral ends the entry with no further
     round: the refusal carries the compile issue the referral names, which
     the user's sentence states (`harness.sentences.referral_reason`)."""
-    tracker = PlannerRun(agent="dfo_planner")
+    tracker = PlannerRun()
     referred = {
         "outcome": "invalid_input",
         "kind": "requirement_needs_repair",
@@ -3613,7 +3279,7 @@ def test_a_closing_referral_ends_the_entry_on_the_proposal_carrying_it(
     before, or a data service that timed out until the discovery budget was
     spent ends the entry as a final refusal naming what stopped it, as soon
     as a proposal's translation answers with it."""
-    tracker = PlannerRun(agent="dfo_planner")
+    tracker = PlannerRun()
     _track_proposal(tracker, referral)
 
     assert tracker.ready_to_break
@@ -3666,7 +3332,7 @@ def test_a_transient_referral_ends_the_entry_as_the_wall_bound_only_for_a_call_n
         "reason": reason,
         **marks,
     }
-    tracker = PlannerRun(agent="dfo_planner")
+    tracker = PlannerRun()
     token = current_discovery_time_left.set(None if time_left is None else lambda: time_left)
     try:
         _track_proposal(tracker, referral)
@@ -3689,7 +3355,7 @@ def test_last_referral_is_cleared_once_a_later_translation_resolves_the_requirem
     last one recorded: a later `ok` response clears it, so an entry that
     ends after that clear carries no referral the plan no longer has
     (`not_ready`)."""
-    tracker = PlannerRun(agent="dfo_planner")
+    tracker = PlannerRun()
     referred = {
         "outcome": "choice_required",
         "kind": "source_ambiguous",
@@ -3710,7 +3376,7 @@ def test_last_referral_survives_a_translation_carrying_no_outcome() -> None:
     translation itself ever returns, but the defensive case `referral_of`
     already reads for -- leaves `last_referral` as it was, so an entry that
     ends right after still carries the last real referral."""
-    tracker = PlannerRun(agent="dfo_planner")
+    tracker = PlannerRun()
     referred = {
         "outcome": "choice_required",
         "kind": "source_ambiguous",
@@ -3858,10 +3524,10 @@ def _skill_surface(responses: dict[str, ToolCallResult]) -> FixtureSurface:
 async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """Two entries of one turn, each its own `run_node` child as the graph's
-    planner node runs them: the later entry's first request holds the turn's
-    question, the brief after it with the amendment, and none of the earlier
-    entry's tool calls, since a `single_turn` run reads only its own node path.
+    """Two entries of one turn, each a planner run of its own: the later
+    entry's first request holds the turn's question, the brief after it with
+    the amendment, and none of the earlier entry's tool calls, since each run
+    sends the model only the question and its brief.
     The skill the earlier entry read is in the later brief instead, starred on
     the Skills named line."""
     scripted = ScriptedGenai(
@@ -3886,33 +3552,17 @@ async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls
     entries: list[dict[str, Any]] = [{}, {"amendment": "only since 2015"}]
     readings = _skill_readings("dfo-faq")
 
-    async def _turn(ctx: Context, node_input: Any) -> None:
-        del node_input
+    async def _turn(ctx: NodeCtx[Any]) -> None:
         for entry in entries:
+            await adapter(
+                ctx=ctx,
+                question="gdp guatemala",
+                readings=readings,
+                prior_plan=plan_json,
+                **entry,
+            )
 
-            async def _entry(ctx: Context, node_input: Any, entry: dict[str, Any] = entry) -> Any:
-                del node_input
-                return await adapter(
-                    ctx=ctx,
-                    question="gdp guatemala",
-                    readings=readings,
-                    prior_plan=plan_json,
-                    **entry,
-                )
-
-            await ctx.run_node(node(_entry, name="planner", rerun_on_resume=True))
-
-    wf = Workflow(
-        name="adapter_test_wf", edges=[(START, node(_turn, name="turn", rerun_on_resume=True))]
-    )
-    sessions = InMemorySessionService()
-    runner = Runner(node=wf, app_name=_APP, session_service=sessions)
-    session = await sessions.create_session(app_name=_APP, user_id=_USER)
-    content = types.Content(role="user", parts=[types.Part(text="probe")])
-    async for _ in runner.run_async(
-        user_id=_USER, session_id=session.id, new_message=content, run_config=SSE
-    ):
-        pass
+    await in_node(_turn)
 
     # `scripted.requests[0..2]` are the first entry: `get_skill`,
     # `propose_plan`, and the closing text. `[3]` is the later entry's first
@@ -3968,7 +3618,7 @@ async def test_a_first_draft_carries_no_skill_an_earlier_plan_read() -> None:
         ]
     )
     adapter = _scripted_planner(scripted, surface=_skill_page_surface())
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
 
     await harness.run(adapter, **entry)
@@ -4008,7 +3658,7 @@ async def test_a_page_stored_with_the_old_tools_call_lines_is_shown_naming_get_s
     }
     scripted = ScriptedGenai([_says("stop")])
     adapter = _scripted_planner(scripted, surface=_skill_page_surface())
-    harness = _AdapterHarness(state)
+    harness = PlannerHarness(state)
 
     await harness.run(
         adapter,
@@ -4035,9 +3685,10 @@ async def test_a_page_stored_in_the_current_form_is_shown_as_stored() -> None:
 
 
 async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> None:
-    """A read stores its own page's text and a short index, so a later read's
-    state delta carries no earlier page and each text appears in one event,
-    however many reads and entries follow."""
+    """A read stores its own page's text and a short index, so the state a
+    later read's response wrote carries no earlier page and each text
+    appears in the state one response wrote, however many reads and entries
+    follow."""
     first, second = "# FAQ " + "a" * 400, "# Methods " + "b" * 400
     scripted = ScriptedGenai(
         [
@@ -4056,18 +3707,18 @@ async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> 
             }
         ),
     )
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
 
     await harness.run(adapter, **entry)
     await harness.run(adapter, amendment="only since 2015", **entry)
 
     deltas = [
-        json.dumps(event.actions.state_delta)
-        for event in await harness.events()
-        if event.actions and event.actions.state_delta
+        json.dumps(item.state)
+        for item in harness.emitted
+        if isinstance(item, PlannerAnswers) and item.state
     ]
-    # The earliest delta holding the second page is its file-read event.
+    # The earliest delta holding the second page is its file-read response's.
     read_second = next(delta for delta in deltas if second in delta)
     assert first not in read_second
     assert sum(delta.count(first) for delta in deltas) == 1
@@ -4099,22 +3750,16 @@ async def test_the_skills_an_entry_shows_survive_a_planner_ask_and_reach_the_nex
         ]
     )
     adapter = _scripted_planner(scripted, surface=_skill_page_surface())
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
 
     await harness.run(adapter, **entry)
     paused = await harness.run(adapter, amendment="only since 2015", **entry)
     assert paused is None, "the ask should pause the amend"
     resuming = len(scripted.requests)
-    answer = types.Content(
-        role="user",
-        parts=[
-            create_request_input_response(
-                _pending_ask_interrupt_id(await harness.events()), {"result": {"spec_id": SPEC}}
-            )
-        ],
+    await harness.run(
+        adapter, amendment="only since 2015", answer=one_answer({"spec_id": SPEC}), **entry
     )
-    await harness.run(adapter, amendment="only since 2015", new_message=answer, **entry)
     replanning = len(scripted.requests)
     await harness.run(adapter, amendment="and drop Kenya", **entry)
 
@@ -4186,30 +3831,24 @@ async def test_an_answer_that_resumes_a_run_after_a_translated_proposal_is_read(
         ]
     )
     adapter = _scripted_planner(scripted, surface=surface)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     plan_json = draft.model_dump(mode="json")
 
     paused = await harness.run(adapter, question=draft.question, readings=[], prior_plan=plan_json)
     assert paused is None, "the ask should pause this call, not resolve it"
 
-    interrupt_id = _pending_ask_interrupt_id(await harness.events())
-    answer = types.Content(
-        role="user",
-        parts=[create_request_input_response(interrupt_id, {"result": {"text": "use debt stock"}})],
-    )
     output = await harness.run(
         adapter,
         question=draft.question,
         readings=[],
         prior_plan=plan_json,
-        new_message=answer,
+        answer=one_answer({"text": "use debt stock"}),
     )
     assert output is not None and output["refused"]["final"] is False
     proposals = [
-        part.function_response.response
-        for event in await harness.events()
-        for part in (event.content.parts if event.content and event.content.parts else [])
-        if part.function_response is not None and part.function_response.name == "propose_plan"
+        answer["response"]
+        for answer in planner_answers(await harness.records())
+        if answer["name"] == "propose_plan"
     ]
     assert [(p or {}).get("outcome") for p in proposals] == ["ok", "ok"], proposals
     assert (proposals[1] or {})["version"] == draft.version + 2
@@ -4399,31 +4038,25 @@ async def test_each_congo_is_settled_by_its_own_answer_and_reaches_search_as_pic
         ]
     )
     adapter = _scripted_planner(scripted, surface=surface)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     assert await harness.run(adapter, question=draft.question, readings=[]) is None
     for pick in (
         f"{dataset.id}|donor|Congo|country/COD",
         f"{dataset.id}|recipient|Congo|country/COG",
     ):
-        interrupt_id = _pending_ask_interrupt_id(await harness.events())
-        answer = types.Content(
-            role="user",
-            parts=[create_request_input_response(interrupt_id, {"result": {"spec_id": pick}})],
+        await harness.run(
+            adapter, question=draft.question, readings=[], answer=one_answer({"spec_id": pick})
         )
-        await harness.run(adapter, question=draft.question, readings=[], new_message=answer)
 
+    records = await harness.records()
     proposals = [
-        part.function_response.response
-        for event in await harness.events()
-        for part in (event.content.parts if event.content and event.content.parts else [])
-        if part.function_response is not None and part.function_response.name == "propose_plan"
+        answer["response"]
+        for answer in planner_answers(records)
+        if answer["name"] == "propose_plan"
     ]
     asked = [
-        part.function_call.args["candidates"]
-        for event in await harness.events()
-        for part in (event.content.parts if event.content and event.content.parts else [])
-        if part.function_call is not None and part.function_call.name == PLANNER_ASK
+        call["args"]["candidates"] for call in planner_calls(records) if call["name"] == PLANNER_ASK
     ]
     assert [[c["spec_id"] for c in candidates] for candidates in asked] == [
         [f"{dataset.id}|{role}|Congo|country/{code}" for code in ("COD", "COG")]
@@ -4493,96 +4126,6 @@ async def test_a_repeating_referral_ends_the_entry_on_its_second_identical_refer
         "code": StopCode.PLAN_NOT_READY,
     }
     assert len(scripted.requests) == 2
-
-
-async def test_a_run_leaves_every_event_it_appended_scoped_to_the_planner(
-    decision: Any, requirement: Any, derived_requirement: Any
-) -> None:
-    """The planner's own events carry `_PLANNER_BRANCH`, and no other agent runs.
-
-    ADK's `_is_event_belongs_to_branch` returns True when either side's branch
-    is empty, so keeping the planner's turns out of another agent's request
-    (the orchestrator's, on its own branch) rests entirely on the branch the
-    run is stamped with. `ctx.run_node` takes it as
-    `override_branch=_PLANNER_BRANCH`. This asserts what that bought, rather
-    than the argument being passed.
-
-    Translation runs inside the planner's own `propose_plan` call, so every function
-    call and response the run appended is the planner's: no second agent
-    makes a model call in a planner run.
-    """
-    scripted = ScriptedGenai([_computed(step) for step in _repeating_proposal_script(1)])
-    adapter = _scripted_planner(
-        scripted,
-        surface=_SkillPagesSurface(schemas=[], responses={"search": _NO_DATA_SEARCH_RESPONSE}),
-    )
-    draft = _gdp_plan(decision, requirement, derived_requirement)
-    harness = _AdapterHarness()
-
-    await harness.run(
-        adapter,
-        question=draft.question,
-        readings=[],
-        prior_plan=draft.model_dump(mode="json"),
-    )
-
-    events = await harness.events()
-    planner_events = [event for event in events if event.author == "dfo_planner"]
-    tool_authors = {
-        event.author
-        for event in events
-        if event.get_function_calls() or event.get_function_responses()
-    }
-
-    assert any(event.get_function_responses() for event in planner_events), (
-        "the run answered no planner tool call, so there is nothing to assert on"
-    )
-    assert tool_authors == {"dfo_planner"}
-    assert {event.branch for event in planner_events} == {_PLANNER_BRANCH}, (
-        "a planner event this run appended is not scoped to "
-        f"{_PLANNER_BRANCH!r}: "
-        f"{sorted({str(event.branch) for event in planner_events})!r}. Without "
-        "`override_branch=_PLANNER_BRANCH` on the planner's `ctx.run_node` call, ADK "
-        "treats an unbranched event as belonging to every branch."
-    )
-
-
-def _branch_check(*branches: tuple[str, str | None]) -> None:
-    """Run `_check_branches` over one event per `(author, branch)` pair."""
-    _check_branches(
-        [Event(author=author, branch=branch) for author, branch in branches],
-        planner="dfo_planner",
-    )
-
-
-@pytest.mark.parametrize("branch", [None, "", "dfo_orchestrator", "dfo_planner.x", "dfo_planner@1"])
-def test_a_planner_event_off_the_planner_branch_fails_the_branch_check(
-    branch: str | None,
-) -> None:
-    """The planner's events carry exactly `_PLANNER_BRANCH`. Any other value fails, an empty one included."""
-    with pytest.raises(PlannerAdapterError, match="other than"):
-        _branch_check(("dfo_planner", branch))
-
-
-@pytest.mark.parametrize(
-    "branches",
-    [(), (("user", None),), (("dfo_orchestrator", "dfo_orchestrator"),)],
-)
-def test_a_slice_with_no_planner_event_passes_the_branch_check(
-    branches: tuple[tuple[str, str | None], ...],
-) -> None:
-    """A run may leave no planner-authored event. A resumed run that finishes the
-    model turn the user's answer completed appends none, and the check judges the
-    events it is given."""
-    _branch_check(*branches)
-
-
-def test_the_branch_check_ignores_events_from_other_authors() -> None:
-    """Only the planner's events are judged, so a user event may be bare."""
-    _branch_check(
-        ("user", None),
-        ("dfo_planner", _PLANNER_BRANCH),
-    )
 
 
 async def test_translation_finds_the_plan_a_bare_amendment_records(
@@ -4715,10 +4258,10 @@ async def test_two_conversations_on_one_planner_each_report_into_their_own_strea
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """One `PlannerAdapter` serves every conversation, and each run reports to
-    the call it belongs to. Conversation A pauses on its first planner generation,
+    the node it runs in. Conversation A pauses on its first planner generation,
     conversation B runs its whole turn, and only then does A call `propose_plan`:
-    A's report has to land in A's own `on_progress` stream, and B's stream
-    must not grow once A resumes.
+    A's answer has to land in A's own events, and B's events must not grow
+    once A resumes.
 
     One script answers both conversations in the order their calls arrive:
     A's held first generation, B's one generation, then A's generation after
@@ -4738,11 +4281,8 @@ async def test_two_conversations_on_one_planner_each_report_into_their_own_strea
         surface=_SkillPagesSurface(schemas=[], responses={"search": _NO_DATA_SEARCH_RESPONSE}),
     )
     draft = _gdp_plan(decision, requirement, derived_requirement)
-    reports_a: list[dict[str, Any]] = []
-    reports_b: list[dict[str, Any]] = []
-
-    harness_a = _AdapterHarness()
-    harness_b = _AdapterHarness()
+    harness_a = PlannerHarness()
+    harness_b = PlannerHarness()
 
     async def _run_a() -> None:
         await harness_a.run(
@@ -4750,7 +4290,6 @@ async def test_two_conversations_on_one_planner_each_report_into_their_own_strea
             question="gdp guatemala",
             readings=[],
             prior_plan=draft.model_dump(mode="json"),
-            on_progress=reports_a.append,
         )
 
     task_a = asyncio.create_task(_run_a())
@@ -4758,20 +4297,24 @@ async def test_two_conversations_on_one_planner_each_report_into_their_own_strea
 
     # Conversation B's whole turn, in this coroutine's own task, while A
     # sits suspended above, before its `propose_plan` call.
-    await harness_b.run(
-        adapter, question="unrelated question", readings=[], on_progress=reports_b.append
-    )
-    reports_b_after_b = list(reports_b)
+    await harness_b.run(adapter, question="unrelated question", readings=[])
+    reports_b_after_b = list(harness_b.emitted)
 
     release_a.set()
     await task_a
 
-    assert reports_b == reports_b_after_b, (
-        "conversation B's on_progress stream grew after B's own turn had already "
-        f"finished -- conversation A's own propose_plan call reported into it: {reports_b}"
+    assert harness_b.emitted == reports_b_after_b, (
+        "conversation B's events grew after B's own turn had already finished -- "
+        f"conversation A's own propose_plan call reported into them: {harness_b.emitted}"
     )
-    assert any(report["tools"] == ["propose_plan"] for report in reports_a), (
-        "conversation A's own propose_plan call never reported into A's own on_progress stream"
+    answered_a = [
+        answer.name
+        for item in harness_a.emitted
+        if isinstance(item, PlannerAnswers)
+        for answer in item.answers
+    ]
+    assert "propose_plan" in answered_a, (
+        "conversation A's own propose_plan call never reported into A's own events"
     )
 
 
@@ -4835,7 +4378,7 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
         [_calls(("propose_plan", {"starts_new_plan": True, "question": "a different question"}))]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(
         adapter,
@@ -4866,7 +4409,7 @@ async def test_a_second_turn_on_one_session_clears_the_first_drafts_plan_and_bri
     drafts its own plan. It is not refused for restating no `amends_version`
     against a plan still on record from the first entry.
     """
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     second_proposal = {
         "question": "kenya oda 2023",
         "answer_mode": "computed",
@@ -4924,7 +4467,7 @@ async def test_a_later_first_draft_reads_none_of_the_earlier_plans_alignments(
     """The earlier entry's plan moved its `second` onto a compile. A later
     first-draft entry of the turn clears that plan, and its alignments go with
     it, so they are gone even when the entry records no plan of its own."""
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     # The first entry's declaration, then the later entry's call and the
     # generation its answer asks for.
     scripted = ScriptedGenai([_calls(*_DECLARE), _calls(*_DECLARE), _says("done")])
@@ -4982,15 +4525,15 @@ class _Drafts(NamedTuple):
     plan: Plan
 
 
-async def _assert_stored_as_live(harness: _AdapterHarness) -> None:
-    """Every key the last run left in the live session state, but a `temp:`
-    one, is in the session reloaded from the store with the same value. A key
-    the live state holds as `None` may be absent from the store."""
+async def _assert_stored_as_live(harness: PlannerHarness) -> None:
+    """Every key the last run left in the live state is in the state as the
+    turn stores it with the same value. A key the live state holds as `None`
+    may be absent from the store."""
     stored = await harness.state()
     lost: dict[str, tuple[Any, Any]] = {}
     for key, value in harness.live_state().items():
         held = stored.get(key, _ABSENT)
-        if key.startswith(State.TEMP_PREFIX) or held == value:
+        if held == value:
             continue
         if value is None and held is _ABSENT:
             continue
@@ -4998,32 +4541,21 @@ async def _assert_stored_as_live(harness: _AdapterHarness) -> None:
     assert lost == {}
 
 
-def _answer_to_the_last_ask(events: list[Event]) -> types.Content:
-    return types.Content(
-        role="user",
-        parts=[
-            create_request_input_response(
-                _pending_ask_interrupt_id(events), {"result": {"spec_id": SPEC}}
-            )
-        ],
-    )
-
-
-async def _first_draft_proposes(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _first_draft_proposes(harness: PlannerHarness, drafts: _Drafts) -> None:
     scripted = ScriptedGenai([_calls(("propose_plan", drafts.proposal)), _says("stop")])
     adapter = _scripted_planner(scripted)
     await harness.run(adapter, question="kenya debt", readings=[])
     await _assert_stored_as_live(harness)
 
 
-async def _first_draft_asks(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _first_draft_asks(harness: PlannerHarness, drafts: _Drafts) -> None:
     del drafts
     adapter = _scripted_planner(ScriptedGenai([_calls(_ASK_A_SOURCE)]))
     assert await harness.run(adapter, question="kenya debt", readings=[]) is None
     await _assert_stored_as_live(harness)
 
 
-async def _asks_after_a_referral(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _asks_after_a_referral(harness: PlannerHarness, drafts: _Drafts) -> None:
     async def referring(call: Any) -> dict[str, object]:
         del call
         return dict(_NEEDS_REPAIR)
@@ -5034,40 +4566,34 @@ async def _asks_after_a_referral(harness: _AdapterHarness, drafts: _Drafts) -> N
     await _assert_stored_as_live(harness)
 
 
-async def _resumed_after_an_answer(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _resumed_after_an_answer(harness: PlannerHarness, drafts: _Drafts) -> None:
     scripted = ScriptedGenai(
         [_calls(_ASK_A_SOURCE), _calls(("propose_plan", drafts.proposal)), _says("stop")]
     )
     adapter = _scripted_planner(scripted)
     assert await harness.run(adapter, question="kenya debt", readings=[]) is None
-    answer = _answer_to_the_last_ask(await harness.events())
-    await harness.run(adapter, question="kenya debt", readings=[], new_message=answer)
+    await harness.run(
+        adapter, question="kenya debt", readings=[], answer=one_answer({"spec_id": SPEC})
+    )
     await _assert_stored_as_live(harness)
 
 
-async def _resumed_proposes_and_asks_again(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _resumed_proposes_and_asks_again(harness: PlannerHarness, drafts: _Drafts) -> None:
     scripted = ScriptedGenai(
         [_calls(_ASK_A_SOURCE), _calls(("propose_plan", drafts.proposal)), _calls(_ASK_A_SOURCE)]
     )
     adapter = _scripted_planner(scripted)
     assert await harness.run(adapter, question="kenya debt", readings=[]) is None
-    answer = _answer_to_the_last_ask(await harness.events())
     assert (
-        await harness.run(adapter, question="kenya debt", readings=[], new_message=answer) is None
+        await harness.run(
+            adapter, question="kenya debt", readings=[], answer=one_answer({"spec_id": SPEC})
+        )
+        is None
     )
     await _assert_stored_as_live(harness)
 
 
-async def _resumed_from_a_legacy_ask(harness: _AdapterHarness, drafts: _Drafts) -> None:
-    del drafts
-    await _pause_on_a_legacy_ask(harness, {"message": "Which source did you mean?"})
-    adapter = _scripted_planner(ScriptedGenai([_says("stop")]))
-    answer = _answer_to_the_last_ask(await harness.events())
-    await harness.run(adapter, question="kenya debt", readings=[], new_message=answer)
-    await _assert_stored_as_live(harness)
-
-
-async def _opened_by_a_card_pick(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _opened_by_a_card_pick(harness: PlannerHarness, drafts: _Drafts) -> None:
     adapter = _scripted_planner(ScriptedGenai([_calls(_ASK_A_SOURCE)]))
     assert (
         await harness.run(
@@ -5082,14 +4608,14 @@ async def _opened_by_a_card_pick(harness: _AdapterHarness, drafts: _Drafts) -> N
     await _assert_stored_as_live(harness)
 
 
-async def _amended(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _amended(harness: PlannerHarness, drafts: _Drafts) -> None:
     await _first_draft_proposes(harness, drafts)
     adapter = _scripted_planner(ScriptedGenai([_says("stop")]))
     await harness.run(adapter, question="kenya debt", readings=[], amendment="one total")
     await _assert_stored_as_live(harness)
 
 
-async def _replanned_on_a_refusal(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _replanned_on_a_refusal(harness: PlannerHarness, drafts: _Drafts) -> None:
     await _first_draft_proposes(harness, drafts)
     adapter = _scripted_planner(ScriptedGenai([_says("stop")]))
     await harness.run(
@@ -5099,7 +4625,7 @@ async def _replanned_on_a_refusal(harness: _AdapterHarness, drafts: _Drafts) -> 
 
 
 async def _replanned_on_a_refusal_earning_a_decline(
-    harness: _AdapterHarness, drafts: _Drafts
+    harness: PlannerHarness, drafts: _Drafts
 ) -> None:
     adapter = _scripted_planner(ScriptedGenai([_says("stop")]))
     await harness.run(
@@ -5112,7 +4638,7 @@ async def _replanned_on_a_refusal_earning_a_decline(
     await _assert_stored_as_live(harness)
 
 
-async def _a_second_first_draft(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _a_second_first_draft(harness: PlannerHarness, drafts: _Drafts) -> None:
     await _first_draft_proposes(harness, drafts)
     await _first_draft_proposes(harness, drafts)
 
@@ -5125,7 +4651,6 @@ async def _a_second_first_draft(harness: _AdapterHarness, drafts: _Drafts) -> No
         _asks_after_a_referral,
         _resumed_after_an_answer,
         _resumed_proposes_and_asks_again,
-        _resumed_from_a_legacy_ask,
         _opened_by_a_card_pick,
         _amended,
         _replanned_on_a_refusal,
@@ -5134,20 +4659,20 @@ async def _a_second_first_draft(harness: _AdapterHarness, drafts: _Drafts) -> No
     ],
 )
 async def test_an_entry_leaves_no_session_write_out_of_the_stored_session(
-    scenario: Callable[[_AdapterHarness, _Drafts], Awaitable[None]],
+    scenario: Callable[[PlannerHarness, _Drafts], Awaitable[None]],
     decision: Any,
     requirement: Any,
     derived_requirement: Any,
 ) -> None:
-    """Every key a planner entry leaves in the live session state, when it
-    pauses on an ask or finishes, holds the same value in the stored session,
-    except `temp:` keys. Nothing the adapter or the planner's tools write is lost
-    at the next `Runner.run_async`."""
+    """Every key a planner entry leaves in the live state, when it pauses on
+    an ask or finishes, holds the same value in the state the turn stores.
+    Nothing the adapter or the planner's tools write is lost at the node's
+    boundary."""
     drafts = _Drafts(
         _amendment_proposal(decision, requirement, derived_requirement),
         _translated_plan(decision, requirement, derived_requirement),
     )
-    await scenario(_AdapterHarness(), drafts)
+    await scenario(PlannerHarness(), drafts)
 
 
 async def test_a_sixth_amendment_turn_still_records_its_own_version(
@@ -5169,7 +4694,7 @@ async def test_a_sixth_amendment_turn_still_records_its_own_version(
     1-2-3-4-5-6 across the six turns rather than any turn resetting it at
     version 1.
     """
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     proposal = _amendment_proposal(decision, requirement, derived_requirement)
 
     # The version the recorded plan stands at as each turn opens. Turn 1
@@ -5193,8 +4718,8 @@ async def test_a_sixth_amendment_turn_still_records_its_own_version(
 
 
 async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
-    """Two calls in one node, the shape the graph's `amend` and `replan` edges
-    take inside one `Runner.run_async`. Each call's requests carry its own
+    """Two calls in one node segment, the shape the graph's `amend` and
+    `replan` edges take within one turn. Each call's requests carry its own
     brief once, after the turn's question. The second brief opens with the
     first byte for byte, since `question`, `readings`, `canvas_digest` and
     `conversation_digest` do not change mid-turn, and only the ask is added
@@ -5218,8 +4743,7 @@ async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
         ledger=planner_adapter._readings_ledger(readings),
     )
 
-    async def _node(ctx: Context, node_input: Any) -> Any:
-        del node_input
+    async def _node(ctx: NodeCtx[Any]) -> Any:
         await adapter(
             ctx=ctx,
             question=question,
@@ -5236,16 +4760,7 @@ async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
             amendment="only since 2015",
         )
 
-    node_fn = node(_node, name="adapter_under_test", rerun_on_resume=True)
-    wf = Workflow(name="adapter_test_wf", edges=[(START, node_fn)])
-    sessions = InMemorySessionService()
-    runner = Runner(node=wf, app_name=_APP, session_service=sessions)
-    session = await sessions.create_session(app_name=_APP, user_id=_USER)
-    content = types.Content(role="user", parts=[types.Part(text="probe")])
-    async for event in runner.run_async(
-        user_id=_USER, session_id=session.id, new_message=content, run_config=SSE
-    ):
-        assert isinstance(event, Event)
+    await in_node(_node)
 
     assert _brief_follows_the_question(scripted.requests[0]) == expected_first_message
     second = _brief_follows_the_question(scripted.requests[1])
@@ -5298,7 +4813,7 @@ async def test_a_refused_loop_leaves_the_last_recorded_version_on_record(
     The four calls before it amend what each recorded (`_amend_step`), so
     the plan on record is the fourth: version 4, still a draft.
     """
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     proposal = _amendment_proposal(decision, requirement, derived_requirement)
     step = _computed(_amend_step(proposal, start_version=1))
     scripted = ScriptedGenai([_calls(("propose_plan", proposal)), step, step, step, step])
@@ -5316,11 +4831,10 @@ async def test_a_refused_loop_leaves_the_last_recorded_version_on_record(
 async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """A mid-turn resume re-enters `__call__` with `ctx.resume_inputs`
-    carrying the interrupt's own answer. Driven through a real planner ask
-    and a real `create_request_input_response` answer, so this is the same
-    boundary a live pause-and-resume crosses, not a double standing in for
-    one.
+    """A mid-turn resume re-enters `__call__` with the user's `answer` to
+    the pause. Driven through a real planner ask and an answer recorded on
+    the turn, so this is the same boundary a live pause-and-resume crosses,
+    not a double standing in for one.
 
     Three rounds are spent for real, through `propose_plan`'s own
     persisted write, in the same continuous planner turn that then asks
@@ -5335,7 +4849,7 @@ async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
     would land the fifth call within a fresh 1-2 budget, succeeding
     rather than refusing at all.
     """
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     proposal = _amendment_proposal(decision, requirement, derived_requirement)
 
     # One continuous planner turn: three real `propose_plan` rounds (no
@@ -5371,25 +4885,19 @@ async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
     paused_requests = len(scripted.requests)
     assert paused is None, "the ask should pause this call, not resolve it"
 
-    # The resumed entry: `ctx.resume_inputs` carries the interrupt's own
-    # answer, populated by ADK's own resume machinery, not set by hand.
+    # The resumed entry: the answer to the pause resumes it.
     # `propose_plan` runs twice more -- the fourth and fifth cumulative
     # rounds if the three spent before the ask survived, only the first and
     # second if an ungated reset wiped them. Gated correctly, the fourth is
     # still within the cap and the fifth goes past it. The answer runs the
     # planner again, whose brief shows the version the paused run recorded,
     # version 3, which the fourth call amends.
-    interrupt_id = _pending_ask_interrupt_id(await harness.events())
-    resume_message = types.Content(
-        role="user",
-        parts=[create_request_input_response(interrupt_id, {"result": {"spec_id": SPEC}})],
-    )
     result = await harness.run(
         adapter,
         question="kenya debt",
         readings=[],
         amendment="one more change",
-        new_message=resume_message,
+        answer=one_answer({"spec_id": SPEC}),
     )
 
     assert result is not None and "refused" in result
@@ -5474,7 +4982,7 @@ async def test_a_run_whose_model_call_the_budget_closed_ends_the_entry_on_that_b
     spent: dict[str, float], code: StopCode
 ) -> None:
     """The model answers a closed call with the bound's sentence
-    (`harness.turn_budget.bounded`) and makes no request. With no referral to
+    (`harness.turn_budget.bounded_by`) and makes no request. With no referral to
     ask about, that ends the planner's run, and the entry refuses on the
     bound, final for the request, in place of `StopCode.PLAN_NOT_READY`."""
     budget = _request_budget()
@@ -5544,11 +5052,11 @@ _SOURCE_AMBIGUOUS = {
 async def _budget_closes_after(
     *translations: dict[str, Any],
     spend: Callable[[TurnBudget], None],
-) -> tuple[dict[str, Any] | None, list[Event]]:
+) -> tuple[dict[str, Any] | None, list[AgentRecord]]:
     """One entry whose planner proposes once for each of `translations`, each
     proposal recorded and translated as it names, and whose next call the
     request's budget closes, `spend` having spent it during the last proposal's
-    generation. Returns the entry's output and the session's events."""
+    generation. Returns the entry's output and the turn's transcript."""
     budget = _request_budget()
     left = list(translations)
 
@@ -5569,21 +5077,19 @@ async def _budget_closes_after(
     replies: list[Step] = [_calls(("propose_plan", {})) for _ in translations[1:]]
     scripted = ScriptedGenai([*replies, last_proposal])
     adapter = scripted_planner(scripted, tools=tools)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     token = current_turn_budget.set(budget)
     try:
         output = await harness.run(adapter, question="gdp guatemala", readings=[])
     finally:
         current_turn_budget.reset(token)
     assert len(scripted.requests) == len(translations), "the closed call was sent"
-    return output, await harness.events()
+    return output, await harness.records()
 
 
-def _asks(events: list[Event]) -> list[types.FunctionCall]:
-    """The planner's `ask_user_question` calls among `events`."""
-    return [
-        call for event in events for call in event.get_function_calls() if call.name == PLANNER_ASK
-    ]
+def _asks(records: list[AgentRecord]) -> list[dict[str, Any]]:
+    """The planner's `ask_user_question` calls in `records`."""
+    return [call for call in planner_calls(records) if call["name"] == PLANNER_ASK]
 
 
 def _spend_model_time(budget: TurnBudget) -> None:
@@ -5629,7 +5135,7 @@ async def test_a_referral_surviving_a_malformed_translation_still_gets_asked_whe
 
     assert output is None, "the budget's question pauses the entry, which refuses nothing"
     (ask,) = _asks(events)
-    assert {c["spec_id"] for c in (ask.args or {})["candidates"]} == {
+    assert {c["spec_id"] for c in ask["args"]["candidates"]} == {
         "spec_nominal",
         "spec_per_capita",
     }
@@ -5639,7 +5145,7 @@ def test_a_run_past_the_event_cap_stops_on_plan_not_ready_before_its_next_reques
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(planner_run, "_MAX_EVENTS", 1)
-    tracker = PlannerRun(agent="dfo_planner")
+    tracker = PlannerRun()
     tracker.tool_answered("read_skill", {"status": "ok"})
     assert tracker.next_request() is None
     tracker.tool_answered("read_skill", {"status": "ok"})
@@ -5654,7 +5160,7 @@ def test_a_run_past_the_event_cap_stops_on_the_refusal_already_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(planner_run, "_MAX_EVENTS", 1)
-    tracker = PlannerRun(agent="dfo_planner")
+    tracker = PlannerRun()
     tracker.model_answered(StopCode.TURN_MODEL_CALLS_SPENT)
     tracker.tool_answered("read_skill", {"status": "ok"})
     tracker.tool_answered("read_skill", {"status": "ok"})
@@ -5669,7 +5175,7 @@ def test_a_run_past_the_event_cap_still_asks_a_user_decided_referral(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(planner_run, "_MAX_EVENTS", 1)
-    tracker = PlannerRun(agent="dfo_planner")
+    tracker = PlannerRun()
     tracker.tool_answered("read_skill", {"status": "ok"})
     _track_proposal(
         tracker,
@@ -5689,7 +5195,7 @@ def test_a_closing_code_outside_stop_code_still_asks_on_a_referral_with_candidat
     """The closing code is read as a `StopCode` only when the entry refuses on
     it, so a code no member names still asks the user over a referral that
     names sources to pin."""
-    tracker = PlannerRun(agent="dfo_planner")
+    tracker = PlannerRun()
     _track_proposal(
         tracker,
         {
@@ -5700,7 +5206,7 @@ def test_a_closing_code_outside_stop_code_still_asks_on_a_referral_with_candidat
         },
     )
 
-    turn = planner_node.directive_turn(tracker.model_answered("closed_by_a_newer_bound"))
+    turn = planner_adapter.directive_turn(tracker.model_answered("closed_by_a_newer_bound"))
 
     assert turn is not None and turn.parts is not None
     (part,) = turn.parts
@@ -5711,7 +5217,7 @@ def test_a_closing_code_outside_stop_code_still_asks_on_a_referral_with_candidat
 def test_a_closing_code_outside_stop_code_raises_when_nothing_is_pinnable() -> None:
     """With nothing to pin the entry refuses on the closing code, so a code no
     `StopCode` member names raises and records no refusal."""
-    tracker = PlannerRun(agent="dfo_planner")
+    tracker = PlannerRun()
 
     with pytest.raises(ValueError, match="closed_by_a_newer_bound"):
         tracker.model_answered("closed_by_a_newer_bound")
@@ -5747,7 +5253,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
             schemas=[], responses={"search": _TWO_CANDIDATES_SEARCH_RESPONSE}
         ),
     )
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     token = current_turn_budget.set(_request_budget(model_calls_max=1))
     try:
@@ -5759,34 +5265,21 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
     assert paused is None, "the budget's clarifying question should pause this call"
     assert len(scripted.requests) == 1
 
-    events = await harness.events()
-    interrupt_id = _pending_ask_interrupt_id(events)
-    (ask_call,) = [
-        part.function_call
-        for event in events
-        for part in (event.content.parts if event.content and event.content.parts else [])
-        if part.function_call is not None and part.function_call.name == PLANNER_ASK
-    ]
-    assert {c["spec_id"] for c in ask_call.args["candidates"]} == {SPEC, SPEC_B}
-    assert "recommended_spec_id" not in ask_call.args
-    assert "gdp_gtm" not in ask_call.args["message"]
+    (ask_call,) = _asks(await harness.records())
+    assert {c["spec_id"] for c in ask_call["args"]["candidates"]} == {SPEC, SPEC_B}
+    assert "recommended_spec_id" not in ask_call["args"]
+    assert "gdp_gtm" not in ask_call["args"]["message"]
 
-    resume_message = types.Content(
-        role="user",
-        parts=[create_request_input_response(interrupt_id, {"result": {"spec_id": SPEC_B}})],
-    )
     await harness.run(
         adapter,
         question=draft.question,
         readings=[],
         prior_plan=draft.model_dump(mode="json"),
-        new_message=resume_message,
+        answer=one_answer({"spec_id": SPEC_B}),
     )
 
-    fake_tool_context = SimpleNamespace(
-        state={}, function_call_id=None, session=SimpleNamespace(events=await harness.events())
-    )
-    assert elected_spec_ids(SessionCall.of(fake_tool_context)) == frozenset({SPEC_B})
+    records = await harness.records()
+    assert elected_spec_ids(SessionCall(records, {}, None)) == frozenset({SPEC_B})
 
 
 async def test_a_submitted_plan_ends_the_planner_run_with_no_further_model_call(
@@ -5934,7 +5427,7 @@ async def _run_the_planner(
             "window": {"start": 2020, "end": 2024, "source": "requested"},
         }
     )
-    harness = _AdapterHarness({ORCHESTRATOR_SPECS_KEY: {_AID_SPEC: _AID_BLOCK}})
+    harness = PlannerHarness({ORCHESTRATOR_SPECS_KEY: {_AID_SPEC: _AID_BLOCK}})
     await harness.run(
         adapter, question=_LAST_FIVE_YEARS, readings=[reading.model_dump(mode="json")]
     )
@@ -6064,7 +5557,7 @@ async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by(
     scripted = ScriptedGenai([_says("Planned.")])
     adapter = _scripted_planner(scripted)
     asks = ["the total", "Debt service by creditor"]
-    harness = _AdapterHarness(
+    harness = PlannerHarness(
         state={
             ASKS_STATE_KEY: asks,
             ASK_BREAKDOWNS_STATE_KEY: [AskBreakdown(ask=1, by=("creditor",)).model_dump()],
@@ -6164,8 +5657,7 @@ async def test_a_revision_repins_the_plan_and_its_scope_decisions_follow_with_no
     adapter = scripted_planner(scripted, translate=translate)
     revised_pin = pinned.model_copy(update={"source_spec_id": new})
 
-    async def _node(ctx: Context, node_input: Any) -> Any:
-        del node_input
+    async def _node(ctx: NodeCtx[Any]) -> Any:
         save_pin_sources(cast(SessionState, ctx.state), shown)
         return await adapter.revise(
             ctx=ctx,
@@ -6174,24 +5666,7 @@ async def test_a_revision_repins_the_plan_and_its_scope_decisions_follow_with_no
             inherits={new: old},
         )
 
-    sessions = InMemorySessionService()
-    session = await sessions.create_session(app_name=_APP, user_id=_USER)
-    runner = Runner(
-        node=Workflow(name="revise_wf", edges=[(START, node(_node, name="revise"))]),
-        app_name=_APP,
-        session_service=sessions,
-    )
-    outputs = [
-        event.output
-        async for event in runner.run_async(
-            user_id=_USER,
-            session_id=session.id,
-            new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
-        )
-        if event.output is not None
-    ]
-
-    (result,) = outputs
+    result = await _node(node_ctx(message="switch"))
     assert scripted.requests == []
     revised = Plan.model_validate(result["plan"])
     assert (revised.version, revised.status) == (2, PlanStatus.PENDING_APPROVAL)
@@ -6315,8 +5790,7 @@ async def test_a_region_switch_and_its_users_decision_carry_through_an_amendment
     adapter = scripted_planner(scripted, translate=translate)
     revised_pin = pinned.model_copy(update={"source_spec_id": new})
 
-    async def _node(ctx: Context, node_input: Any) -> Any:
-        del node_input
+    async def _node(ctx: NodeCtx[Any]) -> Any:
         state = cast(SessionState, ctx.state)
         save_pin_sources(state, shown)
         switched = await adapter.revise(
@@ -6334,22 +5808,7 @@ async def test_a_region_switch_and_its_users_decision_carry_through_an_amendment
         )
         return {"done": True}
 
-    sessions = InMemorySessionService()
-    session = await sessions.create_session(app_name=_APP, user_id=_USER)
-    runner = Runner(
-        node=Workflow(
-            name="amend_wf", edges=[(START, node(_node, name="amend", rerun_on_resume=True))]
-        ),
-        app_name=_APP,
-        session_service=sessions,
-    )
-    async for _ in runner.run_async(
-        user_id=_USER,
-        session_id=session.id,
-        new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
-        run_config=SSE,
-    ):
-        pass
+    await _node(node_ctx(message="switch"))
 
     switched_plan, amended = drafted[0], drafted[-1]
     assert (switched_plan.version, amended.version) == (2, 3)
@@ -6477,8 +5936,7 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
         {"variable": "health aid", "status": "definite", "spec_id": new, "scope": scope}
     )
 
-    async def _node(ctx: Context, node_input: Any) -> Any:
-        del node_input
+    async def _node(ctx: NodeCtx[Any]) -> Any:
         save_pin_sources(cast(SessionState, ctx.state), shown)
         ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
         return await adapter.revise(
@@ -6490,23 +5948,8 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
             inherits={new: old},
         )
 
-    sessions = InMemorySessionService()
-    session = await sessions.create_session(app_name=_APP, user_id=_USER)
-    runner = Runner(
-        node=Workflow(name="referred_wf", edges=[(START, node(_node, name="revise"))]),
-        app_name=_APP,
-        session_service=sessions,
-    )
     with caplog.at_level(logging.INFO, logger=planner_adapter.__name__):
-        (result,) = [
-            event.output
-            async for event in runner.run_async(
-                user_id=_USER,
-                session_id=session.id,
-                new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
-            )
-            if event.output is not None
-        ]
+        result = await _node(node_ctx(message="switch"))
 
     refused = result["refused"]
     assert (refused["code"], refused["final"], refused["reason"]) == (code, final, reason)
@@ -6546,13 +5989,12 @@ def test_a_declared_wholes_compile_leaves_the_readings_unchanged() -> None:
         },
         whole_axis="donor",
     )
-    ctx = SimpleNamespace(state={ORCHESTRATOR_SEARCHES_KEY: [origin]})
-    planner_state: dict[str, Any] = {}
-    save_aligned_pin(cast(SessionState, planner_state), whole, warnings=())
+    state: dict[str, Any] = {ORCHESTRATOR_SEARCHES_KEY: [origin]}
+    save_aligned_pin(cast(SessionState, state), whole, warnings=())
 
-    planner_adapter.store_searched_pin_readings(cast(Any, ctx), cast(SessionState, planner_state))
+    planner_adapter.store_searched_pin_readings(cast(SessionState, state))
 
-    assert ctx.state == {ORCHESTRATOR_SEARCHES_KEY: [origin]}
+    assert state[ORCHESTRATOR_SEARCHES_KEY] == [origin]
 
 
 _WINDOWED_HEALTH = "spec_" + "e" * 32
@@ -6667,8 +6109,7 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_no_reading_and_its_row_swit
     surface = BasisCompiles()
     adapter = scripted_planner(ScriptedGenai([]), surface=cast(Any, surface), translate=translate)
 
-    async def _node(ctx: Context, node_input: Any) -> Any:
-        del node_input
+    async def _node(ctx: NodeCtx[Any]) -> Any:
         save_pin_sources(cast(SessionState, ctx.state), shown)
         ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [origin.model_dump(mode="json")]
         await adapter.revise(
@@ -6705,22 +6146,7 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_no_reading_and_its_row_swit
             "carried": _search_context(cast(SessionState, ctx.state)).carried_entries,
         }
 
-    sessions = InMemorySessionService()
-    session = await sessions.create_session(app_name=_APP, user_id=_USER)
-    runner = Runner(
-        node=Workflow(name="align_wf", edges=[(START, node(_node, name="revise"))]),
-        app_name=_APP,
-        session_service=sessions,
-    )
-    (result,) = [
-        event.output
-        async for event in runner.run_async(
-            user_id=_USER,
-            session_id=session.id,
-            new_message=types.Content(role="user", parts=[types.Part(text="align")]),
-        )
-        if event.output is not None
-    ]
+    result = await _node(node_ctx(message="align"))
 
     assert len(surface.calls) == 1
     assert result["stored"] == [(TOTAL, ())]
@@ -6851,8 +6277,7 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
     surface = BasisCompiles()
     adapter = scripted_planner(ScriptedGenai([]), surface=cast(Any, surface), translate=translate)
 
-    async def _node(ctx: Context, node_input: Any) -> Any:
-        del node_input
+    async def _node(ctx: NodeCtx[Any]) -> Any:
         state = cast(SessionState, ctx.state)
         save_pin_sources(state, shown)
         await adapter.revise(
@@ -6893,22 +6318,7 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
             ),
         }
 
-    sessions = InMemorySessionService()
-    session = await sessions.create_session(app_name=_APP, user_id=_USER)
-    runner = Runner(
-        node=Workflow(name="share_switch_wf", edges=[(START, node(_node, name="revise"))]),
-        app_name=_APP,
-        session_service=sessions,
-    )
-    (result,) = [
-        event.output
-        async for event in runner.run_async(
-            user_id=_USER,
-            session_id=session.id,
-            new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
-        )
-        if event.output is not None
-    ]
+    result = await _node(node_ctx(message="switch"))
 
     assert result["pins"] == {"health": _HEALTH_SWITCHED, "total": total_after}
     assert surface.tools == tools
@@ -7037,14 +6447,13 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
 
     # Each revision is offered as recorded: what it compiles is not this test's.
     monkeypatch.setattr(
-        planner_adapter, "end_run_when_ready", lambda answer, ctx: {**answer, "summary": {}}
+        planner_adapter, "declare_ready", lambda answer, call: {**answer, "summary": {}}
     )
     compiles = fake()
     adapter = scripted_planner(ScriptedGenai([]), surface=cast(Any, compiles), translate=translate)
     switching = switch.switch_node(planner=adapter, definition_surface=cast(Any, compiles))
 
-    async def _node(ctx: Context, node_input: Any) -> Any:
-        del node_input
+    async def _node(ctx: NodeCtx[Any]) -> Any:
         state = cast(SessionState, ctx.state)
         save_pin_sources(state, {part_pin: PinSource(block=health, settled=True)})
         reading = SearchReading.from_part(
@@ -7073,8 +6482,8 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
                 in {part_pin, US_2023["health_inclusive"]["spec"]["spec_id"]}
             ]
             pick = {"choice_id": plan_display.choice_id(shown, row), "option_id": option_id}
-            async for event in switching(ctx, {"switch": pick}):
-                assert "switch_failed" not in event.output, event.output["switch_failed"]
+            offered = await switching.run(ctx, {"switch": pick})
+            assert "switch_failed" not in offered.output, offered.output["switch_failed"]
             counted.append(len(compiles.calls))
         shown = Plan.model_validate_json(ctx.state["plan"])
         return {
@@ -7082,22 +6491,7 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
             "whole": shown.requirement("total").source_spec_id,  # type: ignore[union-attr]
         }
 
-    sessions = InMemorySessionService()
-    session = await sessions.create_session(app_name=_APP, user_id=_USER)
-    runner = Runner(
-        node=Workflow(name="whole_switch_wf", edges=[(START, node(_node, name="switch"))]),
-        app_name=_APP,
-        session_service=sessions,
-    )
-    (result,) = [
-        event.output
-        async for event in runner.run_async(
-            user_id=_USER,
-            session_id=session.id,
-            new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
-        )
-        if event.output is not None
-    ]
+    result = await _node(node_ctx(message="switch"))
 
     # The draft compiles the whole. Each switch posts the part, and a new whole once.
     assert result["calls"] == calls

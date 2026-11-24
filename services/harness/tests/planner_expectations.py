@@ -37,12 +37,14 @@ import difflib
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 from harness.planner_adapter import _READINGS_CONTEXT
+
+from .scripted_genai import Request
 
 PLANNER_RUNS = Path(__file__).parent / "fixtures" / "planner_runs"
 _SHARED = PLANNER_RUNS / "shared"
@@ -106,6 +108,31 @@ def versionless_headers(config: Mapping[str, Any]) -> dict[str, Any]:
         for name, value in options["headers"].items()
     }
     return {**config, "http_options": {**options, "headers": headers}}
+
+
+def request_dumped(request: Request) -> dict[str, Any]:
+    """`request`'s model, config and contents, dumped, each package version in the
+    config's HTTP headers put as `<version>` (`versionless_headers`)."""
+    return {
+        "model": request.model,
+        "config": versionless_headers(
+            request.generate_config.model_dump(mode="json", exclude_none=True)
+        ),
+        "contents": [
+            content.model_dump(mode="json", exclude_none=True) for content in request.content_list
+        ],
+    }
+
+
+def briefs(request: Request) -> list[str]:
+    """The text of each part of `request` that holds the planner brief."""
+    return [
+        part.text
+        for content in request.content_list
+        if content.role == "user"
+        for part in content.parts or ()
+        if part.text is not None and part.text.startswith(BRIEF_OPENING)
+    ]
 
 
 def _dumped(value: Any) -> str:
@@ -198,14 +225,22 @@ def assert_json_equal(produced: Any, stored: Any, *, name: str) -> None:
     pytest.fail(diff or f"{name}: a shared value is named differently", pytrace=False)
 
 
-def expect(name: str, value: Any) -> None:
+def expect(name: str, value: Any, *, unread: Collection[str] = ()) -> None:
     """Assert that `value` equals the stored expectation `name`.
+
+    `unread` names keys of the stored expectation, an object, that `value`
+    leaves out: they stay in the file as stored and are not compared.
 
     With `PLANNER_EXPECTATIONS=write`, write `value` to the file, and fail when
     that, or a `shared` value written for it, changed a file.
     """
     produced = as_json(value)
     path = PLANNER_RUNS / f"{name}.json"
+    if unread and path.exists():
+        stored = json.loads(path.read_text())
+        kept = {key: stored[key] for key in unread if key in stored}
+        produced = {**kept, **produced}
+        produced = {key: produced[key] for key in [*stored, *produced] if key in produced}
     if _WRITING:
         changed = [*_CHANGED]
         _CHANGED.clear()

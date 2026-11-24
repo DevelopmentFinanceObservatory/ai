@@ -21,9 +21,9 @@ from harness.settings import Settings
 from planner.settings import AgentSettings
 from translator import discovery
 
+from .planner_host import PlannerHarness
 from .planner_tools import call_planner_tool
 from .scripted_genai import Request, ScriptedGenai, reply, text_part
-from .test_planner_adapter import _AdapterHarness
 
 
 @pytest.fixture(autouse=True)
@@ -48,12 +48,12 @@ def _adapter(
 
 
 async def _first_request(
-    adapter: PlannerAdapter, scripted: ScriptedGenai, harness: _AdapterHarness | None = None
+    adapter: PlannerAdapter, scripted: ScriptedGenai, harness: PlannerHarness | None = None
 ) -> Request:
     """The first request the planner `adapter` makes of its model, answered with
     text, which ends the entry."""
     scripted.replies.append(reply(text_part("No plan.")))
-    await (harness or _AdapterHarness()).run(adapter, question="kenya debt", readings=[])
+    await (harness or PlannerHarness()).run(adapter, question="kenya debt", readings=[])
     return scripted.requests[0]
 
 
@@ -93,13 +93,13 @@ async def test_the_served_translation_resolves_through_the_graph_and_reads_the_n
 async def test_creates_a_planner_whose_propose_plan_translates_without_a_tool_of_its_own() -> None:
     """Translation runs inside `propose_plan`, so the model is declared no `translate` tool."""
     scripted = ScriptedGenai([])
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     names = _declared(await _first_request(_adapter(scripted), scripted, harness))
 
     assert "propose_plan" in names
     assert "translate" not in names
-    assert "dfo_planner" in {event.author for event in await harness.events()}
+    assert any(record.agent == "planner" for record in await harness.records())
 
 
 async def test_the_planner_reads_skills_through_the_surface_translation_gets() -> None:
@@ -115,9 +115,7 @@ async def test_the_planner_reads_skills_through_the_surface_translation_gets() -
     answer = await call_planner_tool(
         tools["get_skill"],
         skill_id="dfo-faq",
-        tool_context=SimpleNamespace(
-            state={}, session=SimpleNamespace(events=[]), function_call_id=None
-        ),
+        tool_context=SimpleNamespace(state={}, records=[], function_call_id=None),
     )
 
     assert answer == "# DFO FAQ\n"

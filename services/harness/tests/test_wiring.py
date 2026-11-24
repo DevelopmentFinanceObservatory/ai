@@ -13,15 +13,14 @@ from typing import Any, override
 
 import pytest
 from compiler.surface import FixtureSurface
-from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.genai import Client, types
 from harness import planner_adapter
 from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
 from harness.wiring import build_planner
 
+from .planner_host import PlannerHarness
 from .scripted_genai import ScriptedGenai, reply, text_part
-from .test_planner_adapter import _AdapterHarness
 
 
 def test_threads_the_given_surface_into_the_planner_adapter(monkeypatch: Any) -> None:
@@ -69,12 +68,7 @@ async def test_the_planner_looks_up_each_request_in_the_prefix_cache_it_is_given
     planner = build_planner(
         settings=Settings(), surface=FixtureSurface(schemas=[]), prefix_cache=prefix_cache
     )
-    await _AdapterHarness().run(
-        planner,
-        question="kenya debt",
-        readings=[],
-        run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-    )
+    await PlannerHarness().run(planner, question="kenya debt", readings=[])
 
     (request,) = scripted.requests
     assert prefix_cache.lookups == [(scripted.client, request.model, request.config)]

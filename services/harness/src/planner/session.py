@@ -1,68 +1,102 @@
-"""The planner's reader of an ADK session: `session_steps` and `SessionCall`.
+"""The planner's reader of a turn's transcript: `session_steps` and `SessionCall`.
 
-The planner stores its run in the session as `harness.planner_events` builds
-it, the events an ADK `LlmAgent` stores for the same exchange. `SessionCall`
-is the `planner.call.PlannerCall` of a call over its session's events.
+A turn's transcript (`harness.turn.transcript`) holds, in order, the user's
+message, each pause the turn put to the user and each answer, which the
+turn loop writes, and the planner's own run records, which the planner host
+(`harness.planner_adapter`) writes as a run goes:
 
-The events a call reads are those of the session as its tool runs. A model
-response's event is appended before the response's calls run, and their
-answers in one event once every call has answered: the planner's node
-(`harness.planner_node`) yields each response's event before Pydantic AI runs
-its calls, and ADK appends each event a node yields before the node goes on.
-So a call sees the earlier events, its own response's call event, and no
-answer of its own response's calls.
+- `response_record` for each model response with parts, holding its parts
+  as the model role's content, each function call with its id, written as
+  soon as the response arrives and before its calls run;
+- `answers_record` for the answers of one response's calls, written once
+  every call of the response has answered, holding every answer in the
+  order the calls were made.
+
+`SessionCall` is the `planner.call.PlannerCall` of a call over the
+transcript as it stands when the call runs, so a call sees the earlier
+records, its own response's record, and no answer of its own response's
+calls.
+
+A record's body is JSON, as the transcript stores it. A planner record's is a
+google-genai `Content` dumped with `model_dump(mode="json",
+exclude_none=True)`, read here as the dict it is.
 """
 
 from __future__ import annotations
 
 import functools
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from google.adk import Context
-from google.adk.events import Event
-from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME
+from google.genai import types
+from harness.turn import transcript
+from harness.turn.store import AgentRecord
+from harness.turn_events import PLANNER_ASK
 
 from planner.call import ResponseCall, Step
 from planner.plan import SessionState
 from planner.tool_results import Outcome
 
-# A session's events, as `session_steps` and `SessionCall` read them.
-type SessionEvents = Sequence[Event]
+# The kinds of the planner's own run records.
+RESPONSE = "response"
+ANSWERS = "answers"
+
+# The kind of the pause on the planner's own ask (`harness.graph.planning`).
+PLANNER_ASK_PAUSE = "planner_ask"
+# The key of a planner-side pause's payload that names the id of the planner
+# ask it put to the user (`harness.graph.planning.planner_ask_pause`).
+ASKED_CALL_ID = "call_id"
+
+# A turn's transcript, as `session_steps` and `SessionCall` read it.
+type Records = Sequence[AgentRecord]
+
+
+def response_record(parts: Sequence[types.Part]) -> AgentRecord:
+    """The record of a model response holding `parts`: the model role's
+    content, each function call with its id."""
+    content = types.Content(role="model", parts=list(parts))
+    return AgentRecord(agent="planner", kind=RESPONSE, body=_dumped(content))
+
+
+def answers_record(answers: Sequence[types.FunctionResponse]) -> AgentRecord:
+    """The one record of the answers of a response's calls: the user role's
+    content holding `answers`' function responses, in call order."""
+    content = types.Content(
+        role="user", parts=[types.Part(function_response=answer) for answer in answers]
+    )
+    return AgentRecord(agent="planner", kind=ANSWERS, body=_dumped(content))
+
+
+def _dumped(content: types.Content) -> dict[str, Any]:
+    return content.model_dump(mode="json", exclude_none=True)
 
 
 @dataclass(frozen=True)
 class SessionCall:
-    """The `planner.call.PlannerCall` of one tool call over its session.
+    """The `planner.call.PlannerCall` of one tool call over its turn's transcript.
 
-    `events` is the session's events, the live list the session appends to,
-    `state` the state the call reads and writes, and `call_id` the id of the
-    function call the tool serves, `None` outside one. The steps are the
-    events read as `session_steps` reads them.
+    `records` is the transcript as it stands when the call runs, `state` the
+    state the call reads and writes, and `call_id` the id of the function
+    call the tool serves, `None` outside one. The steps are the records read
+    as `session_steps` reads them.
     """
 
-    events: SessionEvents
+    records: Records
     state: SessionState
     call_id: str | None
 
-    @classmethod
-    def of(cls, context: Context) -> SessionCall:
-        """The call `context` serves: a tool's `ToolContext` or a graph node's
-        `Context`, over its session's events and state."""
-        return cls(context.session.events, context.state, context.function_call_id)
-
     @functools.cached_property
     def _steps(self) -> tuple[Step, ...]:
-        return tuple(session_steps(self.events, serving=self.call_id))
+        return tuple(session_steps(self.records, serving=self.call_id))
 
     def steps(self) -> Sequence[Step]:
-        """`session_steps` over the call's session events, read once per call.
+        """`session_steps` over the call's records, read once per call.
 
-        A `SessionCall` serves one tool call, and the session appends the
-        answers of a model response's calls only after they all finish, so
-        the events a call sees do not change while it runs and the cached
-        view cannot outlive the response it was read in.
+        A `SessionCall` serves one tool call over the records as they stood
+        when it began, and the transcript gains the answers of a model
+        response's calls only after they all finish, so the cached view
+        cannot outlive the response it was read in.
         """
         return self._steps
 
@@ -71,156 +105,143 @@ class SessionCall:
         (`_response_holding`)."""
         if self.call_id is None:
             return ()
-        calls = _response_holding(self.events, self.call_id)
-        return tuple(ResponseCall(call.name, call.id) for call in calls)
+        calls = _response_holding(self.records, self.call_id)
+        return tuple(ResponseCall(str(call["name"]), call.get("id")) for call in calls)
 
 
-def _function_calls(event: Any) -> list[Any]:
-    """The function calls of `event`'s parts, in order."""
-    if not (event.content and event.content.parts):
+def _parts(record: AgentRecord, kind: str) -> list[Mapping[str, Any]]:
+    """The parts of a planner record of `kind`, in order, or none for any other record."""
+    if record.agent != "planner" or record.kind != kind:
         return []
-    return [part.function_call for part in event.content.parts if part.function_call]
+    return list(record.body.get("parts") or ())
 
 
-def _response_holding(events: SessionEvents, call_id: str) -> list[Any]:
-    """The function calls of the latest model response in `events` that holds a
-    call with `call_id`, in order, or none.
+def function_calls(record: AgentRecord) -> list[Mapping[str, Any]]:
+    """The function calls of a planner response record, in order."""
+    return [part["function_call"] for part in _parts(record, RESPONSE) if "function_call" in part]
 
-    The graph's planner node pauses on an accepted ask with an interrupt call
-    (`REQUEST_INPUT_FUNCTION_CALL_NAME`) under the ask's own id, so a later
-    event can hold the id without being the response that made the call. A
-    call of that name under `call_id` is skipped.
-    """
-    for event in reversed(events):
-        calls = _function_calls(event)
-        if any(
-            call.id == call_id and call.name != REQUEST_INPUT_FUNCTION_CALL_NAME for call in calls
-        ):
+
+def function_responses(record: AgentRecord) -> list[Mapping[str, Any]]:
+    """The function responses of a planner answers record, in order."""
+    return [
+        part["function_response"] for part in _parts(record, ANSWERS) if "function_response" in part
+    ]
+
+
+def _response_holding(records: Records, call_id: str) -> list[Mapping[str, Any]]:
+    """The function calls of the latest model response in `records` that holds
+    a call with `call_id`, in order, or none."""
+    for record in reversed(records):
+        calls = function_calls(record)
+        if any(call.get("id") == call_id for call in calls):
             return calls
     return []
 
 
-def _in_flight_calls(events: SessionEvents, serving: str | None) -> frozenset[str]:
+def _in_flight_calls(records: Records, serving: str | None) -> frozenset[str]:
     """The ids of the calls in the model response that holds the call `serving`
-    which no event answers yet.
+    which no record answers yet.
 
     `serving` is a tool that reads steps, never an ask, which decides from its
-    response's call list instead (`_ask_beside_ask`).
+    response's call list instead (`SessionCall.response_calls`).
 
-    The session appends a response's merged answers after all its calls
-    finish, so while one call of the response runs, its siblings have no
-    answer in the session, whether they have finished or not.
+    The transcript gains a response's answers after all its calls finish, so
+    while one call of the response runs, its siblings have no answer in it,
+    whether they have finished or not.
     """
     if serving is None:
         return frozenset()
-    answered = {
-        part.function_response.id
-        for event in events
-        for part in (event.content.parts if event.content and event.content.parts else ())
-        if part.function_response is not None
-    }
-    calls = _response_holding(events, serving)
-    if not any(call.id == serving and call.name != PLANNER_ASK for call in calls):
+    answered = {response.get("id") for record in records for response in function_responses(record)}
+    calls = _response_holding(records, serving)
+    if not any(call.get("id") == serving and call.get("name") != PLANNER_ASK for call in calls):
         return frozenset()
-    return frozenset(call.id for call in calls if call.id and call.id not in answered)
+    return frozenset(call["id"] for call in calls if call.get("id") and call["id"] not in answered)
 
 
-def session_steps(events: SessionEvents, *, serving: str | None = None) -> Iterator[Step]:
-    """The steps of a session's `events`, in event order (`planner.call.Step`).
+def session_steps(records: Records, *, serving: str | None = None) -> Iterator[Step]:
+    """The steps of a turn's transcript `records`, in order (`planner.call.Step`).
 
-    The only reader of ADK events in the planner. A message the user typed
-    (`_user_message`) is one `message` step. The event's other parts are not
-    read, and no producer in the harness sends a user-typed event that also
-    carries a function part. Every other event yields a `call` step for each
-    ask carrying an id, an `answer` step for each response to one, paired
-    with the `args` of the nearest preceding call sharing its id, and a
-    `response` step for each other tool's response.
+    The user's message (`transcript.USER`) is one `message` step. A pause the
+    turn put to the user (`transcript.PAUSE`) is a `call` step under its wire
+    interrupt id, its `args` holding the pause's `message` and its `payload`.
+    The user's answer (`transcript.ANSWER`) is an `answer` step under the id
+    of the call it answers, paired with the `args` of the nearest preceding
+    call sharing that id, its body `{"result": <the answer>}`.
 
-    An ask is the planner's own (`PLANNER_ASK`) or one of the workflow's
-    interrupts. The planner's call holds its question flat in `args`. A
-    planner ask whose response is its tool's refusal, or ADK's rejection of
-    the call, never reached the user: it yields no step at all, so every
-    reader sees the session as if the ask had not been made. An accepted
-    one's tool answers `ASK_ACCEPTED`, which says nothing the user did and is
-    not read, and the graph's planner node pauses on it with a `RequestInput`
-    under the call's own id, so the user's answer to that interrupt is the
-    answer to the call, and the interrupt's own call repeats the question.
-    A workflow interrupt is a `RequestInput` its node yields.
-    `create_request_input_event` builds the call with `id=interrupt_id` and
-    dumps the whole `RequestInput` into its `args`, so the node's own
-    `payload` nests under `args["payload"]`, and
-    `create_request_input_response`, which `harness.studio`'s `/interrupt`
-    route sends, builds the answer with `FunctionResponse.id` set to that
-    same `interrupt_id`.
+    The planner's own ask (`PLANNER_ASK`) is a `call` step under the call's id,
+    its question flat in `args`. A planner ask its tool refused never reached
+    the user. It yields no step at all, so every reader sees the transcript as
+    if the ask had not been made. An accepted one's tool answers
+    `ASK_ACCEPTED`, which says nothing the user did and is not read. The
+    planner node pauses on it (`PLANNER_ASK_PAUSE`), and that pause yields no
+    step of its own. It puts the ask its payload names (`ASKED_CALL_ID`) to
+    the user, so the answer to the pause is the answer to that call. Every
+    other tool's response is a `response` step.
 
     `serving` is the id of the tool call being served. The calls of its own
-    model response that no event answers yet (`_in_flight_calls`) yield no
-    step, so a call running beside an ask reads the session as it stood
+    model response that no record answers yet (`_in_flight_calls`) yield no
+    step, so a call running beside an ask reads the transcript as it stood
     before that response, and the ask, which may still be refused or may be
     accepted, is not counted as put to the user.
     """
-    refused = _refused_asks(events)
-    in_flight = _in_flight_calls(events, serving)
+    refused = _refused_asks(records)
+    in_flight = _in_flight_calls(records, serving)
     calls: dict[str, dict[str, Any]] = {}
-    planner_asks: set[str] = set()
-    for event in events:
-        if not (event.content and event.content.parts):
+    # The call each planner-side pause's wire id put to the user.
+    asks: dict[str, str] = {}
+    for record in records:
+        if record.agent == "loop":
+            if record.kind == transcript.PAUSE and record.body["kind"] == PLANNER_ASK_PAUSE:
+                asks[str(record.body["interrupt_id"])] = str(record.body["payload"][ASKED_CALL_ID])
+                continue
+            step = _loop_step(record, calls, asks)
+            if step is not None:
+                yield step
             continue
-        if _user_message(event):
-            yield Step("message")
-            continue
-        for part in event.content.parts:
-            call = part.function_call
-            if call is not None and call.id is not None:
-                if call.id in in_flight:
-                    continue
-                if call.name == PLANNER_ASK:
-                    if call.id in refused:
-                        continue
-                    planner_asks.add(call.id)
-                elif call.name != REQUEST_INPUT_FUNCTION_CALL_NAME or call.id in planner_asks:
-                    continue
-                calls[call.id] = call.args or {}
-                yield Step("call", call.id, call.args or {})
+        for call in function_calls(record):
+            call_id = call.get("id")
+            if (
+                call_id is None
+                or call.get("name") != PLANNER_ASK
+                or call_id in in_flight
+                or call_id in refused
+            ):
                 continue
-            response = part.function_response
-            if response is None:
-                continue
-            body = response.response or {}
-            if response.name == PLANNER_ASK and "result" not in body:
-                continue
-            if response.name in (PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME):
-                yield Step("answer", response.id, calls.get(response.id or ""), body)
-            else:
-                yield Step("response", body=body, name=response.name)
+            calls[call_id] = dict(call.get("args") or {})
+            yield Step("call", call_id, calls[call_id])
+        for response in function_responses(record):
+            if response.get("name") != PLANNER_ASK:
+                yield Step("response", body=response.get("response") or {}, name=response["name"])
 
 
-def _refused_asks(events: Iterable[Event]) -> frozenset[str]:
-    """The ids of the planner asks that never reached the user: their response
-    is neither `ASK_ACCEPTED` nor an answer (no `result`), so it is the tool's
-    refusal or ADK's rejection of the call."""
+def _loop_step(
+    record: AgentRecord, calls: dict[str, dict[str, Any]], asks: Mapping[str, str]
+) -> Step | None:
+    """The step of a record the turn loop wrote, other than a planner-side
+    pause, recording a pause's `args` in `calls`, or `None` for a record no
+    reader reads."""
+    body = record.body
+    if record.kind == transcript.USER:
+        return Step("message")
+    if record.kind == transcript.PAUSE:
+        interrupt_id = str(body["interrupt_id"])
+        calls[interrupt_id] = {"message": body.get("message", ""), "payload": body["payload"]}
+        return Step("call", interrupt_id, calls[interrupt_id])
+    if record.kind == transcript.ANSWER:
+        interrupt_id = str(body["interrupt_id"])
+        call_id = asks.get(interrupt_id, interrupt_id)
+        return Step("answer", call_id, calls.get(call_id), {"result": body["answer"]})
+    return None
+
+
+def _refused_asks(records: Iterable[AgentRecord]) -> frozenset[str]:
+    """The ids of the planner asks that never reached the user: their tool
+    answered anything but `ASK_ACCEPTED`, so it refused them."""
     return frozenset(
-        response.id
-        for event in events
-        for part in (event.content.parts if event.content and event.content.parts else ())
-        if (response := part.function_response) is not None
-        and response.id is not None
-        and response.name == PLANNER_ASK
-        and "result" not in (body := response.response or {})
-        and body.get("outcome") != Outcome.OK.value
-    )
-
-
-def _user_message(event: Any) -> bool:
-    """Whether `event` is a message the user typed into the session.
-
-    A user-authored event with text and no `branch`. The planner adapter sends
-    its own messages (the brief, an amendment's or a refusal's ask) as
-    user-role content under `harness.planner_adapter._PLANNER_BRANCH`, so they
-    are not the user's.
-    """
-    return (
-        getattr(event, "author", None) == "user"
-        and not getattr(event, "branch", None)
-        and any((getattr(part, "text", None) or "").strip() for part in event.content.parts)
+        response["id"]
+        for record in records
+        for response in function_responses(record)
+        if response.get("id") is not None
+        and response.get("name") == PLANNER_ASK
+        and (response.get("response") or {}).get("outcome") != Outcome.OK.value
     )

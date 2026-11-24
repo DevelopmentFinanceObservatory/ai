@@ -1,24 +1,25 @@
-"""Root workflow for the DFO harness.
+"""The DFO harness's turn graph.
 
-The workflow is the deterministic spine around the orchestrator agent:
+The graph is the deterministic spine around the orchestrator agent:
 routing, approval, retries and execution are code; only the orchestrator and
 the planner (`PlannerModel`, implemented by `harness.planner_adapter`) generate.
-A turn runs `seed` (the runs an earlier turn left unfinished, carried on,
-and any datasets the user brought from Search) ->
-`orchestrate` (the agent and its tools, `harness.orchestrator_tools`) ->
-`route`, which takes the one action the agent asked for: `ask` puts its
-question to the user, and `plan_start` hands its brief to `planner` ->
+Its nodes run on the turn loop (`harness.turn`) and its edges are
+`harness.graph.workflow.EDGES`: `seed` (the runs an earlier turn left
+unfinished, carried on, and any datasets the user brought from Search) ->
+`orchestrate` (the agent and its tools, `harness.orchestrator_tools`), whose
+edge is the one action the agent asked for: `ask` puts its question to the
+user, and `plan` hands its brief through `plan_start` to `planner` ->
 `approve` -> `execute`, whose result `plan_done` hands back to the agent.
 
 Everything external is injected (`executor`, `tool_surface`,
-`definition_surface`, `run_ledger`, `publisher`). The injected dependencies are async: ADK
-runs a sync function node inline on the event loop, and the real implementations (`harness.mcp_client`)
-call the loopback MCP mounts over HTTP on that same loop -- a sync dependency would
-block the loop and deadlock the loopback request.
+`definition_surface`, `run_ledger`, `publisher`). The injected dependencies
+are async: the real implementations (`harness.mcp_client`) call the loopback
+MCP mounts over HTTP on the turn's own event loop, where a sync dependency
+would block the loop and deadlock the loopback request.
 
 Behavioral guarantees the topology encodes:
 
-* Approval is a workflow interrupt with a stable id. Nothing downstream of
+* Approval is a pause of the `approve` node. Nothing downstream of
   `approve` exists on a path that skips it, and approval is version-bound:
   a plan amended since the reviewed version waits for a fresh approval.
 * The `execute` node runs the approved plan's compiled workflow through
@@ -42,9 +43,9 @@ Behavioral guarantees the topology encodes:
 * Execution-triggered replanning is bounded: after `MAX_REPLANS` rounds the
   plan closes with what ran, naming the step that could not.
 
-One approval gate: the workflow's own `approve` interrupt. The planner's
+One approval gate: the `approve` node's pause. The planner's
 `propose_plan` declares a compiled plan ready for the user's answer
-(`planner.tools.declare_ready`) and gates nothing itself. Only this
-workflow's `execute` node, reached downstream of `approve`, runs a step
-against a real server.
+(`planner.tools.declare_ready`) and gates nothing itself. Only the graph's
+`execute` node, reached downstream of `approve`, runs a step against a real
+server.
 """

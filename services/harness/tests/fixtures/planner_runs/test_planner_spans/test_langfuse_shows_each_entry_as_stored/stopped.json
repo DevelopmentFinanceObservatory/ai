@@ -130,7 +130,8 @@
     },
     "budget": {
       "dfo.model.first_chunk_s": "timed",
-      "dfo.model.thoughts_token_count": 4
+      "dfo.model.thoughts_token_count": 4,
+      "dfo.model.finish_reason": "timed"
     }
   },
   {

@@ -42,7 +42,6 @@ import itertools
 import json
 import math
 import re
-from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence, Set
 from dataclasses import dataclass
 from typing import Any
@@ -54,7 +53,6 @@ from harness.reply_figures import (
     point_figure,
     series_ends,
 )
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wire import STUDIO_FRAME_ADAPTER
 from pydantic import ValidationError
 
@@ -1338,17 +1336,6 @@ def check_transcript(
 # Case checks: properties a case names in its `checks` list
 # ---------------------------------------------------------------------------
 
-# ADK's fence around another agent's quoted turn
-# (`google.adk.flows.llm_flows.context._fencing.QUOTED_CONTENT_BEGIN`), spelled out so a
-# change to the marker shows here instead of passing unnoticed.
-RELAY_MARKER = "<<<BEGIN_QUOTED_AGENT_CONTENT>>>"
-# The function name ADK gives a pause for the user's input.
-REQUEST_INPUT_NAME = REQUEST_INPUT_FUNCTION_CALL_NAME
-
-# ADK opens each relayed payload with the relaying agent's name in brackets; its
-# own framing sentence carries the marker with no name.
-_AUTHOR_TAG = re.compile(r"^\[([^\]\n]+)\]")
-
 
 @dataclass(frozen=True)
 class Evidence:
@@ -1374,6 +1361,14 @@ def _contents_text(request: dict[str, Any]) -> str:
     return json.dumps(request["contents"], ensure_ascii=False)
 
 
+def _need_log(evidence: Evidence, check: str) -> list[str]:
+    return (
+        []
+        if evidence.log is not None
+        else [f"{check}: needs the scripted orchestrator's request log"]
+    )
+
+
 def _label(request: dict[str, Any], log: list[dict[str, Any]]) -> str:
     ordinal = sum(
         1
@@ -1383,77 +1378,85 @@ def _label(request: dict[str, Any], log: list[dict[str, Any]]) -> str:
     return f"{request['agent']} request {ordinal + 1}"
 
 
-def _need_log(evidence: Evidence, check: str) -> list[str]:
-    return (
-        []
-        if evidence.log is not None
-        else [f"{check}: needs the scripted orchestrator's request log"]
+def _first_step(log: list[dict[str, Any]], *, refused: bool = False) -> int | None:
+    """The log index of the first plan-step call, or of the first refused one."""
+    return next(
+        (
+            index
+            for index, entry in enumerate(log)
+            if entry["kind"] == "call"
+            and entry["layer"] == "step"
+            and (not refused or entry["outcome"] == "refused")
+        ),
+        None,
     )
 
 
 def approval_payload_absent_after_approval(evidence: Evidence) -> list[str]:
-    """No model request made after the plan's first step ran mentions a pause for
-    the user's input. The approval pause carries the whole plan and the user's
-    answer to it; the browser reads both from the stream, and no model is
-    meant to."""
+    """No model request made after the plan's first step ran carries the
+    approval pause's payload or the user's answer to it. The turn writes
+    both to its transcript (`harness.turn.transcript`), where the planner's
+    session reads the pause as a call and the answer as an answer step.
+    The browser reads both from the stream, and no model is meant to. The
+    pause's payload (the plan card) and the answer (`{"approved":
+    <revision>}`) both hold the plan's whole revision, which the plan's
+    hand-back names only by a 12-character prefix."""
     if missing := _need_log(evidence, "approval_payload_absent_after_approval"):
         return missing
     log = evidence.log or []
-    started = next(
+    started = _first_step(log)
+    approved = [
+        frame
+        for turn in evidence.turn_frames
+        for frame in turn
+        if frame["event"] == "plan.approved"
+    ]
+    if started is None or not approved:
+        return ["approval_payload_absent_after_approval: no plan step ran, so nothing was approved"]
+    revisions = {frame["revision"] for frame in approved}
+    return [
+        f"{_label(entry, log)} after approval carries the approval pause or its answer"
+        for entry in log[started:]
+        if entry["kind"] == "request"
+        and any(
+            revision in _contents_text(entry) or revision in entry["system"]
+            for revision in revisions
+        )
+    ]
+
+
+def refused_step_reaches_the_next_plan(evidence: Evidence) -> list[str]:
+    """A refused plan step reaches the orchestrator, and the planner is
+    entered again after it. The orchestrator's first request after the
+    refusal names the refusal's code in the plan's hand-back, and a planner
+    request follows that one. The turn graph hands the refused run back to
+    the orchestrator, whose second `plan` call opens the planner once more
+    in the same turn."""
+    if missing := _need_log(evidence, "refused_step_reaches_the_next_plan"):
+        return missing
+    log = evidence.log or []
+    refused = _first_step(log, refused=True)
+    if refused is None:
+        return ["refused_step_reaches_the_next_plan: no plan step was refused"]
+    code = log[refused]["code"]
+    handed_back = next(
         (
             index
-            for index, entry in enumerate(log)
-            if entry["kind"] == "call" and entry["layer"] == "step"
+            for index in range(refused + 1, len(log))
+            if log[index]["kind"] == "request" and log[index]["agent"] == "orchestrator"
         ),
         None,
     )
-    if started is None:
-        return ["approval_payload_absent_after_approval: no plan step ran, so nothing was approved"]
-    return [
-        f"{_label(entry, log)} after approval carries a pause for input ({REQUEST_INPUT_NAME})"
-        for entry in log[started:]
-        if entry["kind"] == "request" and REQUEST_INPUT_NAME in _contents_text(entry)
-    ]
-
-
-def _fenced_authors(request: dict[str, Any]) -> list[str]:
-    """The author named on each fenced block in `request`'s contents, `untagged`
-    for ADK's own framing sentence, which names none."""
-    authors = []
-    for content in request["contents"]:
-        for part in content.get("parts", []):
-            text = part.get("text") or ""
-            if RELAY_MARKER in text:
-                tag = _AUTHOR_TAG.match(text)
-                authors.append(tag.group(1) if tag else "untagged")
-    return authors
-
-
-def _relay_marker_violations(evidence: Evidence, *, check: str, agent: str | None) -> list[str]:
-    if missing := _need_log(evidence, check):
-        return missing
-    log = evidence.log or []
-    return [
-        f"{_label(entry, log)} holds fenced quoted blocks by "
-        f"{dict(sorted(Counter(authors).items()))}"
-        for entry in _requests(evidence, agent=agent)
-        if (authors := _fenced_authors(entry))
-    ]
-
-
-def no_relay_marker(evidence: Evidence) -> list[str]:
-    """No model request holds ADK's fence around another agent's quoted turn.
-    The orchestrator and the planner read their own hand-backs and answers;
-    a fenced block is the framework presenting a graph node's output as another
-    agent's speech."""
-    return _relay_marker_violations(evidence, check="no_relay_marker", agent=None)
-
-
-def planner_sees_no_relay_marker(evidence: Evidence) -> list[str]:
-    """`no_relay_marker` over the planner's requests alone: a planner entered a
-    second time in a turn reads the turn's session, and the orchestrator's
-    hand-back from the first plan is in it."""
-    return _relay_marker_violations(evidence, check="planner_sees_no_relay_marker", agent="planner")
+    if handed_back is None:
+        return ["no orchestrator request followed the refused step"]
+    violations = []
+    if code not in _contents_text(log[handed_back]):
+        violations.append(
+            f"{_label(log[handed_back], log)} after the refused step does not name its code {code}"
+        )
+    if not _requests(Evidence(turn_frames=[], log=log[handed_back:]), agent="planner"):
+        violations.append("the planner was not entered again after the refused step")
+    return violations
 
 
 _SPEC_ID = re.compile(r"spec_[0-9a-f]{32}")
@@ -1541,8 +1544,8 @@ def previous_final_message_in_view(evidence: Evidence) -> list[str]:
 def earlier_plan_in_view(evidence: Evidence) -> list[str]:
     """Each turn's first orchestrator request names, by spec_id, every source a
     plan step retrieved in an earlier turn. A question about a plan ("why does
-    the data stop in 2023?") comes a turn after the plan ran, in a session that
-    holds none of that turn's events."""
+    the data stop in 2023?") comes a turn after the plan ran, in a turn whose
+    transcript holds none of that turn's records."""
     if missing := _need_log(evidence, "earlier_plan_in_view"):
         return missing
     turns: list[tuple[list[dict[str, Any]], list[str]]] = []
@@ -1733,8 +1736,7 @@ def every_ask_accounted_for(evidence: Evidence) -> list[str]:
 
 CASE_CHECKS: dict[str, Callable[[Evidence], list[str]]] = {
     "approval_payload_absent_after_approval": approval_payload_absent_after_approval,
-    "no_relay_marker": no_relay_marker,
-    "planner_sees_no_relay_marker": planner_sees_no_relay_marker,
+    "refused_step_reaches_the_next_plan": refused_step_reaches_the_next_plan,
     "planner_first_message_carries_search_evidence": planner_first_message_carries_search_evidence,
     "previous_final_message_in_view": previous_final_message_in_view,
     "earlier_plan_in_view": earlier_plan_in_view,

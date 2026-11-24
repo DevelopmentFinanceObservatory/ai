@@ -1,10 +1,11 @@
-"""The graph's planner adapter, backed by the planner agent.
+"""The graph's planner adapter, backed by the planner agent, and the run of
+the planner it hosts in the `planner` node (`harness.graph.planning`).
 
-An adapter over the planner, a Pydantic AI agent run as a workflow node
-(`harness.planner_node`), on one set of tools with translation attached to
-`propose_plan`. The planner runs as a dynamically-scheduled child of the
-graph's own node, through `Context.run_node`, and this module reads what it
-leaves in session state and translates it into
+An adapter over the planner, a Pydantic AI agent
+(`planner.pydantic_agent`), on one set of tools with translation attached to
+`propose_plan`. Each entry runs the planner in the `planner` node's own task
+(`PlannerAdapter._propose`), with the turn's state as the planner's state,
+and translates what the run leaves there into
 `harness.graph.interfaces.PlannerModel`'s contract.
 
 The planner's own tools settle methodology and carry it to a compiled
@@ -15,28 +16,28 @@ declares the plan ready for the user's answer in code
 `Plan` itself. An entry that ends without a plan ready ends on a
 refusal whose sentence comes from `harness.sentences`.
 
-`ctx.run_node` shares one session both directions with the graph's own
-node: there is no second `Runner`, no second session service, and no LRU or
-lease bookkeeping to keep one bounded, because there is only the one
-session the graph already owns and already persists. `ctx.state["plan"]`
-is the graph's own authoritative record; `planner.plan.save_plan`/
-`load_plan` read and write a second, namespaced key
+`ctx.state["plan"]` is the graph's own authoritative record;
+`planner.plan.save_plan`/`load_plan` read and write a second, namespaced key
 (`planner.plan.PLAN_STATE_KEY`, `"planner:plan"`) in that same `ctx.state`
-for the planner's own drafting state -- one store, two keys, not two stores
-kept in step.
+for the planner's own drafting state, so one store holds both keys. The turn
+loop writes the state with the turn's cursor at the node's boundary, a pause
+on the planner's ask included.
+
+A run's records go to the turn's transcript as they happen
+(`planner.session.response_record`, `answers_record`): each model response
+before its calls run, and the answers of its calls once they all answered.
+The planner's tools read the transcript through `planner.session.SessionCall`
+for what the user was asked and answered, and the node emits each record's
+item (`planner.pydantic_agent.PlannerResponse`, `PlannerAnswers`) for Studio.
 
 Every call renders the full brief: the search readings, the skill pages an
 earlier call for the same plan read, the canvas and conversation digests, the
 plan being changed, the question, and the amendment or refusal ask that
-opened the call. The planner node sends the model only the turn's question
-(`harness.turn_events.turn_question`) and that brief, and its tools read the
-session's events through `planner.session.SessionCall.of` and `session_steps`
-for what the user was asked and answered. A call sees nothing an earlier
-call was sent or read, so an amend or replan needs the plan it changes and
-the skills already read in front of it. `_propose` runs the planner with no node input and gives its node the
-brief, which the run shows after the turn's question. The entry the user's
-answer to a planner-side ask resumes renders it again, with the question and
-the answer added (`_answer_text`), since the planner node reruns on resume.
+opened the call. The run sends the model only the turn's question and that
+brief. A call sees nothing an earlier call was sent or read, so an amend or
+replan needs the plan it changes and the skills already read in front of it.
+The entry the user's answer to a planner-side ask resumes renders the brief
+again, with the question and the answer added (`_answer_text`).
 
 `_plan_context` renders the plan being changed as a digest, and
 `_READINGS_BUDGET` holds the search readings. With a realistic
@@ -51,35 +52,27 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import cached_property
 from typing import Any, NamedTuple, cast
 
+from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
 from compiler.surface import ToolSurface
 from data_mcp.skills_client import name_get_skill_in_call_lines
 from executor.classify import RECOVERABLE_SPEC_CODES
-from google.adk import Context, Event
-from google.genai import Client
+from google.genai import Client, types
 from planner.call import CallSession
 from planner.instruction import planner_instruction
+from planner.model import planner_model, refuse_vertex_ai
 from planner.operations import OperationKind
 from planner.plan import (
-    AMENDMENT_ENTRY_STATE_KEY,
-    DECISION_PICK_STATE_KEY,
     MAX_QUESTION_CHARS,
-    OPTIONAL_DECLINES_STATE_KEY,
-    PIN_SOURCES_STATE_KEY,
-    PLAN_STATE_KEY,
-    REDUCTION_REFUSED_ASKS_STATE_KEY,
-    REFUSAL_DETAILS_STATE_KEY,
-    REFUSED_SPECS_STATE_KEY,
-    SPEC_SEARCHED_STATE_KEY,
-    TERMINAL_DECLINES_STATE_KEY,
-    UNSUPPORTED_STATE_KEY,
     AskBreakdown,
     PinSource,
     Plan,
@@ -96,7 +89,6 @@ from planner.plan import (
     load_asks,
     load_asks_across_years,
     load_plan,
-    load_plan_rounds,
     load_refused_specs,
     record_optional_decline,
     record_unsupported,
@@ -111,8 +103,15 @@ from planner.plan import (
     warning_codes,
     windowed_origins,
 )
+from planner.pydantic_agent import (
+    PlannerAnswers,
+    PlannerDeps,
+    PydanticPlanner,
+    planner_agent,
+    run_planner,
+)
 from planner.records import EvidenceIssueCode, Severity
-from planner.session import SessionCall
+from planner.session import SessionCall, answers_record, response_record
 from planner.settings import AGENT_NAME, AgentSettings
 from planner.skills import (
     SKILLS_READ_STATE_KEY,
@@ -124,17 +123,14 @@ from planner.specs import PROPOSE_PLAN, planner_specs
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import (
-    PENDING_ASK_STATE_KEY,
     AcceptedAsk,
     clear_pending_ask,
+    declare_ready,
     load_pending_ask,
-    ready_and_end,
 )
 from planner.workflow import ElectedMeasure, SelectedSource
+from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from submission.service import (
-    ALIGNED_PIN_WARNINGS_STATE_KEY,
-    ALIGNED_PINS_STATE_KEY,
-    SEARCHED_PINS_STATE_KEY,
     Proposal,
     SourceReadings,
     pinned_sources,
@@ -142,15 +138,16 @@ from submission.service import (
     searched_pins,
     submit,
 )
-from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import CutCalls, current_cut_calls, resolving_once
-from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
+from translator.mechanical import clear_compile_failures
 from translator.referral import ReferralKind
 from translator.tool import Translate, build_translate, permitted_repair
 
-from harness import plan_display
+from harness import gemini_wire, plan_display
 from harness.agents import build_tool_surface
 from harness.decision_pick import DecisionPick
+from harness.gemini_wire import StreamResumedError, Usage, resumed_over_output
+from harness.graph.events import GraphEvent
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -162,11 +159,12 @@ from harness.graph.state import (
     stored_mapping,
     stored_sequence,
 )
-from harness.planner_model import refuse_vertex_ai
-from harness.planner_node import planner_node, pydantic_planner
 from harness.planner_run import (
+    Ask,
+    Directive,
     PlannerAdapterError,
     PlannerRun,
+    Stop,
     closing_refusal,
     not_ready,
     referral_of,
@@ -179,8 +177,9 @@ from harness.sentences import (
     refusal_sentence,
 )
 from harness.settings import Settings
-from harness.turn_budget import current_turn_budget
-from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn.node import NodeCtx
+from harness.turn_budget import TurnBudget, current_turn_budget
+from harness.turn_events import PLANNER_ASK
 from harness.turn_records import (
     SETTLED_STATUSES,
     CandidateReading,
@@ -191,26 +190,15 @@ from harness.turn_records import (
     newest_per_spec_id,
     render_readings,
 )
+from harness.usage import log_usage
 
 logger = logging.getLogger(__name__)
 
-# The branch every planner run is stamped with, so ADK's own branch filter
-# keeps the planner's events and another agent's apart. `ctx.run_node` is
-# called without one otherwise, and an event carrying no branch belongs to
-# every branch (`flows/llm_flows/contents._is_event_belongs_to_branch`), so
-# the orchestrator, which runs on its own branch (`harness.graph`), would
-# read the planner's calls and results back as fenced user text
-# (`flows/llm_flows/context/_fencing._present_other_agent_message`).
-#
-# The name is a fixed root segment. Each `_propose` call is a separate
-# dynamic run, and `use_sub_branch` would give each its own (`dfo_planner@1`,
-# `dfo_planner@2`), excluding the planner's own earlier events from its later
-# request and splitting a multi-round turn's history. A fixed branch keeps
-# the planner's events on one path across every call. It also sits outside
-# the graph's own names (`planner`, not `dfo_planner`), so anything matching
-# on the branch can tell an event the planner node itself authors apart from
-# a planner event.
-_PLANNER_BRANCH = "dfo_planner"
+# Gemini requires a `thought_signature` on a generation's first `functionCall`
+# part and answers a request replaying one without it with a 400. This is
+# the documented placeholder that makes the API skip validation for a call
+# injected outside a model turn.
+SKIP_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
 
 # The opening of the planner's brief: the search readings of the
 # conversation, which name every spec_id a pin may take without a referral.
@@ -353,9 +341,9 @@ class PlannerAdapter:
         # model calls go through. None builds one from the environment on the
         # first run. A planner whose client uses Vertex AI, the given one or
         # the one the environment selects, or whose model's name is a Vertex
-        # AI resource path, is refused (`harness.planner_model.refuse_vertex_ai`).
+        # AI resource path, is refused (`planner.model.refuse_vertex_ai`).
         # The planner's model sets its retries on each request
-        # (`harness.planner_model`).
+        # (`harness.gemini_wire`).
         #
         # `on_tool_answered` observes each planner tool's name and the answer
         # the model reads for the call (`PlannerRun.tool_answered`).
@@ -395,16 +383,17 @@ class PlannerAdapter:
                 surface=self._surface,
             )
         )
-        # Built once and shared by every run, each of which names its own model.
+        # Built once and shared by every run, each of which names its own
+        # model. Its spans carry the run's messages when the environment
+        # puts message content on spans (`content_on_spans`), read here.
         self._planner = pydantic_planner(
-            self._specs,
-            instruction=planner_instruction(),
+            self._specs, instruction=planner_instruction(), include_content=content_on_spans()
         )
 
     async def __call__(
         self,
         *,
-        ctx: Context,
+        ctx: NodeCtx[GraphEvent],
         question: str,
         readings: Sequence[Mapping[str, Any]],
         prior_plan: dict[str, Any] | None = None,
@@ -412,83 +401,63 @@ class PlannerAdapter:
         amendment: str | None = None,
         canvas_digest: dict[str, Any] | None = None,
         conversation_digest: dict[str, Any] | None = None,
-        on_progress: Callable[[dict[str, Any]], None] | None = None,
         pick: DecisionPick | None = None,
+        answer: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # `readings` is the search readings of the conversation's earlier
         # turns and then this turn's, as `harness.orchestrator_tools` stores
         # them. The brief renders them.
         #
-        # `propose_plan` amends from the graph's record, not whatever this
-        # session's own drafting key already holds, reseeded every entry. The
+        # `answer` is the user's answer to the ask an earlier run of this
+        # entry ended on, which the planner node paused on, or None for an
+        # entry the node opened afresh.
+        #
+        # `propose_plan` amends from the graph's record, not whatever the
+        # state's own drafting key already holds, reseeded every entry. The
         # resume of an entry by the user's answer to the planner's ask keeps
         # what the entry drafted before it asked, and its brief shows that
         # draft as the plan being changed.
-        #
-        # Written through `ctx.session.state`, not `ctx.state`, and so is
-        # every other write this method makes before its `finally`.
-        # `ctx.state[key] = value` records the write in
-        # `ctx.actions.state_delta`, which the framework attaches to this
-        # *node's own* event once it finishes. This write happens before
-        # `ctx.run_node` runs the planner, so it would sit in that delta until
-        # the node's event re-applies it, over whatever the planner's own tool
-        # calls wrote in between. A write to the live `Session.state` dict
-        # skips that delta. It is visible at once to the planner's tool calls
-        # (the same live dict, not a copy), but it is not durable on its own
-        # across a `Runner.run_async` boundary, a resume included. The two
-        # writes in the `finally`, `store_searched_pin_readings` and
-        # `_persist_durable`, go through `ctx.state`, since they run after
-        # `ctx.run_node` has returned and nothing the planner writes can follow
-        # them. `_persist_durable` mirrors into `ctx.state` what this method's
-        # writes and the planner's left in the live dict, so the delta this
-        # node's event carries is as new as what `ctx.run_node` produced.
+        state = cast(SessionState, ctx.state)
+        resuming = answer is not None
         seeded = Plan.model_validate(prior_plan) if prior_plan is not None else None
-        if seeded is not None and not ctx.resume_inputs:
-            save_plan(cast(SessionState, ctx.session.state), seeded)
-        changing = load_plan(cast(SessionState, ctx.session.state)) if ctx.resume_inputs else seeded
-        # The ask an earlier run of this entry ended on, which the graph's
-        # planner node paused on under the ask's call id, and the user's
-        # answer, which the resume carries under that id. The ask is put to
-        # the user once: every entry starts with none waiting.
-        asked = load_pending_ask(cast(SessionState, ctx.session.state))
-        if asked is None or asked.call_id not in ctx.resume_inputs:
-            asked = self._legacy_ask(ctx) or asked
+        if seeded is not None and not resuming:
+            save_plan(state, seeded)
+        changing = load_plan(state) if resuming else seeded
+        # The ask an earlier run of this entry ended on, which the planner
+        # node paused on, and the user's answer to it. The ask is put to the
+        # user once: every entry starts with none waiting.
+        asked = load_pending_ask(state)
         answered = (
-            _Answered(
-                asked,
-                ctx.resume_inputs[asked.call_id],
-                ctx.session.state.get(_ASKED_REFERRAL_STATE_KEY),
-            )
-            if asked is not None and asked.call_id in ctx.resume_inputs
+            _Answered(asked, answer, ctx.state.get(_ASKED_REFERRAL_STATE_KEY))
+            if asked is not None and answer is not None
             else None
         )
-        _forget_ask(ctx)
-        if not ctx.resume_inputs:
-            # One `__call__` is one entry into the planner, EXCEPT when it
-            # re-enters with the user's answer to the ask a run of this entry
-            # ended on, which the graph's planner node paused on, in
-            # `ctx.resume_inputs` -- the graph's own
-            # "amend" and "replan" edges both re-enter `__call__` fresh, with
-            # nothing in `resume_inputs`, so they get a new budget here.
+        _forget_ask(state)
+        if not resuming:
+            # One `__call__` is one entry into the planner, except when it
+            # re-enters with the user's answer (`answer`) to the ask a run of
+            # this entry ended on, which the planner node paused on. The
+            # graph's own "amend" and "replan" edges both re-enter `__call__`
+            # fresh, with no answer, so they get a new budget here.
             # Resetting unconditionally would zero the budget partway through
             # an entry on the resume path, and the refer-and-repropose loop
             # `MAX_PLAN_ROUNDS` bounds would run unbounded for the rest of it.
-            save_plan_rounds(cast(SessionState, ctx.session.state), 0)
+            save_plan_rounds(state, 0)
             # Whether the user's own words open this entry, which
             # `propose_plan` reads to accept the steps its `across_years`
             # names (`submission.service.admit`). `_message` renders the
             # amendment on the same test.
-            save_amendment_entry(cast(SessionState, ctx.session.state), bool(amendment))
+            save_amendment_entry(state, bool(amendment))
             # The option the user picked on the plan card, which this entry
             # replans to hold, with the scope the card gave the replan:
             # admission refuses a plan that does not state it or that changes
             # anything but the picked decision and the requirements citing it
             # (`submission.service._picked_decision`). Any other entry clears it.
-            save_decision_pick(cast(SessionState, ctx.session.state), pick)
-            clear_unsupported(cast(SessionState, ctx.session.state))
+            save_decision_pick(state, pick)
+            clear_unsupported(state)
             for operation in _earned_by_refusal(refusal):
-                record_unsupported(cast(SessionState, ctx.session.state), operation)
-            clear_compile_failures(ctx.session.state)
+                record_unsupported(state, operation)
+            clear_compile_failures(ctx.state)
             if prior_plan is None and refusal is None and amendment is None:
                 # This shape -- no `prior_plan`, no `refusal`, no
                 # `amendment` -- names a genuine first-draft entry: the
@@ -499,44 +468,38 @@ class PlannerAdapter:
                 # None` alone is not enough to gate this on: a caller of
                 # this adapter directly can omit it on a real amendment too
                 # (`amendment` set, still nothing to seed `propose_plan`
-                # from but the session's own last draft -- see
+                # from but the state's own last draft, as in
                 # `test_a_sixth_amendment_turn_still_records_its_own_
                 # version`), and that call must not have its own
                 # in-progress draft wiped out from under it. Gated the same
-                # way the round reset above is, by `not ctx.resume_inputs`:
-                # a first-draft entry that pauses mid-draft (a
-                # planner-side ask) re-enters `__call__` with this same
-                # shape on its resume, and clearing again there would
-                # throw away the very draft the ask paused, not a stale
-                # one.
+                # way the round reset above is, by `not resuming`: a
+                # first-draft entry that pauses mid-draft (a planner-side
+                # ask) re-enters `__call__` with this same shape on its
+                # resume, and clearing again there would throw away the
+                # very draft the ask paused, not a stale one.
                 #
-                # Each turn opens a brand-new ADK session, so a turn's
-                # first entry has nothing to clear. A later `plan` call in
-                # the same turn does: without this, its first-draft entry
-                # would find the earlier entry's plan still on record and
-                # could only amend it, since `starts_new_plan` is refused
-                # (`submission.service._resolve_intent`).
+                # A turn's first entry has nothing to clear. A later `plan`
+                # call in the same turn does: without this, its first-draft
+                # entry would find the earlier entry's plan still on record
+                # and could only amend it, since `starts_new_plan` is
+                # refused (`submission.service._resolve_intent`).
                 # The plan's alignments go with it (`clear_plan`), so no
                 # amendment of the new draft reads an input the old plan
                 # moved. The spec_ids the earlier plan's runs refused go too.
-                clear_plan(cast(SessionState, ctx.session.state))
-                save_refused_specs(cast(SessionState, ctx.session.state), ())
+                clear_plan(ctx.state)
+                save_refused_specs(state, ())
                 # The page texts an earlier plan read stay under their own
                 # keys, but nothing reads one once it leaves this index.
-                ctx.session.state[SKILLS_READ_STATE_KEY] = []
+                ctx.state[SKILLS_READ_STATE_KEY] = []
                 # A first draft may decline an ask no requirement kind states,
                 # which no tool's answer could ever earn, except one a
                 # `period_reduction_unstated` refusal named
                 # (`submission.service._declinable`). A replan or an
                 # amendment earns each decline from a tool's answer.
                 record_optional_decline(
-                    cast(SessionState, ctx.session.state),
-                    UnsupportedOperation.NO_OPERATION_COVERS,
-                    terminal=True,
+                    state, UnsupportedOperation.NO_OPERATION_COVERS, terminal=True
                 )
-        ctx.session.state[_SKILLS_BEFORE_ENTRY_STATE_KEY] = len(
-            skills_read(cast(SessionState, ctx.session.state))
-        )
+        ctx.state[_SKILLS_BEFORE_ENTRY_STATE_KEY] = len(skills_read(state))
         # A `resolve_definition` the request's wall-clock bound cuts keeps running here
         # for a later proposal in the same entry to be served, and is
         # cancelled on the way out (`translator.discovery.CutCalls`).
@@ -544,19 +507,15 @@ class PlannerAdapter:
         cut_calls_token = current_cut_calls.set(cut_calls)
         # A `resolve_definition` call this turn already made is served its answer
         # (`translator.discovery.resolving_once`).
-        with resolving_once(cast(SessionState, ctx.state)):
+        with resolving_once(state):
             try:
                 # The executor's refusals accumulate across the replans after
                 # a first draft, each with its code and the time this entry
                 # began, and the ones no later search lifted stay out of the
                 # pins (`submission.service.refused_in_force`). A resume
                 # passes this call's refusal again, which adds nothing.
-                _record_refusal(
-                    cast(SessionState, ctx.session.state),
-                    refusal,
-                    resumed=bool(ctx.resume_inputs),
-                )
-                excluded = sorted(refused_in_force(cast(SessionState, ctx.session.state), readings))
+                _record_refusal(state, refusal, resumed=resuming)
+                excluded = sorted(refused_in_force(state, readings))
                 # Every spec_id the planner's brief shows it, less the refused
                 # ones, written on every entry so `propose_plan` reads it
                 # (`PIN_SOURCES_STATE_KEY`). A pin of a shown one reuses its
@@ -567,9 +526,9 @@ class PlannerAdapter:
                 # Each page read before this entry, with its text, which sits
                 # under a key of its own (`planner.skills.skill_page_key`).
                 skills = [
-                    {**page, "text": ctx.session.state[skill_page_key(page)]}
-                    for page in skills_read(cast(SessionState, ctx.session.state))[
-                        : ctx.session.state.get(_SKILLS_BEFORE_ENTRY_STATE_KEY, 0)
+                    {**page, "text": ctx.state[skill_page_key(page)]}
+                    for page in skills_read(state)[
+                        : ctx.state.get(_SKILLS_BEFORE_ENTRY_STATE_KEY, 0)
                     ]
                 ]
                 ledger = _readings_ledger(
@@ -595,7 +554,7 @@ class PlannerAdapter:
                     },
                 )
                 sources = {k: v for k, v in sources.items() if k not in excluded}
-                save_pin_sources(cast(SessionState, ctx.session.state), sources)
+                save_pin_sources(state, sources)
                 message = self._message(
                     question=question,
                     prior_plan=_as_authored(changing),
@@ -608,31 +567,25 @@ class PlannerAdapter:
                     conversation_digest=conversation_digest,
                     ledger=ledger,
                     skills=skills,
-                    asks=load_asks(cast(SessionState, ctx.session.state)),
-                    ask_breakdowns=load_ask_breakdowns(cast(SessionState, ctx.session.state)),
-                    asks_across_years=load_asks_across_years(cast(SessionState, ctx.session.state)),
+                    asks=load_asks(state),
+                    ask_breakdowns=load_ask_breakdowns(state),
+                    asks_across_years=load_asks_across_years(state),
                     dropped=changing.dropped_asks if changing is not None else (),
                 )
-                submitted, plan, refused = await self._propose(
-                    ctx=ctx,
-                    message=message,
-                    on_progress=on_progress,
-                    run_id=f"answered-{answered.ask.call_id}" if answered is not None else None,
-                )
+                submitted, plan, refused = await self._propose(ctx=ctx, message=message)
                 # A run that ended on an accepted ask pauses the entry on it
                 # (`harness.graph.planning`), unless a plan declared ready
                 # beside it answers the entry or a refusal the run met ends
                 # it, which no answer could undo (`_propose` sets none of its
                 # own on an ask).
-                asking = load_pending_ask(cast(SessionState, ctx.session.state))
+                asking = load_pending_ask(state)
                 if asking is not None and submitted is None and refused is None:
                     return {"asked": asking._asdict()}
-                _forget_ask(ctx)
+                _forget_ask(state)
                 if refused is not None:
                     if pick is not None:
                         # The card shows why under the decision the user
                         # switched, as for a switch revised in code.
-                        state = cast(SessionState, ctx.session.state)
                         return self._revision_refused(
                             refused,
                             words=_revision_words(load_plan(state), seeded, state=state)
@@ -658,117 +611,19 @@ class PlannerAdapter:
                 # An entry that raises asks nothing: the turn ends on the
                 # failure, so no ask is left for a resume or a reader of the
                 # state to find.
-                _forget_ask(ctx)
+                _forget_ask(state)
                 raise
             finally:
-                # Every exit of this method runs through here: a normal return,
-                # an ask the planner's run ended on included, and a raised
-                # `PlannerAdapterError`. Nothing in this method catches that
-                # exception, so only a `finally` runs before the flush this
-                # node's own `NodeRunner` performs (see `_persist_durable`'s own
-                # docstring).
                 try:
-                    store_searched_pin_readings(ctx, cast(SessionState, ctx.session.state))
-                    self._persist_durable(ctx)
+                    store_searched_pin_readings(state)
                 finally:
                     current_cut_calls.reset(cut_calls_token)
                     await cut_calls.close()
 
-    def _legacy_ask(self, ctx: Context) -> AcceptedAsk | None:
-        """The ask a turn paused on before the planner node paused on its
-        planner's asks, which the resume answers, or `None`.
-
-        Such a turn paused inside the planner's run, on the planner's own
-        `REQUEST_INPUT_FUNCTION_CALL_NAME` call, whose arguments were the
-        question, and records no `PENDING_ASK_STATE_KEY`. Its answer
-        re-enters the planner as a new ask's does, in the brief of a fresh run
-        (`_answer_text`).
-        """
-        for event in reversed(ctx.session.events):
-            if event.author != AGENT_NAME:
-                continue
-            for call in event.get_function_calls():
-                if call.name == REQUEST_INPUT_FUNCTION_CALL_NAME and call.id in ctx.resume_inputs:
-                    return AcceptedAsk(call.id, dict(call.args or {}))
-        return None
-
-    @staticmethod
-    def _persist_durable(ctx: Context) -> None:
-        """Mirror this call's live `ctx.session.state` writes into `ctx.state`,
-        so a real event carries them and they survive past this
-        `Runner.run_async` call, a resume included.
-
-        Each value is read off `ctx.session.state` here, at the end of
-        `__call__` (its `finally`). `ctx.run_node`, in between, may have
-        replaced `planner:plan` and `planner:rounds` several times over with
-        the planner's own durable writes (`propose_plan`, through
-        `tool_context.state`), so what `__call__` wrote at its top may be
-        stale. This node's own delta flushes onto an event only once the node
-        finishes or pauses, so a value written through `ctx.state` when first
-        set would be applied over that newer write.
-
-        `PLAN_STATE_KEY` is mirrored even when the live plan is `None`.
-        `__call__`'s first-draft clear can leave it `None` on a session whose
-        durable `ctx.state` still holds the plan of an earlier `plan` call in
-        the same turn, which a later flush would otherwise apply over the
-        clear. `PLAN_STATE_KEY in ctx.session.state` (true even holding
-        `None`, since ADK hands back a plain `dict`) tells that clear apart
-        from a session that has held no plan, where there is nothing to
-        overwrite.
-        """
-        session_state = cast(SessionState, ctx.session.state)
-        plan = load_plan(session_state)
-        if plan is not None:
-            save_plan(cast(SessionState, ctx.state), plan)
-        elif PLAN_STATE_KEY in ctx.session.state:
-            clear_plan(cast(SessionState, ctx.state))
-        save_plan_rounds(cast(SessionState, ctx.state), load_plan_rounds(session_state))
-        # `__call__` writes `PIN_SOURCES_STATE_KEY`, empty included, on every
-        # entry, so a resume after a planner-side ask sees this turn's own
-        # value once `propose_plan` runs again. The `in` check only guards a
-        # direct caller of this adapter's pair that bypassed `__call__`.
-        if PIN_SOURCES_STATE_KEY in ctx.session.state:
-            ctx.state[PIN_SOURCES_STATE_KEY] = ctx.session.state[PIN_SOURCES_STATE_KEY]
-        # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY`,
-        # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
-        # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY`,
-        # `DECISION_PICK_STATE_KEY`, `ALIGNED_PINS_STATE_KEY`,
-        # `ALIGNED_PIN_WARNINGS_STATE_KEY`,
-        # `SEARCHED_PINS_STATE_KEY`, `SPEC_SEARCHED_STATE_KEY`,
-        # `REFUSED_SPECS_STATE_KEY`, `REFUSAL_DETAILS_STATE_KEY`,
-        # `SKILLS_READ_STATE_KEY`, `_SKILLS_BEFORE_ENTRY_STATE_KEY`,
-        # `PENDING_ASK_STATE_KEY` and `_ASKED_REFERRAL_STATE_KEY` too. The
-        # declines an ask-the-user resume still owes or may make, the failures
-        # it may repeat, the amendment or card pick that opened it, the pins
-        # compiled for its proposals and when Search settled on each, the
-        # spec_ids it may not pin, the skill pages its brief shows, and the
-        # ask it paused on with the referral before it are this entry's own.
-        for key in (
-            UNSUPPORTED_STATE_KEY,
-            OPTIONAL_DECLINES_STATE_KEY,
-            TERMINAL_DECLINES_STATE_KEY,
-            REDUCTION_REFUSED_ASKS_STATE_KEY,
-            COMPILE_FAILURES_STATE_KEY,
-            AMENDMENT_ENTRY_STATE_KEY,
-            DECISION_PICK_STATE_KEY,
-            ALIGNED_PINS_STATE_KEY,
-            ALIGNED_PIN_WARNINGS_STATE_KEY,
-            SEARCHED_PINS_STATE_KEY,
-            SPEC_SEARCHED_STATE_KEY,
-            REFUSED_SPECS_STATE_KEY,
-            REFUSAL_DETAILS_STATE_KEY,
-            SKILLS_READ_STATE_KEY,
-            _SKILLS_BEFORE_ENTRY_STATE_KEY,
-            PENDING_ASK_STATE_KEY,
-            _ASKED_REFERRAL_STATE_KEY,
-        ):
-            if key in ctx.session.state:
-                ctx.state[key] = ctx.session.state[key]
-
     async def revise(
         self,
         *,
-        ctx: Context,
+        ctx: NodeCtx[GraphEvent],
         prior_plan: dict[str, Any],
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],
@@ -813,7 +668,7 @@ class PlannerAdapter:
     async def _revised(
         self,
         *,
-        ctx: Context,
+        ctx: NodeCtx[GraphEvent],
         prior_plan: dict[str, Any],
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],
@@ -823,7 +678,7 @@ class PlannerAdapter:
         prior = Plan.model_validate(prior_plan)
         save_plan(state, prior)
         save_plan_rounds(state, 0)
-        call = SessionCall.of(ctx)
+        call = SessionCall(ctx.transcript.records, state, None)
         view = _RevisionSession(call=call, inherits=dict(inherits))
         proposal = Proposal(
             evidence_requirements=list(evidence_requirements), amends_version=prior.version
@@ -837,7 +692,7 @@ class PlannerAdapter:
             state=state,
             surface=self._surface,
         )
-        store_searched_pin_readings(ctx, state)
+        store_searched_pin_readings(state)
         if recorded.get("outcome") != Outcome.OK.value:
             return self._revision_refused(recorded, words=plan_display.plan_words(prior))
         translation = await self._translate(call)
@@ -847,7 +702,8 @@ class PlannerAdapter:
                 closing_refusal(referral) or _unanswered(referral) or not_ready(referral),
                 words=_revision_words(load_plan(state), prior, state=state),
             )
-        answer = end_run_when_ready({**recorded, "translation": translation}, ctx)
+        # No run to end: the revision calls no model.
+        answer = declare_ready({**recorded, "translation": translation}, call)
         plan = load_plan(state)
         if "summary" not in answer or plan is None:
             blocked = answer.get("submission") or answer.get("translation")
@@ -860,26 +716,18 @@ class PlannerAdapter:
     # -- one agent run ------------------------------------------------------
 
     async def _propose(
-        self,
-        *,
-        ctx: Context,
-        message: str,
-        on_progress: Callable[[dict[str, Any]], None] | None,
-        run_id: str | None = None,
+        self, *, ctx: NodeCtx[GraphEvent], message: str
     ) -> tuple[dict[str, Any] | None, Plan | None, dict[str, Any] | None]:
-        """Run the planner once through `ctx.run_node`, in the graph's own
-        session.
+        """Run the planner once on the turn's question and `message`, the
+        brief, in the planner node's own task.
 
-        The planner's node (`harness.planner_node.planner_node`) is given the
-        brief, shows it after the turn's question, and reports to this call's
-        `PlannerRun` as the run goes: each tool's answer, a call the turn's
-        budget closed, and before each request whether the run asks or stops
-        instead (`PlannerRun.next_request`). An ask or a stop is answered with
-        a model turn in place of a request, which ends the run the way a
-        normal turn ends (a model response with no further function call), so
-        the session it leaves behind has a `FunctionResponse` recorded for
-        every call. No half-finished turn is left for a later entry's message
-        to resume instead of seeing.
+        The run reports to this call's `PlannerRun` as it goes: each tool's
+        answer, a call the turn's budget closed, and before each request
+        whether the run asks or stops instead (`PlannerRun.next_request`). An
+        ask or a stop is answered with a model turn in place of a request
+        (`directive_turn`), which ends the run the way a normal turn ends (a
+        model response with no further function call), so the transcript it
+        leaves behind has an answer recorded for every call.
 
         Answers the declared-ready `propose_plan` answer and the plan, or the
         refusal the run ended on. A run that ends with no plan declared ready
@@ -887,76 +735,125 @@ class PlannerAdapter:
         model calls (`harness.turn_budget.TurnBudget.closed`), or else on
         `StopCode.PLAN_NOT_READY`, carrying the referral the last translation
         answered, if any (`harness.planner_run.not_ready`). A run that ends on
-        an accepted ask answers neither: the ask is in session state for
+        an accepted ask answers neither: the ask is in the turn's state for
         `__call__` to return.
-
-        `run_id` names the run the user's answer resumes, which the default
-        would put on the path of the run that asked. The resumed run sends the
-        model the turn's question and a brief that restates what it needs of
-        the asking run's calls (`_answer_text`, `_skills_section`,
-        `_plan_context`), with none of those calls' own history.
 
         A discovery call inside the run may take what is left of the
         request's wall-clock bound (`planner.plan.discovery_time_left`); with
         no request budget set it takes its own timeout alone.
-
-        The run carries `_PLANNER_BRANCH` (see its own comment), because a
-        `ctx.run_node` call made without one leaves the planner's events
-        unbranched, and an unbranched event belongs to every branch. The
-        branch filters on ADK's side. Session state
-        is untouched by it and `ctx.session.state` still reads the child's
-        write back, below.
-
-        What this run appended to the session is checked afterward
-        (`_check_branches`), because the branch is what makes that filtering
-        hold and ADK's own `_is_event_belongs_to_branch` returns True for any
-        event whose branch is empty. The assertion covers both ways the
-        guarantee can lapse: a dropped `override_branch` here, and a future
-        ADK release that stops honouring it. The check runs when the run
-        raises as well.
         """
-        run = PlannerRun(
-            agent=AGENT_NAME, on_progress=on_progress, on_tool_answered=self._on_tool_answered
-        )
+        run = PlannerRun(on_tool_answered=self._on_tool_answered)
         budget = current_turn_budget.get()
         time_left_token = current_discovery_time_left.set(
             budget.wall_left if budget is not None else None
         )
-        before = len(ctx.session.events)
         try:
-            planner = planner_node(
-                run,
-                planner=self._planner,
-                model_name=self._model_name,
-                client=self._genai_client,
-                budget=budget,
-                prefix_cache=self._prefix_cache,
-                brief=message,
-            )
-            await ctx.run_node(planner, None, run_id=run_id, override_branch=_PLANNER_BRANCH)
+            await self._run_planner(ctx, run, budget=budget, brief=message)
         finally:
             current_discovery_time_left.reset(time_left_token)
-            # Also checked when the run raised.
-            _check_branches(ctx.session.events[before:], planner=AGENT_NAME)
-
-        # Not `ctx.state`: `Context.state` is a `State` wrapper holding a
-        # reference to `invocation_context.session.state` captured once, at
-        # this node's own `Context` construction -- correct for what this
-        # node itself writes before calling `ctx.run_node`, but it does not
-        # pick up a write the *child* makes during that call, on a session
-        # this node's own turn did not start. `ctx.session.state`, read
-        # fresh off the live `Session` object, is what actually reflects
-        # what the run just left behind.
-        plan = load_plan(cast(SessionState, ctx.session.state))
-        asked = load_pending_ask(cast(SessionState, ctx.session.state)) is not None
+        state = cast(SessionState, ctx.state)
+        plan = load_plan(state)
+        asked = load_pending_ask(state) is not None
         # The referral the run saw last, which the brief of the run the
         # user's answer resumes shows, since that run sees none of this one's
         # calls (`_answer_text`).
-        ctx.session.state[_ASKED_REFERRAL_STATE_KEY] = run.last_referral if asked else None
+        ctx.state[_ASKED_REFERRAL_STATE_KEY] = run.last_referral if asked else None
         if run.submitted is None and run.refused is None and not asked:
             closed = budget.closed if budget is not None else None
             run.refused = closed or not_ready(run.last_referral)
         return run.submitted, plan, run.refused
+
+    async def _run_planner(
+        self, ctx: NodeCtx[GraphEvent], run: PlannerRun, *, budget: TurnBudget | None, brief: str
+    ) -> None:
+        """Run the planner once on `brief`, after the turn's question, in the
+        node's task, with the turn's state as the planner's state.
+
+        Each model response with parts and each response's answers go to the
+        turn's transcript as a record (`planner.session.response_record`,
+        `answers_record`) and to the node's events as the item the run
+        yielded. A response with no parts, an empty or a blocked one, leaves
+        neither. A tool call reads the transcript as it stands when the call
+        runs (`planner.session.SessionCall`).
+
+        The turn's question is its message (`ctx.inputs["message"]`), the
+        text the user sent.
+
+        Raises:
+            StreamResumedError: google-genai resumed a stream over output no
+                continuation token covers (`harness.gemini_wire.resumed_over_output`),
+                a dropped connection, so the turn ends as a dropped Gemini call
+                ends it (`compiler.surface.transient`).
+        """
+
+        def before_request() -> types.Content | None:
+            return directive_turn(run.next_request())
+
+        def after_response(closed_by: StopCode | None, usage: Usage | None) -> types.Content | None:
+            # A call a bound closed is logged with the usage its chunks
+            # reported before the cut.
+            if usage is not None:
+                log_usage(AGENT_NAME, usage)
+            if closed_by is not None:
+                return directive_turn(run.model_answered(closed_by))
+            return None
+
+        def tool_failed(name: str, error: BaseException) -> dict[str, Any]:
+            logger.error(
+                "planner tool %s raised %s turn=%s trace_id=%s",
+                name,
+                type(error).__name__,
+                ctx.key,
+                current_trace_id(),
+                exc_info=error,
+            )
+            return run.tool_failed(name, error)
+
+        model = planner_model(
+            self._model_name,
+            client=self._genai_client,
+            budget=budget,
+            prefix_cache=self._prefix_cache,
+            before_request=before_request,
+            after_response=after_response,
+        )
+        deps = PlannerDeps(
+            state=ctx.state,
+            call_for=lambda state, call_id: SessionCall(ctx.transcript.records, state, call_id),
+            tool_answered=run.tool_answered,
+            tool_failed=tool_failed,
+        )
+        items = run_planner(
+            self._planner,
+            deps,
+            model=model,
+            question=str(ctx.inputs["message"]),
+            brief=brief,
+            conversation_id=ctx.key.conversation_id,
+        )
+        # Closed here, in the node's task, when a Stop cancels the node, so
+        # the run's spans and context variables end in the task that opened
+        # them.
+        try:
+            async with aclosing(items):
+                async for item in items:
+                    if isinstance(item, PlannerAnswers):
+                        ctx.transcript.append(answers_record(item.answers))
+                    elif item.parts:
+                        ctx.transcript.append(response_record(item.parts))
+                    else:
+                        continue
+                    ctx.emit(item)
+        except Exception as exc:
+            if not resumed_over_output(exc):
+                raise
+            logger.warning(
+                "planner stream resumed over output turn=%s trace_id=%s: %s",
+                ctx.key,
+                current_trace_id(),
+                exc,
+            )
+            raise StreamResumedError(str(exc)) from exc
 
     @cached_property
     def _genai_client(self) -> Client:
@@ -1157,21 +1054,54 @@ def _ask_text(
     return ask
 
 
-def end_run_when_ready(answer: dict[str, object], ctx: Context) -> dict[str, object]:
-    """`declare_ready` over the call `ctx` serves (`SessionCall.of`), marking
-    `ctx`'s actions `skip_summarization` once the plan is ready
-    (`planner.tools.ready_and_end`)."""
-
-    def end_run() -> None:
-        ctx.actions.skip_summarization = True
-
-    return ready_and_end(answer, SessionCall.of(ctx), end_run)
+# The OpenTelemetry GenAI variable that says where message content goes,
+# which `common.telemetry` sets when a backend comes up.
+_CONTENT_CAPTURE = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 
 
-def _forget_ask(ctx: Context) -> None:
+def content_on_spans() -> bool:
+    """Whether `_CONTENT_CAPTURE` puts message content on spans: `SPAN_ONLY` or
+    `SPAN_AND_EVENT`. Any other value, or none, keeps it off them."""
+    return os.environ.get(_CONTENT_CAPTURE, "").upper() in {"SPAN_ONLY", "SPAN_AND_EVENT"}
+
+
+def pydantic_planner(
+    specs: Sequence[ToolSpec], *, instruction: str, include_content: bool
+) -> PydanticPlanner:
+    """The planner on `specs` and `instruction`, named
+    `planner.settings.AGENT_NAME`, its spans carrying message content when
+    `include_content`. It has no model of its own, since each run names one
+    (`PlannerAdapter._run_planner`). Built once, it serves every run."""
+    return planner_agent(
+        specs, instruction=instruction, name=AGENT_NAME, include_content=include_content
+    )
+
+
+def directive_turn(directive: Directive | None) -> types.Content | None:
+    """The model turn `directive` stands for, or `None` to keep the model's own.
+
+    An ask is one `PLANNER_ASK` call with the ask's arguments, under a call id
+    of the form the wire gives a call the model sent without one
+    (`harness.gemini_wire.client_call_id`), so the resume pairs the user's
+    answer with it the way it pairs one with a model-issued ask
+    (`planner.call.elected_spec_ids`). A stop is the sentence of the refusal
+    the run ends on (`harness.sentences.refusal_sentence`).
+    """
+    match directive:
+        case Ask(args=args):
+            call = types.FunctionCall(id=gemini_wire.client_call_id(), name=PLANNER_ASK, args=args)
+            part = types.Part(function_call=call, thought_signature=SKIP_THOUGHT_SIGNATURE)
+        case Stop(refusal=refusal):
+            part = types.Part(text=f"Stopping this turn: {refusal_sentence(refusal)}")
+        case None:
+            return None
+    return types.Content(role="model", parts=[part])
+
+
+def _forget_ask(state: SessionState) -> None:
     """Clear the ask the planner's run ended on and the referral kept with it."""
-    clear_pending_ask(cast(SessionState, ctx.session.state))
-    ctx.session.state[_ASKED_REFERRAL_STATE_KEY] = None
+    clear_pending_ask(state)
+    state[_ASKED_REFERRAL_STATE_KEY] = None
 
 
 # The line before the referral `_answer_text` renders.
@@ -1516,44 +1446,6 @@ def _asks_section(
 _REMOVED_MARK = " (removed by the user)"
 
 
-def _check_branches(events: Sequence[Event], *, planner: str) -> None:
-    """Raise unless every planner event this run appended carries `_PLANNER_BRANCH`.
-
-    ADK's `_is_event_belongs_to_branch` (`google.adk.flows.llm_flows.contents`)
-    returns True when either side's branch is empty, and otherwise when the
-    invocation's branch path equals the event's or descends from it. An
-    unbranched planner event therefore belongs to every branch, the
-    orchestrator's included, which then reads the planner's calls and results
-    as another agent's turns. The planner's `ctx.run_node` call passes
-    `override_branch=_PLANNER_BRANCH` to prevent that, and this checks the
-    effect rather than the argument: a dropped keyword and a future ADK
-    release that stops honouring it both surface here.
-
-    An empty slice, or one with no planner event, passes. A run that raised
-    may have appended nothing yet.
-
-    Raises:
-        PlannerAdapterError: If a planner event carries another branch. Nothing
-            about the run is reported back. A planner whose events reach
-            every branch has also read every unbranched event, so the plan it
-            produced cannot be trusted to have been drafted from its own
-            context alone.
-    """
-    strays = sorted(
-        str(event.branch)
-        for event in events
-        if event.author == planner and event.branch != _PLANNER_BRANCH
-    )
-    if strays:
-        raise PlannerAdapterError(
-            f"{len(strays)} planner event(s) this run appended carry a branch other than "
-            f"{_PLANNER_BRANCH!r}: {strays!r}. ADK treats an unbranched event as belonging "
-            "to every branch and filters a branched one by path, so the planner's events "
-            f"stay out of other agents' requests only on exactly {_PLANNER_BRANCH!r}. The "
-            f"planner's `ctx.run_node` call has to pass override_branch={_PLANNER_BRANCH!r}."
-        )
-
-
 def _readings_ledger(
     readings: Sequence[Mapping[str, Any]], *, skills_read: Collection[str] = ()
 ) -> RenderedReadings:
@@ -1590,11 +1482,11 @@ def _skills_section(pages: Sequence[Mapping[str, Any]]) -> str:
     return _SKILLS_CONTEXT + "".join(rendered)
 
 
-def store_searched_pin_readings(ctx: Context, planner_state: SessionState) -> None:
+def store_searched_pin_readings(state: SessionState) -> None:
     """Store each dataset Search settled on for a calculation's input the planner
     pinned none for as a reading of the conversation.
 
-    `planner_state` holds those searches (`submission.service.searched_pins`),
+    `state` holds those searches (`submission.service.searched_pins`),
     each with Search's answer as a digest. One no reading of the conversation
     names yet joins this turn's readings through `store_search`, as the
     `switch` node stores a switched one: under the words it was searched as,
@@ -1608,18 +1500,17 @@ def store_searched_pin_readings(ctx: Context, planner_state: SessionState) -> No
     turn reads its spec_id as any source the translator found
     (`harness.turn_records.PlanRecord.source_readings`).
     """
-    searched = [pin for pin in searched_pins(planner_state) if pin.spec_id and pin.digest]
+    searched = [pin for pin in searched_pins(state) if pin.spec_id and pin.digest]
     if not searched:
         return
     stored = {
-        SearchReading.model_validate(reading).spec_id
-        for reading in conversation_readings(ctx.state)
+        SearchReading.model_validate(reading).spec_id for reading in conversation_readings(state)
     }
     for found in searched:
         if found.spec_id in stored or found.digest is None:
             continue
         store_search(
-            cast(SessionState, ctx.state),
+            state,
             found.digest,
             asked=[found.asked_roles],
             held_open=[found.open_roles],

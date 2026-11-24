@@ -1,9 +1,10 @@
 """Tests for `harness.prefix_cache`: one shared cache per static prefix.
 
-A fake genai client records every `caches.create` and every generate call's
-model and config, and fails on cue the way Gemini and its transports do. A
-request against a gone cache raises 403 when the response is first read,
-streamed or not.
+Each call goes through `harness.gemini_wire.GeminiStream`, the stream that
+looks a request's prefix up and sends the request against its cache. A fake
+genai client records every `caches.create` and every streamed call's model
+and config, and fails on cue the way Gemini and its transports do. A request
+against a gone cache raises 403 when its stream is first read.
 """
 
 from __future__ import annotations
@@ -16,15 +17,14 @@ from typing import Any
 import aiohttp
 import httpx
 import pytest
-from google.adk.models.google_llm import Gemini
-from google.adk.models.llm_request import LlmRequest
 from google.genai import Client, errors, types
+from harness.gemini_wire import GeminiStream
 from harness.prefix_cache import (
     CACHE_TTL_S,
     CREATE_COOLDOWN_S,
     REFRESH_MARGIN_S,
     PrefixCache,
-    PrefixCachedGemini,
+    gemini_model_name,
 )
 
 MODEL = "gemini-3.8-flash"
@@ -94,10 +94,6 @@ class _Models:
         if self._error is not None:
             raise self._error
 
-    async def generate_content(self, *, model: str, contents: Any, config: Any) -> Any:
-        self._check(model, config)
-        return _chunk("done")
-
     async def generate_content_stream(self, *, model: str, contents: Any, config: Any) -> Any:
         async def chunks() -> AsyncIterator[types.GenerateContentResponse]:
             self._check(model, config)
@@ -144,30 +140,32 @@ class _Clock:
         return self.now
 
 
-def _model(cache: PrefixCache, client: _FakeClient) -> PrefixCachedGemini:
-    return PrefixCachedGemini(model=MODEL, client=client, prefix_cache=cache)
-
-
-def _request(system: str = "You are the planner.", *, model: str = MODEL) -> LlmRequest:
-    return LlmRequest(
-        model=model,
-        contents=[types.Content(role="user", parts=[types.Part(text="question")])],
-        config=types.GenerateContentConfig(
-            system_instruction=system,
-            tools=[TOOL],
-            tool_config=types.ToolConfig(
-                function_calling_config=types.FunctionCallingConfig(mode="AUTO")
-            ),
-        ),
+def _stream(cache: PrefixCache, client: _FakeClient) -> GeminiStream:
+    return GeminiStream(
+        client=client, budget=None, prefix_cache=cache, before_request=None, after_response=None
     )
 
 
-async def _call(model: Gemini, request: LlmRequest, *, stream: bool = False) -> list[str]:
-    return [
-        "".join(part.text or "" for part in response.content.parts)
-        async for response in model.generate_content_async(request, stream=stream)
-        if response.content and response.content.parts and not response.partial
-    ]
+def _config(system: str = "You are the planner.") -> types.GenerateContentConfig:
+    """A request's config as Pydantic AI's `GoogleModel` builds it."""
+    return types.GenerateContentConfig(
+        system_instruction=types.Content(role="user", parts=[types.Part(text=system)]),
+        tools=[TOOL],
+        tool_config=types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(mode="AUTO")
+        ),
+        response_modalities=[types.Modality.TEXT],
+    )
+
+
+async def _call(stream: GeminiStream, config: types.GenerateContentConfig | None = None) -> str:
+    """The text of the streamed answer to one request."""
+    chunks = await stream(
+        model=MODEL,
+        contents=[types.Content(role="user", parts=[types.Part(text="question")])],
+        config=config or _config(),
+    )
+    return "".join([chunk.text or "" async for chunk in chunks])
 
 
 def _sent_against(config: types.GenerateContentConfig) -> str | None:
@@ -183,10 +181,10 @@ def _sent_against(config: types.GenerateContentConfig) -> str | None:
 async def test_one_cache_serves_five_calls_across_two_sessions() -> None:
     cache = PrefixCache()
     client = _FakeClient()
-    sessions = [_model(cache, client), _model(cache, client)]
+    sessions = [_stream(cache, client), _stream(cache, client)]
 
     for model in [*sessions, *sessions, sessions[0]]:
-        await _call(model, _request())
+        await _call(model)
 
     assert len(client.cache_calls.created) == 1
     created = client.cache_calls.created[0]
@@ -198,29 +196,15 @@ async def test_one_cache_serves_five_calls_across_two_sessions() -> None:
     ] * 5
 
 
-async def test_the_traced_request_keeps_its_instruction_and_tools() -> None:
-    client = _FakeClient()
-    request = _request()
-
-    await _call(_model(PrefixCache(), client), request, stream=True)
-
-    assert _sent_against(client.model_calls.configs[0]) == "cachedContents/c1"
-    assert request.config.cached_content is None
-    assert request.config.system_instruction == "You are the planner."
-    assert request.config.tools == [TOOL]
-    assert request.config.tool_config is not None
-
-
-@pytest.mark.parametrize("stream", [False, True])
-async def test_a_gone_cache_is_created_again_and_the_request_resent_once(stream: bool) -> None:
+async def test_a_gone_cache_is_created_again_and_the_request_resent_once() -> None:
     cache = PrefixCache()
     client = _FakeClient(gone={"cachedContents/c1"})
-    model = _model(cache, client)
+    model = _stream(cache, client)
 
-    texts = await _call(model, _request(), stream=stream)
-    await _call(model, _request(), stream=stream)
+    texts = await _call(model)
+    await _call(model)
 
-    assert texts == ["done"]
+    assert texts == "done"
     assert len(client.cache_calls.created) == 2
     assert [_sent_against(config) for config in client.model_calls.configs] == [
         "cachedContents/c1",
@@ -234,9 +218,9 @@ async def test_a_gone_cache_that_cannot_be_created_again_is_resent_uncached() ->
         gone={"cachedContents/c1"}, create_failures=[None, aiohttp.ClientPayloadError("reset")]
     )
 
-    texts = await _call(_model(PrefixCache(), client), _request())
+    texts = await _call(_stream(PrefixCache(), client))
 
-    assert texts == ["done"]
+    assert texts == "done"
     assert [_sent_against(config) for config in client.model_calls.configs] == [
         "cachedContents/c1",
         None,
@@ -247,7 +231,7 @@ async def test_a_cache_gone_after_the_first_chunk_is_not_resent() -> None:
     client = _FakeClient(gone_after_chunk={"cachedContents/c1"})
 
     with pytest.raises(errors.ClientError) as raised:
-        await _call(_model(PrefixCache(), client), _request(), stream=True)
+        await _call(_stream(PrefixCache(), client))
 
     assert raised.value.code == 403
     assert len(client.cache_calls.created) == 1
@@ -259,10 +243,10 @@ async def test_a_prefix_the_api_refuses_to_cache_is_sent_whole_from_then_on() ->
         400, {"error": {"code": 400, "message": "too small", "status": "INVALID_ARGUMENT"}}
     )
     client = _FakeClient(create_failures=[too_small])
-    model = _model(PrefixCache(), client)
+    model = _stream(PrefixCache(), client)
 
-    await _call(model, _request())
-    await _call(model, _request())
+    await _call(model)
+    await _call(model)
 
     assert client.cache_calls.created == []
     assert [_sent_against(config) for config in client.model_calls.configs] == [None, None]
@@ -286,14 +270,14 @@ async def test_a_transient_create_failure_goes_uncached_until_the_cooldown_ends(
 ) -> None:
     clock = _Clock()
     client = _FakeClient(create_failures=[failure])
-    model = _model(PrefixCache(clock=clock), client)
+    model = _stream(PrefixCache(clock=clock), client)
 
-    await _call(model, _request())
+    await _call(model)
     clock.now += CREATE_COOLDOWN_S - 1
-    await _call(model, _request())
+    await _call(model)
     attempts_in_cooldown = client.cache_calls.attempts
     clock.now += 1
-    await _call(model, _request())
+    await _call(model)
 
     assert attempts_in_cooldown == 1
     assert client.cache_calls.attempts == 2
@@ -311,7 +295,7 @@ async def test_a_model_error_on_the_uncached_request_reaches_the_caller() -> Non
     )
 
     with pytest.raises(errors.ServerError) as raised:
-        await _call(_model(PrefixCache(), client), _request())
+        await _call(_stream(PrefixCache(), client))
 
     assert raised.value.code == 500
     assert [_sent_against(config) for config in client.model_calls.configs] == [None]
@@ -319,12 +303,12 @@ async def test_a_model_error_on_the_uncached_request_reaches_the_caller() -> Non
 
 async def test_a_create_that_never_returns_goes_uncached_within_the_bound() -> None:
     client = _FakeClient(release_create=asyncio.Event())
-    model = _model(PrefixCache(create_timeout_s=0.05), client)
+    model = _stream(PrefixCache(create_timeout_s=0.05), client)
 
     async with asyncio.timeout(1):
-        texts = await _call(model, _request())
+        texts = await _call(model)
 
-    assert texts == ["done"]
+    assert texts == "done"
     assert client.cache_calls.created == []
     assert [_sent_against(config) for config in client.model_calls.configs] == [None]
 
@@ -335,9 +319,9 @@ async def test_concurrent_calls_on_a_create_that_never_returns_share_one_bound()
     cache = PrefixCache(create_timeout_s=0.2)
 
     async with asyncio.timeout(0.35):
-        texts = await asyncio.gather(*(_call(_model(cache, client), _request()) for _ in range(4)))
+        texts = await asyncio.gather(*(_call(_stream(cache, client)) for _ in range(4)))
 
-    assert texts == [["done"]] * 4
+    assert texts == ["done"] * 4
     assert client.cache_calls.attempts == 1
     assert [_sent_against(config) for config in client.model_calls.configs] == [None] * 4
 
@@ -346,8 +330,8 @@ async def test_a_cancelled_call_propagates_and_leaves_the_shared_create_running(
     release = asyncio.Event()
     client = _FakeClient(release_create=release)
     cache = PrefixCache()
-    cancelled = asyncio.create_task(_call(_model(cache, client), _request()))
-    waiting = asyncio.create_task(_call(_model(cache, client), _request()))
+    cancelled = asyncio.create_task(_call(_stream(cache, client)))
+    waiting = asyncio.create_task(_call(_stream(cache, client)))
 
     await asyncio.sleep(0.01)
     cancelled.cancel()
@@ -364,9 +348,7 @@ async def test_concurrent_first_calls_on_one_prefix_create_one_cache() -> None:
     release = asyncio.Event()
     client = _FakeClient(release_create=release)
     cache = PrefixCache()
-    calls = asyncio.gather(
-        _call(_model(cache, client), _request()), _call(_model(cache, client), _request())
-    )
+    calls = asyncio.gather(_call(_stream(cache, client)), _call(_stream(cache, client)))
 
     await asyncio.sleep(0.01)
     release.set()
@@ -380,11 +362,11 @@ async def test_concurrent_first_calls_on_one_prefix_create_one_cache() -> None:
 
 async def test_a_changed_instruction_gets_its_own_cache() -> None:
     client = _FakeClient()
-    model = _model(PrefixCache(), client)
+    model = _stream(PrefixCache(), client)
 
-    await _call(model, _request("You are the planner."))
-    await _call(model, _request("You are the orchestrator."))
-    await _call(model, _request("You are the planner."))
+    await _call(model, _config("You are the planner."))
+    await _call(model, _config("You are the orchestrator."))
+    await _call(model, _config("You are the planner."))
 
     assert [created.system_instruction for created in client.cache_calls.created] == [
         "You are the planner.",
@@ -400,13 +382,13 @@ async def test_a_changed_instruction_gets_its_own_cache() -> None:
 async def test_a_cache_near_its_expiry_is_replaced_before_use() -> None:
     clock = _Clock()
     client = _FakeClient()
-    model = _model(PrefixCache(clock=clock), client)
+    model = _stream(PrefixCache(clock=clock), client)
 
-    await _call(model, _request())
+    await _call(model)
     clock.now += CACHE_TTL_S - REFRESH_MARGIN_S - 1
-    await _call(model, _request())
+    await _call(model)
     clock.now += 2
-    await _call(model, _request())
+    await _call(model)
 
     assert [_sent_against(config) for config in client.model_calls.configs] == [
         "cachedContents/c1",
@@ -417,37 +399,37 @@ async def test_a_cache_near_its_expiry_is_replaced_before_use() -> None:
 
 async def test_a_request_with_no_instruction_or_tools_goes_uncached() -> None:
     client = _FakeClient()
-    request = LlmRequest(
-        model=MODEL, contents=[types.Content(role="user", parts=[types.Part(text="q")])]
+
+    found = await PrefixCache().lookup(
+        client=client, model=MODEL, config=types.GenerateContentConfig()
     )
 
-    await _call(_model(PrefixCache(), client), request)
-
-    assert client.cache_calls.created == []
-    assert _sent_against(client.model_calls.configs[0]) is None
+    assert found is None
+    assert client.cache_calls.attempts == 0
 
 
 @pytest.mark.parametrize(
-    ("model_name", "cached"),
-    [("gemini-3.8-flash", True), ("gemma-3-27b-it", False), ("openai/gpt-4o", False)],
+    ("model_name", "sent"),
+    [
+        pytest.param("gemini-3.8-flash", "gemini-3.8-flash", id="gemini"),
+        pytest.param("gemma-4-31b-it", "gemma-4-31b-it", id="gemma-4"),
+        pytest.param("gemma-3-27b-it", None, id="gemma-3"),
+        pytest.param("openai/gpt-4o", None, id="litellm-path"),
+        pytest.param("claude-3-5-sonnet", None, id="claude"),
+        pytest.param("Gemini:gemini-3.8-flash", "gemini-3.8-flash", id="gemini-prefix"),
+        pytest.param("gemini:gemma-3-27b-it", "gemma-3-27b-it", id="gemini-prefix-any-name"),
+        pytest.param("openai:gemini-3.8-flash", None, id="other-prefix"),
+        pytest.param(
+            "projects/p/locations/l/endpoints/e",
+            "projects/p/locations/l/endpoints/e",
+            id="endpoint",
+        ),
+        pytest.param(
+            "projects/p/locations/l/publishers/google/models/gemini-3.8-flash",
+            "projects/p/locations/l/publishers/google/models/gemini-3.8-flash",
+            id="vertex-path",
+        ),
+    ],
 )
-def test_only_a_gemini_model_is_wrapped(model_name: str, cached: bool) -> None:
-    model = PrefixCache().model_for(model_name)
-
-    assert isinstance(model, PrefixCachedGemini) is cached
-    if not cached:
-        assert model == model_name
-
-
-async def test_a_provider_prefixed_gemini_name_is_cached_and_sent_without_its_prefix() -> None:
-    wrapped = PrefixCache().model_for("Gemini:gemini-3.8-flash")
-    assert isinstance(wrapped, PrefixCachedGemini)
-    client = _FakeClient()
-    model = wrapped.model_copy(update={"client": client})
-
-    # ADK names the request's model from the agent's model (`basic.py`).
-    await _call(model, _request(model=model.model))
-
-    assert model.model == MODEL
-    assert client.cache_calls.models == [MODEL]
-    assert client.model_calls.models == [MODEL]
+def test_a_name_gemini_serves_is_sent_as_gemini_names_it(model_name: str, sent: str | None) -> None:
+    assert gemini_model_name(model_name) == sent

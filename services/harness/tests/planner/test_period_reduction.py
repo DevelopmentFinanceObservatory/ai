@@ -21,7 +21,6 @@ from typing import Any
 
 import pytest
 from data_mcp.definition_store import canonicalize, spec_id_for
-from google.adk.events import EventActions
 from harness.planner_adapter import _reading_pin_sources
 from harness.turn_records import RecordedIdentity
 from planner.plan import (
@@ -208,7 +207,7 @@ def _context(
     amendment: bool | None = None,
     pins: dict[str, PinSource] | None = None,
 ) -> Any:
-    """The part of ADK's `ToolContext` `propose_plan` reads.
+    """The part of a tool call's context `propose_plan` reads.
 
     `across_years` numbers the asks the orchestrator marked, and
     `amendment` is what the adapter recorded of the entry, `None` for a session
@@ -225,8 +224,8 @@ def _context(
     return SimpleNamespace(
         state=state,
         function_call_id=None,
-        actions=EventActions(),
-        session=SimpleNamespace(events=[]),
+        run_ended=False,
+        records=[],
     )
 
 
@@ -770,7 +769,7 @@ def test_an_intervening_version_keeping_its_years_keeps_the_licence_through_stor
         state = {**ctx.state}
         save_plan(state, recorded)
         return SimpleNamespace(
-            state=state, function_call_id=None, actions=EventActions(), session=ctx.session
+            state=state, function_call_id=None, run_ended=False, records=ctx.records
         )
 
     ctx = stored(ctx)

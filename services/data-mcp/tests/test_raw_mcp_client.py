@@ -1,8 +1,8 @@
-"""A raw, low-level MCP client reads the templated artifact resource end to end, no ADK.
+"""A raw, low-level MCP client reads the templated artifact resource end to end, no agent framework.
 
 `fastmcp.Client` is a convenience wrapper this suite otherwise drives everything
 through, but it discovers resources through `resources/list` alone -- the same
-path ADK's harness uses (see `artifact_resource.py`'s module docstring) -- so it
+path the harness's MCP client uses (see `artifact_resource.py`'s module docstring) -- so it
 cannot prove the templated URI is reachable by anything at all. This
 module drives a raw `mcp.ClientSession` over streamable HTTP instead, the way a
 client that already holds a URI (from a `get_data` result's resource link) would.
@@ -70,7 +70,7 @@ def _routing_handler(*, mint_payload: dict[str, Any], snapshot_payload: dict[str
 @asynccontextmanager
 async def _raw_session() -> AsyncIterator[ClientSession]:
     """A raw `ClientSession` over streamable HTTP, ASGI-mounted with no sockets --
-    `net_guard`'s `no_network` fixture applies here too, and is what proves the "no ADK, no
+    `net_guard`'s `no_network` fixture applies here too, and is what proves the "no agent framework, no
     network" claim. `app.router.lifespan_context(app)` is required: the mounted FastMCP
     app's `StreamableHTTPSessionManager` only starts inside its own lifespan, the same
     contract `harness/server.py` documents for `combine_lifespans`.

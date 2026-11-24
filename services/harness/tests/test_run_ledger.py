@@ -37,7 +37,6 @@ from harness.studio_store import DATABASE_NOW, StudioStore
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from .orchestrator_fakes import NO_ADK, no_turn_specs
 from .store_clock import StoreClock
 
 PRINCIPAL = "principal"
@@ -68,8 +67,6 @@ def _store(
 ) -> StudioStore:
     return StudioStore(
         engine,
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         clock=clock,
         time_sql=time_sql,
     )
@@ -137,7 +134,9 @@ async def test_a_run_and_its_key_survive_into_a_fresh_store_over_the_same_servic
     await ledger.record(run.run_id, Seal(INPUTS, retrievals=RETRIEVALS))
     await ledger.store_plan("rev-1", "the plan")
     await ledger.store_plan("rev-1", "another plan")
-    await store.release(PRINCIPAL, CONVERSATION, store.current(PRINCIPAL, CONVERSATION).segment.id)
+    await store.close_segment(
+        PRINCIPAL, CONVERSATION, store.current(PRINCIPAL, CONVERSATION).segment.id
+    )
 
     fresh = StudioRunLedger(await _streaming_store(pg_engine, [START]))
 
@@ -179,7 +178,7 @@ async def test_run_items_stay_out_of_conversation_state_and_survive_its_saves(
 
     state.turn_final_text = "answered"
     await store.save(PRINCIPAL, CONVERSATION)
-    await store.checkpoint(PRINCIPAL, CONVERSATION, segment_id)
+    await store.close_segment(PRINCIPAL, CONVERSATION, segment_id)
 
     async with pg_engine.connect() as conn:
         stored_keys = (
@@ -203,15 +202,15 @@ async def test_a_writer_fenced_out_by_a_takeover_cannot_record_publication(
     await clock.advance(studio_state.SEGMENT_TTL_S + 1)  # A's segment has expired
     await _streaming_store(service, clock)  # B takes the conversation over
     streaming = store_a.current(PRINCIPAL, CONVERSATION)
-    streaming.cancel_event = asyncio.Event()
+    streaming.renew_now = asyncio.Event()
 
     with pytest.raises(SegmentLost):
         await ledger_a.record(run.run_id, Published(DERIVED, "rpk_1"))
 
-    # A's stream ends as lost, since the graph reports the ledger's failure
-    # to the model as data and would otherwise run on.
-    assert streaming.cancel_event.is_set()
-    assert streaming.cancel_reason == "segment_lost"
+    # A's heartbeat renews at once, finds the lease lost and ends the stream,
+    # since the graph reports the ledger's failure to the model as data and
+    # would otherwise run on.
+    assert streaming.renew_now.is_set()
     recorded = await StudioRunLedger(_store(service)).get(run.run_id)
     assert recorded.status is RunStatus.PUBLISHING
     assert recorded.results[0].replay_key is None

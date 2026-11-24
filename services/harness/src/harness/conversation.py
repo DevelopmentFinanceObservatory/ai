@@ -6,7 +6,7 @@ to pick the client of the conversation's current turn, which names the
 conversation to the MCP servers in its `x-dfo-caller` header
 (`common.caller`), which data-mcp and analysis-mcp record as a stored frame's
 `writer`. It is a contextvar
-because the value has to cross the graph: studio -> ADK runner -> graph
+because the value has to cross the graph: studio -> turn engine -> graph
 node -> executor, and none of those layers carries wire identity, since the
 graph must stay runnable without any studio layer at all.
 
@@ -35,6 +35,17 @@ from compiler.surface import current_spec_uses
 from opentelemetry import context as otel_context
 
 NO_CONVERSATION = "no-conversation"
+
+
+def ledger_conversation_id(principal: str, conversation_id: str) -> str:
+    """The id the studio names `principal`'s conversation `conversation_id`
+    by: what `current_conversation_id` holds for its segments, what the
+    recording surface keys its step order on, and what its runs are admitted
+    under (`executor.ledger.idempotency_key`), by `execute` and by the
+    interrupt route. Every turn of the conversation names the same one, so a
+    later turn executing the same revision carries the run on."""
+    return f"{principal}/{conversation_id}"
+
 
 current_conversation_id: ContextVar[str] = ContextVar(
     "studio_conversation_id", default=NO_CONVERSATION
@@ -113,16 +124,8 @@ def shared_work_context() -> Context:
     return context
 
 
-def conversation_of(session_id: str) -> str:
-    """The conversation a turn whose ADK session is `session_id` belongs to:
-    the studio's, which spans its turns, or outside the studio the session's."""
-    conversation = current_conversation_id.get()
-    return session_id if conversation == NO_CONVERSATION else conversation
-
-
 __all__ = [
     "NO_CONVERSATION",
-    "conversation_of",
     "current_caller_turn",
     "current_conversation_caller",
     "current_conversation_id",

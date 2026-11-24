@@ -33,11 +33,17 @@ from planner.operations import RetrieveOperation, Translation
 from planner.plan import AnswerMode, DatasetRequirement, Decision, Plan, PlanStatus
 from planner.workflow import SelectedSource
 
-from ..resolved_revision import component_for, resolved_revision
+from ..resolved_revision import resolved_revision
 from .conftest import CONTENT_VERSION, SPEC_KENYA, ScriptedSurface, ok
 
 ManifestFactory = Callable[..., dict[str, Any]]
 SourceFactory = Callable[..., SelectedSource]
+
+
+async def _assembled_component(executor: Any, **kwargs: Any) -> dict[str, Any] | None:
+    """The wire component `_assemble_component` built, or None when it withheld the card."""
+    assembled = await executor._assemble_component(**kwargs)
+    return None if assembled is None else assembled.component
 
 
 def _retrieval_terminal_plan(
@@ -138,7 +144,7 @@ async def test_a_retrieval_terminal_plan_assembles_a_card_from_its_own_source(
     frame_ref = outcome.results["annual_debt_service"].model_dump()
 
     executor = McpExecutor(settings=Settings(), provenance=store)
-    component = component_for(
+    component = await _assembled_component(
         executor,
         reply={"component_id": "cmp_1", "revision": 1},
         envelope=resolved_revision("line_chart", frame_ref=frame_ref),
@@ -184,7 +190,7 @@ async def test_a_retrieval_terminal_card_counts_the_stat_vars_its_frame_holds(
     frame_ref = outcome.results["annual_debt_service"].model_dump()
 
     executor = McpExecutor(settings=Settings(), provenance=store)
-    component = component_for(
+    component = await _assembled_component(
         executor,
         reply={"component_id": "cmp_1", "revision": 1},
         envelope=resolved_revision("line_chart", frame_ref=frame_ref),

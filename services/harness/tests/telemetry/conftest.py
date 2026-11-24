@@ -4,9 +4,9 @@ reach the wire.
 
 `isolated_telemetry` starts a test from an unconfigured `common.telemetry`
 with no telemetry env vars, no global tracer provider and no tracer left bound
-by ADK's or the `mcp` SDK's module-level tracers, and puts back what it
-found: OpenTelemetry allows one global provider per process and other suites
-in the session install their own. `fake_langfuse` points the SDK's env vars at a local server that
+by the `mcp` SDK's module-level tracers, and puts back what it found:
+OpenTelemetry allows one global provider per process and other suites in the
+session install their own. `fake_langfuse` points the SDK's env vars at a local server that
 answers the credentials check and records every OTLP trace export. Both mirror
 `packages/common/tests/conftest.py` and `test_telemetry_export.py`; a fixture
 cannot be imported across suites.
@@ -45,8 +45,6 @@ from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.util._once import Once
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from ..orchestrator_fakes import NO_ADK, no_turn_specs
-
 _PROJECTS_BODY = {
     "data": [
         {"id": "p", "name": "proj", "organization": {"id": "o", "name": "org"}, "metadata": {}}
@@ -74,13 +72,12 @@ class FakeLangfuse:
         return [span for _, span in self.scoped_spans()]
 
 
-# The packages whose modules build a tracer once, at import: ADK's, and the
-# `mcp` SDK's (`mcp.shared._otel`), whose `MCP send` spans parent every MCP
-# server span.
-_TRACER_CACHING_PACKAGES = ("google.adk", "mcp")
+# The packages whose modules build a tracer once, at import: the `mcp` SDK's
+# (`mcp.shared._otel`), whose `MCP send` spans parent every MCP server span.
+_TRACER_CACHING_PACKAGES = ("mcp",)
 
 
-def _adk_tracer_slots() -> Iterator[tuple[Any, str, Any]]:
+def _cached_tracer_slots() -> Iterator[tuple[Any, str, Any]]:
     """Every module-level `(module, attribute, tracer)` in the modules of
     `_TRACER_CACHING_PACKAGES`."""
     for name, module in list(sys.modules.items()):
@@ -94,22 +91,22 @@ def _adk_tracer_slots() -> Iterator[tuple[Any, str, Any]]:
                 yield module, attribute, value
 
 
-def _unbind_adk_tracers() -> list[tuple[Any, str, Any]]:
-    """Make ADK's module-level tracers resolve the current global provider, and
-    return the SDK tracers that were replaced so `_rebind_adk_tracers` can put
-    them back.
+def _unbind_cached_tracers() -> list[tuple[Any, str, Any]]:
+    """Make the module-level tracers of `_TRACER_CACHING_PACKAGES` resolve the
+    current global provider, and return the SDK tracers that were replaced so
+    `_rebind_cached_tracers` can put them back.
 
-    ADK builds each tracer once at import. When no provider is global then, it
-    is an OpenTelemetry `ProxyTracer`, which keeps the first real tracer it
+    Such a tracer is built once at import. When no provider is global then,
+    it is an OpenTelemetry `ProxyTracer`, which keeps the first real tracer it
     resolves for the life of the process; when the shared span provider from
     the root `conftest.py` is already global, it is an SDK tracer bound to that
     provider for good. Left alone, either would keep feeding whichever provider
     it first met, and a test that installs its own provider would see none of
-    ADK's spans. A proxy is cleared, and an SDK tracer is swapped for a proxy
+    its spans. A proxy is cleared, and an SDK tracer is swapped for a proxy
     that resolves the provider current when it is first used.
     """
     replaced: list[tuple[Any, str, Any]] = []
-    for module, attribute, value in _adk_tracer_slots():
+    for module, attribute, value in _cached_tracer_slots():
         if isinstance(value, trace.ProxyTracer):
             value._real_tracer = None
             continue
@@ -120,11 +117,11 @@ def _unbind_adk_tracers() -> list[tuple[Any, str, Any]]:
     return replaced
 
 
-def _rebind_adk_tracers(replaced: list[tuple[Any, str, Any]]) -> None:
-    """Put back the SDK tracers `_unbind_adk_tracers` replaced, and clear any proxy."""
+def _rebind_cached_tracers(replaced: list[tuple[Any, str, Any]]) -> None:
+    """Put back the SDK tracers `_unbind_cached_tracers` replaced, and clear any proxy."""
     for module, attribute, original in replaced:
         setattr(module, attribute, original)
-    for _, _, value in _adk_tracer_slots():
+    for _, _, value in _cached_tracer_slots():
         if isinstance(value, trace.ProxyTracer):
             value._real_tracer = None
 
@@ -142,7 +139,7 @@ def isolated_telemetry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     saved_once = trace._TRACER_PROVIDER_SET_ONCE
     trace._TRACER_PROVIDER = None
     trace._TRACER_PROVIDER_SET_ONCE = Once()
-    replaced_tracers = _unbind_adk_tracers()
+    replaced_tracers = _unbind_cached_tracers()
     telemetry._configured = False
     telemetry._backend = None
     telemetry._event_failure_warned = False
@@ -156,7 +153,7 @@ def isolated_telemetry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         os.environ.pop(telemetry._CAPTURE_MESSAGE_CONTENT_VAR, None)
         trace._TRACER_PROVIDER = saved_provider
         trace._TRACER_PROVIDER_SET_ONCE = saved_once
-        _rebind_adk_tracers(replaced_tracers)
+        _rebind_cached_tracers(replaced_tracers)
         telemetry._configured = False
         telemetry._backend = None
         telemetry._event_failure_warned = False
@@ -207,7 +204,7 @@ def fake_langfuse(
     finally:
         # Shutting the client down flushes it, which needs the server up. It
         # leaves the tracer provider's batch thread running, and libraries that
-        # cache the provider's tracer (ADK does) would keep feeding it spans
+        # cache the provider's tracer would keep feeding it spans
         # for later tests to export at a server that is gone, so the provider
         # is shut down as well.
         provider = trace.get_tracer_provider()
@@ -293,9 +290,7 @@ class Quiescence:
         on `engine` holds for `conversation_id`, read through a fresh
         `StudioStore`."""
         self.assert_quiescent()
-        stored = await StudioStore(engine, adk=NO_ADK, turn_specs=no_turn_specs).load(
-            principal, conversation_id
-        )
+        stored = await StudioStore(engine).load(principal, conversation_id)
         records = stored.turns if stored is not None else []
         assert [(record.get("trace_id"), record.get("error")) for record in records] == (
             self.lines()

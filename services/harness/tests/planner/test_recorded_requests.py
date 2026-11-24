@@ -27,10 +27,12 @@ from harness.turn_events import PLANNER_ASK
 from planner.settings import AgentSettings
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION
 
+from ..planner_expectations import briefs as _briefs
 from ..planner_expectations import expect, expectation_name, shared
+from ..planner_expectations import request_dumped as _request_dumped
 from ..scripted_genai import Reply, Request, ScriptedGenai, call_part, reply
 from ..test_planner_entry_eval import entry, validate
-from ..test_planner_node import _briefs, _numbered_call_ids, _request_dumped
+from ..turn_driver import numbered_call_ids as _numbered_call_ids
 
 _MODEL = AgentSettings().planner_model_name
 

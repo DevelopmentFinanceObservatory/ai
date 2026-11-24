@@ -106,7 +106,8 @@
       "dfo.model.first_thought_s": "timed",
       "dfo.model.first_text_s": "timed",
       "dfo.model.chunk_gaps_s": "timed",
-      "dfo.model.thoughts_token_count": 4
+      "dfo.model.thoughts_token_count": 4,
+      "dfo.model.finish_reason": "timed"
     }
   },
   {

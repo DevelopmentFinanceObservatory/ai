@@ -69,17 +69,17 @@ conversation's row is claimed by `/turn` and by `/interrupt`'s
 resume, expires 45 s after it is last renewed, and is renewed by its
 owner every 5 s; a second stream on a live segment gets the 409
 `TRANSIENT_UNAVAILABLE` below with `retry_after_seconds` set to the
-lease's remaining time. The owning instance checkpoints the full
-conversation state into its row before any frame that says "paused"
-(`plan.proposed`, `elicitation.request`) or "done" leaves the wire; a
-checkpoint that fails ends the stream with a stream-fatal
+lease's remaining time. The owning instance saves the full conversation
+state into its row, and clears the lease, in one write before any frame
+that says "paused" (`plan.proposed`, `elicitation.request`) or "done"
+leaves the wire. A write that fails ends the stream with a stream-fatal
 `transient_unavailable` error in that frame's place, so any success
-frame the client sees already matches the stored conversation. The
+frame the client sees already matches the stored conversation. Every
+stream ends on exactly one ending frame, which is its last. The
 database is a deployment setting (`DATABASE_URL` or the `SESSION_STORE_*`
 family, see `services/harness/README.md`). The harness refuses to start
-without it. What a stalled owner writes after losing its segment stays
-unfenced: its per-turn ADK session writes race
-the new owner's (ADK's own compare-and-swap fails one of the two), and a
+without it. A stalled owner that lost its segment cannot write the
+conversation or its turn, whose writes are fenced on the lease, but a
 presentation-platform write already in flight can land as an orphaned
 component. One piece of state stays bound to the instance that produced
 it regardless of the database: editing a component requires the
@@ -118,16 +118,22 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
   choose, and the planner plans on without a pick of theirs.
 - **`turn.cancel`** → `POST /api/studio/cancel` (delta 14) aborts the
   conversation's in-flight segment (the Stop button), whichever instance
-  owns it: the request sets the segment's durable cancel flag on the
+  owns it: the request records a durable Stop request on the
   conversation's row, and the owning instance's own heartbeat observes it and ends
   the stream within one heartbeat interval (5 s). Idempotent; returns
   204\. The aborted stream, if still open, ends with a stream-fatal `error`
   frame whose code is `cancelled` (a studio-side addition to the error
-  grammar); no `done` follows. Client disconnect (closing the SSE
-  response) also aborts the running segment when the server observes it
-  (the ASGI server cancels the response task), but a dropped connection
-  is not reliably observable through proxies, so `cancel` is the
-  dependable path.
+  grammar); no `done` follows. A Stop that lands after the turn's pause
+  was stored but before the stream ended ends the stream on `cancelled`
+  alone, with no `plan.proposed` or `elicitation.request` before it. A
+  Stop also ends a calculation the turn is running, so no later turn
+  carries it on. Client disconnect (closing the SSE response) stops the
+  running segment when the server observes it (the response's ASGI call
+  ends and the stream's owner cancels the work) but leaves the turn and
+  its calculations unfinished: the next `turn.request` carries an unfinished
+  calculation on and lists its results, and a retried
+  `interrupt.response` with the same answer carries the turn on where it
+  stopped. To end the work rather than leave it, send `cancel`.
 - **`composition.mutate`** applies canvas operations
   (`add | reorder | remove | pin | unpin | set_layout_hints | set_card_meta`) and returns the new manifest. `add` (delta 11) appends a
   block for a component this conversation already streamed (the server
@@ -154,7 +160,7 @@ pause; `plan.proposed` has a second showing a failed switch).
 | `message.complete`    | final text for the turn's message                                                                                                           |
 | `plan.proposed`       | the plan awaiting approval; **pauses and ends the stream** (delta 1)                                                                        |
 | `plan.versioned`      | a new plan replaces the one `supersedes` names; a fresh `plan.proposed` follows. `version` can be lower than the superseded one (see below) |
-| `plan.approved`       | the plan the user approved; sent once per interrupt, once the run has accepted the approval, and not on a retried resume (delta 22)         |
+| `plan.approved`       | the plan the user approved; sent once, by the segment whose `approve` node takes the approval, and by no retry after it (delta 22)          |
 | `activity.step`       | one execution step, the only progress channel; `step_id` is the call's position within the stream (see `docs/frontend-interface.md`)        |
 | `component.created`   | a new card: opaque `payload` + `fact_summary` + inline `provenance`                                                                         |
 | `component.revised`   | new revision under the same `component_id`                                                                                                  |
@@ -200,20 +206,26 @@ segment is still live answers 409 `transient_unavailable` with
 that segment's lease has expired resumes the turn again, on a fresh
 stream whose `seq` starts in a block of numbers past every one the dead
 stream could have sent, so it never repeats a `seq` the dead stream sent.
+When the turn had already paused again on a later question before the
+resumed stream was lost, the retry's stream sends that question
+(`plan.proposed` or `elicitation.request`, with the later pause's own
+`interrupt_id`) and runs nothing again, and the client answers it as it
+answers any pause.
 Retrying with a DIFFERENT decision, payload or answers than the one that actually resumed answers 409
-`edit_conflict`. The approval record for a plan interrupt is appended
+`edit_conflict`. Once the turn has paused again on a later question, a
+different answer finds no pending interrupt and answers 404 `not_found`. The approval record for a plan interrupt is appended
 once per `interrupt_id`, on its first answer, however many times the
 resume itself retries.
 
 ### `seq` (delta 2)
 
 `seq` increases **per turn**, across resumed segments. Each segment of a
-turn reserves a block of 256 numbers (a new turn numbers from 0), and a
-resumed segment, whether it follows a pause or a dead stream, starts in
-the block after every one reserved before. The first frame after a resume
-therefore carries a number past the paused segment's last, with a gap
-between them. Gaps are legal, and `seq` always orders frames. Use it for
-ordering only.
+turn reserves a block of 1,048,576 numbers (2^20) when it is claimed (a
+new turn numbers from 0), and a resumed segment, whether it follows a
+pause or a dead stream, starts in the block after every one reserved
+before. The first frame after a resume therefore carries a number past
+the paused segment's last, with a gap between them. Gaps are legal, and
+`seq` always orders frames. Use it for ordering only.
 
 ### Heartbeats (delta 3)
 
@@ -251,16 +263,6 @@ conversation. `/cancel` on an unknown or idle conversation is a no-op
 204, and a second `/turn` while one is already claimed on that
 conversation answers 409 `transient_unavailable` with
 `retry_after_seconds` set to the live segment's remaining lease.
-
-A conversation that changed both in ADK's session store and in the
-harness's tables since it was last copied across cannot be served until
-an operator repairs it. `/turn`, `/interrupt` and
-`/composition` on it answer 409 `constraint_violation`, `do_not_retry`,
-`constraint_id: "conversation_diverged"`, `pointer: "/conversation_id"`,
-and `detail` is one sentence for the user. `/cancel` answers 204 when the
-conversation has a live stream, which it signals to stop, and the same
-409 otherwise. A 409 request changes nothing, and the same request
-succeeds once the conversation is repaired.
 
 ### `interrupt_id` is opaque (delta 7)
 
@@ -669,7 +671,8 @@ Fixture values that are samples:
    intent cannot hold; harness-owned, never sent to the platform.
 1. `POST /api/studio/cancel` aborts the in-flight segment, reaching one
    running on any instance within one heartbeat interval; the stream ends
-   with error code `cancelled`. Client disconnect aborts too.
+   with error code `cancelled`. Client disconnect stops the stream and
+   leaves the turn for the next request to carry on.
 1. `message.delta` / `message.complete` text is GitHub-flavored Markdown;
    render it, don't escape it.
 1. (folded into delta 11.)

@@ -171,7 +171,7 @@ def _array_attribute(span: Span, key: str) -> list[str] | None:
 
 
 def _child_span(name: str) -> None:
-    """Open and close a span with a `gen_ai` attribute, the kind ADK and
+    """Open and close a span with a `gen_ai` attribute, the kind Pydantic AI and
     fastmcp emit, which Langfuse's default filter exports."""
     with trace.get_tracer("test.child").start_as_current_span(name) as child:
         child.set_attribute("gen_ai.system", "test")
@@ -604,31 +604,31 @@ def _spans_with_an_unexported_parent(spans: list[Span]) -> list[Span]:
     return [span for span in spans if span.parent_span_id not in exported]
 
 
-async def test_adks_spans_export_under_the_turn_and_bare_spans_do_not(
+async def test_an_agent_librarys_spans_export_under_the_segment_and_bare_spans_do_not(
     fake_langfuse: FakeLangfuse,
 ) -> None:
-    """ADK's schema v2 spans carry `gen_ai.*` attributes, so the Langfuse
-    default filter exports them, `invoke_workflow` as a child of the segment.
-    A span with no such attribute, from ADK's scope or any other, is
+    """An instrumentor's spans carrying `gen_ai.*` attributes export under the
+    Langfuse default filter, `invoke_agent` as a child of the segment. A span
+    with no such attribute, from that instrumentor's scope or any other, is
     dropped."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
     with turn_segment("tr_export0010"):
-        adk = trace.get_tracer("gcp.vertex.agent")
-        with adk.start_as_current_span("invoke_workflow wf") as workflow:
-            workflow.set_attribute("gen_ai.operation.name", "invoke_workflow")
-        with adk.start_as_current_span("bare_adk_span"):
+        library = trace.get_tracer("an.agent.library")
+        with library.start_as_current_span("invoke_agent orchestrator") as agent:
+            agent.set_attribute("gen_ai.operation.name", "invoke_agent")
+        with library.start_as_current_span("bare_library_span"):
             pass
         with trace.get_tracer("some.other.library").start_as_current_span("bare"):
             pass
     get_client().flush()
 
     spans = fake_langfuse.spans()
-    assert sorted(span.name for span in spans) == ["invoke_workflow wf", "turn.segment"]
+    assert sorted(span.name for span in spans) == ["invoke_agent orchestrator", "turn.segment"]
     (turn,) = [span for span in spans if span.name == "turn.segment"]
-    (workflow,) = [span for span in spans if span.name == "invoke_workflow wf"]
-    assert workflow.parent_span_id == turn.span_id
+    (agent,) = [span for span in spans if span.name == "invoke_agent orchestrator"]
+    assert agent.parent_span_id == turn.span_id
     # The only parent that was never exported is the SDK's synthetic one for
     # the segment.
     assert _spans_with_an_unexported_parent(spans) == [turn]
@@ -848,10 +848,10 @@ def test_the_langfuse_exporter_sends_no_compression_when_the_setting_says_none(
 # --- one Langfuse session per conversation ------------------------------------
 
 
-def _adk_child_span(name: str) -> None:
-    """A span like ADK's `generate_content`: a separate tracer, with ADK's own
-    per-turn conversation id."""
-    with trace.get_tracer("gcp.vertex.agent").start_as_current_span(name) as span:
+def _library_child_span(name: str) -> None:
+    """A span like a model call's `generate_content`: a separate tracer, with the
+    per-turn conversation id an agent framework sets."""
+    with trace.get_tracer("an.agent.library").start_as_current_span(name) as span:
         span.set_attribute("gen_ai.conversation.id", "conv-1#t1")
 
 
@@ -864,7 +864,7 @@ def test_a_turn_with_a_session_id_exports_it_on_the_turn_and_on_spans_a_library_
     _join_auth_check_thread()
 
     with turn_segment("tr_export0013", session_id="conv-1", user_id="a" * 64, tags=["studio"]):
-        _adk_child_span("generate_content gemini-x")
+        _library_child_span("generate_content gemini-x")
     record_turn_outcome("tr_export0013", session_id="conv-1", user_id="a" * 64, tags=["studio"])
     get_client().flush()
 
@@ -930,7 +930,7 @@ def test_a_turn_exports_its_request_and_response_on_the_outcome_observation_alon
     _join_auth_check_thread()
 
     with turn_segment("tr_export0018", session_id="conv-1"):
-        _adk_child_span("generate_content gemini-x")
+        _library_child_span("generate_content gemini-x")
     record_turn_outcome(
         "tr_export0018",
         session_id="conv-1",

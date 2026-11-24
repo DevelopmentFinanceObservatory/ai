@@ -27,6 +27,11 @@ engine's bound. Nothing bounds a run as a whole. At startup Cloud Run's
 killed and the transaction rolls back, so a run that needs longer goes out
 of band.
 
+A pending file named in `harness.db.cutover_gates.BEFORE` has its check run
+in the same transaction just before it, so a check added after the file was
+recorded somewhere runs where the file applies and nowhere else, and adds
+no file an older image would lack.
+
 Each file runs through asyncpg's simple-query protocol (`Connection.execute`
 with no arguments), which accepts several statements in one string.
 """
@@ -35,9 +40,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncEngine
+
+from harness.db.cutover_gates import BEFORE
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +87,12 @@ async def apply_pending(
     directory: Path = MIGRATIONS_DIR,
     timeout_s: float = MIGRATION_TIMEOUT_S,
     lock_timeout_s: float = MIGRATION_LOCK_TIMEOUT_S,
+    check_settings: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Apply every file in `directory` not yet recorded, in filename order, in
-    one transaction, and return their names. `timeout_s` bounds each
+    one transaction, and return their names. `check_settings` sets each
+    transaction setting (`harness.db.cutover_gates.LAPSED_LEDGER_LEASES`) the
+    checks in `BEFORE` read. `timeout_s` bounds each
     statement (`statement_timeout`) and `lock_timeout_s` each wait for a
     lock (`lock_timeout`). The client waits on each call up to
     `MIGRATION_CALL_TIMEOUT_S`, whatever the engine's `command_timeout`.
@@ -119,6 +130,8 @@ async def apply_pending(
                 raise MigrationChecksumError(f"applied but not in {directory}: {refused}")
             if missing:
                 logger.info("schema: applied by a later release, not in this image: %s", missing)
+            for name, value in (check_settings or {}).items():
+                await conn.execute("SELECT set_config($1, $2, true)", name, value, timeout=wait)
             ran: list[str] = []
             for path in files:
                 digest = _sha256(path)
@@ -126,6 +139,8 @@ async def apply_pending(
                     if applied[path.name] != digest:
                         raise MigrationChecksumError(f"{path.name} changed since it was applied")
                     continue
+                if (check := BEFORE.get(path.name)) is not None:
+                    await conn.execute(check, timeout=wait)
                 await conn.execute(path.read_text(), timeout=wait)
                 await conn.execute(
                     "INSERT INTO harness_schema_migrations (version, content_sha256) "

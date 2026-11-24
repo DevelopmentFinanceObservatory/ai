@@ -106,7 +106,6 @@
       "actions": {
         "state_delta": {
           "planner:plan": null,
-          "planner:alignments": null,
           "planner:rounds": 0,
           "planner:pin_sources": {},
           "planner:unsupported": [],
@@ -199,7 +198,6 @@
       }
     },
     "planner:plan": null,
-    "planner:alignments": null,
     "planner:rounds": 0,
     "planner:pin_sources": {},
     "planner:unsupported": [],

@@ -1,7 +1,7 @@
 """The Pydantic AI planner run on a script, for tests that check what it sends and leaves.
 
 `pydantic_run` runs the Pydantic AI planner (`planner_agent` on
-`harness.planner_model.planner_model` over the scripted client) once per brief,
+`planner.model.planner_model` over the scripted client) once per brief,
 each run after the first handed the steps of the runs before it. It returns the
 requests the scripted client recorded and the conversation each run leaves
 (`Turn`), read off the planner's items.
@@ -15,10 +15,11 @@ from functools import partial
 from typing import Any
 
 from compiler.surface import ToolSurface
-from google.adk.events import Event
 from google.genai import types
-from harness.planner_model import planner_model
+from harness.turn import transcript
+from harness.turn.store import AgentRecord
 from planner.instruction import planner_instruction
+from planner.model import planner_model
 from planner.pydantic_agent import (
     PlannerDeps,
     PlannerItem,
@@ -26,8 +27,7 @@ from planner.pydantic_agent import (
     planner_agent,
     run_planner,
 )
-from planner.session import SessionCall
-from planner.settings import AGENT_NAME
+from planner.session import SessionCall, answers_record, response_record
 from planner.specs import planner_tool_specs, skill_tool_spec
 from planner.tool_spec import ToolSpec
 from translator.tool import Translate
@@ -37,9 +37,6 @@ from ..scripted_genai import Reply, Request, ScriptedGenai
 MODEL = "gemini-3.8-flash"
 QUESTION = "How much aid did Ghana receive?"
 BRIEF = "Context for this question: the readings."
-
-# The branch `PlannerAdapter` runs the planner on (`harness.planner_adapter`).
-_BRANCH = "dfo_planner"
 
 # One entry of a run's conversation: a model response's part (`types.Part`
 # dumped) or a call's answer (`("answer", name, call_id, answer)`).
@@ -76,9 +73,10 @@ async def pydantic_run(
 ) -> PairRun:
     """The Pydantic AI planner's runs on `replies`, one per brief, over one state.
 
-    Each run's tools read the events the node would have stored by then
-    (`harness.planner_node`): the runs before it, each response of its own as
-    it arrives, and the answers of a response once its calls have all answered.
+    Each run's tools read the transcript the planner host would have
+    written by then (`harness.planner_adapter`): the runs before it, each
+    response of its own as it arrives, and the answers of a response once its
+    calls have all answered.
     """
     scripted = ScriptedGenai(replies)
     planner = planner_agent(
@@ -91,25 +89,21 @@ async def pydantic_run(
         ),
     )
     state: dict[str, Any] = {}
-    events = [Event(author="user", content=_user_content(QUESTION))]
+    records: list[AgentRecord] = [transcript.user_message(QUESTION)]
     run = PairRun(requests=scripted.requests, state=state)
     for brief in briefs:
         deps = PlannerDeps(
             state=state,
-            call_for=partial(SessionCall, events),
+            call_for=partial(SessionCall, records),
             tool_answered=lambda name, answer: None,
             tool_failed=lambda name, error: {"error": f"{name} failed"},
         )
         items: list[PlannerItem] = []
         async for item in run_planner(planner, deps, question=QUESTION, brief=brief):
             items.append(item)
-            events += _stored(item)
+            records.extend(_stored(item))
         run.conversations.append(_item_turns(items))
     return run
-
-
-def _user_content(text: str) -> types.Content:
-    return types.Content(role="user", parts=[types.Part(text=text)])
 
 
 def _dumped(part: types.Part) -> dict[str, Any]:
@@ -129,13 +123,8 @@ def _item_turns(items: Sequence[PlannerItem]) -> list[Turn]:
     return turns
 
 
-def _stored(item: PlannerItem) -> list[Event]:
-    """The event `item` stands for, if any, as far as `session_steps` reads it."""
+def _stored(item: PlannerItem) -> list[AgentRecord]:
+    """The record `item` stands for, if any, as the planner host writes it."""
     if isinstance(item, PlannerResponse):
-        if not item.parts:
-            return []
-        content = types.Content(role="model", parts=list(item.parts))
-    else:
-        parts = [types.Part(function_response=answer) for answer in item.answers]
-        content = types.Content(role="user", parts=parts)
-    return [Event(author=AGENT_NAME, branch=_BRANCH, content=content)]
+        return [response_record(item.parts)] if item.parts else []
+    return [answers_record(item.answers)]

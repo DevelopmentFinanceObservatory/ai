@@ -1,46 +1,54 @@
-"""The `orchestrate`, `route` and `ask` nodes: the agent's turn, the one action
-it asked for, and its question to the user.
+"""The `orchestrate` and `ask` nodes: the agent's runs of the turn, and its
+question to the user.
+
+`orchestrate` runs the agent (`orchestrator.run.run_orchestrator`) from the
+turn's opening, or from the `AgentHandBack` that answers the `plan` or
+`ask_user` call its last run handed off on, and streams the run's events.
+The action the hand-off recorded is the node's edge: `plan` or `ask`, with
+the action as the next node's input, or `answered` when the agent replied.
 """
 
 from __future__ import annotations
 
 from collections.abc import (
-    AsyncIterator,
     Callable,
-    Iterator,
     Mapping,
     Sequence,
 )
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 
-from google.adk import Context, Event
-from google.adk.agents import LlmAgent
-from google.adk.events import RequestInput
-from google.genai import types
-from orchestrator.agent import SEEDED_STATE_KEY
+from orchestrator.agent import Orchestrator
+from orchestrator.run import (
+    Answered,
+    HandBack,
+    HandedOff,
+    Opening,
+    StoredHistory,
+    run_orchestrator,
+)
 from pydantic import BaseModel, Field, model_validator
+from pydantic_ai.models import Model
 
+from harness.graph.events import AgentStatus, GraphEvent
 from harness.graph.state import (
-    CLARIFY_INTERRUPT,
-    ORCHESTRATOR_ASKED_KEY,
+    ORCHESTRATOR_HISTORY_KEY,
     ORCHESTRATOR_PENDING_KEY,
     ORCHESTRATOR_SPECS_KEY,
-    ORCHESTRATOR_STATUS_FAILURE_KEY,
-    ORCHESTRATOR_STATUS_KEY,
     AskOption,
     AskQuestion,
     PendingAsk,
     PricedOption,
+    TurnInput,
     ask_candidates,
     ask_questions,
-    interrupt_event,
     pending_action,
     priced_options,
     resume_answers,
     stored_mapping,
 )
-from harness.orchestrator_tools import HANDED_OFF
+from harness.turn.node import Next, Node, NodeCtx, Pause, TurnKey
 
 
 class AgentHandBack(BaseModel):
@@ -74,153 +82,126 @@ class AgentHandBack(BaseModel):
         return {"result": self.text, **self.body}
 
 
-def open_call(events: Sequence[Event], *, agent: str, name: str) -> types.FunctionCall | None:
-    """`agent`'s latest call to `name` still waiting on its hand-back: the
-    call whose last response is `harness.orchestrator_tools._pend`'s record
-    of the hand-off (`HANDED_OFF`). None when no such call waits."""
-    calls: dict[str, types.FunctionCall] = {}
-    waiting: dict[str, bool] = {}
-    for event in events:
-        if event.author == agent:
-            for call in event.get_function_calls():
-                if call.id and call.name == name:
-                    calls[call.id] = call
-                    waiting[call.id] = False
-        for response in event.get_function_responses():
-            if response.id in calls:
-                waiting[response.id] = bool((response.response or {}).get(HANDED_OFF))
-    return next((calls[call_id] for call_id in reversed(waiting) if waiting[call_id]), None)
+def turn_id(key: TurnKey) -> str:
+    """The id the orchestrator's tools know the turn by
+    (`orchestrator.call.OrchestratorCall.turn_id`), the same on every run of
+    the turn."""
+    return f"{key.conversation_id}/{key.turn_index}"
 
 
-def orchestrate_node(*, orchestrator: LlmAgent) -> Callable[[Context, Any], AsyncIterator[Event]]:
-    """The `orchestrate` node, running `orchestrator`."""
+# The edge each hand-off takes, by the tool whose call handed off.
+HAND_OFF_EDGES = {"plan": "plan", "ask_user": "ask"}
 
-    async def orchestrate(ctx: Context, node_input: Any) -> AsyncIterator[Event]:
-        """The orchestrator's turn: the agent runs with its tools on its own
-        branch, in chat mode, so each run sees the turn so far (the user's
-        message, its own calls and their results) and none of the
-        planner's internal events. Reached from START with the user's
-        message (already in the session) and, when `seed` hands it
-        something, an `AgentHandBack`; and again after `ask` and `plan_done`
-        with the `AgentHandBack` that answers the agent's `ask_user` or `plan`
-        call.
 
-        An answer is the call's result: a function response authored `user`
-        under the id of the call's open record (`open_call`), on the
-        agent's branch, so it is saved with the session and still in view
-        after a later pause. ADK pairs a call with its last response, as it
-        does for a tool that reports more than once under one id, so the
-        model reads the answer where it read the record. A seed hand-back
-        answers no call: it waits in state (`SEEDED_STATE_KEY`), and
-        `orchestrator.agent.prepend_digests` shows it after the user's
-        message on every request.
+def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) -> Node[GraphEvent]:
+    """The `orchestrate` node, running `orchestrator` on the model `model`
+    builds for each run (`orchestrator.model.orchestrator_model`, on the
+    turn's budget)."""
 
-        The answer is authored `user` because ADK quotes an event another
-        author wrote as that agent's data, and it is branched because an
-        unbranched event reaches every agent, the planner on a later `plan`
-        call included. The author is restored before the agent runs, since
-        a child context inherits it. An event's explicit branch also becomes
-        its node's branch, which ADK hands to every node downstream; the
-        status event that follows carries the empty branch, which ADK reads
-        as "clear it", so this node's output and every later node of the
-        turn stay unbranched, as they are before any hand-back.
+    async def orchestrate(ctx: NodeCtx[GraphEvent], node_input: Any) -> Next:
+        """One run of the agent. Reached from `seed` with nothing or a seed
+        hand-back, and again after `ask` and `plan_done` with the
+        `AgentHandBack` that answers the agent's `ask_user` or `plan` call.
+
+        The entry first shows its status line: "Reading your question", or
+        the hand-back's own. A turn's first run opens on the user's message,
+        the date and the digests (`TurnInput`), with a seed hand-back after
+        the message; a later run resumes the conversation the last one
+        handed off with (`ORCHESTRATOR_HISTORY_KEY`), its waiting call
+        answered by the hand-back. The run's first `ToolsAnswered` carries
+        that answer, so the node emits nothing else for it. Every event of
+        the run is emitted as it comes.
+
+        A run that hands off stores its conversation and takes the action
+        its call recorded (`ORCHESTRATOR_PENDING_KEY`) as the edge and the
+        next node's input. Anything the run raises fails the turn: a model
+        response Gemini blocked (`pydantic_ai.exceptions.ContentFilterError`)
+        and one that held no answer (`harness.gemini_agent.EmptyResponseError`)
+        included.
 
         Raises:
-            RuntimeError: If an answer finds no call of the agent's waiting on it.
+            RuntimeError: A hand-back answers a call but no conversation
+                waits on one, or a run handed off with no action recorded.
         """
-        if node_input is None:
-            yield Event(custom_metadata={ORCHESTRATOR_STATUS_KEY: "Reading your question"})
+        hand_back = AgentHandBack.model_validate(node_input) if node_input is not None else None
+        if hand_back is None:
+            ctx.emit(AgentStatus(text="Reading your question"))
         else:
-            hand_back = AgentHandBack.model_validate(node_input)
-            if hand_back.answers is None:
-                ctx.state[SEEDED_STATE_KEY] = hand_back.text
-            else:
-                result = _call_result(
-                    ctx, hand_back, agent=orchestrator.name, name=hand_back.answers
-                )
-                author, ctx.event_author = ctx.event_author, "user"
-                try:
-                    yield Event(content=result, branch=orchestrator.name)
-                finally:
-                    ctx.event_author = author
-            status: dict[str, Any] = {ORCHESTRATOR_STATUS_KEY: hand_back.status}
-            if hand_back.failure is not None:
-                status[ORCHESTRATOR_STATUS_FAILURE_KEY] = hand_back.failure
-            yield Event(custom_metadata=status, branch="")
-        await ctx.run_node(orchestrator, None, override_branch=orchestrator.name)
-        # A `chat`-mode agent sets no output: ADK reads an agent's output only
-        # in `single_turn` and `task` mode, so `run_node` returns None. `route`
-        # reads the pending action from state, not this node's output. ADK
-        # records no output for an event whose output is None, and a resume
-        # could not replay past this node, so the node outputs empty text.
-        yield Event(output="")
-
-    return orchestrate
-
-
-def _call_result(ctx: Context, hand_back: AgentHandBack, *, agent: str, name: str) -> types.Content:
-    """`hand_back` as the result of `agent`'s open call to `name` (`open_call`).
-
-    Raises:
-        RuntimeError: If no call of `agent`'s to `name` waits on a hand-back.
-    """
-    call = open_call(ctx.session.events, agent=agent, name=name)
-    if call is None:
-        raise RuntimeError(f"no {name} call of {agent} waits on this hand-back")
-    return types.Content(
-        role="user",
-        parts=[
-            types.Part(
-                function_response=types.FunctionResponse(
-                    id=call.id, name=call.name, response=hand_back.response()
-                )
+            ctx.emit(AgentStatus(text=hand_back.status, failure=hand_back.failure))
+        opening: Opening | None = None
+        history: StoredHistory | None = None
+        resumed: HandBack | None = None
+        if hand_back is None or hand_back.answers is None:
+            inputs = TurnInput.model_validate(ctx.inputs)
+            opening = Opening(
+                question=inputs.message,
+                today=datetime.now(UTC).date(),
+                canvas_digest=inputs.canvas_digest,
+                conversation_digest=inputs.conversation_digest,
+                seeded=hand_back.text if hand_back is not None else None,
             )
-        ],
-    )
+        else:
+            stored = ctx.state.pop(ORCHESTRATOR_HISTORY_KEY, None)
+            if stored is None:
+                raise RuntimeError(f"no conversation waits on the {hand_back.answers} hand-back")
+            history = StoredHistory.model_validate(stored)
+            resumed = HandBack(answers=hand_back.answers, result=hand_back.response())
+        run = run_orchestrator(
+            orchestrator,
+            state=ctx.state,
+            turn_id=turn_id(ctx.key),
+            model=model(),
+            opening=opening,
+            history=history,
+            hand_back=resumed,
+            conversation_id=ctx.key.conversation_id,
+        )
+        async for event in run:
+            if isinstance(event, HandedOff):
+                return _handed_off(ctx, event)
+            if isinstance(event, Answered):
+                return Next("answered")
+            ctx.emit(event)
+        raise RuntimeError("the orchestrator's run ended without its reply or a hand-off")
+
+    return Node(run=orchestrate)
 
 
-def route(ctx: Context, node_input: Any) -> Iterator[Event]:
-    """The one action the agent asked for, or none: it answered."""
-    del node_input
+def _handed_off(ctx: NodeCtx[GraphEvent], handed: HandedOff) -> Next:
+    """Store the conversation `handed` waits with, and go on along the edge
+    of the action its call recorded, removing that action from the state."""
     pending = pending_action(ctx.state)
-    ctx.state[ORCHESTRATOR_PENDING_KEY] = None
-    if pending is None:
-        yield Event(output=None, route="answered")
-    else:
-        yield Event(output=pending.model_dump(), route=pending.kind)
+    ctx.state.pop(ORCHESTRATOR_PENDING_KEY, None)
+    if pending is None or pending.kind != HAND_OFF_EDGES.get(handed.tool):
+        raise RuntimeError(f"the {handed.tool} call handed off with no action of its own recorded")
+    ctx.state[ORCHESTRATOR_HISTORY_KEY] = handed.history.model_dump(mode="json")
+    return Next(pending.kind, pending.model_dump(mode="json"))
 
 
 _SETTLED = "Each answered choice is settled. Do not ask it again."
 
 
-def ask(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
-    """Put the agent's questions to the user through one clarify interrupt,
-    each under its id with its options as candidates (`ask_questions`), and
-    hand the answers back in the options' own words (`answer_replies`), as
-    the result of the agent's `ask_user` call (`AgentHandBack`). Each
-    prices option carries the part and prices code reads for it
-    (`priced_options`), which the turn's search results do not change while
-    the interrupt is open. The `PendingAsk` waits under
-    `ORCHESTRATOR_ASKED_KEY` while the interrupt is open, so a resume is told
-    from a fresh entry."""
-    result = (ctx.resume_inputs or {}).get(CLARIFY_INTERRUPT)
-    held = ctx.state.get(ORCHESTRATOR_ASKED_KEY)
-    if not (held and result is not None):
-        ctx.state[ORCHESTRATOR_ASKED_KEY] = node_input
-        questions = PendingAsk.model_validate(node_input).questions
-        yield interrupt_event(
-            RequestInput(
-                interrupt_id=CLARIFY_INTERRUPT,
-                message=questions[0].question,
-                payload={
-                    "questions": ask_questions(questions, priced_options(questions, ctx.state))
-                },
-            )
-        )
-        return
-    ctx.state[ORCHESTRATOR_ASKED_KEY] = None
-    questions = PendingAsk.model_validate(held).questions
-    answers = resume_answers(result)
+async def _ask(ctx: NodeCtx[GraphEvent], node_input: dict[str, Any]) -> Pause:
+    """Put the agent's questions to the user in one pause, each under its id
+    with its options as candidates (`ask_questions`). Each prices option
+    carries the part and prices code reads for it (`priced_options`), which
+    the turn's search results do not change while the pause is open."""
+    questions = PendingAsk.model_validate(node_input).questions
+    return Pause(
+        kind="ask",
+        message=questions[0].question,
+        payload={"questions": ask_questions(questions, priced_options(questions, ctx.state))},
+    )
+
+
+async def _answered(
+    ctx: NodeCtx[GraphEvent], node_input: dict[str, Any], answer: dict[str, Any]
+) -> Next:
+    """Hand the user's `answer` back in the options' own words
+    (`answer_replies`), as the result of the agent's `ask_user` call
+    (`AgentHandBack`)."""
+    questions = PendingAsk.model_validate(node_input).questions
+    answers = resume_answers(answer)
     if answers is None:
         replies = [""] * len(questions)
         them = (
@@ -252,7 +233,11 @@ def ask(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
     hand_back = AgentHandBack(
         answers="ask_user", status="Reading your answer", text="\n".join([*lines, closing])
     )
-    yield Event(output=hand_back.model_dump(mode="json"))
+    return Next("next", hand_back.model_dump(mode="json"))
+
+
+# The agent's question to the user: a pause, and the answer handed back.
+ask: Node[GraphEvent] = Node(run=_ask, resume=_answered)
 
 
 def answer_replies(
