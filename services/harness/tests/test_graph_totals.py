@@ -1597,6 +1597,8 @@ def test_a_card_over_a_sum_counts_the_distinct_stat_vars_under_both_sides(
 # an analysis answer's `stat_vars_summed` names in place of the version the call read
 # (dfo-apis `scripts/local-stack/smoke.py` `check_summed`).
 _LEFT_SUMMED = SummedRead(spec_id="spec_" + "a" * 32, content_version="cv_" + "5" * 32, count=2)
+# A rolling call's anchor root of the left retrieval's dataset, read under another selection.
+_ANCHOR_SUMMED = _LEFT_SUMMED.model_copy(update={"content_version": "cv_" + "6" * 32, "count": 12})
 
 
 @pytest.mark.parametrize(
@@ -1605,12 +1607,23 @@ _LEFT_SUMMED = SummedRead(spec_id="spec_" + "a" * 32, content_version="cv_" + "5
         # The aggregate that summed the retrieval, and a filter over it.
         ("added", 1, 2),
         ("added_later", 1, 2),
+        # The aggregate's call also read an anchor root of the dataset summed over
+        # twelve. The reads disagree, so neither is matched.
+        ("anchored", 1, 1),
         # The sum beside the right retrieval's one StatVar.
         ("added_beside", 2, 3),
-        # A join of a compare over the sum with the retrieval itself, which
-        # carries the retrieval's two StatVars as retrieved. Its call read the
-        # retrieval summed again under the compare, and that read names it too.
-        ("rejoined", 3, 3),
+        # The sum joined to the retrieval kept unsummed by a filter, which dfo-apis
+        # reads without summing: the frame carries A and B as retrieved beside the
+        # sum's ref, so the retrieval counts as retrieved.
+        ("added_and_kept", 3, 3),
+        # A join of a compare over the sum with the retrieval itself. dfo-apis sums
+        # the retrieval under the join too, so the frame carries the compare's ref
+        # and the sum's, and declares 2. The join's read of the retrieval cannot be
+        # told from the one under the compare, so it is left unmatched by design.
+        # The retrieval then reads as two unsummed StatVars that the one ref beside
+        # the compare cannot hold, and the count falls back to the largest part, 1,
+        # as it does with no read at all. A, B and X make 3.
+        ("rejoined", 2, 1),
     ],
 )
 def test_a_card_counts_a_retrieval_an_analysis_call_summed_where_its_sum_reaches(
@@ -1627,6 +1640,7 @@ def test_a_card_counts_a_retrieval_an_analysis_call_summed_where_its_sum_reaches
         _step("right", "get_data"),
         _step("added", "aggregate", frame_bindings={"frame_ref": "left"}),
         _step("added_later", "filter", frame_bindings={"frame_ref": "added"}),
+        _step("anchored", "growth", frame_bindings={"frame_ref": "left"}),
         _step(
             "added_beside",
             "join",
@@ -1638,6 +1652,12 @@ def test_a_card_counts_a_retrieval_an_analysis_call_summed_where_its_sum_reaches
         _step(
             "rejoined", "join", frame_bindings={"frame_ref": "compared", "right_frame_ref": "left"}
         ),
+        _step("kept", "filter", frame_bindings={"frame_ref": "left"}),
+        _step(
+            "added_and_kept",
+            "join",
+            frame_bindings={"frame_ref": "added", "right_frame_ref": "kept"},
+        ),
     )
 
     assert (
@@ -1647,7 +1667,15 @@ def test_a_card_counts_a_retrieval_an_analysis_call_summed_where_its_sum_reaches
             right=(("X",), None),
             terminal=terminal,
             declared=declared,
-            reads=frozenset(step.id for step in workflow_steps[2:]),
+            # Every call that reads the retrieval under a step other than a filter
+            # reads it summed, itself or through the derived input it computes again.
+            reads={
+                step.id: (_LEFT_SUMMED, _ANCHOR_SUMMED)
+                if step.id == "anchored"
+                else (_LEFT_SUMMED,)
+                for step in workflow_steps[2:]
+                if step.id != "kept"
+            },
         )
         == counted
     )
@@ -1660,13 +1688,13 @@ def _linked_count(
     right: tuple[tuple[str, ...], int | None],
     terminal: str,
     declared: int = 1,
-    reads: frozenset[str] = frozenset(),
+    reads: Mapping[str, tuple[SummedRead, ...]] | None = None,
 ) -> int | None:
     """The StatVars the card over `terminal` counts once its frame is linked.
     The retrievals `left` and `right` each list their StatVars and the count
     they summed, every step's frame declares one StatVar but `terminal`'s,
-    which declares `declared`, and each step in `reads` states that it read
-    the left retrieval summed (`_LEFT_SUMMED`)."""
+    which declares `declared`, and each step in `reads` states the roots its
+    call read summed."""
     sources = {
         step_id: SelectedSource(
             spec_id="spec_" + spec_char * 32,
@@ -1718,7 +1746,7 @@ def _linked_count(
                 frame_ref=frames[step.id],
                 digest="d",
                 stat_var_count=declared if step.id == terminal else 1,
-                stat_vars_summed=(_LEFT_SUMMED,) if step.id in reads else (),
+                stat_vars_summed=(reads or {}).get(step.id, ()),
             )
             for step in workflow_steps
         ),

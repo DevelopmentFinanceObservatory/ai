@@ -219,15 +219,18 @@ def _summed_input(
     alone. That match is certain only when `retrieval` is the one input of
     that dataset the call read: no other retrieval of the dataset is bound
     to `step`, and none sits under a derived input, which dfo-apis computes
-    again and so reads again. Where it is not, the read is left unmatched.
+    again and so reads again. The reads of the dataset must also state one
+    count, since a rolling call's anchor roots are read beside its inputs and
+    may read the dataset under another selection. Where any of this fails, the
+    read is left unmatched.
     """
     record = records.get(step.id)
     retrieved = records.get(retrieval)
     if record is None or retrieved is None:
         return None
     dataset = {retrieved.frame_ref.spec_id, retrieved.presented_ref.spec_id}
-    reads = [read.count for read in record.stat_vars_summed if read.spec_id in dataset]
-    if not reads:
+    counts = {read.count for read in record.stat_vars_summed if read.spec_id in dataset}
+    if len(counts) != 1:
         return None
     others: set[str] = set()
     for binding in step.bindings.values():
@@ -247,7 +250,8 @@ def _summed_input(
         if (held := records.get(other)) is not None
     ):
         return None
-    return max(reads)
+    (count,) = counts
+    return count
 
 
 def _ran(outcome: RunOutcome) -> tuple[StepRecord, ...]:
