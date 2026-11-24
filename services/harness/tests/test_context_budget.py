@@ -169,9 +169,8 @@ from .context_probe import (
 from .planner_host import PlannerHarness
 from .scripted_genai import Reply, Request, ScriptedGenai, call_part, reply, text_part
 from .session_events import one_answer
-from .test_keep_question import _calls as _keep_calls
-from .test_keep_question import _propose as _keep_propose
 from .test_keep_question import _Turn as _KeepTurn
+from .test_keep_question import paused_on_keep
 from .test_planner_adapter import _NO_DATA_SEARCH_RESPONSE, _gdp_plan
 
 # The root conftest.py chdirs every test into a tmp_path, so this must be absolute.
@@ -280,20 +279,21 @@ _STATED_WORDS = (
 )
 _STATED_READINGS = Path(__file__).resolve().parent / "fixtures" / "stated_scope_readings.json"
 
-# The fourth: the entry the user's dismissal of the keep question resumes, whose
-# brief says DAC1 was not kept and carries the paused proposal's requirements
-# (`harness.planner_adapter._keep_text`), over the G7 question with DAC1 on record.
+# The fourth: the entry the user's dismissal of a keep question an earlier release
+# paused the turn on resumes, whose brief says DAC1 was not kept and carries the
+# paused proposal's requirements (`harness.planner_adapter._keep_text`), over the G7
+# question with DAC1 on record.
 KEEP_RESUMED = "keep-resumed"
 
 
 async def _keep_resumed_round() -> tuple[list[dict[str, Any]], list[Any]]:
     """The requests of the entry a dismissed keep question resumes, as
-    `context_probe.compose` records and as `ModelRequest` objects: the first run
-    proposes DAC1 and pauses on the question, and the resumed one answers in text."""
-    turn = _KeepTurn("dac1", replies=[_keep_calls(_keep_propose()), reply(text_part("done"))])
-    await turn.run()
+    `context_probe.compose` records and as `ModelRequest` objects: the turn is left
+    paused on the question, and the resumed run answers in text."""
+    turn = _KeepTurn("dac1", replies=[reply(text_part("done"))])
+    paused_on_keep(turn)
     await turn.run(answer=one_answer({"skip": True}))
-    requests = [_as_model_request(request) for request in turn.scripted.requests[1:]]
+    requests = [_as_model_request(request) for request in turn.scripted.requests]
     records = [
         compose(request, agent="planner", scenario=KEEP_RESUMED, call_index=index)
         for index, request in enumerate(requests)

@@ -154,6 +154,7 @@ from planner.plan import (
     RecordedDefinition,
     RequirementSide,
     ResolvedBy,
+    ScopeNote,
     ScopeOptionState,
     SessionState,
     ShareOfRequirement,
@@ -255,17 +256,7 @@ from planner.records import (
     Year,
 )
 from planner.shapes import PLACE_PHRASE, pooling_remedy
-from planner.stated_scope import (
-    KeepQuestion,
-    StatedOption,
-    StatedScopeRecord,
-    TextReading,
-    keep_question,
-    stated_scope_record,
-    stated_scope_unread,
-    stated_uncompiled,
-    unattributed_refused,
-)
+from planner.stated_scope import StatedScopeRecord, stated_scope_record, stated_uncompiled
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 from planner.workflow import OpenEntityAxis, SelectedSource
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError, model_validator
@@ -333,11 +324,9 @@ class SessionView(Protocol):
     asks, the pending referral, the discovery log), read through their own
     loaders. The four readers answer from what the user was asked and
     answered in this session, and `decision_pick` names the pick on the plan
-    card a planner entry replans for. The six writes are the chain's only side
-    effects: an `unsupported` answer, an optional decline, the asks a
-    `PERIOD_REDUCTION_UNSTATED` refusal names, the provider option a
-    `STATED_SCOPE_UNATTRIBUTED` refusal names and the datasets a
-    `STATED_PROVIDER_DROPPED` refusal lists, each recorded even though the
+    card a planner entry replans for. The four writes are the chain's only side
+    effects: an `unsupported` answer, an optional decline and the asks a
+    `PERIOD_REDUCTION_UNSTATED` refusal names, each recorded even though the
     call is refused, and an admitted plan.
     """
 
@@ -390,17 +379,6 @@ class SessionView(Protocol):
 
     def record_reduction_refused(self, asks: Iterable[int]) -> None:
         """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
-        ...
-
-    def record_scope_unattributed(self, option_id: str, refused: Iterable[tuple[str, str]]) -> None:
-        """Record a `STATED_SCOPE_UNATTRIBUTED` refusal given for `option_id` this turn,
-        with `refused`: the id and `measure` of each dataset requirement whose pin offers
-        the option."""
-        ...
-
-    def record_keep_offered(self, pairs: Iterable[tuple[str, str]]) -> None:
-        """Record that a `STATED_PROVIDER_DROPPED` refusal listed the datasets on record
-        serving `pairs`, each a pin and the provider option it cannot count."""
         ...
 
     def record_admission(self, admission: Admission) -> None:
@@ -692,9 +670,6 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     )
     if blocked is not None:
         return blocked
-    stated_scope = _stated_reading(stated_scope_record(view.state), written)
-    if isinstance(stated_scope, dict):
-        return stated_scope
     realigned = _aligned_bases(
         written,
         evidence_requirements,
@@ -703,14 +678,13 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         aligned=aligned_pins(view.state),
         searched=searched_pins(view.state),
         pick=pick,
-        stated=stated_scope,
-        keep=keep_question(view.state),
+        previous=previous,
         view=view,
         proposer=proposer,
     )
     if isinstance(realigned, dict):
         return realigned
-    evidence_requirements, targets, stated_moves = realigned
+    evidence_requirements, targets, stated_moves, scope_notes = realigned
     # A carried input alignment is restated too, so an input it does not move this
     # call has its decisions derived on the pin it states.
     own = {requirement.id for requirement in evidence_requirements}
@@ -753,6 +727,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         wholes=_whole_decisions(wholes, aligned_after, shown=on_record),
         moved=moved,
         stated_moves=stated_moves,
+        notes={note.requirement_id: note.line for note in scope_notes},
         calculations=_difference_decisions(
             aligned_after,
             sources=sources,
@@ -961,7 +936,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             update={
                 "period_licences": period_licences_held(
                     plan, named=patch.across_years, previous=previous
-                )
+                ),
+                "scope_notes": scope_notes,
             }
         )
         # `Plan` validation compares the sides of a share by name; the
@@ -4574,7 +4550,10 @@ def _moved_for_one(decision: Decision) -> bool:
 
 
 def _moved_axis_decisions(
-    moved: Mapping[str, AlignedPin], *, stated: Collection[str] = ()
+    moved: Mapping[str, AlignedPin],
+    *,
+    stated: Collection[str] = (),
+    notes: Mapping[str, str] = {},
 ) -> dict[str, tuple[Decision, ...]]:
     """The decision each input alignment moves (`_aligned_bases`) states for each axis
     it moves on, by requirement id, `moved` holding each one's compile.
@@ -4587,9 +4566,10 @@ def _moved_axis_decisions(
     other decision the requirement cites fixes too, so a requirement pinning
     the compile directly cites the compile's own rows and shares none of these.
     The requirement cites it in place of its pin's decision on that axis
-    (`_scope_decisions`). An input of `stated`, moved to the provider scope its
-    `measure` states in the user's words (`_stated_claims`), reads "The user's
-    question asked for" that scope on the provider axis.
+    (`_scope_decisions`). An input of `stated`, moved to the provider scope it
+    declares (`_declared_claims`), reads "The user's question asked for" that scope
+    on the provider axis. An input `notes` holds a line for (`_scope_notes`) reads
+    the line there instead.
     """
     decisions: dict[str, tuple[Decision, ...]] = {}
     for requirement_id, pin in moved.items():
@@ -4603,7 +4583,9 @@ def _moved_axis_decisions(
                 update={
                     "slot": _moved_axis_slot(requirement_id, choice.axis),
                     **(
-                        {"rationale": f"The user's question asked for {decision.chosen}."}
+                        {"rationale": notes[requirement_id]}
+                        if requirement_id in notes and choice.axis == PROVIDER_AXIS
+                        else {"rationale": f"The user's question asked for {decision.chosen}."}
                         if requirement_id in stated and choice.axis == PROVIDER_AXIS
                         else {}
                     ),
@@ -4632,6 +4614,7 @@ def _scope_decisions(
     calculations: Mapping[str, Sequence[Decision]],
     removed: Collection[str],
     stated_moves: Collection[str] = (),
+    notes: Mapping[str, str] = {},
 ) -> tuple[list[Decision], list[EvidenceRequirement]]:
     """Add the scope decisions each pin in this call's requirements states, and cite them.
 
@@ -4645,7 +4628,10 @@ def _scope_decisions(
     whole's. An input alignment moves (`moved`) cites the decision it
     states for each axis it moves on (`_moved_axis_decisions`) in place of
     its pin's on that axis, and every requirement drops a citation of such
-    a decision it does not state. Each calculation of `calculations`, this call's or
+    a decision it does not state. An input `notes` holds a line for reads it on its
+    provider row: the decision alignment moved it to on that axis, else a copy of its
+    pin's under the same slot, which it cites in place of the pin's. Each calculation
+    of `calculations`, this call's or
     one `previous` carries, cites the decisions it states
     (`_difference_decisions`), restated where their words changed,
     and one citing such a decision it no longer states has that citation
@@ -4678,8 +4664,10 @@ def _scope_decisions(
             requirement id (`_whole_decisions`).
         moved: The compile each input alignment moves is pinned to, by
             requirement id (`_aligned_bases`).
-        stated_moves: The inputs of `moved` moved to the provider scope their
-            `measure` states in the user's words (`_stated_claims`).
+        stated_moves: The inputs of `moved` moved to the provider scope they
+            declare (`_declared_claims`).
+        notes: The plan card's line for each dataset input whose provider scope and
+            the user's words part (`_scope_notes`), by requirement id.
         calculations: The provider-scope and measure-basis decisions each
             comparison, share, quotient or sum states, by requirement id, empty
             for one stating none (`_difference_decisions`).
@@ -4713,11 +4701,44 @@ def _scope_decisions(
             if requirement.id in calculations and requirement.id not in restated
         ),
     ]
-    aligned = _moved_axis_decisions(moved, stated=stated_moves)
+    aligned = _moved_axis_decisions(moved, stated=stated_moves, notes=notes)
+    # An input whose provider row reads a line and that alignment leaves on its pin's
+    # provider option reads it on a copy of its pin's row.
+    noted: set[str] = set()
+    for requirement in evidence_requirements:
+        pin = requirement.source_spec_id if isinstance(requirement, DatasetRequirement) else None
+        line = notes.get(requirement.id)
+        if pin is None or line is None:
+            continue
+        if any(
+            d.scope is not None and d.scope.axis == PROVIDER_AXIS
+            for d in aligned.get(requirement.id, ())
+        ):
+            continue
+        own = next(
+            (
+                d
+                for d in scopes.get(pin, ())
+                if d.scope is not None and d.scope.axis == PROVIDER_AXIS
+            ),
+            None,
+        )
+        if own is not None:
+            noted.add(requirement.id)
+            aligned[requirement.id] = (
+                *aligned.get(requirement.id, ()),
+                own.model_copy(
+                    update={
+                        "slot": _moved_axis_slot(requirement.id, PROVIDER_AXIS),
+                        "rationale": line,
+                    }
+                ),
+            )
 
     def moved_axes(requirement: EvidenceRequirement) -> set[str]:
         pin = moved.get(requirement.id)
-        return {option_axis(option_id) for option_id in pin.option_ids} if pin else set()
+        axes = {option_axis(option_id) for option_id in pin.option_ids} if pin else set()
+        return axes | ({PROVIDER_AXIS} if requirement.id in noted else set())
 
     def stale(requirement: DatasetRequirement, decision: Decision) -> bool:
         if decision.scope is not None and not is_scope_choice(decision):
@@ -4988,10 +5009,9 @@ class Realignment(NamedTuple):
     options to compile it on, one per axis it moves on, sorted so one set
     of options has one form. `requirement_id` is the dataset requirement
     pinning it and `step_id` the calculation that wants its first option, or the
-    requirement itself where its `measure` states that provider option in the
-    user's words and nothing else moves it (`stated`). `stated_option` is the
-    provider option its `measure` states, where alignment moves it there, beside
-    any calculation's move.
+    requirement itself where it declares that provider option and nothing else moves
+    it (`stated`). `stated_option` is the provider option it declares, where
+    alignment moves it there, beside any calculation's move.
 
     With `whole_axis` set, the input is a declared whole
     (`DatasetRequirement.whole_of`): `spec_id` is its part's pin, compiled
@@ -5008,9 +5028,8 @@ class Realignment(NamedTuple):
 
     @property
     def stated(self) -> bool:
-        """Whether this compile moves a pin to the provider option its requirement's
-        `measure` states in the user's words (`stated_option`, `_stated_claims`) and on
-        nothing else, which names the requirement as its own step (`_realigned_pins`).
+        """Whether this compile moves a pin to the provider option its requirement
+        declares (`stated_option`, `_declared_claims`) and on nothing else, which names the requirement as its own step (`_realigned_pins`).
         A compile a calculation also moves names the calculation."""
         return self.whole_axis is None and self.option_ids == (self.stated_option,)
 
@@ -5058,10 +5077,8 @@ class _InputBasis:
     what the requirement reads of it (`_Reads`), which alignment sees before
     `_window_pins` puts each pin on its own period, so two inputs holding one
     `held.part`, one option on every axis and one `reads` read one series.
-    `wanted` is the provider option the requirement's `measure` states in the
-    user's words, or the one a total it asks for is counted on, which it is
-    counted on whatever calculation reads it (`_stated_claims`); `None` for any
-    other input.
+    `wanted` is the provider option the requirement declares, which it is counted on
+    whatever calculation reads it (`_declared_claims`); `None` for any other input.
     """
 
     requirement_id: str
@@ -5488,11 +5505,13 @@ def _aligned_bases(
     aligned: Sequence[AlignedPin],
     searched: Sequence[SearchedPin],
     pick: DecisionPick | None,
-    stated: _StatedReading | None,
-    keep: KeepQuestion,
+    previous: Plan | None,
     view: SessionView,
     proposer: Proposer,
-) -> tuple[list[EvidenceRequirement], dict[str, AlignedPin], frozenset[str]] | dict[str, object]:
+) -> (
+    tuple[list[EvidenceRequirement], dict[str, AlignedPin], frozenset[str], tuple[ScopeNote, ...]]
+    | dict[str, object]
+):
     """This call's requirements, and the compile that puts each input of a calculation on one measure basis and one provider scope, or the refusal that stops the plan.
 
     A dataset input the planner pinned no dataset for is pinned first to the
@@ -5533,17 +5552,14 @@ def _aligned_bases(
     Otherwise its dataset inputs with a choice on the axis are counted on
     one option, except a calculation's whose two sides would then read one
     series, which keep their own (`_sides_one_series`). Only a comparison, share, quotient or sum aligns the
-    provider scope, and not one the user asked to keep its inputs' own
-    (`accept_provider_difference`); a join keeps each input's own
-    (`_aligns`). Calculations sharing an input, such as a sum read by a
+    provider scope; a join keeps each input's own (`_aligns`). Calculations sharing an input, such as a sum read by a
     share, form one group and take one option for every input any of them
     combines (`_shared_basis`): the one the user stated on any of them, else
     the one the narrowest part is counted on (`_part_rank`), the first such
     input in plan order on a tie. A group whose inputs the user stated on
     different options has no one option, and each of its calculations takes
     its own. A sum whose inputs the user stated on different provider
-    scopes, or one accepting a provider difference whose inputs are on
-    different scopes, is refused where two of them can count one flow
+    scopes is refused where two of them can count one flow
     (`_Flows.meet`: no donor, recipient, summable slot or year keeps them apart),
     where they count one money (`_shared_money`), since an inclusive figure
     already holds the bilateral one and the sum would count it twice. A
@@ -5567,18 +5583,15 @@ def _aligned_bases(
     share or quotient beneath another calculation is one figure, its own
     inputs left on the options it put them on, except that a calculation over
     ratios alone aligns their numerators with each other and their
-    denominators with each other. It leaves a position's provider scopes as they stand when a ratio
-    supplying it accepts a provider difference, since that ratio's contract
-    stands. So comparing two shares of the DAC1 total that each accept a
-    provider difference keeps both denominators.
+    denominators with each other.
 
-    A dataset input whose `measure` states the provider option the user's words
-    ask for (`stated`) is counted on it whatever calculation reads it, and reads
-    as stated there, so its calculation aligns its other inputs on it
-    (`_stated_claims`). One the user kept as published (`kept`) is left as it
-    stands, a pin that cannot count it answers `STATED_PROVIDER_DROPPED`, and a
-    plan none of whose requirements states the one option the turn's words state
-    answers `STATED_SCOPE_UNATTRIBUTED` once (`_stated_unattributed`).
+    A dataset input declaring a provider option (`DatasetRequirement.scope_options`)
+    is counted on it whatever calculation reads it, and reads as stated there, so
+    its calculation aligns its other inputs on it, and two inputs declaring
+    different options keep their own (`_declared_claims`). A pin that cannot count
+    its option answers `STATED_PROVIDER_DROPPED`, and a share, quotient or
+    comparison some of whose inputs declare an option and some do not answers
+    `STATED_SCOPE_UNATTRIBUTED` (`_half_declared`).
 
     An input already on its options keeps its pin. Another takes the pin
     compiled from its pin on the options it moves to, one per axis
@@ -5594,8 +5607,9 @@ def _aligned_bases(
     of one axis, answer `OPERATION_UNSUPPORTED`.
 
     Returns the requirements, each search's pin taken, the compile
-    each input or whole moves to (`AlignedPin`), by requirement id, and the
-    inputs moved to the provider option their `measure` states.
+    each input or whole moves to (`AlignedPin`), by requirement id, the
+    inputs moved to the provider option they declare, and the plan card's line for
+    each input whose provider scope and the user's words part (`_scope_notes`).
 
     Args:
         requirements: Every requirement the plan states once this call's
@@ -5607,10 +5621,8 @@ def _aligned_bases(
         searched: The searches made so far for unpinned inputs (`searched_pins`).
         pick: The decision the user picked on the plan card, which this entry
             replans for, `None` where none is held.
-        stated: The provider options the requirements' measures state in the
-            user's words (`_stated_reading`), `None` where the turn's words name
-            none.
-        kept: Each pin the user kept as published, with the option it cannot count.
+        previous: The plan this call amends, whose lines an input declaring what
+            it declared there keeps (`_scope_notes`), or `None`.
         view: The session, where an `unsupported` answer is recorded.
         proposer: The tool a refusal's `action` names.
     """
@@ -5681,22 +5693,10 @@ def _aligned_bases(
         if unread:
             raise _Unservable(_scope_unread_problem(unread, proposer))
         providers = by_axis[PROVIDER_AXIS]
-        claims: dict[str, str] = {}
-        if stated is not None:
-            claims = _stated_claims(
-                stated,
-                providers,
-                requirements=requirements,
-                compiled=aligned,
-                keep=keep,
-                shown=shown,
-                sources=sources,
-                view=view,
-                proposer=proposer,
-            )
-            _stated_unattributed(
-                stated, providers, claims, requirements=requirements, view=view, proposer=proposer
-            )
+        claims = _declared_claims(
+            aligning, providers, uncompiled=stated_uncompiled(view.state), proposer=proposer
+        )
+        _half_declared(aligning, providers, proposer=proposer)
         by_axis = {
             **by_axis,
             PROVIDER_AXIS: {
@@ -5737,10 +5737,23 @@ def _aligned_bases(
         for requirement_id, option_id in claims.items()
         if option_id != providers[requirement_id].choice.active
     )
+    counted = {
+        requirement_id: option_id
+        for requirement_id, pin in realigned.items()
+        for option_id in pin.option_ids
+        if option_axis(option_id) == PROVIDER_AXIS
+    }
     return (
         _with_found(evidence_requirements, requirements, found, restated=moved.keys()),
         moved,
         stated_moves,
+        _scope_notes(
+            requirements,
+            providers,
+            counted=counted,
+            previous=previous,
+            record=stated_scope_record(view.state),
+        ),
     )
 
 
@@ -5959,10 +5972,7 @@ def _compiled_series(
 class _InputGroup(NamedTuple):
     """Inputs one calculation counts on one option (`_input_groups`).
 
-    `members` are requirement ids, the datasets among them the inputs.
-    `accepted` says a ratio beneath the calculation supplying a member accepts a
-    provider difference (`accept_provider_difference`), so the calculation
-    leaves the group's provider scopes as they stand. `sides` are the
+    `members` are requirement ids, the datasets among them the inputs. `sides` are the
     derivations of the two sides of a comparison, sum, share or quotient
     (`_side_derivations`), for one reading its sides as one group, so alignment can
     keep the two sides apart (`_sides_one_series`); `None` for any other group,
@@ -5970,7 +5980,6 @@ class _InputGroup(NamedTuple):
     """
 
     members: frozenset[str]
-    accepted: bool = False
     sides: tuple[_Derivation, _Derivation] | None = None
 
 
@@ -6207,12 +6216,10 @@ def _input_groups(
 
     A calculation reads one group: what it reads, and what a calculation it
     reads reads, down to a share or quotient, which it reads as one figure,
-    its inputs counted as the ratio itself settled them, aligned or accepted
-    as different (`accept_provider_difference`). One whose every input is a
+    its inputs counted as the ratio itself settled them. One whose every input is a
     ratio, read directly or through calculations reading one input each,
     whose sides hold no ratio, reads the ratios position by position: their
-    numerators as one group and their denominators as another, each
-    `accepted` when any of those ratios accepts a provider difference. So
+    numerators as one group and their denominators as another. So
     comparing two shares of one total aligns the numerators with each other
     and leaves each share's own contract between numerator and denominator
     standing, and comparing gross ODA per person with net ODA per person
@@ -6248,12 +6255,8 @@ def _input_groups(
         if len(sides) == len(inputs) and not any(
             reached(side, cut) & ratios.keys() for pair in sides for side in pair
         ):
-            accepted = any(ratio.accept_provider_difference for ratio in under)
             groups[step.id] = [
-                _InputGroup(
-                    frozenset().union(*(reached(pair[position], cut) for pair in sides)),
-                    accepted,
-                )
+                _InputGroup(frozenset().union(*(reached(pair[position], cut) for pair in sides)))
                 for position in (0, 1)
             ]
         else:
@@ -6307,9 +6310,8 @@ def _alignment_targets(
     money is refused (`_refuse_double_count`), as US bilateral ODA plus US
     total ODA is, the total already holding the bilateral flows.
 
-    Each input of `claims` is counted on the provider option its `measure`
-    states in the user's words, or the one a total it asks for is counted on
-    (`_stated_claims`), named as its own step, before any calculation claims it.
+    Each input of `claims` is counted on the provider option it declares
+    (`_declared_claims`), named as its own step, before any calculation claims it.
 
     An input a sum adds to a side reading a dataset with no provider choice
     keeps its own provider scope (`_summed_beside_unchosen`): moving it would
@@ -6343,7 +6345,7 @@ def _alignment_targets(
                 ]
                 if len(inputs) < 2:
                     continue
-                aligns = _aligns(step, axis) and not (axis == PROVIDER_AXIS and group.accepted)
+                aligns = _aligns(step, axis)
                 own = _shared_basis(inputs) if aligns else None
                 candidates.append(_Aligning(step, group, inputs, aligns, own))
         # Each candidate counting its inputs on one option, by its index in
@@ -6391,7 +6393,7 @@ def _alignment_targets(
             if index in aligned:
                 continue
             # A group left unaligned to keep two sides apart refuses as one
-            # accepting a provider difference does, on every input.
+            # whose inputs declare different provider options does, on every input.
             kept_apart = candidate.own is not None
             _refuse_double_count(
                 candidate.step,
@@ -6823,8 +6825,8 @@ def _summed_input_moved(
 def _stated_summed(
     basis: _InputBasis, option_id: str, summed: SumOfRequirement, unchosen: str
 ) -> dict[str, object]:
-    """The `PROVIDERS_UNALIGNED` problem for an input whose `measure` states
-    `option_id` in the user's words, which `summed` adds to `unchosen`, a dataset with
+    """The `PROVIDERS_UNALIGNED` problem for an input declaring `option_id`, which
+    `summed` adds to `unchosen`, a dataset with
     no provider choice (`_summed_beside_unchosen`). Counted as stated, the sum may
     count what `unchosen` adds twice, as bilateral plus imputed multilateral aid
     added to imputed multilateral aid does. The repair is one requirement counted as
@@ -6832,11 +6834,11 @@ def _stated_summed(
     moved, label = basis.requirement_id, basis.label(option_id)
     return problem(
         ProblemCode.PROVIDERS_UNALIGNED,
-        f"{moved!r}'s `measure` asks for {label}, as the user's words do, and {summed.id!r} "
+        f"{moved!r} declares {label}, and {summed.id!r} "
         f"adds it to {unchosen!r}, whose dataset has no provider choice, so nothing on record "
         f"tells whether {moved!r} counted as {label} already holds what {unchosen!r} adds. "
         f"State {summed.id!r} as one dataset requirement under that id pinning {basis.pin} "
-        f"with a `measure` naming {label}, in place of the sum and its inputs, and remove the "
+        f"declaring {option_id!r}, in place of the sum and its inputs, and remove the "
         "decisions only they cite.",
         outcome=Outcome.INVALID_INPUT,
         detail={
@@ -6881,7 +6883,7 @@ def _realigned_pins(
         if pin is None:
             # A calculation's move names the calculation, so a compile names the
             # requirement as its own step (`Realignment.stated`) only where the
-            # provider option its `measure` states is its one move.
+            # provider option it declares is its one move.
             step_id = next((step for _, step in moved if step != requirement_id), moved[0][1])
             stated_option = next((t for t, step in moved if step == requirement_id), None)
             wanted.append(
@@ -6907,7 +6909,7 @@ def _providers_unaligned(
 
     The planner can repair it: declare a share's total the part over every
     sector, donor or recipient (`DatasetRequirement.whole_of`), or pin an input counted on that
-    scope. `accept_provider_difference` is named only for a user who asked for
+    scope. Declaring each input's own option is named only for a user who asked for
     that input's source, so the planner does not take it as a way past the
     refusal. Where no repair applies, the calculation is declined: `permit`
     records an `unsupported_ask` decline as optional, so the decline is earned
@@ -6924,8 +6926,8 @@ def _providers_unaligned(
         f"{step.id!r} is a share of a figure in its total over every sector, donor or "
         "recipient, state that total with `whole_of` naming its part and that axis; otherwise "
         "pin for "
-        f"{basis.requirement_id!r} a dataset counted as {basis.label(target)}. Set "
-        f"`accept_provider_difference` on {step.id!r} only when the user asked for "
+        f"{basis.requirement_id!r} a dataset counted as {basis.label(target)}. Declare "
+        f"each input's own option in `scope_options` only when the user asked for "
         f"{basis.requirement_id!r}'s source as it stands. When none of these applies, record "
         f"the part of the question asking for {step.id!r} in `declined` with code "
         f"{UnsupportedOperation.UNSUPPORTED_ASK.value!r}.",
@@ -7067,8 +7069,8 @@ def _shared_basis(inputs: Sequence[_InputBasis]) -> str | None:
 def _reads_on(step: EvidenceRequirement, axis: str) -> bool:
     """Whether `step` reads its inputs' options on `axis`: every calculation on the
     measure basis, and on the provider scope a comparison, share, quotient or
-    sum (`_PROVIDER_ALIGNED`), whether it aligns them (`_aligns`) or accepts a
-    provider difference, where a sum refuses counting flows twice and the
+    sum (`_PROVIDER_ALIGNED`), whether it aligns them (`_aligns`) or keeps the
+    options its inputs declare, where a sum refuses counting flows twice and the
     difference is stated (`_difference_decisions`)."""
     return axis != PROVIDER_AXIS or isinstance(step, _PROVIDER_ALIGNED)
 
@@ -7076,28 +7078,16 @@ def _reads_on(step: EvidenceRequirement, axis: str) -> bool:
 def _aligns(step: EvidenceRequirement, axis: str) -> bool:
     """Whether `step` counts its inputs on one option of `axis`: every calculation
     on the measure basis, and on the provider scope a comparison, share,
-    quotient or sum (`_PROVIDER_ALIGNED`), unless the user asked for its inputs as each dataset
-    counts them (`accept_provider_difference`)."""
+    quotient or sum (`_PROVIDER_ALIGNED`). Inputs declaring different options keep
+    their own (`_shared_basis`)."""
     if axis != PROVIDER_AXIS:
         return True
-    return isinstance(step, _PROVIDER_ALIGNED) and not step.accept_provider_difference
+    return isinstance(step, _PROVIDER_ALIGNED)
 
 
-# The option of the question a `STATED_PROVIDER_DROPPED` refusal carries that keeps
-# the datasets it names as published (`_stated_unserved`), and the options that
-# question offers: each `id` is what the user's pick comes back as
-# (`harness.planner_adapter.PlannerAdapter` records it), and Studio shows each `label`.
-KEEP_PUBLISHED_OPTION = "keep as published"
-COUNT_AS_ASKED_OPTION = "count it as asked"
-STATED_SCOPE_OPTIONS: tuple[dict[str, str], ...] = (
-    {"id": KEEP_PUBLISHED_OPTION, "label": "Use this data as published"},
-    {"id": COUNT_AS_ASKED_OPTION, "label": "Use only data counted the way I asked"},
-)
-
-
-# The words the keep question and the brief name each provider option in
-# (`_stated_label`). An option missing here is named by the label the pin's provider
-# choice gives it, else by the user's own words.
+# The words the brief and the plan card's provider rows name each provider option in
+# (`_stated_label`, `_scope_notes`). An option missing here is named by the label the
+# pin's provider choice gives it, else by the user's own words.
 _PROVIDER_OPTION_LABELS: Mapping[str, str] = {
     "provider:bilateral": "bilateral aid only",
     "provider:multilateral": "core contributions to multilateral agencies",
@@ -7121,99 +7111,14 @@ def _stated_label(option_id: str, *, words: str, offered: str | None = None) -> 
     )
 
 
-# The provider options counting part of a donor's total ODA, which a "total" in the
-# same words contrasts with (`_stated_reading`).
-_NARROWER_THAN_TOTAL = frozenset({"provider:bilateral", "provider:multilateral"})
-
-
-class _StatedReading(NamedTuple):
-    """The provider scope the user's words state, as each requirement carries it
-    (`_stated_reading`).
-
-    `options` holds, by requirement id, the provider option each dataset
-    requirement's `measure` states where the turn's words name it too. `totals`
-    holds each one whose `measure` asks for a total and states no provider option,
-    where the turn's words ask for a total. `sole` is the one provider option the
-    turn's words state, `None` where they state none or two.
-    """
-
-    options: Mapping[str, StatedOption]
-    totals: frozenset[str]
-    sole: StatedOption | None
-
-
-def _stated_reading(
-    record: StatedScopeRecord | None, requirements: Sequence[EvidenceRequirement]
-) -> _StatedReading | dict[str, object] | None:
-    """What the user's words state of whose spending `requirements` count, read off
-    Search's readings of the turn's words and each dataset requirement's `measure`
-    (`record`, `planner.stated_scope.read_stated_scope`); `None` where no reading of
-    the turn's words is held, or they name no provider option.
-
-    A requirement states an option where Search reads it from its `measure` and the
-    turn's words name it (`TextReading.mentions`), so a `measure` naming a scope the
-    user never named states nothing. Where the turn's words state one option counting
-    all of a donor's ODA (one outside `_NARROWER_THAN_TOTAL`, such as imputed
-    multilateral aid included, or the summed lines), a `measure` naming it states it in
-    the turn's words even beside a narrower word, which then states nothing of its own.
-    "Bilateral net disbursements including imputed multilateral aid" is the inclusive
-    count, whose label it is. A narrower option keeps the rule above, so under "what
-    share of G7 ODA is bilateral" a `measure` of "bilateral and multilateral ODA"
-    states nothing. The planner attributes the user's words to the
-    requirements they qualify, and cannot add one. A declared whole follows its
-    part and states nothing. A `measure` asking for a total, naming no provider
-    option, under words asking for a total and naming an option narrower than one
-    (`_NARROWER_THAN_TOTAL`), holds its pin on the option it is counted on ("US
-    bilateral aid to Kenya as a share of total US ODA"). Under words naming only
-    imputed multilateral aid, itself a count of total ODA, such a `measure` states
-    nothing, and alignment counts it as the other inputs are. A `measure` no reading
-    is held for answers `SURFACE_UNAVAILABLE`, since admission reads only the scope it
-    was given.
-    """
-    if record is None:
-        return None
-    turn = record.readings.get(record.words)
-    if turn is None:
-        return stated_scope_unread()
-    if not turn.mentions:
-        return None
-    options: dict[str, StatedOption] = {}
-    totals: set[str] = set()
-    narrower = not _NARROWER_THAN_TOTAL.isdisjoint(turn.mentions)
-    total_counting = (
-        turn.stated
-        if turn.stated is not None and turn.stated.option_id not in _NARROWER_THAN_TOTAL
-        else None
-    )
-    for requirement in requirements:
-        if not isinstance(requirement, DatasetRequirement) or requirement.whole_of is not None:
-            continue
-        reading: TextReading | None = record.readings.get(requirement.measure)
-        if reading is None:
-            return stated_scope_unread()
-        option = reading.stated
-        if option is not None and option.option_id in turn.mentions:
-            options[requirement.id] = option
-        elif total_counting is not None and total_counting.option_id in reading.mentions:
-            options[requirement.id] = total_counting
-        elif not reading.provider and reading.total and turn.total and narrower:
-            totals.add(requirement.id)
-    return _StatedReading(
-        options=options,
-        totals=frozenset(totals),
-        sole=turn.stated,
-    )
-
-
 def stated_scope_line(record: StatedScopeRecord | None, shown: Mapping[str, PinSource]) -> str:
     """The brief's line on the provider option the turn's words state (`record`,
-    `planner.stated_scope.read_stated_scope`): the user's phrase, the option's label
-    and each dataset on record (`shown`) whose provider choice offers it, other than
-    unavailable, which a `measure` carrying the phrase is counted on
-    (`_stated_reading`). Empty where no reading of the turn's words is held, or they
-    state no one option. Words summing the bilateral and multilateral lines are
-    offered by a choice's option counting core contributions, else by the option
-    Search read (`_stated_option_of`)."""
+    `planner.stated_scope.read_stated_scope`): the user's phrase, the option's label and
+    id, and each dataset on record (`shown`) whose provider choice offers it, other than
+    unavailable, which a requirement declaring it (`DatasetRequirement.scope_options`)
+    is counted on. Empty where no reading of the turn's words is held, or they state no
+    one option. Words summing the bilateral and multilateral lines are offered by a
+    choice's option counting core contributions, else by the option Search read."""
     turn = record.readings.get(record.words) if record is not None else None
     stated = turn.stated if turn is not None else None
     if stated is None:
@@ -7236,10 +7141,9 @@ def stated_scope_line(record: StatedScopeRecord | None, shown: Mapping[str, PinS
     # Words summing the lines name the summing option a dataset on record offers,
     # which is the option the line labels, not the one Search read.
     first = next(iter(offering.values()), None)
+    option_id = first.option_id if first is not None else stated.option_id
     label = _stated_label(
-        first.option_id if first is not None else stated.option_id,
-        words=stated.words,
-        offered=first.label if first is not None else None,
+        option_id, words=stated.words, offered=first.label if first is not None else None
     )
     pins = (
         f"which {', '.join(offering)} on record can be counted as"
@@ -7247,153 +7151,253 @@ def stated_scope_line(record: StatedScopeRecord | None, shown: Mapping[str, PinS
         else "which no dataset on record can be counted as"
     )
     return (
-        f"\nThe user's words {stated.words!r} ask for {label}, {pins}. Write this phrase in "
-        "the `measure` of each dataset requirement it qualifies; one requirement counts it, "
-        "not a `sum_of`.\n"
+        f"\nThe user's words {stated.words!r} ask for {label} ({option_id}), {pins}. "
+        "Declare it in `scope_options` on each dataset requirement it qualifies; one "
+        "requirement counts it, not a `sum_of`.\n"
     )
 
 
-def _stated_option_of(basis: _InputBasis, option: StatedOption) -> str:
-    """The option of `basis`'s provider choice the stated `option` asks for.
-
-    Words summing the bilateral and multilateral lines with no imputed share
-    (`StatedOption.sums_providers`, "bilateral plus multilateral") name the pin's own
-    summing option, as Search reads them on a part: the option counting core
-    contributions to multilaterals where the choice offers it (DAC1's total ODA), else
-    the inclusive option Search read. Any other stated option is itself."""
-    if option.sums_providers:
-        summing = next(
-            (
-                offered.option_id
-                for offered in basis.choice.options
-                if offered.provider_scope == "contributions"
-                and offered.availability.status != "unavailable"
-            ),
-            None,
-        )
-        if summing is not None:
-            return summing
-    return option.option_id
-
-
-def _stated_claims(
-    stated: _StatedReading,
+def _declared_claims(
+    requirements: Sequence[EvidenceRequirement],
     bases: Mapping[str, _InputBasis],
     *,
-    requirements: Sequence[EvidenceRequirement],
-    compiled: Iterable[AlignedPin],
-    keep: KeepQuestion,
-    shown: Mapping[str, PinSource],
-    sources: SourceReadings,
-    view: SessionView,
+    uncompiled: Mapping[tuple[str, str], str],
     proposer: Proposer,
 ) -> dict[str, str]:
-    """The provider option each pinned input is counted on as the user's words ask
-    (`_stated_reading`), by requirement id. Alignment counts it there whatever
-    calculation reads it, and moves its calculation's other inputs to it.
+    """The provider option each pinned dataset requirement declares
+    (`DatasetRequirement.scope_options`), by requirement id. Alignment counts it there
+    whatever calculation reads it, and moves its calculation's other inputs to it.
 
-    A requirement stating an option its pin's choice offers (`bases`, other than
-    unavailable) is counted on it, moved to the compile of its pin on it where its
-    pin is counted otherwise by default or by the planner, with no refusal since the
-    pin can count it. Words summing the bilateral and multilateral lines name the pin's
-    own summing option (`_stated_option_of`). A requirement asking for a total
-    (`_StatedReading.totals`), and one whose pin the user kept as published
-    (`KeepQuestion.kept`), are counted on the pin's own
-    option, so a share of bilateral aid in total ODA, or of imputed multilateral aid
-    in a DAC1 total kept, contrasts the two. Left alone are a pin with no provider
-    choice (GNI, the imputed multilateral series) and one whose provider choice the
-    user switched on the plan card (`_switched_by_user`), which is their later word.
-    A keep holds for the turn it was made in. A later turn whose words name the option
-    again asks again.
-
-    A pin that cannot count the option, each pair of pin and option on its own
-    (`keep`): released by the user, the plan is refused with no question
-    (`_stated_declined`); with datasets on record serving the option, refused once
-    listing them (`_stated_serving`, `KeepQuestion.offered`); otherwise refused with
-    the question for the user, which `propose_plan` puts to them
-    (`_stated_unserved`).
-
-    A pin Search refused to compile on the option (`planner.stated_scope.stated_uncompiled`)
-    cannot count it, whatever its choice offers. The datasets `requirements` pin, and
-    the compiles `compiled` holds of them, serve none of those requirements
-    (`_pinned_by_plan`).
+    A pin whose provider choice (`bases`) offers the option, other than unavailable,
+    is counted on it. Left as they stand are a requirement not yet pinned, a pin with
+    no provider choice (GNI, the imputed multilateral series), a declared whole, which
+    follows its part, and a pin whose provider choice the user switched on the plan
+    card (`_switched_by_user`), which is their later word. A pin Search refused to
+    compile on the option (`uncompiled`, `planner.stated_scope.stated_uncompiled`)
+    cannot count it, whatever its choice offers.
 
     Raises:
-        _Unservable: `STATED_PROVIDER_DROPPED` for every requirement whose pin
-            cannot count the option its `measure` states.
+        _Unservable: `STATED_PROVIDER_DROPPED` naming every requirement whose pin
+            cannot count the option it declares, with the options the pin offers;
+            `detail.causes` holds Search's code for each.
     """
     claims: dict[str, str] = {}
-    unserved: list[_Unserved] = []
-    uncompiled = stated_uncompiled(view.state)
-    for requirement_id, option in stated.options.items():
-        basis = bases.get(requirement_id)
-        if basis is None:
+    faults: list[str] = []
+    unserved: list[dict[str, JsonValue]] = []
+    causes: dict[str, JsonValue] = {}
+    for requirement in requirements:
+        if not isinstance(requirement, DatasetRequirement) or requirement.whole_of is not None:
             continue
-        option_id = _stated_option_of(basis, option)
-        pair = (basis.pin, option_id)
-        if pair in keep.kept:
-            # Kept as published, the pin holds its own option, as a total does.
-            claims[requirement_id] = basis.choice.active
+        option_id = requirement.provider_option
+        basis = bases.get(requirement.id)
+        if option_id is None or basis is None or _switched_by_user(basis):
             continue
-        if _switched_by_user(basis):
+        offered = [
+            option.option_id
+            for option in basis.choice.options
+            if option.availability.status != "unavailable"
+            and (basis.pin, option.option_id) not in uncompiled
+        ]
+        if option_id == basis.choice.active or option_id in offered:
+            claims[requirement.id] = option_id
             continue
-        offered = next((o for o in basis.choice.options if o.option_id == option_id), None)
+        offered_option = next(
+            (option for option in basis.choice.options if option.option_id == option_id), None
+        )
         refused = uncompiled.get((basis.pin, option_id))
-        if basis.choice.active == option_id or (
-            refused is None and offered is not None and offered.availability.status != "unavailable"
-        ):
-            claims[requirement_id] = option_id
-            continue
         if refused is not None:
             cause, code = "Search does not compile it counted that way", refused
-        elif offered is not None:
+        elif offered_option is not None:
             cause = "Search does not publish it counted that way"
-            code = offered.availability.code or "unavailable"
+            code = offered_option.availability.code or "unavailable"
         else:
             cause, code = "the dataset has no option counting it that way", "not_offered"
+        causes[requirement.id] = code
+        faults.append(
+            f"{requirement.id!r} declares {option_id!r}, which its pin {basis.pin} cannot "
+            f"count ({cause}); it offers {', '.join(offered) or 'no other option'}"
+        )
         unserved.append(
-            _Unserved(
-                requirement_id=requirement_id,
-                pin=basis.pin,
-                option_id=option_id,
-                label=_stated_label(
-                    option_id,
-                    words=option.words,
-                    offered=offered.label if offered is not None else None,
-                ),
-                words=option.words,
-                cause=cause,
-                code=code,
-            )
+            {"requirement_id": requirement.id, "spec_id": basis.pin, "option_id": option_id}
         )
-    declined = [item for item in unserved if (item.pin, item.option_id) in keep.released]
-    besides = _pinned_by_plan(requirements, compiled)
-    if declined:
+    if faults:
         raise _Unservable(
-            _stated_declined(
-                declined,
-                shown=shown,
-                sources=sources,
-                besides=besides,
-                permit=view.record_optional_decline,
-                proposer=proposer,
+            problem(
+                ProblemCode.STATED_PROVIDER_DROPPED,
+                f"{'; '.join(faults)}. Declare an option its pin offers, pin a dataset that "
+                "counts the option declared, or declare none.",
+                outcome=Outcome.INVALID_INPUT,
+                action=proposer.action(needs=("evidence_requirements",)),
+                detail={
+                    "requirement_id": unserved[0]["requirement_id"],
+                    "unserved": unserved,
+                    "causes": causes,
+                },
             )
         )
-    if unserved:
-        view.record_optional_decline(UnsupportedOperation.UNSUPPORTED_ASK)
-        serving = _serving_stated(unserved, shown=shown, sources=sources, besides=besides)
-        pairs = {(item.pin, item.option_id) for item in unserved}
-        if serving and not pairs <= set(keep.offered):
-            view.record_keep_offered(pairs)
-            raise _Unservable(
-                _stated_serving(unserved, serving, sources=sources, proposer=proposer)
-            )
-        raise _Unservable(_stated_unserved(unserved, serving, sources=sources))
-    for requirement_id in stated.totals:
-        basis = bases.get(requirement_id)
-        if basis is not None and not _switched_by_user(basis):
-            claims[requirement_id] = basis.choice.active
     return claims
+
+
+def _contrasted_inputs(
+    requirements: Sequence[EvidenceRequirement], chosen: Collection[str]
+) -> dict[str, frozenset[str]]:
+    """The dataset requirements each share, quotient or comparison of `requirements`
+    sets against each other, by its id: those whose pin has a provider choice
+    (`chosen`), reached through any calculation but a `sum_of`, whose inputs count
+    different streams by design. A declared whole follows its part and is left out."""
+    by_id = {requirement.id: requirement for requirement in requirements}
+
+    def leaves(requirement_id: str) -> set[str]:
+        requirement = by_id.get(requirement_id)
+        if requirement is None or isinstance(requirement, SumOfRequirement):
+            return set()
+        if isinstance(requirement, DatasetRequirement):
+            judged = requirement.id in chosen and requirement.whole_of is None
+            return {requirement.id} if judged else set()
+        return set().union(*(leaves(i) for i in inputs_of(requirement)))
+
+    return {
+        requirement.id: frozenset(members)
+        for requirement in requirements
+        if isinstance(requirement, ShareOfRequirement | QuotientRequirement | ComparisonRequirement)
+        and len(members := set().union(*(leaves(i) for i in inputs_of(requirement)))) >= 2
+    }
+
+
+def _half_declared(
+    requirements: Sequence[EvidenceRequirement],
+    bases: Mapping[str, _InputBasis],
+    *,
+    proposer: Proposer,
+) -> None:
+    """Refuse a share, quotient or comparison some of whose dataset inputs declare a
+    provider option (`DatasetRequirement.scope_options`) and some do not
+    (`_contrasted_inputs`): either every input of such a calculation states how it is
+    counted, or none does and alignment counts them alike. An input the user's own
+    entry already settles (`_InputBasis.stated`, a switch on the plan card among them)
+    is neither: alignment holds it on the user's option. The repair is fixed: each
+    input left declares its pin's own option, or the declarations go.
+
+    Raises:
+        _Unservable: `STATED_SCOPE_UNATTRIBUTED` for the first such calculation in
+            plan order.
+    """
+    declared = {
+        requirement.id
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement) and requirement.provider_option is not None
+    }
+    users = {requirement_id for requirement_id, basis in bases.items() if basis.stated}
+    for step_id, members in _contrasted_inputs(requirements, bases.keys()).items():
+        stating = sorted(members & declared)
+        left = sorted(members - declared - users)
+        if not stating or not left:
+            continue
+        own = ", ".join(f"{rid!r} {bases[rid].choice.active!r}" for rid in left)
+        raise _Unservable(
+            problem(
+                ProblemCode.STATED_SCOPE_UNATTRIBUTED,
+                f"{step_id!r} sets {', '.join(map(repr, stating))}, which declare a provider "
+                f"option in `scope_options`, against {', '.join(map(repr, left))}, which "
+                f"declare none. Declare one on every dataset input of {step_id!r}: the option "
+                "the user's words ask for where they qualify it, else the option its pin is "
+                f"counted on ({own}). Or declare none on any of them.",
+                outcome=Outcome.INVALID_INPUT,
+                action=proposer.action(needs=("evidence_requirements",)),
+                detail={"requirement_id": step_id, "declared": stating, "undeclared": left},
+            )
+        )
+
+
+def _scope_notes(
+    requirements: Sequence[EvidenceRequirement],
+    bases: Mapping[str, _InputBasis],
+    *,
+    counted: Mapping[str, str],
+    previous: Plan | None,
+    record: StatedScopeRecord | None,
+) -> tuple[ScopeNote, ...]:
+    """The line each dataset requirement's provider row on the plan card reads where the
+    option it is counted on and the user's words part (`_scope_decisions`), in plan
+    order.
+
+    `bases` holds each pinned input's provider choice, and `counted` the option each is
+    counted on once alignment has moved it. The turn's words are read once
+    (`record`, `TextReading.mentions`). A requirement declaring an option
+    (`DatasetRequirement.scope_options`) the words do not name reads so; one declaring
+    none, whose choice offers an option the words name that no figure of the plan
+    declares or is counted on, reads that. A line is judged against the words of the
+    turn that set the declaration: a requirement declaring what the plan it amends
+    (`previous`) declares for it keeps the line it had there, and one declaring none
+    keeps it too where this turn's words name no option, so "Extend it to 2025" raises
+    no line of its own. A declared whole follows its part and reads none, and so does
+    an input a sum adds to a series with no provider choice, bilateral aid plus
+    imputed multilateral aid, which counts the words' option through the sum.
+    """
+    turn = record.readings.get(record.words) if record is not None else None
+    mentions = frozenset(turn.mentions) if turn is not None else frozenset()
+    before = (
+        {
+            requirement.id: requirement.scope_options
+            for requirement in previous.evidence_requirements
+            if isinstance(requirement, DatasetRequirement)
+        }
+        if previous is not None
+        else {}
+    )
+    carried = (
+        {note.requirement_id: note for note in previous.scope_notes} if previous is not None else {}
+    )
+    dataset = [
+        requirement
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement)
+        and requirement.whole_of is None
+        and requirement.id in bases
+    ]
+    held = {option for requirement in dataset for option in requirement.scope_options} | {
+        counted.get(requirement.id, bases[requirement.id].choice.active) for requirement in dataset
+    }
+    # An input a sum adds to imputed multilateral aid counts the words' option
+    # through the sum (`_summed_beside_unchosen`), so it reads no line of its own.
+    summed = _summed_beside_unchosen(requirements, bases.keys())
+    notes: list[ScopeNote] = []
+    for requirement in dataset:
+        basis = bases[requirement.id]
+        unchanged = before.get(requirement.id) == requirement.scope_options
+        declared = requirement.provider_option
+        line: str | None = None
+        if unchanged and (declared is not None or not mentions):
+            note = carried.get(requirement.id)
+            line = note.line if note is not None else None
+        elif declared is not None and turn is not None and declared not in mentions:
+            line = (
+                f"Counted as {_option_label(basis, declared)}, which your words do not name; "
+                "the planner chose it. Change it here if you did not mean it."
+            )
+        elif declared is None and requirement.id not in summed:
+            named = sorted(
+                option.option_id
+                for option in basis.choice.options
+                if option.option_id in mentions - held
+                and option.availability.status != "unavailable"
+            )
+            if named:
+                own = counted.get(requirement.id, basis.choice.active)
+                line = (
+                    f"Your words name {_option_label(basis, named[0])}, and no figure in this "
+                    f"plan is counted that way; this one is counted as "
+                    f"{_option_label(basis, own)}. Change it here if you meant it."
+                )
+        if line is not None:
+            notes.append(ScopeNote(requirement_id=requirement.id, line=line))
+    return tuple(notes)
+
+
+def _option_label(basis: _InputBasis, option_id: str) -> str:
+    """How the plan card names provider option `option_id` of `basis`'s choice: by
+    `_PROVIDER_OPTION_LABELS`, else by the label the choice gives it."""
+    return _PROVIDER_OPTION_LABELS.get(option_id) or basis.label(option_id)
 
 
 def _switched_by_user(basis: _InputBasis) -> bool:
@@ -7410,328 +7414,15 @@ def _switched_by_user(basis: _InputBasis) -> bool:
     )
 
 
-def _stated_unattributed(
-    stated: _StatedReading,
-    bases: Mapping[str, _InputBasis],
-    claims: Mapping[str, str],
-    *,
-    requirements: Sequence[EvidenceRequirement],
-    view: SessionView,
-    proposer: Proposer,
-) -> None:
-    """Refuse a plan that leaves out the one provider option the turn's
-    words state (`_StatedReading.sole`).
-
-    It is left out where a pinned input's choice offers it (`bases`, other than
-    unavailable), no requirement's `measure` states it, and no input is counted on
-    it, by its pin or by `claims`: "G7 aid ... including imputed multilateral aid"
-    planned as bilateral aid on every side. Words summing the bilateral and
-    multilateral lines are read on each pin as its own summing option (`_stated_option_of`).
-    A pin the user switched on the plan card offers nothing here
-    (`_switched_by_user`), since the switch is their later word. The refusal asks the
-    planner to carry the user's words to the `measure` of each requirement they
-    qualify. A plan whose requirements pinned to a dataset offering the option are
-    those the refusal named, each with the `measure` it had
-    (`planner.stated_scope.unattributed_refused`), is the planner's word that the words
-    qualify none of them, and is admitted, whatever else it changed. A repin of
-    another requirement carries no attribution. A plan changing those requirements or
-    their measures is judged again. A turn whose words state no one option, and a plan
-    no pin of which can count it, as a debt question about bilateral creditors, pass.
-
-    Raises:
-        _Unservable: `STATED_SCOPE_UNATTRIBUTED`, recorded for the option with the id
-            and `measure` of each requirement whose pin offers it
-            (`SessionView.record_scope_unattributed`).
-    """
-    sole = stated.sole
-    if sole is None:
-        return
-    option_id = sole.option_id
-    if any(option.option_id == option_id for option in stated.options.values()):
-        return
-    if any(
-        _stated_option_of(basis, sole) in {basis.choice.active, claims.get(requirement_id)}
-        for requirement_id, basis in bases.items()
-    ):
-        return
-    offering = [
-        basis
-        for basis in bases.values()
-        if not _switched_by_user(basis)
-        and any(
-            option.option_id == _stated_option_of(basis, sole)
-            and option.availability.status != "unavailable"
-            for option in basis.choice.options
-        )
-    ]
-    if not offering:
-        return
-    measures = {
-        requirement.id: requirement.measure
-        for requirement in requirements
-        if isinstance(requirement, DatasetRequirement)
-    }
-    written = frozenset(
-        (basis.requirement_id, measures[basis.requirement_id]) for basis in offering
-    )
-    if unattributed_refused(view.state).get(option_id) == written:
-        return
-    view.record_scope_unattributed(option_id, written)
-    label = offering[0].label(_stated_option_of(offering[0], sole))
-    pins = ", ".join(f"{basis.requirement_id!r} ({basis.pin})" for basis in offering)
-    raise _Unservable(
-        problem(
-            ProblemCode.STATED_SCOPE_UNATTRIBUTED,
-            f"The user's words ({sole.words!r}) ask for {label}, which {pins} can be counted "
-            "as, and no requirement's `measure` names it. Put the user's words in the "
-            "`measure` of each dataset requirement they qualify, on every side of a "
-            "calculation when they qualify the whole question; a requirement stating them "
-            "is counted that way. Bilateral plus imputed multilateral aid is one dataset "
-            "requirement, not a `sum_of`. Where the user's words qualify none of the "
-            "requirements, propose the plan again unchanged.",
-            outcome=Outcome.INVALID_INPUT,
-            action=proposer.action(needs=("evidence_requirements",)),
-            detail={
-                "requirement_id": offering[0].requirement_id,
-                "option_id": option_id,
-                "offering": [basis.requirement_id for basis in offering],
-            },
-        )
-    )
-
-
-def _pinned_by_plan(
-    requirements: Sequence[EvidenceRequirement], compiled: Iterable[AlignedPin]
-) -> frozenset[str]:
-    """The spec_ids the dataset requirements of `requirements` pin, with each pin
-    `compiled` from one of them and each pin one of them was compiled from
-    (`AlignedPin.origin`)."""
-    found = {
-        requirement.source_spec_id
-        for requirement in requirements
-        if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id is not None
-    }
-    for pin in compiled:
-        if pin.origin in found or pin.spec_id in found:
-            found |= {pin.origin, pin.spec_id}
-    return frozenset(found)
-
-
-class _Unserved(NamedTuple):
-    """A requirement whose `measure` states, in the user's `words`, a provider option
-    its pin cannot count (`_stated_claims`): its id, the pin, the option and its
-    reader's label, and why the pin cannot count it: `cause` as a phrase for the model,
-    `code` as Search answered it, which stays in the refusal's `detail`."""
-
-    requirement_id: str
-    pin: str
-    option_id: str
-    label: str
-    words: str | None
-    cause: str
-    code: str
-
-
-def _stated_faults(unserved: Sequence[_Unserved], sources: SourceReadings) -> str:
-    """Each requirement of `unserved`, the option it asks for and why its pin cannot
-    count it, as the planner reads them."""
-    return "; ".join(
-        f"{item.requirement_id!r} asks for {item.label}"
-        + (f" ({item.words!r})" if item.words else "")
-        + f", and its pin {item.pin} ({_sentence(item.pin, sources)}) cannot count it "
-        f"({item.cause})"
-        for item in unserved
-    )
-
-
-def _stated_detail(
-    unserved: Sequence[_Unserved], serving: Sequence[tuple[str, str]]
-) -> dict[str, JsonValue]:
-    """The `detail` of a `STATED_PROVIDER_DROPPED` refusal for `unserved`: each
-    requirement, pin and option, Search's code for why the pin cannot count it, and
-    the datasets on record serving it."""
-    return {
-        "requirement_id": unserved[0].requirement_id,
-        "unserved": [
-            {
-                "requirement_id": item.requirement_id,
-                "spec_id": item.pin,
-                "option_id": item.option_id,
-            }
-            for item in unserved
-        ],
-        "causes": {item.requirement_id: item.code for item in unserved},
-        "serving": [spec_id for spec_id, _ in serving],
-    }
-
-
-def _stated_serving(
-    unserved: Sequence[_Unserved],
-    serving: Sequence[tuple[str, str]],
-    *,
-    sources: SourceReadings,
-    proposer: Proposer,
-) -> dict[str, object]:
-    """The `STATED_PROVIDER_DROPPED` problem for `unserved`, each a requirement whose
-    pin cannot count the provider option the user's words ask for, listing `serving`,
-    the datasets on record that count it (`_serving_stated`). It is given once for
-    each pin and option (`KeepQuestion.offered`). The planner pins a listed one
-    where it measures what the requirement asks for, removes the figure, or proposes
-    the pin again, which puts the question whether to keep it to the user."""
-    listed = "; ".join(f"{spec_id} ({sentence})" for spec_id, sentence in serving)
-    return problem(
-        ProblemCode.STATED_PROVIDER_DROPPED,
-        f"The user's words ask for whose spending to count: {_stated_faults(unserved, sources)}. "
-        f"These datasets on record count it: {listed}. Pin one where it measures what the "
-        "requirement asks for, or remove the figure and record the part of the question "
-        f"asking for it in `declined` with code {UnsupportedOperation.UNSUPPORTED_ASK.value!r}. "
-        "Proposing the same pin again asks the user whether to keep it as published. "
-        "`accept_provider_difference` keeps no such pin.",
-        outcome=Outcome.REFUSED,
-        action=proposer.action(needs=("evidence_requirements",)),
-        detail=_stated_detail(unserved, serving),
-    )
-
-
-def _stated_unserved(
-    unserved: Sequence[_Unserved],
-    serving: Sequence[tuple[str, str]],
-    *,
-    sources: SourceReadings,
-) -> dict[str, object]:
-    """The `STATED_PROVIDER_DROPPED` problem for `unserved`, each a requirement whose
-    pin cannot count the provider option the user's words ask for, carrying the
-    question whether to keep the pins counted as published under `detail.ask`.
-    Only the user keeps a dataset that cannot count the scope they asked for.
-    `propose_plan` puts it to the user (`planner.tools.pause_on_keep_question`), and
-    the entry their answer resumes records it (`planner.stated_scope.record_keep_answer`).
-    The question is built here, from each pin's dataset title as the catalogue gives
-    it ("OECD DAC1"), the option's label (`_stated_label`) and the user's words, none
-    of them an id; a pin with no title is "the dataset chosen", numbered where two or
-    more are. Its options are `STATED_SCOPE_OPTIONS`, so it takes no free text.
-    """
-    chosen = list(dict.fromkeys(item.pin for item in unserved))
-    titles = {pin: block_dataset(sources.block(pin)).title for pin in chosen}
-    untitled = [pin for pin in chosen if titles[pin] is None]
-    named = {
-        **{pin: title for pin, title in titles.items() if title is not None},
-        **{
-            pin: f"the {_ordinal(n)} dataset chosen" if len(untitled) > 1 else "the dataset chosen"
-            for n, pin in enumerate(untitled, start=1)
-        },
-    }
-    asked = " ".join(
-        f"You asked for {item.label}"
-        + (f" (\u201c{item.words}\u201d)" if item.words else "")
-        + f", and {named[item.pin]} is not counted that way."
-        for item in unserved
-    )
-    pins = ", ".join(dict.fromkeys(item.pin for item in unserved))
-    return problem(
-        ProblemCode.STATED_PROVIDER_DROPPED,
-        f"The user's words ask for whose spending to count: {_stated_faults(unserved, sources)}. "
-        f"Whether to keep {pins} counted as published is the user's to answer, and this "
-        "call puts the question to them.",
-        outcome=Outcome.REFUSED,
-        detail={
-            **_stated_detail(unserved, serving),
-            "ask": {
-                "message": f"{asked} Use the data as published, or only data counted the way "
-                "you asked?",
-                "candidates": [],
-                "options": [dict(option) for option in STATED_SCOPE_OPTIONS],
-                "recommended_spec_id": None,
-                "rationale": None,
-            },
-        },
-    )
-
-
-def _serving_stated(
-    unserved: Sequence[_Unserved],
-    *,
-    shown: Mapping[str, PinSource],
-    sources: SourceReadings,
-    besides: Collection[str],
-) -> list[tuple[str, str]]:
-    """Each dataset on record (`shown`) whose provider choice offers an option of
-    `unserved` other than unavailable, with its sentence, but the pins `unserved` names
-    and `besides`, the datasets the plan pins already (`_pinned_by_plan`)."""
-    options = {item.option_id for item in unserved}
-    excluded = {item.pin for item in unserved} | set(besides)
-    return [
-        (spec_id, _sentence(spec_id, sources))
-        for spec_id in shown
-        if spec_id not in excluded
-        and (choice := _provider_choice(part_scope(spec_id, sources.block(spec_id)))) is not None
-        and any(
-            option.option_id in options and option.availability.status != "unavailable"
-            for option in choice.options
-        )
-    ]
-
-
-def _stated_declined(
-    declined: Sequence[_Unserved],
-    *,
-    shown: Mapping[str, PinSource],
-    sources: SourceReadings,
-    besides: Collection[str],
-    permit: Callable[[UnsupportedOperation], None],
-    proposer: Proposer,
-) -> dict[str, object]:
-    """The `STATED_PROVIDER_DROPPED` problem for `declined`, pins the user did not keep
-    as published this turn, answering the question `_stated_unserved` carries with
-    anything but `KEEP_PUBLISHED_OPTION`. The user has answered, so it carries no ask.
-    The planner pins a dataset on record counting the option where one measures the
-    figure (`_serving_stated`, as `_stated_unserved` lists them), or removes the figure
-    and records the part of the question asking for it in `declined`, which `permit`
-    allows as optional."""
-    permit(UnsupportedOperation.UNSUPPORTED_ASK)
-    serving = _serving_stated(declined, shown=shown, sources=sources, besides=besides)
-    faults = "; ".join(
-        f"{item.requirement_id!r} pins {item.pin}, which cannot count {item.label}"
-        for item in declined
-    )
-    listed = "; ".join(f"{spec_id} ({sentence})" for spec_id, sentence in serving)
-    pins = ", ".join(dict.fromkeys(item.pin for item in declined))
-    instead = (
-        f"These datasets on record count it: {listed}. Pin one where it measures what the "
-        "requirement asks for; otherwise remove "
-        if serving
-        else "Remove "
-    )
-    return problem(
-        ProblemCode.STATED_PROVIDER_DROPPED,
-        f"The user did not keep {pins} counted as published: {faults}. "
-        f"Do not ask again. {instead}each such figure and record the part of the question "
-        f"asking for it in `declined` with code {UnsupportedOperation.UNSUPPORTED_ASK.value!r}.",
-        outcome=Outcome.INVALID_INPUT,
-        action=proposer.action(needs=("evidence_requirements", "declined")),
-        detail={
-            "requirement_id": declined[0].requirement_id,
-            "unserved": [
-                {
-                    "requirement_id": item.requirement_id,
-                    "spec_id": item.pin,
-                    "option_id": item.option_id,
-                }
-                for item in declined
-            ],
-            "serving": [spec_id for spec_id, _ in serving],
-        },
-    )
-
-
 def stated_compile_unanswered(
     realignment: Realignment, *, shown: Mapping[str, PinSource], cause: str
 ) -> dict[str, object]:
     """The `SURFACE_UNAVAILABLE` refusal for a pin Search did not compile, and can
-    later, on the provider option its requirement's `measure` states in the user's
-    words (`Realignment.stated`). `cause` is the code Search answered, kept in `detail`
-    only. The same plan proposed again can be served. A compile Search refuses for good is recorded
-    instead (`planner.stated_scope.record_stated_uncompiled`), and `_stated_claims`
-    refuses the pin as one that cannot count the option."""
+    later, on the provider option its requirement declares (`Realignment.stated`).
+    `cause` is the code Search answered, kept in `detail` only. The same plan proposed
+    again can be served. A compile Search refuses for good is recorded instead
+    (`planner.stated_scope.record_stated_uncompiled`), and `_declared_claims` refuses
+    the pin as one that cannot count the option."""
     (option_id,) = [o for o in realignment.option_ids if option_axis(o) == PROVIDER_AXIS]
     sources = SourceReadings.of_shown(shown)
     choice = _provider_choice(part_scope(realignment.spec_id, sources.block(realignment.spec_id)))
@@ -7742,7 +7433,7 @@ def stated_compile_unanswered(
     return problem(
         ProblemCode.SURFACE_UNAVAILABLE,
         f"Search did not compile {realignment.spec_id}, which {realignment.requirement_id!r} "
-        f"pins, counted as {label}, which its `measure` asks for. The plan is sound "
+        f"pins, counted as {label}, which it declares. The plan is sound "
         "and nothing was recorded; propose it again.",
         outcome=Outcome.REFUSED,
         detail={"basis": realignment.detail(), "cause": cause},
@@ -7755,7 +7446,7 @@ def stated_alone_unanswered(
     """The `SURFACE_UNAVAILABLE` refusal for a pin Search would not compile on its
     calculation's options together (`Realignment.stated_option`), and did not
     compile, though it can later, on `option_id` alone, the provider option its
-    requirement's `measure` states in the user's words. `cause` is the code Search
+    requirement declares. `cause` is the code Search
     answered, kept in `detail` only, whose `basis` names `option_id` alone."""
     sources = SourceReadings.of_shown(shown)
     choice = _provider_choice(part_scope(realignment.spec_id, sources.block(realignment.spec_id)))
@@ -7766,7 +7457,7 @@ def stated_alone_unanswered(
     return problem(
         ProblemCode.SURFACE_UNAVAILABLE,
         f"Search did not compile {realignment.spec_id}, which {realignment.requirement_id!r} "
-        f"pins, counted as {label} alone, which its `measure` asks for. Nothing was "
+        f"pins, counted as {label} alone, which it declares. Nothing was "
         "recorded; propose the plan again.",
         outcome=Outcome.REFUSED,
         detail={
@@ -7781,24 +7472,6 @@ def _provider_choice(scope: PartScope | None) -> ScopeChoice | None:
     if scope is None:
         return None
     return next((choice for choice in scope.choices if choice.axis == PROVIDER_AXIS), None)
-
-
-def _sentence(spec_id: str, sources: SourceReadings) -> str:
-    """`spec_id`'s sentence as Search renders it (`resolved.rendered_sentence`), else
-    its dataset's name, else the spec_id."""
-    block = sources.block(spec_id)
-    rendered = ((block or {}).get("resolved") or {}).get("rendered_sentence")
-    if isinstance(rendered, str) and rendered:
-        return rendered
-    return block_dataset(block).name or spec_id
-
-
-_ORDINALS = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth")
-
-
-def _ordinal(n: int) -> str:
-    """`n`, counted from 1, as an ordinal in words, in figures past `_ORDINALS`."""
-    return _ORDINALS[n - 1] if n <= len(_ORDINALS) else f"{n}th"
 
 
 def _whole_parts(
@@ -8306,9 +7979,10 @@ _DIFFERENCES: Mapping[str, _Difference] = {
         unstated="does not say which measure basis it is counted on",
     ),
 }
-# The lead of a provider difference the question asked for (`accept_provider_difference`).
-_ACCEPTED_PROVIDER_LEAD = (
-    "The question asks for the inputs as their datasets count them, so they may "
+# The lead of a provider difference stated because an input whose dataset states no
+# provider scope sits beside one declaring its option (`_difference_decisions`).
+_UNRECORDED_PROVIDER_LEAD = (
+    "One input's dataset does not say which providers it counts, so the inputs may "
     "count different providers' spending."
 )
 # The caveats a calculation's own decisions carry (`_difference_decisions`).
@@ -8336,14 +8010,10 @@ def _difference_decisions(
     the user set its inputs to different ones or alignment kept two sides
     apart (`_alignment_targets`), whatever an input with no such record
     counts; on the provider axis the options are compared by the scope they
-    count (`Option.provider_scope`). One accepting a provider difference, the
-    user having asked for its inputs as each dataset counts them
-    (`accept_provider_difference`), states a provider one unless every pinned
-    dataset input's scope record holds a provider scope and all match: an
-    input whose record states none may count other providers, since nothing
-    says what it counts. A group a ratio beneath supplies under an accepted
-    provider difference (`_InputGroup.accepted`) reads as accepted, and a
-    decision naming one is worded as the user's request. The decision says
+    count (`Option.provider_scope`). On the provider axis it states one too where
+    an input declares its option (`DatasetRequirement.scope_options`) and another's
+    record states none, since nothing says the second counts the same providers,
+    led by `_UNRECORDED_PROVIDER_LEAD`. The decision says
     so in reader words, one sentence per input naming what it counts, or
     that its dataset does not say (`_difference_sentence`), each input read
     on the compile alignment moves it to (`moved_to`, by requirement id),
@@ -8375,6 +8045,11 @@ def _difference_decisions(
         if isinstance(requirement, DatasetRequirement) and requirement.whole_of is not None
     }
     groups = _input_groups(requirements)
+    declared = {
+        requirement.id
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement) and requirement.scope_options
+    }
     decisions: dict[str, tuple[Decision, ...]] = {}
     for step in requirements:
         if not isinstance(step, _PROVIDER_ALIGNED):
@@ -8386,11 +8061,10 @@ def _difference_decisions(
                 for requirement, block, scope in pinned
             ]
             differing: set[str] = set()
-            flagged = axis == PROVIDER_AXIS and step.accept_provider_difference
+            # Whether two inputs' records differ, and whether a group is stated only
+            # for an input with no record beside a declared one.
+            recorded = unrecorded = False
             for group in groups[step.id]:
-                accepted = axis == PROVIDER_AXIS and (
-                    step.accept_provider_difference or group.accepted
-                )
                 members = group.members - {
                     whole for whole, part in whole_parts.items() if part in group.members
                 }
@@ -8399,9 +8073,12 @@ def _difference_decisions(
                     for requirement, _, option in held
                     if requirement.id in members
                 }
-                if len(counted - {None}) > 1 or (accepted and None in counted):
+                if len(counted - {None}) > 1:
                     differing |= members
-                    flagged |= accepted and group.accepted
+                    recorded = True
+                elif axis == PROVIDER_AXIS and None in counted and members & declared:
+                    differing |= members
+                    unrecorded = True
             inputs = [entry for entry in held if entry[0].id in differing]
             if not inputs:
                 continue
@@ -8412,7 +8089,7 @@ def _difference_decisions(
                     scope_decisions=scope_decisions or {},
                     sources=sources,
                 )
-            lead = _ACCEPTED_PROVIDER_LEAD if flagged else difference.lead
+            lead = _UNRECORDED_PROVIDER_LEAD if unrecorded and not recorded else difference.lead
             try:
                 decision = Decision(
                     slot=_derived_slot(difference.prefix, step.id),

@@ -122,7 +122,7 @@ from sqlalchemy import exc as sa_exc
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 from sqlalchemy.ext.asyncio import AsyncEngine
 from submission.prices_choice import prices_slot, unit_slot
-from submission.service import COMBINATION_OPTIONS, STATED_SCOPE_OPTIONS, scope_choice_decisions
+from submission.service import COMBINATION_OPTIONS, scope_choice_decisions
 from translator.discovery import NoTimeLeftError
 from translator.referral import (
     ENTITY_CHOICE_REPAIR,
@@ -306,15 +306,10 @@ def test_a_planner_ask_marks_the_recommended_option_and_carries_its_rationale() 
     assert (question.allow_free_text, question.skippable) == (True, False)
 
 
-@pytest.mark.parametrize(
-    "fixed", [COMBINATION_OPTIONS, STATED_SCOPE_OPTIONS], ids=["combination", "stated-scope"]
-)
-def test_a_fixed_options_ask_offers_its_options_and_takes_no_free_text(
-    fixed: tuple[dict[str, str], ...],
-) -> None:
-    # The planner's ask whether to add two datasets, or to keep one counted as
-    # published, carries the refusal's `options`; the user's pick of one comes back
-    # as its id, and the question takes no free text.
+def test_a_fixed_options_ask_offers_its_options_and_takes_no_free_text() -> None:
+    # The planner's ask whether to add two datasets carries the refusal's `options`;
+    # the user's pick of one comes back as its id, and the question takes no free text.
+    fixed = COMBINATION_OPTIONS
     args = {"message": "Add them?", "options": [dict(option) for option in fixed]}
 
     (frame,) = _translator()._interrupt_frames(_pause("planner_ask", args))

@@ -76,6 +76,7 @@ from planner.tool_results import Outcome, ProblemCode
 from planner.tools import PLAN_WRITES, running_plan_write
 from planner.workflow import ToolId
 from pydantic import ValidationError
+from submission.service import SEARCH_DEFAULT_RATIONALE
 
 from harness import plan_display
 from harness.card_unit import UnitCard, card_unit_change, stored_block, unit_card
@@ -1331,11 +1332,14 @@ def _unit_members(decision: Decision, offer: UnitOffer) -> dict[str, Any]:
 
 
 def _search_default(decision: Decision | None) -> bool:
-    """Whether `decision` states a scope choice Search's default settled."""
+    """Whether `decision` states a scope choice Search's default settled, and gives
+    that as its reason (`submission.service.SEARCH_DEFAULT_RATIONALE`). A row whose
+    words and the user's part reads its own line (`submission.service._scope_notes`)."""
     return (
         decision is not None
         and decision.scope is not None
         and decision.scope.provenance == "default"
+        and decision.rationale == SEARCH_DEFAULT_RATIONALE
     )
 
 

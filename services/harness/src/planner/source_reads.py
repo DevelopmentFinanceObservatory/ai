@@ -303,11 +303,11 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     answers with no one dataset, or when what it posts of the part's entity
     groups is not readable, since a resubmit posted without them can bind
     another population. A pin compiled on the provider option its
-    requirement's `measure` states in the user's words, and nothing else
+    requirement declares, and nothing else
     (`Realignment.stated`), answers `submission.service.stated_compile_unanswered`
     where Search can answer later, and otherwise records Search's code
     (`planner.stated_scope.record_stated_uncompiled`), so the next proposal is
-    refused for a pin that cannot count the option, with the ask that keeps it.
+    refused for a pin that cannot count the option.
 
     A compile moving a calculation's axis beside the stated option
     (`Realignment.stated_option`) that Search refuses for good is held for the turn

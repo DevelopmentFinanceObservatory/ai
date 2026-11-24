@@ -223,7 +223,6 @@ from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
     SEARCHED_PINS_STATE_KEY,
-    STATED_SCOPE_OPTIONS,
     AlignedPin,
     Realignment,
     SourceReadings,
@@ -3574,7 +3573,6 @@ def test_asking_the_user_rejects_a_recommendation_naming_no_candidate() -> None:
     ("candidates", "options", "refused"),
     [
         ([], [dict(option) for option in COMBINATION_OPTIONS], False),
-        ([], [dict(option) for option in STATED_SCOPE_OPTIONS], True),
         ([], [{"id": "add them", "label": "Add them"}, {"id": "no", "label": "No"}], True),
         (
             [{"spec_id": SPEC, "label": "a candidate"}],
@@ -3582,7 +3580,7 @@ def test_asking_the_user_rejects_a_recommendation_naming_no_candidate() -> None:
             True,
         ),
     ],
-    ids=["refusals-options", "stated-scope-options", "other-options", "options-with-candidates"],
+    ids=["refusals-options", "other-options", "options-with-candidates"],
 )
 def test_asking_the_user_takes_only_the_options_a_refusal_carries(
     candidates: list[dict[str, str]], options: list[dict[str, str]], refused: bool
@@ -5176,12 +5174,18 @@ async def test_a_share_whose_total_is_not_published_on_the_shared_basis_is_refus
 
 
 def _sum_of_health(
-    propose: Callable[..., Any], ctx: _FakeToolContext, decision: Decision, *, accept: bool = False
+    propose: Callable[..., Any],
+    ctx: _FakeToolContext,
+    decision: Decision,
+    *,
+    declares: tuple[str, str] | None = None,
 ) -> Any:
     """Propose US health aid plus the US total, pinning `HEALTH` and `TOTAL`; with
-    `accept`, the sum accepts a provider difference."""
+    `declares`, each declares the provider option given, in that order."""
 
-    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
+    def dataset(
+        requirement_id: str, measure: str, pin: str, option: str | None = None
+    ) -> DatasetRequirement:
         return DatasetRequirement(
             id=requirement_id,
             decision_ids=["measure"],
@@ -5189,6 +5193,7 @@ def _sum_of_health(
             entities=[Entity(name="United States", role="donor")],
             period=Period(start=2015, end=2024),
             source_spec_id=pin,
+            scope_options=(option,) if option is not None else (),
         )
 
     return propose(
@@ -5196,14 +5201,13 @@ def _sum_of_health(
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision]),
         evidence_requirements=[
-            dataset("health", "US aid to health", HEALTH),
-            dataset("total", "US total ODA", TOTAL),
+            dataset("health", "US aid to health", HEALTH, declares and declares[0]),
+            dataset("total", "US total ODA", TOTAL, declares and declares[1]),
             SumOfRequirement(
                 id="sum",
                 decision_ids=["measure"],
                 left=RequirementSide(input_id="health"),
                 right=RequirementSide(input_id="total"),
-                accept_provider_difference=accept,
             ),
         ],
         tool_context=ctx,
@@ -5388,15 +5392,15 @@ def test_inputs_the_user_stated_on_different_provider_scopes_are_shared_and_neve
         ),
     ],
 )
-def test_a_sum_accepting_a_provider_difference_is_still_refused_where_it_counts_flows_twice(
+def test_a_sum_whose_inputs_declare_their_own_options_is_still_refused_where_it_counts_twice(
     decision: DecisionFactory,
     scopes: tuple[str, str],
     donors: tuple[list[str], list[str]],
     code: str,
 ) -> None:
-    """US health aid plus the US total on other provider scopes, the sum accepting a
-    provider difference. The flag lets each input keep its own scope, so the inputs
-    are not realigned, and the sum still refuses where one donor's money would be
+    """US health aid plus the US total on other provider scopes, each declaring its
+    own. The declarations keep each input on its own scope, so the inputs are not
+    realigned, and the sum still refuses where one donor's money would be
     counted twice: bilateral flows in both, or its aid through multilaterals counted
     as core contributions in both, or as core contributions in one and as an imputed
     share of the multilaterals' spending in the other. Over disjoint donors, or over
@@ -5416,7 +5420,7 @@ def test_a_sum_accepting_a_provider_difference_is_still_refused_where_it_counts_
         functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
         ctx,
         decision(),
-        accept=True,
+        declares=(f"provider:{scopes[0]}", f"provider:{scopes[1]}"),
     )
 
     assert result.get("outcome") == code or result.get("code") == code, result
@@ -5427,7 +5431,7 @@ def test_a_sum_accepting_a_provider_difference_is_still_refused_where_it_counts_
         assert _pins(ctx) == [("health", HEALTH), ("total", TOTAL)]
 
 
-@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "accepted"])
+@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "declared"])
 @pytest.mark.parametrize(
     ("scope", "health_donor", "total_donor", "marked", "code"),
     [
@@ -5490,7 +5494,7 @@ def test_a_sum_on_one_provider_scope_is_refused_where_its_reporters_count_one_mo
     code: str,
 ) -> None:
     """US health aid plus a total, both counted on one provider scope, whether the sum
-    aligns its inputs or accepts a provider difference. Where the scope counts imputed
+    aligns its inputs or each declares that scope. Where the scope counts imputed
     multilateral flows and the total is IDA's, whose own outflows spend the core
     contributions its funders paid it, both inputs count the donors' aid through
     multilaterals, one as an imputed share and one as IDA's spending, so the sum is
@@ -5517,7 +5521,7 @@ def test_a_sum_on_one_provider_scope_is_refused_where_its_reporters_count_one_mo
         functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
         ctx,
         decision(),
-        accept=accept,
+        declares=(f"provider:{scope}", f"provider:{scope}") if accept else None,
     )
 
     assert result.get("outcome") == code or result.get("code") == code, result
@@ -5575,7 +5579,7 @@ def test_a_donor_search_states_no_graph_type_for_reads_as_a_country_by_its_ref(
         functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
         ctx,
         decision(),
-        accept=True,
+        declares=("provider:inclusive", "provider:inclusive"),
     )
 
     assert result.get("outcome") == code or result.get("code") == code, result
@@ -5623,7 +5627,7 @@ def _by_instrument(block: dict[str, Any], codes: list[str], *, added: list[str])
     return block
 
 
-@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "accepted"])
+@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "declared"])
 @pytest.mark.parametrize(
     "donors",
     [
@@ -5684,7 +5688,7 @@ def test_a_sum_on_one_provider_scope_counts_no_flow_twice_over_apart_slots(
         functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
         ctx,
         decision(),
-        accept=accept,
+        declares=("provider:inclusive", "provider:inclusive") if accept else None,
     )
 
     if donors is None or apart:
@@ -5696,7 +5700,7 @@ def test_a_sum_on_one_provider_scope_counts_no_flow_twice_over_apart_slots(
         assert load_plan(ctx.state) is None
 
 
-@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "accepted"])
+@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "declared"])
 @pytest.mark.parametrize(
     ("donors", "dataset", "code"),
     [
@@ -5763,7 +5767,7 @@ def test_a_sum_on_one_provider_scope_counts_one_donor_population_by_the_same_str
         functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
         ctx,
         decision(),
-        accept=accept,
+        declares=("provider:inclusive", "provider:inclusive") if accept else None,
     )
 
     assert result.get("outcome") == code or result.get("code") == code, result
@@ -6909,7 +6913,8 @@ def _us_2023(
     the whole's source written as `source`; with `quotient`, the part summed by year
     is divided by the whole as a `quotient_of`, as the planner wrote the share in a
     recorded Studio run; with `summed_whole`, the whole too is summed by year and
-    the part summed by year is a `share_of` it, or a `quotient_of` it with `quotient`; with `accept`, the share accepts a provider difference;
+    the part summed by year is a `share_of` it, or a `quotient_of` it with `quotient`; with `accept`, the part and the whole each declare the provider option their
+    pin is counted on, so each keeps its own (`_keeping_its_own`);
     with `denominator`, a decision of the planner's the whole alone cites; `extra`
     is proposed after the rest; `own` are further decisions the part cites."""
 
@@ -6921,6 +6926,7 @@ def _us_2023(
         cited: tuple[str, ...] = (),
         whole_of: WholeOf | None = None,
     ) -> DatasetRequirement:
+        block = None if name is None else _us_block(name)
         return DatasetRequirement(
             id=requirement_id,
             decision_ids=["measure", *cited],
@@ -6928,8 +6934,9 @@ def _us_2023(
             entities=[] if whole_of else [Entity(name="United States", role="donor")],
             period=Period(start=2023, end=2023),
             source=named,
-            source_spec_id=None if name is None else _us_block(name)["spec_id"],
+            source_spec_id=None if block is None else block["spec_id"],
             whole_of=whole_of,
+            scope_options=_keeping_its_own(block) if accept and whole_of is None else (),
         )
 
     summed: list[EvidenceRequirement] = []
@@ -6958,7 +6965,6 @@ def _us_2023(
                 id=_SHARE,
                 numerator=RequirementSide(input_id="health_by_year"),
                 denominator=RequirementSide(input_id=denominator_id),
-                accept_provider_difference=accept,
             ),
         ]
     step: EvidenceRequirement = (
@@ -6967,7 +6973,6 @@ def _us_2023(
             decision_ids=["measure"],
             numerator=RequirementSide(input_id=_PART),
             denominator=RequirementSide(input_id=_WHOLE),
-            accept_provider_difference=accept,
         )
         if share
         else ComparisonRequirement(
@@ -6975,7 +6980,6 @@ def _us_2023(
             decision_ids=["measure"],
             minuend=RequirementSide(input_id=_WHOLE),
             subtrahend=RequirementSide(input_id=_PART),
-            accept_provider_difference=accept,
         )
     )
     return propose(
@@ -6997,6 +7001,14 @@ def _us_2023(
         ],
         tool_context=ctx,
     )
+
+
+def _keeping_its_own(block: Mapping[str, Any] | None) -> tuple[Any, ...]:
+    """The provider option `block` is counted on, as a dataset requirement declares it
+    to keep it beside inputs counted otherwise (`DatasetRequirement.scope_options`);
+    none where `block` has no provider choice."""
+    scope = ((block or {}).get("resolved") or {}).get("scope_choices") or {}
+    return tuple(c["active"] for c in scope.get("choices", ()) if c["axis"] == "provider")
 
 
 def _pins(ctx: _FakeToolContext) -> list[tuple[str, str | None]]:
@@ -8173,8 +8185,8 @@ async def test_a_share_accepting_a_provider_difference_states_one_unless_its_inp
 async def test_a_provider_difference_names_inputs_of_one_concept_as_the_card_does(
     decision: DecisionFactory,
 ) -> None:
-    """The CRS bilateral total compared with the DAC1 total, the comparison accepting
-    the difference. Search names both "official development assistance", so the
+    """The CRS bilateral total compared with the DAC1 total, each declaring its own
+    provider option. Search names both "official development assistance", so the
     card tells the two apart, and the stated difference names each input as the
     card does, so its two sentences read two subjects."""
     ctx = _FakeToolContext()
@@ -8209,7 +8221,8 @@ async def test_a_revisions_provider_difference_names_its_inputs_as_the_revisions
     decision: DecisionFactory,
 ) -> None:
     """US health aid in 2023 from the CRS, whose card names it "health". A revision adds the inclusive CRS health figures, which Search also
-    names "health", and compares them with the first, accepting the difference. The
+    names "health", and compares them with the first, each declaring its own provider
+    option. The
     revision's card names both health inputs afresh, so the stated difference names
     each as that card does, and the first keeps no name the earlier card gave it."""
     ctx = _FakeToolContext()
@@ -8261,15 +8274,19 @@ async def test_a_revisions_provider_difference_names_its_inputs_as_the_revisions
     second = await call_planner_tool(
         tools["propose_plan"],
         evidence_requirements=[
+            health.model_copy(update={"scope_options": _keeping_its_own(us_2023_block("health"))}),
             health.model_copy(
-                update={"id": inclusive, "source_spec_id": us_2023_block(inclusive)["spec_id"]}
+                update={
+                    "id": inclusive,
+                    "source_spec_id": us_2023_block(inclusive)["spec_id"],
+                    "scope_options": _keeping_its_own(us_2023_block(inclusive)),
+                }
             ),
             ComparisonRequirement(
                 id=_COMPARE,
                 decision_ids=["measure"],
                 minuend=RequirementSide(input_id=inclusive),
                 subtrahend=RequirementSide(input_id=_PART),
-                accept_provider_difference=True,
             ),
         ],
         amends_version=first["version"],
@@ -8317,6 +8334,7 @@ async def test_a_provider_difference_names_namesake_inputs_by_the_scope_each_cou
             entities=[Entity(name="United States of America", role="donor")],
             period=Period(start=2023, end=2023),
             source_spec_id=block["spec_id"],
+            scope_options=_keeping_its_own(block),
         )
         for requirement_id, block in blocks.items()
     ]
@@ -8325,7 +8343,6 @@ async def test_a_provider_difference_names_namesake_inputs_by_the_scope_each_cou
         decision_ids=["measure"],
         minuend=RequirementSide(input_id=_WHOLE),
         subtrahend=RequirementSide(input_id=_PART),
-        accept_provider_difference=True,
     )
 
     result = await call_planner_tool(
@@ -8481,8 +8498,8 @@ async def test_a_basis_difference_names_namesake_inputs_by_the_basis_each_is_cou
 async def test_a_carried_share_restates_its_provider_difference_when_an_input_is_repinned(
     decision: DecisionFactory, whole: str, labelled: bool, counted: str
 ) -> None:
-    """CRS bilateral health aid over the DAC1 total, the share accepting the
-    difference. A revision re-pins the part alone to the inclusive CRS form, as a
+    """CRS bilateral health aid over the DAC1 total, each declaring its own provider
+    option. A revision re-pins the part alone to the inclusive CRS form, as a
     plan-card switch does, and carries the share: the share's stated difference now
     names what the re-pinned part counts, one sentence per input naming its concept,
     the provider scope it counts and the tables it is published in, the composite's
@@ -8520,10 +8537,14 @@ async def test_a_carried_share_restates_its_provider_difference_when_an_input_is
     assert plan is not None
     (stated,) = [d for d in plan.decisions if d.caveat == "providers_differ"]
     assert stated.slot in plan.requirement(_SHARE).decision_ids
-    assert stated.rationale == (
-        "The question asks for the inputs as their datasets count them, so they may count "
-        f"different providers' spending. {counted}"
+    lead = (
+        "One input's dataset does not say which providers it counts, so the inputs may "
+        "count different providers' spending."
+        if whole == "dac1_total_gross"
+        else "The inputs are set to different provider scopes, so they count different "
+        "providers' spending."
     )
+    assert stated.rationale == f"{lead} {counted}"
 
 
 @pytest.mark.parametrize(
@@ -8596,21 +8617,19 @@ def test_a_provider_difference_over_four_inputs_is_stated_within_the_rationale_l
 
 
 @pytest.mark.parametrize(
-    ("b_counts", "accept", "differs"),
+    ("b_counts", "differs"),
     [
-        pytest.param("provider:inclusive", False, True, id="set-apart"),
-        pytest.param("provider:inclusive", True, True, id="accepted"),
-        pytest.param("provider:bilateral", False, False, id="one-scope"),
+        pytest.param("provider:inclusive", True, id="set-apart"),
+        pytest.param("provider:bilateral", False, id="one-scope"),
     ],
 )
 def test_a_sum_states_the_provider_difference_of_its_inputs_beside_one_with_no_record(
-    b_counts: str, accept: bool, differs: bool
+    b_counts: str, differs: bool
 ) -> None:
     """US aid a, set to bilateral flows, plus b, set to `b_counts`, plus the DAC1
     total c, whose dataset states no provider scope: (a + b) + c. Where a and b
-    count different providers, the outer sum states so as the inner one does,
-    whether or not it accepts the difference; c's missing record does not hide
-    it. Where a and b match, c alone states nothing on a sum not accepting it."""
+    count different providers, the outer sum states so as the inner one does; c's
+    missing record does not hide it. Where a and b match, c alone states nothing."""
     a = provider_block(
         f"spec_{'a' * 32}", narrow=False, active="provider:bilateral", provenance="explicit"
     )
@@ -8634,7 +8653,6 @@ def test_a_sum_states_the_provider_difference_of_its_inputs_beside_one_with_no_r
             id="abc",
             left=RequirementSide(input_id="ab"),
             right=RequirementSide(input_id="c"),
-            accept_provider_difference=accept,
         ),
     ]
     shown = {block["spec_id"]: PinSource(block=block, settled=True) for block in (a, b, c)}
@@ -8738,18 +8756,12 @@ async def test_a_comparison_with_a_total_stating_no_provider_scope_keeps_both_da
     ]
 
 
-@pytest.mark.parametrize(
-    "flagged_share", [False, True], ids=["sum-alone", "beside-a-flagged-share"]
-)
-async def test_a_provider_difference_accepted_on_one_share_leaves_every_other_calculation_aligned(
-    decision: DecisionFactory, flagged_share: bool
+async def test_a_comparison_and_a_sum_over_a_total_serving_no_bilateral_option_refuse_in_order(
+    decision: DecisionFactory,
 ) -> None:
-    """CRS bilateral health aid plus a total counting core contributions to
-    multilaterals, serving no bilateral option, in a sum mixes providers, so the sum
-    is refused, whether or not a share reading the same total accepts the
-    provider difference: the user's request exempts that one share. Beside a
-    comparison of the same inputs accepting nothing, the comparison, first in plan
-    order, is refused first."""
+    """CRS bilateral health aid compared with, and added to, a total counting core
+    contributions to multilaterals, serving no bilateral option: both mix providers,
+    and the comparison, first in plan order, is refused first."""
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"), total_without_bilateral())
     summed = SumOfRequirement(
@@ -8765,13 +8777,12 @@ async def test_a_provider_difference_accepted_on_one_share_leaves_every_other_ca
         decision(),
         part="health",
         whole="no_bilateral",
-        share=flagged_share,
-        accept=flagged_share,
+        share=False,
         extra=[summed],
     )
 
     assert result["code"] == ProblemCode.PROVIDERS_UNALIGNED.value, result
-    assert result["detail"]["provider"]["step_id"] == (_SUM if flagged_share else _COMPARE)
+    assert result["detail"]["provider"]["step_id"] == _COMPARE
     assert load_plan(ctx.state) is None
 
 
@@ -10619,7 +10630,7 @@ async def test_a_sum_with_a_multilaterals_outflows_is_refused_where_the_other_co
     unmarked: str | None,
     refused: str | None,
 ) -> None:
-    """Two figures added, the sum accepting a provider difference. IDA's health aid to
+    """Two figures added, each declaring its own provider option. IDA's health aid to
     Kenya, which Search marks a multilateral's outflows, spends the core contributions
     its funders paid it, so it counts multilateral money: the sum is refused beside a
     figure counting the DAC countries' core contributions, on multilateral ODA or total
@@ -10653,6 +10664,7 @@ async def test_a_sum_with_a_multilaterals_outflows_is_refused_where_the_other_co
                     entities=_named(block),
                     period=period,
                     source_spec_id=block["spec_id"],
+                    scope_options=_keeping_its_own(block),
                 )
                 for requirement_id, block in blocks.items()
             ),
@@ -10661,7 +10673,6 @@ async def test_a_sum_with_a_multilaterals_outflows_is_refused_where_the_other_co
                 decision_ids=["measure"],
                 left=RequirementSide(input_id=_TOTAL),
                 right=RequirementSide(input_id=_PART),
-                accept_provider_difference=True,
             ),
         ],
         tool_context=ctx,
@@ -16256,7 +16267,9 @@ def test_propose_plans_declaration_describes_every_field() -> None:
     # field means without it having to live in `_PLANNING` prose.
     # `_undescribed_properties` walks `$defs`, the shape the model
     # is actually sent. The fields every requirement kind shares are described once,
-    # on the `evidence_requirements` argument.
+    # on the `evidence_requirements` argument. `scope_options` carries none: its enum
+    # names each option, and a description puts the declaration over its ceiling
+    # (`test_context_budget.PROPOSE_PLAN_DECLARATION_CEILING`).
     tools = _tools_by_name()
 
     declaration = planner_tool_declaration(tools["propose_plan"])
@@ -16268,7 +16281,7 @@ def test_propose_plans_declaration_describes_every_field() -> None:
         name for name, field in schema["properties"].items() if not field.get("description")
     ] == []
     assert sorted({entry.rsplit(".", 1)[1] for entry in _undescribed_properties(schema)}) == sorted(
-        SHARED_FIELDS
+        {*SHARED_FIELDS, "scope_options"}
     )
     described = schema["properties"]["evidence_requirements"]["description"]
     assert all(f"`{field}`" in described for field in SHARED_FIELDS)
@@ -21007,7 +21020,7 @@ async def test_a_double_count_refusal_names_the_wider_figure_by_its_label(
     decision: DecisionFactory,
 ) -> None:
     """Bilateral CRS health aid plus the DAC1 total counting core contributions to
-    multilaterals, the sum accepting a provider difference: the refusal names the
+    multilaterals, each declaring its own provider option: the refusal names the
     total by the count it carries, whose cause is not imputed multilateral flows."""
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"), dac1_with_contributions())
@@ -21016,7 +21029,6 @@ async def test_a_double_count_refusal_names_the_wider_figure_by_its_label(
         decision_ids=["measure"],
         left=RequirementSide(input_id=_PART),
         right=RequirementSide(input_id=_WHOLE),
-        accept_provider_difference=True,
     )
 
     refused = await _us_2023(
@@ -21089,74 +21101,55 @@ def _us_dataset(
     )
 
 
-_FLAGGED_LEAD = "The question asks for the inputs as their datasets count them"
-
-
 @pytest.mark.parametrize(
-    ("wholes", "accepts", "pinned", "compiled", "compare_lead"),
+    ("wholes", "declares", "pinned", "compiled"),
     [
         pytest.param(
             ("dac1_contributions", "dac1_contributions"),
             (True, True),
             ("dac1_contributions", "dac1_contributions"),
             False,
-            None,
-            id="both-accepting-over-dac1",
+            id="both-declaring-over-dac1",
         ),
         pytest.param(
             (None, "dac1_contributions"),
             (False, False),
             ("whole", "whole"),
             True,
-            None,
             id="declared-whole-beside-dac1",
-        ),
-        pytest.param(
-            (None, "dac1_contributions"),
-            (False, True),
-            ("whole", "dac1_contributions"),
-            True,
-            _FLAGGED_LEAD,
-            id="declared-whole-beside-accepted-dac1",
         ),
         pytest.param(
             ("dac1_contributions", "whole"),
             (True, False),
-            ("dac1_contributions", "whole"),
+            None,
             False,
-            _FLAGGED_LEAD,
-            id="one-accepting-over-dac1",
+            id="one-declaring-over-dac1",
         ),
     ],
 )
-async def test_comparing_two_shares_keeps_each_shares_own_provider_contract(
+async def test_comparing_two_shares_keeps_each_shares_declared_options(
     decision: DecisionFactory,
     wholes: tuple[str | None, str],
-    accepts: tuple[bool, bool],
-    pinned: tuple[str, str],
+    declares: tuple[bool, bool],
+    pinned: tuple[str, str] | None,
     compiled: bool,
-    compare_lead: str | None,
 ) -> None:
     """US health and education aid each as a share of a total, the two shares
     compared. The comparison counts numerators with numerators and denominators
-    with denominators, and a share's own contract stands.
+    with denominators.
 
     Both shares over the DAC1 total, which counts core contributions to
-    multilaterals, each accepting the provider difference: the positions already
-    match, so the DAC1 total keeps its pin though Search offers DAC1 bilateral ODA
-    beside it, nothing is compiled, and the comparison states no provider
-    difference beside each share's own. The health share over a whole declared
-    from its part, beside the education share over the DAC1 total: the declared
+    multilaterals, every input declaring the option its pin is counted on: the
+    positions already match, so the DAC1 total keeps its pin though Search offers
+    DAC1 bilateral ODA beside it, nothing is compiled, and the comparison states no
+    provider difference. The health share over a whole declared from its part,
+    beside the education share over the DAC1 total, declaring nothing: the declared
     whole stands in for its bilateral part, so the DAC1 denominator is compiled
-    bilateral, unless the education share accepts the difference, when its DAC1
-    denominator stays and the comparison states the denominators' difference as
-    the user's request. The health share over the DAC1 total accepting the difference,
-    beside the education share over the CRS bilateral total: the accepted
-    contract stands, nothing moves, and the comparison states the denominators'
-    difference as the user's request."""
+    bilateral. Only the health share's inputs declaring their options: the
+    comparison reads inputs that declare and inputs that do not, and is refused."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
-    blocks = {name: _us_block(name) for name in {*wholes, *pinned} - {None}}
+    blocks = {name: _us_block(name) for name in {*wholes, "whole"} - {None}}
     _show_blocks(
         ctx,
         us_2023_block("health"),
@@ -21164,20 +21157,24 @@ async def test_comparing_two_shares_keeps_each_shares_own_provider_contract(
         *blocks.values(),
     )
 
-    def total(requirement_id: str, whole: str | None) -> DatasetRequirement:
+    def dataset(requirement_id: str, measure: str, block: Mapping[str, Any], keep: bool):
+        return _us_dataset(requirement_id, measure, block["spec_id"]).model_copy(
+            update={"scope_options": _keeping_its_own(block) if keep else ()}
+        )
+
+    def total(requirement_id: str, whole: str | None, keep: bool) -> DatasetRequirement:
         if whole is None:
             return _us_dataset(
                 requirement_id, "US total ODA", None, WholeOf(part=_PART, axis="sector")
             )
-        return _us_dataset(requirement_id, "US total ODA", blocks[whole]["spec_id"])
+        return dataset(requirement_id, "US total ODA", blocks[whole], keep)
 
-    def share(requirement_id: str, part: str, whole: str, accept: bool) -> ShareOfRequirement:
+    def share(requirement_id: str, part: str, whole: str) -> ShareOfRequirement:
         return ShareOfRequirement(
             id=requirement_id,
             decision_ids=["measure"],
             numerator=RequirementSide(input_id=part),
             denominator=RequirementSide(input_id=whole),
-            accept_provider_difference=accept,
         )
 
     result = await call_planner_tool(
@@ -21186,12 +21183,17 @@ async def test_comparing_two_shares_keeps_each_shares_own_provider_contract(
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
         evidence_requirements=[
-            _us_dataset(_PART, "US aid to health", us_2023_block("health")["spec_id"]),
-            _us_dataset("education_crs", "US aid to education", _EDUCATION),
-            total(_WHOLE, wholes[0]),
-            total("total_education", wholes[1]),
-            share(_SHARE, _PART, _WHOLE, accepts[0]),
-            share("share_education", "education_crs", "total_education", accepts[1]),
+            dataset(_PART, "US aid to health", us_2023_block("health"), declares[0]),
+            dataset(
+                "education_crs",
+                "US aid to education",
+                _education_block("health", spec_id=_EDUCATION),
+                declares[1],
+            ),
+            total(_WHOLE, wholes[0], declares[0]),
+            total("total_education", wholes[1], declares[1]),
+            share(_SHARE, _PART, _WHOLE),
+            share("share_education", "education_crs", "total_education"),
             ComparisonRequirement(
                 id=_COMPARE,
                 decision_ids=["measure"],
@@ -21202,6 +21204,10 @@ async def test_comparing_two_shares_keeps_each_shares_own_provider_contract(
         tool_context=ctx,
     )
 
+    if pinned is None:
+        assert result["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, result
+        assert result["detail"]["requirement_id"] == _COMPARE
+        return
     assert result["outcome"] == Outcome.OK.value, result
     assert bool(surface.calls) is compiled
     assert _pins(ctx) == [
@@ -21212,14 +21218,11 @@ async def test_comparing_two_shares_keeps_each_shares_own_provider_contract(
     ]
     plan = load_plan(ctx.state)
     assert plan is not None
-    stated = [
+    assert not [
         d
         for d in plan.decisions
         if d.caveat == "providers_differ" and d.slot in plan.requirement(_COMPARE).decision_ids
     ]
-    assert [d.rationale.startswith(compare_lead) for d in stated] == (
-        [] if compare_lead is None else [True]
-    )
 
 
 def test_comparing_two_quotients_counts_their_numerators_on_one_basis(
@@ -21350,8 +21353,8 @@ def test_a_sum_accepting_a_provider_difference_counts_flows_twice_only_where_the
     inclusive: Callable[[], dict[str, Any]],
     code: str,
 ) -> None:
-    """US bilateral health aid plus US aid with imputed multilateral flows, the sum
-    accepting the provider difference. The inclusive figure holds the bilateral
+    """US bilateral health aid plus US aid with imputed multilateral flows, each
+    declaring its own provider option. The inclusive figure holds the bilateral
     flows only where the two meet on every axis: one donor, a sector, a recipient
     and a year in common. US bilateral health aid plus US inclusive education aid
     counts no flow twice and is served; so is a sum over years or recipient
@@ -21368,14 +21371,17 @@ def test_a_sum_accepting_a_provider_difference_counts_flows_twice_only_where_the
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
         evidence_requirements=[
-            _us_dataset(_PART, "US bilateral aid to health", left["spec_id"]),
-            _us_dataset("other_aid", "US aid with imputed multilateral", right["spec_id"]),
+            _us_dataset(_PART, "US bilateral aid to health", left["spec_id"]).model_copy(
+                update={"scope_options": _keeping_its_own(left)}
+            ),
+            _us_dataset(
+                "other_aid", "US aid with imputed multilateral", right["spec_id"]
+            ).model_copy(update={"scope_options": _keeping_its_own(right)}),
             SumOfRequirement(
                 id=_SUM,
                 decision_ids=["measure"],
                 left=RequirementSide(input_id=_PART),
                 right=RequirementSide(input_id="other_aid"),
-                accept_provider_difference=True,
             ),
         ],
         tool_context=ctx,
