@@ -114,8 +114,8 @@ ALLOW_SPARSE_BREAKDOWNS_DESCRIPTION = (
     "stat_var_crsPurpose) from failing the coverage check. Set it for a flow that adds up, "
     "such as aid by purpose, or when a coverage_insufficient refusal's fix names it. "
     "Empty cells are not read as 0: each aggregation reads only the rows present, so 100 "
-    "in one year and no row the next averages 100, not 50. Recipients, donors, years and "
-    "stat_var still count every missing cell."
+    "for one purpose in a year and no row for it the next averages 100, not 50. "
+    "Recipients, donors, years and stat_var still count every missing cell."
 )
 # The furthest a rolling period can sit behind the latest one, since the frame
 # grammar's years run from 0000 to 9999.

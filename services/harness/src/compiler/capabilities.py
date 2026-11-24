@@ -198,7 +198,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         inputs=(_FRAME_IN,),
         outputs=(_FRAME_OUT,),
         implementation_version="1",
-        input_schema_hash="6a3318c0554e03d23047dc13c24d5a38215f3c07092eb10b9667b09a40e60354",
+        input_schema_hash="c3c4d5ff6a08e274138a0264a5a5a9b2cd9c6878ca6eb15d97e3259b444a4e62",
         output_schema_hash="44b06d89c36976895baaaa443635e7b4e127df60d32de5d821b87e910845b799",
     ),
     ToolCapability(
@@ -230,7 +230,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `per_period`, `limit`, `rolling` and `anchor_key` parameters.
-        input_schema_hash="ba6402ef17cab0180e7abe7c30b9a396a8af6de901ba291297341eeccad0a35e",
+        input_schema_hash="963341da91d717af764a03078961c6055acf1a5990b9e5e2024d304e247846a0",
         output_schema_hash="44b06d89c36976895baaaa443635e7b4e127df60d32de5d821b87e910845b799",
     ),
     ToolCapability(

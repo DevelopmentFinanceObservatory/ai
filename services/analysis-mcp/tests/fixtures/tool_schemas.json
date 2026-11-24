@@ -27,7 +27,7 @@
         },
         "allow_sparse_breakdowns": {
           "default": false,
-          "description": "True stops empty cells of a breakdown column (stat_var_<axis>, such as stat_var_crsPurpose) from failing the coverage check. Set it for a flow that adds up, such as aid by purpose, or when a coverage_insufficient refusal's fix names it. Empty cells are not read as 0: each aggregation reads only the rows present, so 100 in one year and no row the next averages 100, not 50. Recipients, donors, years and stat_var still count every missing cell.",
+          "description": "True stops empty cells of a breakdown column (stat_var_<axis>, such as stat_var_crsPurpose) from failing the coverage check. Set it for a flow that adds up, such as aid by purpose, or when a coverage_insufficient refusal's fix names it. Empty cells are not read as 0: each aggregation reads only the rows present, so 100 for one purpose in a year and no row for it the next averages 100, not 50. Recipients, donors, years and stat_var still count every missing cell.",
           "type": "boolean"
         },
         "frame_ref": {
@@ -2989,7 +2989,7 @@
         },
         "allow_sparse_breakdowns": {
           "default": false,
-          "description": "True stops empty cells of a breakdown column (stat_var_<axis>, such as stat_var_crsPurpose) from failing the coverage check. Set it for a flow that adds up, such as aid by purpose, or when a coverage_insufficient refusal's fix names it. Empty cells are not read as 0: each aggregation reads only the rows present, so 100 in one year and no row the next averages 100, not 50. Recipients, donors, years and stat_var still count every missing cell.",
+          "description": "True stops empty cells of a breakdown column (stat_var_<axis>, such as stat_var_crsPurpose) from failing the coverage check. Set it for a flow that adds up, such as aid by purpose, or when a coverage_insufficient refusal's fix names it. Empty cells are not read as 0: each aggregation reads only the rows present, so 100 for one purpose in a year and no row for it the next averages 100, not 50. Recipients, donors, years and stat_var still count every missing cell.",
           "type": "boolean"
         },
         "anchor_key": {
