@@ -744,11 +744,13 @@ def test_a_partitioned_rank_digest_names_the_partitions_past_the_cap() -> None:
     assert f"2 partitions not shown: destination=country/R{LIST_CAP} (3 ranked)" in digest
 
 
-_TAG = re.compile(r"(\w+)=([^,()=\n]+?) \(private (donor|party) class\)")
+# A pair `column=value` whose value runs to the tag, a label's parentheses included but
+# not the next pair of the key.
+_TAG = re.compile(r"\b(\w+)=((?:(?!, \w+=).)+?) \(party_class=private\)")
 
 
-def _private_tags(digest: str) -> list[tuple[str, str, str]]:
-    """The (column, value, noun) of every private tag in `digest`, in reading order."""
+def _private_tags(digest: str) -> list[tuple[str, str]]:
+    """The (column, shown value) of every private tag in `digest`, in reading order."""
     return _TAG.findall(digest)
 
 
@@ -806,10 +808,10 @@ RECIPIENT = "financingRecipient"
 _PROVIDER_KEYS: list[KeyPairs] = [
     ((PROVIDER, f"donor/P {p}"), (RECIPIENT, f"country/R {r}")) for p in range(2) for r in range(2)
 ]
-_R0 = ("destination", "country/R 0", "party")
-_SECTOR = ("sector", "sector 1", "party")
-_D1 = (PROVIDER, "donor/D 1", "donor")
-_P0 = (PROVIDER, "donor/P 0", "donor")
+_R0 = ("destination", "country/R 0")
+_SECTOR = ("sector", "sector 1")
+_D1 = (PROVIDER, "donor/D 1")
+_P0 = (PROVIDER, "donor/P 0")
 
 
 @pytest.mark.parametrize(
@@ -862,7 +864,7 @@ _P0 = (PROVIDER, "donor/P 0", "donor")
             (),
             ((PROVIDER, "DACPrivateDonors"),),
             False,
-            [(PROVIDER, "DACPrivateDonors", "donor")],
+            [(PROVIDER, "DACPrivateDonors")],
         ),
     ],
     ids=[
@@ -881,17 +883,34 @@ def test_a_rank_digest_tags_each_private_pair_beside_itself(
     partition_by: tuple[str, ...],
     private: tuple[tuple[str, str], ...],
     per_period: bool,
-    tagged: list[tuple[str, str, str]],
+    tagged: list[tuple[str, str]],
 ) -> None:
-    """The tag names the party class, not a donor count, and follows the pair it
-    describes: a private partition column is tagged on its heading, a private entity on
-    its own line, a pair beside a private one carries no tag, and a private whole
-    total reads as the class, not as one donor."""
+    """The tag follows the pair it describes and names its party class: a private
+    partition column is tagged on its heading, a private entity on its own line, and a
+    pair beside a private one carries no tag."""
     digest = _tagged_rank_digest(
         keys, rank_by=rank_by, partition_by=partition_by, private=private, per_period=per_period
     )
 
     assert _private_tags(digest) == tagged
+
+
+def test_a_rank_digest_tags_a_labelled_private_pair_after_its_dcid() -> None:
+    """A labelled cell reads `label (value)`, and the tag follows the whole cell."""
+    token = digest_module._cell_label.set(
+        lambda column, value: "Gates Foundation" if value == "GatesFoundation" else None
+    )
+    try:
+        digest = _tagged_rank_digest(
+            [((PROVIDER, "GatesFoundation"),), ((PROVIDER, "donor/D 0"),)],
+            rank_by=(PROVIDER,),
+            partition_by=(),
+            private=((PROVIDER, "GatesFoundation"),),
+        )
+    finally:
+        digest_module._cell_label.reset(token)
+
+    assert _private_tags(digest) == [(PROVIDER, "Gates Foundation (GatesFoundation)")]
 
 
 def test_a_partitioned_rank_digest_tags_a_private_partition_it_leaves_out() -> None:
@@ -910,7 +929,7 @@ def test_a_partitioned_rank_digest_tags_a_private_partition_it_leaves_out() -> N
         execution_identity=_EI,
     )
 
-    assert _private_tags(digest) == [("destination", f"country/R{LIST_CAP}", "party")]
+    assert _private_tags(digest) == [("destination", f"country/R{LIST_CAP}")]
     assert f"country/R{LIST_CAP + 1} (3 ranked)" in digest
 
 
@@ -1729,9 +1748,9 @@ def test_a_rank_of_donors_tags_each_private_donor() -> None:
 
     lines = render_rank_digest(rank_by=(PROVIDER,), result=result, **_identity()).splitlines()
 
-    tagged = [line for line in lines if "(private donor class)" in line]
+    tagged = [line for line in lines if "(party_class=private)" in line]
     assert [line.split(":")[0] for line in tagged] == [
-        f"  #3 {PROVIDER}=GatesFoundation (private donor class)"
+        f"  #3 {PROVIDER}=GatesFoundation (party_class=private)"
     ]
 
 

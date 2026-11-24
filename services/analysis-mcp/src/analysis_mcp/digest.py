@@ -136,17 +136,22 @@ def _cell(column: str, value: str) -> str:
     return text + suffix
 
 
+# Follows a rank key pair whose party the frame's `{role}_party_class` column marks
+# `private`, a member or a whole total alike (`dfo_analysis_engine.engine.common.private_parties`).
+PRIVATE_TAG = " (party_class=private)"
+
+
 def _key_text(
     key: Sequence[tuple[str, str]], *, private: frozenset[tuple[str, str]] = frozenset()
 ) -> str:
     """The `column=value, ...` text for an entity/group key tuple, each cell
     named by `_cell`. Each column name is left uncapped, since a column name
-    is schema, not a per-row data value. A pair in `private` is followed by the
-    noun for its private party (`_private_tag`)."""
+    is schema, not a per-row data value. A pair in `private` is followed by
+    `PRIVATE_TAG`."""
     if not key:
         return "(all rows)"
     return ", ".join(
-        f"{column}={_cell(column, value)}{_private_tag(column) if (column, value) in private else ''}"
+        f"{column}={_cell(column, value)}{PRIVATE_TAG if (column, value) in private else ''}"
         for column, value in key
     )
 
@@ -154,15 +159,12 @@ def _key_text(
 # How a flow party role's pooled parties are named in a sum's private-party line, one and
 # several: its members, its private members, its whole totals and its private whole totals.
 # A pool of members beside whole totals names the totals `whole total` on every role.
-# A rank tags a private key pair by `_PRIVATE_PAIR_NOUNS`, since a rank's private pairs
-# hold private members and private whole totals alike.
 _MEMBER_NOUNS: dict[str, tuple[str, str]] = {"financingProvider": ("provider", "providers")}
 _OTHER_MEMBER_NOUNS = ("party", "parties")
 _PRIVATE_MEMBER_NOUNS: dict[str, tuple[str, str]] = {
     "financingProvider": ("private donor", "private donors")
 }
 _OTHER_PRIVATE_MEMBER_NOUNS = ("private party", "private parties")
-
 _WHOLE_TOTAL_NOUNS: dict[str, tuple[str, str]] = {
     "financingProvider": ("whole total of providers", "whole totals of providers")
 }
@@ -171,16 +173,6 @@ _PRIVATE_TOTAL_NOUNS: dict[str, tuple[str, str]] = {
     "financingProvider": ("total of private donors", "totals of private donors")
 }
 _OTHER_PRIVATE_TOTAL_NOUNS = ("private total", "private totals")
-# What a rank's tag calls a private key pair of a role: its party class, which a member
-# and a whole total of the private class share.
-_PRIVATE_PAIR_NOUNS: dict[str, str] = {"financingProvider": "private donor class"}
-_OTHER_PRIVATE_PAIR_NOUN = "private party class"
-
-
-def _private_tag(column: str) -> str:
-    """` (private donor class)` or ` (private party class)`: what the private value of
-    the party role `column` is, so a tag beside a key pair names the party it describes."""
-    return f" ({_PRIVATE_PAIR_NOUNS.get(column, _OTHER_PRIVATE_PAIR_NOUN)})"
 
 
 def _counted(count: int, nouns: tuple[str, str], *, qualifier: str = "") -> str:
