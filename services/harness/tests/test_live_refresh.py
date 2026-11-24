@@ -1202,6 +1202,9 @@ async def test_on_cloud_run_both_dfo_apis_clients_share_one_id_token_provider(
         assert auth.audience == "https://dfo-dev-apis-abc123.a.run.app"
         assembler = getattr(service.publish, "__self__", None)
         assert isinstance(assembler, PlatformAssembler)
+        assert str(assembler._client.base_url).rstrip("/") == (
+            "https://dfo-dev-apis-abc123.a.run.app"
+        )
         assert assembler._auth is auth
     finally:
         await service.aclose()
