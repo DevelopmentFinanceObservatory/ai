@@ -136,7 +136,7 @@ class Settings(BaseServiceSettings):
     `combined_mcp_max_in_flight` caps the tool calls and resource reads the
     combined server runs at once, per instance. The token bucket limits how
     often calls start, and each call can run for up to 45 s
-    (`data_mcp.deadline.EXTERNAL_CALL_LIMIT_S`), so without this cap a burst
+    (`common.call_limit.EXTERNAL_CALL_LIMIT_S`), so without this cap a burst
     of slow calls piles up on one instance, each holding an upstream
     connection and memory. A call over the cap refuses `rate_limited` at
     once rather than queueing, since a queued call would spend its own 45 s

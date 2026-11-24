@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, cast, override
 
 import pytest
+from compiler.compile import CompileIssueCode
 from compiler.evidence import check_evidence, errors, evidence_from_manifest, resolve_name
 from compiler.sources import bound_refs
 from compiler.surface import FixtureSurface, ToolCallResult, ToolSurfaceUnavailableError
@@ -83,7 +84,7 @@ from harness.turn.node import NodeCtx
 from harness.turn.store import AgentRecord
 from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.turn_events import PLANNER_ASK
-from harness.turn_records import SearchReading
+from harness.turn_records import RecordedIdentity, SearchReading
 from harness.wiring import handing_back_planner_failures
 from planner.call import elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
@@ -128,6 +129,7 @@ from planner.plan import (
     amendment_entry,
     current_discovery_time_left,
     current_earlier_block,
+    current_recorded_identity,
     decision_pick,
     discovery_time_left,
     full_histories,
@@ -142,7 +144,7 @@ from planner.plan import (
     save_refused_specs,
 )
 from planner.pydantic_agent import PlannerAnswers
-from planner.records import GroupBy, Reduction, RelativePeriod
+from planner.records import GroupBy, Reduction, RelativePeriod, RollingWindow, StatVarReading
 from planner.session import SessionCall
 from planner.settings import (
     AGENT_THINKING_CONFIG,
@@ -167,6 +169,7 @@ from submission.service import (
 from translator.discovery import current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY
 from translator.referral import ReferralKind
+from translator.tool import permitted_repair
 
 from .basis_alignment import (
     HEALTH,
@@ -6645,3 +6648,114 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
     ][-1]
     (provider,) = [e for e in whole["scope_entries"] if e["axis"] == "provider"]
     assert provider.get("concept") == concept
+
+
+# A flow family on record over every year, which a rolling step may pin.
+_DEBT_EVERY_YEAR = {
+    "identity_version": "spec1",
+    "measure": "external debt service",
+    "requested_window": {"kind": "all"},
+}
+_DEBT_EVERY_YEAR_SPEC = spec_id_for(canonicalize(_DEBT_EVERY_YEAR))
+
+
+@pytest.mark.parametrize("decided", [False, True], ids=["undecided", "planners-own-decision"])
+async def test_a_rolling_growth_referred_for_a_sum_on_read_lands_read_summed_on_the_next_proposal(
+    decision: Any, requirement: Any, decided: bool
+) -> None:
+    """A rolling growth over a flow family read separately sums it on read, which the
+    compiler refers back (`compiler.shapes._rolls_over_a_cut_sum`); `translate` stands
+    in for it. The planner restates the family read summed, its own decision on the
+    card included, and the amended proposal is admitted and translated without the
+    referral repeating. A user's pick of 'separate' cannot be restated, since a replan
+    for a pick states the picked option (`submission.service._picked_decision`)."""
+    translated: list[Plan] = []
+    referral = {
+        "outcome": "invalid_input",
+        "kind": "requirement_needs_repair",
+        "requirement_id": "growth_of_debt",
+        "constraint": "input_shape_unsupported",
+        "reason": "operation 'change' (growth) refused: this step follows the newest year",
+        "repair": permitted_repair(CompileIssueCode.INPUT_SHAPE_UNSUPPORTED),
+    }
+
+    async def translate(call: Any) -> dict[str, object]:
+        plan = load_plan(call.state)
+        assert plan is not None
+        translated.append(plan)
+        dataset = plan.evidence_requirements[0]
+        assert isinstance(dataset, DatasetRequirement)
+        if dataset.stat_vars is StatVarReading.SEPARATE:
+            return dict(referral)
+        return {"translated_by": "the caller"}
+
+    def proposal(reading: StatVarReading) -> dict[str, Any]:
+        reading_slot = ["reading"] if decided else []
+        decisions = [decision().model_dump(mode="json")]
+        if decided:
+            decisions.append(
+                {
+                    "slot": "reading",
+                    "description": "Whether to total the family or keep each StatVar.",
+                    "options": [StatVarReading.SUM.value, StatVarReading.SEPARATE.value],
+                    "chosen": reading.value,
+                    "resolved_by": ResolvedBy.PLANNER_DEFAULT.value,
+                    "rationale": "The question asks how the total has grown.",
+                    "fixes": ["stat_vars"],
+                }
+            )
+        growth = GrowthRequirement(
+            id="growth_of_debt",
+            decision_ids=["measure"],
+            input_id="annual_debt_service",
+            window_start=2019,
+            window_end=2024,
+            rolling=RollingWindow(window_end=RelativePeriod(offset=0)),
+        )
+        return {
+            "question": "kenya debt",
+            "answer_mode": "computed",
+            "decisions": decisions,
+            "evidence_requirements": [
+                requirement(
+                    decision_ids=["measure", *reading_slot],
+                    period=Period(start=2015, end=2024),
+                    period_end_open=True,
+                    source_spec_id=_DEBT_EVERY_YEAR_SPEC,
+                    stat_vars=reading,
+                ).model_dump(mode="json"),
+                growth.model_dump(mode="json"),
+            ],
+        }
+
+    scripted = ScriptedGenai(
+        [
+            _calls(("propose_plan", proposal(StatVarReading.SEPARATE))),
+            _calls(("propose_plan", proposal(StatVarReading.SUM) | {"amends_version": 1})),
+            _says("done"),
+        ]
+    )
+    adapter = scripted_planner(scripted, translate=translate)
+
+    recorded = {_DEBT_EVERY_YEAR_SPEC: RecordedIdentity(identity=_DEBT_EVERY_YEAR)}
+    token = current_recorded_identity.set(recorded.get)
+    try:
+        await _run_adapter(adapter, question="kenya debt", readings=[])
+    finally:
+        current_recorded_identity.reset(token)
+
+    first, second = _answers(scripted.requests[2], "propose_plan")
+    assert first["translation"] == referral
+    assert second["outcome"] == "ok"
+    assert second["translation"] == {"translated_by": "the caller"}
+    readings = [plan.evidence_requirements[0] for plan in translated]
+    assert [getattr(read, "stat_vars", None) for read in readings] == [
+        StatVarReading.SEPARATE,
+        StatVarReading.SUM,
+    ]
+    if decided:
+        (landed,) = (d for d in translated[-1].decisions if d.slot == "reading")
+        assert (landed.chosen, landed.fixes and landed.fixes.stat_vars) == (
+            StatVarReading.SUM.value,
+            StatVarReading.SUM,
+        )

@@ -87,6 +87,7 @@ from analysis_mcp.identity import (
     op_spec_hash_for,
 )
 from analysis_mcp.op_spec import OpSpecAdapter
+from common.call_limit import CallDeadline
 from common.caller import shared_work_context
 from common.live_apis import FramePair, LiveApisClient, LiveApisError
 from common.materialisation import (
@@ -106,7 +107,7 @@ from common.recipe import (
 )
 from common.rolling import canonical_populations, rolling_roots
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, RowBudgetExhausted
-from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallBudget, CallDeadline, use_call_budget
+from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallBudget, use_call_budget
 from data_mcp.frame_materialisation import WITHOUT_PARTY_TOTALS, frame_ref_for, named_groupbys
 from data_mcp.get_data_tool import RootMint, mint_recorded_root
 from data_mcp.operations import QueuedOperation
