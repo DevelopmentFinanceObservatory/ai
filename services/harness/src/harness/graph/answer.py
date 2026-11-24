@@ -147,7 +147,9 @@ def _carried_parts(
     *,
     steps_by_id: dict[str, WorkflowStep],
     retrieval_step_ids: frozenset[str],
-) -> tuple[frozenset[str], frozenset[str]]:
+    records: Mapping[str, StepRecord],
+    memo: dict[str, frozenset[str]],
+) -> tuple[dict[str, int | None], frozenset[str]]:
     """The retrieval steps, and the steps writing a StatVar of their own,
     whose StatVars `step_id`'s frame carries.
 
@@ -155,24 +157,101 @@ def _carried_parts(
     `sum_of`, `quotient_of` or `share_of` (`_writes_own_stat_var`). The frame
     carries that step's one StatVar, which stands for every StatVar under its
     sides, in place of the retrievals beneath it.
+
+    Each retrieval comes with how many StatVars an analysis call on the way
+    to it added up into one (`_summed_input`), or `None` where some path
+    reaches it with no such call, since the frame then carries its StatVars
+    as retrieved.
     """
     if step_id in retrieval_step_ids:
-        return frozenset({step_id}), frozenset()
+        return {step_id: None}, frozenset()
     step = steps_by_id.get(step_id)
     if step is None:
-        return frozenset(), frozenset()
+        return {}, frozenset()
     if _writes_own_stat_var(step):
-        return frozenset(), frozenset({step_id})
-    retrievals: set[str] = set()
+        return {}, frozenset({step_id})
+    retrievals: dict[str, int | None] = {}
     writers: set[str] = set()
     for name in _carried_frame_parameters(step):
-        if (binding := step.bindings.get(name)) is not None:
+        if (binding := step.bindings.get(name)) is None:
+            continue
+        if binding.from_step in retrieval_step_ids:
+            found: dict[str, int | None] = {
+                binding.from_step: _summed_input(
+                    step,
+                    binding.from_step,
+                    steps_by_id=steps_by_id,
+                    retrieval_step_ids=retrieval_step_ids,
+                    records=records,
+                    memo=memo,
+                )
+            }
+        else:
             found, written = _carried_parts(
-                binding.from_step, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
+                binding.from_step,
+                steps_by_id=steps_by_id,
+                retrieval_step_ids=retrieval_step_ids,
+                records=records,
+                memo=memo,
             )
-            retrievals |= found
             writers |= written
-    return frozenset(retrievals), frozenset(writers)
+        for retrieval, count in found.items():
+            held = retrievals.get(retrieval, count)
+            retrievals[retrieval] = None if held is None or count is None else max(held, count)
+    return retrievals, frozenset(writers)
+
+
+def _summed_input(
+    step: WorkflowStep,
+    retrieval: str,
+    *,
+    steps_by_id: dict[str, WorkflowStep],
+    retrieval_step_ids: frozenset[str],
+    records: Mapping[str, StepRecord],
+    memo: dict[str, frozenset[str]],
+) -> int | None:
+    """How many StatVars `step`'s call added up into one where it read the
+    retrieval `retrieval` bound to it, or `None` where it added up none.
+
+    dfo-apis states each root it read summed (`StepRecord.stat_vars_summed`)
+    under the pair of the rendering it made for the sum, which no retrieval
+    holds, so a read is matched to the retrieval by its dataset's `spec_id`
+    alone. That match is certain only when `retrieval` is the one input of
+    that dataset the call read: no other retrieval of the dataset is bound
+    to `step`, and none sits under a derived input, which dfo-apis computes
+    again and so reads again. The reads of the dataset must also state one
+    count, since a rolling call's anchor roots are read beside its inputs and
+    may read the dataset under another selection. Where any of this fails, the
+    read is left unmatched.
+    """
+    record = records.get(step.id)
+    retrieved = records.get(retrieval)
+    if record is None or retrieved is None:
+        return None
+    dataset = {retrieved.frame_ref.spec_id, retrieved.presented_ref.spec_id}
+    counts = {read.count for read in record.stat_vars_summed if read.spec_id in dataset}
+    if len(counts) != 1:
+        return None
+    others: set[str] = set()
+    for binding in step.bindings.values():
+        if binding.from_step in retrieval_step_ids:
+            if binding.from_step != retrieval:
+                others.add(binding.from_step)
+        else:
+            others |= _upstream_retrievals(
+                binding.from_step,
+                steps_by_id=steps_by_id,
+                retrieval_step_ids=retrieval_step_ids,
+                memo=memo,
+            )
+    if any(
+        dataset & {held.frame_ref.spec_id, held.presented_ref.spec_id}
+        for other in others
+        if (held := records.get(other)) is not None
+    ):
+        return None
+    (count,) = counts
+    return count
 
 
 def _ran(outcome: RunOutcome) -> tuple[StepRecord, ...]:
@@ -281,7 +360,8 @@ def link_evidence_to_terminal_frames(
     steps_by_id = {step.id: step for step in workflow.steps}
     step_order = {step.id: index for index, step in enumerate(workflow.steps)}
     evidence_by_step = {record.step_id: record for record in outcome.evidence}
-    stat_var_counts = {record.step_id: record.stat_var_count for record in _ran(outcome)}
+    records = {record.step_id: record for record in _ran(outcome)}
+    stat_var_counts = {step_id: record.stat_var_count for step_id, record in records.items()}
     memo: dict[str, frozenset[str]] = {}
     for step_id, frame in answer_frames(outcome, published=published).items():
         frame_ref = frame.presented
@@ -304,7 +384,11 @@ def link_evidence_to_terminal_frames(
             )
             continue
         carried, writers = _carried_parts(
-            step_id, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
+            step_id,
+            steps_by_id=steps_by_id,
+            retrieval_step_ids=retrieval_step_ids,
+            records=records,
+            memo=memo,
         )
         link(
             frame_ref=frame_ref.model_dump(),
@@ -329,6 +413,11 @@ def link_evidence_to_terminal_frames(
                     )
                     for writer in sorted(writers, key=step_order.__getitem__)
                 )
+            ],
+            summed_reads=[
+                {**evidence_by_step[source].frame_ref.model_dump(), "count": count}
+                for source in sources
+                if (count := carried.get(source)) is not None
             ],
         )
 

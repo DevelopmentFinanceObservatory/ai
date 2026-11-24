@@ -52,6 +52,7 @@ from executor.ledger import (
     stored_run,
     submission_digest,
 )
+from executor.outcomes import SummedRead
 from planner.records import StrictModel
 
 GDP = "spec_" + "a" * 32
@@ -586,6 +587,32 @@ async def test_a_pending_run_failed_hands_back_no_hold(ledger) -> None:
         "status": "failed",
         "code": "publication_error",
     }
+
+
+_SUMMED = SummedRead(spec_id="spec_" + "1" * 32, content_version="cv_" + "5" * 32, count=2)
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["first-outcome", "outcome-held"])
+async def test_a_failed_run_keeps_the_summed_reads_of_the_outcome_it_keeps(ledger, held) -> None:
+    """A run that comes to no outcome before it fails stores the stopped
+    computation's outcome and summed reads. A run that already holds an outcome
+    keeps that outcome and the reads recorded with it."""
+    run = await _run_to(ledger, RunStatus.RUNNING)
+    first = ({"kind": "accepted"}, {"totals": (_SUMMED,)})
+    if held:
+        await ledger.record(run.run_id, Seal(INPUTS))
+        await ledger.record(
+            run.run_id,
+            Publishing((ROOT, DERIVED), outcome=first[0], stat_vars_summed=first[1]),
+        )
+    stopped = ({"kind": "refused"}, {"growth": (_SUMMED.model_copy(update={"count": 3}),)})
+
+    failed = await ledger.record(
+        run.run_id,
+        Fail("step_refused", "the tool refused", outcome=stopped[0], stat_vars_summed=stopped[1]),
+    )
+
+    assert (failed.outcome, failed.stat_vars_summed) == (first if held else stopped)
 
 
 def test_a_stored_record_from_another_release_loads_with_its_unknown_keys_ignored() -> None:

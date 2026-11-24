@@ -1,0 +1,1327 @@
+{
+ "harness": "d21aa63f",
+ "outcome": {
+  "$defs": {
+   "Accepted": {
+    "additionalProperties": false,
+    "description": "Every step ran and every requirement is met.\n\n`anchors` holds each newest period the run's rolling steps were written\nfrom, in the order resolved, one for each group of rolling steps\n(`compiler.rolling.anchor_groups`), with groups over the same series and\nframes sharing one. Empty when no step rolls.",
+    "properties": {
+     "anchors": {
+      "default": [],
+      "items": {
+       "$ref": "#/$defs/AnchorResult"
+      },
+      "type": "array"
+     },
+     "evidence": {
+      "items": {
+       "$ref": "#/$defs/EvidenceRecord"
+      },
+      "type": "array"
+     },
+     "kind": {
+      "const": "accepted",
+      "default": "accepted",
+      "type": "string"
+     },
+     "results": {
+      "additionalProperties": {
+       "$ref": "#/$defs/FrameRef"
+      },
+      "type": "object"
+     },
+     "revision": {
+      "type": "string"
+     },
+     "run_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "steps": {
+      "items": {
+       "$ref": "#/$defs/StepRecord"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "revision",
+     "evidence",
+     "steps",
+     "results"
+    ],
+    "type": "object"
+   },
+   "AnchorResult": {
+    "additionalProperties": false,
+    "description": "The newest period one group of a run's rolling steps stands on, as\n`resolve_anchor` answered it (`compiler.rolling.anchor_groups`).\n\n`anchor_key` names the stored resolution every rolling call of the group\nwas sent, `period` is the newest period held by at least half of the\nseries of each population, and `left_out` the series that hold no value\nat it. `steps` are the rolling steps of every group that stands on it\n(`AnchorGroup.steps`), `roots` the retrieval steps of those groups\n(`AnchorGroup.roots`), and `populations` the populations the period was\ntaken over, spelled the way the retrieved frames spell their columns\n(`compiler.frame_columns.bound_populations`). The run writes all three;\n`resolve_anchor` does not send them.",
+    "properties": {
+     "anchor_key": {
+      "type": "string"
+     },
+     "left_out": {
+      "default": [],
+      "items": {
+       "$ref": "#/$defs/LeftOutSeries"
+      },
+      "type": "array"
+     },
+     "period": {
+      "type": "string"
+     },
+     "populations": {
+      "default": [],
+      "items": {
+       "$ref": "#/$defs/JsonValue"
+      },
+      "type": "array"
+     },
+     "roots": {
+      "default": [],
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "steps": {
+      "default": [],
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "anchor_key",
+     "period"
+    ],
+    "type": "object"
+   },
+   "EvidenceIssue": {
+    "additionalProperties": false,
+    "description": "One finding about one requirement.",
+    "properties": {
+     "code": {
+      "$ref": "#/$defs/EvidenceIssueCode"
+     },
+     "detail": {
+      "description": "A human-readable explanation of this finding.",
+      "type": "string"
+     },
+     "entities": {
+      "default": [],
+      "description": "The entities of the one retrieved series a `window_short` or `coverage_gaps` finding is about.",
+      "items": {
+       "$ref": "#/$defs/SeriesEntity"
+      },
+      "type": "array"
+     },
+     "found": {
+      "$ref": "#/$defs/JsonValue",
+      "default": null,
+      "description": "What was actually found, when this finding compares an expectation to an observation."
+     },
+     "magnitude": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "The largest absolute value the one retrieved series a `window_short` or `coverage_gaps` finding is about holds in any period, which ranks the series an answer names."
+     },
+     "required": {
+      "$ref": "#/$defs/JsonValue",
+      "default": null,
+      "description": "What was required, when this finding compares an expectation to an observation."
+     },
+     "requirement_id": {
+      "description": "The requirement this finding is about.",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "type": "string"
+     },
+     "severity": {
+      "$ref": "#/$defs/Severity",
+      "description": "How this finding bears on the requirement: error, warning or info."
+     },
+     "stat_var": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "The StatVar of the one retrieved series a `window_short` or `coverage_gaps` finding is about."
+     }
+    },
+    "required": [
+     "code",
+     "severity",
+     "requirement_id",
+     "detail"
+    ],
+    "type": "object"
+   },
+   "EvidenceIssueCode": {
+    "description": "What `check_evidence` found.",
+    "enum": [
+     "no_data_at_source",
+     "data_unverified",
+     "identity_unverified",
+     "entity_missing",
+     "entity_no_series",
+     "entity_unverified",
+     "entity_role_ambiguous",
+     "entity_role_mismatch",
+     "entity_role_unverified",
+     "group_read_as_total",
+     "open_axis_unresolved",
+     "window_short",
+     "period_unverified",
+     "scope_entities_unbound",
+     "scope_entities_wider",
+     "scope_window_short",
+     "unit_matches",
+     "unit_mismatch",
+     "unit_unverified",
+     "unit_price_basis_mismatch",
+     "unit_price_basis_unverified",
+     "source_pin_mismatch",
+     "source_mismatch",
+     "source_unverified",
+     "source_drift",
+     "stat_var_membership_drift",
+     "stat_var_family_moved",
+     "source_substituted",
+     "rows_empty",
+     "statistics_unavailable",
+     "coverage_gaps",
+     "grain_ambiguous"
+    ],
+    "type": "string"
+   },
+   "EvidenceRecord": {
+    "additionalProperties": false,
+    "description": "One requirement's evidence: the frame that carries it and what the checks found.\n\n`gaps` holds the findings the requirement accepts -- years missing under\n`report_gaps`, a named entity the retrieval left out, a unit the source\ndid not state -- so an answer built on this evidence can say what it\nrests on.",
+    "properties": {
+     "citation": {
+      "type": "string"
+     },
+     "frame_ref": {
+      "$ref": "#/$defs/FrameRef"
+     },
+     "gaps": {
+      "items": {
+       "$ref": "#/$defs/EvidenceIssue"
+      },
+      "type": "array"
+     },
+     "requirement_id": {
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "type": "string"
+     },
+     "spec_id": {
+      "pattern": "^spec_[0-9a-f]{32}$",
+      "type": "string"
+     },
+     "stat_vars": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "step_id": {
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "type": "string"
+     },
+     "window": {
+      "anyOf": [
+       {
+        "$ref": "#/$defs/Period"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     }
+    },
+    "required": [
+     "requirement_id",
+     "step_id",
+     "frame_ref",
+     "spec_id",
+     "stat_vars",
+     "window",
+     "gaps",
+     "citation"
+    ],
+    "type": "object"
+   },
+   "FrameRef": {
+    "additionalProperties": false,
+    "description": "Names one frame by the `{spec_id, content_version}` pair a tool reply gives.\n\nA data or analysis tool's reply gives both values. `spec_id` is a dataset's\n`spec_` id or an analysis result's `ops_` id, and `content_version` is the\nmatching `cv_` or `ocv_` value.",
+    "properties": {
+     "content_version": {
+      "pattern": "^(?:cv|ocv)_[0-9a-f]{32}$",
+      "title": "Content Version",
+      "type": "string"
+     },
+     "spec_id": {
+      "pattern": "^(?:spec|ops)_[0-9a-f]{32}$",
+      "title": "Spec Id",
+      "type": "string"
+     }
+    },
+    "required": [
+     "spec_id",
+     "content_version"
+    ],
+    "title": "FrameRef",
+    "type": "object"
+   },
+   "JsonValue": {},
+   "LeftOutSeries": {
+    "additionalProperties": false,
+    "description": "One series counted for the newest period that holds no value at it.\n\n`root` indexes the populations `resolve_anchor` was sent, in their\ncanonical order, and `coordinates` is the series' value in each of its\ncolumns.",
+    "properties": {
+     "coordinates": {
+      "additionalProperties": {
+       "type": "string"
+      },
+      "type": "object"
+     },
+     "root": {
+      "type": "integer"
+     }
+    },
+    "required": [
+     "root",
+     "coordinates"
+    ],
+    "type": "object"
+   },
+   "MethodChoiceNeeded": {
+    "additionalProperties": false,
+    "description": "A tool refused with a choice only the planner can make with the user.\n\n`candidates` is whatever the refusal offered to choose from, verbatim.\n`also_stopped` names the wave's other stops, wave order, when this one\nis the wave's first and so the one a run raises (`executor.run._Run.execute`).\n`completed` and `evidence` hold the steps that finished before the stop\nand the evidence their retrievals recorded, in the plan's own step order.\n`answers` holds, by step id, each finished terminal step's frame that\npassed the answer check an accepted run applies (`executor.run._Run.\n_answer_refusal`). `anchors` holds the newest period of each group of\nrolling steps the run resolved before it stopped.",
+    "properties": {
+     "also_stopped": {
+      "default": [],
+      "items": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/MethodChoiceNeeded"
+        },
+        {
+         "$ref": "#/$defs/Refused"
+        },
+        {
+         "$ref": "#/$defs/RediscoveryNeeded"
+        }
+       ]
+      },
+      "type": "array"
+     },
+     "anchors": {
+      "default": [],
+      "items": {
+       "$ref": "#/$defs/AnchorResult"
+      },
+      "type": "array"
+     },
+     "answers": {
+      "additionalProperties": {
+       "$ref": "#/$defs/FrameRef"
+      },
+      "type": "object"
+     },
+     "candidates": {
+      "$ref": "#/$defs/JsonValue"
+     },
+     "code": {
+      "type": "string"
+     },
+     "completed": {
+      "items": {
+       "$ref": "#/$defs/StepRecord"
+      },
+      "type": "array"
+     },
+     "evidence": {
+      "default": [],
+      "items": {
+       "$ref": "#/$defs/EvidenceRecord"
+      },
+      "type": "array"
+     },
+     "kind": {
+      "const": "method_choice_needed",
+      "default": "method_choice_needed",
+      "type": "string"
+     },
+     "refusal": {
+      "$ref": "#/$defs/ToolFailure"
+     },
+     "revision": {
+      "type": "string"
+     },
+     "run_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "step_id": {
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "type": "string"
+     },
+     "tool": {
+      "$ref": "#/$defs/ToolId"
+     }
+    },
+    "required": [
+     "revision",
+     "step_id",
+     "tool",
+     "code",
+     "candidates",
+     "refusal",
+     "completed"
+    ],
+    "type": "object"
+   },
+   "Period": {
+    "additionalProperties": false,
+    "description": "An inclusive range of calendar years.",
+    "properties": {
+     "end": {
+      "description": "The last year this period covers.",
+      "maximum": 2100,
+      "minimum": 1900,
+      "type": "integer"
+     },
+     "start": {
+      "description": "The first year this period covers.",
+      "maximum": 2100,
+      "minimum": 1900,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "start",
+     "end"
+    ],
+    "type": "object"
+   },
+   "RediscoveryNeeded": {
+    "additionalProperties": false,
+    "description": "A retrieval's source needs discovering again; a bare retry would only repeat the refusal.\n\nDiscovering the source again is the translator's job under a new plan\nrevision, not a retry this loop can make on its own. `requirement_id`\nand `spec_id` name the requirement and the source the step was approved\nto retrieve, read off its `EvidenceBinding`; a step without one has\nnothing to rediscover, so its refusal comes back as `Refused` instead.\n`also_stopped` names the wave's other stops, wave order, when this one\nis the wave's first and so the one a run raises (`executor.run._Run.execute`).\n`completed` and `evidence` hold the steps that finished before the stop\nand the evidence their retrievals recorded, in the plan's own step order.\n`answers` holds, by step id, each finished terminal step's frame that\npassed the answer check an accepted run applies (`executor.run._Run.\n_answer_refusal`). `anchors` holds the newest period of each group of\nrolling steps the run resolved before it stopped.",
+    "properties": {
+     "also_stopped": {
+      "default": [],
+      "items": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/MethodChoiceNeeded"
+        },
+        {
+         "$ref": "#/$defs/Refused"
+        },
+        {
+         "$ref": "#/$defs/RediscoveryNeeded"
+        }
+       ]
+      },
+      "type": "array"
+     },
+     "anchors": {
+      "default": [],
+      "items": {
+       "$ref": "#/$defs/AnchorResult"
+      },
+      "type": "array"
+     },
+     "answers": {
+      "additionalProperties": {
+       "$ref": "#/$defs/FrameRef"
+      },
+      "type": "object"
+     },
+     "completed": {
+      "items": {
+       "$ref": "#/$defs/StepRecord"
+      },
+      "type": "array"
+     },
+     "evidence": {
+      "default": [],
+      "items": {
+       "$ref": "#/$defs/EvidenceRecord"
+      },
+      "type": "array"
+     },
+     "kind": {
+      "const": "rediscovery_needed",
+      "default": "rediscovery_needed",
+      "type": "string"
+     },
+     "refusal": {
+      "$ref": "#/$defs/ToolFailure"
+     },
+     "requirement_id": {
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "type": "string"
+     },
+     "revision": {
+      "type": "string"
+     },
+     "run_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "spec_id": {
+      "pattern": "^spec_[0-9a-f]{32}$",
+      "type": "string"
+     },
+     "step_id": {
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "type": "string"
+     },
+     "tool": {
+      "$ref": "#/$defs/ToolId"
+     }
+    },
+    "required": [
+     "revision",
+     "step_id",
+     "tool",
+     "requirement_id",
+     "spec_id",
+     "refusal",
+     "completed"
+    ],
+    "type": "object"
+   },
+   "RefusalKind": {
+    "description": "Why a run stopped.",
+    "enum": [
+     "not_approved",
+     "stale_revision",
+     "surface_changed",
+     "transport_failed",
+     "binding_invalid",
+     "step_refused",
+     "step_result_unusable",
+     "requirement_unmet",
+     "empty_answer",
+     "shape_mismatch",
+     "column_unbound",
+     "rolling_window_outside_dataset",
+     "rolling_anchor_behind_plan",
+     "authorisation_expired",
+     "manifest_outside_authorisation",
+     "authorisation_mismatch",
+     "run_abandoned"
+    ],
+    "title": "RefusalKind",
+    "type": "string"
+   },
+   "Refused": {
+    "additionalProperties": false,
+    "description": "The run stopped: what stopped it, where, and what was said.\n\n`also_stopped` names the wave's other stops, wave order, when this one\nis the wave's first and so the one a run raises (`executor.run._Run.execute`).\n`completed` and `evidence` hold the steps that finished before the stop\nand the evidence their retrievals recorded, in the plan's own step order.\n`answers` holds, by step id, each finished terminal step's frame that\npassed the answer check an accepted run applies (`executor.run._Run.\n_answer_refusal`). `anchors` holds the newest period of each group of\nrolling steps the run resolved before it stopped.\n\n`spec_id` names the source a `REQUIREMENT_UNMET` stop read, when the\nrequirement has a binding, as a `RediscoveryNeeded` does. Other stops leave\nit unset. A replan avoids the source of a `Refused` stop only when an error\nfinding says its unit is unverified and found no unit text\n(`harness.planner_adapter._SOURCE_FAULT_CODES`).\n\n`retryable` says whether a later attempt can get past a\n`TRANSPORT_FAILED` stop: `False` when the tool surface reported a failure\nno retry changes (`compiler.surface.ToolSurfaceUnavailableError`), such as\na server it does not cover. It is `True` for every other stop.",
+    "properties": {
+     "also_stopped": {
+      "default": [],
+      "items": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/MethodChoiceNeeded"
+        },
+        {
+         "$ref": "#/$defs/Refused"
+        },
+        {
+         "$ref": "#/$defs/RediscoveryNeeded"
+        }
+       ]
+      },
+      "type": "array"
+     },
+     "anchors": {
+      "default": [],
+      "items": {
+       "$ref": "#/$defs/AnchorResult"
+      },
+      "type": "array"
+     },
+     "answers": {
+      "additionalProperties": {
+       "$ref": "#/$defs/FrameRef"
+      },
+      "type": "object"
+     },
+     "completed": {
+      "default": [],
+      "items": {
+       "$ref": "#/$defs/StepRecord"
+      },
+      "type": "array"
+     },
+     "detail": {
+      "type": "string"
+     },
+     "evidence": {
+      "default": [],
+      "items": {
+       "$ref": "#/$defs/EvidenceRecord"
+      },
+      "type": "array"
+     },
+     "issues": {
+      "default": [],
+      "items": {
+       "$ref": "#/$defs/EvidenceIssue"
+      },
+      "type": "array"
+     },
+     "kind": {
+      "const": "refused",
+      "default": "refused",
+      "type": "string"
+     },
+     "payload": {
+      "anyOf": [
+       {
+        "$ref": "#/$defs/ToolFailure"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "refusal": {
+      "$ref": "#/$defs/RefusalKind"
+     },
+     "requirement_id": {
+      "anyOf": [
+       {
+        "pattern": "^[a-z][a-z0-9_]{0,63}$",
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "retryable": {
+      "default": true,
+      "type": "boolean"
+     },
+     "revision": {
+      "type": "string"
+     },
+     "run_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "spec_id": {
+      "anyOf": [
+       {
+        "pattern": "^spec_[0-9a-f]{32}$",
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "step_id": {
+      "anyOf": [
+       {
+        "pattern": "^[a-z][a-z0-9_]{0,63}$",
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     }
+    },
+    "required": [
+     "revision",
+     "refusal",
+     "detail"
+    ],
+    "type": "object"
+   },
+   "SeriesEntity": {
+    "additionalProperties": false,
+    "description": "One entity of a retrieved series, as its statistics name it.\n\n`role` and `ref` are the series' own; `label` is the name the approved\nsource gives `ref`, `None` where it gives none.",
+    "properties": {
+     "label": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "The approved source's name for `ref`, when it names one."
+     },
+     "ref": {
+      "description": "The entity's value in that column.",
+      "type": "string"
+     },
+     "role": {
+      "description": "The series' role column for this entity.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "role",
+     "ref"
+    ],
+    "type": "object"
+   },
+   "Severity": {
+    "description": "How a finding bears on the requirement.",
+    "enum": [
+     "error",
+     "warning",
+     "info"
+    ],
+    "type": "string"
+   },
+   "StepRecord": {
+    "additionalProperties": false,
+    "description": "One step that ran: what it called, how many attempts it took, what it produced.\n\n`row_count`, `role_keys` and `stat_var_count` are the row count, the\nframe's role columns and the distinct StatVars a successful call\ndeclared in its own `structured_content`, or `None` when it declared\nnone. `get_data`, whose structured result is a `Manifest`, declares no\n`rows`, and declares `role_keys` and `stat_var_count` whenever it read\nthe frame. `dropped_key_count` and `right_dropped_key_count` are how many\nkeys of its first and second input the call declared it left out of its\nresult (`executor.artifacts.declared_dropped_key_counts`): the numerator\nkeys a keyed `quotient_of` or `share_of` found nothing to divide by, and\neach side's entities a `join` matched in no period. Both are 0 for every\nother call, and `right_dropped_key_count` for every call but a `join`.\n`ranked_before_limit` is how many entries a `rank` call ranked before its\n`limit` cut them (`executor.artifacts.declared_ranked_before_limit`),\n`None` when the call set no limit.\n\n`frame_ref` is the pair later steps read the frame by. `manifest_ref` is\nthe manifest's own pair for a `get_data` step whose `frame_ref` differs\nfrom it (a frame minted with extra columns,\n`executor.artifacts.manifest_frame_ref`), and `None` otherwise.",
+    "properties": {
+     "attempts": {
+      "type": "integer"
+     },
+     "digest": {
+      "type": "string"
+     },
+     "dropped_key_count": {
+      "default": 0,
+      "minimum": 0,
+      "type": "integer"
+     },
+     "frame_ref": {
+      "$ref": "#/$defs/FrameRef"
+     },
+     "manifest_ref": {
+      "anyOf": [
+       {
+        "$ref": "#/$defs/FrameRef"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "ranked_before_limit": {
+      "anyOf": [
+       {
+        "minimum": 0,
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "right_dropped_key_count": {
+      "default": 0,
+      "minimum": 0,
+      "type": "integer"
+     },
+     "role_keys": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "row_count": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "stat_var_count": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "step_id": {
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "type": "string"
+     },
+     "tool": {
+      "$ref": "#/$defs/ToolId"
+     }
+    },
+    "required": [
+     "step_id",
+     "tool",
+     "attempts",
+     "frame_ref",
+     "digest"
+    ],
+    "type": "object"
+   },
+   "ToolFailure": {
+    "additionalProperties": false,
+    "description": "A tool's refusal, typed off the raw MCP payload.\n\n`code` and `retry_mode` are read against the five sets above, not\nagainst a closed enum here -- the served vocabulary belongs to\n`data_mcp.tool_errors.ToolErrorCode` and `analysis_mcp.tool_errors.ToolErrorCode`,\nand this model exists to stop `classify.py` and its callers from\nindexing an untyped mapping, not to duplicate those enums.",
+    "properties": {
+     "code": {
+      "type": "string"
+     },
+     "fix": {
+      "additionalProperties": {
+       "$ref": "#/$defs/JsonValue"
+      },
+      "type": "object"
+     },
+     "message": {
+      "type": "string"
+     },
+     "retry_mode": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "code",
+     "message",
+     "retry_mode"
+    ],
+    "type": "object"
+   },
+   "ToolId": {
+    "additionalProperties": false,
+    "description": "A tool, by the server that serves it and its name there.",
+    "properties": {
+     "name": {
+      "minLength": 1,
+      "type": "string"
+     },
+     "server": {
+      "enum": [
+       "data-mcp",
+       "analysis-mcp"
+      ],
+      "type": "string"
+     }
+    },
+    "required": [
+     "server",
+     "name"
+    ],
+    "type": "object"
+   }
+  },
+  "discriminator": {
+   "mapping": {
+    "accepted": "#/$defs/Accepted",
+    "method_choice_needed": "#/$defs/MethodChoiceNeeded",
+    "rediscovery_needed": "#/$defs/RediscoveryNeeded",
+    "refused": "#/$defs/Refused"
+   },
+   "propertyName": "kind"
+  },
+  "oneOf": [
+   {
+    "$ref": "#/$defs/Accepted"
+   },
+   {
+    "$ref": "#/$defs/MethodChoiceNeeded"
+   },
+   {
+    "$ref": "#/$defs/Refused"
+   },
+   {
+    "$ref": "#/$defs/RediscoveryNeeded"
+   }
+  ]
+ },
+ "run_record": {
+  "$defs": {
+   "InputManifest": {
+    "additionalProperties": false,
+    "description": "The run's retrieved inputs, sealed before any derived step runs.",
+    "properties": {
+     "entries": {
+      "items": {
+       "$ref": "#/$defs/ManifestEntry"
+      },
+      "type": "array"
+     },
+     "sealed_at": {
+      "format": "date-time",
+      "type": "string"
+     }
+    },
+    "required": [
+     "entries",
+     "sealed_at"
+    ],
+    "type": "object"
+   },
+   "JsonValue": {},
+   "ManifestEntry": {
+    "additionalProperties": false,
+    "description": "One retrieved root input at the exact version the run read. One source\nmay be read at several versions, by retrievals of different arguments.",
+    "properties": {
+     "content_version": {
+      "pattern": "^cv_[0-9a-f]{32}$",
+      "type": "string"
+     },
+     "spec_id": {
+      "pattern": "^spec_[0-9a-f]{32}$",
+      "type": "string"
+     }
+    },
+    "required": [
+     "spec_id",
+     "content_version"
+    ],
+    "type": "object"
+   },
+   "ParameterOrigin": {
+    "description": "Where a `RequestAuthorisation`'s recipe parameter came from: `recorded`\nwhen the harness checked it against what the conversation recorded,\n`model_stated` when it was the model's reading of the user's words.",
+    "enum": [
+     "recorded",
+     "model_stated"
+    ],
+    "title": "ParameterOrigin",
+    "type": "string"
+   },
+   "PendingHold": {
+    "additionalProperties": false,
+    "description": "Why a run's publication is unfinished, and when a retry may succeed.\n`code` is the fault's code; `reason` its text, which stays in the ledger.",
+    "properties": {
+     "code": {
+      "default": "publication_unfinished",
+      "type": "string"
+     },
+     "reason": {
+      "type": "string"
+     },
+     "retry_after_s": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     }
+    },
+    "required": [
+     "reason"
+    ],
+    "type": "object"
+   },
+   "PlanApproval": {
+    "additionalProperties": false,
+    "description": "A user's approval of one Plan revision, the authorisation every new run is\nadmitted under.",
+    "properties": {
+     "approved_revision": {
+      "type": "string"
+     },
+     "approver": {
+      "type": "string"
+     },
+     "at": {
+      "format": "date-time",
+      "type": "string"
+     },
+     "expires_at": {
+      "format": "date-time",
+      "type": "string"
+     },
+     "kind": {
+      "const": "plan_approval",
+      "default": "plan_approval",
+      "type": "string"
+     },
+     "plan_version": {
+      "type": "integer"
+     },
+     "source_policy": {
+      "$ref": "#/$defs/SourcePolicy"
+     }
+    },
+    "required": [
+     "source_policy",
+     "expires_at",
+     "plan_version",
+     "approved_revision",
+     "approver",
+     "at"
+    ],
+    "type": "object"
+   },
+   "Publication": {
+    "description": "Where a terminal result stands on durable publication. A root `spec_`\nframe needs none; a derived `ops_` frame is `required` until published with\nits replay recipe.",
+    "enum": [
+     "not_required",
+     "required",
+     "published"
+    ],
+    "title": "Publication",
+    "type": "string"
+   },
+   "RequestAuthorisation": {
+    "additionalProperties": false,
+    "description": "The harness's authorisation of a request to run one reviewed recipe\nwithout a plan. Stored runs carry it, so `RunRecord` reads it and a run\nadmitted under it is carried on like any other (`executor.run.resume_run`);\n`new_run` takes a `PlanApproval`, so no new run is admitted under it.\n`parameter_origins` names where each recipe parameter came from.",
+    "properties": {
+     "at": {
+      "format": "date-time",
+      "type": "string"
+     },
+     "expires_at": {
+      "format": "date-time",
+      "type": "string"
+     },
+     "graph_digest": {
+      "type": "string"
+     },
+     "kind": {
+      "const": "request",
+      "default": "request",
+      "type": "string"
+     },
+     "limits": {
+      "additionalProperties": {
+       "type": "integer"
+      },
+      "type": "object"
+     },
+     "parameter_origins": {
+      "additionalProperties": {
+       "$ref": "#/$defs/ParameterOrigin"
+      },
+      "type": "object"
+     },
+     "recipe_id": {
+      "type": "string"
+     },
+     "recipe_revision": {
+      "type": "string"
+     },
+     "source_policy": {
+      "$ref": "#/$defs/SourcePolicy"
+     },
+     "task": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "source_policy",
+     "expires_at",
+     "task",
+     "recipe_id",
+     "recipe_revision",
+     "graph_digest",
+     "limits",
+     "parameter_origins",
+     "at"
+    ],
+    "type": "object"
+   },
+   "ResultFrame": {
+    "additionalProperties": false,
+    "description": "One terminal frame a run produced: a root `spec_` frame or a derived `ops_` one.",
+    "properties": {
+     "content_version": {
+      "pattern": "^(?:cv|ocv)_[0-9a-f]{32}$",
+      "type": "string"
+     },
+     "spec_id": {
+      "pattern": "^(?:spec|ops)_[0-9a-f]{32}$",
+      "type": "string"
+     }
+    },
+    "required": [
+     "spec_id",
+     "content_version"
+    ],
+    "type": "object"
+   },
+   "RunFailure": {
+    "additionalProperties": false,
+    "properties": {
+     "code": {
+      "type": "string"
+     },
+     "reason": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "code",
+     "reason"
+    ],
+    "type": "object"
+   },
+   "RunStatus": {
+    "enum": [
+     "admitted",
+     "running",
+     "publishing",
+     "completed",
+     "pending",
+     "failed"
+    ],
+    "title": "RunStatus",
+    "type": "string"
+   },
+   "SourcePolicy": {
+    "additionalProperties": false,
+    "description": "Which source definitions a run may read, and which of their versions.\n\n`sources` are root `spec_` ids, held sorted and unique so two policies\nnaming the same sources digest the same. `latest` lets retrieval resolve\nwhatever version each source holds when it runs; the sealed manifest\nrecords the versions it found.",
+    "properties": {
+     "sources": {
+      "items": {
+       "pattern": "^spec_[0-9a-f]{32}$",
+       "type": "string"
+      },
+      "minLength": 1,
+      "type": "array"
+     },
+     "version_policy": {
+      "const": "latest",
+      "default": "latest",
+      "type": "string"
+     }
+    },
+    "required": [
+     "sources"
+    ],
+    "type": "object"
+   },
+   "StepAttempt": {
+    "additionalProperties": false,
+    "description": "One dispatch of one step's tool, recorded before the call goes out.\n`attempt` counts from 1 per step.",
+    "properties": {
+     "at": {
+      "format": "date-time",
+      "type": "string"
+     },
+     "attempt": {
+      "type": "integer"
+     },
+     "step_id": {
+      "type": "string"
+     },
+     "tool": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "step_id",
+     "tool",
+     "attempt",
+     "at"
+    ],
+    "type": "object"
+   },
+   "TerminalResult": {
+    "additionalProperties": false,
+    "properties": {
+     "frame": {
+      "$ref": "#/$defs/ResultFrame"
+     },
+     "publication": {
+      "$ref": "#/$defs/Publication"
+     },
+     "replay_key": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     }
+    },
+    "required": [
+     "frame",
+     "publication"
+    ],
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "description": "Everything durable about one run. `submission_digest` is\n`submission_digest()` of the submission and source policy the run\nexecutes. `outcome` is what its computation came to, as the executor\nstates it, recorded once with `Publishing` or `Fail`. `resumes` counts\nhow often the unfinished run was carried on (`Resume`). `delivered` says\nno later turn carries a completed run on: the conversation recorded the\nhand-back of its result, or `undelivered` reached the delivery bound\n(`Undelivered`). `undelivered` counts the turns that carried a completed\nrun on without delivering its result.",
+  "properties": {
+   "admitted_at": {
+    "format": "date-time",
+    "type": "string"
+   },
+   "attempts": {
+    "default": [],
+    "items": {
+     "$ref": "#/$defs/StepAttempt"
+    },
+    "type": "array"
+   },
+   "authorisation": {
+    "discriminator": {
+     "mapping": {
+      "plan_approval": "#/$defs/PlanApproval",
+      "request": "#/$defs/RequestAuthorisation"
+     },
+     "propertyName": "kind"
+    },
+    "oneOf": [
+     {
+      "$ref": "#/$defs/PlanApproval"
+     },
+     {
+      "$ref": "#/$defs/RequestAuthorisation"
+     }
+    ]
+   },
+   "delivered": {
+    "default": false,
+    "type": "boolean"
+   },
+   "failure": {
+    "anyOf": [
+     {
+      "$ref": "#/$defs/RunFailure"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null
+   },
+   "idempotency_key": {
+    "type": "string"
+   },
+   "manifest": {
+    "anyOf": [
+     {
+      "$ref": "#/$defs/InputManifest"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null
+   },
+   "outcome": {
+    "$ref": "#/$defs/JsonValue",
+    "default": null
+   },
+   "pending": {
+    "anyOf": [
+     {
+      "$ref": "#/$defs/PendingHold"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null
+   },
+   "results": {
+    "default": [],
+    "items": {
+     "$ref": "#/$defs/TerminalResult"
+    },
+    "type": "array"
+   },
+   "resumes": {
+    "default": 0,
+    "type": "integer"
+   },
+   "run_id": {
+    "type": "string"
+   },
+   "status": {
+    "$ref": "#/$defs/RunStatus"
+   },
+   "submission_digest": {
+    "type": "string"
+   },
+   "undelivered": {
+    "default": 0,
+    "type": "integer"
+   }
+  },
+  "required": [
+   "run_id",
+   "idempotency_key",
+   "submission_digest",
+   "authorisation",
+   "status",
+   "admitted_at"
+  ],
+  "type": "object"
+ }
+}

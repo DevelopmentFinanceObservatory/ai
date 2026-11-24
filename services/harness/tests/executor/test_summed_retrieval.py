@@ -10,13 +10,18 @@ No count at all is a fetch that degraded, and runs on.
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
+import jsonschema
 import pytest
 from compiler.sources import member_digest
 from compiler.surface import ToolSchema
 from executor.classify import Disposition, ExecutorCode, classify_refusal
+from executor.ledger import InMemoryRunLedger
 from executor.outcomes import Accepted, RefusalKind, Refused
 from executor.run import execute_approved_plan
 from planner.plan import Plan
@@ -129,3 +134,62 @@ async def test_a_retrieval_that_does_not_sum_declares_whatever_its_frame_holds(
     outcome = await _run_with_declared_count(plan, manifest(), real_schemas, {})
 
     assert isinstance(outcome, Accepted), outcome
+
+
+# The run outcome and run record schemas of the released harness, generated from its
+# `executor.outcomes.RunOutcome` and `executor.ledger.RunRecord`. It reads a stored run
+# with `stored_run`, which ignores keys it does not know, and the outcome in it with
+# `outcome_from_json`, which rejects them.
+_RELEASED = json.loads(
+    (Path(__file__).parent.parent / "fixtures" / "released_run_schemas.json").read_text()
+)
+
+
+async def test_a_run_keeps_the_roots_an_analysis_call_summed_where_the_released_harness_reads_it(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An `aggregate` over an unsummed retrieval declares one StatVar for its
+    frame and names the root it read summed, as dfo-apis does, by the version it
+    rendered for the sum. The record keeps the read and leaves out, with a log
+    line, an entry it cannot read. The ledger stores the read beside the
+    outcome, so the released harness reads the stored run and its outcome, and
+    the run driven again hands the read back."""
+    read = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "5" * 32, "count": 2}
+    surface = ScriptedSurface(
+        schemas=real_schemas,
+        responses={
+            "get_data": [ok(manifest())],
+            "aggregate": [ok(RESULT_FRAME | {"stat_vars_summed": [read, {"count": "x"}]})],
+        },
+    )
+    ledger = InMemoryRunLedger()
+    plan = approved_plan()
+
+    with caplog.at_level(logging.WARNING, logger="executor.artifacts"):
+        _finished, outcome = await execute_approved_plan(plan, surface=surface, ledger=ledger)
+    assert isinstance(outcome, Accepted), outcome
+    assert outcome.run_id is not None
+    run = await ledger.get(outcome.run_id)
+    assert run is not None
+    stored = run.model_dump(mode="json")
+    _finished, again = await execute_approved_plan(plan, surface=surface, ledger=ledger)
+
+    assert outcome.steps[-1].stat_var_count == 1
+    reads = [[summed.model_dump() for summed in step.stat_vars_summed] for step in outcome.steps]
+    assert reads == [[], [read]]
+    assert [
+        record.getMessage().startswith("stat_vars_summed entry")
+        for record in caplog.records
+        if record.name == "executor.artifacts"
+    ] == [True]
+    jsonschema.validate(stored["outcome"], _RELEASED["outcome"])
+    known = _RELEASED["run_record"]["properties"]
+    assert set(stored) - set(known) == {"stat_vars_summed"}
+    jsonschema.validate(
+        {key: stored[key] for key in known if key in stored}, _RELEASED["run_record"]
+    )
+    assert isinstance(again, Accepted), again
+    assert again.steps == outcome.steps
