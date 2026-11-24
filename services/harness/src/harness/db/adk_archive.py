@@ -16,10 +16,12 @@ commits.
   and owned sequences, for an image that reads ADK's tables. It leaves 0005
   recorded in `harness_schema_migrations`, so an image that holds 0005
   refuses to start beside the restored tables
-  (`harness.server._check_beside_adk_tables`); deploy/README.md's `DFA05`
+  (`harness.server._refuse_beside_adk_tables`); deploy/README.md's `DFA05`
   entry gives the step for each case. It prints which of ADK's five tables
-  it restores and refuses when anything is archived but not all five, the
-  import ledger alone included, unless `--allow-missing` is given. With
+  it restores and refuses when anything is archived but not all five and
+  the import ledger, `adk_archive_adk_ledger_imports`, unless
+  `--allow-missing` is given: without the ledger, ADK's restored history
+  has no import records, and the import job cannot clear it. With
   nothing archived it finds nothing to do, so a rerun after a restore
   changes nothing. It refuses before renaming anything when an
   `adk_archive_<name>` table lacks the columns of the table it archived,
@@ -295,6 +297,7 @@ async def _restore(conn: Any, *, allow_missing: bool = False) -> list[str]:
     found = {table.name.removeprefix(PREFIX) for table in tables}
     restoring = [name for name in ADK_TABLES if name in found]
     missing = [name for name in ADK_TABLES if name not in found]
+    lacking = [name for name in ARCHIVED if name not in found]
     if not archived:
         return []
     print(
@@ -309,11 +312,12 @@ async def _restore(conn: Any, *, allow_missing: bool = False) -> list[str]:
                 f"{table.qualified}, which lacks the columns of `{name}`, so it is not the "
                 "archive. Rename it or drop it by hand, then run restore again."
             )
-    if missing and not allow_missing:
+    if lacking and not allow_missing:
         raise ArchiveRefusedError(
-            f"restore renames nothing, because the archive lacks ADK's {', '.join(missing)}. An "
-            "image that reads ADK's tables would create them empty. Pass --allow-missing to "
-            "restore the rest anyway."
+            f"restore renames nothing, because the archive lacks {', '.join(lacking)}. An "
+            "image that reads ADK's tables would create a missing table of ADK's empty, and "
+            "without adk_ledger_imports ADK's history has no import records, so the import "
+            "job cannot clear it. Pass --allow-missing to restore the rest anyway."
         )
     taken = await _restore_conflicts(conn, archived)
     if taken:
@@ -507,7 +511,7 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
             verb_parser.add_argument(
                 "--allow-missing",
                 action="store_true",
-                help="restore when the archive lacks some of ADK's five tables",
+                help="restore when the archive lacks some of ADK's five tables or the ledger",
             )
         if verb in DROPS:
             verb_parser.add_argument(

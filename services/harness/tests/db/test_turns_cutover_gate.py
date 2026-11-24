@@ -1,9 +1,10 @@
 """The cutover gate: the release that stops reading ADK refuses to start,
-with SQLSTATE DFA02 and nothing applied, while an ADK ledger session is not
-cleared (imported or kept as of its last ADK write, 0003) or holds a live
+with nothing applied, while an ADK ledger session is not cleared (imported
+or kept as of its last ADK write, 0003, SQLSTATE DFA02) or holds a live
 `studio:segment` lease (`harness.db.cutover_gates.LIVE_LEDGER_LEASE_GATE`,
-run in 0003's transaction just before it). The case table is the one the
-import job's `gate` verb and 0005 are pinned by."""
+run in 0003's transaction just before it, SQLSTATE DFR02, which startup
+retries). The case table is the one the import job's `gate` verb and 0005
+are pinned by."""
 
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from pathlib import Path
 import asyncpg
 import pytest
 from harness.db.migrate import MIGRATIONS_DIR, apply_pending
+from harness.server import _apply_migrations_with_retries
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -90,7 +92,7 @@ def _conversation(cid: str) -> str:
 
 
 async def _migrate_before_0003(engine: AsyncEngine, tmp_path: Path) -> None:
-    """Apply the migrations release 1 shipped, 0001 and 0002."""
+    """Apply 0001 and 0002."""
     for name in _BEFORE_0003:
         shutil.copy(MIGRATIONS_DIR / name, tmp_path / name)
     await apply_pending(engine, directory=tmp_path)
@@ -116,12 +118,13 @@ async def _applied(engine: AsyncEngine) -> list[str]:
         return [row[0] for row in rows]
 
 
-async def _refused(engine: AsyncEngine) -> str:
-    """0003 raises DFA02 and applies nothing. Returns the error's message."""
+async def _refused(engine: AsyncEngine, sqlstate: str = "DFA02") -> str:
+    """The run raises `sqlstate` and applies nothing. Returns the error's
+    message."""
     before = await _applied(engine)
     with pytest.raises(asyncpg.PostgresError) as refusal:
         await apply_pending(engine)
-    assert refusal.value.sqlstate == "DFA02"
+    assert refusal.value.sqlstate == sqlstate
     assert await _applied(engine) == before
     async with engine.connect() as conn:
         assert (await conn.execute(text("SELECT to_regclass('turn_cursors')"))).scalar() is None
@@ -164,15 +167,6 @@ async def _refused(engine: AsyncEngine) -> str:
             (_session("c1", updated=_MOVED), _kept("c1")),
             ["p/c1"],
             id="kept, ADK moved after it",
-        ),
-        pytest.param(
-            (_ADK_SESSIONS,),
-            (
-                _live_session("c1", 600),
-                *(_imported("c1"), _conversation("c1")),
-            ),
-            ["p/c1"],
-            id="imported, a live lease on ADK",
         ),
         pytest.param(
             (_ADK_SESSIONS,),
@@ -261,8 +255,9 @@ async def test_the_lease_gate_runs_in_0003s_transaction_before_it(
     leased = _session("c1", state=_leased(600))
     await _execute(pg_empty_engine, _ADK_SESSIONS, leased, _imported("c1"), _conversation("c1"))
 
-    message = await _refused(pg_empty_engine)
+    message = await _refused(pg_empty_engine, "DFR02")
 
+    assert message.startswith("1 ledger session(s) in ADK's `sessions` hold a live")
     assert "hold a live `studio:segment` lease: p/c1." in message
     assert await _applied(pg_empty_engine) == sorted(_BEFORE_0003)
     await _execute(pg_empty_engine, f"UPDATE sessions SET state = '{_leased(-60)}'::jsonb")
@@ -279,3 +274,17 @@ async def test_the_lease_gate_never_runs_once_0003_is_recorded(
     await _execute(pg_empty_engine, _ADK_SESSIONS, _session("c1", state=_leased(600)))
 
     assert await apply_pending(pg_empty_engine) == []
+
+
+async def test_startup_retries_a_live_lease_until_it_lapses(
+    pg_empty_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """A lease that lapses within the startup budget delays the start that
+    applies 0003, and does not fail it."""
+    await _migrate_before_0003(pg_empty_engine, tmp_path)
+    leased = _session("c1", state=_leased(2))
+    await _execute(pg_empty_engine, _ADK_SESSIONS, leased, _imported("c1"), _conversation("c1"))
+
+    await _apply_migrations_with_retries(pg_empty_engine, budget_s=30)
+
+    assert _MIGRATION in await _applied(pg_empty_engine)

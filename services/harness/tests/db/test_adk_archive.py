@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import logging
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -309,20 +308,17 @@ async def test_startup_reports_no_archive_beside_a_foreign_table_of_an_archive_n
     assert refusal.ledger_present is True
 
 
-async def test_startup_warns_beside_a_fresh_adk_table_created_after_the_whole_archive(
-    pg_empty_engine: AsyncEngine,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    caplog: pytest.LogCaptureFixture,
+async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until_drop_adk(
+    pg_empty_engine: AsyncEngine, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """An ADK-reading image started after the archive creates its tables and
-    writes a ledger session. With the whole archive in place the tables are
-    fresh, so startup logs DFA05 and goes on, and the serving revision can
-    still scale out; with part of the archive gone it refuses. `archive`
-    refuses with 0005's DFA02, since no `adk_ledger_imports` resolves to clear
-    it, so the remedy is `drop-adk`, which prints the conversations it
-    discards in a dry run and with `--apply`, and refuses `--apply` without
-    `--backup`."""
+    writes a ledger session. Startup refuses, naming the live table beside
+    its own archive twin. `archive` refuses with 0005's DFA02, since no
+    `adk_ledger_imports` resolves to clear it, so the remedy is `drop-adk`,
+    which prints the conversations it discards in a dry run and with
+    `--apply`, and refuses `--apply` without a numeric `--backup`. Startup
+    proceeds once it has run. After `drop-archive` a fresh table has no twin,
+    and startup refuses the same way."""
     await _archived_by_startup(pg_empty_engine, tmp_path)
     await _start(pg_empty_engine)
     sessions = next(statement for statement in _ADK_V1_DDL if "TABLE sessions" in statement)
@@ -330,19 +326,13 @@ async def test_startup_warns_beside_a_fresh_adk_table_created_after_the_whole_ar
         pg_empty_engine, sessions, _session("c3"), _session("c3:turn1", app="dfo_analyst_graph")
     )
     archived = {f"adk_archive_{table}" for table in _ARCHIVED}
-    caplog.clear()
 
-    with caplog.at_level(logging.ERROR, logger=server_module.__name__):
-        await _start(pg_empty_engine)
-
-    (warned,) = [record.getMessage() for record in caplog.records if "DFA05" in record.getMessage()]
-    assert warned.startswith("DFA05: ") and ".sessions" in warned
-    await _execute(pg_empty_engine, "ALTER TABLE adk_archive_events RENAME TO events_elsewhere")
     refusal = await _start_refused(pg_empty_engine)
+
     assert _names(refusal.tables) == {"sessions"}
     assert refusal.archive_present is True
     assert refusal.ledger_present is False
-    await _execute(pg_empty_engine, "ALTER TABLE events_elsewhere RENAME TO adk_archive_events")
+    assert ".sessions (beside adk_archive_sessions)" in str(refusal)
     capsys.readouterr()
     assert await _verb(pg_empty_engine, "archive") == 1
     assert "SQLSTATE DFA02" in capsys.readouterr().err
@@ -355,22 +345,16 @@ async def test_startup_warns_beside_a_fresh_adk_table_created_after_the_whole_ar
     printed = capsys.readouterr().out
     assert _drop_adk_rows(printed) == 1
     assert "ran and committed, after backup 1732441200000:" in printed
-    caplog.clear()
     await _start(pg_empty_engine)
-    assert not [record for record in caplog.records if "DFA05" in record.getMessage()]
-
     tables = await _tables(pg_empty_engine)
     assert archived <= tables
     assert "sessions" not in tables
-    # Once `drop-archive` has removed the archive and the import ledger, fresh
-    # tables a stray image creates are logged the same way.
+
     assert await _verb(pg_empty_engine, "drop-archive") == 0
     await _execute(pg_empty_engine, sessions, _session("c4"))
-    caplog.clear()
-    with caplog.at_level(logging.ERROR, logger=server_module.__name__):
-        await _start(pg_empty_engine)
-    (warned,) = [record.getMessage() for record in caplog.records if "DFA05" in record.getMessage()]
-    assert "no archive and no adk_ledger_imports" in warned
+    refusal = await _start_refused(pg_empty_engine)
+    assert ".sessions (without adk_archive_sessions)" in str(refusal)
+    assert (refusal.archive_present, refusal.ledger_present) == (False, False)
 
 
 async def test_startup_leaves_foreign_tables_of_adks_names_alone(
@@ -389,6 +373,7 @@ async def test_startup_leaves_foreign_tables_of_adks_names_alone(
     [
         pytest.param(_ADK_V1_DDL[1:], ("adk_internal_metadata",), id="one of five missing"),
         pytest.param((), _ADK_TABLES, id="ledger only"),
+        pytest.param(_ADK_V1_DDL, ("adk_ledger_imports",), id="no ledger"),
     ],
 )
 async def test_restore_refuses_an_archive_without_all_of_adks_tables_unless_allowed(
@@ -401,6 +386,8 @@ async def test_restore_refuses_an_archive_without_all_of_adks_tables_unless_allo
     await _migrate_through_0004(pg_empty_engine, tmp_path)
     await _execute(pg_empty_engine, *tables)
     await apply_pending(pg_empty_engine)
+    if "adk_ledger_imports" in missing:
+        await _execute(pg_empty_engine, "DROP TABLE adk_archive_adk_ledger_imports")
     archived = await _tables(pg_empty_engine)
     capsys.readouterr()
 
@@ -408,8 +395,10 @@ async def test_restore_refuses_an_archive_without_all_of_adks_tables_unless_allo
         assert await _verb(pg_empty_engine, "restore", apply=apply) == 1
 
     printed = capsys.readouterr()
-    assert f"missing: {', '.join(missing)}" in printed.out
-    assert f"lacks ADK's {', '.join(missing)}" in printed.err
+    if "adk_ledger_imports" not in missing:
+        assert f"missing: {', '.join(missing)}" in printed.out
+    lacking = [name for name in (*_ADK_TABLES, "adk_ledger_imports") if name in missing]
+    assert f"the archive lacks {', '.join(lacking)}." in printed.err
     assert await _tables(pg_empty_engine) == archived
     assert adk_archive._arguments(["restore", "--allow-missing"]).allow_missing
     assert (
