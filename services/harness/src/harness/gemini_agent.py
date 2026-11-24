@@ -120,25 +120,26 @@ class RecordingState:
 
 class EmptyResponseError(UnexpectedModelBehavior, TransientFaultError):
     """The model's response held neither answer text nor a function call
-    (`holds_no_answer`), and the turn showed the user no card
-    (`orchestrator.run.turn_answered`), so it has nothing to go on with. The same request samples again on a later attempt,
-    so the fault is transient (`compiler.surface.TransientFaultError`)."""
+    (`holds_no_answer`), and the run drew no card
+    (`orchestrator.run.run_drew_a_card`), so it has nothing to go on with. The same
+    request samples again on a later attempt, so the fault is transient
+    (`compiler.surface.TransientFaultError`)."""
 
 
 def holds_no_answer(response: ModelResponse) -> bool:
     """Whether `response` holds neither answer text nor a function call: no
-    parts, thoughts alone, or text that is empty.
+    parts, thoughts alone, or text that is empty or whitespace.
 
     Neither agent sends such a response back for another try. Pydantic AI
     would, with a retry prompt added to the instruction, which breaks the
     one request form (`harness.gemini_wire.in_canonical_form`) and the cached
     prefix, and which no Gemini model of the harness was ever sent. The
     planner's run ends on it with no output (`planner.pydantic_agent`). The
-    orchestrator's ends answered when the turn showed the user a card, and
-    otherwise raises `EmptyResponseError` (`orchestrator.run.turn_answered`).
+    orchestrator's ends answered when the run drew a card, and otherwise raises
+    `EmptyResponseError` (`orchestrator.run.run_drew_a_card`).
     """
     return not any(
-        isinstance(part, ToolCallPart) or (isinstance(part, TextPart) and part.content)
+        isinstance(part, ToolCallPart) or (isinstance(part, TextPart) and part.content.strip())
         for part in response.parts
     )
 

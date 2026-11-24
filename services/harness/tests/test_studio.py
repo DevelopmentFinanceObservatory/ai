@@ -940,19 +940,34 @@ async def test_a_model_response_with_no_answer_ends_on_whether_the_turn_answered
     assert "component.created" in events
 
 
-async def test_an_approved_plan_whose_closing_response_is_empty_ends_on_the_turns_card() -> None:
-    """A card the turn drew before handing a plan off is one it showed the user, so
-    once the plan is approved and run, an empty closing response ends the turn
-    answered and nothing advises a retry that would run the plan again."""
-    executor = ScriptedExecutor(_card_results())
-    app = _app(
-        *_card()[:3],
-        plan_call("q with forks"),
-        empty_reply(),
-        resolver=_search(),
-        executor=executor,
-        tool_surface=ScriptedSurface(),
-    )
+@pytest.mark.parametrize(
+    "drawn",
+    ["after-the-approval", "before-the-plan"],
+)
+async def test_an_approved_plans_empty_closing_response_ends_answered_only_on_its_own_card(
+    drawn: str,
+) -> None:
+    """The run that takes a plan's approval answers it. Where its closing response
+    holds no answer, a card it drew ends the turn answered; a card the turn drew
+    before handing the plan off answered nothing the approval asked, so the turn
+    fails and the user is told to retry."""
+    if drawn == "after-the-approval":
+        script = (
+            plan_call("q with forks"),
+            make_charts_call(chart(PLAN_FRAME, type_="stat_card", title="Aid to Kenya")),
+        )
+        app = _app(
+            *script, empty_reply(), executor=ScriptedExecutor(), tool_surface=ScriptedSurface()
+        )
+    else:
+        app = _app(
+            *_card()[:3],
+            plan_call("q with forks"),
+            empty_reply(),
+            resolver=_search(),
+            executor=ScriptedExecutor(_card_results()),
+            tool_surface=ScriptedSurface(),
+        )
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
@@ -960,8 +975,13 @@ async def test_an_approved_plan_whose_closing_response_is_empty_ends_on_the_turn
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
         )
 
-    assert "component.created" in _events(first)
     events = _events(second)
+    if drawn == "before-the-plan":
+        assert "component.created" in _events(first)
+        error = _frame(second, "error")["error"]
+        assert (error["error"], error["retry"]) == ("transient_unavailable", "retry_after_delay")
+        return
+    assert "component.created" in events
     assert "error" not in events
     assert events[-1] == "done"
 

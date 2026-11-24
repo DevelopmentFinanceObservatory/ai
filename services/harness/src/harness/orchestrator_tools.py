@@ -210,14 +210,16 @@ _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 
 
-def drawn_card_ids(state: Mapping[str, Any], turn_id: str) -> frozenset[str]:
-    """The component ids of the cards `make_charts` drew in turn `turn_id` that are
-    on the canvas (`_DRAWN_CARDS_KEY`), less any it could not read back."""
+def drawn_cards(state: Mapping[str, Any], turn_id: str) -> frozenset[tuple[str, int]]:
+    """The cards `make_charts` drew in turn `turn_id` that are on the canvas
+    (`_DRAWN_CARDS_KEY`), less any it could not read back, each as its component id
+    and revision. A chart whose card is drawn already keeps its entry, so a set taken
+    later gains only the cards drawn in between."""
     held = state.get(_DRAWN_CARDS_KEY) or {}
     if held.get("turn") != turn_id:
         return frozenset()
     return frozenset(
-        card["component_id"]
+        (card["component_id"], card["revision"])
         for card in held["drawn"].values()
         if not card.get("unreadable") and card.get("component_id")
     )

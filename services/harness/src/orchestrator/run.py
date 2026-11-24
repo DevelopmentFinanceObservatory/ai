@@ -17,8 +17,8 @@ they happen:
 
 A response with neither answer text nor a function call
 (`harness.gemini_agent.holds_no_answer`) is not sent back for another try.
-It ends the run `Answered`, with no text, when the turn answered the user all
-the same (`turn_answered`), and raises `EmptyResponseError` otherwise.
+It ends the run `Answered`, with no text, when the run drew a card itself
+(`run_drew_a_card`), and raises `EmptyResponseError` otherwise.
 
 A turn whose first response makes one `remove_cards` call and holds no
 answer text ends after that call: the harness writes the reply from the
@@ -57,7 +57,7 @@ from harness.gemini_agent import (
 )
 from harness.gemini_wire import StreamResumedError, resumed_over_output
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
-from harness.orchestrator_tools import drawn_card_ids, removal_reply
+from harness.orchestrator_tools import drawn_cards, removal_reply
 from pydantic import BaseModel, SerializerFunctionWrapHandler, field_serializer, field_validator
 from pydantic_ai import (
     Agent,
@@ -254,13 +254,12 @@ async def run_orchestrator(
     The first request opens with the date and the digests as one user content,
     then the user's message as its own, then the seed hand-back when there is
     one. A response with neither answer text nor a function call ends the run
-    `Answered`, with no text, where the turn showed the user a card
-    (`turn_answered`). Any other exception the model or Pydantic AI raises
-    propagates.
+    `Answered`, with no text, where the run drew a card itself (`run_drew_a_card`).
+    Any other exception the model or Pydantic AI raises propagates.
 
     Raises:
         EmptyResponseError: A model response held neither answer text nor a
-            function call, and the turn showed the user no card.
+            function call, and the run drew no card.
         StreamResumedError: google-genai resumed a stream over output no
             continuation token covers (`harness.gemini_wire.resumed_over_output`),
             a dropped connection a later attempt may not meet.
@@ -307,9 +306,10 @@ async def run_orchestrator(
             # The reply the harness writes for a lone removal, which ends the
             # run once the agent's run has closed.
             removal: str | None = None
-            # Whether the run ended on a response with no answer in a turn that
-            # answered the user all the same (`turn_answered`).
+            # Whether the run ended on a response with no answer after it drew a
+            # card itself (`run_drew_a_card`), and the cards drawn before it.
             ended_empty = False
+            drawn_before = drawn_cards(deps.state, turn_id)
             async for node in run:
                 if Agent.is_model_request_node(node):
                     deps.view = RecordingState(deps.state)
@@ -320,16 +320,16 @@ async def run_orchestrator(
                                 yield TextDelta(text)
                         response = stream.response
                     if holds_no_answer(response):
-                        if not turn_answered(response, deps.state, turn_id):
+                        if not run_drew_a_card(deps.state, turn_id, drawn_before):
                             raise EmptyResponseError(
                                 "the model's response held neither answer text nor a "
-                                "function call, and the turn showed the user no card"
+                                "function call, and the run drew no card"
                             )
                         logger.warning(
-                            "orchestrator response held no answer; the turn ends on the "
-                            "cards it showed turn_id=%s cards=%d",
+                            "orchestrator response held no answer; the run ends on the "
+                            "cards it drew turn_id=%s cards=%d",
                             turn_id,
-                            len(drawn_card_ids(deps.state, turn_id)),
+                            len(drawn_cards(deps.state, turn_id) - drawn_before),
                         )
                         ended_empty = True
                         break
@@ -381,16 +381,21 @@ async def run_orchestrator(
     yield Answered(text=output)
 
 
-def turn_answered(final: ModelResponse, state: Mapping[str, Any], turn_id: str) -> bool:
-    """Whether turn `turn_id`, whose run ended on `final`, a response making no call,
-    answered the user: `final` holds answer text, or the turn showed the user a card.
+def run_drew_a_card(
+    state: Mapping[str, Any], turn_id: str, before: frozenset[tuple[str, int]]
+) -> bool:
+    """Whether a run of turn `turn_id` that began with `before` drawn
+    (`harness.orchestrator_tools.drawn_cards`) drew a card itself.
 
-    Every card a turn shows is drawn by `make_charts`, in this run or one before a
-    hand-back (`harness.orchestrator_tools.drawn_card_ids`): the execute node of an
-    approved plan publishes frames, which the agent then draws. Text a response
-    streamed beside its calls ("Looking it up.") is narration, which answers
-    nothing."""
-    return not holds_no_answer(final) or bool(drawn_card_ids(state, turn_id))
+    A run answers the user it runs for, on the turn's message, an `ask_user` answer
+    or a plan's approval, when its final response holds text, or, where that
+    response holds no answer (`harness.gemini_agent.holds_no_answer`), when the run
+    drew a card. A card drawn before a hand-back answered the run that drew it, not
+    the user's reply. Every card a turn shows is drawn by `make_charts`: the execute
+    node of an approved plan publishes frames, which the agent then draws. Text a
+    response streamed beside its calls ("Looking it up.") is narration, which
+    answers nothing."""
+    return bool(drawn_cards(state, turn_id) - before)
 
 
 def _opening(opening: Opening) -> tuple[str, list[ModelMessage]]:
@@ -503,6 +508,6 @@ __all__ = [
     "StoredHistory",
     "TextDelta",
     "ToolsAnswered",
+    "run_drew_a_card",
     "run_orchestrator",
-    "turn_answered",
 ]

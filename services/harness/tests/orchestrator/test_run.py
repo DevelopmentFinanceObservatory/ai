@@ -550,8 +550,9 @@ async def test_a_resumed_run_names_the_conversation_its_caller_gives(
         [reply(thought_part("Thinking."))],
         [reply(_SEARCH), empty_reply()],
         [reply(text_part("Looking it up."), _SEARCH), empty_reply()],
+        [reply(text_part(" \n"))],
     ],
-    ids=["no-parts", "thought-only", "after-a-call", "after-narration"],
+    ids=["no-parts", "thought-only", "after-a-call", "after-narration", "whitespace-only"],
 )
 async def test_a_response_with_no_answer_in_a_turn_that_showed_no_card_fails_transiently(
     replies: list[Any],
@@ -567,37 +568,6 @@ async def test_a_response_with_no_answer_in_a_turn_that_showed_no_card_fails_tra
 
     assert transient(raised.value)
     assert len(scripted.requests) == len(replies)
-
-
-async def test_a_resumed_run_whose_first_response_holds_no_answer_fails_transiently() -> None:
-    """The hand-back that opens a resumed run is no answer the user sees: a resumed
-    run whose response holds no answer fails, so the user's answer is not met with
-    silence."""
-    asked = {"questions": [{"question": "Which Congo?", "options": [{"label": "DR Congo"}]}]}
-    scripted = ScriptedGenai([reply(call_part("ask_user", asked)), reply(thought_part("Hmm."))])
-    orchestrator = orchestrator_agent(
-        build_orchestrator_tools(resolver=_Searches(), executor=_no_executor)
-    )
-    state: dict[str, Any] = {"surface": "studio"}
-    model = orchestrator_model("gemini-test", client=scripted.client, budget=None)
-    (handed,) = [
-        e
-        async for e in run_orchestrator(
-            orchestrator, state=state, turn_id="turn-1", model=model, opening=Opening("q", TODAY)
-        )
-        if isinstance(e, HandedOff)
-    ]
-
-    with pytest.raises(EmptyResponseError):
-        async for _ in run_orchestrator(
-            orchestrator,
-            state=state,
-            turn_id="turn-1",
-            model=model,
-            history=handed.history,
-            hand_back=HandBack(answers="ask_user", result={"result": "DR Congo"}),
-        ):
-            pass
 
 
 class _DrawingSearches(_Searches):
@@ -631,13 +601,37 @@ async def test_a_response_with_no_answer_after_a_card_drawn_this_run_ends_it_ans
     assert len(scripted.requests) == 2
 
 
-async def test_a_resumed_run_ends_answered_on_a_card_drawn_before_the_hand_back() -> None:
-    """A card drawn in the run before a hand-back is one the turn showed the user, so
-    a resumed run whose response holds no answer ends answered."""
-    asked = {"questions": [{"question": "Which Congo?", "options": [{"label": "DR Congo"}]}]}
-    scripted = ScriptedGenai(
-        [reply(_SEARCH), reply(call_part("ask_user", asked)), reply(thought_part("Hmm."))]
-    )
+_ASKED = {"questions": [{"question": "Which Congo?", "options": [{"label": "DR Congo"}]}]}
+
+
+@pytest.mark.parametrize(
+    ("replies", "answered"),
+    [
+        pytest.param(
+            [reply(call_part("ask_user", _ASKED)), reply(thought_part("Hmm."))],
+            False,
+            id="nothing-drawn",
+        ),
+        pytest.param(
+            [reply(_SEARCH), reply(call_part("ask_user", _ASKED)), reply(thought_part("Hmm."))],
+            False,
+            id="card-before-the-hand-back",
+        ),
+        pytest.param(
+            [reply(call_part("ask_user", _ASKED)), reply(_SEARCH), reply(thought_part("Hmm."))],
+            True,
+            id="card-after-the-reply",
+        ),
+    ],
+)
+async def test_a_resumed_run_with_no_answer_ends_answered_only_on_a_card_it_drew(
+    replies: list[Any], answered: bool
+) -> None:
+    """A resumed run answers the user's reply. Where its response holds no answer, it
+    ends answered on a card it drew itself; the hand-back that opens it, and a card
+    drawn before the hand-back, answered nothing the user replied, so the run fails
+    transiently and the reply is not met with silence."""
+    scripted = ScriptedGenai(replies)
     drawn: dict[str, Any] = {}
     orchestrator = orchestrator_agent(
         build_orchestrator_tools(resolver=_DrawingSearches(drawn), executor=_no_executor)
@@ -655,19 +649,20 @@ async def test_a_resumed_run_ends_answered_on_a_card_drawn_before_the_hand_back(
         if isinstance(e, HandedOff)
     ]
 
-    resumed = [
-        e
-        async for e in run_orchestrator(
-            orchestrator,
-            state=state,
-            turn_id="turn-1",
-            model=model,
-            history=handed.history,
-            hand_back=HandBack(answers="ask_user", result={"result": "DR Congo"}),
-        )
-    ]
-
-    assert resumed[-1] == Answered(text="")
+    resume = run_orchestrator(
+        orchestrator,
+        state=state,
+        turn_id="turn-1",
+        model=model,
+        history=handed.history,
+        hand_back=HandBack(answers="ask_user", result={"result": "DR Congo"}),
+    )
+    if not answered:
+        with pytest.raises(EmptyResponseError):
+            async for _ in resume:
+                pass
+        return
+    assert [e async for e in resume][-1] == Answered(text="")
 
 
 async def test_a_hand_back_for_a_call_that_does_not_wait_is_refused() -> None:
