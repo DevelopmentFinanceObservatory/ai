@@ -524,7 +524,7 @@ An elicitation opened before this delta and still paused takes its one
 answer as `payload` (an offered option id, or free text). Any other
 elicitation refuses `payload`. `schema_version` stays 1.
 
-`/interrupt` reads at most 262,144 bytes of body and refuses more with
+`/interrupt` reads at most 641,536 bytes of body and refuses more with
 413 `resource_exhausted` before parsing. `payload` and a `text` answer
 take at most 16,000 characters each; more is a 422 `string_too_long`
 on the field.

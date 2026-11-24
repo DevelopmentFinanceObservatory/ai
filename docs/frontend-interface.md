@@ -336,7 +336,7 @@ Each answer in `answers` is one of:
 - `{"kind": "skipped"}`: the user leaves this question to the agent. Only on
   a question that sets `skippable: true`; the turn still resumes as answered.
 
-A body past 262,144 bytes gets a 413 `resource_exhausted` before it is parsed. An amendment (`payload`) or a `text` answer of more than 16,000 characters gets a 422 whose `detail` names the field with type `string_too_long`, and a `client_features` list of more than 16 values gets one with type `too_long`. Cap the composer at 16,000 characters when it amends a plan or answers a question.
+A body past 641,536 bytes gets a 413 `resource_exhausted` before it is parsed. An amendment (`payload`) or a `text` answer of more than 16,000 characters gets a 422 whose `detail` names the field with type `string_too_long`, and a `client_features` list of more than 16 values gets one with type `too_long`. Cap the composer at 16,000 characters when it amends a plan or answers a question.
 
 ```json
 {

@@ -25,6 +25,7 @@ from google.genai import types
 from harness import studio as studio_module
 from harness.scripted import ScriptedSurface
 from harness.studio import (
+    _answer_again,
     _carried_answer,
     _conversation_read,
     _read_status,
@@ -42,7 +43,7 @@ from harness.studio_store import (
     turn_standing,
 )
 from harness.turn.store import TurnStatus, TurnStore
-from harness.wire import TURN_INDEX_HEADER, MessageComplete
+from harness.wire import MAX_INTERRUPT_TEXT_CHARS, TURN_INDEX_HEADER, MessageComplete
 from planner.workflow import ToolId
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -1224,6 +1225,39 @@ def test_a_carried_answers_refusal_is_the_resumes_own(
     if answered == "edit_conflict":
         assert response.status_code == 409
         assert body["pointer"] == "/turn_index"
+
+
+@pytest.mark.parametrize(
+    ("answer", "words"),
+    [
+        pytest.param(
+            {"decision": "amend", "payload": "w" * (MAX_INTERRUPT_TEXT_CHARS + 1)},
+            lambda carried: carried.payload,
+            id="amendment",
+        ),
+        pytest.param(
+            {
+                "decision": "answer",
+                "answers": {"q1": {"kind": "text", "text": "w" * (MAX_INTERRUPT_TEXT_CHARS + 1)}},
+            },
+            lambda carried: carried.answers["q1"].text,
+            id="text-answer",
+        ),
+    ],
+)
+def test_a_carried_answer_stored_past_the_word_cap_is_carried_whole(
+    answer: dict[str, Any], words: Callable[[Any], str]
+) -> None:
+    """The cap on a request's own words (`MAX_INTERRUPT_TEXT_CHARS`) holds for new
+    input only: an answer `/interrupt` stored before the cap is rebuilt for `/resume`
+    in full."""
+    pending = _PendingInterrupt(
+        adk_id="int_1", kind="plan", resuming_segment="seg_left", answer=answer
+    )
+
+    carried = _answer_again(CONVERSATION, "int_1", pending)
+
+    assert words(carried) == "w" * (MAX_INTERRUPT_TEXT_CHARS + 1)
 
 
 async def test_a_follow_up_sent_from_two_pages_begins_one_turn(pg_engine: AsyncEngine) -> None:

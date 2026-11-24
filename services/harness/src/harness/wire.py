@@ -41,6 +41,7 @@ from typing import Annotated, Any, Literal, cast, get_args
 
 from common.place_type import PartyClass
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -52,6 +53,7 @@ from pydantic import (
     WrapValidator,
     model_validator,
 )
+from pydantic_core import PydanticCustomError
 
 logger = logging.getLogger(__name__)
 
@@ -384,11 +386,37 @@ MAX_TURN_REQUEST_BYTES = MAX_SEEDS * MAX_SEED_SPEC_BYTES + 65_536
 # amendment a person types.
 MAX_INTERRUPT_TEXT_CHARS = 16_000
 
+# The validation context key under which an interrupt `/interrupt` stored is rebuilt
+# (`harness.studio._answer_again`). Stored words were taken before the cap and stand,
+# so `MAX_INTERRUPT_TEXT_CHARS` holds for a request's own words only.
+STORED_INTERRUPT = "stored_interrupt"
+
+# The most free-text answers one interrupt carries: one per question of an
+# elicitation (`ElicitationRequest.questions`).
+_MAX_TEXT_ANSWERS = 3
+
 # The largest `/api/studio/interrupt` body the route reads (`harness.studio`'s
-# `_BoundedInterruptRoute`): room for the user's words at the cap, each character
-# escaped as a JSON surrogate pair at worst (12 bytes), and for the rest of the
-# request.
-MAX_INTERRUPT_REQUEST_BYTES = 262_144
+# `_BoundedInterruptRoute`): room for a free-text answer to each question at the cap,
+# each character escaped as a JSON surrogate pair at worst (12 bytes), and for the
+# rest of the request.
+MAX_INTERRUPT_REQUEST_BYTES = _MAX_TEXT_ANSWERS * MAX_INTERRUPT_TEXT_CHARS * 12 + 65_536
+
+
+def _within_word_cap(value: str | None, info: ValidationInfo) -> str | None:
+    """`value`, refused `string_too_long` past `MAX_INTERRUPT_TEXT_CHARS` unless it is
+    rebuilt from what `/interrupt` stored (`STORED_INTERRUPT`)."""
+    stored = isinstance(info.context, dict) and info.context.get(STORED_INTERRUPT) is True
+    if value is not None and len(value) > MAX_INTERRUPT_TEXT_CHARS and not stored:
+        raise PydanticCustomError(
+            "string_too_long",
+            "String should have at most {max_length} characters",
+            {"max_length": MAX_INTERRUPT_TEXT_CHARS},
+        )
+    return value
+
+
+# The user's own words in an interrupt: an amendment or a free-text answer.
+UserWords = Annotated[str, AfterValidator(_within_word_cap)]
 
 # The most `client_features` values a request may declare. A client names the
 # question forms it renders, a handful; one this release does not know is ignored
@@ -1068,7 +1096,7 @@ class TextAnswer(_WireModel):
     """The user answered in their own words (`allow_free_text`)."""
 
     kind: Literal["text"]
-    text: str = Field(min_length=1, max_length=MAX_INTERRUPT_TEXT_CHARS)
+    text: Annotated[UserWords, Field(min_length=1)]
 
 
 class SkippedAnswer(_WireModel):
@@ -1141,7 +1169,7 @@ class InterruptResponse(_WireModel):
     # The amendment text of a plan's `amend`. An elicitation opened before
     # the frame carried `questions` also takes its one answer here: an
     # offered option id, or free text.
-    payload: str | None = Field(default=None, max_length=MAX_INTERRUPT_TEXT_CHARS)
+    payload: UserWords | None = None
     # An elicitation's `answer`: each question id of the frame to its answer.
     answers: dict[str, ElicitationAnswer] | None = None
     # A plan's `switch`: the scope choice or planner decision, the option it

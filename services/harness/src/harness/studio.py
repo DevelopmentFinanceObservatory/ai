@@ -191,6 +191,7 @@ from harness.wire import (
     MAX_CLOSED_SINCE,
     MAX_INTERRUPT_REQUEST_BYTES,
     MAX_TURN_REQUEST_BYTES,
+    STORED_INTERRUPT,
     AddOp,
     ApplyChoice,
     ApplyUnit,
@@ -1681,6 +1682,7 @@ def _answer_again(
     names the revision of the plan it switched on, the entry's own."""
     answer = pending.answer or {}
     switch = answer.get("switch") or {}
+    # Words stored before the cap on them stand (`STORED_INTERRUPT`).
     return InterruptResponse.model_validate(
         {
             "kind": "interrupt.response",
@@ -1691,7 +1693,8 @@ def _answer_again(
             **({"payload": answer["payload"]} if answer.get("payload") is not None else {}),
             **({"answers": answer["answers"]} if "answers" in answer else {}),
             **({**switch, "plan_revision": pending.plan_revision} if switch else {}),
-        }
+        },
+        context={STORED_INTERRUPT: True},
     )
 
 
