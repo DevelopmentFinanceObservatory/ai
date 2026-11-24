@@ -390,8 +390,8 @@ _REFUSED = [CompileIssueCode.INPUT_SHAPE_UNSUPPORTED]
             },
             [],
         ),
-        # A family whose membership is not settled counts as several, and the runner
-        # sums it on read.
+        # A family whose membership is not settled may hold several StatVars, which the
+        # runner would sum on read, and the compiler cannot tell.
         (
             StatVarReading.SEPARATE,
             "growth",
