@@ -1254,14 +1254,23 @@ async def test_a_stop_naming_an_earlier_turn_leaves_a_streaming_turn_running(
     assert await other.stop_live(PRINCIPAL, CONVERSATION) is True
 
 
+@pytest.mark.parametrize(
+    ("taken", "closed"),
+    [
+        pytest.param(False, "cancelled", id="stop-names-the-turn"),
+        pytest.param(True, "abandoned", id="stop-its-scope-took"),
+    ],
+)
 async def test_a_stop_landing_between_a_claim_and_its_next_turn_cancels_the_turn_it_names(
-    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, taken: bool, closed: str
 ) -> None:
     """Turn 1 is paused on its plan, with no lease, when a `/turn` claims the
     lease for turn 2. A Stop naming turn 1 lands on that lease before the
     claim's save begins turn 2, so it is recorded naming turn 1. The save
-    then closes turn 1 `cancelled`, cursor and record, where it would have
-    closed it `abandoned`, and turn 2 runs to its answer."""
+    then closes turn 1 `cancelled`, cursor and record, and turn 2's model
+    reads it so, and turn 2 runs to its answer. A Stop turn 1's `StopScope`
+    already answered (its cursor's `stop_taken_id`), as a re-offered plan
+    records one, is spent, and turn 1 closes `abandoned` as with no Stop."""
     app, _ = orchestrator_app(plan_call("q with forks"), _text("Two."), engine=pg_engine)
     store: StudioStore = app.state.studio.store
     claim = store.claim_turn_lease
@@ -1271,6 +1280,14 @@ async def test_a_stop_landing_between_a_claim_and_its_next_turn_cancels_the_turn
         lease = await claim(*args, **kwargs)
         stopper = StudioStore(pg_engine)
         stops.append(await stopper.request_cancel(PRINCIPAL, CONVERSATION, turn_index=1))
+        if taken:
+            async with pg_engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE turn_cursors SET stop_taken_id = "
+                        "(SELECT stop_id FROM conversations) WHERE turn_index = 1"
+                    )
+                )
         return lease
 
     async with studio_client(app) as client:
@@ -1282,8 +1299,14 @@ async def test_a_stop_landing_between_a_claim_and_its_next_turn_cancels_the_turn
     assert _events(second)[-1] == "done"
     stored = await StudioStore(pg_engine).load(PRINCIPAL, CONVERSATION)
     assert stored is not None
-    assert [turn.get("error") for turn in stored.turns] == ["cancelled", None]
-    assert await _cursor_statuses(pg_engine) == ["cancelled", "done"]
+    assert [turn.get("error") for turn in stored.turns] == [closed, None]
+    assert await _cursor_statuses(pg_engine) == [closed, "done"]
+    async with pg_engine.connect() as conn:
+        inputs = (
+            await conn.execute(text("SELECT inputs FROM turn_cursors WHERE turn_index = 2"))
+        ).scalar_one()
+    (read,) = json.loads(inputs["conversation_digest"])["turns"][:1]
+    assert read["error"] == closed
 
 
 def _stored_state(

@@ -2670,7 +2670,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 body.component_ref is not None
                 and body.component_ref.intent is ComponentRefIntent.EDIT
             )
-            opening = None if editing else _turn_opening(work, body, chip_label)
             opened: list[Cursor] = []
 
             async def begin_turn(conn: AsyncConnection, pk: int) -> None:
@@ -2680,18 +2679,23 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # open as it stood, its pause still answerable. A Stop that
                 # names the turn left open, one that landed on this request's
                 # lease after its claim, closes it `cancelled`, cursor and
-                # record, as `_act_on_stop` would have before the claim.
+                # record, as `_act_on_stop` would have before the claim. The
+                # new turn's opening is read after that close, so its model
+                # reads the turn left open as it closed.
                 if left_open is not None:
                     if await stop_names_turn(conn, pk, left_open.turn_index):
                         await stop_turn_on(
-                            conn, left_open, segment_id=segment_id, now=datetime.now(UTC)
+                            conn,
+                            left_open,
+                            segment_id=segment_id,
+                            now=datetime.fromtimestamp(studio.store.now(), UTC),
                         )
                         if left_record is not None:
                             work.turns[left_record]["error"] = ErrorCode.CANCELLED.value
                     else:
                         await abandon_on(conn, left_open, segment_id=segment_id)
-                if opening is not None:
-                    inputs, state, text = opening
+                if not editing:
+                    inputs, state, text = _turn_opening(work, body, chip_label)
                     opened.append(
                         await open_turn_on(
                             conn,
