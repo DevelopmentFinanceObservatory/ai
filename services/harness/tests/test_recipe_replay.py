@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from common.call_limit import CallDeadline
 from common.caller import (
     CALLER_PRINCIPAL_HEADER,
     SURFACE_HEADER,
@@ -42,7 +43,6 @@ from common.materialisation import (
 from common.recipe import build_recipe, replay_key
 from common.row_budget import RowBudget
 from compiler.caller_clients import CallerTurn, caller_transport
-from data_mcp.deadline import CallDeadline
 from data_mcp.frame_materialisation import (
     KIND_COLUMNS,
     WITHOUT_PARTY_TOTALS,

@@ -73,12 +73,6 @@ from planner.plan import (
     save_plan_rounds,
     save_windowed_pins,
 )
-from planner.stated_scope import (
-    Pair,
-    RefusedRequirement,
-    record_keep_offered,
-    record_unattributed,
-)
 from planner.tool_results import ProblemCode
 
 # The session-state slot holding how many records of the turn's transcript
@@ -855,19 +849,6 @@ class CallSession:
     def record_reduction_refused(self, asks: Iterable[int]) -> None:
         """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
         record_reduction_refused_asks(self.call.state, asks)
-
-    def record_scope_unattributed(
-        self, option_id: str, refused: Iterable[RefusedRequirement]
-    ) -> None:
-        """Record a `STATED_SCOPE_UNATTRIBUTED` refusal for `option_id` in the call's
-        state, with `refused`: the id and `measure` of each dataset requirement whose pin
-        offers the option."""
-        record_unattributed(self.call.state, option_id, refused)
-
-    def record_keep_offered(self, pairs: Iterable[Pair]) -> None:
-        """Record that a refusal listed the datasets serving `pairs`
-        (`planner.stated_scope.record_keep_offered`) in the call's state."""
-        record_keep_offered(self.call.state, pairs)
 
     def record_admission(self, admission: Admission) -> None:
         """Record `admission` in the call's state, with how many records of

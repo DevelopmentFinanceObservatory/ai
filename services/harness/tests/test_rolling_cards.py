@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from analysis_mcp.runner_client import DerivedUnread
 from common import telemetry
+from common.call_limit import CallDeadline
 from common.caller import (
     conversation_caller,
     current_caller,
@@ -30,7 +31,6 @@ from common.recipe import RecipeAnchorError, build_recipe
 from common.telemetry import record_event, turn_segment
 from compiler.caller_clients import CallerTurn
 from compiler.surface import current_spec_uses
-from data_mcp.deadline import CallDeadline
 from data_mcp.operations import QueuedOperation
 from dfo_frame_grammar import Frame
 from harness import rolling_cards

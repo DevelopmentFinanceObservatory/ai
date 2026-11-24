@@ -21,6 +21,7 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Literal, Self
 
+from common.call_limit import CallDeadline
 from fastmcp.server.dependencies import fastmcp_request_ctx
 from fastmcp.tools import ToolResult
 from opentelemetry import trace
@@ -34,7 +35,6 @@ from pydantic import (
 )
 
 from data_mcp.client_holder import get_client
-from data_mcp.deadline import CallDeadline
 from data_mcp.definition_store import IdentityMismatch, StoredDefinition
 from data_mcp.definition_writes import put_definitions, stored_definition
 from data_mcp.digest import render_answer, render_digest

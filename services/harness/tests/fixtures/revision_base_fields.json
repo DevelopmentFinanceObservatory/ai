@@ -254,6 +254,10 @@
     "years",
     "code"
   ],
+  "planner.plan.ScopeWords": [
+    "mentions",
+    "summing"
+  ],
   "planner.plan.ShareOfRequirement": [
     "kind",
     "id",

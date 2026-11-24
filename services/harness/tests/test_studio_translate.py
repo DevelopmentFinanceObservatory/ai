@@ -124,7 +124,7 @@ from sqlalchemy import exc as sa_exc
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 from sqlalchemy.ext.asyncio import AsyncEngine
 from submission.prices_choice import prices_slot, unit_slot
-from submission.service import COMBINATION_OPTIONS, STATED_SCOPE_OPTIONS, scope_choice_decisions
+from submission.service import COMBINATION_OPTIONS, scope_choice_decisions
 from translator.discovery import NoTimeLeftError
 from translator.referral import (
     ENTITY_CHOICE_REPAIR,
@@ -308,15 +308,10 @@ def test_a_planner_ask_marks_the_recommended_option_and_carries_its_rationale() 
     assert (question.allow_free_text, question.skippable) == (True, False)
 
 
-@pytest.mark.parametrize(
-    "fixed", [COMBINATION_OPTIONS, STATED_SCOPE_OPTIONS], ids=["combination", "stated-scope"]
-)
-def test_a_fixed_options_ask_offers_its_options_and_takes_no_free_text(
-    fixed: tuple[dict[str, str], ...],
-) -> None:
-    # The planner's ask whether to add two datasets, or to keep one counted as
-    # published, carries the refusal's `options`; the user's pick of one comes back
-    # as its id, and the question takes no free text.
+def test_a_fixed_options_ask_offers_its_options_and_takes_no_free_text() -> None:
+    # The planner's ask whether to add two datasets carries the refusal's `options`;
+    # the user's pick of one comes back as its id, and the question takes no free text.
+    fixed = COMBINATION_OPTIONS
     args = {"message": "Add them?", "options": [dict(option) for option in fixed]}
 
     (frame,) = _translator()._interrupt_frames(_pause("planner_ask", args))
@@ -403,10 +398,31 @@ def test_a_plan_proposed_ask_without_asks_leaves_them_unset() -> None:
     assert frame.asks is None
 
 
-def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> None:
+_LINE = "Your words name grant equivalents, and no figure in this plan is counted that way."
+
+
+@pytest.mark.parametrize(
+    ("rationale", "line", "reason"),
+    [
+        pytest.param(None, False, "", id="search-default"),
+        pytest.param(
+            "Counted this way by default.",
+            False,
+            "Counted this way by default.",
+            id="other-default-reason",
+        ),
+        pytest.param(_LINE, True, _LINE, id="scope-line"),
+    ],
+)
+def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option(
+    rationale: str | None, line: bool, reason: str
+) -> None:
     """US health aid to Africa: each scope choice with another option to
     switch to is a card row naming the choice, its active option and every
-    option, with why one out of reach is; a planner decision carries none."""
+    option, with why one out of reach is; a planner decision carries none. A row
+    Search's default settled leaves off a reason saying only that Search's default
+    holds; any other reason, the card's line where the user's words and its option
+    part among them (`DecisionScope.line`), shows."""
     plan = scripted_plan("kenya life expectancy", spec_id=None)
     dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
     pin = "spec_" + "e" * 32
@@ -420,6 +436,18 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
     }
     block = {"spec_id": pin, "resolved": {"scope_choices": scope}}
     scoped = scope_choice_decisions({pin: PinSource(block=block, settled=True)})[pin]
+    if rationale is not None:
+        basis_row = scoped[2]
+        assert basis_row.scope is not None
+        scoped = (
+            *scoped[:2],
+            basis_row.model_copy(
+                update={
+                    "rationale": rationale,
+                    "scope": basis_row.scope.model_copy(update={"line": line}),
+                }
+            ),
+        )
     cited = dataset.model_copy(
         update={
             "decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped)),
@@ -476,7 +504,7 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
         ),
     ]
     # A reason saying only that Search's default holds is left off the card.
-    assert (basis.reason, basis.resolved_by) == ("", "default")
+    assert (basis.reason, basis.resolved_by) == (reason, "default")
     assert frame.actions == ["approve", "amend", "reject", "switch"]
     assert frame.moved is None
     # What a switch on this card may name: every shown choice, with its

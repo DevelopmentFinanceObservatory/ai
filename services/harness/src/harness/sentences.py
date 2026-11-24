@@ -385,8 +385,8 @@ STOP_SENTENCES: Mapping[StopCode | ProblemCode, str] = {
         "for, so nothing was recorded."
     ),
     ProblemCode.STATED_SCOPE_UNATTRIBUTED: (
-        "The plan{at} does not say which figures count the providers' spending the question "
-        "asks for, so nothing was recorded."
+        "The plan{at} says whose spending some figures of one calculation count and not "
+        "others, so nothing was recorded."
     ),
     ProblemCode.ASK_NOT_UNDERSTOOD: (
         "Part of the request could not be matched to data{at}, so nothing was recorded."
@@ -455,8 +455,7 @@ STOP_REASONS: Mapping[StopCode | ProblemCode, str] = {
         "{lead}the data the plan reads cannot count the providers' spending the question asks for"
     ),
     ProblemCode.STATED_SCOPE_UNATTRIBUTED: (
-        "{lead}the plan does not say which figures count the providers' spending the question "
-        "asks for"
+        "{lead}the plan says whose spending some figures of one calculation count and not others"
     ),
     ProblemCode.ASK_NOT_UNDERSTOOD: "{lead}part of the request could not be matched to data",
     ProblemCode.SEARCH_REFUSED: "Search refused to look up the data{at}",

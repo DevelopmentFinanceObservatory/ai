@@ -17,10 +17,10 @@ import asyncio
 import json
 import logging
 
+from common.call_limit import CallDeadline
 from fastmcp.tools import ToolResult
 
 from data_mcp.client_holder import get_client
-from data_mcp.deadline import CallDeadline
 from data_mcp.definition_store import DefinitionStoreUnavailable, IdentityMismatch, get_store
 from data_mcp.errors import UpstreamError
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
