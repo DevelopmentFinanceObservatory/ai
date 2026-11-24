@@ -1301,15 +1301,38 @@ class CompositionMutation(_WireModel):
     expected_revision: int | None = Field(default=None, ge=1)
 
 
+# The largest turn index a `turn.cancel` may name: Postgres's `int`, which the
+# store compares it with (`harness.studio_store.StudioStore.request_cancel`).
+MAX_TURN_INDEX = 2**31 - 1
+
+
 class CancelRequest(_WireModel):
     """POST /api/studio/cancel -- abort the conversation's in-flight
     segment (the Stop button). Idempotent: cancelling an idle conversation
-    is a no-op 204. The aborted stream, if still open, ends with a
-    stream-fatal `error` frame ("cancelled")."""
+    answers 204 and leaves it as it was, as does a Stop naming the latest
+    turn once it has closed. The aborted stream, if still open, ends with a
+    stream-fatal `error` frame ("cancelled").
+
+    `turn_index`, when given, is the turn the Stop is for: the index the
+    stream's `x-dfo-turn-index` header named. When the conversation's latest
+    turn is another, the route answers 200 with a `CancelSkipped` and the
+    conversation stays as it was. Without it, the Stop is for whatever turn
+    the conversation runs."""
 
     kind: Literal["turn.cancel"]
     schema_version: Literal[1]
     conversation_id: str
+    turn_index: int | None = Field(default=None, ge=1, le=MAX_TURN_INDEX)
+
+
+class CancelSkipped(_WireModel):
+    """POST /api/studio/cancel's 200 answer to a Stop whose `turn_index` is
+    not the conversation's latest turn, which leaves the conversation as it
+    was. `code` is `turn_moved`, and `turn_index` is the conversation's
+    latest turn, 0 before its first."""
+
+    code: Literal["turn_moved"]
+    turn_index: int = Field(ge=0)
 
 
 class ResumeRequest(_WireModel):
@@ -2021,13 +2044,22 @@ class StoredCard(_WireModel):
     its type, title, revision and the `fact_summary` its
     `component.created` or `component.revised` frame carried. The stored
     card holds no `payload` or `provenance`. The component id reads the
-    resolved revision from the presentation platform."""
+    resolved revision from the presentation platform.
+
+    `unit_change` and `replaces` have `ComponentCreated`'s names and
+    shapes. `unit_change` is the card's offer now, as `apply_unit` reads it
+    from what the conversation keeps with the card, set while the card is on
+    the canvas. `replaces` names the card whose canvas slot this one took,
+    on the closed turn that swapped it in. A card an earlier release stored
+    carries no `replaces`."""
 
     component_id: str
     type: str
     title: str
     revision: int = Field(ge=1)
     fact_summary: FactSummary | None = None
+    unit_change: UnitChange | None = None
+    replaces: str | None = None
 
 
 class ClosedTurn(_WireModel):

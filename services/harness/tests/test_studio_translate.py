@@ -3889,7 +3889,7 @@ async def test_a_turn_its_cards_answer_closes_with_the_notes_line_and_chips(
     assert (stored.get("match_notes"), stored["basis_line"]) == (note, _EXAMPLE_LINE)
     assert "Aid to Kenya" in stored["assistant"]
     assert "cmp_1" not in stored["assistant"]
-    assert _closed_turn(1, stored, {}).reply == complete.text
+    assert _closed_turn(len(conversation.turns), conversation).reply == complete.text
     digest = conversation.conversation_digest_state()
     assert digest is not None
     assert digest["turns"][-1]["assistant"] == stored["assistant"]

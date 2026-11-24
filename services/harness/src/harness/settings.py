@@ -252,6 +252,11 @@ class Settings(BaseServiceSettings):
     # real agent on another port). Empty sends no CORS headers: the deployed
     # service is reached same-origin through the website's proxy.
     studio_cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Ledger sessions, as comma-separated `principal/conversation_id`, whose
+    # `studio:segment` lease the startup check before `0003_turns.sql` cannot
+    # read and the operator has checked by hand and declared lapsed
+    # (`harness.db.cutover_gates.LIVE_LEDGER_LEASE_GATE`, DFA06).
+    lapsed_ledger_leases: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # The shared cache of the agents' static prompt prefixes; see the class
     # docstring.
     studio_prefix_cache: bool = True
@@ -345,7 +350,7 @@ class Settings(BaseServiceSettings):
             return None
         return value
 
-    @field_validator("studio_cors_origins", mode="before")
+    @field_validator("studio_cors_origins", "lapsed_ledger_leases", mode="before")
     @classmethod
     def _split_list(cls, value: object) -> object:
         if isinstance(value, str):

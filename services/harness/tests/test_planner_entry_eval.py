@@ -1240,10 +1240,15 @@ class _FakeLangfuse:
 
     `run_experiment` runs the task and evaluators on each item as the SDK does and keeps one
     item run per item: its output serialised, its metadata the item's and the experiment's
-    with every value a string, and its scores. `api.experiments.list_items` reads item runs
-    back newest first, two to a page, and shows at most one item run per dataset item in an
-    experiment, as Langfuse does. The next push loses its first `lose_runs` item runs and
-    the scores of the `lose_scores` after them, as a failed send would.
+    in the v5 typed shape (a JSON round trip, so ints stay ints), and its scores.
+    `api.experiments.list_items` reads item runs back newest first, two to a page, every
+    one of them, failed runs at level ERROR included. The next push loses its first
+    `lose_runs` item runs and the scores of the `lose_scores` after them, as a failed send
+    would. It also leaves the first `fail_items` items out of the result and shows an item
+    run with the output `Error: ...` at level ERROR for each, as the SDK does for an item
+    whose task raised. `api.trace.delete_multiple` removes the item runs of the traces it
+    names, but they stay listed for `delete_lag` more `list_items` calls, as Langfuse's
+    deletion lags.
     """
 
     def __init__(self, *, project: str = langfuse_store.PROJECT_ID) -> None:
@@ -1252,13 +1257,21 @@ class _FakeLangfuse:
         self.runs: list[dict[str, Any]] = []
         self.lose_runs = 0
         self.lose_scores = 0
+        self.fail_items = 0
+        self.serial = 0
+        self.delete_lag = 0
+        self.deleting: dict[str, int] = {}
         self.api = SimpleNamespace(
             projects=SimpleNamespace(
                 get=lambda: SimpleNamespace(data=[SimpleNamespace(id=project)])
             ),
             datasets=SimpleNamespace(get=self._dataset),
             experiments=SimpleNamespace(list_items=self._list_items),
+            trace=SimpleNamespace(delete_multiple=self._delete_traces),
         )
+
+    def _delete_traces(self, *, trace_ids: list[str]) -> None:
+        self.deleting |= dict.fromkeys(trace_ids, self.delete_lag)
 
     def _dataset(self, *, dataset_name: str) -> Any:
         if dataset_name not in self.datasets:
@@ -1297,6 +1310,10 @@ class _FakeLangfuse:
     ) -> Any:
         results = []
         for item in data:
+            if self.fail_items:
+                self.fail_items -= 1
+                self._record(run_name, item, "Error: boom", kwargs, {}, level="ERROR")
+                continue
             output = task(item=item)
             evaluations = [
                 evaluation
@@ -1308,26 +1325,40 @@ class _FakeLangfuse:
                     metadata=item.metadata,
                 )
             ]
-            results.append(output)
+            results.append(SimpleNamespace(output=output))
             if self.lose_runs:
                 self.lose_runs -= 1
                 continue
             if self.lose_scores:
                 self.lose_scores -= 1
                 evaluations = []
-            metadata = {**item.metadata, **kwargs["metadata"]}
-            self.runs.append(
-                {
-                    "experiment": run_name,
-                    "dataset": item.dataset_id,
-                    "item": item.id,
-                    "trace_id": f"trace-{len(self.runs)}",
-                    "output": json.dumps(output),
-                    "metadata": {key: str(value) for key, value in metadata.items()},
-                    "scores": {e.name: e.value for e in evaluations},
-                }
-            )
+            self._record(run_name, item, json.dumps(output), kwargs, evaluations)
         return SimpleNamespace(item_results=results)
+
+    def _record(
+        self,
+        run_name: str,
+        item: Any,
+        output: str,
+        kwargs: Mapping[str, Any],
+        evaluations: Any,
+        *,
+        level: str = "DEFAULT",
+    ) -> None:
+        metadata = {**item.metadata, **kwargs["metadata"]}
+        self.serial += 1
+        self.runs.append(
+            {
+                "experiment": run_name,
+                "dataset": item.dataset_id,
+                "item": item.id,
+                "trace_id": f"trace-{self.serial}",
+                "level": level,
+                "output": output,
+                "metadata": json.loads(json.dumps(metadata)),
+                "scores": {e.name: e.value for e in evaluations},
+            }
+        )
 
     def create_score(self, *, trace_id: str, name: str, value: Any, **_: Any) -> None:
         next(r for r in self.runs if r["trace_id"] == trace_id)["scores"][name] = value
@@ -1338,17 +1369,24 @@ class _FakeLangfuse:
     def _list_items(
         self, *, experiment_name: str, dataset_id: str, cursor: str | None, **_: Any
     ) -> Any:
-        held: dict[str, dict[str, Any]] = {}
-        for r in reversed(self.runs):
-            if (r["experiment"], r["dataset"]) == (experiment_name, dataset_id):
-                held.setdefault(r["item"], r)
-        shown = list(held.values())
+        for trace_id in list(self.deleting):
+            if not self.deleting[trace_id]:
+                self.runs = [r for r in self.runs if r["trace_id"] != trace_id]
+                del self.deleting[trace_id]
+            else:
+                self.deleting[trace_id] -= 1
+        shown = [
+            r
+            for r in reversed(self.runs)
+            if (r["experiment"], r["dataset"]) == (experiment_name, dataset_id)
+        ]
         start = int(cursor or 0)
         return SimpleNamespace(
             data=[
                 SimpleNamespace(
                     id=r["trace_id"],
                     trace_id=r["trace_id"],
+                    level=r["level"],
                     output=r["output"],
                     metadata=r["metadata"],
                     scores=[SimpleNamespace(name=name) for name in r["scores"]],
@@ -1494,6 +1532,47 @@ def test_a_push_langfuse_shows_only_in_part_fails_and_pushing_again_completes_it
     assert langfuse_store.pull(fake, resumed) == records[1:]
 
 
+def test_a_failed_task_leaves_a_run_the_next_push_clears_before_it_sends_the_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(langfuse_store, "LOOK_EVERY_S", 0.001)
+    directory = _run_directory(tmp_path)
+    records = summarise.read_records([directory / "records.jsonl"])
+    fake = _FakeLangfuse()
+    fake.fail_items = 1
+    fake.delete_lag = 50
+
+    with pytest.raises(SystemExit, match="push the run directory again"):
+        langfuse_store.push(fake, directory, tasks=entry.load_tasks(), wait_s=0)
+
+    name = langfuse_store.experiment_name(directory.name, records)
+    assert [run["level"] for run in fake.runs].count("ERROR") == 1
+    assert len(langfuse_store.pushed(fake, name)) == 2
+
+    assert langfuse_store.push(fake, directory, tasks=entry.load_tasks(), wait_s=5) == [name]
+
+    assert not [run for run in fake.runs if run["level"] == "ERROR"]
+    assert len(fake.runs) == 3
+    assert langfuse_store.pull(fake, name) == records
+
+
+def test_a_failed_run_beside_a_good_run_of_its_task_is_skipped_and_then_deleted(
+    tmp_path: Path,
+) -> None:
+    directory = _run_directory(tmp_path)
+    fake = _FakeLangfuse()
+    name = _pushed(fake, directory)
+    fake.runs.append(
+        {**fake.runs[0], "trace_id": "trace-failed", "output": "Error: boom", "level": "ERROR"}
+    )
+
+    assert len(langfuse_store.pushed(fake, name)) == 3
+
+    _pushed(fake, directory)
+
+    assert [run["trace_id"] for run in fake.runs] == ["trace-1", "trace-2", "trace-3"]
+
+
 def _without_a_secret(fake: _FakeLangfuse, directory: Path, monkeypatch: Any) -> None:
     del fake, directory
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
@@ -1549,6 +1628,22 @@ def _replaced_then_pushed_again(fake: _FakeLangfuse, directory: Path, monkeypatc
     _pushed(fake, directory)
 
 
+def _holding_a_run_that_is_not_the_tasks(
+    fake: _FakeLangfuse, directory: Path, monkeypatch: Any
+) -> None:
+    del monkeypatch
+    name = _pushed(fake, directory)
+    fake.runs[1]["output"] = "Error: boom"
+    langfuse_store.pushed(fake, name)
+
+
+def _shown_with_a_failed_run(fake: _FakeLangfuse, directory: Path, monkeypatch: Any) -> None:
+    del monkeypatch
+    name = _pushed(fake, directory)
+    fake.runs[1].update(output="Error: boom", level="ERROR")
+    langfuse_store.pull(fake, name)
+
+
 def _never_pushed(fake: _FakeLangfuse, directory: Path, monkeypatch: Any) -> None:
     del monkeypatch
     _pushed(fake, directory)
@@ -1561,7 +1656,9 @@ def _never_pushed(fake: _FakeLangfuse, directory: Path, monkeypatch: Any) -> Non
         (_without_a_secret, "needs LANGFUSE_SECRET_KEY"),
         (_in_another_project, "name project cm-another"),
         (_edited_in_langfuse, "does not hold the records pushed with it"),
+        (_holding_a_run_that_is_not_the_tasks, r"item run trace-2 \(trace trace-2\)"),
         (_shown_in_part, "shows 2 of the 3 tasks"),
+        (_shown_with_a_failed_run, "shows 2 of the 3 tasks"),
         (_replaced_in_langfuse, "do not match the runs pushed"),
         (_replaced_then_pushed_again, "that the run directory lacks"),
         (_never_pushed, "holds no runs"),

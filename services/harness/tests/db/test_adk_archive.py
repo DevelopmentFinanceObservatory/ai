@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import contextlib
 import re
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import asyncpg
 import pytest
 from harness import server as server_module
 from harness.db import adk_archive
-from harness.db.migrate import apply_pending
+from harness.db.migrate import MIGRATIONS_DIR, apply_pending
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -103,7 +105,8 @@ def _archived_split(schema: str, adk_schema: str) -> set[str]:
 
 
 async def _verb(engine: AsyncEngine, verb: str, *, apply: bool = True) -> int:
-    return await adk_archive.run(engine, verb=verb, apply=apply)
+    """Run `verb`, naming a backup id, which an applied drop needs."""
+    return await adk_archive.run(engine, verb=verb, apply=apply, backup="1732441200000")
 
 
 async def test_archive_dry_runs_then_renames_a_split_layout_and_a_rerun_finds_nothing(
@@ -253,6 +256,13 @@ def _drop_adk_rows(printed: str) -> int:
     return int(rows)
 
 
+def _restore_lacks(printed: str) -> list[list[str]]:
+    """The tables each of `restore`'s summary lines printed as missing from
+    the archive."""
+    found = re.findall(r"^adk_archive restore: .*; missing from the archive: (.+)$", printed, re.M)
+    return [[] if names == "none" else names.split(", ") for names in found]
+
+
 def _names(tables: tuple[str, ...]) -> set[str]:
     """The unqualified names of the schema-qualified `tables`."""
     return {table.rsplit(".", 1)[1] for table in tables}
@@ -311,10 +321,13 @@ async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until
     pg_empty_engine: AsyncEngine, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """An ADK-reading image started after the archive creates its tables and
-    writes a ledger session. `archive` refuses with 0005's DFA02, since no
-    `adk_ledger_imports` resolves to clear it, so the only remedy is
-    `drop-adk`, which prints the conversations it discards in a dry run and with
-    `--apply`. Startup proceeds once it has run."""
+    writes a ledger session. Startup refuses, naming the live table beside
+    its own archive twin. `archive` refuses with 0005's DFA02, since no
+    `adk_ledger_imports` resolves to clear it, so the remedy is `drop-adk`,
+    which prints the conversations it discards in a dry run and with
+    `--apply`, and refuses `--apply` without a numeric `--backup`. Startup
+    proceeds once it has run. After `drop-archive` a fresh table has no twin,
+    and startup refuses the same way."""
     await _archived_by_startup(pg_empty_engine, tmp_path)
     await _start(pg_empty_engine)
     sessions = next(statement for statement in _ADK_V1_DDL if "TABLE sessions" in statement)
@@ -328,17 +341,31 @@ async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until
     assert _names(refusal.tables) == {"sessions"}
     assert refusal.archive_present is True
     assert refusal.ledger_present is False
+    assert _names(refusal.beside) == {"sessions"}
     capsys.readouterr()
     assert await _verb(pg_empty_engine, "archive") == 1
     assert "SQLSTATE DFA02" in capsys.readouterr().err
     assert await _verb(pg_empty_engine, "drop-adk", apply=False) == 0
     assert _drop_adk_rows(capsys.readouterr().out) == 1
+    for backup in (None, "", "\u00b2", "\u0661\u0662\u0663", "12a"):
+        assert (
+            await adk_archive.run(pg_empty_engine, verb="drop-adk", apply=True, backup=backup) == 2
+        )
+    assert "sessions" in await _tables(pg_empty_engine)
     assert await _verb(pg_empty_engine, "drop-adk") == 0
-    assert _drop_adk_rows(capsys.readouterr().out) == 1
+    printed = capsys.readouterr().out
+    assert _drop_adk_rows(printed) == 1
+    assert "1732441200000" in printed
     await _start(pg_empty_engine)
     tables = await _tables(pg_empty_engine)
     assert archived <= tables
     assert "sessions" not in tables
+
+    assert await _verb(pg_empty_engine, "drop-archive") == 0
+    await _execute(pg_empty_engine, sessions, _session("c4"))
+    refusal = await _start_refused(pg_empty_engine)
+    assert (_names(refusal.tables), refusal.beside) == ({"sessions"}, ())
+    assert (refusal.archive_present, refusal.ledger_present) == (False, False)
 
 
 async def test_startup_leaves_foreign_tables_of_adks_names_alone(
@@ -357,6 +384,7 @@ async def test_startup_leaves_foreign_tables_of_adks_names_alone(
     [
         pytest.param(_ADK_V1_DDL[1:], ("adk_internal_metadata",), id="one of five missing"),
         pytest.param((), _ADK_TABLES, id="ledger only"),
+        pytest.param(_ADK_V1_DDL, ("adk_ledger_imports",), id="no ledger"),
     ],
 )
 async def test_restore_refuses_an_archive_without_all_of_adks_tables_unless_allowed(
@@ -369,6 +397,8 @@ async def test_restore_refuses_an_archive_without_all_of_adks_tables_unless_allo
     await _migrate_through_0004(pg_empty_engine, tmp_path)
     await _execute(pg_empty_engine, *tables)
     await apply_pending(pg_empty_engine)
+    if "adk_ledger_imports" in missing:
+        await _execute(pg_empty_engine, "DROP TABLE adk_archive_adk_ledger_imports")
     archived = await _tables(pg_empty_engine)
     capsys.readouterr()
 
@@ -376,8 +406,8 @@ async def test_restore_refuses_an_archive_without_all_of_adks_tables_unless_allo
         assert await _verb(pg_empty_engine, "restore", apply=apply) == 1
 
     printed = capsys.readouterr()
-    assert f"missing: {', '.join(missing)}" in printed.out
-    assert f"lacks ADK's {', '.join(missing)}" in printed.err
+    lacking = [name for name in (*_ADK_TABLES, "adk_ledger_imports") if name in missing]
+    assert _restore_lacks(printed.out) == [lacking, lacking]
     assert await _tables(pg_empty_engine) == archived
     assert adk_archive._arguments(["restore", "--allow-missing"]).allow_missing
     assert (
@@ -418,6 +448,11 @@ async def test_drop_archive_drops_every_archived_table_of_a_split_layout(
         assert await _verb(split, "archive") == 0
 
         assert await _verb(split, "drop-archive", apply=False) == 0
+        assert await _archive_relations(split, schema, adk_schema) == _archived_split(
+            schema, adk_schema
+        )
+        for backup in (None, " ", "BACKUP_ID", "12 3"):
+            assert await adk_archive.run(split, verb="drop-archive", apply=True, backup=backup) == 2
         assert await _archive_relations(split, schema, adk_schema) == _archived_split(
             schema, adk_schema
         )
@@ -542,3 +577,102 @@ def test_drop_adk_checks_the_column_signature_the_migration_checks() -> None:
     assert {name: tuple(re.findall(r"'(\w+)'", columns)) for name, columns in pairs} == (
         adk_archive._ADK_COLUMNS
     )
+
+
+def _migration_dirs(tmp_path: Path) -> tuple[Path, Path]:
+    """Directories of the files through 0002 and through 0004."""
+    dirs = (tmp_path / "through_0002", tmp_path / "through_0004")
+    for directory, last in zip(dirs, ("0002", "0004"), strict=True):
+        directory.mkdir()
+        for path in MIGRATIONS_DIR.glob("*.sql"):
+            if path.name[:4] <= last:
+                shutil.copy(path, directory / path.name)
+    return dirs
+
+
+async def _open_on_adk(engine: AsyncEngine) -> None:
+    """Conversation c1, imported, with turn 1 open on its ADK turn session
+    `c1#t1`, as the release that runs turns on ADK leaves a paused turn."""
+    await _execute(
+        engine,
+        *_ADK_V1_DDL,
+        _session("c1"),
+        _session("c1#t1", app="dfo_analyst_graph"),
+        _imported("c1"),
+        "INSERT INTO conversations (principal, conversation_id, turn_state) "
+        """VALUES ('p', 'c1', '{"turn_index": 1}')""",
+    )
+
+
+async def test_a_start_refuses_to_archive_adk_while_a_turn_is_open_on_it(
+    pg_empty_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """At 0002, with turn 1 open on ADK, a start of this image refuses with
+    DFA07 and applies nothing, and so does `archive`. Once the turn is
+    closed, as `close-open-turns` closes it, the same start applies 0003 to
+    0005."""
+    through_0002, _ = _migration_dirs(tmp_path)
+    await apply_pending(pg_empty_engine, directory=through_0002)
+    await _open_on_adk(pg_empty_engine)
+
+    with pytest.raises(asyncpg.PostgresError) as refusal:
+        await apply_pending(pg_empty_engine)
+
+    assert refusal.value.sqlstate == "DFA07"
+    assert "turn_cursors" not in await _tables(pg_empty_engine)
+    await _execute(
+        pg_empty_engine,
+        """UPDATE conversations SET turn_state = '{"turn_index": 1, "turn_recorded": true}'""",
+    )
+    assert await apply_pending(pg_empty_engine) == [
+        "0003_turns.sql",
+        "0004_card_lineage.sql",
+        "0005_rename_adk_tables.sql",
+    ]
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["not in turn_cursors", "in turn_cursors"])
+async def test_archive_refuses_a_turn_open_on_adk_that_turn_cursors_does_not_hold(
+    pg_empty_engine: AsyncEngine, tmp_path: Path, capsys: pytest.CaptureFixture[str], held: bool
+) -> None:
+    """At 0004, a turn open on ADK refuses the start and `archive` with
+    DFA07 unless `turn_cursors` holds the turn, opened there under the
+    number of a leftover ADK turn session."""
+    through_0002, through_0004 = _migration_dirs(tmp_path)
+    await apply_pending(pg_empty_engine, directory=through_0002)
+    await _open_on_adk(pg_empty_engine)
+    await apply_pending(pg_empty_engine, directory=through_0004)
+    if held:
+        await _execute(
+            pg_empty_engine,
+            "INSERT INTO turn_cursors (conversation, turn_index, node, status, inputs, state) "
+            "SELECT id, 1, 'plan', 'running', '{}', '{}' FROM conversations",
+        )
+    if held:
+        assert await apply_pending(pg_empty_engine) == ["0005_rename_adk_tables.sql"]
+    else:
+        with pytest.raises(asyncpg.PostgresError) as refusal:
+            await apply_pending(pg_empty_engine)
+        assert refusal.value.sqlstate == "DFA07"
+    capsys.readouterr()
+
+    assert await _verb(pg_empty_engine, "archive") == (0 if held else 1)
+    assert ("SQLSTATE DFA07" in capsys.readouterr().err) is not held
+
+
+async def test_a_start_archives_beside_a_foreign_sessions_table(
+    pg_empty_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """At 0004, a `sessions` table of another service, with integer
+    `app_name`, `user_id` and `id` and without ADK's other columns, is not
+    ADK's: the DFA07 check passes over it and the start applies 0005."""
+    _, through_0004 = _migration_dirs(tmp_path)
+    await apply_pending(pg_empty_engine, directory=through_0004)
+    await _execute(
+        pg_empty_engine,
+        "CREATE TABLE sessions (app_name integer, user_id integer, id integer)",
+        "INSERT INTO conversations (principal, conversation_id, turn_state) "
+        """VALUES ('p', 'c1', '{"turn_index": 1}')""",
+    )
+
+    assert await apply_pending(pg_empty_engine) == ["0005_rename_adk_tables.sql"]

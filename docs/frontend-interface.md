@@ -66,15 +66,15 @@ the list of blocks on the canvas.
 
 ## 2. Endpoints
 
-| Method | Path                      | Response                                         |
-| ------ | ------------------------- | ------------------------------------------------ |
-| POST   | `/api/studio/turn`        | SSE stream of frames                             |
-| POST   | `/api/studio/interrupt`   | SSE stream of frames (continues a paused turn)   |
-| POST   | `/api/studio/composition` | JSON: the composition manifest after the request |
-| POST   | `/api/studio/cancel`      | HTTP 204, no body                                |
-| POST   | `/api/studio/resume`      | SSE stream of frames (continues a running turn)  |
-| GET    | `/api/studio/state`       | JSON: the conversation as stored                 |
-| GET    | `/healthz`                | JSON liveness                                    |
+| Method | Path                      | Response                                               |
+| ------ | ------------------------- | ------------------------------------------------------ |
+| POST   | `/api/studio/turn`        | SSE stream of frames                                   |
+| POST   | `/api/studio/interrupt`   | SSE stream of frames (continues a paused turn)         |
+| POST   | `/api/studio/composition` | JSON: the composition manifest after the request       |
+| POST   | `/api/studio/cancel`      | HTTP 204, no body; JSON for a Stop naming another turn |
+| POST   | `/api/studio/resume`      | SSE stream of frames (continues a running turn)        |
+| GET    | `/api/studio/state`       | JSON: the conversation as stored                       |
+| GET    | `/healthz`                | JSON liveness                                          |
 
 ## 3. The stream
 
@@ -427,23 +427,13 @@ Concurrency and atomicity:
 
 ### 4.4 `turn.cancel` → POST `/api/studio/cancel`
 
-Fields: `kind: "turn.cancel"`, `schema_version: 1`, `conversation_id`.
-The server stops the conversation's active stream and returns HTTP 204.
-The active stream may be running on a different server instance than the
-one that answers this request; the server finds it there too and stops
-it within about 5 seconds. The stopped stream ends with an `error` frame
-whose code is `cancelled`. It is the stream's only ending frame, so a Stop
-that lands as the turn pauses ends the stream on `cancelled` with no
-`plan.proposed` or `elicitation.request` before it. A stream running a
-plan-card `switch` is the exception: `/cancel` stops the switch, and the stream ends on a
-`plan.proposed` re-offering the unchanged plan with a fresh
-`interrupt_id` and `switch_failed.code` `switch_cancelled`. Keep reading
-the stream after the call. A second `/cancel`, or 10 seconds with no
-re-offered plan, ends it with the `cancelled` error frame. The call is
-safe when nothing streams. A
-closed connection stops the stream too and leaves the turn open where it
-stopped, for `/resume` to carry on (§4.5). Proxies can hide a closed
-connection. Use `/cancel` for the Stop button.
+Fields: `kind: "turn.cancel"`, `schema_version: 1`, `conversation_id`, `turn_index?`. The server stops the conversation's active stream and returns HTTP 204. The active stream may be running on a different server instance than the one that answers this request; the server finds it there too and stops it within about 5 seconds. The stopped stream ends with an `error` frame whose code is `cancelled`. It is the stream's only ending frame, so a Stop that lands as the turn pauses ends the stream on `cancelled` with no `plan.proposed` or `elicitation.request` before it. A stream running a plan-card `switch` is the exception: `/cancel` stops the switch, and the stream ends on a `plan.proposed` re-offering the unchanged plan with a fresh `interrupt_id` and `switch_failed.code` `switch_cancelled`. Keep reading the stream after the call. A second `/cancel`, or 10 seconds with no re-offered plan, ends it with the `cancelled` error frame. The call is safe when nothing streams. A closed connection stops the stream too and leaves the turn open where it stopped, for `/resume` to carry on (§4.5). Proxies can hide a closed connection. Use `/cancel` for the Stop button.
+
+Set `turn_index` to the turn the page is stopping, the index its stream's `x-dfo-turn-index` header named (§3). A page that sends a `/turn`, which starts a new turn, drops the index it held until the new stream's header names one, and sends its Stops without `turn_index` meanwhile. Such a Stop reaches the new turn once that turn's claim has landed. One that lands earlier, on another server instance, can answer 204 without reaching the new turn, so a page that sent a Stop in that window sends it again with the new `turn_index` once the header arrives.
+
+When the conversation's latest turn is `turn_index`, the server stops it and answers HTTP 204. When the latest turn is another, one begun from another tab say, the server answers HTTP 200 with `{"code": "turn_moved", "turn_index": <the latest turn>}` and the conversation stays as it was. The page's own turn has already ended, and the later turn runs on. The body holds exactly these two members, with no error envelope. `/turn` answers a stale `after_turn` in another shape, a 409 `edit_conflict` whose `constraint_id` is `turn_moved`. Without `turn_index`, the server stops whatever turn the conversation runs.
+
+A server from before `turn_index` answers 422 to a Stop carrying it. On a 422, send the Stop again without `turn_index`.
 
 ### 4.5 `turn.resume` → POST `/api/studio/resume`
 
@@ -467,7 +457,7 @@ The server carries on the turn on a new stream, which you read as any other. Sen
 Query: `conversation_id`, and `since`, the number of the last turn the page holds (0 for none). The answer is JSON. The call takes no lease, so it answers while a turn streams, and it changes nothing. An unknown `conversation_id` answers 404 `not_found`. A member with no value is left out.
 
 - `turn`: `{index, status, trace_id, user_message, approved?, lease_live, retry_after_seconds?}`, absent before the first turn. `user_message` is the turn's prompt. Show it above a resumed reply when the page lacks the prompt. `approved` holds the `plan.approved` frame of each plan the open turn approved, one per `revision`. Attach any the page lacks to the turn's message. `status` is `running`, `paused`, `done`, `failed`, `cancelled` or `abandoned`. `retry_after_seconds` is set while `lease_live` is true.
-- `closed_since`: the closed turns after `since`, oldest first, at most 3, each `{turn_index, user_message, reply, component_ids, cards, approved?, error?, new_question?}`. `approved` holds the `plan.approved` frame of each plan the turn approved, one per `revision`. `cards` holds each card the turn made, in `component_ids` order, at its current revision, `{component_id, type, title, revision, fact_summary?}`, so a card a later turn revised shows that revision. It holds no `payload` or `provenance`. Read the resolved revision from the presentation platform by `component_id`. `reply` is the text `message.complete` sent, empty when the turn closed with none. `error` is the code of a turn that did not end cleanly. `new_question` is set on a turn ended by a new question (§6), which the page sends as the next turn when it holds none after it.
+- `closed_since`: the closed turns after `since`, oldest first, at most 3, each `{turn_index, user_message, reply, component_ids, cards, approved?, error?, new_question?}`. `approved` holds the `plan.approved` frame of each plan the turn approved, one per `revision`. `cards` holds each card the turn made, in `component_ids` order, at its current revision, `{component_id, type, title, revision, fact_summary?, unit_change?, replaces?}`, so a card a later turn revised shows that revision. `unit_change` and `replaces` take `component.created`'s names and shapes (4.1.4), so the page applies one replacement and Change unit rule to a card from a state read and a card from a stream. `unit_change` is the card's offer now, set while the card is on the canvas. `replaces` comes on the closed turn that swapped the card in, and a card an earlier release stored has none. It holds no `payload` or `provenance`. Read the resolved revision from the presentation platform by `component_id`. `reply` is the text `message.complete` sent, empty when the turn closed with none. `error` is the code of a turn that did not end cleanly. `new_question` is set on a turn ended by a new question (§6), which the page sends as the next turn when it holds none after it.
 - `closed_total`: how many closed turns the conversation holds, the index of the last one. While the page holds fewer, read again with `since` set to the last `turn_index` returned.
 - `pause`: on a paused turn, `{interrupt_id, kind, frames}`. `kind` is `plan` or `elicitation`. `frames` are the frames the pause was sent as, its `plan.proposed` or `elicitation.request` last. Feed them to the same handlers as live frames.
 - `manifest`: the composition manifest, absent when there is no canvas.
