@@ -42,8 +42,8 @@ Both drops name every table in one `DROP TABLE` without `CASCADE`, so a
 foreign key among the dropped tables resolves and PostgreSQL refuses the
 statement when anything else, such as a view, depends on one of them. They
 cannot be undone, so with `--apply` each refuses, before it connects,
-unless `--backup BACKUP_ID` names the on-demand Cloud SQL backup taken for
-it, which it prints with the statements. The job cannot read Cloud SQL's
+unless `--backup BACKUP_ID` gives the numeric id of the on-demand Cloud
+SQL backup taken for it, which it prints with the statements. The job cannot read Cloud SQL's
 backup list, so the name is the operator's record, checked by the runbook
 step that takes the backup.
 
@@ -321,7 +321,8 @@ async def _restore(conn: Any, *, allow_missing: bool = False) -> list[str]:
             "restore renames nothing, because names it would restore are taken:\n"
             + "\n".join(f"  {line}" for line in taken)
             + "\nAn image that reads ADK's tables created them after the archive. Drop them "
-            "with `drop-adk --apply`, which discards what that image wrote to them, or rename "
+            "with `drop-adk --apply --backup BACKUP_ID` after a backup, which discards what that "
+            "image wrote to them, or rename "
             "them by hand, then run restore again."
         )
     statements = []
@@ -432,12 +433,12 @@ async def run(
     roll it back otherwise, print what it ran, and return the exit status.
     `allow_missing` lets `restore` run when the archive lacks some of ADK's
     tables. A drop (`DROPS`) with `apply` returns 2 without connecting unless
-    `backup` names the backup taken before it."""
-    if apply and verb in DROPS and not (backup or "").strip():
+    `backup` is the numeric id of the backup taken before it."""
+    if apply and verb in DROPS and not (backup or "").isdigit():
         print(
             f"adk_archive {verb}: --apply drops tables for good, so it needs --backup "
-            "BACKUP_ID, the on-demand Cloud SQL backup taken for it (deploy/README.md, The "
-            "archive job)",
+            "BACKUP_ID, the numeric id of the on-demand Cloud SQL backup taken for it "
+            "(deploy/README.md, The archive job)",
             file=sys.stderr,
         )
         return 2

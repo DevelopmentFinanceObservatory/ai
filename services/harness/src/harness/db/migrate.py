@@ -27,6 +27,11 @@ engine's bound. Nothing bounds a run as a whole. At startup Cloud Run's
 killed and the transaction rolls back, so a run that needs longer goes out
 of band.
 
+A pending file named in `harness.db.cutover_gates.BEFORE` has its check run
+in the same transaction just before it, so a check added after the file was
+recorded somewhere runs where the file applies and nowhere else, and adds
+no file an older image would lack.
+
 Each file runs through asyncpg's simple-query protocol (`Connection.execute`
 with no arguments), which accepts several statements in one string.
 """
@@ -39,6 +44,8 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine
+
+from harness.db.cutover_gates import BEFORE
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +158,8 @@ async def apply_pending(
                     if applied[path.name] != digest:
                         raise MigrationChecksumError(f"{path.name} changed since it was applied")
                     continue
+                if (check := BEFORE.get(path.name)) is not None:
+                    await conn.execute(check, timeout=wait)
                 await conn.execute(path.read_text(), timeout=wait)
                 await record_applied(conn, path)
                 ran.append(path.name)

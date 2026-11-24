@@ -1,15 +1,16 @@
 """The cutover gate: the release that stops reading ADK refuses to start,
 with SQLSTATE DFA02 and nothing applied, while an ADK ledger session is not
 cleared (imported or kept as of its last ADK write, 0003) or holds a live
-`studio:segment` lease (0002_live_ledger_lease_gate, which sorts before 0003
-and runs in its transaction). The case table is the one release 1's `gate`
-verb and release 3's 0005 are pinned by."""
+`studio:segment` lease (`harness.db.cutover_gates.LIVE_LEDGER_LEASE_GATE`,
+run in 0003's transaction just before it). The case table is the one the
+import job's `gate` verb and 0005 are pinned by."""
 
 from __future__ import annotations
 
 import json
 import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import asyncpg
@@ -19,8 +20,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 _MIGRATION = "0003_turns.sql"
-# The migrations release 1 shipped.
-_RELEASE_1 = ("0001_conversations.sql", "0002_adk_ledger_imports.sql")
+# The migrations before 0003.
+_BEFORE_0003 = ("0001_conversations.sql", "0002_adk_ledger_imports.sql")
 
 # ADK's v1 `sessions` as google-adk 2.13 creates it on PostgreSQL
 # (`google/adk/sessions/schemas/v1.py`, StorageSession).
@@ -45,10 +46,19 @@ def _session(
 
 def _leased(expires_at: object) -> str:
     """A ledger state whose `studio:segment` lease expires at `expires_at`,
-    as the revision before the import wrote one."""
+    as the revision before the import wrote one. A number is seconds from
+    now, read when the test runs."""
+    if isinstance(expires_at, int):
+        expires_at = time.time() + expires_at
     return json.dumps(
         {"studio:segment": {"id": "seg", "owner": "old", "expires_at": expires_at, "cancel": False}}
     )
+
+
+def _live_session(cid: str, seconds: int) -> Callable[[], str]:
+    """A ledger session whose lease lapses `seconds` after the test starts
+    it, built when the test runs."""
+    return lambda: _session(cid, state=_leased(seconds))
 
 
 def _imported(cid: str, *, updated: str = _UPDATED) -> str:
@@ -81,7 +91,7 @@ def _conversation(cid: str) -> str:
 
 async def _migrate_before_0003(engine: AsyncEngine, tmp_path: Path) -> None:
     """Apply the migrations release 1 shipped, 0001 and 0002."""
-    for name in _RELEASE_1:
+    for name in _BEFORE_0003:
         shutil.copy(MIGRATIONS_DIR / name, tmp_path / name)
     await apply_pending(engine, directory=tmp_path)
 
@@ -158,7 +168,7 @@ async def _refused(engine: AsyncEngine) -> str:
         pytest.param(
             (_ADK_SESSIONS,),
             (
-                _session("c1", state=_leased(time.time() + 600)),
+                _live_session("c1", 600),
                 *(_imported("c1"), _conversation("c1")),
             ),
             ["p/c1"],
@@ -167,7 +177,7 @@ async def _refused(engine: AsyncEngine) -> str:
         pytest.param(
             (_ADK_SESSIONS,),
             (
-                _session("c1", state=_leased(time.time() - 60)),
+                _live_session("c1", -60),
                 *(_imported("c1"), _conversation("c1")),
             ),
             [],
@@ -198,11 +208,11 @@ async def test_0003_waits_for_every_ledger_session_to_be_imported_or_kept(
     pg_empty_engine: AsyncEngine,
     tmp_path: Path,
     tables: tuple[str, ...],
-    rows: tuple[str, ...],
+    rows: tuple[str | Callable[[], str], ...],
     uncleared: list[str],
 ) -> None:
     await _migrate_before_0003(pg_empty_engine, tmp_path)
-    await _execute(pg_empty_engine, *tables, *rows)
+    await _execute(pg_empty_engine, *tables, *(row() if callable(row) else row for row in rows))
 
     if not uncleared:
         assert _MIGRATION in await apply_pending(pg_empty_engine)
@@ -241,56 +251,33 @@ async def test_one_run_from_no_harness_migration_refuses_a_never_imported_ledger
         assert (await conn.execute(text("SELECT to_regclass('conversations')"))).scalar() is None
 
 
-_LEASE_GATE = "0002_live_ledger_lease_gate.sql"
-
-
-async def test_the_lease_gate_runs_in_the_stage_2_transaction_before_0003(
+async def test_the_lease_gate_runs_in_0003s_transaction_before_it(
     pg_empty_engine: AsyncEngine, tmp_path: Path
 ) -> None:
-    """Production at the stage-2 deploy: release 1 applied 0001 and 0002. The
-    lease gate, 0003 and 0004 are pending and apply in one run, the gate
-    first. A live lease refuses the run, which records and creates nothing;
-    once it lapses the same run applies all three in that order."""
+    """0001 and 0002 are applied, 0003 and later pending. A live lease
+    refuses the run before 0003, which records and creates nothing; once the
+    lease lapses the same run applies 0003 and the rest."""
     await _migrate_before_0003(pg_empty_engine, tmp_path)
-    leased = _session("c1", state=_leased(time.time() + 600))
+    leased = _session("c1", state=_leased(600))
     await _execute(pg_empty_engine, _ADK_SESSIONS, leased, _imported("c1"), _conversation("c1"))
 
     message = await _refused(pg_empty_engine)
 
     assert "hold a live `studio:segment` lease: p/c1." in message
-    assert await _applied(pg_empty_engine) == sorted(_RELEASE_1)
-    await _execute(
-        pg_empty_engine,
-        f"UPDATE sessions SET state = '{_leased(time.time() - 60)}'::jsonb",
-    )
-    ran = await apply_pending(pg_empty_engine)
-    assert ran[:3] == [_LEASE_GATE, _MIGRATION, "0004_card_lineage.sql"]
+    assert await _applied(pg_empty_engine) == sorted(_BEFORE_0003)
+    await _execute(pg_empty_engine, f"UPDATE sessions SET state = '{_leased(-60)}'::jsonb")
+    assert (await apply_pending(pg_empty_engine))[:2] == [_MIGRATION, "0004_card_lineage.sql"]
 
 
-async def test_the_lease_gate_applies_alone_and_checks_nothing_after_0005(
-    pg_empty_engine: AsyncEngine, tmp_path: Path
+async def test_the_lease_gate_never_runs_once_0003_is_recorded(
+    pg_empty_engine: AsyncEngine,
 ) -> None:
-    """Dev: 0001 to 0005 were applied before the lease gate shipped, and
-    0005 archived ADK's `sessions`. The gate sorts below applied files, which
-    `apply_pending` allows for a file not yet applied: it runs alone, finds
-    no `sessions` table, records itself, and a second run applies nothing.
-    A live lease left in the archive is not read."""
-    await _migrate_before_0003(pg_empty_engine, tmp_path)
-    await _execute(pg_empty_engine, _ADK_SESSIONS, _session("c1"), _imported("c1"))
-    await _execute(pg_empty_engine, _conversation("c1"))
-    for path in MIGRATIONS_DIR.glob("*.sql"):
-        if path.name != _LEASE_GATE:
-            shutil.copy(path, tmp_path / path.name)
-    assert await apply_pending(pg_empty_engine, directory=tmp_path) == [
-        _MIGRATION,
-        "0004_card_lineage.sql",
-        "0005_rename_adk_tables.sql",
-    ]
-    await _execute(
-        pg_empty_engine,
-        f"UPDATE adk_archive_sessions SET state = '{_leased(time.time() + 600)}'::jsonb",
-    )
+    """Every shipped file is applied and ADK's tables are archived. A fresh
+    `sessions` an ADK-reading image created since holds a live lease, and a
+    start applies nothing and refuses nothing, since 0003 is not pending."""
+    await _execute(pg_empty_engine, _ADK_SESSIONS)
+    shipped = await apply_pending(pg_empty_engine)
+    assert _MIGRATION in shipped and "0005_rename_adk_tables.sql" in shipped
+    await _execute(pg_empty_engine, _ADK_SESSIONS, _session("c1", state=_leased(600)))
 
-    assert await apply_pending(pg_empty_engine) == [_LEASE_GATE]
     assert await apply_pending(pg_empty_engine) == []
-    assert _LEASE_GATE in await _applied(pg_empty_engine)

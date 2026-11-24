@@ -104,8 +104,8 @@ def _archived_split(schema: str, adk_schema: str) -> set[str]:
 
 
 async def _verb(engine: AsyncEngine, verb: str, *, apply: bool = True) -> int:
-    """Run `verb`, naming a backup, which an applied drop needs."""
-    return await adk_archive.run(engine, verb=verb, apply=apply, backup="before-drop")
+    """Run `verb`, naming a backup id, which an applied drop needs."""
+    return await adk_archive.run(engine, verb=verb, apply=apply, backup="1732441200000")
 
 
 async def test_archive_dry_runs_then_renames_a_split_layout_and_a_rerun_finds_nothing(
@@ -354,13 +354,23 @@ async def test_startup_warns_beside_a_fresh_adk_table_created_after_the_whole_ar
     assert await _verb(pg_empty_engine, "drop-adk") == 0
     printed = capsys.readouterr().out
     assert _drop_adk_rows(printed) == 1
-    assert "ran and committed, after backup before-drop:" in printed
+    assert "ran and committed, after backup 1732441200000:" in printed
     caplog.clear()
     await _start(pg_empty_engine)
     assert not [record for record in caplog.records if "DFA05" in record.getMessage()]
+
     tables = await _tables(pg_empty_engine)
     assert archived <= tables
     assert "sessions" not in tables
+    # Once `drop-archive` has removed the archive and the import ledger, fresh
+    # tables a stray image creates are logged the same way.
+    assert await _verb(pg_empty_engine, "drop-archive") == 0
+    await _execute(pg_empty_engine, sessions, _session("c4"))
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger=server_module.__name__):
+        await _start(pg_empty_engine)
+    (warned,) = [record.getMessage() for record in caplog.records if "DFA05" in record.getMessage()]
+    assert "no archive and no adk_ledger_imports" in warned
 
 
 async def test_startup_leaves_foreign_tables_of_adks_names_alone(
@@ -443,7 +453,7 @@ async def test_drop_archive_drops_every_archived_table_of_a_split_layout(
         assert await _archive_relations(split, schema, adk_schema) == _archived_split(
             schema, adk_schema
         )
-        for backup in (None, " "):
+        for backup in (None, " ", "BACKUP_ID", "12 3"):
             assert await adk_archive.run(split, verb="drop-archive", apply=True, backup=backup) == 2
         assert await _archive_relations(split, schema, adk_schema) == _archived_split(
             schema, adk_schema

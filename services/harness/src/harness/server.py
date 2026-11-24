@@ -245,9 +245,10 @@ async def _retry_startup_step(
 
 class _MigrationRefusedError(RuntimeError):
     """A migration raised a SQLSTATE beginning `DFA`, its own refusal to run
-    against this database (`0002_live_ledger_lease_gate.sql`, `0003_turns.sql`
-    and `0005_rename_adk_tables.sql`), or `_check_beside_adk_tables` refused
-    with `DFA05`. The database does
+    against this database (`0003_turns.sql`, the check
+    `harness.db.cutover_gates` runs before it, and
+    `0005_rename_adk_tables.sql`), or `_check_beside_adk_tables` refused with
+    `DFA05`. The database does
     not change by waiting. The message leads with the SQLSTATE, which
     deploy/README.md lists with each refusal's manual step. A `DFA05`
     refusal also carries the `tables` it names and `archive_present`,
@@ -279,39 +280,43 @@ async def _check_beside_adk_tables(engine: AsyncEngine) -> None:
     ADK's columns (`harness.db.adk_archive.live_adk_tables`), and act on what
     the archive (`harness.db.adk_archive.archive_state`) says they are.
 
-    With the whole archive in place, every table 0005 renamed still under its
-    `adk_archive_<name>`, nothing was restored, so the live tables are fresh
-    ones an ADK-reading image created after the archive. They hold only what
-    that image wrote since, which this image never reads. Refusing would stop
-    the serving revision scaling out or replacing an instance without
-    stopping that image, so this logs an error naming `DFA05` and the tables,
-    for an alert to match, and the start goes on.
+    It runs after the migrations, so 0005 is recorded and the tables it
+    found were archived. Two states mean nothing was restored since: the
+    whole archive in place, every table 0005 renamed still under its
+    `adk_archive_<name>`, or no archive, no table of an archive name and no
+    `adk_ledger_imports`, as `drop-archive` leaves it (`restore` brings the
+    ledger back with ADK's tables). In both the live tables are fresh ones an
+    ADK-reading image created after the archive. They hold only what that
+    image wrote since, which this image never reads. Refusing would stop the
+    serving revision scaling out or replacing an instance without stopping
+    that image, so this logs an error naming `DFA05` and the tables, for an
+    alert to match, and the start goes on.
 
-    Otherwise, with no archive or part of it, as after a rollback and
-    `restore --apply`, the live tables hold ADK's restored history and an
-    image that reads them may be serving, so this raises
-    `_MigrationRefusedError` with `DFA05` and the image does not start. The
-    message says whether the archive resolves and names each table of an
-    archive name that resolves without the archive's columns.
-    deploy/README.md's `DFA05` entry gives the step for each case."""
+    Otherwise, as after a rollback and `restore --apply`, the live tables
+    can hold ADK's restored history and an image that reads them may be
+    serving, so this raises `_MigrationRefusedError` with `DFA05` and the
+    image does not start. The message says whether the archive resolves and
+    names each table of an archive name that resolves without the archive's
+    columns. deploy/README.md's `DFA05` entry gives the step for each case."""
     tables = await live_adk_tables(engine)
     if not tables:
         return
     archive, foreign = await archive_state(engine)
-    if len(archive) == len(ARCHIVED):
+    ledger = await ledger_resolves(engine)
+    whole = len(archive) == len(ARCHIVED)
+    if whole or not (archive or foreign or ledger):
         logger.error(
-            "DFA05: ADK's tables resolve on search_path under their own names beside the "
-            "whole archive: %s. An image that reads ADK's tables started after the archive "
-            "and created them, and what it writes there is in neither the harness tables nor "
-            "the archive. This image starts anyway. deploy/README.md's DFA05 entry gives the "
-            "step.",
+            "DFA05: ADK's tables resolve on search_path under their own names beside %s: %s. "
+            "An image that reads ADK's tables started after the archive and created them, and "
+            "what it writes there is in neither the harness tables nor the archive. This image "
+            "starts anyway. deploy/README.md's DFA05 entry gives the step.",
+            "the whole archive" if whole else "no archive and no adk_ledger_imports",
             ", ".join(tables),
         )
         return
     archived = f"The archive resolves: {', '.join(archive)}." if archive else "No archive resolves."
     for qualified in foreign:
         archived += f" {qualified} resolves but is not the archive."
-    ledger = await ledger_resolves(engine)
     archived += (
         " adk_ledger_imports resolves under its own name."
         if ledger
