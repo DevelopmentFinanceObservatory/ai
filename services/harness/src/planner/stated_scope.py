@@ -298,19 +298,6 @@ async def read_stated_scope(
     return None
 
 
-def stated_scope_unread() -> dict[str, object]:
-    """The `SURFACE_UNAVAILABLE` problem for a text admission needs that no reading is
-    held for (`submission.service._stated_reading`). The same proposal reads it first,
-    so it can succeed later."""
-    return problem(
-        ProblemCode.SURFACE_UNAVAILABLE,
-        "Whose spending the user's words ask for could not be read from Search just now, so "
-        "nothing was recorded; propose the plan again.",
-        outcome=Outcome.REFUSED,
-        detail={"read": "stated_scope"},
-    )
-
-
 def _stated_scope_unreadable(*, status: int | None, code: str | None) -> dict[str, object]:
     """The `STATED_SCOPE_UNREADABLE` problem for a read Search refused in a way no retry
     changes. It ends the entry (`harness.sentences.TERMINAL_PROPOSE_CODES`), since every
