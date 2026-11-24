@@ -53,6 +53,7 @@ from pydantic import (
     WrapValidator,
     model_validator,
 )
+from pydantic.json_schema import WithJsonSchema
 from pydantic_core import PydanticCustomError
 
 logger = logging.getLogger(__name__)
@@ -387,8 +388,8 @@ MAX_TURN_REQUEST_BYTES = MAX_SEEDS * MAX_SEED_SPEC_BYTES + 65_536
 MAX_INTERRUPT_TEXT_CHARS = 16_000
 
 # The validation context key under which an interrupt `/interrupt` stored is rebuilt
-# (`harness.studio._answer_again`). Stored words were taken before the cap and stand,
-# so `MAX_INTERRUPT_TEXT_CHARS` holds for a request's own words only.
+# (`harness.studio._answer_again`). `MAX_INTERRUPT_TEXT_CHARS` holds for a request's
+# own words, and a stored answer is carried whole, whatever its length.
 STORED_INTERRUPT = "stored_interrupt"
 
 # The most free-text answers one interrupt carries: one per question of an
@@ -415,8 +416,13 @@ def _within_word_cap(value: str | None, info: ValidationInfo) -> str | None:
     return value
 
 
-# The user's own words in an interrupt: an amendment or a free-text answer.
-UserWords = Annotated[str, AfterValidator(_within_word_cap)]
+# The user's own words in an interrupt: an amendment or a free-text answer. The schema
+# states the cap, which `_within_word_cap` applies.
+UserWords = Annotated[
+    str,
+    AfterValidator(_within_word_cap),
+    WithJsonSchema({"type": "string", "maxLength": MAX_INTERRUPT_TEXT_CHARS}),
+]
 
 # The most `client_features` values a request may declare. A client names the
 # question forms it renders, a handful; one this release does not know is ignored
@@ -1096,7 +1102,12 @@ class TextAnswer(_WireModel):
     """The user answered in their own words (`allow_free_text`)."""
 
     kind: Literal["text"]
-    text: Annotated[UserWords, Field(min_length=1)]
+    text: Annotated[
+        str,
+        Field(min_length=1),
+        AfterValidator(_within_word_cap),
+        WithJsonSchema({"type": "string", "minLength": 1, "maxLength": MAX_INTERRUPT_TEXT_CHARS}),
+    ]
 
 
 class SkippedAnswer(_WireModel):

@@ -756,8 +756,8 @@ def _given_answers(
     (question,) = pending.questions
     if body.payload in question.options:
         return {question.id: OptionAnswer(kind="option", option_id=body.payload)}
-    # `body` held the payload within the cap on new words, or was rebuilt from a stored
-    # answer that stands (`STORED_INTERRUPT`), so the answer takes it whole.
+    # `body` holds the payload within the cap on a request's own words, or is rebuilt
+    # from a stored answer, which is carried whole (`STORED_INTERRUPT`).
     return {
         question.id: TextAnswer.model_validate(
             {"kind": "text", "text": body.payload}, context={STORED_INTERRUPT: True}
@@ -1688,7 +1688,7 @@ def _answer_again(
     names the revision of the plan it switched on, the entry's own."""
     answer = pending.answer or {}
     switch = answer.get("switch") or {}
-    # Words stored before the cap on them stand (`STORED_INTERRUPT`).
+    # A stored answer is carried whole, whatever its length (`STORED_INTERRUPT`).
     return InterruptResponse.model_validate(
         {
             "kind": "interrupt.response",

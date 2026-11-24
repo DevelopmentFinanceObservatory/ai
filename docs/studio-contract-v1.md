@@ -524,7 +524,7 @@ An elicitation opened before this delta and still paused takes its one
 answer as `payload` (an offered option id, or free text). Any other
 elicitation refuses `payload`. `schema_version` stays 1.
 
-`/interrupt` reads at most 641,536 bytes of body and refuses more with 413 `resource_exhausted` before parsing. `payload` and a `text` answer take at most 16,000 characters each. A longer one gets a 422 `string_too_long` on the field. An answer stored before these caps is carried whole by `/resume`.
+`/interrupt` reads at most 641,536 bytes of body and refuses more with 413 `resource_exhausted` before parsing. `payload` and a `text` answer take at most 16,000 characters each. A longer one gets a 422 `string_too_long` on the field. `/resume` carries a stored answer whole, whatever its length.
 
 ## Plan summary, answer step, failed switch and approval (delta 22, v1.7)
 

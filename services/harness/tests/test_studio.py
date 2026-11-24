@@ -12373,6 +12373,12 @@ async def test_a_request_past_the_body_cap_is_refused_before_it_is_parsed() -> N
             id="text-past-its-cap",
         ),
         pytest.param(
+            {"answers": {"q1": {"kind": "text", "text": ""}}},
+            422,
+            "string_too_short",
+            id="empty-text",
+        ),
+        pytest.param(
             {"client_features": [f"f{i}" for i in range(MAX_CLIENT_FEATURES + 1)]},
             422,
             "too_long",
@@ -12406,6 +12412,17 @@ async def test_an_interrupt_past_its_bounds_is_refused_before_it_touches_the_con
         elicitation["interrupt_id"]
         in app.state.studio.store.current(PRINCIPAL, CONVERSATION).pending
     )
+
+
+def test_the_interrupt_schema_states_the_cap_on_the_users_words() -> None:
+    """A client built from the schema sees `MAX_INTERRUPT_TEXT_CHARS` on an amendment
+    and on a free-text answer."""
+    schema = InterruptResponse.model_json_schema()
+    (payload,) = [s for s in schema["properties"]["payload"]["anyOf"] if s["type"] == "string"]
+    text = schema["$defs"]["TextAnswer"]["properties"]["text"]
+
+    assert payload["maxLength"] == MAX_INTERRUPT_TEXT_CHARS
+    assert (text["minLength"], text["maxLength"]) == (1, MAX_INTERRUPT_TEXT_CHARS)
 
 
 async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block(

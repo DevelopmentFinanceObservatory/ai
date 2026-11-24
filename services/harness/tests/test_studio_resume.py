@@ -1258,7 +1258,7 @@ def test_a_carried_answer_stored_past_the_word_cap_is_carried_whole(
     legacy: bool,
 ) -> None:
     """The cap on a request's own words (`MAX_INTERRUPT_TEXT_CHARS`) holds for new
-    input only: an answer `/interrupt` stored before the cap is rebuilt for `/resume`
+    input only: an answer `/interrupt` stored past the cap is rebuilt for `/resume`
     in full, and a legacy entry's free-text payload answers its one question whole."""
     pending = _PendingInterrupt(
         adk_id="int_1",
