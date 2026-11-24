@@ -1,14 +1,15 @@
 """Archives, restores and drops ADK's session tables.
 
-`python -m harness.db.adk_archive VERB [--apply]` runs one verb in one
-transaction and prints each statement it ran. Without `--apply` it rolls the
-transaction back, so a dry run checks everything the verb would do, the
-database's own refusals included, and changes nothing. With `--apply` it
-commits.
+`python -m harness.db.adk_archive VERB [--apply] [--allow-missing]
+[--backup BACKUP_ID]` runs one verb in one transaction and prints each
+statement it ran. Without `--apply` it rolls the transaction back, so a dry
+run checks everything the verb would do, the database's own refusals
+included, and changes nothing. With `--apply` it commits.
 
 - `archive` runs `0005_rename_adk_tables.sql`, the migration that renames
-  ADK's five tables and `adk_ledger_imports` to `adk_archive_<name>`, so its
-  checks and its rename are the migration's own, and records the file in
+  ADK's five tables and `adk_ledger_imports` to `adk_archive_<name>`, after
+  the check startup runs before it (`harness.db.cutover_gates.BEFORE`, DFA07),
+  so its checks and its rename are the migration's own, and records the file in
   `harness_schema_migrations` as applied when it is not recorded yet. The
   file is one `DO` block and renames nothing a second time, so a rerun
   finds nothing to do.
@@ -18,8 +19,10 @@ commits.
   refuses to start beside the restored tables
   (`harness.server._refuse_beside_adk_tables`); deploy/README.md's `DFA05`
   entry gives the step for each case. It prints which of ADK's five tables
-  it restores and refuses when anything is archived but not all five, the
-  import ledger alone included, unless `--allow-missing` is given. With
+  it restores and refuses when anything is archived but not all five and
+  the import ledger, `adk_archive_adk_ledger_imports`, unless
+  `--allow-missing` is given: without the ledger, ADK's restored history
+  has no import records, and the import job cannot clear it. With
   nothing archived it finds nothing to do, so a rerun after a restore
   changes nothing. It refuses before renaming anything when an
   `adk_archive_<name>` table lacks the columns of the table it archived,
@@ -40,7 +43,12 @@ commits.
 
 Both drops name every table in one `DROP TABLE` without `CASCADE`, so a
 foreign key among the dropped tables resolves and PostgreSQL refuses the
-statement when anything else, such as a view, depends on one of them.
+statement when anything else, such as a view, depends on one of them. They
+cannot be undone, so with `--apply` each refuses, before it connects,
+unless `--backup BACKUP_ID` gives the numeric id of the on-demand Cloud
+SQL backup taken for it, which it prints with the statements. The job cannot read Cloud SQL's
+backup list, so the id is the operator's record, checked by the runbook
+step that takes the backup.
 
 Each verb's transaction takes the advisory lock and the statement and lock
 timeouts of `harness.db.migrate`, so it never runs beside a starting
@@ -52,8 +60,8 @@ module connects as the harness does (`harness.settings.Settings`,
 `SESSION_STORE_*` settings over the Cloud SQL Connector with IAM auth.
 
 Exit status: 0 when the verb ran or found nothing to do, 1 when it or the
-database refused, and 2 on a usage error or with no or an invalid database
-configuration.
+database refused, and 2 on a usage error, a drop with `--apply` and no
+`--backup`, or with no or an invalid database configuration.
 """
 
 from __future__ import annotations
@@ -61,6 +69,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import functools
+import re
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -70,6 +79,7 @@ import asyncpg
 import pydantic
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from harness.db.cutover_gates import BEFORE
 from harness.db.engine import build_database
 from harness.db.migrate import MIGRATIONS_DIR, bound_and_lock, record_applied, sha256
 from harness.settings import Settings
@@ -258,6 +268,8 @@ async def _archive(conn: Any) -> list[str]:
             "the harness's database."
         )
     before = await _relations(conn, ARCHIVED)
+    # The migration's own check, as `apply_pending` runs it (`BEFORE`).
+    await conn.execute(BEFORE[ARCHIVE_MIGRATION.name])
     await conn.execute(ARCHIVE_MIGRATION.read_text())
     after = {
         row["oid"]: row["relname"] for row in await conn.fetch(_DESCRIBE, [r.oid for r in before])
@@ -289,12 +301,12 @@ async def _restore(conn: Any, *, allow_missing: bool = False) -> list[str]:
     tables = [relation for relation in archived if relation.kind == "TABLE"]
     found = {table.name.removeprefix(PREFIX) for table in tables}
     restoring = [name for name in ADK_TABLES if name in found]
-    missing = [name for name in ADK_TABLES if name not in found]
+    lacking = [name for name in ARCHIVED if name not in found]
     if not archived:
         return []
     print(
         f"adk_archive restore: ADK's tables in the archive: {', '.join(restoring) or 'none'}; "
-        f"missing: {', '.join(missing) or 'none'}"
+        f"missing from the archive: {', '.join(lacking) or 'none'}"
     )
     for table in tables:
         name = table.name.removeprefix(PREFIX)
@@ -304,11 +316,21 @@ async def _restore(conn: Any, *, allow_missing: bool = False) -> list[str]:
                 f"{table.qualified}, which lacks the columns of `{name}`, so it is not the "
                 "archive. Rename it or drop it by hand, then run restore again."
             )
-    if missing and not allow_missing:
+    if lacking and not allow_missing:
         raise ArchiveRefusedError(
-            f"restore renames nothing, because the archive lacks ADK's {', '.join(missing)}. An "
-            "image that reads ADK's tables would create them empty. Pass --allow-missing to "
-            "restore the rest anyway."
+            f"restore renames nothing, because the archive lacks {', '.join(lacking)}."
+            + (
+                " An image that reads ADK's tables would create a missing table of ADK's empty."
+                if set(lacking) & set(ADK_TABLES)
+                else ""
+            )
+            + (
+                " Without adk_ledger_imports ADK's history has no import records, so the "
+                "import job cannot clear it."
+                if "adk_ledger_imports" in lacking
+                else ""
+            )
+            + " Pass --allow-missing to restore the rest anyway."
         )
     taken = await _restore_conflicts(conn, archived)
     if taken:
@@ -316,7 +338,8 @@ async def _restore(conn: Any, *, allow_missing: bool = False) -> list[str]:
             "restore renames nothing, because names it would restore are taken:\n"
             + "\n".join(f"  {line}" for line in taken)
             + "\nAn image that reads ADK's tables created them after the archive. Drop them "
-            "with `drop-adk --apply`, which discards what that image wrote to them, or rename "
+            "with `drop-adk --apply --backup BACKUP_ID` after a backup, which discards what that "
+            "image wrote to them, or rename "
             "them by hand, then run restore again."
         )
     statements = []
@@ -404,6 +427,9 @@ async def _drop_archive(conn: Any) -> list[str]:
     return await _drop(conn, tables)
 
 
+# The verbs that cannot be undone, which `--apply` runs only with `--backup`.
+DROPS = ("drop-adk", "drop-archive")
+
 _VERBS: dict[str, Callable[[Any], Awaitable[list[str]]]] = {
     "archive": _archive,
     "restore": _restore,
@@ -412,11 +438,27 @@ _VERBS: dict[str, Callable[[Any], Awaitable[list[str]]]] = {
 }
 
 
-async def run(engine: AsyncEngine, *, verb: str, apply: bool, allow_missing: bool = False) -> int:
+async def run(
+    engine: AsyncEngine,
+    *,
+    verb: str,
+    apply: bool,
+    allow_missing: bool = False,
+    backup: str | None = None,
+) -> int:
     """Run `verb` in one transaction on `engine`, commit it when `apply` and
     roll it back otherwise, print what it ran, and return the exit status.
     `allow_missing` lets `restore` run when the archive lacks some of ADK's
-    tables."""
+    tables. A drop (`DROPS`) with `apply` returns 2 without connecting unless
+    `backup` is the numeric id of the backup taken before it."""
+    if apply and verb in DROPS and not re.fullmatch(r"[0-9]+", backup or ""):
+        print(
+            f"adk_archive {verb}: --apply drops tables for good, so it needs --backup "
+            "BACKUP_ID, the numeric id of the on-demand Cloud SQL backup taken for it "
+            "(deploy/README.md, The archive job)",
+            file=sys.stderr,
+        )
+        return 2
     act = (
         functools.partial(_restore, allow_missing=allow_missing)
         if verb == "restore"
@@ -453,6 +495,8 @@ async def run(engine: AsyncEngine, *, verb: str, apply: bool, allow_missing: boo
         print(f"adk_archive {verb}: nothing to do")
         return 0
     outcome = "ran and committed" if apply else "dry run, rolled back; --apply commits"
+    if apply and verb in DROPS:
+        outcome += f", after backup {backup}"
     print(f"adk_archive {verb}: {outcome}:")
     for statement in statements:
         print(f"  {statement}")
@@ -480,7 +524,13 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
             verb_parser.add_argument(
                 "--allow-missing",
                 action="store_true",
-                help="restore when the archive lacks some of ADK's five tables",
+                help="restore when the archive lacks some of ADK's five tables or the ledger",
+            )
+        if verb in DROPS:
+            verb_parser.add_argument(
+                "--backup",
+                metavar="BACKUP_ID",
+                help="the on-demand Cloud SQL backup taken before this drop; --apply needs it",
             )
     return parser.parse_args(argv)
 
@@ -511,6 +561,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verb=arguments.verb,
                 apply=arguments.apply,
                 allow_missing=getattr(arguments, "allow_missing", False),
+                backup=getattr(arguments, "backup", None),
             )
         finally:
             await database.aclose()
