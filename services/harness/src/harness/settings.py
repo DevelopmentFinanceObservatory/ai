@@ -59,6 +59,9 @@ class Settings(BaseServiceSettings):
     / `PRESENTATION_MCP_URL` always wins over that default -- that env
     override is what lets a service split back out replace its loopback mount
     (point it at the split-out service's URL instead of the loopback path).
+    `dfo_apis_url` (`DFO_APIS_URL`) is the origin of dfo-apis, which the planner's
+    stated-scope reader (`harness.wiring.build_stated_scope_reader`) and the live
+    refresh (`harness.live_refresh.build_live_refresh`) call.
     `database_url` and the `session_store_*` fields together select the
     harness's Postgres database (`harness.db.engine.build_database`), which
     holds the studio's conversations: no database when none of them is set
@@ -282,6 +285,8 @@ class Settings(BaseServiceSettings):
     # capabilities document does not explain). An apis whose capabilities document
     # lists no `stated_scope` door answers the route 404 and reads as off.
     planner_stated_scope: bool = True
+    # The origin of dfo-apis (`DFO_APIS_URL`).
+    dfo_apis_url: str = "http://localhost:8083"
     # The combined server's limits for outside callers; see the class docstring.
     combined_mcp_requests_per_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     combined_mcp_burst: int = Field(default=20, ge=1)
