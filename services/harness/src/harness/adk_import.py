@@ -149,8 +149,12 @@ Verbs:
   ledger session, so the previous release would claim the same numbers and
   answer 409 until its index passed them. It also deletes every turn
   session of a conversation with no ledger session, one started on this
-  release, which the previous release reads as new and numbers from 1. Under `--apply` each
-  conversation's ledger session is locked `FOR UPDATE` first, so a turn
+  release, which the previous release reads as new and numbers from 1.
+  `--apply` refuses (`ReleaseStreaming`) while any conversation's lease is
+  live on the database's clock, since a stream of this release still runs
+  on a turn session it would delete; nothing is deleted then. Under
+  `--apply` each conversation's ledger session is locked `FOR UPDATE`
+  first, so a turn
   the previous release claims commits its index before or after the read,
   and the session it creates after its claim is never above the index
   read. ADK's `events` rows go with their session (`ON DELETE CASCADE`).
@@ -207,11 +211,14 @@ conversation that changed during the run, a ledger session the gate did
 not clear, or a turn session `rollback-turn-sessions` found; 2 when no
 database is configured, ADK's schema is not the one the job reads, the
 gate finds no ADK `sessions` table without `--adk-archived` or with it and
-no `adk_archive_sessions`,
-`close-open-turns --apply` finds no `turn_cursors` table, the harness's
-tables are missing, a migration file is refused, or `--prefer-adk`,
-`--keep-tables` or `--discard` names a conversation no ledger session holds
-or two of them name one.
+no `adk_archive_sessions`, the harness's tables are missing, a migration
+file is refused, or `--prefer-adk`, `--keep-tables` or `--discard` names a
+conversation no ledger session holds or two of them name one; 3 when
+`close-open-turns --apply` finds no `turn_cursors` table, so the next
+release has not started (`NextReleaseMissing`); 4 when a later release has
+archived ADK's tables, so no verb but `gate --adk-archived` runs again
+(`AdkArchived`); and 5 when `rollback-turn-sessions --apply` finds a stream
+of this release still holding a conversation's lease (`ReleaseStreaming`).
 """
 
 from __future__ import annotations
@@ -341,7 +348,20 @@ class AdkTablesMissing(RuntimeError):  # noqa: N818 -- names the state it report
 class NextReleaseMissing(RuntimeError):  # noqa: N818 -- names the state it reports
     """`close-open-turns --apply` found no `turn_cursors` table: the next
     release has not started, so this release may still answer a paused
-    turn."""
+    turn. Exit status 3: rerun once the next release has started."""
+
+
+class AdkArchived(RuntimeError):  # noqa: N818 -- names the state it reports
+    """`adk_archive_adk_ledger_imports` resolves: the release that archives
+    ADK's tables (`0005_rename_adk_tables.sql`) has started, so no verb that
+    reads ADK's tables or the import records can run again. Exit status 4."""
+
+
+class ReleaseStreaming(RuntimeError):  # noqa: N818 -- names the state it reports
+    """`rollback-turn-sessions --apply` found a conversation whose lease is
+    live on the database's clock: a stream of this release still runs, and
+    deleting its turn session would cut it. Exit status 5: rerun once the
+    streams end."""
 
 
 class UnknownConversation(ValueError):  # noqa: N818 -- names the state it reports
@@ -605,6 +625,15 @@ def _digest(value: Any) -> str:
 
 
 async def _check_adk_schema(conn: AsyncConnection) -> None:
+    """Raises `AdkArchived` once a later release archived ADK's tables, and
+    `AdkSchemaError` when ADK's tables are missing or another version."""
+    if (
+        await conn.execute(text("SELECT to_regclass('adk_archive_adk_ledger_imports')"))
+    ).scalar() is not None:
+        raise AdkArchived(
+            "adk_archive_adk_ledger_imports resolves: the release that archives ADK's tables "
+            "has started, and this job no longer runs against this database"
+        )
     if (await conn.execute(text("SELECT to_regclass('adk_internal_metadata')"))).scalar() is None:
         raise AdkSchemaError(
             "no adk_internal_metadata table: ADK's session tables are missing or use the "
@@ -829,6 +858,16 @@ _DISCARDED_COLUMN = text(
     "DEFAULT false"
 )
 _RECORD_DISCARDED = "coalesce((to_jsonb(i) -> 'discarded')::boolean, false)"
+# Whether the column exists. `_DISCARDED_COLUMN` takes ACCESS EXCLUSIVE on
+# the table, which every read of the serving release queues behind, so it
+# runs only when the column is absent, and gives up on a lock it waits for
+# longer than `_COLUMN_LOCK_TIMEOUT`, the bound `harness.db.migrate` uses.
+_HAS_DISCARDED_COLUMN = text(
+    "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = "
+    "to_regclass('adk_ledger_imports') AND attname = 'discarded' AND attnum > 0 "
+    "AND NOT attisdropped)"
+)
+_COLUMN_LOCK_TIMEOUT = "10s"
 _MARK_DISCARDED = text(
     "UPDATE adk_ledger_imports SET discarded = :discarded "
     "WHERE principal = :principal AND conversation_id = :conversation_id"
@@ -1077,8 +1116,7 @@ class ImportReport:
                 ),
                 (f"tables' copy {would}kept (--keep-tables)", self.kept),
                 (
-                    f"{would}discarded (--discard): the tables hold none of it, and its next "
-                    "turn starts it afresh",
+                    f"{would}given up with --discard: ADK's copy is not imported",
                     self.discarded,
                 ),
             )
@@ -1263,6 +1301,9 @@ async def _import_one(
                 previous is not None and previous.kept_tables and previous.source_digest == source
             )
             if kept_here and not prefer:
+                if keep and absent:
+                    reasons = [_KEEP_ABSENT]
+                    raise _Undo
                 if drop and not (absent or previous.discarded):
                     reasons = [_DISCARD_HELD]
                     raise _Undo
@@ -1286,10 +1327,13 @@ async def _import_one(
                 # refuses the conversation, before any outcome is decided, so
                 # a refusal is recorded as a refusal and the operator's flags
                 # can clear it.
+                # The open turn is read under a savepoint, so a database error
+                # there leaves the transaction usable for the flags' write.
                 try:
                     rows = _import_rows(ledger)
                     if open_turn:
-                        turn = await _read_open_turn(conn, session, ledger)
+                        async with conn.begin_nested():
+                            turn = await _read_open_turn(conn, session, ledger)
                 except Exception as exc:
                     rows = None
                     reasons = [f"the import failed: {type(exc).__name__}: {exc}"]
@@ -1455,7 +1499,9 @@ async def import_conversations(
     await apply_pending(engine)
     if apply and (keep_tables or discard):
         async with engine.begin() as conn:
-            await conn.execute(_DISCARDED_COLUMN)
+            if not (await conn.execute(_HAS_DISCARDED_COLUMN)).scalar_one():
+                await conn.execute(text(f"SET LOCAL lock_timeout = '{_COLUMN_LOCK_TIMEOUT}'"))
+                await conn.execute(_DISCARDED_COLUMN)
     report = ImportReport(apply=apply)
     for key in keys:
         try:
@@ -2329,6 +2375,15 @@ _LEDGER_TURN_INDEX = (
     "WHERE app_name = :app AND user_id = :principal AND id = :id"
 )
 
+# Each conversation a stream of this release holds: its lease is live on the
+# database's clock. The previous release writes its leases to ADK's ledger
+# sessions, so a live lease here is this release's.
+_RELEASE_STREAMING = text(
+    "SELECT principal, conversation_id FROM conversations "
+    f"WHERE lease_expires_at > {DATABASE_NOW} ORDER BY principal, conversation_id"
+)
+
+
 # The turn number of an ADK turn session `{conversation_id}#t{n}` whose
 # conversation id is `:id`, NULL for any other id. The CASE guards the cast,
 # since PostgreSQL does not promise to test the pattern first.
@@ -2415,10 +2470,26 @@ async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> Rollbac
     With `apply` false, list them only, without locking.
 
     Raises:
+        AdkArchived: a later release archived ADK's tables.
         AdkSchemaError: ADK's schema is not the one the job reads.
+        ReleaseStreaming: under `apply`, a conversation's lease is live on
+            the database's clock (`_RELEASE_STREAMING`): a stream of this
+            release still runs on an ADK turn session the run would delete.
+            Nothing is deleted.
     """
     async with engine.connect() as conn:
         await _check_adk_schema(conn)
+        conversations = (await conn.execute(text("SELECT to_regclass('conversations')"))).scalar()
+        if apply and conversations is not None:
+            live = (await conn.execute(_RELEASE_STREAMING)).all()
+            if live:
+                raise ReleaseStreaming(
+                    f"{len(live)} conversations hold a live lease of this release's streams: "
+                    + ", ".join(f"{row.principal}/{row.conversation_id}" for row in live[:10])
+                    + ("" if len(live) <= 10 else ", ...")
+                    + ". Rerun once they end; a lease lapses 45 s after its stream last "
+                    "renewed it, and a stream ends within the 900 s request timeout"
+                )
     report = RollbackReport(apply=apply)
     lock = " FOR UPDATE" if apply else ""
     for key in await _ledger_keys(engine):
@@ -2561,9 +2632,8 @@ class GateReport:
         if self.archived:
             return "cutover gate: no ADK sessions table, archived as --adk-archived says"
         discarded = [
-            f"cutover gate: {len(self.discarded)} cleared ledger sessions discarded "
-            "(--discard): the tables held none of each when it was discarded, and its next "
-            "turn started it afresh:",
+            f"cutover gate: {len(self.discarded)} cleared ledger sessions given up with "
+            "--discard, ADK's copy of each not imported:",
             *(f"  {name}" for name in self.discarded),
         ]
         if self.clean:
@@ -2757,6 +2827,15 @@ async def _run(arguments: argparse.Namespace, engine: AsyncEngine) -> _Report:
     )
 
 
+# The exit status of each state a verb waits on or has passed, apart from 2,
+# a fault in the arguments, the configuration or the schema.
+_WAIT_EXIT: dict[type[Exception], int] = {
+    NextReleaseMissing: 3,
+    AdkArchived: 4,
+    ReleaseStreaming: 5,
+}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the verb and print its report. Returns the exit status.
 
@@ -2783,10 +2862,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         report = asyncio.run(go())
+    except (NextReleaseMissing, AdkArchived, ReleaseStreaming) as exc:
+        print(f"adk_import: {exc}", file=sys.stderr)
+        return _WAIT_EXIT[type(exc)]
     except (
         AdkSchemaError,
         AdkTablesMissing,
-        NextReleaseMissing,
         TablesMissing,
         MigrationChecksumError,
         UnknownConversation,

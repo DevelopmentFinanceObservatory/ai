@@ -40,6 +40,7 @@ from harness.adk_import import (
     AdkTablesMissing,
     NamedTwice,
     NextReleaseMissing,
+    ReleaseStreaming,
     TablesMissing,
     UnknownConversation,
     _stored_digest,
@@ -429,6 +430,18 @@ async def test_rollback_turn_sessions_deletes_each_turn_session_above_the_ledger
     await _set_adk_state(adk, PLAN_PAUSED, {"studio:turn_index": "1"})
     unreadable = await rollback_turn_sessions(adk, apply=True)
     assert (unreadable.unreadable, unreadable.clean) == ([_name(PLAN_PAUSED)], True)
+
+    # A stream of this release still runs: `--apply` deletes nothing.
+    await _add_turn_sessions(adk, PRINCIPAL, ["conv_late#t1"])
+    await _lease(adk, TEXT_ONLY, 600)
+    with pytest.raises(ReleaseStreaming, match=_name(TEXT_ONLY)):
+        await rollback_turn_sessions(adk, apply=True)
+    assert (PRINCIPAL, "conv_late#t1") in await _turn_session_ids(adk)
+    assert list((await rollback_turn_sessions(adk, apply=False)).ahead) == [
+        f"{PRINCIPAL}/conv_late"
+    ]
+    await _lease(adk, TEXT_ONLY, -1)
+    assert list((await rollback_turn_sessions(adk, apply=True)).ahead) == [f"{PRINCIPAL}/conv_late"]
 
 
 @_LATER_COLUMNS
@@ -855,8 +868,16 @@ async def test_the_command_exits_non_zero_after_importing_the_rest_when_one_is_r
         assert await _count(engine) == 2
         assert await asyncio.to_thread(main, ["import", "--verify"]) == 1
         assert capsys.readouterr().out.splitlines()[-1] == "2 of 3 equal"
-        assert await asyncio.to_thread(main, ["close-open-turns", "--apply"]) == 2
+        assert await asyncio.to_thread(main, ["close-open-turns", "--apply"]) == 3
         assert "no turn_cursors table" in capsys.readouterr().err
+        # The release that archives ADK's tables has started.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("ALTER TABLE adk_ledger_imports RENAME TO adk_archive_adk_ledger_imports")
+            )
+        for verb in (["close-open-turns", "--apply"], ["import", "--verify"]):
+            assert await asyncio.to_thread(main, verb) == 4
+            assert "adk_archive_adk_ledger_imports resolves" in capsys.readouterr().err
     finally:
         await engine.dispose()
 
@@ -2439,12 +2460,25 @@ async def test_a_refused_conversation_the_tables_lack_is_discarded_only_by_name_
     dry = await import_conversations(pg_empty_engine, apply=False, discard=drop)
 
     assert (dry.discarded, dry.refused, dry.clean) == ([name], {}, True)
-    assert "would be discarded (--discard): the tables hold none of it" in dry.render()
+    assert "would be given up with --discard" in dry.render()
     assert not (await cutover_gate(pg_empty_engine)).clean
 
     applied = await import_conversations(pg_empty_engine, apply=True, discard=drop)
 
     assert (applied.discarded, applied.refused, applied.clean) == ([name], {}, True)
+    # With the column in place, a repair takes no lock on the table beyond a
+    # row write's, so a reader holding it does not stall the run.
+    async with pg_empty_engine.connect() as reader:
+        await reader.execute(text("LOCK TABLE adk_ledger_imports IN ACCESS SHARE MODE"))
+        again = await asyncio.wait_for(
+            import_conversations(pg_empty_engine, apply=True, discard=drop), timeout=5
+        )
+        await reader.rollback()
+    assert again.discarded == [name]
+    # The record keeps nothing of a conversation the tables lack.
+    kept_absent = await import_conversations(pg_empty_engine, apply=True, keep_tables=keep)
+    assert kept_absent.refused == {name: [kept_absent.refused[name][0]]}
+    assert kept_absent.refused[name][0].startswith("--keep-tables keeps the tables' copy, and")
     gate = await cutover_gate(pg_empty_engine)
     assert (gate.clean, gate.discarded) == (True, [name])
     assert gate.render().splitlines()[1].startswith("cutover gate: 1 cleared ledger sessions")
