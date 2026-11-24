@@ -897,7 +897,7 @@ async def test_a_slow_migration_is_not_cut_short(
     statement, so a slow migration completes on its first attempt."""
     attempts: list[int] = []
 
-    async def slow_apply_pending(engine: object) -> list[str]:
+    async def slow_apply_pending(engine: object, **_: object) -> list[str]:
         attempts.append(len(attempts) + 1)
         await asyncio.sleep(0.05)
         return []
@@ -1028,7 +1028,7 @@ async def test_a_migration_refusal_is_fatal_at_once(monkeypatch: pytest.MonkeyPa
     """A SQLSTATE beginning `DFA`, a migration's own refusal, is not retried."""
     attempts: list[int] = []
 
-    async def refusing_apply_pending(engine: object) -> list[str]:
+    async def refusing_apply_pending(engine: object, **_: object) -> list[str]:
         attempts.append(len(attempts) + 1)
         raise _postgres_error("DFA04")
 
@@ -1085,7 +1085,7 @@ async def test_any_other_migration_database_error_retries_until_the_budget_ends(
 ) -> None:
     attempts: list[int] = []
 
-    async def failing_apply_pending(engine: object) -> list[str]:
+    async def failing_apply_pending(engine: object, **_: object) -> list[str]:
         attempts.append(len(attempts) + 1)
         raise _postgres_error("55P03")
 
