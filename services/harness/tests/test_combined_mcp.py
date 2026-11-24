@@ -38,6 +38,7 @@ from analysis_mcp.verbs import FOLLOWS_TREE
 from common import auth as mcp_auth
 from common import refusal as refusal_module
 from common import telemetry
+from common.call_limit import EXTERNAL_CALL_LIMIT_S
 from common.logging import JSON_FIELDS, configure_logging
 from common.materialisation import FrameRef, MintRecord
 from common.materialisation import get_store as get_frame_store
@@ -57,7 +58,6 @@ from data_mcp.deadline import (
     DEADLINE_RETRY_AFTER_S,
     DIRECT_CALL_BUDGET,
     EXTERNAL_CALL_BUDGET,
-    EXTERNAL_CALL_LIMIT_S,
     CallBudget,
 )
 from data_mcp.definition_store import (
@@ -98,6 +98,7 @@ from harness.settings import (
 from mcp import MCPError
 from mcp import types as mt
 from mcp.client import advertise
+from mcp.server import _streamable_http_modern as streamable_http_modern
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from mcp_types import INTERNAL_ERROR, INVALID_PARAMS
 from opentelemetry import trace as otel_trace
@@ -117,6 +118,7 @@ from presentation_mcp.platform_contract import (
 from presentation_mcp.projection import ROWLESS_NOTICE, UNKNOWN_HOST_ROWLESS_NOTICE
 from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic import ValidationError as PydanticValidationError
+from sse_starlette import EventSourceResponse
 from starlette.applications import Starlette
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -954,9 +956,9 @@ _RECORDED_RELEASE = Path(__file__).resolve().parents[2] / (
 
 # The most o200k tokens the public tool list may cost as a client hands it to its
 # model (the compact JSON of each tool's name, description and input schema). Every
-# client pays it on every turn. The bound is the measured count, 18,018, rounded up
+# client pays it on every turn. The bound is the measured count, 18,707, rounded up
 # to the next 500. The list must stay within 20,000. Lower the bound as it shrinks.
-_PUBLIC_LIST_TOKEN_BOUND = 18_500
+_PUBLIC_LIST_TOKEN_BOUND = 19_000
 
 
 async def _public_list(monkeypatch: pytest.MonkeyPatch) -> list[mt.Tool]:
@@ -1820,9 +1822,8 @@ LIMIT_S = 0.5
 _CLIENT_TIMEOUT_S = 10
 
 _ARTIFACT_URI = f"dfo://artifact/spec_{'5' * 32}/cv_1/sha256:{'1' * 64}"
-# A spec the definition store does not hold, and apis' registry answer for it
-# (`GET /api/datasets/{id}/options`), which a public `get_data` reads to choose the
-# type columns it always asks for.
+# A spec the definition store does not hold, which a public `get_data` mints on the
+# registry-fallback path.
 _UNSTORED_IDENTITY = {
     "identity_version": "spec1",
     "shape": {"id": "LimitTestShape", "kind": "stat_var"},
@@ -1832,23 +1833,17 @@ _UNSTORED_IDENTITY = {
     "slots": [],
 }
 _UNSTORED_SPEC = spec_id_for(canonicalize(_UNSTORED_IDENTITY))
-_REGISTRY_DEFINITION = {
-    "definition": {"schema_version": 1, "spec_id": _UNSTORED_SPEC, "identity": _UNSTORED_IDENTITY}
-}
 
 
 class _StalledUpstream:
-    """apis holding every request but a registry read until `release` is set,
-    recording the path of each request whose wait was cancelled. Once released,
-    it answers 400."""
+    """apis holding every request until `release` is set, recording the path of each
+    request whose wait was cancelled. Once released, it answers 400."""
 
     def __init__(self) -> None:
         self.release = asyncio.Event()
         self.cancelled: list[str] = []
 
     async def handler(self, request: httpx2.Request) -> httpx2.Response:
-        if request.url.path.endswith("/options"):
-            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         try:
             await self.release.wait()
         except asyncio.CancelledError:
@@ -1899,7 +1894,7 @@ def _stopped_envelope(tool: str, limit_s: float = LIMIT_S) -> dict[str, Any]:
 
 def test_the_combined_server_stops_calls_at_the_external_call_limit_by_default() -> None:
     """`get_data`'s own deadline is sized to end inside this limit
-    (`data_mcp.deadline.EXTERNAL_CALL_MARGIN_S`)."""
+    (`common.call_limit.EXTERNAL_CALL_MARGIN_S`)."""
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
     [limit] = [m for m in combined.middleware if isinstance(m, combined_mcp._CallLimit)]
 
@@ -2051,8 +2046,6 @@ async def test_get_data_refuses_on_its_own_deadline_before_the_limit_stops_it(
                 - poll_time_left_s
             )
             return httpx2.Response(202, json={"operation": operation})
-        if request.url.path.endswith("/options"):
-            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         assert request.url.path == operation["poll"]
         return httpx2.Response(200, json={"operation": operation})
 
@@ -2096,8 +2089,6 @@ async def test_an_address_caller_reaches_dfo_apis_with_its_surface_and_user_agen
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        if request.url.path.endswith("/options"):
-            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         return httpx2.Response(400)
 
     client_holder.set_client(
@@ -3117,20 +3108,49 @@ def _timing_bodies(app: ASGIApp, sent: list[tuple[float, bytes]]) -> ASGIApp:
     return timed
 
 
+# The ping test's clock runs at this fraction of real time, so a 21 s call
+# takes 5.25 s. The 5 s between the 15 s ping interval and the 20 s deadline
+# scales to 1.25 s, which absorbs scheduler delay under parallel workers.
+_PING_TIME_SCALE = 0.25
+
+
 @REVISIONS
 async def test_a_slow_call_is_kept_alive_with_pings_under_20s_apart(
     mode: str,
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A proxy on the way cuts a response after 100 s without a byte. Both
-    revisions send an SSE ping comment every 15 s while a call runs."""
+    revisions send an SSE ping comment every 15 s while a call runs.
+
+    The deadline, the call and both revisions' ping intervals run at
+    `_PING_TIME_SCALE`: the 2025-11-25 revision's, which each sse-starlette
+    `EventSourceResponse` sets, and the 2026-07-28 revision's, which the SDK's
+    modern transport reads from its module. Each interval is recorded before it
+    is scaled and must sit under the unscaled 20 s. A ping that came from an
+    unscaled interval would arrive long after the scaled call ends."""
+    chosen = [streamable_http_modern._SSE_PING_INTERVAL]
+    monkeypatch.setattr(
+        streamable_http_modern,
+        "_SSE_PING_INTERVAL",
+        streamable_http_modern._SSE_PING_INTERVAL * _PING_TIME_SCALE,
+    )
+    init = EventSourceResponse.__init__
+
+    def scaled_init(self: EventSourceResponse, *args: Any, **kwargs: Any) -> None:
+        init(self, *args, **kwargs)
+        chosen.append(self.ping_interval)
+        self.ping_interval = self.ping_interval * _PING_TIME_SCALE
+
+    monkeypatch.setattr(EventSourceResponse, "__init__", scaled_init)
+    deadline = 20 * _PING_TIME_SCALE
     probe = FastMCP(name="probe")
 
     @probe.tool
     async def slow() -> str:
-        await asyncio.sleep(21)
+        await asyncio.sleep(21 * _PING_TIME_SCALE)
         return "done"
 
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
@@ -3151,9 +3171,10 @@ async def test_a_slow_call_is_kept_alive_with_pings_under_20s_apart(
     pings = [at for at, body in sent if body.startswith(b": ping")]
     marks = [started, *pings, ended]
     assert result.content[0].text == "done"  # shaped: the text alone
-    assert ended - started > 20
+    assert max(chosen) < 20
+    assert ended - started > deadline
     assert pings
-    assert max(later - earlier for earlier, later in pairwise(marks)) < 20
+    assert max(later - earlier for earlier, later in pairwise(marks)) < deadline
 
 
 async def test_the_combined_server_refuses_an_unauthenticated_request(

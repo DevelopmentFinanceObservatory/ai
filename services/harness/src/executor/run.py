@@ -57,10 +57,14 @@ can fix -- the source's upstream version changed, or its approved `spec_id`
 is no longer held -- comes back as `RediscoveryNeeded` naming the requirement
 and source off the step's `EvidenceBinding`, since a bare retry reproduces it
 identically and only a new discovery, under a new plan revision, can change
-what gets retrieved; the same refusal on a step bound to no evidence has
-nothing to rediscover and stops the run as `Refused`, as does any other
-refusal. `executor.classify` places every server code. The executor never
-corrects a call, because a corrected call is a different plan.
+what gets retrieved. The same refusal on a step bound to no evidence has
+nothing to rediscover: one a second call can get past
+(`executor.classify.repost_recovers`, `upstream_version_changed`) is
+called again once, at once, within `MAX_ATTEMPTS_PER_STEP`, and otherwise,
+or when the second call refuses too, it stops the run as `Refused` with the
+refusal's message, as does any other refusal. `executor.classify` places
+every server code. The executor never corrects a call, because a corrected
+call is a different plan.
 
 A step whose tool capability pins `call_timeout_s` (`get_data`, among the
 workflow's tools) runs under one absolute budget, `step_budget_s`, covering
@@ -184,6 +188,8 @@ from functools import partial
 
 import httpx2
 import pyarrow as pa
+from common.breakdown_labels import Cell, breakdown_axis, code_label
+from common.call_limit import CallDeadline
 from common.materialisation import FrameRef
 from common.refusal import internal_error_message
 from common.telemetry import current_trace_id
@@ -196,7 +202,7 @@ from compiler.evidence import (
     errors,
     evidence_from_manifest,
     left_out_entities,
-    unlabelled_series_refs,
+    unlabelled_series_cells,
     with_series_labels,
 )
 from compiler.frame_columns import (
@@ -231,7 +237,7 @@ from compiler.surface import (
     transient,
 )
 from data_mcp.artifact_resource import ArtifactRefusalError
-from data_mcp.deadline import CallDeadline
+from data_mcp.graph_wire import NotHeldEntry
 from data_mcp.manifest import Manifest
 from data_mcp.node_lookup import describe_nodes
 from data_mcp.series_statistics import (
@@ -261,6 +267,7 @@ from executor.artifacts import (
     declared_dropped_key_counts,
     declared_ranked_before_limit,
     declared_shape,
+    declared_stat_vars_summed,
     extract_frame_ref,
     manifest_frame_ref,
     parse_manifest,
@@ -283,6 +290,7 @@ from executor.classify import (
     is_anchor_fault,
     jittered_retry_delay,
     parse_tool_failure,
+    repost_recovers,
 )
 from executor.completion import ResultPublisher, publish_results
 from executor.ledger import (
@@ -324,6 +332,8 @@ from executor.outcomes import (
     RunOutcome,
     StepRecord,
     outcome_from_json,
+    summed_reads,
+    with_summed_reads,
 )
 
 logger = logging.getLogger(__name__)
@@ -441,14 +451,15 @@ Sleep = Callable[[float], Awaitable[None]]
 # already supplies its own `surface`/`executor`/`resolver` in place of the real ones.
 FetchSeriesStats = Callable[[Manifest], Awaitable[pa.Table | None]]
 
-# The names the graph gives each of some entity refs, keyed by ref; a ref it
-# names none for is absent. Injectable as `FetchSeriesStats` is. One that
-# raises or runs past its deadline names nothing (`_series_labels`).
-LabelRefs = Callable[[Sequence[str]], Awaitable[Mapping[str, str]]]
+# The names the graph gives some series entities, each a `(role, dcid)` cell, the dcid
+# without its `dcid:` marker (`compiler.evidence.unlabelled_series_cells`); a cell it names
+# none for is absent. Injectable as `FetchSeriesStats` is. One that raises or runs past its
+# deadline names nothing (`_series_labels`).
+LabelRefs = Callable[[Sequence[Cell]], Awaitable[Mapping[Cell, str]]]
 
-# The most entity refs one evidence check asks names for: two requests of
+# The most entity cells one evidence check asks names for: two requests of
 # `describe_nodes`' 50. The largest short series' come first
-# (`unlabelled_series_refs`), and an answer names three of them.
+# (`unlabelled_series_cells`), and an answer names three of them.
 LABELLED_REFS = 100
 
 # The most seconds that lookup may take. Past it the series stay unlabelled,
@@ -585,22 +596,35 @@ async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
         raise StatisticsUnusableError(detail) from exc
 
 
-async def default_label_refs(refs: Sequence[str]) -> Mapping[str, str]:
-    """The names the graph gives `refs`, through `data_mcp.node_lookup.describe_nodes`:
-    `execute_approved_plan`'s default `label_refs`."""
-    nodes = await describe_nodes(refs)
-    return {ref: label for ref, node in nodes.items() if (label := getattr(node, "label", None))}
+async def default_label_refs(cells: Sequence[Cell]) -> Mapping[Cell, str]:
+    """The names the graph gives `cells`, through `data_mcp.node_lookup.describe_nodes`:
+    `execute_approved_plan`'s default `label_refs`. A breakdown cell takes the label of a
+    code of its own axis, as the figures name it (`common.breakdown_labels.code_label`), and
+    any other cell its node's label."""
+    nodes = await describe_nodes(list(dict.fromkeys(dcid for _, dcid in cells)))
+    labels: dict[Cell, str] = {}
+    for role, dcid in cells:
+        node = nodes.get(dcid)
+        if node is None or isinstance(node, NotHeldEntry):
+            continue
+        if (axis := breakdown_axis(role)) is not None:
+            label = code_label(node.model_dump(mode="json"), axis=axis)
+        else:
+            label = getattr(node, "label", None)
+        if label:
+            labels[role, dcid] = label
+    return labels
 
 
-async def no_label_refs(refs: Sequence[str]) -> Mapping[str, str]:
+async def no_label_refs(cells: Sequence[Cell]) -> Mapping[Cell, str]:
     """The `LabelRefs` that names nothing, for a read no answer is written from
     (`read_anchors`) and a caller that makes no upstream call."""
-    del refs
+    del cells
     return {}
 
 
-async def _series_labels(label_refs: LabelRefs, refs: Sequence[str]) -> Mapping[str, str]:
-    """The names `label_refs` gives `refs`, or none where it fails or outruns its deadline.
+async def _series_labels(label_refs: LabelRefs, cells: Sequence[Cell]) -> Mapping[Cell, str]:
+    """The names `label_refs` gives `cells`, or none where it fails or outruns its deadline.
 
     A name labels a series in an answer's notes and nothing else, so the
     step goes on without it, and its series are counted. The deadline is
@@ -616,9 +640,9 @@ async def _series_labels(label_refs: LabelRefs, refs: Sequence[str]) -> Mapping[
     # Whatever an injected dependency raises, only the names go unread, so the catch is broad.
     try:
         async with asyncio.timeout(allowance_s):
-            return await label_refs(refs)
+            return await label_refs(cells)
     except Exception as exc:
-        logger.warning("executor: could not read names for %d entity refs: %r", len(refs), exc)
+        logger.warning("executor: could not read names for %d entity refs: %r", len(cells), exc)
         return {}
 
 
@@ -968,7 +992,7 @@ async def _drive(
                 sleep=runtime.sleep,
                 jitter=runtime.jitter,
             )
-        return _recorded_outcome(run.outcome, workflow=submission.workflow)
+        return _recorded_outcome(run, workflow=submission.workflow)
     if run.status is RunStatus.FAILED:
         assert run.failure is not None, "a failed run records its failure"
         return Refused(
@@ -1006,7 +1030,13 @@ async def _drive(
         for frame in outcome.results.values()
     )
     run = await record_change(
-        ledger, run.run_id, Publishing(results, outcome=outcome.model_dump(mode="json"))
+        ledger,
+        run.run_id,
+        Publishing(
+            results,
+            outcome=outcome.model_dump(mode="json"),
+            stat_vars_summed=summed_reads(outcome),
+        ),
     )
     await publish_results(
         run,
@@ -1018,15 +1048,16 @@ async def _drive(
     return outcome
 
 
-def _recorded_outcome(raw: JsonValue, *, workflow: Workflow) -> RunOutcome:
-    """The outcome a run record holds, its frames by terminal step in
+def _recorded_outcome(run: RunRecord, *, workflow: Workflow) -> RunOutcome:
+    """The outcome `run` holds, with the roots its steps read summed
+    (`RunRecord.stat_vars_summed`), its frames by terminal step in
     `workflow`'s terminal order, the order the run produced them in. A store
     may hand a JSON object back in another key order (Postgres `jsonb` does)."""
 
     def ordered(frames: Mapping[str, FrameRef]) -> dict[str, FrameRef]:
         return {step: frames[step] for step in workflow.terminal_steps if step in frames}
 
-    outcome = outcome_from_json(raw)
+    outcome = with_summed_reads(outcome_from_json(run.outcome), run.stat_vars_summed)
     if isinstance(outcome, Accepted):
         return outcome.model_copy(update={"results": ordered(outcome.results)})
     also_stopped = tuple(
@@ -1064,7 +1095,14 @@ async def _failed(
     else:
         code, reason = outcome.kind, outcome.refusal.message or outcome.refusal.code
     await record_change(
-        ledger, outcome.run_id, Fail(code, reason, outcome=outcome.model_dump(mode="json"))
+        ledger,
+        outcome.run_id,
+        Fail(
+            code,
+            reason,
+            outcome=outcome.model_dump(mode="json"),
+            stat_vars_summed=summed_reads(outcome),
+        ),
     )
     return outcome
 
@@ -2240,6 +2278,7 @@ class _Run:
                         dropped_key_count=self.dropped_key_counts[step.id][0],
                         right_dropped_key_count=self.dropped_key_counts[step.id][1],
                         ranked_before_limit=self.ranked_before_limit[step.id],
+                        stat_vars_summed=declared_stat_vars_summed(result.structured_content),
                     )
                     evidence = (
                         await self._check_evidence(step, result)
@@ -2509,9 +2548,11 @@ class _Run:
         call hands `on_progress`, bound to the step's id, to the surface. Each answer is reported as it arrives, so the step's line
         stops showing the server's last wait message once the call returns.
         Each retry reports the attempt it is about to make before its delay
-        starts.
+        starts. A refusal `_repost_recovers` reads is called again once, at
+        once, within the same attempt limit.
         """
         on_progress = partial(self.on_progress, step_id) if self.on_progress is not None else None
+        reposted = False
         for attempt in range(MAX_ATTEMPTS_PER_STEP):
             last = attempt + 1 == MAX_ATTEMPTS_PER_STEP
             await self._record_attempt(step_id, tool)
@@ -2552,9 +2593,20 @@ class _Run:
                 result.structured_content or {}, attempt, jitter=self.jitter
             )
             if delay_s is None:
-                return result, attempt + 1
+                if last or reposted or not self._repost_recovers(step_id, result):
+                    return result, attempt + 1
+                reposted = True
+                delay_s = 0.0
             await self._before_retry(delay_s, attempt, on_progress)
         raise AssertionError("unreachable: every attempt returns or raises")
+
+    def _repost_recovers(self, step_id: str, result: ToolCallResult) -> bool:
+        """Whether calling again with the same arguments can get past the refusal `result`
+        carries (`executor.classify.repost_recovers`) on a step bound to no evidence. A bound
+        step goes back to the planner as `RediscoveryNeeded` instead."""
+        return step_id not in self.evidence_bindings and repost_recovers(
+            result.structured_content or {}
+        )
 
     async def _record_attempt(self, step_id: str, tool: ToolId) -> None:
         """Record an attempt of `tool` for step `step_id`, with the step's
@@ -2629,7 +2681,8 @@ class _Run:
                 )
             )
         # A rediscovery on a step bound to no evidence would name nothing to
-        # rediscover, so it is a plain stop like any other refusal.
+        # rediscover, so it is a plain stop like any other refusal; `_call`
+        # has already called again once where that can get past it.
         return self._step_refused(step.id, step.tool, result, failure)
 
     def _step_refused(
@@ -2710,8 +2763,8 @@ class _Run:
                 issues=tuple(findings),
                 spec_id=self.evidence_bindings[step.id].spec_id,
             )
-        if refs := unlabelled_series_refs(findings, limit=LABELLED_REFS):
-            findings = with_series_labels(findings, await _series_labels(self.label_refs, refs))
+        if cells := unlabelled_series_cells(findings, limit=LABELLED_REFS):
+            findings = with_series_labels(findings, await _series_labels(self.label_refs, cells))
         self.left_out[step.id] = {
             (entity.role, entity.ref): issue
             for entity, issue in left_out_entities(requirement, evidence, approved).items()

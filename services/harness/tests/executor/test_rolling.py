@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
+from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal, to_tool_result
 from compiler.capabilities import CAPABILITIES
 from compiler.compile import compile_plan
 from compiler.rolling import RollingBound
@@ -591,8 +591,10 @@ async def test_a_rolling_plan_refuses_a_capability_table_that_pins_no_resolve_an
             True,
         ),
         (
-            ToolRefusal.rolling_grain_unsupported(
-                reason="a root frame holds periods that are no calendar year", periods=["2023-01"]
+            ToolRefusal(
+                code=ToolErrorCode.ROLLING_GRAIN_UNSUPPORTED,
+                message="A latest period can be taken over calendar years only.",
+                fix={"periods": ["2023-01"]},
             ),
             True,
         ),

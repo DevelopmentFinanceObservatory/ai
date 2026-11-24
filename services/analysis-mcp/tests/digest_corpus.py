@@ -7,24 +7,11 @@ digest shapes (one tool per verb, no status discriminator) actually need.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
-import pyarrow as pa
 from analysis_mcp.artifact import Exclusion
-from analysis_mcp.engine.aggregate import AggregateResult, GroupSummary
-from analysis_mcp.engine.compare import CompareResult, PeriodComparison
-from analysis_mcp.engine.filter import FilterResult, FilterRowSummary
-from analysis_mcp.engine.growth import EntityGrowth, GrowthResult
-from analysis_mcp.engine.join import JoinResult, MatchedKey, MatchedKeys
-from analysis_mcp.engine.quotient_of import PeriodQuotient, QuotientOfResult, ZeroDenominatorCell
-from analysis_mcp.engine.rank import EntityRank, RankResult
-from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult
-from analysis_mcp.engine.sum_of import PeriodSum, SumOfResult
-from analysis_mcp.execution_identity import ExecutionIdentity
-from dfo_frame_grammar import Frame
-from dfo_frame_grammar.grammar import ComposedUnit, StatVarPart
-from digest_facts import (
+from analysis_mcp.digest import (
     render_aggregate_digest,
     render_compare_digest,
     render_filter_digest,
@@ -35,6 +22,31 @@ from digest_facts import (
     render_share_of_digest,
     render_sum_of_digest,
 )
+from analysis_mcp.execution_identity import ExecutionIdentity
+from analysis_mcp.summary import (
+    AggregateFacts,
+    CompareFacts,
+    EntityGrowth,
+    EntityRank,
+    FilterFacts,
+    FilterRowSummary,
+    GroupSummary,
+    GrowthFacts,
+    JoinFacts,
+    MatchedKey,
+    PeriodComparison,
+    PeriodQuotient,
+    PeriodShare,
+    PeriodSum,
+    QuotientOfFacts,
+    RankFacts,
+    ShareOfFacts,
+    SumOfFacts,
+    ZeroDenominatorCell,
+)
+from dfo_frame_grammar import Frame
+from dfo_frame_grammar.grammar import ComposedUnit, StatVarPart
+from digest_facts import facts
 
 _EI = ExecutionIdentity(
     engine_version="0.1.0", frame_grammar_version="1.0.0", reduction_policy_version="0.1.0"
@@ -70,7 +82,7 @@ def _summary(
     )
 
 
-def _result(group_summaries: tuple[GroupSummary, ...], **overrides: object) -> AggregateResult:
+def _result(group_summaries: tuple[GroupSummary, ...], **overrides: object) -> AggregateFacts:
     defaults: dict[str, object] = {
         "frame": None,
         "resolved_unit": "dcid:USDollar",
@@ -84,11 +96,11 @@ def _result(group_summaries: tuple[GroupSummary, ...], **overrides: object) -> A
         "period_label": "2021",
     }
     defaults.update(overrides)
-    return AggregateResult(group_summaries=group_summaries, **defaults)
+    return facts(AggregateFacts, group_summaries=group_summaries, **defaults)
 
 
 def _digest_kwargs(
-    result: AggregateResult, *, group_by: tuple[str, ...] = ("reporter",), aggregation: str = "sum"
+    result: AggregateFacts, *, group_by: tuple[str, ...] = ("reporter",), aggregation: str = "sum"
 ) -> dict:
     return {
         "group_by": group_by,
@@ -169,23 +181,22 @@ def _entity_growth(key: str, rate: float) -> EntityGrowth:
     )
 
 
-def _growth_result(entity_growths: tuple[EntityGrowth, ...], **overrides: object) -> GrowthResult:
+def _growth_result(entity_growths: tuple[EntityGrowth, ...], **overrides: object) -> GrowthFacts:
     defaults: dict[str, object] = {
         "frame": None,
         "resolved_unit": "dcid:USDollar",
         "facet_selections": (),
         "warnings": (),
-        "window_start": "2020",
-        "window_end": "2023",
+        "change": "relative",
     }
     defaults.update(overrides)
-    return GrowthResult(entity_growths=entity_growths, **defaults)
+    return facts(GrowthFacts, entity_growths=entity_growths, **defaults)
 
 
-def _growth_digest_kwargs(result: GrowthResult) -> dict:
+def _growth_digest_kwargs(result: GrowthFacts) -> dict:
     return {
-        "window_start": result.window_start,
-        "window_end": result.window_end,
+        "window_start": "2020",
+        "window_end": "2023",
         "entity_by": ("reporter",),
         "result": result,
         "op_spec_hash": "ops_" + "a" * 32,
@@ -226,7 +237,7 @@ def _period_comparison(period: str, left: float, right: float) -> PeriodComparis
 
 def _compare_result(
     period_comparisons: tuple[PeriodComparison, ...], **overrides: object
-) -> CompareResult:
+) -> CompareFacts:
     defaults: dict[str, object] = {
         "frame": None,
         "stat_var": "dcid:ops_" + "a" * 32,
@@ -246,10 +257,10 @@ def _compare_result(
         "right_coverage_fraction": 1.0,
     }
     defaults.update(overrides)
-    return CompareResult(period_comparisons=period_comparisons, **defaults)
+    return facts(CompareFacts, period_comparisons=period_comparisons, **defaults)
 
 
-def _compare_digest_kwargs(result: CompareResult) -> dict:
+def _compare_digest_kwargs(result: CompareFacts) -> dict:
     return {
         "result": result,
         "op_spec_hash": "ops_" + "a" * 32,
@@ -332,7 +343,7 @@ def _sum_of_digest_kwargs(
         for i, period in enumerate(periods)
     )
     return {
-        "result": SumOfResult(period_sums=sums, **fields),
+        "result": facts(SumOfFacts, period_sums=sums, **fields),
         "op_spec_hash": "ops_" + "a" * 32,
         "content_version": "ocv_" + "b" * 32,
         "execution_identity": _EI,
@@ -370,7 +381,7 @@ def quotient_of_result(
     numerator_periods: tuple[str, ...] | None = None,
     denominator_periods: tuple[str, ...] | None = None,
     **overrides: object,
-) -> QuotientOfResult:
+) -> QuotientOfFacts:
     matched = matched_periods or tuple(sorted({entry.time_period for entry in period_quotients}))
     numerator_periods = matched if numerator_periods is None else numerator_periods
     denominator_periods = matched if denominator_periods is None else denominator_periods
@@ -395,10 +406,10 @@ def quotient_of_result(
         "denominator_coverage_fraction": len(matched) / len(denominator_periods),
     }
     defaults.update(overrides)
-    return QuotientOfResult(period_quotients=period_quotients, **defaults)
+    return facts(QuotientOfFacts, period_quotients=period_quotients, **defaults)
 
 
-def _quotient_of_digest_kwargs(result: QuotientOfResult) -> dict:
+def _quotient_of_digest_kwargs(result: QuotientOfFacts) -> dict:
     return {
         "result": result,
         "op_spec_hash": "ops_" + "a" * 32,
@@ -482,11 +493,16 @@ QUOTIENT_OF_CASES: tuple[CorpusCase, ...] = (
 
 def _entity_rank(key: str, value: float, rank: int) -> EntityRank:
     return EntityRank(
-        entity_key=(("reporter", key),), value=value, rank=rank, row_count=1, coverage_fraction=1.0
+        entity_key=(("reporter", key),),
+        value=value,
+        rank=rank,
+        row_count=1,
+        coverage_fraction=1.0,
+        time_period="",
     )
 
 
-def _rank_result(entity_ranks: tuple[EntityRank, ...], **overrides: object) -> RankResult:
+def _rank_result(entity_ranks: tuple[EntityRank, ...], **overrides: object) -> RankFacts:
     defaults: dict[str, object] = {
         "frame": None,
         "resolved_unit": "dcid:USDollar",
@@ -499,12 +515,13 @@ def _rank_result(entity_ranks: tuple[EntityRank, ...], **overrides: object) -> R
         "expected_cell_count": len(entity_ranks) * 3 or 1,
         "present_cell_count": len(entity_ranks) * 3,
         "overall_coverage_fraction": 1.0,
+        "per_period": False,
     }
     defaults.update(overrides)
-    return RankResult(entity_ranks=entity_ranks, **defaults)
+    return facts(RankFacts, entity_ranks=entity_ranks, **defaults)
 
 
-def _rank_digest_kwargs(result: RankResult) -> dict:
+def _rank_digest_kwargs(result: RankFacts) -> dict:
     return {
         "rank_by": ("reporter",),
         "result": result,
@@ -558,7 +575,7 @@ def _period_share(period: str, numerator: float, denominator: float) -> PeriodSh
     )
 
 
-def share_of_result(period_shares: tuple[PeriodShare, ...], **overrides: object) -> ShareOfResult:
+def share_of_result(period_shares: tuple[PeriodShare, ...], **overrides: object) -> ShareOfFacts:
     defaults: dict[str, object] = {
         "frame": None,
         "stat_var": "dcid:ops_" + "a" * 32,
@@ -576,10 +593,10 @@ def share_of_result(period_shares: tuple[PeriodShare, ...], **overrides: object)
         "denominator_coverage_fraction": 1.0,
     }
     defaults.update(overrides)
-    return ShareOfResult(period_shares=period_shares, **defaults)
+    return facts(ShareOfFacts, period_shares=period_shares, **defaults)
 
 
-def _share_of_digest_kwargs(result: ShareOfResult) -> dict:
+def _share_of_digest_kwargs(result: ShareOfFacts) -> dict:
     return {
         "result": result,
         "op_spec_hash": "ops_" + "a" * 32,
@@ -617,22 +634,7 @@ def _matched_key(key: str, value: float) -> MatchedKey:
     )
 
 
-def matched_keys_of(rows: Sequence[MatchedKey]) -> MatchedKeys:
-    """`rows` as the columnar `MatchedKeys` a `JoinResult` carries. Every
-    row names the same key columns, in the same order."""
-    columns = [column for column, _ in rows[0].key] if rows else []
-    return MatchedKeys(
-        role_cells={
-            column: pa.array([dict(row.key)[column] for row in rows], type=pa.string())
-            for column in columns
-        },
-        time_periods=pa.array([row.time_period for row in rows], type=pa.string()),
-        left_values=pa.array([row.left_value for row in rows], type=pa.float64()),
-        right_values=pa.array([row.right_value for row in rows], type=pa.float64()),
-    )
-
-
-def _join_result(matched_keys: tuple[MatchedKey, ...], **overrides: object) -> JoinResult:
+def _join_result(matched_keys: tuple[MatchedKey, ...], **overrides: object) -> JoinFacts:
     defaults: dict[str, object] = {
         "frame": None,
         "left_resolved_unit": "dcid:USDollar",
@@ -648,10 +650,10 @@ def _join_result(matched_keys: tuple[MatchedKey, ...], **overrides: object) -> J
         "right_unmatched_entity_count": 0,
     }
     defaults.update(overrides)
-    return JoinResult(matched_keys=matched_keys_of(matched_keys), **defaults)
+    return facts(JoinFacts, matched_keys=matched_keys, **defaults)
 
 
-def _join_digest_kwargs(result: JoinResult) -> dict:
+def _join_digest_kwargs(result: JoinFacts) -> dict:
     return {
         "result": result,
         "op_spec_hash": "ops_" + "a" * 32,
@@ -703,7 +705,7 @@ def _filter_row_summary(key: str, value: float) -> FilterRowSummary:
 
 def _filter_result(
     kept_row_summaries: tuple[FilterRowSummary, ...], **overrides: object
-) -> FilterResult:
+) -> FilterFacts:
     defaults: dict[str, object] = {
         "frame": None,
         "total_row_count": len(kept_row_summaries) + 1,
@@ -711,10 +713,10 @@ def _filter_result(
         "dropped_row_count": 1,
     }
     defaults.update(overrides)
-    return FilterResult(kept_row_summaries=kept_row_summaries, **defaults)
+    return facts(FilterFacts, kept_row_summaries=kept_row_summaries, **defaults)
 
 
-def _filter_digest_kwargs(result: FilterResult) -> dict:
+def _filter_digest_kwargs(result: FilterFacts) -> dict:
     return {
         "predicate_count": 1,
         "result": result,

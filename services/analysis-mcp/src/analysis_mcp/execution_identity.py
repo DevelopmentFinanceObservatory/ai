@@ -2,38 +2,23 @@
 
 `op_spec_hash` and a result's `content_version` name *what* was asked and
 *what came back*; `ExecutionIdentity` names *which engine computed it* --
-the toolkit's own build, the frame grammar it validated against, and the
+the engine's build, the frame grammar it validated against, and the
 reduction policy its arithmetic followed. Any change that could move a
-computed number moves one of these three fields; a test that perturbs the
-engine and watches `content_version` move confirms the binding holds.
+computed number moves one of these three fields, and `content_version` is
+minted over them (`identity.mint_toolkit_content_version`).
 
-`frame_grammar_version` is read from `dfo_frame_grammar.FRAME_GRAMMAR_VERSION`
-rather than pinned here, so a frame-grammar bump is picked up automatically
-instead of drifting out of sync with a hand-copied literal.
-
-`current_execution_identity` names this package's own engine, which only the
-in-process verb functions compute with (`tool_pipeline.mint_identity_or_refusal`).
-The registered tools compute on dfo-apis' analysis runner, whose identity apis'
-capabilities document names (`common.live_apis.LiveApisClient.analysis_execution_identity`).
+dfo-apis' analysis runner computes every verb and states its identity in each
+summary (`summary.VerbSummary.execution_identity`) and in apis' capabilities
+document (`common.live_apis.LiveApisClient.analysis_execution_identity`), which
+`harness.recipe_replay` reads to predict the pair a recomputed step mints. A
+stored frame that an in-process analysis-mcp verb computed carries that engine's
+identity in its trace (`trace.Trace.execution_identity`).
 """
 
 from __future__ import annotations
 
-from dfo_frame_grammar import FRAME_GRAMMAR_VERSION
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
-
-# The engine's own version, hand-set as a literal.
-ENGINE_VERSION = "0.9.1"
-
-# The reduction policy's version -- separate from `ENGINE_VERSION` because a
-# reduction policy (e.g. "skip nulls, use fsum") can change independently of
-# the engine's own build. At 0.2.0: a row leaving `unit` unbound is excluded
-# from every verb's own computation once it resolves to a real unit. The
-# exclusion runs on `aggregate`'s unpinned path (matching what its pinned path
-# already did), then extends to `rank`, `share_of`, `growth`, `join`, and
-# `compare`.
-REDUCTION_POLICY_VERSION = "0.2.0"
 
 
 @dataclass(frozen=True, kw_only=True, config=ConfigDict(extra="forbid"))
@@ -58,12 +43,3 @@ class ExecutionIdentity:
         to sort or validate a fourth nested object.
         """
         return f"{self.engine_version}|{self.frame_grammar_version}|{self.reduction_policy_version}"
-
-
-def current_execution_identity() -> ExecutionIdentity:
-    """The engine's execution identity as of this build."""
-    return ExecutionIdentity(
-        engine_version=ENGINE_VERSION,
-        frame_grammar_version=FRAME_GRAMMAR_VERSION,
-        reduction_policy_version=REDUCTION_POLICY_VERSION,
-    )

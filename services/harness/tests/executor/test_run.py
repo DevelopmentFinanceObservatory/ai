@@ -13,14 +13,17 @@ from __future__ import annotations
 import asyncio
 import random
 import ssl
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
+from functools import partial
+from pathlib import Path
 from typing import Any
 
 import httpx2
 import pyarrow as pa
 import pytest
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
+from common.call_limit import CallDeadline
 from common.materialisation import FrameRef
 from compiler.capabilities import CAPABILITIES, ToolCapability
 from compiler.compile import compile_plan
@@ -34,9 +37,8 @@ from compiler.surface import (
 )
 from data_mcp import stat_var_list
 from data_mcp.client import UpstreamClient
-from data_mcp.deadline import CallDeadline
 from data_mcp.errors import UpstreamError
-from data_mcp.graph_wire import NotHeldEntry, OrganisationNode
+from data_mcp.graph_wire import CodeNode, NotHeldEntry, OrganisationNode, OtherNode
 from data_mcp.manifest import strip_manifest
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA
 from data_mcp.settings import Settings as DataMcpSettings
@@ -86,7 +88,15 @@ from planner.plan import (
 from planner.workflow import SelectedSource, ToolId
 
 from ..unreachable_surface import unreachable_surface
-from .conftest import RESULT_FRAME, SPEC_KENYA, SPEC_POPULATION, ScriptedSurface, ok, refusal
+from .conftest import (
+    RESULT_FRAME,
+    SPEC_KENYA,
+    SPEC_POPULATION,
+    ScriptedSurface,
+    ok,
+    refusal,
+    runner_refused,
+)
 
 PlanFactory = Callable[..., Plan]
 ManifestFactory = Callable[..., dict[str, Any]]
@@ -850,27 +860,73 @@ async def test_a_definition_no_longer_held_sends_the_requirement_back_to_discove
     assert len(surface.calls) == 1
 
 
-async def test_a_rediscovery_on_a_step_bound_to_no_evidence_is_a_plain_refusal(
+async def test_a_runner_upstream_version_change_on_an_analysis_step_is_posted_once_more(
     approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
 ) -> None:
-    # No analysis verb answers `refresh_then_retry` today; the executor
-    # classifies by mode, so one that did would reach the aggregate step,
-    # which no `EvidenceBinding` names. There is nothing to rediscover, so
-    # the run stops on the step rather than instructing a rediscovery of
-    # nothing in particular.
-    surface = _surface(
-        real_schemas,
-        manifest(),
-        aggregate=[refusal("upstream_version_changed", "refresh_then_retry")],
+    """The runner answers `upstream_version_changed` when a root read at its newest
+    version met an upstream refresh mid-load. No `EvidenceBinding` names the aggregate
+    step, so there is nothing to rediscover; the same tree posted again reads the
+    refreshed version, so the step is called once more, at once."""
+    refused = await runner_refused(
+        status=503, code="upstream_version_changed", title="Upstream Version Changed"
     )
+    surface = _surface(real_schemas, manifest(), aggregate=[refused, ok(RESULT_FRAME)])
+    sleeps = _Sleeps()
+
+    outcome = await _run(approved_plan(), surface=surface, sleep=sleeps)
+
+    assert isinstance(outcome, Accepted), outcome
+    first, second = [arguments for tool, arguments in surface.calls if tool == "aggregate"]
+    assert first == second
+    assert sleeps.delays == [0.0]
+
+
+async def _definition_not_held() -> ToolCallResult:
+    return refusal(
+        "definition_not_held",
+        "correct_and_retry",
+        message="Definition Not Held: the run could not finish.",
+        fix={"definition_id": SPEC_KENYA, "next_step": "search"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "calls"),
+    [
+        pytest.param(
+            partial(
+                runner_refused,
+                status=503,
+                code="upstream_version_changed",
+                title="Upstream Version Changed",
+            ),
+            2,
+            id="upstream-version-changed-twice",
+        ),
+        # A code a second call cannot get past stops at the first refusal.
+        pytest.param(_definition_not_held, 1, id="definition-not-held"),
+    ],
+)
+async def test_a_rediscovery_on_a_step_bound_to_no_evidence_stops_with_the_refusals_message(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    answer: Callable[[], Awaitable[ToolCallResult]],
+    calls: int,
+) -> None:
+    result = await answer()
+    surface = _surface(real_schemas, manifest(), aggregate=[result])
 
     outcome = await _run(approved_plan(), surface=surface, sleep=_Sleeps())
 
     assert isinstance(outcome, Refused), outcome
     assert outcome.refusal is RefusalKind.STEP_REFUSED
     assert outcome.step_id == "totals"
-    assert outcome.payload is not None and outcome.payload.code == "upstream_version_changed"
+    assert outcome.payload is not None
+    assert outcome.payload.code == (result.structured_content or {})["code"]
+    assert outcome.detail.endswith("the run could not finish.")
     assert [step.step_id for step in outcome.completed] == ["debt"]
+    assert [tool for tool, _ in surface.calls].count("aggregate") == calls
 
 
 async def test_a_refused_steps_detail_carries_the_message_without_the_envelope_line(
@@ -1365,8 +1421,8 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
             "donor/XYZ": NotHeldEntry(ref="donor/XYZ", status="not_held"),
         }
 
-    async def injected(refs: Sequence[str]) -> Mapping[str, str]:
-        asked.append(list(refs))
+    async def injected(cells: Sequence[tuple[str, str]]) -> Mapping[tuple[str, str], str]:
+        asked.append([dcid for _, dcid in cells])
         if lookup == "raises":
             raise RuntimeError("a lookup's own defect")
         await asyncio.Event().wait()
@@ -1388,6 +1444,75 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
         labels[:2],
         [labels[0], labels[2]],
     ]
+
+
+# Graph nodes recorded from the nodes route: a CRS purpose code, whose label carries its
+# code system after it, and a node of another kind.
+_NODES = Path(__file__).resolve().parents[3] / "data-mcp" / "tests" / "fixtures"
+_CODE_NODE = CodeNode.model_validate_json((_NODES / "node_code.json").read_text())
+_OTHER_NODE = OtherNode.model_validate_json((_NODES / "node_other.json").read_text())
+
+
+@pytest.mark.parametrize(
+    ("cell", "label"),
+    [
+        # Text the nodes route refuses as a dcid is not asked for.
+        pytest.param("humanitarian aid", None, id="text"),
+        # A breakdown cell holds the code's dcid (dfo-apis `datasets_api.decode`). It
+        # takes the code's label without its code system, as the figures name it.
+        pytest.param(
+            _CODE_NODE.ref,
+            "civilian peace-building, conflict prevention and resolution",
+            id="code-dcid",
+        ),
+        # A code dcid the graph does not name keeps no label, so a note counts its series.
+        pytest.param("CRSPurposeCode99999", None, id="code-dcid-unnamed"),
+        # A dcid the graph holds as no code of the cell's axis keeps no label.
+        pytest.param(_OTHER_NODE.ref, None, id="not-a-code"),
+    ],
+)
+async def test_a_series_breakdown_cell_is_named_by_the_graph_only_as_a_code_of_its_axis(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    requirement: RequirementFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    cell: str,
+    label: str | None,
+) -> None:
+    """Two series miss years: one from a donor, one under a breakdown's sector cell.
+    The donor is named by the graph in every case, and the sector when its cell is
+    the dcid of a code of its axis."""
+    sparse = manifest()
+    (row,) = sparse["statistics"]
+    row["observations"] = 7
+    sparse["statistics"][:] = [
+        {**row, "entities": [*row["entities"], {"role": role, "ref": ref}]}
+        for role, ref in (("donor", "donor/DEU"), ("stat_var_crsPurpose", cell))
+    ]
+    sparse["series_count"] = 2
+    lookups: list[list[str]] = []
+
+    async def describe(dcids: list[str]) -> dict[str, Any]:
+        lookups.append(list(dcids))
+        held = {
+            "donor/DEU": OrganisationNode.model_construct(ref="donor/DEU", label="Germany"),
+            _CODE_NODE.ref: _CODE_NODE,
+            _OTHER_NODE.ref: _OTHER_NODE,
+        }
+        return {dcid: held.get(dcid, NotHeldEntry(ref=dcid, status="not_held")) for dcid in dcids}
+
+    monkeypatch.setattr("executor.run.describe_nodes", describe)
+    plan = approved_plan(requirement=requirement(coverage=Coverage(on_missing="report_gaps")))
+
+    outcome = await _run(plan, surface=_surface(real_schemas, sparse), sleep=_Sleeps())
+
+    assert isinstance(outcome, Accepted), outcome
+    assert sorted(lookups[0]) == sorted({"donor/DEU", cell} - {"humanitarian aid"})
+    gaps = [gap for gap in outcome.evidence[0].gaps if gap.code.value == "coverage_gaps"]
+    named = {e.ref: e.label for gap in gaps for e in gap.entities}
+    assert named["donor/DEU"] == "Germany"
+    assert named[cell] == label
 
 
 async def test_a_name_lookup_needs_more_step_budget_left_than_its_margin() -> None:

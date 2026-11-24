@@ -77,7 +77,9 @@ from typing import Literal, NamedTuple, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
+from common.breakdown_labels import Cell
 from common.price_basis import price_basis_reading
+from data_mcp.dcid import bare_dcid, is_dcid
 from data_mcp.manifest import Manifest
 from data_mcp.series_statistics import continuing_method, series_index
 from dfo_frame_grammar.columnar import array_kernel, scalar_kernel, unit_codes
@@ -1654,7 +1656,7 @@ def read_unit_dcid(ref: str | None) -> UnitReading:
     """The currency and price basis a unit id's own structure names."""
     if ref is None:
         return UnitReading()
-    dcid = ref.removeprefix("dcid:")
+    dcid = bare_dcid(ref)
     if dcid in _PPP_DCIDS or _PPP in _LETTER_RUNS.findall(dcid):
         return UnitReading(currency=_PPP)
     if match := _CURRENCY_DCID.fullmatch(dcid):
@@ -2233,7 +2235,7 @@ def _pinned_stat_var(approved: SelectedSource) -> set[str] | None:
     shape, and one with no `shape` at all, falls through to the digest.
     """
     dcid = pinned_stat_var(approved.identity)
-    return {_bare_dcid(dcid)} if dcid is not None else None
+    return {bare_dcid(dcid)} if dcid is not None else None
 
 
 def _membership_issues(
@@ -2343,7 +2345,7 @@ def _binding_comparison_issues(
     retrieved = evidence.resolved_stat_vars
     if retrieved is None:
         return [_membership_unverified(requirement, found=None, required=sorted(approved_set))]
-    retrieved_set = {_bare_dcid(v) for v in retrieved}
+    retrieved_set = {bare_dcid(v) for v in retrieved}
     if approved_set == retrieved_set:
         return []
     return [
@@ -2393,40 +2395,47 @@ def series_rank(finding: EvidenceIssue) -> tuple[bool, float, str, tuple[str, ..
     return size is None, -(size or 0.0), finding.stat_var or "", refs
 
 
-def unlabelled_series_refs(findings: Iterable[EvidenceIssue], *, limit: int) -> list[str]:
-    """The refs, at most `limit`, of the entities the series findings among
-    `findings` name with no label, the largest series' first (`series_rank`).
+def unlabelled_series_cells(findings: Iterable[EvidenceIssue], *, limit: int) -> list[Cell]:
+    """The `(role, dcid)` cells, at most `limit`, of the entities the series
+    findings among `findings` name with no label, the largest series' first
+    (`series_rank`).
+
+    A ref is looked up only if the nodes route accepts it once its `dcid:`
+    marker is stripped. A breakdown cell (`stat_var_crsPurpose`) holds the
+    code's dcid (dfo-apis `datasets_api.decode`), and its role says which
+    axis's code it names (`common.breakdown_labels.code_label`).
 
     An answer names the largest series that fall short
     (`harness.graph.answer`), so a lookup bounded this way still labels the
     series it names.
     """
-    refs: dict[str, None] = {}
+    cells: dict[Cell, None] = {}
     for finding in sorted(
         (one for one in findings if one.code in _SERIES_CODES and one.entities), key=series_rank
     ):
         for entity in finding.entities:
-            if len(refs) == limit:
-                return list(refs)
-            if entity.label is None:
-                refs.setdefault(entity.ref)
-    return list(refs)
+            if len(cells) == limit:
+                return list(cells)
+            if entity.label is None and is_dcid(dcid := bare_dcid(entity.ref)):
+                cells.setdefault((entity.role, dcid))
+    return list(cells)
 
 
 def with_series_labels(
-    findings: Iterable[EvidenceIssue], labels: Mapping[str, str]
+    findings: Iterable[EvidenceIssue], labels: Mapping[Cell, str]
 ) -> list[EvidenceIssue]:
-    """`findings` with each series entity that has no label labelled by its ref in `labels`."""
+    """`findings` with each series entity that has no label labelled by its
+    `(role, dcid)` cell in `labels` (`unlabelled_series_cells`)."""
+
+    def labelled(entity: SeriesEntity) -> SeriesEntity:
+        label = labels.get((entity.role, bare_dcid(entity.ref)))
+        if entity.label is not None or label is None:
+            return entity
+        return entity.model_copy(update={"label": label})
+
     return [
         finding.model_copy(
-            update={
-                "entities": tuple(
-                    entity
-                    if entity.label is not None or entity.ref not in labels
-                    else entity.model_copy(update={"label": labels[entity.ref]})
-                    for entity in finding.entities
-                )
-            }
+            update={"entities": tuple(labelled(entity) for entity in finding.entities)}
         )
         if finding.code in _SERIES_CODES
         else finding
@@ -2469,7 +2478,7 @@ def _series_issues(
     gives its ref, and its largest absolute value (`EvidenceIssue.magnitude`), so
     an answer can say whose series falls short and name the largest. The
     executor labels the entities `approved` names none for, such as the
-    members of an open population (`unlabelled_series_refs`).
+    members of an open population (`unlabelled_series_cells`).
     """
     if evidence.series is None or not evidence.series.num_rows:
         # `None` (the manifest carries no statistics at all) and a table with
@@ -2487,7 +2496,9 @@ def _series_issues(
     issues: list[EvidenceIssue] = []
     period = requirement.period
     held = _held_period(requirement, evidence)
-    labels = {one.ref: one.label for one in approved.entities} if approved is not None else {}
+    labels = (
+        {bare_dcid(one.ref): one.label for one in approved.entities} if approved is not None else {}
+    )
     for one in _series_off_period(evidence.series, held, labels=labels):
         reach = Period(start=one.first_year, end=one.latest_year)
         if not reach.covers(held):
@@ -2552,11 +2563,6 @@ def _series_issues(
 # --- Manifest: reading a `get_data` result into evidence ----------------------
 
 
-def _bare_dcid(ref: str) -> str:
-    """A stat_var as the graph names it, without the `dcid:` a frame cell carries."""
-    return ref.removeprefix("dcid:")
-
-
 def _resolved_stat_vars(trace: Mapping[str, object]) -> tuple[str, ...] | None:
     """The dcids `trace.resolved_stat_vars` binds this spec to, or `None` when the key is absent.
 
@@ -2570,7 +2576,7 @@ def _resolved_stat_vars(trace: Mapping[str, object]) -> tuple[str, ...] | None:
     if not isinstance(raw, list):
         return None
     return tuple(
-        _bare_dcid(str(ref))
+        bare_dcid(str(ref))
         for entry in raw
         if isinstance(entry, Mapping) and (ref := entry.get("ref")) is not None
     )
@@ -2639,7 +2645,7 @@ def _years(periods: pa.Array) -> pa.Array:
 def _series_stat_vars(series: pa.Table) -> tuple[str, ...]:
     """The distinct stat_vars `series` carries, bare and sorted."""
     distinct = array_kernel("unique", _column(series, "stat_var")).to_pylist()
-    return tuple(sorted({_bare_dcid(one) for one in distinct}))
+    return tuple(sorted({bare_dcid(one) for one in distinct}))
 
 
 def _series_entities(series: pa.Table) -> tuple[ResolvedEntity, ...]:
@@ -2739,7 +2745,7 @@ def _series_off_period(
     held to the period as one. A series with a first or last period that
     names no year is left out, since neither check can run on it. The rest
     are selected column by column, and only the selected series become
-    `SeriesEvidence`, each entity labelled by `labels`, keyed by ref.
+    `SeriesEvidence`, each entity labelled by `labels`, keyed by bare dcid.
     """
     unskipped = pc.ScalarAggregateOptions(skip_nulls=False)
     folded = (
@@ -2794,10 +2800,12 @@ def _series_off_period(
     )
     for row in selected.to_pylist():
         yield SeriesEvidence(
-            stat_var=_bare_dcid(row["stat_var"]),
+            stat_var=bare_dcid(row["stat_var"]),
             entities=tuple(
                 SeriesEntity(
-                    role=entity["role"], ref=entity["ref"], label=labels.get(entity["ref"])
+                    role=entity["role"],
+                    ref=entity["ref"],
+                    label=labels.get(bare_dcid(entity["ref"])),
                 )
                 for entity in row["entities"]
             ),

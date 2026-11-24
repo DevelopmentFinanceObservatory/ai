@@ -24,7 +24,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
-from analysis_mcp.rolling_tool import coordinate_text
+from analysis_mcp.coordinates import coordinate_text
 from common.breakdown_labels import NO_LABELS, Cell, CellLabels
 from dfo_frame_grammar.grammar import (
     FACET_IDENTITY_COLUMNS,

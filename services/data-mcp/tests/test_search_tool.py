@@ -10,8 +10,8 @@ from typing import Any
 
 import httpx2
 import pytest
+from common.call_limit import CallDeadline
 from data_mcp import client_holder, search_tool
-from data_mcp.deadline import CallDeadline
 from data_mcp.digest import render_answer, render_digest
 from data_mcp.search_result import SEARCH_CONTEXT_META_KEY, SEARCH_ENVELOPE_META_KEY
 from data_mcp.search_tool import (

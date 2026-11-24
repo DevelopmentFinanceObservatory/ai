@@ -8,22 +8,25 @@ import asyncio
 import functools
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import httpx2
 import pytest
-from analysis_mcp import digest, verbs
+from analysis_mcp import digest, tool_pipeline, verbs
 from analysis_mcp.digest import render_summary_digest
 from analysis_mcp.runner_client import (
     DEFAULT_RETRY_AFTER_S,
     RunnerClient,
     read_derived_manifest,
+    run_tree,
     runner_holder,
 )
 from analysis_mcp.summary import LIST_CAP, VerbSummary
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from common.breakdown_labels import NODES_READ_TIMEOUT_S
+from common.call_limit import CallDeadline, use_call_deadline
 from common.materialisation import (
     DEFAULT_MINT_OPTIONS,
     AnchorRecord,
@@ -312,6 +315,46 @@ async def test_a_rolling_call_that_read_data_outside_its_anchor_record_refuses(
     }
 
 
+# A version the runner rendered from `_FRAME`'s dataset: a sum over its StatVars,
+# or a party-totals cut.
+_SUMMED = {"spec_id": _SPEC, "content_version": "cv_" + "a" * 32}
+
+
+@pytest.mark.parametrize(
+    ("base", "covered"),
+    [(_CV, True), ("cv_" + "b" * 32, False), (None, False)],
+    ids=[
+        "sum-of-the-anchored-version",
+        "sum-of-another-version",
+        # dfo-apis names no base for a cut, which can drop periods (C121f).
+        "cut-of-the-anchored-version",
+    ],
+)
+async def test_a_rolling_call_that_read_a_rendering_is_checked_by_its_base_version(
+    store: InMemoryMaterialisationStore, base: str | None, covered: bool
+) -> None:
+    # The record holds `_FRAME`'s dataset version; the runner read a version of its
+    # own rendered from it, and names the version a sum derives from.
+    record = await _anchor_over_both(store)
+    ready = _reading(_recorded_ready("growth"), _SUMMED, _OTHER_DATASET)
+    derived = [] if base is None else [{**_SUMMED, "base_content_version": base}]
+    _install(httpx2.Response(200, json={**ready, "derived_roots": derived}))
+
+    result = await _rolling_growth(_FRAME, record.anchor_key)
+
+    structured = result.structured_content
+    assert structured is not None
+    if covered:
+        assert result.is_error is False, result.content
+        return
+    assert structured["code"] == "rolling_anchor_unresolved"
+    assert structured["fix"] == {
+        "detail": "root_not_in_record",
+        "anchor_key": record.anchor_key,
+        "root": _SUMMED,
+    }
+
+
 async def test_a_rolling_call_over_other_populations_than_its_record_refuses_before_any_call(
     store: InMemoryMaterialisationStore,
 ) -> None:
@@ -457,7 +500,8 @@ def _record(options: dict[str, Any]) -> MintRecord:
         ),
         (
             # data-mcp's flow enrichment order: the type columns, then party_kind,
-            # party_class and party_whole. dfo-apis keeps a root's columns sorted.
+            # party_class and party_whole. The root sends them sorted and once, as
+            # a stored recipe's root names them.
             _record(
                 {
                     "format": "parquet",
@@ -493,7 +537,7 @@ def _record(options: dict[str, Any]) -> MintRecord:
         "mint-record",
         "stat-vars-sum",
         "breakdown-with-columns",
-        "flow-columns-sorted",
+        "flow-columns-sorted-once",
     ],
 )
 async def test_a_get_data_frame_is_sent_as_the_dataset_version_its_mint_record_names(
@@ -573,6 +617,24 @@ async def test_a_ready_answer_replies_with_its_summarys_verb_result_and_digest(
     text = result.content[0].text
     assert text.endswith(f"execution_identity: {summary.execution_identity.canonical_string()}")
     assert f"spec_id={summary.spec_id}, content_version={summary.content_version}" in text
+
+
+async def test_the_statvars_a_summed_read_added_up_reach_the_result_and_the_digest(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    summed = [{"spec_id": _SPEC, "content_version": _DATASET_CV, "count": 1598}]
+    _install(
+        httpx2.Response(200, json={**_recorded_ready("aggregate"), "stat_vars_summed": summed})
+    )
+
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    assert result.is_error is False, result.content
+    assert result.structured_content is not None
+    assert result.structured_content["stat_vars_summed"] == summed
+    head, _, identity = result.content[0].text.rpartition("\n\n")
+    assert head.endswith(f"summed: {_SPEC}, {_DATASET_CV} added up over 1,598 StatVars.")
+    assert identity.startswith("frame reference:")
 
 
 # A CRS purpose code as dfo-apis' `POST /api/graph/nodes` answers it.
@@ -728,6 +790,20 @@ def _count_renders(monkeypatch: pytest.MonkeyPatch) -> list[None]:
     return renders
 
 
+async def test_an_answer_whose_summed_reads_do_not_fit_refuses_as_outside_the_contract(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    summed = [{"spec_id": _SPEC, "count": 0}]
+    _install(
+        httpx2.Response(200, json={**_recorded_ready("aggregate"), "stat_vars_summed": summed})
+    )
+
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "upstream_error"
+
+
 async def test_a_summary_tolerates_fields_dfo_apis_adds_to_its_exclusions_and_time(
     store: InMemoryMaterialisationStore,
 ) -> None:
@@ -746,6 +822,24 @@ async def test_a_summary_tolerates_fields_dfo_apis_adds_to_its_exclusions_and_ti
     assert result.is_error is False, result.content
     assert result.structured_content is not None
     assert result.structured_content["exclusions"] == summary["exclusions"]
+
+
+async def test_an_exclusion_reason_the_tools_do_not_declare_is_named_in_the_digest_only(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    body = _recorded_ready("rank")
+    summary = body["summary"]
+    (declared, *_) = summary["exclusions"]
+    added = {**declared, "reason": "a_reason_dfo_apis_added", "side": "a_side_it_added"}
+    stated = {**summary, "exclusions": [*summary["exclusions"], added]}
+    _install(httpx2.Response(200, json={**body, "summary": stated}))
+
+    result = await verbs.rank(frame_ref=_FRAME, rank_by=["donor"])
+
+    assert result.is_error is False, result.content
+    assert result.structured_content is not None
+    assert result.structured_content["exclusions"] == summary["exclusions"]
+    assert "a_reason_dfo_apis_added, a_side_it_added" in result.content[0].text
 
 
 @pytest.mark.parametrize(
@@ -906,15 +1000,50 @@ async def test_the_caller_is_named_beside_the_principal(
         ),
         (
             _problem(404, "spec_not_found"),
-            "upstream_error",
+            "spec_not_found",
             "do_not_retry",
-            {"detail": "spec_not_found detail"},
+            {},
         ),
         (
             httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
-            "upstream_error",
+            "timeout",
             "retry_after_delay",
-            {"detail": "slow"},
+            {},
+        ),
+        (
+            _problem(
+                422,
+                "compare_no_key_matched",
+                fix={"on": {"donor": "donor"}},
+                retry_mode="correct_and_retry",
+            ),
+            "compare_no_key_matched",
+            "correct_and_retry",
+            {"on": {"donor": "donor"}},
+        ),
+        (
+            _problem(422, "a_code_no_registry_holds", fix={"x": 1}, retry_mode="correct_and_retry"),
+            "a_code_no_registry_holds",
+            "correct_and_retry",
+            {"x": 1},
+        ),
+        (
+            _problem(422, "unit_heterogeneous", fix={"x": 1}, retry_mode="retry_whenever"),
+            "unit_heterogeneous",
+            "correct_and_retry",
+            {"x": 1},
+        ),
+        (
+            _problem(422, "a_code_no_registry_holds", fix={"x": 1}, retry_mode=["correct"]),
+            "a_code_no_registry_holds",
+            "do_not_retry",
+            {"x": 1},
+        ),
+        (
+            _problem(500, "internal_error"),
+            "upstream_error",
+            "do_not_retry",
+            {"detail": "internal_error detail"},
         ),
         (
             httpx2.Response(502, text="bad gateway"),
@@ -936,8 +1065,13 @@ async def test_the_caller_is_named_beside_the_principal(
         "over-ceiling",
         "busy",
         "pending",
-        "unmapped-code",
-        "retryable-unmapped-code",
+        "registry-code",
+        "retryable-registry-code",
+        "code-this-service-defines-no-factory-for",
+        "code-no-registry-holds",
+        "unheld-retry-mode",
+        "malformed-retry-mode",
+        "this-services-own-code",
         "no-problem-document",
         "summary-unreadable",
     ],
@@ -1258,7 +1392,7 @@ class _HungMintRecordWrites(InMemoryMaterialisationStore):
 async def test_a_record_write_that_hangs_leaves_the_answer_standing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(rendering, "_RECORD_WRITE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(rendering, "RECORD_WRITE_TIMEOUT_S", 0.01)
     set_store(_HungMintRecordWrites())
     try:
         _install(_reading_spec)
@@ -1525,6 +1659,37 @@ async def test_a_frame_the_runner_lost_is_fetched_again_at_its_newest_version(
     assert await store.get_mint_record(FrameRef(**_READ_FRAME)) == _READ_RECORD
 
 
+async def test_a_lost_frame_fetched_again_is_named_when_its_read_goes_unrecorded(
+    store: InMemoryMaterialisationStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With no time left to record the Spec read, the digest still says the lost frame was
+    fetched again at its newest version, naming the pair it had, and the cut is logged."""
+    await store.put_mint_record(_record({"format": "parquet"}))
+    lost = {"spec_id": _SPEC, "content_version": _DATASET_CV}
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if "tree" in body and "content_version" in body["tree"]["inputs"]["data"]:
+            return _problem(404, "snapshot_not_found", fix=lost)
+        return _reading_spec(body)
+
+    _install(answer)
+    # The deadline leaves the label read its time and the record step none.
+    deadline = CallDeadline(expires_at=NODES_READ_TIMEOUT_S, clock=lambda: 0.0)
+    with (
+        caplog.at_level(logging.WARNING, logger="analysis_mcp.tool_pipeline"),
+        use_call_deadline(deadline),
+    ):
+        result = await verbs.aggregate(
+            frame_ref=_FRAME, aggregation="sum", rebuild_lost_frames=True
+        )
+
+    assert result.is_error is False, _text(result)
+    assert _CV in _text(result)
+    assert _READ_FRAME["content_version"] not in _text(result)
+    assert await store.get_mint_record(FrameRef(**_READ_FRAME)) is None
+    assert [record.name for record in caplog.records] == ["analysis_mcp.tool_pipeline"]
+
+
 async def test_a_lost_frame_no_record_states_refuses_with_no_rebuild(
     store: InMemoryMaterialisationStore,
 ) -> None:
@@ -1632,15 +1797,18 @@ async def test_a_rebuilt_input_the_tree_recomputed_is_named_by_its_replayed_pair
 
 
 @pytest.mark.parametrize(
-    "resent",
+    ("resent", "code"),
     [
-        httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
-        httpx2.Response(502, text="bad gateway"),
+        (
+            httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
+            "timeout",
+        ),
+        (httpx2.Response(502, text="bad gateway"), "upstream_error"),
     ],
     ids=["timeout", "no-problem-document"],
 )
 async def test_a_transient_failure_of_the_call_sent_again_stays_retryable(
-    store: InMemoryMaterialisationStore, resent: httpx2.Response
+    store: InMemoryMaterialisationStore, resent: httpx2.Response, code: str
 ) -> None:
     await store.put_mint_record(_record({"format": "parquet"}))
     lost = {"spec_id": _SPEC, "content_version": _DATASET_CV}
@@ -1655,10 +1823,7 @@ async def test_a_transient_failure_of_the_call_sent_again_stays_retryable(
 
     structured = result.structured_content
     assert structured is not None
-    assert (structured["code"], structured["retry_mode"]) == (
-        "upstream_error",
-        "retry_after_delay",
-    )
+    assert (structured["code"], structured["retry_mode"]) == (code, "retry_after_delay")
     assert structured["retry_after_s"] is not None
 
 
@@ -1785,7 +1950,7 @@ async def test_a_lost_frame_on_a_call_that_does_not_rebuild_returns_the_runners_
         ),
         (
             httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
-            "upstream_error",
+            "timeout",
             DEFAULT_RETRY_AFTER_S,
             True,
         ),
@@ -1823,6 +1988,230 @@ async def test_a_derived_input_whose_replay_cannot_run_yet_refuses_with_its_dela
     assert any(_OPS in record.getMessage() for record in caplog.records) is logged
 
 
+@pytest.mark.parametrize(
+    ("replays", "code", "retry_mode"),
+    [
+        (
+            [
+                _problem(503, "upstream_version_changed", retryable=True),
+                httpx2.Response(200, json=_ready_as(_REPLAYED)),
+            ],
+            None,
+            None,
+        ),
+        (
+            [_problem(503, "upstream_version_changed", retryable=True)] * 2,
+            "upstream_version_changed",
+            "refresh_then_retry",
+        ),
+    ],
+    ids=["settles", "persists"],
+)
+async def test_a_replay_the_upstream_refreshed_under_is_run_once_more(
+    store: InMemoryMaterialisationStore,
+    replays: list[httpx2.Response],
+    code: str | None,
+    retry_mode: str | None,
+) -> None:
+    """A replay reads its roots at their newest versions, so a second replay reads
+    the refreshed data; one that refuses again answers with the runner's refusal."""
+    lost_root = {"spec_id": _SPEC, "content_version": _DATASET_CV}
+    answers = iter(replays)
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if body["latest"]:
+            return next(answers)
+        if body["tree"]["inputs"]["data"] == _DERIVED:
+            return _problem(404, "snapshot_not_found", fix=lost_root)
+        return httpx2.Response(200, json=_recorded_ready("aggregate"))
+
+    runner = _install(answer)
+    result = await verbs.aggregate(frame_ref=_DERIVED, aggregation="sum", rebuild_lost_frames=True)
+
+    assert sum(json.loads(request.content)["latest"] for request in runner.requests) == 2
+    structured = result.structured_content
+    assert structured is not None
+    if code is None:
+        assert result.is_error is False, _text(result)
+    else:
+        assert (structured["code"], structured["retry_mode"]) == (code, retry_mode)
+
+
+@pytest.mark.parametrize(
+    ("public", "answers", "posts", "code"),
+    [
+        (
+            True,
+            [
+                _problem(503, "upstream_version_changed", retryable=True),
+                httpx2.Response(200, json=_recorded_ready("aggregate")),
+            ],
+            2,
+            None,
+        ),
+        (
+            True,
+            [_problem(503, "upstream_version_changed", retryable=True)] * 3,
+            2,
+            "upstream_version_changed",
+        ),
+        (
+            # The harness's executor sends the step again (`executor.run._repost_recovers`).
+            False,
+            [_problem(503, "upstream_version_changed", retryable=True)] * 2,
+            1,
+            "upstream_version_changed",
+        ),
+    ],
+    ids=["settles", "persists", "harness-call"],
+)
+async def test_a_public_call_the_upstream_refreshed_under_is_sent_once_more(
+    store: InMemoryMaterialisationStore,
+    public: bool,
+    answers: list[httpx2.Response],
+    posts: int,
+    code: str | None,
+) -> None:
+    """A bare Spec read while its source refreshed reads the refreshed version when sent
+    again at once, so a public call sends it once more and answers a second refusal as
+    the runner wrote it."""
+    replies = iter(answers)
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        # The answer's manifest, read to record the Spec read, is not held.
+        return _problem(404, "snapshot_not_found") if "get" in body else next(replies)
+
+    runner = _install(answer)
+    flags = {"rebuild_lost_frames": True, "rolling_follows_tree": True} if public else {}
+
+    result = await verbs.aggregate(frame_ref={"spec_id": _SPEC}, aggregation="sum", **flags)
+
+    assert sum(request.method == "POST" for request in runner.requests) == posts
+    structured = result.structured_content
+    assert structured is not None
+    assert structured.get("code") == code
+
+
+@pytest.mark.parametrize(
+    ("spent_before", "seconds_per_call", "posts"),
+    [(0.0, 10.0, 2), (0.0, 25.0, 1), (0.0, 20.0, 1), (15.0, 12.0, 1)],
+    ids=["time-left", "no-time-for-the-call", "no-time-for-the-work-after", "late-start"],
+)
+async def test_a_public_call_is_sent_once_more_only_when_its_deadline_leaves_time(
+    store: InMemoryMaterialisationStore,
+    spent_before: float,
+    seconds_per_call: float,
+    posts: int,
+) -> None:
+    """An outside call runs under the deadline the combined server started for it,
+    42 s from its start, so a refused call is sent again only when as long a call
+    again, and the record write and label read after it, still end inside it. A call
+    that began its deadline before the verb ran, as registering a bare Spec does, has
+    that much less. Otherwise the caller gets the retryable refusal, not a cancelled
+    call."""
+    now = [0.0]
+    deadline = CallDeadline.after(42.0, clock=lambda: now[0])
+    now[0] += spent_before
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if "get" in body:
+            return _problem(404, "snapshot_not_found")
+        now[0] += seconds_per_call
+        return _problem(503, "upstream_version_changed", retryable=True)
+
+    runner = _install(answer)
+    with use_call_deadline(deadline):
+        result = await verbs.aggregate(
+            frame_ref={"spec_id": _SPEC},
+            aggregation="sum",
+            rebuild_lost_frames=True,
+            rolling_follows_tree=True,
+        )
+
+    assert sum(request.method == "POST" for request in runner.requests) == posts
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured["retry_mode"]) == (
+        "upstream_version_changed",
+        "refresh_then_retry",
+    )
+
+
+async def test_a_second_send_that_outruns_the_deadline_answers_the_first_refusal(
+    store: InMemoryMaterialisationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A public call sent once more runs only until the work after it would no longer fit
+    the call's deadline, so a slow second send answers the first refusal, which the
+    caller may retry, before the combined server cancels the call."""
+    sends = 0
+
+    async def slow_second(*args: Any, **kwargs: Any) -> Any:
+        nonlocal sends
+        sends += 1
+        if sends == 2:
+            await asyncio.sleep(2.0)
+        return await run_tree(*args, **kwargs)
+
+    monkeypatch.setattr(tool_pipeline, "run_tree", slow_second)
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if "get" in body:
+            return _problem(404, "snapshot_not_found")
+        return _problem(503, "upstream_version_changed", retryable=True)
+
+    _install(answer)
+    started = time.monotonic()
+    # The deadline's clock stands still, so the first send takes no time on it and the
+    # second gets 0.2 s of real time before the work after it is due.
+    deadline = CallDeadline(expires_at=tool_pipeline._AFTER_ANSWER_S + 0.2, clock=lambda: 0.0)
+    with use_call_deadline(deadline):
+        result = await verbs.aggregate(
+            frame_ref={"spec_id": _SPEC},
+            aggregation="sum",
+            rebuild_lost_frames=True,
+            rolling_follows_tree=True,
+        )
+
+    assert time.monotonic() - started < 1.0
+    assert sends == 2
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["code"] == "upstream_version_changed"
+
+
+async def test_recording_a_spec_read_gives_way_to_the_deadline_and_the_answer_stands(
+    store: InMemoryMaterialisationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Spec reads of an answered call are recorded only while the call's deadline
+    leaves the label read its time, so a slow manifest read costs the record, not the
+    answer."""
+    cancelled = False
+
+    async def slow_record(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        return {}
+
+    monkeypatch.setattr(tool_pipeline, "record_spec_reads", slow_record)
+    _install(httpx2.Response(200, json=_recorded_ready("aggregate")))
+    started = time.monotonic()
+    deadline = CallDeadline(expires_at=NODES_READ_TIMEOUT_S + 0.2, clock=lambda: 0.0)
+    with use_call_deadline(deadline):
+        result = await verbs.aggregate(
+            frame_ref={"spec_id": _SPEC},
+            aggregation="sum",
+            rebuild_lost_frames=True,
+            rolling_follows_tree=True,
+        )
+
+    assert (cancelled, result.is_error) == (True, False)
+    assert time.monotonic() - started < 1.0
+
+
 def _level_column(node: dict[str, Any]) -> str:
     """The column of the place_level predicate of the filter step `node`."""
     assert node["verb"] == "filter"
@@ -1839,6 +2228,16 @@ def _level_column(node: dict[str, Any]) -> str:
                 frame_ref=_FRAME, rank_by=("observationAbout",), place_level="Country"
             ),
             {"data": "observationAbout_type"},
+        ),
+        (
+            # The ranked purposes have no place: the level is the partitions' places.
+            lambda: verbs.rank(
+                frame_ref=_FRAME,
+                rank_by=("stat_var_crsPurpose",),
+                partition_by=("financingRecipient",),
+                place_level="Country",
+            ),
+            {"data": "financingRecipient_type"},
         ),
         (
             lambda: verbs.aggregate(frame_ref=_FRAME, aggregation="sum", place_level="Country"),
@@ -1875,6 +2274,7 @@ def _level_column(node: dict[str, Any]) -> str:
     ],
     ids=[
         "rank",
+        "rank-within-partitions",
         "aggregate-pooled-place",
         "aggregate-named-side",
         "share_of-each-side",

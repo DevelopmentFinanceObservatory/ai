@@ -447,7 +447,7 @@ graph-models:
 # Reads DFO_APIS_URL (`just apis-proxy`) unless given a url.
 # Refresh the Graph API schema and capabilities snapshots from apis (then `just graph-models`)
 graph-schema url=DFO_APIS_URL: (_check-apis url)
-    curl -fsS "{{url}}/api/graph/schema" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True))' > services/data-mcp/tests/fixtures/graph_api_schema.json
+    curl -fsS "{{url}}/api/graph/json-schema" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True))' > services/data-mcp/tests/fixtures/graph_api_schema.json
     curl -fsS "{{url}}/api/graph/capabilities" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True))' > services/data-mcp/tests/fixtures/graph_api_capabilities.json
 
 # Re-measure the digest corpus and rewrite the committed baseline

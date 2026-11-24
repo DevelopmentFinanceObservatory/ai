@@ -1,16 +1,6 @@
-"""The shared tail of every verb tool's own body: turning a verb's own
-already-parsed parameters into a validated op-spec, minting a toolkit
-result's identity, and storing the computed frame under its own pair before
-rendering its digest.
-
-`frame_ref_resolution.py` already owns the frame_ref/array-parameter/
-derived-marker half of the nine verbs' shared shape -- the half with a
-`frame_ref` to resolve. This module owns the rest: constructing an op-spec,
-and the mint-identity/store/render/return sequence every verb's own body
-ends with, once its own engine call (and any coverage-floor check) has
-already succeeded. What sits between those two halves -- the engine call
-itself, and mapping its own typed exceptions to a refusal -- stays inline in
-each verb tool: that mapping is genuinely each verb's own.
+"""The shared tail of every registered verb tool: turning a verb's own
+already-parsed parameters into a validated op-spec (`build_op_spec_or_refusal`),
+and computing it on dfo-apis' analysis runner (`run_on_runner`).
 
 The registered tools (`verbs`) compute in dfo-apis' analysis runner.
 `run_on_runner` sends a validated op-spec as a one-node tree
@@ -20,14 +10,19 @@ cells read as their labels (`common.breakdown_labels`), read from the graph
 nodes of the cells the digest names (`digest.digest_cells`). A digest with no
 cell labelled is rendered once.
 
-On a public call (`rebuild_lost_frames`), a frame the runner no longer holds
-(`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_` frame
-as the Spec root that fetches it at its newest version in its recorded rendering
+On a public call (`rebuild_lost_frames`), a call or a replay refused with a code the same
+request can get past (`common.refusal.REPOST_RECOVERS_CODES`, the upstream refreshing under
+the read) is sent once more when a send as long as the first, and the work after it, still
+ends before the call's deadline, which the combined server starts for an outside client
+(`common.call_limit.current_call_deadline`). A second such refusal, or one with too little
+time left, answers the call as the runner wrote it (`_sent_again_once`). A frame the runner
+no longer holds (`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_`
+frame as the Spec root that fetches it at its newest version in its recorded rendering
 (`runner_tree.spec_root`), an `ops_` frame as the pair the runner computes from its
 stored recipe on current data (`runner_client.replay_derived`). The runner names one
-lost dataset per refusal, so a call over two lost datasets is sent again once per
-side, at most once per distinct frame argument. A `spec_` frame whose rendering
-cannot be established refuses as `spec_root` says. A replay the runner cannot run
+lost dataset per refusal, so a call over two lost datasets is sent again once per side,
+at most once per distinct frame argument. A `spec_` frame whose rendering cannot be
+established refuses as `spec_root` says. A replay the runner cannot run
 yet refuses with its own delay. When any other replay fails, the call refuses with
 the lost-frame refusal and the sentence that says so (`ToolRefusal.not_rebuilt`). The
 call sent again keeps its own refusal, and gains that sentence only when it names a
@@ -35,44 +30,41 @@ frame still lost.
 The frame each bare `spec_id` and each fetched-again `spec_` frame was read as is
 recorded as its mint record (`runner_tree.record_spec_reads`), and the digest
 opens with a sentence naming that frame's pair, and one naming the pair each rebuilt
-frame was read as when it moved, since a replay can mint a new `ops_` id.
-
-The rest of this module serves the in-process tools, which no registered tool
-calls.
+frame was read as when it moved, since a replay can mint a new `ops_` id. A fetched-again
+`spec_` frame whose read went unrecorded, as when the call's deadline cuts the record step
+short, is named fetched again with no new pair.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from common.breakdown_labels import label_cells
-from common.caller import current_writer
-from common.materialisation import FrameRef, FrameTooLarge, get_store
+from common.breakdown_labels import NO_LABELS, NODES_READ_TIMEOUT_S, label_cells
+from common.call_limit import current_call_deadline
+from common.materialisation import FrameRef
+from common.materialisation.rendering import RECORD_WRITE_TIMEOUT_S
+from common.refusal import REPOST_RECOVERS_CODES
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, ValidationError
 
-from analysis_mcp.artifact import Exclusion
 from analysis_mcp.digest import digest_cells, render_summary_digest
-from analysis_mcp.execution_identity import ExecutionIdentity, current_execution_identity
-from analysis_mcp.frame_ref_resolution import call_row_claim, op_spec_hash_or_refusal
-from analysis_mcp.identity import mint_toolkit_content_version
-from analysis_mcp.result import VerbResult, observed_shape
 from analysis_mcp.runner_client import Pair, read_graph_nodes, replay_derived, run_tree
 from analysis_mcp.runner_tree import Tree, newest_ref, record_spec_reads, spec_root, verb_tree
 from analysis_mcp.summary import VerbSummary
 from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal, to_tool_result
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Mapping
 
     from common.place_type import PlaceLevel
-    from dfo_frame_grammar import Frame
 
-    from analysis_mcp.engine.common import Exclusions
     from analysis_mcp.identity import OpSpecVariant
-    from analysis_mcp.steps import Step
-    from analysis_mcp.trace import Trace
+
+logger = logging.getLogger(__name__)
 
 
 def build_op_spec_or_refusal[T: BaseModel](build: Callable[[], T]) -> T | ToolResult:
@@ -112,132 +104,6 @@ def _render_validation_errors(exc: ValidationError) -> str:
     return "\n".join(lines)
 
 
-def mint_identity_or_refusal(
-    op_spec: OpSpecVariant, *, input_content_versions: Sequence[str]
-) -> tuple[str, ExecutionIdentity, str] | ToolResult:
-    """`(op_spec_hash, execution_identity, content_version)` for `op_spec`,
-    minted over `input_content_versions`, or the `op_spec_invalid` refusal
-    minting `op_spec_hash` can hit (see `op_spec_hash_or_refusal`'s own
-    docstring for the two failure modes it catches). Every verb calls this
-    once, right after its own engine call (and any coverage-floor check) has
-    already succeeded.
-
-    Callers compute their own `input_content_versions` before calling this,
-    so `op_spec_hash_or_refusal` runs after that work rather than before it.
-    That ordering is only safe while both of its failure modes are already
-    ruled out by the time a verb gets here: a duplicate in an array-shaped
-    field is refused earlier by `canonical_columns_or_refusal`/
-    `canonical_predicates_or_refusal`, which run the same normalisation
-    functions, and every numeric operand an op-spec carries
-    (`OrderedThresholdPredicate.value` included) refuses a non-finite value
-    at its own field validator. An array-shaped field that skips those
-    canonicalisers, or a numeric field admitting a non-finite value, would
-    reopen a path where this refuses too late to be the refusal a caller
-    sees.
-    """
-    op_spec_hash = op_spec_hash_or_refusal(op_spec)
-    if isinstance(op_spec_hash, ToolResult):
-        return op_spec_hash
-    execution_identity = current_execution_identity()
-    content_version = mint_toolkit_content_version(
-        op_spec_hash=op_spec_hash,
-        input_content_versions=input_content_versions,
-        execution_identity=execution_identity,
-    )
-    return op_spec_hash, execution_identity, content_version
-
-
-def exclusions_for_trace(exclusions: Exclusions) -> tuple[Exclusion, ...]:
-    """`exclusions` (an engine result's `analysis_mcp.engine.common.
-    Exclusions` accumulator), wrapped into the pydantic `Exclusion` models
-    `Trace.exclusions` carries. Every verb tool calls this once when building
-    its output `Trace`.
-    """
-    return tuple(
-        Exclusion(
-            reason=record.reason,
-            rows=record.row_count,
-            entities=record.entities,
-            entities_truncated=record.entities_truncated,
-            side=record.side,
-        )
-        for record in exclusions.records
-    )
-
-
-async def store_result_and_render(
-    *,
-    frame: Frame,
-    trace: Trace,
-    digest: Callable[[], str],
-    step: Step | None = None,
-    dropped_key_count: int = 0,
-    right_dropped_key_count: int = 0,
-    ranked_before_limit: int | None = None,
-) -> ToolResult:
-    """Store `frame`/`trace` under the pair identity `trace` already carries
-    (`trace.op_spec_hash`, `trace.content_version`), and render `digest` --
-    a verb's own `render_x_digest` bound to every argument it already has in
-    scope, taking none from here -- into the returned `ToolResult`. The
-    lines every verb's own body ends with, once its own output `Trace` is
-    built.
-
-    The stored trace is `trace` with its `steps` set to `step`, the record of
-    the verb's own operation, or empty when the caller passes none.
-
-    A durable store's `put` can raise `FrameTooLarge` for a result over its
-    own row ceiling -- a two-sided verb (`join`'s own doubled output rows
-    are the reproduced case) can legitimately compute a result larger than
-    either of its own already-admitted inputs. That's caught here and
-    returned as the `frame_too_large` refusal rather than a success: no
-    object was written, so there is no reference to hand back.
-
-    Runs inside a `holds_input_rows` verb call, whose row claim covers the
-    write until its worker thread finishes, even when the call is cancelled
-    first; outside one it raises `RuntimeError`.
-
-    The returned `structured_content` is built from a real `VerbResult(...)`
-    -- `role_keys`/`stat_var_count` read off `frame` itself via
-    `observed_shape`, so the payload matches `result.VERB_OUTPUT_SCHEMA`,
-    the schema `server._register` declares at each verb's registration site.
-    `dropped_key_count` and `right_dropped_key_count` are the numbers of
-    the first and second inputs' keys the verb left out of `frame`, which
-    `frame` cannot state. A keyed `quotient_of` or `share_of` passes the
-    first, a `join` both.
-    `ranked_before_limit` is how many entries a limited `rank` ranked before
-    its limit cut them, which `frame` cannot state. Only `rank` passes one.
-    """
-    trace = trace.model_copy(update={"steps": () if step is None else (step,)})
-    ref = FrameRef(spec_id=trace.op_spec_hash, content_version=trace.content_version)
-    try:
-        # A durable store's `put` encodes and uploads in a worker thread that a
-        # cancelled call leaves running, so the call's row claim lasts until it ends.
-        await call_row_claim().hold_through(
-            get_store().put(ref, frame=frame, trace=trace, writer=current_writer())
-        )
-    except FrameTooLarge as exc:
-        return to_tool_result(ToolRefusal.frame_too_large_on_write(reason=exc.reason))
-    role_keys, stat_var_count = observed_shape(frame)
-    result = VerbResult(
-        spec_id=ref.spec_id,
-        content_version=ref.content_version,
-        frame_content_version=trace.frame_content_version,
-        rows=frame.num_rows,
-        role_keys=role_keys,
-        stat_var_count=stat_var_count,
-        dropped_key_count=dropped_key_count,
-        right_dropped_key_count=right_dropped_key_count,
-        ranked_before_limit=ranked_before_limit,
-        exclusions=trace.exclusions,
-        time=trace.time,
-    )
-    return ToolResult(
-        content=digest(),
-        structured_content=result.model_dump(mode="json"),
-        is_error=False,
-    )
-
-
 @dataclass(frozen=True, kw_only=True)
 class _Rebuilt:
     """A lost frame `ref` and the root `node` that stands for it."""
@@ -252,15 +118,82 @@ def _transient(refusal: ToolRefusal) -> bool:
     return refusal.code is ToolErrorCode.SERVICE_UNAVAILABLE or refusal.retry_after_s is not None
 
 
+# What a call does once the runner answers it: store the mint records of the Spec frames
+# it read (`runner_tree.record_spec_reads`) and read the labels of its cells
+# (`common.breakdown_labels.label_cells`), each under its own bound. Both run inside the
+# call's deadline too (`_by_deadline`), so this is all the time they take.
+_AFTER_ANSWER_S = RECORD_WRITE_TIMEOUT_S + NODES_READ_TIMEOUT_S
+
+
+def _now() -> float:
+    """The time on the clock of the call's deadline (`common.call_limit`), or on the
+    monotonic clock for a call with none."""
+    deadline = current_call_deadline()
+    return deadline.clock() if deadline is not None else time.monotonic()
+
+
+def _seconds_left(reserve_s: float = 0.0) -> float | None:
+    """The seconds the call's deadline leaves once `reserve_s` is kept back, or `None`
+    for a call with no deadline (`common.call_limit.current_call_deadline`)."""
+    deadline = current_call_deadline()
+    return None if deadline is None else deadline.remaining() - reserve_s
+
+
+async def _by_deadline[T](work: Awaitable[T], *, reserve_s: float, missed: T, what: str) -> T:
+    """What `work` answers when it ends with `reserve_s` of the call's deadline still left,
+    else `missed`, logging that `what` was cut short. A call with no deadline waits for
+    `work`, and a `TimeoutError` of `work`'s own propagates."""
+    limit = asyncio.timeout(_seconds_left(reserve_s))
+    try:
+        async with limit:
+            return await work
+    except TimeoutError:
+        if not limit.expired():
+            raise
+        logger.warning("%s cut short by the call's deadline", what)
+        return missed
+
+
+def _time_for(seconds: float) -> bool:
+    """Whether `seconds` of work still ends before the call's deadline, which a call from
+    an outside client has (`common.call_limit.current_call_deadline`). A call with no
+    deadline has time for any."""
+    deadline = current_call_deadline()
+    return deadline is None or deadline.remaining() >= seconds
+
+
+async def _sent_again_once[T](
+    send: Callable[[], Awaitable[T | ToolRefusal]], *, reserve_s: float
+) -> T | ToolRefusal:
+    """What `send` answers, sent once more at once when it refuses with a code the same
+    request can get past (`common.refusal.REPOST_RECOVERS_CODES`) and a send as long as
+    the first, followed by `reserve_s` of the work after it, still ends before the
+    call's deadline (`_time_for`). The second send runs until `reserve_s` before that
+    deadline; one that runs longer, a second refusal, or too little time left answers
+    the first refusal or the second as it stands."""
+    started = _now()
+    answer = await send()
+    if not (isinstance(answer, ToolRefusal) and answer.code in REPOST_RECOVERS_CODES):
+        return answer
+    if not _time_for(_now() - started + reserve_s):
+        return answer
+    return await _by_deadline(
+        send(), reserve_s=reserve_s, missed=answer, what="the second send of a refreshed call"
+    )
+
+
 async def _rebuilt(
-    ref: FrameRef, *, lost: ToolRefusal, default_enrichment: bool
+    ref: FrameRef, *, lost: ToolRefusal, default_enrichment: bool, reserve_s: float
 ) -> _Rebuilt | ToolRefusal:
     """The root that rebuilds `ref`, which the refusal `lost` names, or the refusal the
-    call answers when no root can."""
+    call answers when no root can. A replay is sent once more when it leaves `reserve_s`
+    for the call sent after it (`_sent_again_once`)."""
     if ref.spec_id.startswith("ops_"):
-        replayed = await replay_derived(ref)
+        replayed = await _sent_again_once(lambda: replay_derived(ref), reserve_s=reserve_s)
         if isinstance(replayed, ToolRefusal):
-            return replayed if _transient(replayed) else lost.not_rebuilt()
+            if replayed.code in REPOST_RECOVERS_CODES or _transient(replayed):
+                return replayed
+            return lost.not_rebuilt()
         return _Rebuilt(ref=ref, node=replayed.model_dump())
     root = await spec_root(ref, default_enrichment=default_enrichment)
     return root if isinstance(root, ToolRefusal) else _Rebuilt(ref=ref, node=root)
@@ -272,8 +205,9 @@ def _pairs(frames: tuple[FrameRef, ...]) -> str:
 
 
 def _rebuilt_sentence(rebuilt: _Rebuilt, read: Mapping[str, tuple[FrameRef, ...]]) -> str | None:
-    """The sentence naming a rebuilt frame's old and new pair, `None` when its pair
-    did not move or the new one is unknown."""
+    """The sentence naming a rebuilt frame's old pair and its new one, `None` when its
+    pair did not move. A `spec_` frame whose read went unrecorded is named fetched again
+    with no new pair."""
     ref = rebuilt.ref
     if "content_version" in rebuilt.node:
         now = (FrameRef.model_validate(rebuilt.node),)
@@ -281,12 +215,10 @@ def _rebuilt_sentence(rebuilt: _Rebuilt, read: Mapping[str, tuple[FrameRef, ...]
     else:
         now = read.get(ref.spec_id, ())
         how = "fetched again at its newest version"
-    if not now or now == (ref,):
+    if now == (ref,):
         return None
-    return (
-        f"The frame {ref.spec_id}, {ref.content_version} was no longer held, so it was "
-        f"{how}: {_pairs(now)} in place of {ref.content_version}."
-    )
+    lost = f"The frame {ref.spec_id}, {ref.content_version} was no longer held, so it was {how}"
+    return f"{lost}: {_pairs(now)} in place of {ref.content_version}." if now else f"{lost}."
 
 
 def _newest_sentence(spec_id: str, read: Mapping[str, tuple[FrameRef, ...]]) -> str:
@@ -325,10 +257,13 @@ async def run_on_runner(
     first. `follows_tree` lets a derived input's rolling years follow the call's
     tree (`run_tree`). `newest` are the Specs passed as bare `spec_id`s, held in
     `op_spec` under `runner_tree.newest_ref` and read at their newest version. With
-    `rebuild_lost_frames`, a lost frame is rebuilt (see the module docstring).
-    Without it, the runner's refusal is returned. `refine`, when given, rewrites a runner
-    refusal before it is returned. `heading`, when given, opens the digest of a
-    `sum_of` or `quotient_of` computed under another tool's name.
+    `rebuild_lost_frames`, the public server's, a lost frame is rebuilt and a call the
+    upstream refreshed under is sent once more (see the module docstring). Without it,
+    the runner's refusal is returned: the harness's executor sends again a step bound
+    to no evidence and refers a bound one to the planner (`executor.run._repost_recovers`).
+    `refine`, when given, rewrites a runner refusal before it is returned. `heading`, when
+    given, opens the digest of a `sum_of` or `quotient_of` computed under another tool's
+    name.
 
     `structured_content` is the summary's `VerbResult` fields and `content` the
     digest rendered from its facts, as the in-process tools built both. A frame
@@ -339,8 +274,18 @@ async def run_on_runner(
         (spec_id, newest_ref(spec_id).content_version): {"spec_id": spec_id} for spec_id in newest
     }
     sent: Tree | None = None
+    # How long the last send to the runner took.
+    took = 0.0
 
     async def run() -> VerbSummary | ToolRefusal:
+        nonlocal took
+        started = _now()
+        try:
+            return await compute()
+        finally:
+            took = _now() - started
+
+    async def compute() -> VerbSummary | ToolRefusal:
         nonlocal sent
         # Only the public server sets `follows_tree`.
         tree = await verb_tree(
@@ -361,7 +306,12 @@ async def run_on_runner(
             follows_tree=follows_tree,
         )
 
-    answer = await run()
+    async def send() -> VerbSummary | ToolRefusal:
+        return await (
+            _sent_again_once(run, reserve_s=_AFTER_ANSWER_S) if rebuild_lost_frames else run()
+        )
+
+    answer = await send()
     rebuilt: dict[Pair, _Rebuilt] = {}
     lost: ToolRefusal | None = None
     frames = _frame_count(op_spec) if rebuild_lost_frames else 0
@@ -375,19 +325,33 @@ async def run_on_runner(
             break
         lost = answer
         for pair, ref in fresh.items():
-            root = await _rebuilt(ref, lost=lost, default_enrichment=follows_tree)
+            # The call is sent again after the rebuild, and may take as long again.
+            root = await _rebuilt(
+                ref,
+                lost=lost,
+                default_enrichment=follows_tree,
+                reserve_s=took + _AFTER_ANSWER_S,
+            )
             if isinstance(root, ToolRefusal):
                 return to_tool_result(root)
             rebuilt[pair] = root
             replaced[pair] = root.node
-        answer = await run()
+        answer = await send()
     if isinstance(answer, ToolRefusal):
         if lost is not None and answer.lost_frames:
             return to_tool_result(answer.not_rebuilt())
         return to_tool_result(answer if refine is None else refine(answer))
+    # A Spec read left unrecorded costs its sentence and a later call's record, not the
+    # answer, so the records give way to the label read and the label read to the deadline.
     read = (
-        await record_spec_reads(
-            FrameRef(spec_id=answer.spec_id, content_version=answer.content_version), sent.node
+        await _by_deadline(
+            record_spec_reads(
+                FrameRef(spec_id=answer.spec_id, content_version=answer.content_version),
+                sent.node,
+            ),
+            reserve_s=NODES_READ_TIMEOUT_S,
+            missed={},
+            what="recording the Spec reads",
         )
         if sent is not None and sent.spec_roots
         else {}
@@ -401,7 +365,12 @@ async def run_on_runner(
         if sentence is not None
     ]
     digest, cells = digest_cells(answer, heading=heading)
-    labels = await label_cells(cells, read_nodes=read_graph_nodes)
+    labels = await _by_deadline(
+        label_cells(cells, read_nodes=read_graph_nodes),
+        reserve_s=0.0,
+        missed=NO_LABELS,
+        what="reading the cell labels",
+    )
     if labels.labels:
         digest = render_summary_digest(answer, heading=heading, labels=labels)
     return ToolResult(
@@ -409,24 +378,3 @@ async def run_on_runner(
         structured_content=answer.verb_result().model_dump(mode="json"),
         is_error=False,
     )
-
-
-def dedupe_input_content_versions(first: str, second: str) -> list[str]:
-    """`[first]` when `second` names the identical content_version,
-    otherwise `[first, second]` -- the two-sided verbs' own (`compare`,
-    `join`, `share_of`, `sum_of`, `quotient_of`) rule for listing each distinct input
-    content_version once in `Trace.input_content_versions`, whether or not
-    their own second side turned out to share the first side's
-    content_version.
-    """
-    return [first] if second == first else [first, second]
-
-
-def entity_label(entity_key: tuple[tuple[str, str], ...]) -> str:
-    """A JSON-object-key-safe label for an entity key tuple, for a trace's
-    own `applied_policy.detail["per_entity_coverage"]` mapping (`growth`,
-    `rank`).
-    """
-    if not entity_key:
-        return "(all rows)"
-    return ", ".join(f"{column}={value}" for column, value in entity_key)

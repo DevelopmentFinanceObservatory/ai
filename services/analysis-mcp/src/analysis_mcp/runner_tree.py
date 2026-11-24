@@ -16,11 +16,13 @@ stored recipe. A `spec_` pair is a frame `get_data` registered in the
 materialisation store, whose mint record (`common.materialisation.MintRecord`)
 names the dataset version apis holds and the options it was read with. Its root
 is that version with the rendering the options state: `without_party_totals`,
-`columns`, the enrichment columns sorted and each listed once, `[]` when the frame
-has none, and `groupby` when the frame was fetched with a `breakdown` or a
-`stat_vars` sum, which the dataset of the mint record is already summed for. On a public
-call (`default_enrichment`), a record of the plain rendering sends no `columns`, so the
-root takes what a Spec root takes. A `spec_` pair with no mint record is sent as a version
+`columns`, the record's enrichment columns sorted and each listed once, `[]` when
+the frame has none, and `groupby`, its `by` sorted, when the frame was fetched with a
+`breakdown` or a `stat_vars` sum, which the dataset of the mint record is already summed
+for. These are the spellings a stored recipe's root names
+(`common.materialisation.rendering.root_rendering`). On a public call
+(`default_enrichment`), a record of the plain rendering sends no `columns`, so the root
+takes what a Spec root takes. A `spec_` pair with no mint record is sent as a version
 read with no columns. A record that does not decode
 refuses `frame_integrity_failed`, and any other failed read of it
 `service_unavailable`, which a retry may mend. The runner reads a root with
@@ -48,7 +50,8 @@ later call naming the frame pair reads the same root as the call that named it.
 verb, on each input, so the call computes the tree an explicit `filter` call and
 the verb over its result would, and gets its ids. The step's predicate reads the
 `{role}_type` column of the first typed role (`common.place_type.TYPED_ROLES`)
-the side keys by (`_place_role`), else of `observationAbout`, the one place role
+the side keys by (`_place_role`), a rank's `partition_by` after its `rank_by`
+(`_side_keys`), else of `observationAbout`, the one place role
 whose mixed levels refuse `place_levels_mixed`. A frame without that column
 refuses `role_ambiguous` on `predicates`, a parameter the caller did not send, so
 `verbs` rewrites that refusal for the columns `place_level_columns` names.
@@ -124,6 +127,10 @@ _SECOND_SLOT: Mapping[Verb, str] = {
 
 # The op-spec frame slots, which the tree's `inputs` fill in place of `arguments`.
 _FRAME_SLOTS = frozenset({"verb", "frame_ref", *_SECOND_SLOT.values()})
+
+# Arguments a tree states only when set, so a call that leaves them at their default
+# sends the tree it sent before they existed, and the runner reads the default.
+_SENT_WHEN_SET: Mapping[str, object] = {"partition_by": (), "allow_sparse_breakdowns": False}
 
 # The content_version a bare `spec_id` argument is held under until the runner reads
 # the Spec (`newest_ref`). It names no version: `verb_tree` sends the Spec root in
@@ -346,9 +353,11 @@ def _place_role(keys: tuple[str, ...]) -> str:
 
 
 def _side_keys(op_spec: OpSpecVariant) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """The columns `op_spec` keys `data` and `other` by."""
+    """The columns `op_spec` keys `data` and `other` by. A rank keys by `rank_by`, then
+    `partition_by`, so a rank of keys with no place keeps the partitions' places."""
     if isinstance(op_spec, RankOpSpec):
-        return op_spec.rank_by, op_spec.rank_by
+        keys = (*op_spec.rank_by, *op_spec.partition_by)
+        return keys, keys
     if isinstance(op_spec, AggregateOpSpec):
         return op_spec.group_by, op_spec.group_by
     numerator_by: tuple[str, ...] = getattr(op_spec, "numerator_by", ())
@@ -375,6 +384,17 @@ def _level_step(
     return {"verb": str(Verb.FILTER), "arguments": arguments, "inputs": {"data": node}}
 
 
+def _arguments(op_spec: OpSpecVariant) -> dict[str, Any]:
+    """The tree `arguments` of `op_spec`: its parameters but its frame slots, `None`
+    ones and those `_SENT_WHEN_SET` names at their default left out."""
+    dumped = op_spec.model_dump(mode="json", exclude=set(_FRAME_SLOTS), exclude_none=True)
+    return {
+        name: value
+        for name, value in dumped.items()
+        if not (name in _SENT_WHEN_SET and getattr(op_spec, name) == _SENT_WHEN_SET[name])
+    }
+
+
 async def verb_tree(
     op_spec: OpSpecVariant,
     *,
@@ -388,7 +408,7 @@ async def verb_tree(
     pair is in `replaced` is sent as the root node it maps to, `place_level`
     filters each input to that level first, and `default_enrichment` is a public
     call's reading of a plain record (see the module docstring)."""
-    arguments = op_spec.model_dump(mode="json", exclude=set(_FRAME_SLOTS), exclude_none=True)
+    arguments = _arguments(op_spec)
     inputs: dict[str, Any] = {}
     refs_by_root: dict[Pair, tuple[FrameRef, ...]] = {}
     spec_roots: set[str] = set()

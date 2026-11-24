@@ -14560,13 +14560,13 @@
             "parts": [],
             "sentence": "Computed by DFO: aggregate.",
             "spec": {
-              "spec_id": "ops_e2c4963c63b92c53b50ae66efadc7b62",
+              "spec_id": "ops_a3160141b36b30fece9cf3f683038c84",
               "recipe": {
                 "normal_form_hash": "rnf_fe59b19ea15bf07c407ecd9a84b840d6",
                 "replay_key": "rpk_003526eb431f26e9172c6ea11199f653"
               }
             },
-            "content_version": "ocv_2b2408d541ab3010d69ccdab4deec4da",
+            "content_version": "ocv_7b9c0d0126ff62ae28bd9c9c494a033c",
             "output_digest": "out_bc56af86d0d38d2a0166533520d4a1d2",
             "roots": [
               {
@@ -14597,8 +14597,8 @@
       "output_digest": "out_bc56af86d0d38d2a0166533520d4a1d2",
       "summary": {
         "verb": "aggregate",
-        "spec_id": "ops_e2c4963c63b92c53b50ae66efadc7b62",
-        "content_version": "ocv_2b2408d541ab3010d69ccdab4deec4da",
+        "spec_id": "ops_a3160141b36b30fece9cf3f683038c84",
+        "content_version": "ocv_7b9c0d0126ff62ae28bd9c9c494a033c",
         "frame_content_version": "cv_74e079db3e2ae7d874a37893b1c2780f",
         "rows": 24,
         "role_keys": [],
@@ -15099,8 +15099,107 @@
         "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
-      "resolved_periods": []
+      "resolved_periods": [],
+      "derived_roots": [],
+      "stat_vars_summed": []
     },
+    "retry_after": null
+  },
+  "GET /api/datasets/derived/ops_a3160141b36b30fece9cf3f683038c84/ocv_7b9c0d0126ff62ae28bd9c9c494a033c?": {
+    "status": 200,
+    "body": {
+      "spec_id": "ops_a3160141b36b30fece9cf3f683038c84",
+      "content_version": "ocv_7b9c0d0126ff62ae28bd9c9c494a033c",
+      "retention": {
+        "pinned": false,
+        "held_until": "2026-11-27T00:00:00Z"
+      },
+      "citation": {
+        "text": "",
+        "sources": []
+      },
+      "recipe": {
+        "normal_form_hash": "rnf_fe59b19ea15bf07c407ecd9a84b840d6",
+        "replay_key": "rpk_003526eb431f26e9172c6ea11199f653",
+        "execution_identity": "0.9.1|1.2.0|0.2.0",
+        "tree": {
+          "frame": {
+            "spec_id": "ops_a3160141b36b30fece9cf3f683038c84",
+            "content_version": "ocv_7b9c0d0126ff62ae28bd9c9c494a033c"
+          },
+          "op_spec": {
+            "frame_ref": {
+              "content_version": "cv_d8f3b627208d553e597f9ba71e26e310",
+              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            },
+            "identity_version": "ops1",
+            "parameters": {
+              "aggregation": "sum",
+              "group_by": [
+                "time_period"
+              ],
+              "unit": null
+            },
+            "verb": "aggregate"
+          },
+          "inputs": {
+            "frame_ref": {
+              "frame": {
+                "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "content_version": "cv_d8f3b627208d553e597f9ba71e26e310"
+              },
+              "root": 0
+            }
+          }
+        },
+        "roots": [
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "content_version": "cv_d8f3b627208d553e597f9ba71e26e310"
+            },
+            "dataset": {
+              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "content_version": "cv_e738086b65591a27b80040bddb156e65"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame",
+              "columns": [
+                "party_class",
+                "party_kind",
+                "party_whole"
+              ],
+              "without_party_totals": true
+            },
+            "scope": {}
+          }
+        ]
+      },
+      "roots": [
+        {
+          "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "content_version": "cv_e738086b65591a27b80040bddb156e65",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame",
+            "without_party_totals": true
+          }
+        }
+      ],
+      "resolved_periods": [],
+      "anchor": null,
+      "left_out": [],
+      "left_out_complete": true
+    },
+    "retry_after": null
+  },
+  "GET /api/datasets/derived/ops_a3160141b36b30fece9cf3f683038c84/ocv_7b9c0d0126ff62ae28bd9c9c494a033c/file?format=parquet&bundle=false": {
+    "status": 200,
+    "content": "UEFSMRUEFRgVHEwVAhUAEgAADCwIAAAAZGNpZDpPZGEVABUSFRYsFTAVEBUGFQYcNgAoCGRjaWQ6T2RhGAhkY2lkOk9kYRERAAAACSACAAAAMAEBMAAVBBWAAxXYAUwVMBUAEgAAwAEcBAAAADIwMDANCAAxDQgAMg0IADMNCAA0DQgANQ0IADYNCAA3DQgAOA0IADkJCAAxDVAAMQ1QADENUAAxDVAAMQ1QADENUAAxDVAAMQ1QADENUAAxDVAAMg1QADINUCQyMgQAAAAyMDIzFQAVLhUyLBUwFRAVBhUGHDYAKAQyMDIzGAQyMDAwEREAAAAXWAIAAAAwAQUHIIhBijkoqcWaezDKSau9FQQVEBUUTBUCFQASAAAIHAAAAAAAAENAFQAVEhUWLBUwFRAVBhUGHBgIAAAAAAAAQ0AYCAAAAAAAAENAFgAoCAAAAAAAAENAGAgAAAAAAABDQBERAAAACSACAAAAMAEBMAAVBBUOFRJMFQIVABIAAAcYAwAAAHVzZBUAFRIVFiwVMBUQFQYVBhw2ACgDdXNkGAN1c2QREQAAAAkgAgAAADABATAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQZjDUAGAZzY2hlbWEVDgAVDCUCGAhzdGF0X3ZhciUATBwAAAAVDCUCGAt0aW1lX3BlcmlvZCUATBwAAAAVCiUCGAV2YWx1ZQAVDCUCGAR1bml0JQBMHAAAABUMJQIYEW1lYXN1cmVtZW50TWV0aG9kJQBMHAAAABUMJQIYCnByb3ZlbmFuY2UlAEwcAAAAFQwlAhgGc3RhdHVzJQBMHAAAABYwGRwZfCYAHBUMGTUABhAZGAhzdGF0X3ZhchUCFjAWnAEWpAEmQCYIHDYAKAhkY2lkOk9kYRgIZGNpZDpPZGEREQAZLBUEFQAVAgAVABUQFQIAPBaAAxkGGSYAMAAAACYAHBUMGTUABhAZGAt0aW1lX3BlcmlvZBUCFjAWlAQW8AImpAMmrAEcNgAoBDIwMjMYBDIwMDAREQAZLBUEFQAVAgAVABUQFQIAPBbAARkGGSYAMAAAACYAHBUKGTUABhAZGAV2YWx1ZRUCFjAWvAEWxAEmzAQmnAQcGAgAAAAAAABDQBgIAAAAAAAAQ0AWACgIAAAAAAAAQ0AYCAAAAAAAAENAEREAGSwVBBUAFQIAFQAVEBUCADwpBhkmADAAAAAmABwVDBk1AAYQGRgEdW5pdBUCFjAWfhaGASaOBibgBRw2ACgDdXNkGAN1c2QREQAZLBUEFQAVAgAVABUQFQIAPBaQARkGGSYAMAAAACYAHBUMGTUABhAZGBFtZWFzdXJlbWVudE1ldGhvZBUCFjAWVBZaJoQHJuYGHDYwABksFQQVABUCABUAFRAVAgA8FgAZBhkmMAAAAAAmABwVDBk1AAYQGRgKcHJvdmVuYW5jZRUCFjAWVBZaJt4HJsAHHDYwABksFQQVABUCABUAFRAVAgA8FgAZBhkmMAAAAAAmABwVDBk1AAYQGRgGc3RhdHVzFQIWMBZUFlomuAgmmggcNjAAGSwVBBUAFQIAFQAVEBUCADwWABkGGSYwAAAAABbmCRYwJggW7AgAGRwYDEFSUk9XOnNjaGVtYRisBC8vLy8vNWdCQUFBUUFBQUFBQUFLQUF3QUJnQUZBQWdBQ2dBQUFBQUJCQUFNQUFBQUNBQUlBQUFBQkFBSUFBQUFCQUFBQUFjQUFBQTRBUUFBK0FBQUFNUUFBQUNZQUFBQVlBQUFBREFBQUFBRUFBQUE5UDcvL3dBQUFRVVFBQUFBR0FBQUFBUUFBQUFBQUFBQUJnQUFBSE4wWVhSMWN3QUE0UDcvL3h6Ly8vOEFBQUVGRUFBQUFCd0FBQUFFQUFBQUFBQUFBQW9BQUFCd2NtOTJaVzVoYm1ObEFBQU0vLy8vU1AvLy93QUFBUVVRQUFBQUpBQUFBQVFBQUFBQUFBQUFFUUFBQUcxbFlYTjFjbVZ0Wlc1MFRXVjBhRzlrQUFBQVFQLy8vM3ovLy84QUFBRUZFQUFBQUJnQUFBQUVBQUFBQUFBQUFBUUFBQUIxYm1sMEFBQUFBR2ovLy8ray8vLy9BQUFCQXhBQUFBQWNBQUFBQkFBQUFBQUFBQUFGQUFBQWRtRnNkV1VBQmdBSUFBWUFCZ0FBQUFBQUFnRFUvLy8vQUFBQkJSQUFBQUFjQUFBQUJBQUFBQUFBQUFBTEFBQUFkR2x0WlY5d1pYSnBiMlFBeFAvLy94QUFGQUFJQUFZQUJ3QU1BQUFBRUFBUUFBQUFBQUFCQlJBQUFBQWdBQUFBQkFBQUFBQUFBQUFJQUFBQWMzUmhkRjkyWVhJQUFBQUFCQUFFQUFRQUFBQT0AGCBwYXJxdWV0LWNwcC1hcnJvdyB2ZXJzaW9uIDI0LjAuMBl8HAAAHAAAHAAAHAAAHAAAHAAAHAAAAGgFAABQQVIx",
     "retry_after": null
   },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_f4e6053bc7e062849df8c89d81156433\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_37736f1d047ff627726fd45167ed4ec5\"}},\"verb\":\"aggregate\"}}": {
@@ -43303,103 +43402,6 @@
             "format": "parquet",
             "bundle": false,
             "layout": "frame"
-          }
-        }
-      ],
-      "resolved_periods": [],
-      "anchor": null,
-      "left_out": [],
-      "left_out_complete": true
-    },
-    "retry_after": null
-  },
-  "GET /api/datasets/derived/ops_e2c4963c63b92c53b50ae66efadc7b62/ocv_2b2408d541ab3010d69ccdab4deec4da/file?format=parquet&bundle=false": {
-    "status": 200,
-    "content": "UEFSMRUEFRgVHEwVAhUAEgAADCwIAAAAZGNpZDpPZGEVABUSFRYsFTAVEBUGFQYcNgAoCGRjaWQ6T2RhGAhkY2lkOk9kYRERAAAACSACAAAAMAEBMAAVBBWAAxXYAUwVMBUAEgAAwAEcBAAAADIwMDANCAAxDQgAMg0IADMNCAA0DQgANQ0IADYNCAA3DQgAOA0IADkJCAAxDVAAMQ1QADENUAAxDVAAMQ1QADENUAAxDVAAMQ1QADENUAAxDVAAMg1QADINUCQyMgQAAAAyMDIzFQAVLhUyLBUwFRAVBhUGHDYAKAQyMDIzGAQyMDAwEREAAAAXWAIAAAAwAQUHIIhBijkoqcWaezDKSau9FQQVEBUUTBUCFQASAAAIHAAAAAAAAENAFQAVEhUWLBUwFRAVBhUGHBgIAAAAAAAAQ0AYCAAAAAAAAENAFgAoCAAAAAAAAENAGAgAAAAAAABDQBERAAAACSACAAAAMAEBMAAVBBUOFRJMFQIVABIAAAcYAwAAAHVzZBUAFRIVFiwVMBUQFQYVBhw2ACgDdXNkGAN1c2QREQAAAAkgAgAAADABATAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQZjDUAGAZzY2hlbWEVDgAVDCUCGAhzdGF0X3ZhciUATBwAAAAVDCUCGAt0aW1lX3BlcmlvZCUATBwAAAAVCiUCGAV2YWx1ZQAVDCUCGAR1bml0JQBMHAAAABUMJQIYEW1lYXN1cmVtZW50TWV0aG9kJQBMHAAAABUMJQIYCnByb3ZlbmFuY2UlAEwcAAAAFQwlAhgGc3RhdHVzJQBMHAAAABYwGRwZfCYAHBUMGTUABhAZGAhzdGF0X3ZhchUCFjAWnAEWpAEmQCYIHDYAKAhkY2lkOk9kYRgIZGNpZDpPZGEREQAZLBUEFQAVAgAVABUQFQIAPBaAAxkGGSYAMAAAACYAHBUMGTUABhAZGAt0aW1lX3BlcmlvZBUCFjAWlAQW8AImpAMmrAEcNgAoBDIwMjMYBDIwMDAREQAZLBUEFQAVAgAVABUQFQIAPBbAARkGGSYAMAAAACYAHBUKGTUABhAZGAV2YWx1ZRUCFjAWvAEWxAEmzAQmnAQcGAgAAAAAAABDQBgIAAAAAAAAQ0AWACgIAAAAAAAAQ0AYCAAAAAAAAENAEREAGSwVBBUAFQIAFQAVEBUCADwpBhkmADAAAAAmABwVDBk1AAYQGRgEdW5pdBUCFjAWfhaGASaOBibgBRw2ACgDdXNkGAN1c2QREQAZLBUEFQAVAgAVABUQFQIAPBaQARkGGSYAMAAAACYAHBUMGTUABhAZGBFtZWFzdXJlbWVudE1ldGhvZBUCFjAWVBZaJoQHJuYGHDYwABksFQQVABUCABUAFRAVAgA8FgAZBhkmMAAAAAAmABwVDBk1AAYQGRgKcHJvdmVuYW5jZRUCFjAWVBZaJt4HJsAHHDYwABksFQQVABUCABUAFRAVAgA8FgAZBhkmMAAAAAAmABwVDBk1AAYQGRgGc3RhdHVzFQIWMBZUFlomuAgmmggcNjAAGSwVBBUAFQIAFQAVEBUCADwWABkGGSYwAAAAABbmCRYwJggW7AgAGRwYDEFSUk9XOnNjaGVtYRisBC8vLy8vNWdCQUFBUUFBQUFBQUFLQUF3QUJnQUZBQWdBQ2dBQUFBQUJCQUFNQUFBQUNBQUlBQUFBQkFBSUFBQUFCQUFBQUFjQUFBQTRBUUFBK0FBQUFNUUFBQUNZQUFBQVlBQUFBREFBQUFBRUFBQUE5UDcvL3dBQUFRVVFBQUFBR0FBQUFBUUFBQUFBQUFBQUJnQUFBSE4wWVhSMWN3QUE0UDcvL3h6Ly8vOEFBQUVGRUFBQUFCd0FBQUFFQUFBQUFBQUFBQW9BQUFCd2NtOTJaVzVoYm1ObEFBQU0vLy8vU1AvLy93QUFBUVVRQUFBQUpBQUFBQVFBQUFBQUFBQUFFUUFBQUcxbFlYTjFjbVZ0Wlc1MFRXVjBhRzlrQUFBQVFQLy8vM3ovLy84QUFBRUZFQUFBQUJnQUFBQUVBQUFBQUFBQUFBUUFBQUIxYm1sMEFBQUFBR2ovLy8ray8vLy9BQUFCQXhBQUFBQWNBQUFBQkFBQUFBQUFBQUFGQUFBQWRtRnNkV1VBQmdBSUFBWUFCZ0FBQUFBQUFnRFUvLy8vQUFBQkJSQUFBQUFjQUFBQUJBQUFBQUFBQUFBTEFBQUFkR2x0WlY5d1pYSnBiMlFBeFAvLy94QUFGQUFJQUFZQUJ3QU1BQUFBRUFBUUFBQUFBQUFCQlJBQUFBQWdBQUFBQkFBQUFBQUFBQUFJQUFBQWMzUmhkRjkyWVhJQUFBQUFCQUFFQUFRQUFBQT0AGCBwYXJxdWV0LWNwcC1hcnJvdyB2ZXJzaW9uIDI0LjAuMBl8HAAAHAAAHAAAHAAAHAAAHAAAHAAAAGgFAABQQVIx",
-    "retry_after": null
-  },
-  "GET /api/datasets/derived/ops_e2c4963c63b92c53b50ae66efadc7b62/ocv_2b2408d541ab3010d69ccdab4deec4da?": {
-    "status": 200,
-    "body": {
-      "spec_id": "ops_e2c4963c63b92c53b50ae66efadc7b62",
-      "content_version": "ocv_2b2408d541ab3010d69ccdab4deec4da",
-      "retention": {
-        "pinned": false,
-        "held_until": "2026-11-27T00:00:00Z"
-      },
-      "citation": {
-        "text": "",
-        "sources": []
-      },
-      "recipe": {
-        "normal_form_hash": "rnf_fe59b19ea15bf07c407ecd9a84b840d6",
-        "replay_key": "rpk_003526eb431f26e9172c6ea11199f653",
-        "execution_identity": "0.9.1|1.2.0|0.2.0",
-        "tree": {
-          "frame": {
-            "spec_id": "ops_e2c4963c63b92c53b50ae66efadc7b62",
-            "content_version": "ocv_2b2408d541ab3010d69ccdab4deec4da"
-          },
-          "op_spec": {
-            "frame_ref": {
-              "content_version": "cv_448c256b1daf26100b7bb76aae1ca94d",
-              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-            },
-            "identity_version": "ops1",
-            "parameters": {
-              "aggregation": "sum",
-              "group_by": [
-                "time_period"
-              ],
-              "unit": null
-            },
-            "verb": "aggregate"
-          },
-          "inputs": {
-            "frame_ref": {
-              "frame": {
-                "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-                "content_version": "cv_448c256b1daf26100b7bb76aae1ca94d"
-              },
-              "root": 0
-            }
-          }
-        },
-        "roots": [
-          {
-            "schema_version": 1,
-            "frame": {
-              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-              "content_version": "cv_448c256b1daf26100b7bb76aae1ca94d"
-            },
-            "dataset": {
-              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-              "content_version": "cv_e738086b65591a27b80040bddb156e65"
-            },
-            "options": {
-              "format": "parquet",
-              "bundle": false,
-              "layout": "frame",
-              "columns": [
-                "party_class",
-                "party_kind",
-                "party_whole"
-              ],
-              "without_party_totals": true
-            },
-            "scope": {}
-          }
-        ]
-      },
-      "roots": [
-        {
-          "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-          "content_version": "cv_e738086b65591a27b80040bddb156e65",
-          "rendering": {
-            "format": "parquet",
-            "bundle": false,
-            "layout": "frame",
-            "without_party_totals": true
           }
         }
       ],

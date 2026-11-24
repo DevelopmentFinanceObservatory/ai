@@ -147,7 +147,8 @@ _event_failure_warned = False
 # holds the wake-up of each call no export pass has yet started for. Each pass
 # takes the waiters registered before it starts and wakes them when it ends.
 # The thread checks `_flush_pending` and clears `_flush_running` in one locked
-# step, so a call is either seen by the running thread or starts its own flush.
+# step, so a call is either seen by the running thread or starts its own flush,
+# and takes that step before it wakes the pass's waiters.
 _flush_lock = threading.Lock()
 _flush_running = False
 _flush_pending = False
@@ -324,11 +325,25 @@ def _langfuse_exporter() -> Any:
     set), Basic auth from the key pair, the SDK's name, version and public-key
     headers, and `LANGFUSE_TIMEOUT` seconds, 5 by default. It also sends
     `x-langfuse-ingestion-version: 4`, which the SDK asks of a custom exporter
-    so that a Langfuse v4 server processes the spans in real time.
+    so that a Langfuse v4 server processes the spans in real time. The body is
+    compressed as the SDK's default exporter compresses it: gzip, unless
+    `LANGFUSE_OTEL_COMPRESSION` or `OTEL_EXPORTER_OTLP_*_COMPRESSION` say
+    otherwise, and only gzip and none are honoured. `OTLPSpanExporter` drops any
+    batch whose uncompressed request exceeds `max_request_size` (64 MiB by
+    default, set by `LANGFUSE_OTEL_MAX_BATCH_SIZE_BYTES`) and reports FAILURE.
+    It does not split the batch.
     """
     import base64
 
     from langfuse import __version__ as langfuse_version
+
+    # Private SDK helpers, so the exporter follows the SDK's compression and batch-size
+    # settings. `test_the_langfuse_exporter_matches_the_one_the_sdk_builds_by_default`
+    # fails if a release renames them.
+    from langfuse._client.span_processor import (
+        _resolve_compression,
+        _resolve_max_batch_size_bytes,
+    )
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
     from common.uri_redaction import UriRedactingExporter
@@ -348,6 +363,8 @@ def _langfuse_exporter() -> Any:
                 "x-langfuse-ingestion-version": "4",
             },
             timeout=int(os.getenv("LANGFUSE_TIMEOUT", "5")),
+            compression=_resolve_compression(None),
+            max_request_size=_resolve_max_batch_size_bytes(),
         )
     )
 
@@ -1178,13 +1195,16 @@ def _start_flush(on_done: Callable[[], None] | None) -> bool:
                 _flush_backend()
             except Exception:
                 logger.warning("telemetry flush failed", exc_info=True)
-            finally:
-                for waiter in waiters:
-                    waiter()
+            # Settle the state before waking anyone, so a woken caller finds
+            # this thread finished unless another pass was asked for.
             with _flush_lock:
-                if not _flush_pending:
+                done = not _flush_pending
+                if done:
                     _flush_running = False
-                    return
+            for waiter in waiters:
+                waiter()
+            if done:
+                return
 
     try:
         threading.Thread(target=flush_off_the_loop, name=_FLUSH_THREAD_NAME, daemon=True).start()

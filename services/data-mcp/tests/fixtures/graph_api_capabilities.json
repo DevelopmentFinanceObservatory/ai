@@ -37,7 +37,7 @@
     },
     {
       "live": true,
-      "name": "schema"
+      "name": "json_schema"
     }
   ],
   "kinds": [

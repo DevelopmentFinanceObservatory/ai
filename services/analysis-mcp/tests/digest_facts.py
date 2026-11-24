@@ -1,32 +1,100 @@
-"""The digest renderers over an engine result, as the in-process tools call them:
-each turns its `result` into the facts a runner summary states
-(`analysis_mcp.engine_facts.facts_of`) before rendering, so a test built from an
-engine result checks the text the runner's facts render."""
+"""The facts a digest renderer reads, as the digest tests build them.
+
+`facts` builds a summary facts model (`analysis_mcp.summary.AggregateFacts` and the
+rest) from the fields a test names, read through their JSON form as a runner
+summary's `result` is. A field the model does not hold, such as a frame, is left
+out.
+
+`computed` is the facts dfo-apis' engine computes for one verb over a test's
+frames, replayed from `fixtures/digest_engine_facts.json`, keyed by the verb, the
+grammar's `frame_sha256` of each frame and the RFC 8785 form of the arguments. The
+fixture's `recorded_with` entry names the dfo-apis revision that computed it. To
+record facts a test asks for and the fixture lacks, run the tests with
+`DIGEST_FACTS_RECORD=<path>`. Each request is written there with its frames as
+base64 Parquet, and the test fails. Compute the facts in a dfo-apis checkout with
+`runner_record/engine_facts.py`, which writes them into the fixture with that
+checkout's revision, and run again.
+"""
 
 from __future__ import annotations
 
-import functools
-from collections.abc import Callable
+import base64
+import json
+import os
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from analysis_mcp import digest
-from analysis_mcp.engine_facts import facts_of
+import pytest
+import rfc8785
+from analysis_mcp.summary import (
+    AggregateFacts,
+    QuotientOfFacts,
+    RankFacts,
+    ShareOfFacts,
+)
+from common.materialisation.frame_codec import frame_to_parquet_bytes
+from dfo_frame_grammar import Frame, frame_sha256
+from dfo_frame_grammar.grammar import ComposedUnit, UnitRequest
+from pydantic import BaseModel
+
+FACTS_PATH = Path(__file__).resolve().parent / "fixtures" / "digest_engine_facts.json"
+
+# The facts model of each verb `computed` replays.
+_MODELS: Mapping[str, type[BaseModel]] = {
+    "aggregate": AggregateFacts,
+    "rank": RankFacts,
+    "share_of": ShareOfFacts,
+    "quotient_of": QuotientOfFacts,
+}
 
 
-def _over_facts(render: Callable[..., str]) -> Callable[..., str]:
-    @functools.wraps(render)
-    def rendered(*, result: Any, **arguments: Any) -> str:
-        return render(result=facts_of(result), **arguments)
+def _json(value: object) -> object:
+    """`value` as JSON: a model as its JSON dump, a unit in its pin form."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, UnitRequest | ComposedUnit):
+        return value.as_json()
+    if isinstance(value, Mapping):
+        return {str(key): _json(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json(item) for item in value]
+    return value
 
-    return rendered
+
+def facts[T: BaseModel](model: type[T], **fields: object) -> T:
+    """`model` holding `fields`, each through its JSON form. A frame is left out."""
+    return model.model_validate(
+        {name: _json(value) for name, value in fields.items() if not isinstance(value, Frame)}
+    )
 
 
-render_aggregate_digest = _over_facts(digest.render_aggregate_digest)
-render_compare_digest = _over_facts(digest.render_compare_digest)
-render_filter_digest = _over_facts(digest.render_filter_digest)
-render_growth_digest = _over_facts(digest.render_growth_digest)
-render_join_digest = _over_facts(digest.render_join_digest)
-render_quotient_of_digest = _over_facts(digest.render_quotient_of_digest)
-render_rank_digest = _over_facts(digest.render_rank_digest)
-render_share_of_digest = _over_facts(digest.render_share_of_digest)
-render_sum_of_digest = _over_facts(digest.render_sum_of_digest)
+def _key(verb: str, frames: tuple[Frame, ...], arguments: Mapping[str, Any]) -> str:
+    body = {"frames": [frame_sha256(frame) for frame in frames], "arguments": _json(arguments)}
+    return f"{verb} {rfc8785.dumps(body).decode()}"
+
+
+def _record(key: str, verb: str, frames: tuple[Frame, ...], arguments: Mapping[str, Any]) -> None:
+    """Write the request under `key` to `DIGEST_FACTS_RECORD`, one file per
+    pytest-xdist worker."""
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    path = Path(os.environ["DIGEST_FACTS_RECORD"] + (f".{worker}" if worker else ""))
+    written = json.loads(path.read_text()) if path.exists() else {}
+    written[key] = {
+        "verb": verb,
+        "frames": [base64.b64encode(frame_to_parquet_bytes(frame)).decode() for frame in frames],
+        "arguments": _json(arguments),
+    }
+    path.write_text(json.dumps(written, indent=1, sort_keys=True))
+
+
+def computed(verb: str, *frames: Frame, **arguments: Any) -> Any:
+    """The facts dfo-apis' engine computes for `verb` over `frames` with
+    `arguments`, the keyword arguments of its `run_<verb>`."""
+    key = _key(verb, frames, arguments)
+    recorded = json.loads(FACTS_PATH.read_text()) if FACTS_PATH.exists() else {}
+    if key not in recorded:
+        if os.environ.get("DIGEST_FACTS_RECORD"):
+            _record(key, verb, frames, arguments)
+        pytest.fail(f"no engine facts are recorded for {key}")
+    return _MODELS[verb].model_validate(recorded[key])

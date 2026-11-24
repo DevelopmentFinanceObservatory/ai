@@ -135,7 +135,7 @@ class Settings(BaseServiceSettings):
     `combined_mcp_max_in_flight` caps the tool calls and resource reads the
     combined server runs at once, per instance. The token bucket limits how
     often calls start, and each call can run for up to 45 s
-    (`data_mcp.deadline.EXTERNAL_CALL_LIMIT_S`), so without this cap a burst
+    (`common.call_limit.EXTERNAL_CALL_LIMIT_S`), so without this cap a burst
     of slow calls piles up on one instance, each holding an upstream
     connection and memory. A call over the cap refuses `rate_limited` at
     once rather than queueing, since a queued call would spend its own 45 s
@@ -173,15 +173,14 @@ class Settings(BaseServiceSettings):
     holds its slot for up to 53 s against a tool call's 45.
 
     `live_refresh_rows_in_flight_max` sizes a second `common.row_budget.RowBudget`
-    that `harness.recipe_replay.replay_recipe` claims from: the input rows of
-    each verb call, the root rows of an anchor call, and the published frame's
-    rows. It caps the rows all replays in this process put through the tools at
-    once. The tools and the publish also claim the same rows from the
-    process-wide budget (`frame_rows_in_flight_max`), and a root mint claims
-    there only. The default of 500,000 is one two-input verb on two full frames,
-    the largest single claim, and leaves 600,000 of the process-wide 1,100,000
-    to Studio conversations and outside MCP callers. A claim the rows in flight
-    leave no room for, in either budget, answers `pending`. A replay step whose
+    that `harness.recipe_replay.replay_recipe` claims from: the rows of a frame
+    the replay publishes. The verbs and anchor calls compute on dfo-apis'
+    analysis runner and claim none. It caps the rows all replays in this process
+    publish at once. The publish also claims the same rows from the process-wide
+    budget (`frame_rows_in_flight_max`), and a root mint claims there only. The
+    default of 500,000 is two full frames, and leaves 600,000 of the process-wide
+    1,100,000 to Studio conversations and outside MCP callers. A claim the rows in
+    flight leave no room for, in either budget, answers `pending`. A publish whose
     rows exceed this whole budget is refused `rows_over_refresh_budget`.
 
     The `turn_*` and `model_first_chunk_s` fields bound one request (one POST

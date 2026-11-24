@@ -366,7 +366,7 @@ _CONFIG_PLACEHOLDER = "__DFO_CONFIG__"
 # How long the view waits for its own describe_component re-read before it
 # draws the notice. The public server's `_CallLimit` (`harness.combined_mcp`)
 # stops every call from an outside client at `EXTERNAL_CALL_LIMIT_S`, 45 s
-# (`data_mcp/deadline.py`), so a reply comes before this or not at all.
+# (`common.call_limit`), so a reply comes before this or not at all.
 _REREAD_DEADLINE_MS = 60_000
 
 # What the view draws when the host's result has no view and no re-read can

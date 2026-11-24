@@ -27,7 +27,7 @@ from compiler.evidence import (
     opens_place_axis,
     resolve_entity,
     resolve_name,
-    unlabelled_series_refs,
+    unlabelled_series_cells,
     with_series_labels,
 )
 from compiler.sources import bound_refs, member_digest, source_from_spec_block, stat_var_reading
@@ -1601,20 +1601,26 @@ def test_a_series_and_the_estimates_continuing_it_are_held_to_the_period_as_one(
 
 
 @pytest.mark.parametrize(
-    ("approved", "kenya"),
+    ("approved", "kenya", "kenya_ref"),
     [
-        pytest.param(True, "Kenya", id="labelled-by-the-approved-source"),
-        pytest.param(False, None, id="unlabelled-with-no-approved-source"),
+        pytest.param(True, "Kenya", "country/KEN", id="labelled-by-the-approved-source"),
+        # A frame cell carries the `dcid:` marker; the approved entity is the bare dcid.
+        pytest.param(True, "Kenya", "dcid:country/KEN", id="labelled-behind-the-dcid-marker"),
+        pytest.param(False, None, "country/KEN", id="unlabelled-with-no-approved-source"),
     ],
 )
 def test_a_short_series_finding_names_its_entities(
-    requirement: RequirementFactory, source: SourceFactory, approved: bool, kenya: str | None
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    approved: bool,
+    kenya: str | None,
+    kenya_ref: str,
 ) -> None:
     """A series ending in 2021 with a year missing is short of 2015-2024 on
     both counts; each finding carries its entities, with the label the
     approved source gives a ref and none where it labels none."""
     named = (
-        SeriesEntity(role="recipient", ref="country/KEN", label=kenya),
+        SeriesEntity(role="recipient", ref=kenya_ref, label=kenya),
         SeriesEntity(role="donor", ref="donor/X"),
     )
     evidence = evidence_from_manifest(
@@ -1623,7 +1629,7 @@ def test_a_short_series_finding_names_its_entities(
             _stat(
                 "DebtServicePaid",
                 entities=[
-                    {"role": "recipient", "ref": "country/KEN"},
+                    {"role": "recipient", "ref": kenya_ref},
                     {"role": "donor", "ref": "donor/X"},
                 ],
                 observations=6,
@@ -1641,7 +1647,9 @@ def test_a_short_series_finding_names_its_entities(
     ] == [(EvidenceIssueCode.WINDOW_SHORT, named), (EvidenceIssueCode.COVERAGE_GAPS, named)]
 
 
-def _short_of(*refs: str, size: float | None, labelled: str | None = None) -> EvidenceIssue:
+def _short_of(
+    *refs: str, size: float | None, labelled: str | None = None, breakdown: tuple[str, ...] = ()
+) -> EvidenceIssue:
     """A `window_short` finding on the series of `refs`, of largest absolute value `size`,
     the ref `labelled` labelled by itself and the rest unlabelled."""
     return EvidenceIssue(
@@ -1650,7 +1658,8 @@ def _short_of(*refs: str, size: float | None, labelled: str | None = None) -> Ev
         requirement_id="debt",
         detail="",
         stat_var="Aid",
-        entities=tuple(
+        entities=tuple(SeriesEntity(role="stat_var_crsPurpose", ref=ref) for ref in breakdown)
+        + tuple(
             SeriesEntity(role="donor", ref=ref, label=ref if ref == labelled else None)
             for ref in refs
         ),
@@ -1667,7 +1676,7 @@ def _short_of(*refs: str, size: float | None, labelled: str | None = None) -> Ev
         pytest.param(2, ["donor/C", "donor/A"], id="bounded"),
     ],
 )
-def test_the_refs_a_short_series_lookup_names_are_the_largest_series_unlabelled_ones(
+def test_the_cells_a_short_series_lookup_names_are_the_largest_series_unlabelled_ones(
     limit: int, refs: list[str]
 ) -> None:
     findings = [
@@ -1683,13 +1692,93 @@ def test_the_refs_a_short_series_lookup_names_are_the_largest_series_unlabelled_
         ),
     ]
 
-    assert unlabelled_series_refs(findings, limit=limit) == refs
+    assert unlabelled_series_cells(findings, limit=limit) == [("donor", ref) for ref in refs]
+
+
+def test_a_series_lookup_asks_only_for_dcids_before_its_cap_and_strips_the_marker() -> None:
+    """Text that is no dcid ("humanitarian aid") takes no slot; a `dcid:` ref is
+    asked for bare, and its answer labels the entity that carries the marker."""
+    text = tuple(f"sector {i}" for i in range(150))
+    findings = [_short_of("dcid:donor/B", "donor/A", size=1.0, breakdown=text)]
+
+    cells = unlabelled_series_cells(findings, limit=100)
+    (labelled,) = with_series_labels(findings, {("donor", "donor/B"): "Beta"})
+
+    assert cells == [("donor", "donor/B"), ("donor", "donor/A")]
+    assert [entity.label for entity in labelled.entities if entity.ref.endswith("B")] == ["Beta"]
+
+
+def test_a_decoded_sector_is_looked_up_and_labelled_by_its_code_dcid() -> None:
+    """A breakdown cell holds the code's dcid (dfo-apis `datasets_api.decode`), so
+    the sector is asked for and labelled like the recipient `dcid:110`, each by
+    its own role and dcid."""
+    findings = [_short_of("dcid:110", size=1.0, breakdown=("CRSPurposeCode110",))]
+    sector = ("stat_var_crsPurpose", "CRSPurposeCode110")
+
+    cells = unlabelled_series_cells(findings, limit=10)
+    (labelled,) = with_series_labels(findings, {("donor", "110"): "Recipient", sector: "Education"})
+
+    assert cells == [sector, ("donor", "110")]
+    assert [(entity.role, entity.label) for entity in labelled.entities] == [
+        ("stat_var_crsPurpose", "Education"),
+        ("donor", "Recipient"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("approved_sector", "sector_label"),
+    [
+        pytest.param(None, None, id="sector-not-approved"),
+        pytest.param("Education", "Education", id="sector-approved"),
+    ],
+)
+def test_an_approved_label_reaches_only_the_entity_its_dcid_names(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    approved_sector: str | None,
+    sector_label: str | None,
+) -> None:
+    """The approved recipient `dcid:110` is labelled "Recipient". A series'
+    sector `CRSPurposeCode110` takes the label the approval gives its dcid, and
+    none where the approval does not name it."""
+    evidence = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            _stat(
+                "DebtServicePaid",
+                entities=[
+                    {"role": "stat_var_crsPurpose", "ref": "CRSPurposeCode110"},
+                    {"role": "recipient", "ref": "dcid:110"},
+                ],
+                observations=6,
+                latest={"value": 2.0, "period": "2021"},
+            )
+        ),
+    )
+    sector = (
+        ()
+        if approved_sector is None
+        else (ResolvedEntity(role="sector", ref="CRSPurposeCode110", label=approved_sector),)
+    )
+    approved = source(
+        entities=(ResolvedEntity(role="recipient", ref="110", label="Recipient"), *sector)
+    )
+
+    issues = check_evidence(requirement(), evidence, approved=approved)
+
+    (short,) = (issue for issue in issues if issue.code is EvidenceIssueCode.WINDOW_SHORT)
+    assert [(entity.role, entity.label) for entity in short.entities] == [
+        ("stat_var_crsPurpose", sector_label),
+        ("recipient", "Recipient"),
+    ]
 
 
 def test_a_short_series_lookup_labels_only_the_entities_it_named() -> None:
     finding = _short_of("donor/A", "donor/B", "donor/K", size=1.0, labelled="donor/K")
 
-    (labelled,) = with_series_labels([finding], {"donor/A": "Austria", "donor/K": "Kenya"})
+    (labelled,) = with_series_labels(
+        [finding], {("donor", "donor/A"): "Austria", ("donor", "donor/K"): "Kenya"}
+    )
 
     assert [entity.label for entity in labelled.entities] == ["Austria", None, "donor/K"]
 
@@ -1725,7 +1814,10 @@ def test_a_series_negative_throughout_ranks_by_how_far_below_zero_it_reaches(
     issues = check_evidence(requirement(), evidence, approved=source())
 
     assert {issue.magnitude for issue in issues if issue.entities} == {1.0, 50.0}
-    assert unlabelled_series_refs(issues, limit=10) == ["donor/REPAYS", "donor/GRANTS"]
+    assert unlabelled_series_cells(issues, limit=10) == [
+        ("donor", "donor/REPAYS"),
+        ("donor", "donor/GRANTS"),
+    ]
 
 
 @pytest.mark.parametrize(
