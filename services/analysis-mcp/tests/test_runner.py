@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx2
 import pytest
-from analysis_mcp import digest, tool_pipeline, verbs
+from analysis_mcp import digest, verbs
 from analysis_mcp.digest import render_summary_digest
 from analysis_mcp.runner_client import (
     DEFAULT_RETRY_AFTER_S,
@@ -24,6 +24,7 @@ from analysis_mcp.runner_client import (
 from analysis_mcp.summary import LIST_CAP, VerbSummary
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from common.breakdown_labels import NODES_READ_TIMEOUT_S
+from common.call_limit import CallDeadline, use_call_deadline
 from common.materialisation import (
     DEFAULT_MINT_OPTIONS,
     AnchorRecord,
@@ -1409,7 +1410,7 @@ class _HungMintRecordWrites(InMemoryMaterialisationStore):
 async def test_a_record_write_that_hangs_leaves_the_answer_standing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(rendering, "_RECORD_WRITE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(rendering, "RECORD_WRITE_TIMEOUT_S", 0.01)
     set_store(_HungMintRecordWrites())
     try:
         _install(_reading_spec)
@@ -2042,7 +2043,7 @@ async def test_a_replay_the_upstream_refreshed_under_is_run_once_more(
             "upstream_version_changed",
         ),
         (
-            # The harness sends a step again itself (`executor.classify.repost_recovers`).
+            # The harness's executor sends the step again (`executor.run._repost_recovers`).
             False,
             [_problem(503, "upstream_version_changed", retryable=True)] * 2,
             1,
@@ -2078,18 +2079,26 @@ async def test_a_public_call_the_upstream_refreshed_under_is_sent_once_more(
     assert structured.get("code") == code
 
 
-@pytest.mark.parametrize(("seconds_per_call", "posts"), [(10.0, 2), (25.0, 1)])
-async def test_a_public_call_is_sent_once_more_only_when_the_call_limit_leaves_time(
+@pytest.mark.parametrize(
+    ("spent_before", "seconds_per_call", "posts"),
+    [(0.0, 10.0, 2), (0.0, 25.0, 1), (0.0, 20.0, 1), (15.0, 12.0, 1)],
+    ids=["time-left", "no-time-for-the-call", "no-time-for-the-work-after", "late-start"],
+)
+async def test_a_public_call_is_sent_once_more_only_when_its_deadline_leaves_time(
     store: InMemoryMaterialisationStore,
-    monkeypatch: pytest.MonkeyPatch,
+    spent_before: float,
     seconds_per_call: float,
     posts: int,
 ) -> None:
-    """An outside call stops at the combined server's call limit, so a refused call is
-    sent again only when as long a call again still ends inside it. Otherwise the caller
-    gets the retryable refusal, not a cancelled call."""
+    """An outside call runs under the deadline the combined server started for it,
+    42 s from its start, so a refused call is sent again only when as long a call
+    again, and the record write and label read after it, still end inside it. A call
+    that began its deadline before the verb ran, as registering a bare Spec does, has
+    that much less. Otherwise the caller gets the retryable refusal, not a cancelled
+    call."""
     now = [0.0]
-    monkeypatch.setattr(tool_pipeline, "_clock", lambda: now[0], raising=False)
+    deadline = CallDeadline.after(42.0, clock=lambda: now[0])
+    now[0] += spent_before
 
     def answer(body: dict[str, Any]) -> httpx2.Response:
         if "get" in body:
@@ -2098,12 +2107,13 @@ async def test_a_public_call_is_sent_once_more_only_when_the_call_limit_leaves_t
         return _problem(503, "upstream_version_changed", retryable=True)
 
     runner = _install(answer)
-    result = await verbs.aggregate(
-        frame_ref={"spec_id": _SPEC},
-        aggregation="sum",
-        rebuild_lost_frames=True,
-        rolling_follows_tree=True,
-    )
+    with use_call_deadline(deadline):
+        result = await verbs.aggregate(
+            frame_ref={"spec_id": _SPEC},
+            aggregation="sum",
+            rebuild_lost_frames=True,
+            rolling_follows_tree=True,
+        )
 
     assert sum(request.method == "POST" for request in runner.requests) == posts
     structured = result.structured_content

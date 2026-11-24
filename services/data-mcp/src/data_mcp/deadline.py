@@ -1,19 +1,20 @@
-"""A wall-clock deadline one caller hands down through every upstream step of a call,
-and the budget that sizes a `get_data` call's deadline for the entry point it came through."""
+"""The budget that sizes a `get_data` call's deadline (`common.call_limit.CallDeadline`) for
+the entry point it came through."""
 
 from __future__ import annotations
 
 import math
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, fields, replace
-from typing import Self
+from dataclasses import dataclass, fields
 
-from common.call_limit import EXTERNAL_CALL_LIMIT_S, EXTERNAL_CALL_MARGIN_S
-
-Clock = Callable[[], float]
+from common.call_limit import (
+    EXTERNAL_CALL_LIMIT_S,
+    EXTERNAL_CALL_MARGIN_S,
+    CallDeadline,
+    use_call_deadline,
+)
 
 # apis' default `mint_timeout_seconds` (`datasets_api/config.py`): the longest it runs
 # a synchronous mint before answering 504.
@@ -25,36 +26,6 @@ DEADLINE_RETRY_AFTER_S = 5.0
 # An outside `get_data` call's own deadline ends `EXTERNAL_CALL_MARGIN_S` before the
 # combined server's `EXTERNAL_CALL_LIMIT_S` (`common.call_limit`), so its refusal at that
 # deadline (`operation_still_processing`, `mint_unanswered`) reaches the caller first.
-
-
-@dataclass(frozen=True, kw_only=True)
-class CallDeadline:
-    """The instant, on `clock`, by which a whole call must finish.
-
-    Passed as an explicit argument, so each step reads the time left and
-    bounds its own work with it. `clock` must be monotonic; tests inject a
-    fake one to move time without sleeping.
-    """
-
-    expires_at: float
-    clock: Clock = time.monotonic
-
-    @classmethod
-    def after(cls, seconds: float, *, clock: Clock = time.monotonic) -> Self:
-        """A deadline `seconds` from now on `clock`."""
-        return cls(expires_at=clock() + seconds, clock=clock)
-
-    def remaining(self) -> float:
-        """Seconds left before the deadline, negative once it has passed."""
-        return self.expires_at - self.clock()
-
-    def reserving(self, seconds: float) -> Self:
-        """This deadline, brought forward by `seconds`.
-
-        What a step passes to the work it bounds when it must itself finish with
-        `seconds` still left on the original deadline, for whatever runs after it.
-        """
-        return replace(self, expires_at=self.expires_at - seconds)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -155,7 +126,6 @@ EXTERNAL_CALL_BUDGET = CallBudget(
 _call_budget: ContextVar[CallBudget] = ContextVar(
     "get_data_call_budget", default=DIRECT_CALL_BUDGET
 )
-_call_deadline: ContextVar[CallDeadline | None] = ContextVar("call_deadline", default=None)
 
 
 def current_call_budget() -> CallBudget:
@@ -164,16 +134,10 @@ def current_call_budget() -> CallBudget:
     return _call_budget.get()
 
 
-def current_call_deadline() -> CallDeadline | None:
-    """The deadline of the call running now, started when `use_call_budget` opened under
-    a budget with a `deadline_s`, else `None`."""
-    return _call_deadline.get()
-
-
 @contextmanager
 def use_call_budget(budget: CallBudget) -> Iterator[None]:
     """Run `get_data` calls made inside the block under `budget`, and start the call's
-    deadline when `budget` states one (`current_call_deadline`).
+    deadline when `budget` states one (`common.call_limit.current_call_deadline`).
 
     The entry point a call came through sets it: the combined server wraps each
     tool call in `use_call_budget(EXTERNAL_CALL_BUDGET)`. A test that drives a
@@ -182,9 +146,8 @@ def use_call_budget(budget: CallBudget) -> Iterator[None]:
     """
     token = _call_budget.set(budget)
     deadline = None if budget.deadline_s is None else CallDeadline.after(budget.deadline_s)
-    deadline_token = _call_deadline.set(deadline)
     try:
-        yield
+        with use_call_deadline(deadline):
+            yield
     finally:
-        _call_deadline.reset(deadline_token)
         _call_budget.reset(token)

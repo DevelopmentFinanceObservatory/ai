@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Literal, NotRequired, TypedDict
 
+from common.call_limit import CallDeadline, current_call_deadline
 from common.derived_replay import DEFAULT_RETRY_AFTER_S
 from common.materialisation import (
     FrameRef,
@@ -52,12 +53,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, with_config
 
 from data_mcp.client import DATASETS_PREFIX
 from data_mcp.client_holder import get_client
-from data_mcp.deadline import (
-    EXTERNAL_CALL_LIMIT_S,
-    EXTERNAL_CALL_MARGIN_S,
-    CallDeadline,
-    current_call_deadline,
-)
+from data_mcp.deadline import EXTERNAL_CALL_LIMIT_S, EXTERNAL_CALL_MARGIN_S
 from data_mcp.errors import UpstreamError
 from data_mcp.tool_errors import ToolRefusal, from_upstream_error, to_tool_result
 

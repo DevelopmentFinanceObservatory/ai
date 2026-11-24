@@ -12,8 +12,9 @@ cell labelled is rendered once.
 
 On a public call (`rebuild_lost_frames`), a call or a replay refused with a code the same
 request can get past (`common.refusal.REPOST_RECOVERS_CODES`, the upstream refreshing under
-the read) is sent once more when a send as long as the first still ends before the combined
-server's call limit (`common.call_limit`), and a second such refusal, or one with too little
+the read) is sent once more when a send as long as the first, and the work after it, still
+ends before the call's deadline, which the combined server starts for an outside client
+(`common.call_limit.current_call_deadline`). A second such refusal, or one with too little
 time left, answers the call as the runner wrote it (`_sent_again_once`). A frame the runner
 no longer holds (`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_`
 frame as the Spec root that fetches it at its newest version in its recorded rendering
@@ -38,9 +39,10 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from common.breakdown_labels import label_cells
-from common.call_limit import EXTERNAL_CALL_LIMIT_S, EXTERNAL_CALL_MARGIN_S
+from common.breakdown_labels import NODES_READ_TIMEOUT_S, label_cells
+from common.call_limit import current_call_deadline
 from common.materialisation import FrameRef
+from common.materialisation.rendering import RECORD_WRITE_TIMEOUT_S
 from common.refusal import REPOST_RECOVERS_CODES
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, ValidationError
@@ -110,35 +112,52 @@ def _transient(refusal: ToolRefusal) -> bool:
     return refusal.code is ToolErrorCode.SERVICE_UNAVAILABLE or refusal.retry_after_s is not None
 
 
-# The clock a public call's deadline is read on.
-_clock = time.monotonic
+# What a call does once the runner answers it: store the mint records of the Spec frames
+# it read (`runner_tree.record_spec_reads`) and read the labels of its cells
+# (`common.breakdown_labels.label_cells`), each under its own bound.
+_AFTER_ANSWER_S = RECORD_WRITE_TIMEOUT_S + NODES_READ_TIMEOUT_S
+
+
+def _now() -> float:
+    """The time on the clock of the call's deadline (`common.call_limit`), or on the
+    monotonic clock for a call with none."""
+    deadline = current_call_deadline()
+    return deadline.clock() if deadline is not None else time.monotonic()
+
+
+def _time_for(seconds: float) -> bool:
+    """Whether `seconds` of work still ends before the call's deadline, which a call from
+    an outside client has (`common.call_limit.current_call_deadline`). A call with no
+    deadline has time for any."""
+    deadline = current_call_deadline()
+    return deadline is None or deadline.remaining() >= seconds
 
 
 async def _sent_again_once[T](
-    send: Callable[[], Awaitable[T | ToolRefusal]], *, deadline: float
+    send: Callable[[], Awaitable[T | ToolRefusal]], *, reserve_s: float
 ) -> T | ToolRefusal:
     """What `send` answers, sent once more at once when it refuses with a code the same
     request can get past (`common.refusal.REPOST_RECOVERS_CODES`) and a send as long as
-    the first still ends by `deadline` on `_clock`. Otherwise, and on a second refusal,
-    the refusal stands."""
-    started = _clock()
+    the first, followed by `reserve_s` of the work after it, still ends before the
+    call's deadline (`_time_for`). Otherwise, and on a second refusal, the refusal
+    stands."""
+    started = _now()
     answer = await send()
     if not (isinstance(answer, ToolRefusal) and answer.code in REPOST_RECOVERS_CODES):
         return answer
-    ended = _clock()
-    if deadline - ended < ended - started:
+    if not _time_for(_now() - started + reserve_s):
         return answer
     return await send()
 
 
 async def _rebuilt(
-    ref: FrameRef, *, lost: ToolRefusal, default_enrichment: bool, deadline: float
+    ref: FrameRef, *, lost: ToolRefusal, default_enrichment: bool, reserve_s: float
 ) -> _Rebuilt | ToolRefusal:
     """The root that rebuilds `ref`, which the refusal `lost` names, or the refusal the
-    call answers when no root can. A replay is sent once more by `deadline`
-    (`_sent_again_once`)."""
+    call answers when no root can. A replay is sent once more when it leaves `reserve_s`
+    for the call sent after it (`_sent_again_once`)."""
     if ref.spec_id.startswith("ops_"):
-        replayed = await _sent_again_once(lambda: replay_derived(ref), deadline=deadline)
+        replayed = await _sent_again_once(lambda: replay_derived(ref), reserve_s=reserve_s)
         if isinstance(replayed, ToolRefusal):
             if replayed.code in REPOST_RECOVERS_CODES or _transient(replayed):
                 return replayed
@@ -209,8 +228,8 @@ async def run_on_runner(
     `op_spec` under `runner_tree.newest_ref` and read at their newest version. With
     `rebuild_lost_frames`, the public server's, a lost frame is rebuilt and a call the
     upstream refreshed under is sent once more (see the module docstring). Without it,
-    the runner's refusal is returned, and the harness sends a step again itself
-    (`executor.classify.repost_recovers`). `refine`, when given, rewrites a runner
+    the runner's refusal is returned: the harness's executor sends again a step bound
+    to no evidence and refers a bound one to the planner (`executor.run._repost_recovers`). `refine`, when given, rewrites a runner
     refusal before it is returned. `heading`, when given, opens the digest of a
     `sum_of` or `quotient_of` computed under another tool's name.
 
@@ -245,12 +264,16 @@ async def run_on_runner(
             follows_tree=follows_tree,
         )
 
-    # A public call comes from an outside client, which the combined server stops at its
-    # call limit.
-    deadline = _clock() + EXTERNAL_CALL_LIMIT_S - EXTERNAL_CALL_MARGIN_S
+    took = 0.0
 
     async def send() -> VerbSummary | ToolRefusal:
-        return await (_sent_again_once(run, deadline=deadline) if rebuild_lost_frames else run())
+        nonlocal took
+        started = _now()
+        answer = await (
+            _sent_again_once(run, reserve_s=_AFTER_ANSWER_S) if rebuild_lost_frames else run()
+        )
+        took = _now() - started
+        return answer
 
     answer = await send()
     rebuilt: dict[Pair, _Rebuilt] = {}
@@ -266,8 +289,12 @@ async def run_on_runner(
             break
         lost = answer
         for pair, ref in fresh.items():
+            # The call is sent again after the rebuild, and may take as long again.
             root = await _rebuilt(
-                ref, lost=lost, default_enrichment=follows_tree, deadline=deadline
+                ref,
+                lost=lost,
+                default_enrichment=follows_tree,
+                reserve_s=took + _AFTER_ANSWER_S,
             )
             if isinstance(root, ToolRefusal):
                 return to_tool_result(root)

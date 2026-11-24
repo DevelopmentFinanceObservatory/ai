@@ -2,13 +2,13 @@ import dataclasses
 import math
 
 import pytest
+from common.call_limit import CallDeadline
 from data_mcp.deadline import (
     DIRECT_CALL_BUDGET,
     EXTERNAL_CALL_BUDGET,
     EXTERNAL_CALL_LIMIT_S,
     EXTERNAL_CALL_MARGIN_S,
     CallBudget,
-    CallDeadline,
     current_call_budget,
     use_call_budget,
 )

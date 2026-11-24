@@ -63,7 +63,7 @@ DEFAULT_MINT_OPTIONS: Mapping[str, Any] = MappingProxyType(
 )
 
 # How long a reply waits on the store for a best-effort record write.
-_RECORD_WRITE_TIMEOUT_S = 2.0
+RECORD_WRITE_TIMEOUT_S = 2.0
 
 
 def root_rendering(record: MintRecord, *, default_enrichment: bool = False) -> dict[str, Any]:
@@ -157,10 +157,10 @@ async def frame_rendering(
 
 async def write_mint_record(record: MintRecord, *, logger: logging.Logger) -> bool:
     """Write `record`, reporting whether the store took it within
-    `_RECORD_WRITE_TIMEOUT_S`, for a reply that stands either way. A failed write is
+    `RECORD_WRITE_TIMEOUT_S`, for a reply that stands either way. A failed write is
     logged on `logger`, the caller's own."""
     try:
-        async with asyncio.timeout(_RECORD_WRITE_TIMEOUT_S):
+        async with asyncio.timeout(RECORD_WRITE_TIMEOUT_S):
             await get_store().put_mint_record(record)
     except Exception:
         # Broad on purpose, as `frame_rendering` reads it. The store's failures belong
