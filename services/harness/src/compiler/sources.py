@@ -871,6 +871,14 @@ def is_family(source: SelectedSource) -> bool:
     return source.served_count != 1
 
 
+def cuts_party_totals(source: SelectedSource) -> bool:
+    """Whether a retrieval of `source` leaves out party totals: a flow role column is
+    among its stated or open entity axes (`get_data`'s `without_party_totals`)."""
+    axes = {entity.role for entity in source.entities}
+    axes.update(axis.column for axis in source.open_entity_axes or ())
+    return bool(axes & FLOW_ROLE_COLUMNS.keys())
+
+
 def stat_var_count(source: SelectedSource) -> int:
     """How many StatVars `source` holds: `served_count` once settled, else the members `search` confirmed."""
     if source.served_count is not None:

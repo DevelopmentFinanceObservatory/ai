@@ -38,6 +38,7 @@ from analysis_mcp.verbs import FOLLOWS_TREE
 from common import auth as mcp_auth
 from common import refusal as refusal_module
 from common import telemetry
+from common.call_limit import EXTERNAL_CALL_LIMIT_S
 from common.logging import JSON_FIELDS, configure_logging
 from common.materialisation import FrameRef, MintRecord
 from common.materialisation import get_store as get_frame_store
@@ -57,7 +58,6 @@ from data_mcp.deadline import (
     DEADLINE_RETRY_AFTER_S,
     DIRECT_CALL_BUDGET,
     EXTERNAL_CALL_BUDGET,
-    EXTERNAL_CALL_LIMIT_S,
     CallBudget,
 )
 from data_mcp.definition_store import (
@@ -1894,7 +1894,7 @@ def _stopped_envelope(tool: str, limit_s: float = LIMIT_S) -> dict[str, Any]:
 
 def test_the_combined_server_stops_calls_at_the_external_call_limit_by_default() -> None:
     """`get_data`'s own deadline is sized to end inside this limit
-    (`data_mcp.deadline.EXTERNAL_CALL_MARGIN_S`)."""
+    (`common.call_limit.EXTERNAL_CALL_MARGIN_S`)."""
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
     [limit] = [m for m in combined.middleware if isinstance(m, combined_mcp._CallLimit)]
 

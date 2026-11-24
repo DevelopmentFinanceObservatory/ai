@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 import httpx2
 import pytest
 from common.apis_auth import TOKEN_HEADER, ApisAuthError, AuthProvider
+from common.call_limit import CallDeadline
 from common.caller import (
     CALLER_HEADER,
     CALLER_PRINCIPAL_HEADER,
@@ -22,7 +23,6 @@ from data_mcp.client import (
     SKILLS_PREFIX,
     UpstreamClient,
 )
-from data_mcp.deadline import CallDeadline
 from data_mcp.errors import UpstreamError, UpstreamSurfaceUnavailable, UpstreamTransportError
 from data_mcp.settings import Settings
 from fastmcp.client.client import CallToolResult
