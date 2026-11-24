@@ -152,9 +152,9 @@ class _Reader:
     (`_READINGS`), through `LiveApisClient`, recording each call's texts in `calls`.
     With `failing`, the route answers 503 to every call, and with `refusing` the status
     and body given, which is no retry's cure when the body says `retryable: false`.
-    Search's capabilities document lists `doors` as live, and answers a bare 404, as a
-    wrong address does, where `doors` is `None`; each read is counted in
-    `capability_reads`."""
+    Search's capabilities document lists `doors` as live, answers a bare 404, as a
+    wrong address does, where `doors` is `None`, and 503 with `capabilities_down`; each
+    read is counted in `capability_reads`."""
 
     def __init__(
         self,
@@ -162,8 +162,10 @@ class _Reader:
         failing: bool = False,
         refusing: tuple[int, dict[str, Any]] | None = None,
         doors: Sequence[str] | None = ("options", "stated_scope"),
+        capabilities_down: bool = False,
     ) -> None:
         self.calls: list[list[str]] = []
+        self.capabilities_down = capabilities_down
         self.failing = failing
         self.refusing = refusing
         self.doors = doors
@@ -172,6 +174,8 @@ class _Reader:
     def handler(self, request: httpx2.Request) -> httpx2.Response:
         if (request.method, request.url.path) == ("GET", "/api/search/capabilities"):
             self.capability_reads += 1
+            if self.capabilities_down:
+                return httpx2.Response(503, json={"code": "unavailable", "retryable": True})
             if self.doors is None:
                 return httpx2.Response(404, text="<html>Not Found</html>")
             doors = [{"name": door, "live": True} for door in self.doors]
@@ -503,22 +507,41 @@ async def test_an_apis_listing_no_stated_scope_door_admits_the_plan_with_no_stat
 
 
 @pytest.mark.parametrize(
-    ("refusing", "doors"),
+    ("refusing", "doors", "down", "code"),
     [
-        pytest.param(_HTML_404, None, id="wrong-address"),
-        pytest.param(_NOT_FOUND, ("options", "stated_scope"), id="door-listed"),
+        pytest.param(
+            _HTML_404, None, False, ProblemCode.STATED_SCOPE_UNREADABLE, id="wrong-address"
+        ),
+        pytest.param(
+            _NOT_FOUND,
+            ("options", "stated_scope"),
+            False,
+            ProblemCode.STATED_SCOPE_UNREADABLE,
+            id="door-listed",
+        ),
+        pytest.param(
+            _NOT_FOUND,
+            ("options",),
+            True,
+            ProblemCode.STATED_SCOPE_UNAVAILABLE,
+            id="capabilities-unavailable",
+        ),
     ],
 )
 async def test_a_404_the_capabilities_document_does_not_explain_ends_the_entry(
-    refusing: tuple[int, dict[str, Any]], doors: Sequence[str] | None
+    refusing: tuple[int, dict[str, Any]],
+    doors: Sequence[str] | None,
+    down: bool,
+    code: ProblemCode,
 ) -> None:
     """A 404 reads as the route not served only on Search's own word: where the
     capabilities document cannot be read, as at a wrong or retired address, or lists
-    the door, the entry ends on `STATED_SCOPE_UNREADABLE` and no plan ignores the
-    scope the user stated."""
+    the door, the entry ends on `STATED_SCOPE_UNREADABLE`, and where the document's
+    read fails in a way that can pass, on `STATED_SCOPE_UNAVAILABLE`. No plan ignores
+    the scope the user stated."""
     ctx = _Context()
     _show(ctx, _block("africa_bilateral"))
-    reader = _Reader(refusing=refusing, doors=doors)
+    reader = _Reader(refusing=refusing, doors=doors, capabilities_down=down)
 
     result = await _propose(
         ctx,
@@ -527,9 +550,9 @@ async def test_a_404_the_capabilities_document_does_not_explain_ends_the_entry(
         reader=reader,
     )
 
-    assert result["code"] == ProblemCode.STATED_SCOPE_UNREADABLE.value, result
-    assert result["detail"]["status"] == 404
-    assert reader.capability_reads == 1
+    assert result["code"] == code.value, result
+    assert result["detail"]["status"] == (503 if down else 404)
+    assert reader.capability_reads >= 1 if down else reader.capability_reads == 1
     assert load_plan(ctx.state) is None
 
 

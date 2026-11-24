@@ -207,8 +207,9 @@ class ApisStatedScopeReader:
         return [TextReading.of(reading) for reading in readings]
 
     async def _route_served(self) -> bool:
-        """Whether Search's capabilities document lists a live `stated_scope` door, or
-        cannot be read, which reads as served so the route's failure stands."""
+        """Whether Search's capabilities document lists a live `stated_scope` door. A
+        failure to read the document that can pass is raised, so the read ends on a
+        retryable refusal; any other reads as served, so the route's 404 stands."""
         if self._clock() < self._served_expires and self._served is not None:
             return self._served
         try:
@@ -220,6 +221,8 @@ class ApisStatedScopeReader:
                 exc.status,
                 exc.code,
             )
+            if exc.retryable:
+                raise
             return True
         self._served = _STATED_SCOPE_DOOR in doors
         self._served_expires = self._clock() + _DOORS_TTL_S
@@ -377,7 +380,7 @@ def _stated_scope_unavailable(*, status: int | None, code: str | None) -> dict[s
     return problem(
         ProblemCode.STATED_SCOPE_UNAVAILABLE,
         "Whose spending the user's words ask for could not be read from Search, which did "
-        "not answer after a retry, so nothing was recorded.",
+        "not answer, so nothing was recorded.",
         outcome=Outcome.REFUSED,
         detail={"read": "stated_scope", "status": status, "code": code},
     )
