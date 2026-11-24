@@ -38,7 +38,7 @@ from pydantic import ValidationError
 
 from common.materialisation.frame_ref import FrameRef
 from common.materialisation.holder import get_store
-from common.materialisation.mint_record import MintRecord
+from common.materialisation.mint_record import MintRecord, normal_groupby
 from common.materialisation.store import FrameIntegrityError
 
 # The mint options a root is read with: the frame-layout Parquet, its enrichment
@@ -68,8 +68,9 @@ _RECORD_WRITE_TIMEOUT_S = 2.0
 
 def root_rendering(record: MintRecord, *, default_enrichment: bool = False) -> dict[str, Any]:
     """The rendering of a root read as `record`'s options state, its `columns` sorted
-    and each listed once, as dfo-apis keeps a root's columns
-    (`analysis_roots.mint_options`). dfo-apis tells two request roots apart by their
+    and each listed once and its `groupby.by` sorted, as dfo-apis keeps a root's
+    rendering (`analysis_roots.mint_options`), a record written before `get_data`
+    sorted `by` included. dfo-apis tells two request roots apart by their
     JSON before it sorts them (`analysis.merged_roots`), so a root in the record's
     order and the same root read from a stored recipe would be two roots of one
     frame, and the recipe of a call reading both would not be the one its key
@@ -81,7 +82,7 @@ def root_rendering(record: MintRecord, *, default_enrichment: bool = False) -> d
         "columns": sorted(set(record.options.get("columns") or ())),
     }
     if (groupby := record.options.get("groupby")) is not None:
-        rendering["groupby"] = groupby
+        rendering["groupby"] = normal_groupby(groupby)
     if default_enrichment and rendering == {"without_party_totals": False, "columns": []}:
         del rendering["columns"]
     return rendering

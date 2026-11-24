@@ -588,8 +588,19 @@ _READ_AS: dict[str, Any] = {"format": "parquet", "bundle": False, "layout": "fra
             True,
             False,
         ),
+        (
+            # A record written before `get_data` sorted `by` keeps its own order.
+            {**_READ_AS, "groupby": {"by": ["time_period", "sector"], "op": "sum"}},
+            {
+                "without_party_totals": False,
+                "columns": [],
+                "groupby": {"by": ["sector", "time_period"], "op": "sum"},
+            },
+            True,
+            False,
+        ),
     ],
-    ids=["default", "columns", "party-total-cut", "groupby"],
+    ids=["default", "columns", "party-total-cut", "groupby", "legacy-groupby-order"],
 )
 async def test_frame_rendering_answers_what_the_record_states(
     options: dict[str, Any], rendering: dict[str, Any], summed: bool, default_rows: bool
