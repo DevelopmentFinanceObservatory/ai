@@ -160,7 +160,8 @@ Some requests are refused whole. A body past 6,356,992 bytes gets a 413
 `resource_exhausted` before it is parsed. A `seed_spec` gets a 422 when
 it is an empty list, holds more than six items, holds an item that is
 not a JSON object, or is a list that comes with an `edit`
-`component_ref`.
+`component_ref`. A `client_features` list of more than 16 values
+gets a 422.
 
 Each seed is checked inside the turn, so one bad seed fails alone, with
 a failed step `seed-<n>` (`n` is its position in the list, from 0) that
@@ -334,6 +335,8 @@ Each answer in `answers` is one of:
   the question sets `allow_free_text: true`.
 - `{"kind": "skipped"}`: the user leaves this question to the agent. Only on
   a question that sets `skippable: true`; the turn still resumes as answered.
+
+A body past 262,144 bytes gets a 413 `resource_exhausted` before it is parsed. An amendment (`payload`) or a `text` answer of more than 16,000 characters gets a 422 whose `detail` names the field with type `string_too_long`, and a `client_features` list of more than 16 values gets one with type `too_long`. Cap the composer at 16,000 characters when it amends a plan or answers a question.
 
 ```json
 {

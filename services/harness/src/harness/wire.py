@@ -378,10 +378,17 @@ MAX_SEED_SPEC_BYTES = 1_048_576
 # request.
 MAX_TURN_REQUEST_BYTES = MAX_SEEDS * MAX_SEED_SPEC_BYTES + 65_536
 
+# The most characters of the user's own words an interrupt carries: an amendment
+# (`InterruptResponse.payload`) or a free-text answer (`TextAnswer.text`). The planner
+# reads the last 2,000 characters of a turn's words, so this leaves room for any
+# amendment a person types.
+MAX_INTERRUPT_TEXT_CHARS = 16_000
+
 # The largest `/api/studio/interrupt` body the route reads (`harness.studio`'s
-# `_BoundedInterruptRoute`). An interrupt carries no seeds, so it gets the room a
-# turn keeps for everything beside them.
-MAX_INTERRUPT_REQUEST_BYTES = 65_536
+# `_BoundedInterruptRoute`): room for the user's words at the cap, each character
+# escaped as a JSON surrogate pair at worst (12 bytes), and for the rest of the
+# request.
+MAX_INTERRUPT_REQUEST_BYTES = 262_144
 
 # The most `client_features` values a request may declare. A client names the
 # question forms it renders, a handful; one this release does not know is ignored
@@ -1061,7 +1068,7 @@ class TextAnswer(_WireModel):
     """The user answered in their own words (`allow_free_text`)."""
 
     kind: Literal["text"]
-    text: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=MAX_INTERRUPT_TEXT_CHARS)
 
 
 class SkippedAnswer(_WireModel):
@@ -1134,7 +1141,7 @@ class InterruptResponse(_WireModel):
     # The amendment text of a plan's `amend`. An elicitation opened before
     # the frame carried `questions` also takes its one answer here: an
     # offered option id, or free text.
-    payload: str | None = None
+    payload: str | None = Field(default=None, max_length=MAX_INTERRUPT_TEXT_CHARS)
     # An elicitation's `answer`: each question id of the frame to its answer.
     answers: dict[str, ElicitationAnswer] | None = None
     # A plan's `switch`: the scope choice or planner decision, the option it

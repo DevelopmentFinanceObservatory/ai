@@ -133,6 +133,8 @@ from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wire import (
     MAX_CLIENT_FEATURES,
+    MAX_INTERRUPT_REQUEST_BYTES,
+    MAX_INTERRUPT_TEXT_CHARS,
     MAX_SEED_SPEC_BYTES,
     MAX_TURN_REQUEST_BYTES,
     ComponentType,
@@ -12269,29 +12271,41 @@ async def test_a_request_past_the_body_cap_is_refused_before_it_is_parsed() -> N
 
 
 @pytest.mark.parametrize(
-    ("change", "status"),
+    ("change", "status", "code"),
     [
         pytest.param(
             {
                 "answers": {
-                    "q1": {"kind": "options", "option_ids": [f"o{i}" for i in range(20_000)]}
+                    "q1": {
+                        "kind": "options",
+                        "option_ids": [f"o{i}" for i in range(MAX_INTERRUPT_REQUEST_BYTES // 6)],
+                    }
                 }
             },
             413,
+            "resource_exhausted",
             id="option-ids-past-the-body-cap",
+        ),
+        pytest.param(
+            {"answers": {"q1": {"kind": "text", "text": "x" * (MAX_INTERRUPT_TEXT_CHARS + 1)}}},
+            422,
+            "string_too_long",
+            id="text-past-its-cap",
         ),
         pytest.param(
             {"client_features": [f"f{i}" for i in range(MAX_CLIENT_FEATURES + 1)]},
             422,
+            "too_long",
             id="client-features-past-their-cap",
         ),
     ],
 )
 async def test_an_interrupt_past_its_bounds_is_refused_before_it_touches_the_conversation(
-    change: dict[str, Any], status: int
+    change: dict[str, Any], status: int, code: str
 ) -> None:
     """`/interrupt` reads at most `MAX_INTERRUPT_REQUEST_BYTES`, so a client cannot post
-    lists of any length, and declares at most `MAX_CLIENT_FEATURES` features."""
+    lists of any length, takes at most `MAX_INTERRUPT_TEXT_CHARS` of the user's words,
+    and declares at most `MAX_CLIENT_FEATURES` features."""
     app = _app(*_ask_questions(("Count?", ("A", "B"))))
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
@@ -12305,9 +12319,9 @@ async def test_an_interrupt_past_its_bounds_is_refused_before_it_touches_the_con
 
     assert response.status_code == status, response.text
     if status == 413:
-        assert response.json()["error"] == "resource_exhausted"
+        assert response.json()["error"] == code
     else:
-        assert [error["type"] for error in response.json()["detail"]] == ["too_long"]
+        assert [error["type"] for error in response.json()["detail"]] == [code]
     assert (
         elicitation["interrupt_id"]
         in app.state.studio.store.current(PRINCIPAL, CONVERSATION).pending
