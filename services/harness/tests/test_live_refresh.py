@@ -1186,10 +1186,17 @@ async def test_on_cloud_run_both_dfo_apis_clients_share_one_id_token_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("K_SERVICE", "dfo-dev-ai")
-    monkeypatch.setenv("DFO_APIS_URL", "https://dfo-dev-apis-abc123.a.run.app/")
-
-    service = build_live_refresh(settings=SETTINGS)
+    monkeypatch.setenv("DFO_APIS_URL", "https://presentation-env-only.a.run.app/")
+    service = build_live_refresh(
+        settings=Settings(
+            live_refresh_principal=LIVE_PRINCIPAL,
+            dfo_apis_url="https://dfo-dev-apis-abc123.a.run.app/",
+        )
+    )
     try:
+        assert str(service._apis._client.base_url).rstrip("/") == (
+            "https://dfo-dev-apis-abc123.a.run.app"
+        )
         auth = service._apis._auth
         assert isinstance(auth, IdTokenProvider)
         assert auth.audience == "https://dfo-dev-apis-abc123.a.run.app"

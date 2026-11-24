@@ -12,7 +12,6 @@ from typing import Any
 
 from compiler.surface import ToolSurface
 from planner.stated_scope import ApisStatedScopeReader, StatedScopeReader, apis_stated_scope_reader
-from presentation_mcp.settings import Settings as PresentationSettings
 
 from harness.graph.interfaces import PlannerModel
 from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
@@ -46,13 +45,13 @@ def build_planner(
 
 
 def build_stated_scope_reader(settings: Settings) -> ApisStatedScopeReader | None:
-    """The reader of dfo-apis' stated-scope route (`DFO_APIS_URL`, as presentation-mcp's
-    settings hold it), or `None` where `planner_stated_scope` is off. Build it once for the
+    """The reader of dfo-apis' stated-scope route at `settings.dfo_apis_url`
+    (`DFO_APIS_URL`), or `None` where `planner_stated_scope` is off. Build it once for the
     process and close it at shutdown (`ApisStatedScopeReader.aclose`), since it holds a
     connection pool."""
     if not settings.planner_stated_scope:
         return None
-    return apis_stated_scope_reader(base_url=PresentationSettings().dfo_apis_url)
+    return apis_stated_scope_reader(base_url=settings.dfo_apis_url)
 
 
 def handing_back_planner_failures(planner: PlannerModel) -> PlannerModel:
