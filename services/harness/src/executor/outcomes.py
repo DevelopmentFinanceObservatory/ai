@@ -9,6 +9,7 @@ check said.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
@@ -89,6 +90,20 @@ class AnchorResult(StrictModel):
     populations: tuple[JsonValue, ...] = ()
 
 
+class SummedRead(StrictModel):
+    """A root an analysis call read summed over more than one StatVar, and how
+    many StatVars the sum added (`analysis_mcp.result.StatVarsSummed`).
+
+    dfo-apis names the root by the version it rendered for the sum, so
+    `spec_id` is the dataset's and `content_version` that rendering's, which no
+    retrieval holds (`harness.graph.answer._summed_input`).
+    """
+
+    spec_id: SpecId
+    content_version: str
+    count: int = Field(ge=1)
+
+
 class StepRecord(StrictModel):
     """One step that ran: what it called, how many attempts it took, what it produced.
 
@@ -106,6 +121,12 @@ class StepRecord(StrictModel):
     `ranked_before_limit` is how many entries a `rank` call ranked before its
     `limit` cut them (`executor.artifacts.declared_ranked_before_limit`),
     `None` when the call set no limit.
+    `stat_vars_summed` is each root the call read summed over several StatVars
+    (`executor.artifacts.declared_stat_vars_summed`), which the frame's own
+    `stat_var_count` of one does not show. A stored outcome leaves it out,
+    since a harness that predates it validates the outcome with
+    `extra="forbid"`, and the ledger keeps it beside the outcome
+    (`summed_reads`, `executor.ledger.RunRecord.stat_vars_summed`).
 
     `frame_ref` is the pair later steps read the frame by. `manifest_ref` is
     the manifest's own pair for a `get_data` step whose `frame_ref` differs
@@ -125,6 +146,7 @@ class StepRecord(StrictModel):
     dropped_key_count: int = Field(default=0, ge=0)
     right_dropped_key_count: int = Field(default=0, ge=0)
     ranked_before_limit: int | None = Field(default=None, ge=0)
+    stat_vars_summed: tuple[SummedRead, ...] = Field(default=(), exclude=True)
 
     @property
     def presented_ref(self) -> FrameRef:
@@ -292,6 +314,36 @@ def outcome_from_json(
 ) -> Accepted | MethodChoiceNeeded | Refused | RediscoveryNeeded:
     """The outcome a run record holds (`executor.ledger.RunRecord.outcome`)."""
     return _OUTCOME_ADAPTER.validate_python(raw)
+
+
+def summed_reads(
+    outcome: Accepted | MethodChoiceNeeded | Refused | RediscoveryNeeded,
+) -> dict[str, tuple[SummedRead, ...]]:
+    """The roots each finished step of `outcome`'s run read summed
+    (`StepRecord.stat_vars_summed`), by step id, for every step that read one.
+    A stored outcome leaves them out, so the ledger keeps them beside it
+    (`executor.ledger.RunRecord.stat_vars_summed`)."""
+    steps = outcome.steps if isinstance(outcome, Accepted) else outcome.completed
+    return {step.step_id: step.stat_vars_summed for step in steps if step.stat_vars_summed}
+
+
+def with_summed_reads[Outcome: Accepted | MethodChoiceNeeded | Refused | RediscoveryNeeded](
+    outcome: Outcome, reads: Mapping[str, tuple[SummedRead, ...]]
+) -> Outcome:
+    """`outcome` with each finished step's summed reads put back from `reads`
+    (`summed_reads`)."""
+    if not reads:
+        return outcome
+    name = "steps" if isinstance(outcome, Accepted) else "completed"
+    steps: tuple[StepRecord, ...] = getattr(outcome, name)
+    return outcome.model_copy(
+        update={
+            name: tuple(
+                step.model_copy(update={"stat_vars_summed": reads.get(step.step_id, ())})
+                for step in steps
+            )
+        }
+    )
 
 
 def load_outcome(
