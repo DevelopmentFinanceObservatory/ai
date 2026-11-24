@@ -379,12 +379,19 @@ def _rolls_over_a_cut_sum(
     versions that year was resolved over. The sum of a retrieval without party
     totals is a version of its own that no resolution names, so the call would
     refuse `rolling_anchor_unresolved` at run time. Read summed at retrieval
-    (`stat_vars='sum'`), the newest year and the call read one version, and the
-    figures are the same, since the step read the family summed already. A filter
-    between them leaves the family unsummed, and every verb after it reads one
-    measure (`planner.shapes._several_measures`), so a filter is no way round.
-    Fixed years are the other: a step that does not follow the newest year reads
-    no newest year.
+    (`stat_vars='sum'`), the newest year and the call read one version. Every
+    step but a filter gives the same figures, since it read the family summed
+    already; a filter reading the retrieval shows the total in place of each
+    StatVar. A filter between them leaves the family unsummed, and every verb
+    after it reads one measure (`planner.shapes._several_measures`), so a filter
+    is no way round. Fixed years are the other: a step without `rolling` reads no
+    newest year.
+
+    A user's pick of `separate` on the plan card cannot take either way, since a
+    replan for a pick states the picked option (`submission.service._picked_decision`),
+    so the entry ends `plan_not_ready` unless the planner drops `rolling`. dfo-apis
+    names no base version for a sum over a cut rendering; once it names the cut
+    version, the call's root is covered and this rule goes.
     """
     if not summed_cut or not rolls(operation) or fixed_end:
         return None
@@ -392,10 +399,11 @@ def _rolls_over_a_cut_sum(
     return (
         f"this step follows the newest year, found over {named} as retrieved, but a step "
         "reads that family of StatVars summed, a version the newest year is not found over; "
-        f"read {named} summed (stat_vars='sum'), which leaves the figures as they are, since "
-        "every step but a filter reads the family summed whichever reading the requirement "
-        "states; a filter before this step leaves several StatVars, which this step refuses; "
-        "or give this step fixed years"
+        f"read {named} summed (stat_vars='sum'), which changes the figures of a filter "
+        "reading it, from each StatVar to their total, and of no other step, since every "
+        "other step reads the family summed already; a filter before this step leaves "
+        "several StatVars, which this step refuses; or drop this step's `rolling` and state "
+        "its years"
     )
 
 
