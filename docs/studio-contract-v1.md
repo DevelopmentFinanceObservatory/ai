@@ -27,7 +27,7 @@ breaking structural change bumps the version and ships a migration note.
 | POST   | `/api/studio/turn`        | SSE stream of frames                                                   |
 | POST   | `/api/studio/interrupt`   | a NEW SSE stream resuming the paused turn (delta 1)                    |
 | POST   | `/api/studio/resume`      | a NEW SSE stream carrying on a running turn its client left (delta 26) |
-| POST   | `/api/studio/cancel`      | 204; aborts the conversation's in-flight segment (delta 14)            |
+| POST   | `/api/studio/cancel`      | 204, or 200 for a Stop naming another turn (deltas 14, 32)             |
 | POST   | `/api/studio/composition` | the new composition manifest, as a JSON body                           |
 | GET    | `/api/studio/state`       | the conversation as stored, as a JSON body; takes no lease (delta 26)  |
 
@@ -137,7 +137,8 @@ union). `GET /api/studio/state` takes query parameters and no body.
   calculation on and lists its results, a retried
   `interrupt.response` with the same answer carries the turn on where it
   stopped, and `turn.resume` carries the turn on with no answer
-  (delta 26). To end the work, send `cancel`.
+  (delta 26). To end the work, send `cancel`. A `cancel` may name the turn
+  it stops in `turn_index` (delta 32).
 - **`turn.resume`** → `POST /api/studio/resume` (delta 26) carries on the
   conversation's open turn `turn_index`, see "Resuming a turn and reading
   the conversation" below.
@@ -628,13 +629,13 @@ Every stream, from `/turn`, `/interrupt` and `/resume`, names the index of the t
 
 `GET /api/studio/state?conversation_id=<id>&since=<n>` answers `ConversationRead` as a JSON body. It takes no lock and no lease, so it answers while a turn streams on any instance, and it changes nothing. An unknown `conversation_id` answers 404 `not_found`. Members with no value are left out, as frames leave them out.
 
-| Member         | What it holds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `turn`         | the latest turn: `index`, `status` (`running`, `paused`, `done`, `failed`, `cancelled`, `abandoned`), `trace_id`, `user_message` (as `closed_since` words it, so a page can show the prompt of a turn it never held), `approved`, the `plan.approved` frame of each plan the open turn approved, one per `revision`, absent when it approved none, `lease_live`, and `retry_after_seconds`, the lease's remaining time, while `lease_live` is true; absent before the first turn                                                                                                                                   |
-| `closed_since` | the closed turns after `since`, oldest first, at most 3: `turn_index`, `user_message`, `reply` (as `message.complete` sent it, empty when the turn closed with none), `component_ids`, `cards` (each id's stored card: `component_id`, `type`, `title`, `revision`, `fact_summary`; no `payload` or `provenance`, which the component id reads from the presentation platform), `approved`, the `plan.approved` frame of each plan the turn approved, one per `revision`, `error`, the code a turn that did not end cleanly closed on, and `new_question` on a turn ended by one (delta 27); empty without `since` |
-| `closed_total` | how many closed turns the conversation holds, which is the index of the last one                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `pause`        | when `turn.status` is `paused`: the `interrupt_id` to answer, its `kind` (`plan` or `elicitation`), and `frames`, the frames the pause was sent as, its `plan.proposed` or `elicitation.request` last, each with the `seq` it went out with                                                                                                                                                                                                                                                                                                                                                                        |
-| `manifest`     | the composition manifest; absent when the conversation has no canvas                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Member         | What it holds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `turn`         | the latest turn: `index`, `status` (`running`, `paused`, `done`, `failed`, `cancelled`, `abandoned`), `trace_id`, `user_message` (as `closed_since` words it, so a page can show the prompt of a turn it never held), `approved`, the `plan.approved` frame of each plan the open turn approved, one per `revision`, absent when it approved none, `lease_live`, and `retry_after_seconds`, the lease's remaining time, while `lease_live` is true; absent before the first turn                                                                                                                                                                                                                  |
+| `closed_since` | the closed turns after `since`, oldest first, at most 3: `turn_index`, `user_message`, `reply` (as `message.complete` sent it, empty when the turn closed with none), `component_ids`, `cards` (each id's stored card: `component_id`, `type`, `title`, `revision`, `fact_summary`, and `unit_change` and `replaces` as `component.created` gives them (delta 32); no `payload` or `provenance`, which the component id reads from the presentation platform), `approved`, the `plan.approved` frame of each plan the turn approved, one per `revision`, `error`, the code a turn that did not end cleanly closed on, and `new_question` on a turn ended by one (delta 27); empty without `since` |
+| `closed_total` | how many closed turns the conversation holds, which is the index of the last one                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pause`        | when `turn.status` is `paused`: the `interrupt_id` to answer, its `kind` (`plan` or `elicitation`), and `frames`, the frames the pause was sent as, its `plan.proposed` or `elicitation.request` last, each with the `seq` it went out with                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `manifest`     | the composition manifest; absent when the conversation has no canvas                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 `user_message` is the turn's record. It holds the message, with a `(then: ...)` line for each amendment, answer or switch on the turn's cards.
 
@@ -835,6 +836,29 @@ After the user answers a unit question, the plan card states the unit in one row
 
 `schema_version` stays 1.
 
+## A Stop that names its turn, and a stored card's unit and slot (delta 32, v1.17)
+
+### A Stop that names its turn
+
+`turn.cancel` gains an optional `turn_index`, the turn the Stop is for: the index the stream's `x-dfo-turn-index` header named. A page that holds no index for its turn, as before the header arrives, leaves it out.
+
+- When the conversation's latest turn is `turn_index`, the Stop acts as one without it, and the route answers 204. On a live lease, the Stop is recorded at once naming that turn, so a turn begun after it under the same lease runs on.
+- When the latest turn is another, the Stop changes nothing, and the route answers 200 with a `CancelSkipped` JSON body: `{"code": "turn_moved", "turn_index": <the latest turn>}`, `turn_index` being 0 before the first turn. It is no error: the turn the page stopped has ended, and a later turn, begun from another tab say, runs on.
+- Without `turn_index`, the Stop is for whatever turn the conversation runs, as before.
+
+```json
+{"kind": "turn.cancel", "schema_version": 1, "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E", "turn_index": 2}
+```
+
+### A stored card's unit and slot
+
+A state read's stored card (`closed_since[].cards[]`, `StoredCard`) gains `unit_change` and `replaces`, with the names and shapes `component.created` gives them, so a page applies one rule to a card from a stream and one from a state read.
+
+- `unit_change`, a `UnitChange`, is set when the card's unit can change, read from what the conversation keeps with the card, as `apply_unit` reads it. Its `offer.start` is the unit the card shows.
+- `replaces` names the card whose canvas slot this card took, recorded when the swap committed, as for a unit change or an Edit Card rebuild. A card an earlier release stored carries none.
+
+Each is left out when it has no value. `schema_version` stays 1.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -957,3 +981,4 @@ Fixture values that are samples:
    count rows on the plan card").
 1. `elicitation.request` questions gain `input: "unit"` with a `unit` offer, and `multi_select` is emitted; answers gain `{kind: "unit", ...}` and `{kind: "options", option_ids}`. `turn.request` and `interrupt.response` gain `client_features`; a client that declares no `unit_question` or `multi_select` gets those questions as `single_select` (see "Question forms a client declares"). `component.created` gains `unit_change` and `replaces`; `turn.request` gains `apply_unit`, which comes alone (see "A unit question, a card's unit change and several answers").
 1. `plan.proposed.decisions[]` gains `unit` on the row stating a unit question's whole unit, whose `options` are whole units; `interrupt.response` gains `unit` on a `switch` (see "A unit row on the plan card").
+1. `turn.cancel` gains an optional `turn_index`; a Stop naming a turn that is not the latest changes nothing and is answered 200 `{"code": "turn_moved", "turn_index"}`. A state read's stored card gains `unit_change` and `replaces` (see "A Stop that names its turn, and a stored card's unit and slot").

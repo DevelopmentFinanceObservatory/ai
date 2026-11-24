@@ -1249,11 +1249,28 @@ class CancelRequest(_WireModel):
     """POST /api/studio/cancel -- abort the conversation's in-flight
     segment (the Stop button). Idempotent: cancelling an idle conversation
     is a no-op 204. The aborted stream, if still open, ends with a
-    stream-fatal `error` frame ("cancelled")."""
+    stream-fatal `error` frame ("cancelled").
+
+    `turn_index`, when given, is the turn the Stop is for: the index the
+    stream's `x-dfo-turn-index` header named. A conversation whose latest
+    turn is another is left as it is, and the route answers 200 with a
+    `CancelSkipped`. Without it, the Stop is for whatever turn the
+    conversation runs."""
 
     kind: Literal["turn.cancel"]
     schema_version: Literal[1]
     conversation_id: str
+    turn_index: int | None = Field(default=None, ge=1)
+
+
+class CancelSkipped(_WireModel):
+    """POST /api/studio/cancel's 200 answer to a Stop whose `turn_index` is
+    not the conversation's latest turn: it stopped nothing. `code` is
+    `turn_moved`, and `turn_index` is the conversation's latest turn, 0
+    before its first."""
+
+    code: Literal["turn_moved"]
+    turn_index: int = Field(ge=0)
 
 
 class ResumeRequest(_WireModel):
@@ -1965,13 +1982,21 @@ class StoredCard(_WireModel):
     its type, title, revision and the `fact_summary` its
     `component.created` or `component.revised` frame carried. The stored
     card holds no `payload` or `provenance`. The component id reads the
-    resolved revision from the presentation platform."""
+    resolved revision from the presentation platform.
+
+    `unit_change` and `replaces` are `ComponentCreated`'s. `unit_change` is
+    set when the card's unit can change, read from what the conversation
+    keeps with the card, as `apply_unit` reads it. `replaces` names the card
+    whose canvas slot this one took, recorded when the swap committed. A
+    card an earlier release stored carries no `replaces`."""
 
     component_id: str
     type: str
     title: str
     revision: int = Field(ge=1)
     fact_summary: FactSummary | None = None
+    unit_change: UnitChange | None = None
+    replaces: str | None = None
 
 
 class ClosedTurn(_WireModel):

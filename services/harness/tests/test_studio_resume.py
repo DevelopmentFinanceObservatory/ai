@@ -1193,6 +1193,32 @@ async def test_a_stop_records_its_turn_cancelled_only_with_the_cursor_closed(
 _CANCEL = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
 
 
+async def test_a_stop_naming_an_earlier_turn_leaves_the_latest_one_open(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A Stop names the turn its page ran (`turn_index`). Sent once turn 2
+    has paused on its plan, a Stop for turn 1 stops nothing: the route
+    answers 200 `turn_moved` naming turn 2, and turn 2 stays paused. A Stop
+    for turn 2 closes it `cancelled`."""
+    app, _ = orchestrator_app(_text("One."), plan_call("q with forks"), engine=pg_engine)
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("first"))
+        await stream(client, "/api/studio/turn", turn_body("q with forks"))
+        skipped = await client.post(
+            "/api/studio/cancel", json={**_CANCEL, "turn_index": 1}, headers=AUTH
+        )
+        kept = (await _state(client)).json()["turn"]
+        stopped = await client.post(
+            "/api/studio/cancel", json={**_CANCEL, "turn_index": 2}, headers=AUTH
+        )
+        ended = (await _state(client)).json()["turn"]
+
+    assert (skipped.status_code, skipped.json()) == (200, {"code": "turn_moved", "turn_index": 2})
+    assert (kept["index"], kept["status"]) == (2, "paused")
+    assert stopped.status_code == 204
+    assert (ended["index"], ended["status"]) == (2, "cancelled")
+
+
 async def _cursor_statuses(engine: AsyncEngine) -> list[str]:
     async with engine.connect() as conn:
         return list(

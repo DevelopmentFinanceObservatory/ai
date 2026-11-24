@@ -1816,6 +1816,11 @@ _SERIES_IDS = "series_ids"
 # drawing it again while the canvas holds that revision (`canvas_cards`). No
 # digest, listing or recall states it either.
 _DRAWN_CARD = "drawn_card"
+# The key of a stored entry holding the id of the card whose canvas slot this
+# card took (`ComponentCreated.replaces`), set by the swap that landed it
+# (`harness.studio_edit._swapped`). The state read gives it on the card's
+# `StoredCard`. No digest, listing or recall states it.
+REPLACED_CARD_KEY = "replaces"
 
 
 def _digest_entry(component: dict[str, Any]) -> dict[str, Any]:
@@ -1850,11 +1855,11 @@ def drawn_series_ids(component: dict[str, Any]) -> dict[str, list[str]]:
 
 def _model_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """A stored entry as a model may read it, without its `_SERIES_IDS`,
-    `_DRAWN_CARD` and `CARD_UNIT_KEY`."""
+    `_DRAWN_CARD`, `CARD_UNIT_KEY` and `REPLACED_CARD_KEY`."""
     return {
         key: value
         for key, value in entry.items()
-        if key not in {_SERIES_IDS, _DRAWN_CARD, CARD_UNIT_KEY}
+        if key not in {_SERIES_IDS, _DRAWN_CARD, CARD_UNIT_KEY, REPLACED_CARD_KEY}
     }
 
 

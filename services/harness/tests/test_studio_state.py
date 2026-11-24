@@ -81,6 +81,7 @@ from harness.studio_store import (
     SegmentClose,
     StopPending,
     StudioStore,
+    TurnMoved,
 )
 from harness.turn.store import TurnStatus, TurnStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
@@ -2518,6 +2519,38 @@ async def test_a_stop_request_sets_only_the_flag_and_the_renewal_records_its_id(
     renewed = await store.renew("principal", CONVERSATION, segment_id)
     assert renewed.stop_id is not None
     assert await _stop_columns(pg_engine) == (False, renewed.stop_id)
+
+
+async def test_a_stop_naming_its_turn_is_live_for_that_turn_alone(
+    new_store, clock, pg_engine
+) -> None:
+    """`request_cancel` given the turn a Stop is for records the Stop naming
+    that turn at once, with no flag, while a live lease holds it, and the
+    holder's renewal reports it. For another turn it raises `TurnMoved`
+    naming the row's turn and records nothing. A turn the holder begins
+    after the Stop, under the same lease, runs on: a flag stamped by a
+    later lease write would name the new turn."""
+    store = new_store(clock=clock)
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    stopper = new_store(clock=clock)
+
+    with pytest.raises(TurnMoved) as moved:
+        await stopper.request_cancel("principal", CONVERSATION, turn_index=2)
+    assert moved.value.latest == 1
+    assert await _stop_row(pg_engine) == (False, None, None)
+
+    assert await stopper.request_cancel("principal", CONVERSATION, turn_index=1) is True
+    flagged, stop_id, stop_turn = await _stop_row(pg_engine)
+    assert (flagged, stop_id is not None, stop_turn) == (False, True, 1)
+    assert (await store.renew("principal", CONVERSATION, segment_id)).stop_id == stop_id
+
+    state.begin_turn()
+    await store.save("principal", CONVERSATION)
+    assert (await store.renew("principal", CONVERSATION, segment_id)).stop_id is None
+    assert not await stopper.stop_live("principal", CONVERSATION)
 
 
 async def _stop_row(engine: AsyncEngine) -> tuple[bool, str | None, int | None]:

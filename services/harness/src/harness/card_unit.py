@@ -161,6 +161,19 @@ def card_unit_change(card: UnitCard, block: Mapping[str, Any] | None) -> UnitCha
     return UnitChange(spec_id=card.spec_id, offer=offer.model_copy(update={"start": served}))
 
 
+def stored_unit_change(
+    entry: Mapping[str, Any], turn_specs: Mapping[str, Any], turns: list[dict[str, Any]]
+) -> UnitChange | None:
+    """The `unit_change` of the card whose stored entry is `entry`: its
+    `UnitCard` with the Search block a turn kept for its spec, read as
+    `unit_move` reads them. `None` for a card stored with no `UnitCard`, or
+    whose spec's block is gone or converts into none."""
+    card = UnitCard.from_json(entry.get(CARD_UNIT_KEY))
+    if card is None:
+        return None
+    return card_unit_change(card, stored_block(turn_specs, turns, card.spec_id))
+
+
 @dataclass(frozen=True)
 class UnitMove:
     """A unit change the route admitted: the card (`component_id`, titled

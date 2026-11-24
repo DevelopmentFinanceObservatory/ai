@@ -66,15 +66,15 @@ the list of blocks on the canvas.
 
 ## 2. Endpoints
 
-| Method | Path                      | Response                                         |
-| ------ | ------------------------- | ------------------------------------------------ |
-| POST   | `/api/studio/turn`        | SSE stream of frames                             |
-| POST   | `/api/studio/interrupt`   | SSE stream of frames (continues a paused turn)   |
-| POST   | `/api/studio/composition` | JSON: the composition manifest after the request |
-| POST   | `/api/studio/cancel`      | HTTP 204, no body                                |
-| POST   | `/api/studio/resume`      | SSE stream of frames (continues a running turn)  |
-| GET    | `/api/studio/state`       | JSON: the conversation as stored                 |
-| GET    | `/healthz`                | JSON liveness                                    |
+| Method | Path                      | Response                                               |
+| ------ | ------------------------- | ------------------------------------------------------ |
+| POST   | `/api/studio/turn`        | SSE stream of frames                                   |
+| POST   | `/api/studio/interrupt`   | SSE stream of frames (continues a paused turn)         |
+| POST   | `/api/studio/composition` | JSON: the composition manifest after the request       |
+| POST   | `/api/studio/cancel`      | HTTP 204, no body; JSON for a Stop naming another turn |
+| POST   | `/api/studio/resume`      | SSE stream of frames (continues a running turn)        |
+| GET    | `/api/studio/state`       | JSON: the conversation as stored                       |
+| GET    | `/healthz`                | JSON liveness                                          |
 
 ## 3. The stream
 
@@ -424,7 +424,8 @@ Concurrency and atomicity:
 
 ### 4.4 `turn.cancel` → POST `/api/studio/cancel`
 
-Fields: `kind: "turn.cancel"`, `schema_version: 1`, `conversation_id`.
+Fields: `kind: "turn.cancel"`, `schema_version: 1`, `conversation_id`,
+`turn_index?`.
 The server stops the conversation's active stream and returns HTTP 204.
 The active stream may be running on a different server instance than the
 one that answers this request; the server finds it there too and stops
@@ -441,6 +442,14 @@ safe when nothing streams. A
 closed connection stops the stream too and leaves the turn open where it
 stopped, for `/resume` to carry on (§4.5). Proxies can hide a closed
 connection. Use `/cancel` for the Stop button.
+
+Set `turn_index` to the turn the page is stopping, the index its stream's
+`x-dfo-turn-index` header named (§3), and leave it out while the page
+holds none. When the conversation's latest turn is another, one begun from
+another tab say, the server stops nothing and answers HTTP 200 with
+`{"code": "turn_moved", "turn_index": <the latest turn>}`. That answer is
+no error: the page's own turn has ended. Without `turn_index`, the server
+stops whatever turn the conversation runs.
 
 ### 4.5 `turn.resume` → POST `/api/studio/resume`
 
@@ -464,7 +473,7 @@ The server carries on the turn on a new stream, which you read as any other. Sen
 Query: `conversation_id`, and `since`, the number of the last turn the page holds (0 for none). The answer is JSON. The call takes no lease, so it answers while a turn streams, and it changes nothing. An unknown `conversation_id` answers 404 `not_found`. A member with no value is left out.
 
 - `turn`: `{index, status, trace_id, user_message, approved?, lease_live, retry_after_seconds?}`, absent before the first turn. `user_message` is the turn's prompt. Show it above a resumed reply when the page lacks the prompt. `approved` holds the `plan.approved` frame of each plan the open turn approved, one per `revision`. Attach any the page lacks to the turn's message. `status` is `running`, `paused`, `done`, `failed`, `cancelled` or `abandoned`. `retry_after_seconds` is set while `lease_live` is true.
-- `closed_since`: the closed turns after `since`, oldest first, at most 3, each `{turn_index, user_message, reply, component_ids, cards, approved?, error?, new_question?}`. `approved` holds the `plan.approved` frame of each plan the turn approved, one per `revision`. `cards` holds each card the turn made, in `component_ids` order, at its current revision, `{component_id, type, title, revision, fact_summary?}`, so a card a later turn revised shows that revision. It holds no `payload` or `provenance`. Read the resolved revision from the presentation platform by `component_id`. `reply` is the text `message.complete` sent, empty when the turn closed with none. `error` is the code of a turn that did not end cleanly. `new_question` is set on a turn ended by a new question (§6), which the page sends as the next turn when it holds none after it.
+- `closed_since`: the closed turns after `since`, oldest first, at most 3, each `{turn_index, user_message, reply, component_ids, cards, approved?, error?, new_question?}`. `approved` holds the `plan.approved` frame of each plan the turn approved, one per `revision`. `cards` holds each card the turn made, in `component_ids` order, at its current revision, `{component_id, type, title, revision, fact_summary?, unit_change?, replaces?}`, so a card a later turn revised shows that revision. `unit_change` and `replaces` are `component.created`'s (4.1.4): apply the same replacement and Change unit handling to a card from a state read as to one from a stream. A card an earlier release stored has no `replaces`. It holds no `payload` or `provenance`. Read the resolved revision from the presentation platform by `component_id`. `reply` is the text `message.complete` sent, empty when the turn closed with none. `error` is the code of a turn that did not end cleanly. `new_question` is set on a turn ended by a new question (§6), which the page sends as the next turn when it holds none after it.
 - `closed_total`: how many closed turns the conversation holds, the index of the last one. While the page holds fewer, read again with `since` set to the last `turn_index` returned.
 - `pause`: on a paused turn, `{interrupt_id, kind, frames}`. `kind` is `plan` or `elicitation`. `frames` are the frames the pause was sent as, its `plan.proposed` or `elicitation.request` last. Feed them to the same handlers as live frames.
 - `manifest`: the composition manifest, absent when there is no canvas.

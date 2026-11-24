@@ -119,6 +119,7 @@ REQUEST_FIXTURES = {
     "request-18-interrupt-unit-pick.json": InterruptResponse,
     "request-19-turn-client-features.json": TurnRequest,
     "request-20-interrupt-switch-unit.json": InterruptResponse,
+    "request-21-cancel-turn.json": CancelRequest,
 }
 
 
