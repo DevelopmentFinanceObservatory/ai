@@ -4,8 +4,9 @@ The combined server (`harness.combined_mcp`) cancels a tool call from an outside
 at `EXTERNAL_CALL_LIMIT_S` and refuses it. Its outermost middleware starts the call's
 deadline `EXTERNAL_CALL_MARGIN_S` before that limit (`data_mcp.deadline.use_call_budget`),
 so a tool that bounds its work by `current_call_deadline` writes its own refusal before the
-call is cancelled: `get_data` and `export_data` (`data_mcp`), and a public analysis call
-sent once more (`analysis_mcp.tool_pipeline`).
+call is cancelled: `export_data` (`data_mcp.export_data_tool`) and a public analysis call
+(`analysis_mcp.tool_pipeline`). `get_data` starts a deadline of its own, sized from the
+same budget (`data_mcp.deadline.current_call_budget`), when its tool body starts.
 """
 
 from __future__ import annotations

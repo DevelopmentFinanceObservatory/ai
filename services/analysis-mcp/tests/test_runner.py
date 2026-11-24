@@ -8,17 +8,19 @@ import asyncio
 import functools
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import httpx2
 import pytest
-from analysis_mcp import digest, verbs
+from analysis_mcp import digest, tool_pipeline, verbs
 from analysis_mcp.digest import render_summary_digest
 from analysis_mcp.runner_client import (
     DEFAULT_RETRY_AFTER_S,
     RunnerClient,
     read_derived_manifest,
+    run_tree,
     runner_holder,
 )
 from analysis_mcp.summary import LIST_CAP, VerbSummary
@@ -2122,6 +2124,77 @@ async def test_a_public_call_is_sent_once_more_only_when_its_deadline_leaves_tim
         "upstream_version_changed",
         "refresh_then_retry",
     )
+
+
+async def test_a_second_send_that_outruns_the_deadline_answers_the_first_refusal(
+    store: InMemoryMaterialisationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A public call sent once more runs only until the work after it would no longer fit
+    the call's deadline, so a slow second send answers the first refusal, which the
+    caller may retry, before the combined server cancels the call."""
+    sends = 0
+
+    async def slow_second(*args: Any, **kwargs: Any) -> Any:
+        nonlocal sends
+        sends += 1
+        if sends == 2:
+            await asyncio.sleep(2.0)
+        return await run_tree(*args, **kwargs)
+
+    monkeypatch.setattr(tool_pipeline, "run_tree", slow_second)
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if "get" in body:
+            return _problem(404, "snapshot_not_found")
+        return _problem(503, "upstream_version_changed", retryable=True)
+
+    _install(answer)
+    started = time.monotonic()
+    with use_call_deadline(CallDeadline.after(tool_pipeline._AFTER_ANSWER_S + 0.2)):
+        result = await verbs.aggregate(
+            frame_ref={"spec_id": _SPEC},
+            aggregation="sum",
+            rebuild_lost_frames=True,
+            rolling_follows_tree=True,
+        )
+
+    assert time.monotonic() - started < 1.0
+    assert sends == 2
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["code"] == "upstream_version_changed"
+
+
+async def test_recording_a_spec_read_gives_way_to_the_deadline_and_the_answer_stands(
+    store: InMemoryMaterialisationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Spec reads of an answered call are recorded only while the call's deadline
+    leaves the label read its time, so a slow manifest read costs the record, not the
+    answer."""
+    cancelled = False
+
+    async def slow_record(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        return {}
+
+    monkeypatch.setattr(tool_pipeline, "record_spec_reads", slow_record)
+    _install(httpx2.Response(200, json=_recorded_ready("aggregate")))
+    started = time.monotonic()
+    with use_call_deadline(CallDeadline.after(NODES_READ_TIMEOUT_S + 0.2)):
+        result = await verbs.aggregate(
+            frame_ref={"spec_id": _SPEC},
+            aggregation="sum",
+            rebuild_lost_frames=True,
+            rolling_follows_tree=True,
+        )
+
+    assert (cancelled, result.is_error) == (True, False)
+    assert time.monotonic() - started < 1.0
 
 
 def _level_column(node: dict[str, Any]) -> str:

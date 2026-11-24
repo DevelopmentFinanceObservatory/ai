@@ -38,6 +38,7 @@ from analysis_mcp.verbs import FOLLOWS_TREE
 from common import auth as mcp_auth
 from common import refusal as refusal_module
 from common import telemetry
+from common.call_limit import EXTERNAL_CALL_LIMIT_S
 from common.logging import JSON_FIELDS, configure_logging
 from common.materialisation import FrameRef, MintRecord
 from common.materialisation import get_store as get_frame_store
@@ -57,7 +58,6 @@ from data_mcp.deadline import (
     DEADLINE_RETRY_AFTER_S,
     DIRECT_CALL_BUDGET,
     EXTERNAL_CALL_BUDGET,
-    EXTERNAL_CALL_LIMIT_S,
     CallBudget,
 )
 from data_mcp.definition_store import (

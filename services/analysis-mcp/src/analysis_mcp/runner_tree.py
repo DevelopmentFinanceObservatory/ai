@@ -16,11 +16,13 @@ stored recipe. A `spec_` pair is a frame `get_data` registered in the
 materialisation store, whose mint record (`common.materialisation.MintRecord`)
 names the dataset version apis holds and the options it was read with. Its root
 is that version with the rendering the options state: `without_party_totals`,
-`columns`, the enrichment columns as the record lists them (dfo-apis sorts and
-dedupes them), `[]` when the frame has none, and `groupby` when the frame was fetched with a `breakdown` or a
-`stat_vars` sum, which the dataset of the mint record is already summed for. On a public
-call (`default_enrichment`), a record of the plain rendering sends no `columns`, so the
-root takes what a Spec root takes. A `spec_` pair with no mint record is sent as a version
+`columns`, the record's enrichment columns sorted and each listed once, `[]` when
+the frame has none, and `groupby`, its `by` sorted, when the frame was fetched with a
+`breakdown` or a `stat_vars` sum, which the dataset of the mint record is already summed
+for. These are the spellings a stored recipe's root names
+(`common.materialisation.rendering.root_rendering`). On a public call
+(`default_enrichment`), a record of the plain rendering sends no `columns`, so the root
+takes what a Spec root takes. A `spec_` pair with no mint record is sent as a version
 read with no columns. A record that does not decode
 refuses `frame_integrity_failed`, and any other failed read of it
 `service_unavailable`, which a retry may mend. The runner reads a root with

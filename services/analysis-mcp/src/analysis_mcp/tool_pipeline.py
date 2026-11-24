@@ -35,11 +35,12 @@ frame was read as when it moved, since a replay can mint a new `ops_` id.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from common.breakdown_labels import NODES_READ_TIMEOUT_S, label_cells
+from common.breakdown_labels import NO_LABELS, NODES_READ_TIMEOUT_S, label_cells
 from common.call_limit import current_call_deadline
 from common.materialisation import FrameRef
 from common.materialisation.rendering import RECORD_WRITE_TIMEOUT_S
@@ -114,7 +115,8 @@ def _transient(refusal: ToolRefusal) -> bool:
 
 # What a call does once the runner answers it: store the mint records of the Spec frames
 # it read (`runner_tree.record_spec_reads`) and read the labels of its cells
-# (`common.breakdown_labels.label_cells`), each under its own bound.
+# (`common.breakdown_labels.label_cells`), each under its own bound. Both run inside the
+# call's deadline too (`_by_deadline`), so this is all the time they take.
 _AFTER_ANSWER_S = RECORD_WRITE_TIMEOUT_S + NODES_READ_TIMEOUT_S
 
 
@@ -123,6 +125,23 @@ def _now() -> float:
     monotonic clock for a call with none."""
     deadline = current_call_deadline()
     return deadline.clock() if deadline is not None else time.monotonic()
+
+
+def _seconds_left(reserve_s: float = 0.0) -> float | None:
+    """The seconds the call's deadline leaves once `reserve_s` is kept back, or `None`
+    for a call with no deadline (`common.call_limit.current_call_deadline`)."""
+    deadline = current_call_deadline()
+    return None if deadline is None else deadline.remaining() - reserve_s
+
+
+async def _by_deadline[T](work: Awaitable[T], *, reserve_s: float, missed: T) -> T:
+    """What `work` answers when it ends with `reserve_s` of the call's deadline still left,
+    else `missed`. A call with no deadline waits for `work`."""
+    try:
+        async with asyncio.timeout(_seconds_left(reserve_s)):
+            return await work
+    except TimeoutError:
+        return missed
 
 
 def _time_for(seconds: float) -> bool:
@@ -139,15 +158,16 @@ async def _sent_again_once[T](
     """What `send` answers, sent once more at once when it refuses with a code the same
     request can get past (`common.refusal.REPOST_RECOVERS_CODES`) and a send as long as
     the first, followed by `reserve_s` of the work after it, still ends before the
-    call's deadline (`_time_for`). Otherwise, and on a second refusal, the refusal
-    stands."""
+    call's deadline (`_time_for`). The second send runs until `reserve_s` before that
+    deadline; one that runs longer, a second refusal, or too little time left answers
+    the first refusal or the second as it stands."""
     started = _now()
     answer = await send()
     if not (isinstance(answer, ToolRefusal) and answer.code in REPOST_RECOVERS_CODES):
         return answer
     if not _time_for(_now() - started + reserve_s):
         return answer
-    return await send()
+    return await _by_deadline(send(), reserve_s=reserve_s, missed=answer)
 
 
 async def _rebuilt(
@@ -229,8 +249,8 @@ async def run_on_runner(
     `rebuild_lost_frames`, the public server's, a lost frame is rebuilt and a call the
     upstream refreshed under is sent once more (see the module docstring). Without it,
     the runner's refusal is returned: the harness's executor sends again a step bound
-    to no evidence and refers a bound one to the planner (`executor.run._repost_recovers`). `refine`, when given, rewrites a runner
-    refusal before it is returned. `heading`, when given, opens the digest of a
+    to no evidence and refers a bound one to the planner (`executor.run._repost_recovers`).
+    `refine`, when given, rewrites a runner refusal before it is returned. `heading`, when given, opens the digest of a
     `sum_of` or `quotient_of` computed under another tool's name.
 
     `structured_content` is the summary's `VerbResult` fields and `content` the
@@ -242,8 +262,18 @@ async def run_on_runner(
         (spec_id, newest_ref(spec_id).content_version): {"spec_id": spec_id} for spec_id in newest
     }
     sent: Tree | None = None
+    # How long the last send to the runner took.
+    took = 0.0
 
     async def run() -> VerbSummary | ToolRefusal:
+        nonlocal took
+        started = _now()
+        try:
+            return await compute()
+        finally:
+            took = _now() - started
+
+    async def compute() -> VerbSummary | ToolRefusal:
         nonlocal sent
         # Only the public server sets `follows_tree`.
         tree = await verb_tree(
@@ -264,16 +294,10 @@ async def run_on_runner(
             follows_tree=follows_tree,
         )
 
-    took = 0.0
-
     async def send() -> VerbSummary | ToolRefusal:
-        nonlocal took
-        started = _now()
-        answer = await (
+        return await (
             _sent_again_once(run, reserve_s=_AFTER_ANSWER_S) if rebuild_lost_frames else run()
         )
-        took = _now() - started
-        return answer
 
     answer = await send()
     rebuilt: dict[Pair, _Rebuilt] = {}
@@ -305,9 +329,16 @@ async def run_on_runner(
         if lost is not None and answer.lost_frames:
             return to_tool_result(answer.not_rebuilt())
         return to_tool_result(answer if refine is None else refine(answer))
+    # A Spec read left unrecorded costs its sentence and a later call's record, not the
+    # answer, so the records give way to the label read and the label read to the deadline.
     read = (
-        await record_spec_reads(
-            FrameRef(spec_id=answer.spec_id, content_version=answer.content_version), sent.node
+        await _by_deadline(
+            record_spec_reads(
+                FrameRef(spec_id=answer.spec_id, content_version=answer.content_version),
+                sent.node,
+            ),
+            reserve_s=NODES_READ_TIMEOUT_S,
+            missed={},
         )
         if sent is not None and sent.spec_roots
         else {}
@@ -321,7 +352,9 @@ async def run_on_runner(
         if sentence is not None
     ]
     digest, cells = digest_cells(answer, heading=heading)
-    labels = await label_cells(cells, read_nodes=read_graph_nodes)
+    labels = await _by_deadline(
+        label_cells(cells, read_nodes=read_graph_nodes), reserve_s=0.0, missed=NO_LABELS
+    )
     if labels.labels:
         digest = render_summary_digest(answer, heading=heading, labels=labels)
     return ToolResult(
