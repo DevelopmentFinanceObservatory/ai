@@ -1620,10 +1620,9 @@ _ANCHOR_SUMMED = _LEFT_SUMMED.model_copy(update={"content_version": "cv_" + "6" 
         # the retrieval under the join too, so the frame carries the compare's ref
         # and the sum's, and declares 2. The join's read of the retrieval cannot be
         # told from the one under the compare, so it is left unmatched by design.
-        # The retrieval then reads as two unsummed StatVars that the one ref beside
-        # the compare cannot hold, and the count falls back to the largest part, 1,
-        # as it does with no read at all. A, B and X make 3.
-        ("rejoined", 2, 1),
+        # The parts then cannot be named, and the count keeps the two refs the
+        # frame declares, short of A, B and X.
+        ("rejoined", 2, 2),
     ],
 )
 def test_a_card_counts_a_retrieval_an_analysis_call_summed_where_its_sum_reaches(

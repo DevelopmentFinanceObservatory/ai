@@ -697,7 +697,8 @@ def _carried_stat_var_count(
     each family counts as its summed count, each sum as the largest count
     under it, and the other refs as one more part, added when every part's
     trace lists refs and no two parts share one, else the largest part
-    alone.
+    alone. Each ref stands for at least one StatVar, so that count is never
+    below `declared`.
     """
     families = [
         (member, count)
@@ -728,8 +729,8 @@ def _carried_stat_var_count(
         )
     listed = [refs for _, refs in parts]
     if all(listed) and len(frozenset[str]().union(*listed)) == sum(len(refs) for refs in listed):
-        return sum(count for count, _ in parts)
-    return max(count for count, _ in parts)
+        return max(declared, sum(count for count, _ in parts))
+    return max(declared, *(count for count, _ in parts))
 
 
 def _named_stat_vars(member: ProvenanceInput, count: int | None) -> frozenset[str] | None:
