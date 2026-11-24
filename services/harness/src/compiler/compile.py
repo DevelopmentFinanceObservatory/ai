@@ -146,6 +146,7 @@ from compiler.shapes import (
     ResolvedShape,
     breakdown_level,
     operation_inputs,
+    retrieved_with_a_fixed_end,
     rolls,
     shapes_for,
     unsummable_axes,
@@ -868,12 +869,7 @@ class _Build:
             requirement = self.requirements.get(requirement_id)
             if not isinstance(requirement, DatasetRequirement):
                 continue
-            source = self._source_of(requirement_id)
-            window = ((source.identity if source is not None else None) or {}).get(
-                "requested_window"
-            )
-            closed = isinstance(window, dict) and window.get("end_year") is not None
-            if requirement.period_end_open and not closed:
+            if not retrieved_with_a_fixed_end(requirement, self._source_of(requirement_id)):
                 continue
             self._issue(
                 CompileIssueCode.ROLLING_NEEDS_OPEN_PERIOD,

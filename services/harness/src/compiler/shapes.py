@@ -298,13 +298,38 @@ def shapes_for(
         reason = (
             (anchor_misses(sides, over[op_id]) if len(sides) > 1 else None)
             or _years_run_out(operation, built.shape, sides, requirements, rolled=rolled[op_id])
-            or _rolls_over_a_cut_sum(operation, summed_cut[op_id])
+            or _rolls_over_a_cut_sum(
+                operation,
+                summed_cut[op_id],
+                fixed_end=any(
+                    retrieved_with_a_fixed_end(
+                        requirement, sources.get(retrieve_by_requirement[requirement_id])
+                    )
+                    for requirement_id in rolled[op_id]
+                    if isinstance(
+                        requirement := requirements.get(requirement_id), DatasetRequirement
+                    )
+                    and requirement_id in retrieve_by_requirement
+                ),
+            )
         )
         if reason is not None:
             issues.append(f"{op_id}: {reason}")
             continue
         shapes[op_id] = built
     return shapes, issues
+
+
+def retrieved_with_a_fixed_end(
+    requirement: DatasetRequirement, source: SelectedSource | None
+) -> bool:
+    """Whether `requirement` is retrieved over fixed years, so it never holds a later one:
+    its period has a fixed end, or its approved source's identity states an end year in
+    its `requested_window`, as Search may answer "since 2015" with one. A rolling step over
+    it is `compiler.compile`'s `ROLLING_NEEDS_OPEN_PERIOD`."""
+    window = ((source.identity if source is not None else None) or {}).get("requested_window")
+    closed = isinstance(window, dict) and window.get("end_year") is not None
+    return closed or not requirement.period_end_open
 
 
 def _summed_cut_reads(
@@ -317,9 +342,10 @@ def _summed_cut_reads(
     cuts party totals.
 
     A verb other than `filter` reading a retrieval the analysis runner sums
-    over its StatVars (`planner.shapes.FrameShape.summed_on_read`) reads the
-    sum, and over a retrieval without party totals (`sources.cuts_party_totals`)
-    the sum and the cut make a dataset version of their own. dfo-apis names no
+    over its StatVars (`planner.shapes.FrameShape.summed_on_read`), a family
+    counted above one, reads the sum. Over a retrieval without party totals
+    (`sources.cuts_party_totals`) the sum and the cut make a dataset version of
+    their own. dfo-apis names no
     version that one derives from, since the cut can drop periods (dfo-apis
     conformance C121f).
     """
@@ -328,33 +354,48 @@ def _summed_cut_reads(
     found: set[str] = set()
     for input_id in operation_inputs(operation):
         read = operations.get(input_id)
+        shape = shapes[input_id].shape
         if (
             isinstance(read, RetrieveOperation)
-            and shapes[input_id].shape.summed_on_read
+            and shape.summed_on_read
+            and isinstance(shape.measures, int)
+            and shape.measures > 1
             and cuts_party_totals(sources[input_id])
         ):
             found.add(read.requirement_id)
     return frozenset(found)
 
 
-def _rolls_over_a_cut_sum(operation: Operation, summed_cut: frozenset[str]) -> str | None:
+def _rolls_over_a_cut_sum(
+    operation: Operation, summed_cut: frozenset[str], *, fixed_end: bool
+) -> str | None:
     """Why a rolling `operation` refuses when a step under it reads the retrievals of the
-    requirements `summed_cut` summed on read, or `None` when it does not.
+    requirements `summed_cut` summed on read, or `None` when it does not. A rolling
+    step over a dataset retrieved with a fixed end (`fixed_end`) is refused for that
+    alone (`retrieved_with_a_fixed_end`), so it does not refuse here.
 
     A run resolves a rolling step's newest year over its retrievals as fetched,
     and analysis-mcp checks every root the step's call read against the
     versions that year was resolved over. The sum of a retrieval without party
     totals is a version of its own that no resolution names, so the call would
     refuse `rolling_anchor_unresolved` at run time. Read summed at retrieval
-    (`stat_vars='sum'`), the newest year and the call read one version.
+    (`stat_vars='sum'`), the newest year and the call read one version, and the
+    figures are the same, since the step read the family summed already. A filter
+    between them leaves the family unsummed, and every verb after it reads one
+    measure (`planner.shapes._several_measures`), so a filter is no way round.
+    Fixed years are the other: a step that does not follow the newest year reads
+    no newest year.
     """
-    if not summed_cut or not rolls(operation):
+    if not summed_cut or not rolls(operation) or fixed_end:
         return None
     named = ", ".join(repr(requirement_id) for requirement_id in sorted(summed_cut))
     return (
         f"this step follows the newest year, found over {named} as retrieved, but a step "
         "reads that family of StatVars summed, a version the newest year is not found over; "
-        f"read {named} summed (stat_vars='sum')"
+        f"read {named} summed (stat_vars='sum'), which leaves the figures as they are, since "
+        "every step but a filter reads the family summed whichever reading the requirement "
+        "states; a filter before this step leaves several StatVars, which this step refuses; "
+        "or give this step fixed years"
     )
 
 

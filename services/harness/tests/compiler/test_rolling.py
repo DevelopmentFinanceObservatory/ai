@@ -89,6 +89,7 @@ from planner.shapes import FIXED, EndDrift, PeriodDrift, StartDrift
 from planner.workflow import (
     OpenAxis,
     OpenEntityAxis,
+    ResolvedEntity,
     SelectedSource,
     ToolId,
     Workflow,
@@ -359,15 +360,59 @@ def _yearly_totals(*, rolling: bool) -> tuple[list[EvidenceRequirement], list[Op
     return [totals, growth_req], [summed, change]
 
 
+# A family of two StatVars served, summable over its one open axis.
+_FAMILY: dict[str, Any] = {
+    "served_count": 2,
+    "shape_member_count": 2,
+    "shape_member_digest": member_digest(["DebtServicePaid", "DebtServiceDue"]),
+    "open_axes": (OpenAxis(property="debtInstrument", summable=True),),
+}
+_REFUSED = [CompileIssueCode.INPUT_SHAPE_UNSUPPORTED]
+
+
 @pytest.mark.parametrize(
-    ("reading", "steps", "refused"),
+    ("reading", "steps", "overrides", "issues"),
     [
-        (StatVarReading.SEPARATE, "growth", True),
-        (StatVarReading.SEPARATE, "rank", True),
-        (StatVarReading.SEPARATE, "totals-then-growth", True),
-        (StatVarReading.SUM, "growth", False),
-        (StatVarReading.SUM, "totals-then-growth", False),
-        (StatVarReading.SEPARATE, "totals-then-fixed-growth", False),
+        (StatVarReading.SEPARATE, "growth", {}, _REFUSED),
+        (StatVarReading.SEPARATE, "rank", {}, _REFUSED),
+        (StatVarReading.SEPARATE, "totals-then-growth", {}, _REFUSED),
+        (StatVarReading.SUM, "growth", {}, []),
+        (StatVarReading.SUM, "totals-then-growth", {}, []),
+        (StatVarReading.SEPARATE, "totals-then-fixed-growth", {}, []),
+        # A dataset about places has no party totals to cut.
+        (
+            StatVarReading.SEPARATE,
+            "growth",
+            {
+                "source": {
+                    "entities": (ResolvedEntity(role="place", ref="country/KEN", label="Kenya"),)
+                }
+            },
+            [],
+        ),
+        # A family whose membership is not settled may serve one StatVar, which the
+        # runner reads as it is.
+        (
+            StatVarReading.SEPARATE,
+            "growth",
+            {"source": {"served_count": None, "stat_var_member_count": 1}},
+            [],
+        ),
+        # A source searched with an end year refuses the rolling step on its own
+        # account, and only that.
+        (
+            StatVarReading.SEPARATE,
+            "growth",
+            {
+                "source": {
+                    "identity": {
+                        "stat_var": "DebtServicePaid",
+                        "requested_window": {"kind": "range", "start_year": 2015, "end_year": 2024},
+                    }
+                }
+            },
+            [CompileIssueCode.ROLLING_NEEDS_OPEN_PERIOD],
+        ),
     ],
     ids=[
         "growth-sums-on-read",
@@ -376,6 +421,9 @@ def _yearly_totals(*, rolling: bool) -> tuple[list[EvidenceRequirement], list[Op
         "growth-over-the-family-read-summed",
         "total-of-the-family-read-summed",
         "fixed-growth-sums-on-read",
+        "no-flow-role",
+        "membership-unsettled",
+        "closed-period",
     ],
 )
 def test_a_rolling_step_over_a_flow_family_summed_on_read_asks_for_it_read_summed(
@@ -385,7 +433,8 @@ def test_a_rolling_step_over_a_flow_family_summed_on_read_asks_for_it_read_summe
     source: SourceFactory,
     reading: StatVarReading,
     steps: str,
-    refused: bool,
+    overrides: dict[str, Any],
+    issues: list[CompileIssueCode],
 ) -> None:
     """A run resolves its newest year over the flow retrieval as fetched, its party
     totals cut, and checks every root the rolling call read against it. A step reading
@@ -393,12 +442,7 @@ def test_a_rolling_step_over_a_flow_family_summed_on_read_asks_for_it_read_summe
     version of its own, which dfo-apis names no base for, since the cut can drop
     periods, so the rolling call would read a root its year was not resolved over. Read
     summed at retrieval, the newest year and the call read one version."""
-    family = source(
-        served_count=2,
-        shape_member_count=2,
-        shape_member_digest=member_digest(["DebtServicePaid", "DebtServiceDue"]),
-        open_axes=(OpenAxis(property="debtInstrument", summable=True),),
-    )
+    family = source(**(_FAMILY | overrides.get("source", {})))
     dataset = requirement(period_end_open=True, stat_vars=reading)
     decisions = [decision()]
     if steps == "growth":
@@ -420,14 +464,8 @@ def test_a_rolling_step_over_a_flow_family_summed_on_read_asks_for_it_read_summe
         discovered={"annual_debt_service": family},
     )
 
-    if not refused:
-        assert result.issues == ()
-        return
-    (issue,) = result.issues
-    assert (issue.code, issue.operation_id) == (
-        CompileIssueCode.INPUT_SHAPE_UNSUPPORTED,
-        terminal,
-    )
+    assert [issue.code for issue in result.issues] == issues
+    assert all(issue.operation_id == terminal for issue in result.issues)
 
 
 def test_a_year_filter_rolling_from_its_start_reads_the_copy_of_its_dataset_and_leaves_the_series_alone(
