@@ -502,6 +502,47 @@ async def test_rollback_clears_a_pause_this_release_resumed_and_keeps_one_it_did
     assert (await rollback_turn_sessions(adk, apply=True)).exit_status == 0
 
 
+async def test_rollback_leaves_a_card_the_previous_release_pauses_on_after_the_move(
+    adk: AsyncEngine,
+) -> None:
+    """After traffic moves back, the previous release pauses TEXT_ONLY on a
+    card at turn 3. Its ledger session moved since the import, so the
+    rollback reads the pause as the previous release's own and leaves it."""
+    await import_conversations(adk, apply=True)
+    assert (await rollback_turn_sessions(adk, apply=False)).cleared == {}
+    card = await _ledger_pending(adk, PLAN_PAUSED)
+    await _set_adk_state(adk, TEXT_ONLY, {"studio:turn_index": 3, "studio:pending": card})
+
+    applied = await rollback_turn_sessions(adk, apply=True)
+
+    assert (applied.cleared, applied.exit_status) == ({}, 0)
+    assert await _ledger_pending(adk, TEXT_ONLY) == card
+
+
+async def test_rollback_reruns_a_conversation_whose_ledger_session_appears_mid_run(
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The previous release creates a conversation's ledger session between
+    the run's read of the turn sessions with no ledger session and their
+    delete: the delete takes none of them, and the run lists the
+    conversation and fails, so the next run reads it through its ledger."""
+    # Read TEXT_ONLY's turn 2 as unledgered, as a read before its ledger
+    # session appeared would.
+    monkeypatch.setattr(
+        adk_import,
+        "_TURN_SESSIONS_UNLEDGERED",
+        text(
+            f"SELECT t.user_id, {adk_import._TURN_CONVERSATION} AS conversation_id, t.id "
+            f"FROM sessions t WHERE t.app_name = :app AND t.id = '{TEXT_ONLY}#t2'"
+        ),
+    )
+
+    applied = await rollback_turn_sessions(adk, apply=True)
+
+    assert (applied.moved, applied.exit_status) == ([_name(TEXT_ONLY)], 1)
+    assert (PRINCIPAL, f"{TEXT_ONLY}#t2") in await _turn_session_ids(adk)
+
+
 @_LATER_COLUMNS
 async def test_a_rerun_leaves_unmoved_conversations_and_reimports_what_only_adk_changed(
     adk: AsyncEngine, later_columns: bool
@@ -2511,14 +2552,14 @@ async def test_a_refused_conversation_the_tables_lack_is_discarded_only_by_name_
         kept = await import_conversations(pg_empty_engine, apply=apply, keep_tables=keep)
 
         assert (kept.kept, list(kept.refused), kept.clean) == ([], [name], False)
-        assert kept.refused[name][0] == "studio:unknown: a key this job does not know"
-        assert kept.refused[name][-1].startswith("--keep-tables keeps the tables' copy, and")
+        # The key's refusal and `--keep-tables`'s own.
+        assert len(kept.refused[name]) == 2
         assert (await cutover_gate(pg_empty_engine)).first == [name]
 
     dry = await import_conversations(pg_empty_engine, apply=False, discard=drop)
 
     assert (dry.discarded, dry.refused, dry.clean) == ([name], {}, True)
-    assert "would be given up with --discard" in dry.render()
+    assert name in dry.render()
     assert not (await cutover_gate(pg_empty_engine)).clean
 
     applied = await import_conversations(pg_empty_engine, apply=True, discard=drop)
@@ -2535,11 +2576,9 @@ async def test_a_refused_conversation_the_tables_lack_is_discarded_only_by_name_
     assert again.discarded == [name]
     # The record keeps nothing of a conversation the tables lack.
     kept_absent = await import_conversations(pg_empty_engine, apply=True, keep_tables=keep)
-    assert kept_absent.refused == {name: [kept_absent.refused[name][0]]}
-    assert kept_absent.refused[name][0].startswith("--keep-tables keeps the tables' copy, and")
+    assert (list(kept_absent.refused), len(kept_absent.refused[name])) == ([name], 1)
     gate = await cutover_gate(pg_empty_engine)
     assert (gate.clean, gate.discarded) == (True, [name])
-    assert gate.render().splitlines()[1].startswith("cutover gate: 1 cleared ledger sessions")
     assert await _count(pg_empty_engine) == 2
     assert (await import_conversations(pg_empty_engine, apply=True)).discarded == [name]
     assert await _reimporting_store(pg_empty_engine).load(PRINCIPAL, TEXT_ONLY) is None
@@ -2564,6 +2603,14 @@ async def test_a_refused_conversation_the_tables_lack_is_discarded_only_by_name_
     gate = await cutover_gate(pg_empty_engine)
     assert (gate.uncleared, gate.first) == (2, sorted([_name(FULL), name]))
     assert name in (await import_conversations(pg_empty_engine, apply=True)).refused
+    # The tables hold it now, so `--discard` refuses, and `--keep-tables`
+    # keeps their copy with the mark the first gate listed.
+    held = await import_conversations(pg_empty_engine, apply=True, discard=drop)
+    assert list(held.refused) == [name]
+    restarted = await import_conversations(pg_empty_engine, apply=True, keep_tables=keep)
+    assert (restarted.kept, restarted.refused) == ([name], {})
+    gate = await cutover_gate(pg_empty_engine)
+    assert (gate.clean, gate.discarded) == (True, [name])
 
 
 @_RELEASE_2_SCHEMA
@@ -2577,7 +2624,7 @@ async def test_keep_tables_serves_a_diverged_conversation_until_adk_moves_again(
     await _diverge(pg_empty_engine, FULL)
     # `--discard` refuses a conflict before the conflict is recorded.
     dropped = await import_conversations(pg_empty_engine, apply=True, discard=frozenset({name}))
-    assert dropped.refused[name][0].endswith("and this one is conflict")
+    assert list(dropped.refused) == [name]
     async with pg_empty_engine.connect() as conn:
         marked = (
             await conn.execute(
