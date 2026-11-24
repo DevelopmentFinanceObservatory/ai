@@ -140,6 +140,10 @@ class ProblemCode(StrEnum):
     # reason no retry changes, so no plan can be admitted on a reading
     # (`planner.stated_scope.read_stated_scope`).
     STATED_SCOPE_UNREADABLE = "stated_scope_unreadable"
+    # Search's reader of the provider scope the user's words state did not answer after
+    # the reader's retries, in a way that can pass, so no plan can be admitted on a
+    # reading this entry (`planner.stated_scope.read_stated_scope`).
+    STATED_SCOPE_UNAVAILABLE = "stated_scope_unavailable"
     # A compile of a pin on the provider scope the user's words state cannot reach
     # Search, and no retry changes that, so no plan counting it can be admitted
     # (`planner.source_reads.compile_on_basis`).

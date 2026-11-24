@@ -20,7 +20,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+import logging
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness import studio
 from harness.conversation import current_user_message
 from harness.planner_adapter import PlannerAdapter
-from harness.sentences import TERMINAL_PROPOSE_CODES
+from harness.sentences import FAILURE_CLASS, TERMINAL_PROPOSE_CODES, FailureClass
 from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.studio_store import keep_turn_records
@@ -55,10 +56,13 @@ from planner.stated_scope import (
     ApisStatedScopeReader,
     KeepQuestion,
     StatedScopeReader,
+    TextReading,
     combined_refused,
     keep_question,
+    read_stated_scope,
     record_keep_answer,
     record_keep_asked,
+    stated_scope_record,
     stated_uncompiled,
     unattributed_refused,
 )
@@ -147,16 +151,31 @@ class _Reader:
     """Search's reader as dfo-apis' route answers it for the recorded texts
     (`_READINGS`), through `LiveApisClient`, recording each call's texts in `calls`.
     With `failing`, the route answers 503 to every call, and with `refusing` the status
-    and body given, which is no retry's cure when the body says `retryable: false`."""
+    and body given, which is no retry's cure when the body says `retryable: false`.
+    Search's capabilities document lists `doors` as live, and answers a bare 404, as a
+    wrong address does, where `doors` is `None`; each read is counted in
+    `capability_reads`."""
 
     def __init__(
-        self, *, failing: bool = False, refusing: tuple[int, dict[str, Any]] | None = None
+        self,
+        *,
+        failing: bool = False,
+        refusing: tuple[int, dict[str, Any]] | None = None,
+        doors: Sequence[str] | None = ("options", "stated_scope"),
     ) -> None:
         self.calls: list[list[str]] = []
         self.failing = failing
         self.refusing = refusing
+        self.doors = doors
+        self.capability_reads = 0
 
     def handler(self, request: httpx2.Request) -> httpx2.Response:
+        if (request.method, request.url.path) == ("GET", "/api/search/capabilities"):
+            self.capability_reads += 1
+            if self.doors is None:
+                return httpx2.Response(404, text="<html>Not Found</html>")
+            doors = [{"name": door, "live": True} for door in self.doors]
+            return httpx2.Response(200, json={"doors": doors})
         assert (request.method, request.url.path) == ("POST", "/api/search/stated-scope")
         texts = json.loads(request.content)["texts"]
         self.calls.append(texts)
@@ -166,7 +185,7 @@ class _Reader:
             return httpx2.Response(503, json={"code": "unavailable", "retryable": True})
         return httpx2.Response(200, json={"readings": [_READINGS[text] for text in texts]})
 
-    def reader(self) -> StatedScopeReader:
+    def reader(self, *, clock: Callable[[], float] | None = None) -> StatedScopeReader:
         async def no_sleep(_: float) -> None:
             return None
 
@@ -176,7 +195,8 @@ class _Reader:
                 transport=httpx2.MockTransport(self.handler),
                 max_attempts=1,
                 sleep=no_sleep,
-            )
+            ),
+            **({"clock": clock} if clock is not None else {}),
         )
 
 
@@ -381,29 +401,11 @@ def _held(ctx: _Context, origin: str, option_id: str) -> str:
 # --- the reader ------------------------------------------------------------
 
 
-async def test_a_route_that_does_not_answer_refuses_the_proposal_and_records_nothing() -> None:
+async def test_a_route_that_does_not_answer_ends_the_entry_on_a_retryable_refusal() -> None:
     """The stated-scope read is made before admission; where the route does not
-    answer, `propose_plan` answers `SURFACE_UNAVAILABLE` naming the read, admits
-    nothing and guesses no scope."""
-    ctx = _Context()
-    _show(ctx, _block("africa_bilateral"))
-    reader = _Reader(failing=True)
-
-    result = await _propose(
-        ctx,
-        [_dataset("aid", _spec("africa_bilateral"), "net ODA", recipient="Africa")],
-        words=_G7,
-        reader=reader,
-    )
-
-    assert result["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, result
-    assert result["detail"] == {"read": "stated_scope"}
-    assert load_plan(ctx.state) is None
-
-
-async def test_a_retryable_failure_asks_to_propose_again_without_vouching_for_the_plan() -> None:
-    """Admission has not run when the read fails, so the refusal does not call the plan
-    sound, and carries none of Search's codes."""
+    answer after the reader's retries, `propose_plan` ends the entry on
+    `STATED_SCOPE_UNAVAILABLE`, which asks the user to try again shortly, admits
+    nothing and guesses no scope. The refusal does not call the plan sound."""
     ctx = _Context()
     _show(ctx, _block("africa_bilateral"))
 
@@ -414,49 +416,51 @@ async def test_a_retryable_failure_asks_to_propose_again_without_vouching_for_th
         reader=_Reader(failing=True),
     )
 
-    assert result["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, result
-    assert "propose" in result["message"]
+    assert result["code"] == ProblemCode.STATED_SCOPE_UNAVAILABLE.value, result
+    assert result["code"] in {code.value for code in TERMINAL_PROPOSE_CODES}
+    assert FAILURE_CLASS[result["code"]] is FailureClass.TRANSIENT
+    assert result["detail"] == {"read": "stated_scope", "status": 503, "code": "unavailable"}
     assert "sound" not in result["message"]
-    assert "unavailable" not in result["message"]
-
-
-async def test_a_second_retryable_failure_in_a_turn_stops_the_entry_naming_the_read() -> None:
-    """The turn's first read that can pass asks the planner to propose again; the next
-    failure ends the entry on a terminal refusal, so a route that stays down does not
-    keep the planner proposing until the turn's budget runs out."""
-    ctx = _Context()
-    _show(ctx, _block("africa_bilateral"))
-    reader = _Reader(failing=True)
-    requirements = [_dataset("aid", _spec("africa_bilateral"), "net ODA", recipient="Africa")]
-
-    first = await _propose(ctx, requirements, words=_G7, reader=reader)
-    second = await _propose(ctx, requirements, words=_G7, reader=reader)
-
-    assert first["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, first
-    assert second["code"] == ProblemCode.STATED_SCOPE_UNREADABLE.value, second
-    assert second["code"] in {code.value for code in TERMINAL_PROPOSE_CODES}
-    assert second["detail"] == {"read": "stated_scope", "status": 503, "code": "unavailable"}
-    assert len(reader.calls) == 2
     assert load_plan(ctx.state) is None
 
 
-@pytest.mark.parametrize(
-    "refusing",
-    [
-        pytest.param((404, {"detail": "not found"}), id="bare-404"),
-        pytest.param(
-            (404, {"code": "not_found", "status": 404, "retryable": False}), id="apis-not-found"
-        ),
-    ],
-)
-async def test_an_apis_without_the_route_admits_the_plan_with_no_stated_scope(
+async def test_each_read_retries_on_its_own_so_an_earlier_failure_spends_nothing() -> None:
+    """Every read site retries within its own call, so neither the brief's hint read
+    nor an earlier proposal's failure in the turn turns a later failure into a fault
+    in the system, and a read that answers after them admits the plan."""
+    ctx = _Context()
+    bilateral = _block("separate_bilateral")
+    _show(ctx, bilateral)
+    requirements = [_dataset("aid", bilateral["spec_id"], "bilateral aid", recipient="Africa")]
+    token = current_user_message.set(_G7_BILATERAL)
+    try:
+        hint = await read_stated_scope(ctx.state, _Reader(failing=True).reader(), measures=())
+    finally:
+        current_user_message.reset(token)
+
+    codes = [hint["code"] if hint is not None else None]
+    for reader in (_Reader(failing=True), _Reader(failing=True), _Reader()):
+        result = await _propose(ctx, requirements, words=_G7_BILATERAL, reader=reader)
+        codes.append(result.get("code") or result["outcome"])
+
+    unavailable = ProblemCode.STATED_SCOPE_UNAVAILABLE.value
+    assert codes == [unavailable, unavailable, unavailable, Outcome.OK.value]
+
+
+_NOT_FOUND = (404, {"code": "not_found", "status": 404, "retryable": False})
+_HTML_404 = (404, {"detail": "not found"})
+
+
+@pytest.mark.parametrize("refusing", [_NOT_FOUND, _HTML_404], ids=["apis-not-found", "bare-404"])
+async def test_an_apis_listing_no_stated_scope_door_admits_the_plan_with_no_stated_scope(
     refusing: tuple[int, dict[str, Any]], caplog: pytest.LogCaptureFixture
 ) -> None:
     """An apis deployed before the stated-scope route, or rolled back past it, answers
-    the route 404. That reads as no reading held: each turn's plan is admitted as a
-    turn with no words of the user's is, on the pin the planner chose, and the process's
-    reader logs the missing route once, however many turns find it missing."""
-    reader = _Reader(refusing=refusing)
+    the route 404 and lists no `stated_scope` door in Search's capabilities document.
+    That reads as no reading held: each turn's plan is admitted as a turn with no words
+    of the user's is, on the pin the planner chose. The process's reader reads the
+    document once while its answer holds, and warns once."""
+    reader = _Reader(refusing=refusing, doors=("options",))
     tools = {
         spec.name: spec
         for spec in planner_tool_specs(surface=_Search(), stated_scope=reader.reader())
@@ -489,8 +493,64 @@ async def test_an_apis_without_the_route_admits_the_plan_with_no_stated_scope(
         assert _pins(ctx) == {"aid": _spec("africa_bilateral")}
         assert ctx.state[STATED_SCOPE_STATE_KEY] is None
     assert len(reader.calls) == 2
-    missing = [r for r in caplog.records if r.getMessage().startswith("stated scope not served")]
-    assert len(missing) == 1
+    assert reader.capability_reads == 1
+    warned = [
+        r
+        for r in caplog.records
+        if r.name == "planner.stated_scope" and r.levelno == logging.WARNING
+    ]
+    assert len(warned) == 1
+
+
+@pytest.mark.parametrize(
+    ("refusing", "doors"),
+    [
+        pytest.param(_HTML_404, None, id="wrong-address"),
+        pytest.param(_NOT_FOUND, ("options", "stated_scope"), id="door-listed"),
+    ],
+)
+async def test_a_404_the_capabilities_document_does_not_explain_ends_the_entry(
+    refusing: tuple[int, dict[str, Any]], doors: Sequence[str] | None
+) -> None:
+    """A 404 reads as the route not served only on Search's own word: where the
+    capabilities document cannot be read, as at a wrong or retired address, or lists
+    the door, the entry ends on `STATED_SCOPE_UNREADABLE` and no plan ignores the
+    scope the user stated."""
+    ctx = _Context()
+    _show(ctx, _block("africa_bilateral"))
+    reader = _Reader(refusing=refusing, doors=doors)
+
+    result = await _propose(
+        ctx,
+        [_dataset("aid", _spec("africa_bilateral"), _STATED_INCLUSIVE, recipient="Africa")],
+        words=_G7,
+        reader=reader,
+    )
+
+    assert result["code"] == ProblemCode.STATED_SCOPE_UNREADABLE.value, result
+    assert result["detail"]["status"] == 404
+    assert reader.capability_reads == 1
+    assert load_plan(ctx.state) is None
+
+
+async def test_a_route_gone_mid_turn_keeps_the_readings_held() -> None:
+    """An apis rolled back past the route mid-turn keeps the reading of the turn's
+    words held earlier: a new text reads as stating nothing, and the turn's words
+    still hold the plan to the scope they state."""
+    ctx = _Context()
+    _show(ctx, _block("africa_bilateral"))
+    token = current_user_message.set(_G7)
+    try:
+        assert await read_stated_scope(ctx.state, _Reader().reader(), measures=()) is None
+        gone = _Reader(refusing=_NOT_FOUND, doors=("options",))
+        assert await read_stated_scope(ctx.state, gone.reader(), measures=["net ODA"]) is None
+    finally:
+        current_user_message.reset(token)
+
+    record = stated_scope_record(ctx.state)
+    assert record is not None
+    assert record.readings[_G7].mentions
+    assert record.readings["net ODA"] == TextReading()
 
 
 @pytest.mark.parametrize(
@@ -517,6 +577,7 @@ async def test_a_permanent_failure_stops_the_entry_naming_the_read(
 
     assert result["code"] == ProblemCode.STATED_SCOPE_UNREADABLE.value, result
     assert result["code"] in {code.value for code in TERMINAL_PROPOSE_CODES}
+    assert FAILURE_CLASS[result["code"]] is FailureClass.SYSTEM_FAULT
     assert result["detail"]["read"] == "stated_scope"
     assert "request_invalid" not in result["message"]
     assert str(refusing[0]) not in result["message"]
@@ -1519,7 +1580,7 @@ async def test_a_compile_held_from_an_earlier_proposal_is_reused() -> None:
 @pytest.mark.parametrize(
     ("failing", "code"),
     [
-        pytest.param(True, ProblemCode.SURFACE_UNAVAILABLE, id="route-unavailable"),
+        pytest.param(True, ProblemCode.STATED_SCOPE_UNAVAILABLE, id="route-unavailable"),
         pytest.param(False, ProblemCode.STATED_PROVIDER_DROPPED, id="read-and-applied"),
     ],
 )
