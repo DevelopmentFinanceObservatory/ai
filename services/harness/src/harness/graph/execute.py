@@ -46,7 +46,13 @@ from executor.run import (
     execute_approved_plan,
 )
 from planner.plan import Plan as PlannerPlan
-from planner.plan import SessionState, aligned_pins, plan_revision, windowed_origins
+from planner.plan import (
+    PlanStatus,
+    SessionState,
+    aligned_pins,
+    plan_revision,
+    windowed_origins,
+)
 
 from harness import plan_display
 from harness.conversation import ledger_conversation_id
@@ -75,6 +81,9 @@ from harness.turn.node import Next, Node, NodeCtx
 from harness.turn_records import SearchReading
 
 logger = logging.getLogger(__name__)
+
+# What the plan card says when an approved plan is offered for approval again.
+REAPPROVE_NOTE = "This plan needs approving again before it runs. Nothing in it has changed."
 
 # Execution-triggered replans per turn. Each one is a new plan card and a new
 # approval; past this the turn closes and names the step that could not run.
@@ -451,6 +460,26 @@ def _without_figures(plan_version: int, *, run: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _not_run(ctx: NodeCtx[GraphEvent], plan: PlannerPlan | None) -> Next:
+    """Where `execute` goes for a plan it does not run. An unreadable plan
+    (`readable_plan`) routes `replan` with `{"unreadable_plan": True}`, and no
+    replan is spent on it. An approval stored over a field the plan does not
+    have reads as awaiting approval (`planner.plan.Plan`), so its card is
+    offered again (`reapprove`), saying why."""
+    if plan is None:
+        return Next("replan", {"unreadable_plan": True})
+    ctx.state["plan"] = plan.model_dump_json()
+    return Next(
+        "reapprove",
+        {
+            **plan.model_dump(mode="json"),
+            "summary": REAPPROVE_NOTE,
+            "revision": plan_revision(plan),
+            "refusal_note": REAPPROVE_NOTE,
+        },
+    )
+
+
 def execute_node(
     *,
     tool_surface: ToolSurface | None,
@@ -564,6 +593,9 @@ def execute_node(
         (`readable_plan`) runs nothing and spends no replan: it routes
         `"replan"` with `{"unreadable_plan": True}`, and `planner` drafts the
         question from the start.
+        An approval stored over a field the plan does not have reads as awaiting
+        approval (`planner.plan.Plan`), so nothing runs and the node routes
+        `"reapprove"`, offering its card again (`_not_run`).
         """
         del node_input
         if tool_surface is None:
@@ -572,9 +604,8 @@ def execute_node(
                 "was not given one, so the approved plan cannot be run"
             )
         plan = readable_plan(ctx, ctx.state["plan"])
-        if plan is None:
-            # Nothing to run, and no replan is spent on it.
-            return Next("replan", {"unreadable_plan": True})
+        if plan is None or plan.status is PlanStatus.PENDING_APPROVAL:
+            return _not_run(ctx, plan)
         tools = {step.id: step.tool.name for step in plan.workflow.steps} if plan.workflow else {}
         try:
             places = _card_places(plan)

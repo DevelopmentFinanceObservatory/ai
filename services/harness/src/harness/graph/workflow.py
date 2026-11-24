@@ -57,6 +57,7 @@ EDGES: Mapping[tuple[str, str], str] = MappingProxyType(
         ("approve", "switch"): "switch",
         ("switch", "offer"): "approve",
         ("execute", "replan"): "planner",
+        ("execute", "reapprove"): "approve",
         ("execute", "ok"): "plan_done",
         ("plan_done", "next"): "orchestrate",
     }

@@ -1382,7 +1382,6 @@ _KENYA_PLAN: dict[str, Any] = {
             "decision_ids": [],
             "denominator": {"entity": "Kenya", "input_id": "total_oda"},
             "numerator": {"input_id": "aggregate_health", "entity": "Kenya"},
-            "accept_provider_difference": True,
             "id": "share_health",
         },
     ],

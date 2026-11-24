@@ -1,18 +1,19 @@
-"""`propose_plan` against the provider scope the user's words state.
+"""`propose_plan` against the provider option each dataset requirement declares.
 
-Each requirement carries the user's scope words in its `measure`; Search's reader
-reads them there and in the turn's words (`planner.stated_scope`), and admission
-counts a requirement on the option both name (`submission.service._stated_claims`),
-refuses a pin that cannot count it (`_stated_unserved`), refuses once a plan stating
-the turn's one option nowhere (`_stated_unattributed`), and refuses a sum that adds
-such a requirement to imputed multilateral aid (`_stated_summed`).
+The planner declares the option the user's words ask a figure to count
+(`DatasetRequirement.scope_options`). Admission counts the pin on it
+(`submission.service._declared_claims`), refuses a pin that cannot count it, refuses a
+share, quotient or comparison only some of whose inputs declare one
+(`_half_declared`), refuses a sum adding such a requirement to imputed multilateral
+aid (`_stated_summed`), and writes a line on the plan card's provider row where the
+figure and the user's words part (`_provider_line`). Search's reader reads the turn's
+words once (`planner.stated_scope`).
 
 The reader answers each text as dfo-apis' route recorded it
 (`fixtures/stated_scope_readings.json`), through `LiveApisClient`. The G7 blocks are
 the ones dev Search answered for "Show G7 aid to Africa as a share of G7 aid to all
 developing countries each year from 1970 to 2024, including imputed multilateral aid"
-(`fixtures/g7_inclusive_share_spec_blocks.json`), whose first plan divided by DAC1
-total ODA; the US blocks are `basis_alignment`'s.
+(`fixtures/g7_inclusive_share_spec_blocks.json`); the US blocks are `basis_alignment`'s.
 """
 
 from __future__ import annotations
@@ -20,32 +21,39 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, cast, get_args
 
 import httpx2
 import pytest
 from common.live_apis import LiveApisClient
 from compiler.surface import ToolCallResult, ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from harness import studio
 from harness.conversation import current_user_message
+from harness.graph import switch as switch_module
+from harness.graph.switch import SwitchFailedError
+from harness.plan_display import choice_id
 from harness.planner_adapter import PlannerAdapter
+from harness.scope_choices import ProviderScope
 from harness.sentences import TERMINAL_PROPOSE_CODES
 from harness.settings import Settings
-from harness.studio_state import ConversationState
-from harness.studio_store import keep_turn_records
 from harness.turn.store import AgentRecord
-from harness.wire import TurnRequest
 from planner.plan import (
-    MAX_MEASURE_CHARS,
+    PLAN_STATE_KEY,
     AlignedPin,
     DatasetRequirement,
     PinSource,
+    ProviderOptionId,
+    ResolvedBy,
+    UnsupportedOperation,
     aligned_pins,
+    load_optional_declines,
     load_plan,
     save_pin_sources,
+    scope_choice_slot,
+    stored_plan,
     windowed_pins,
 )
 from planner.source_reads import _NO_ONE_DATASET, _UNANSWERED
@@ -53,26 +61,13 @@ from planner.specs import planner_tool_specs
 from planner.stated_scope import (
     STATED_SCOPE_STATE_KEY,
     ApisStatedScopeReader,
-    KeepQuestion,
     StatedScopeReader,
-    combined_refused,
-    keep_question,
-    record_keep_answer,
-    record_keep_asked,
     stated_uncompiled,
-    unattributed_refused,
 )
 from planner.tool_results import Outcome, ProblemCode
 from planner.tools import load_pending_ask
 from planner.workflow import ToolId
-from submission.service import (
-    STATED_SCOPE_OPTIONS,
-    SourceReadings,
-    _stated_label,
-    _stated_unserved,
-    _Unserved,
-    save_aligned_pin,
-)
+from submission.service import _ALIGNED_REASONS, _stated_label, save_aligned_pin
 
 from ..basis_alignment import (
     HEALTH,
@@ -114,10 +109,7 @@ _LATER = "Extend it to 2025."
 
 _INCLUSIVE = "provider:inclusive"
 _BILATERAL = "provider:bilateral"
-_STATED_INCLUSIVE = "net ODA including imputed multilateral aid"
-# A `measure` naming the narrower bilateral option beside the inclusive one, which
-# Search reads as stating neither.
-_MIXED = "bilateral net disbursements including imputed multilateral aid"
+_CONTRIBUTIONS = "provider:contributions"
 
 
 def _block(name: str) -> dict[str, Any]:
@@ -325,9 +317,11 @@ def _dataset(
     donor: str = "Group of Seven",
     recipient: str | None = None,
     period: tuple[int, int] = (1970, 2024),
+    declares: str | None = None,
     **fields: Any,
 ) -> dict[str, Any]:
-    """A dataset requirement pinning `pin`, from `donor`, to `recipient` where given."""
+    """A dataset requirement pinning `pin`, from `donor`, to `recipient` where given,
+    declaring the provider option `declares` where given."""
     entities = [{"name": donor, "role": "donor"}]
     if recipient is not None:
         entities.append({"name": recipient, "role": "recipient"})
@@ -338,6 +332,7 @@ def _dataset(
         "entities": entities,
         "period": {"start": period[0], "end": period[1]},
         "source_spec_id": pin,
+        **({"scope_options": [declares]} if declares is not None else {}),
         **fields,
     }
 
@@ -366,6 +361,13 @@ def _pins(ctx: _Context) -> dict[str, str | None]:
         if isinstance(requirement, DatasetRequirement)
         for pin in [requirement.source_spec_id]
     }
+
+
+def _dac1_total(
+    measure: str, declares: str | None = None, *, period: tuple[int, int] = (1970, 2024)
+) -> dict[str, Any]:
+    """G7 total ODA on DAC1, under `measure`, declaring `declares` where given."""
+    return _dataset("g7_total", DAC1, measure, period=period, declares=declares)
 
 
 def _held(ctx: _Context, origin: str, option_id: str) -> str:
@@ -452,26 +454,6 @@ async def test_a_permanent_failure_stops_the_entry_naming_the_read(
     assert load_plan(ctx.state) is None
 
 
-async def test_a_measure_over_the_plans_cap_gets_the_validation_error_unread() -> None:
-    """A `measure` Plan validation refuses (`MAX_MEASURE_CHARS`) is never sent to the
-    route, whose own cap it could break, so the planner reads the validation error."""
-    ctx = _Context()
-    _show(ctx, _block("africa_bilateral"))
-    reader = _Reader()
-    measure = "net ODA " * 30
-    assert len(measure) > MAX_MEASURE_CHARS
-
-    result = await _propose(
-        ctx,
-        [_dataset("aid", _spec("africa_bilateral"), measure, recipient="Africa")],
-        words=_G7,
-        reader=reader,
-    )
-
-    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
-    assert reader.calls == [[_G7]]
-
-
 async def test_the_words_are_cut_to_the_routes_cap_from_their_start() -> None:
     """Studio bounds a message by the request's bytes alone, so the read cuts the words
     to the route's per-text cap, keeping their end as Search reads a message."""
@@ -492,183 +474,9 @@ async def test_the_words_are_cut_to_the_routes_cap_from_their_start() -> None:
     assert len(sent) < len(words)
 
 
-async def test_each_text_is_read_once_a_turn() -> None:
-    """The turn's words and each `measure` go to the route once: a second proposal
-    stating the same texts reads none, and an amendment's new words are read alone."""
-    ctx = _Context()
-    _show(ctx, _block("separate_bilateral"), _block("separate_imputed"))
-    reader = _Reader()
-    requirements = [
-        _dataset("bilateral", _spec("separate_bilateral"), "bilateral aid", recipient="Africa"),
-        _dataset("imputed", _spec("separate_imputed"), "imputed multilateral aid"),
-    ]
-
-    await _propose(ctx, requirements, words=_SEPARATELY, reader=reader)
-    await _propose(ctx, requirements, words=_SEPARATELY, reader=reader)
-
-    assert reader.calls == [[_SEPARATELY, "bilateral aid", "imputed multilateral aid"]]
-
-
-async def test_a_measure_with_no_reading_held_refuses_the_proposal() -> None:
-    """Admission reads only the readings held: a proposal whose tools read nothing
-    (`planner_tool_specs` with no reader), stating a `measure` the turn has not read,
-    answers `SURFACE_UNAVAILABLE` naming the read and records nothing."""
-    ctx = _Context()
-    bilateral = _block("separate_bilateral")
-    _show(ctx, bilateral)
-    pin = bilateral["spec_id"]
-    first = await _propose(
-        ctx, [_dataset("aid", pin, "bilateral aid", recipient="Africa")], words=_G7_BILATERAL
-    )
-    assert first["outcome"] == Outcome.OK.value, first
-    tools = {spec.name: spec for spec in planner_tool_specs(surface=_Search(bilateral))}
-    token = current_user_message.set(_G7_BILATERAL)
-    try:
-        result = await call_planner_tool(
-            tools["propose_plan"],
-            question=_G7_BILATERAL,
-            answer_mode="series",
-            decisions=[],
-            evidence_requirements=[_dataset("aid", pin, "bilateral ODA", recipient="Africa")],
-            amends_version=1,
-            tool_context=ctx,
-        )
-    finally:
-        current_user_message.reset(token)
-
-    assert result["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, result
-    assert result["detail"] == {"read": "stated_scope"}
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    assert plan.version == 1
-
-
-# --- false moves -----------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("words", "moved"),
-    [
-        pytest.param(_G7_BILATERAL, True, id="words-name-bilateral"),
-        pytest.param(_G7, False, id="words-name-another-scope"),
-    ],
-)
-async def test_a_numerator_stating_bilateral_moves_and_its_total_stays(
-    words: str, moved: bool
-) -> None:
-    """ "What share of G7 ODA is bilateral?": the numerator's `measure` says bilateral,
-    as the user's words do, so it is counted on DAC1's bilateral row; the total states
-    nothing and stays on DAC1 total ODA, since moving it too would divide the row by
-    itself. A `measure` saying bilateral under words that name another scope states
-    nothing: nothing moves, and both sides read DAC1 total ODA as one series."""
-    ctx = _Context()
-    dac1 = _block("dac1")
-    _show(ctx, dac1)
-    surface = _Search(dac1)
-    requirements = [
-        _dataset("bilateral", DAC1, "bilateral ODA"),
-        _dataset("total", DAC1, "official development assistance"),
-        _share("bilateral", "total"),
-    ]
-
-    result = await _propose(ctx, requirements, words=words, surface=surface)
-
-    if not moved:
-        # Both sides read DAC1 total ODA as it stands.
-        assert result["code"] == ProblemCode.SHARE_OF_ITSELF.value, result
-        assert surface.calls == []
-        return
-    assert result["outcome"] == Outcome.OK.value, result
-    assert _pins(ctx) == {"bilateral": _held(ctx, DAC1, _BILATERAL), "total": DAC1}
-    assert len(surface.calls) == 1
-
-
-async def test_a_total_naming_two_narrower_options_states_nothing() -> None:
-    """ "What share of G7 ODA is bilateral?" with the total's `measure` "bilateral and
-    multilateral ODA": the user's words state the narrower bilateral option, which a
-    `measure` naming it beside another option does not state, so the total stays on
-    DAC1 total ODA and only the numerator moves."""
-    ctx = _Context()
-    dac1 = _block("dac1")
-    _show(ctx, dac1)
-    surface = _Search(dac1)
-    requirements = [
-        _dataset("bilateral", DAC1, "bilateral ODA"),
-        _dataset("total", DAC1, "bilateral and multilateral ODA"),
-        _share("bilateral", "total"),
-    ]
-
-    result = await _propose(ctx, requirements, words=_G7_BILATERAL, surface=surface)
-
-    assert result["outcome"] == Outcome.OK.value, result
-    assert _pins(ctx) == {"bilateral": _held(ctx, DAC1, _BILATERAL), "total": DAC1}
-
-
 def _us_bilateral() -> dict[str, Any]:
     """US aid to Kenya counted as bilateral flows, as the words "bilateral aid" ask."""
     return provider_block(HEALTH, narrow=True, active=_BILATERAL, provenance="explicit")
-
-
-@pytest.mark.parametrize(
-    ("words", "measure", "moved"),
-    [
-        pytest.param(_US_TOTAL, "total ODA", False, id="a-total"),
-        pytest.param(_US_TOTAL, "ODA", True, id="no-total"),
-        pytest.param(_US_NO_SCOPE, "total ODA", True, id="words-naming-no-scope"),
-        pytest.param(_US_NO_TOTAL, "total ODA", True, id="words-asking-no-total"),
-    ],
-)
-async def test_a_total_the_user_asks_for_stays_on_its_own_scope(
-    words: str, measure: str, moved: bool
-) -> None:
-    """ "US bilateral aid to Kenya as a share of total US ODA": the denominator's
-    `measure` asks for a total, as the user's words do, so it is held on what DAC1
-    total ODA counts and the share states the difference. A denominator whose
-    `measure` asks for no total is counted as bilateral flows, as the numerator is,
-    and so is one asking for a total where the user's words name no provider scope,
-    as alignment counts it with no stated scope, or ask for no total."""
-    ctx = _Context()
-    total = dac1_with_contributions()
-    _show(ctx, _us_bilateral(), total)
-    surface = _Search(total)
-    requirements = [
-        _dataset("bilateral", HEALTH, "bilateral aid", donor="United States", recipient="Kenya"),
-        _dataset("total", total["spec_id"], measure, donor="United States"),
-        _share("bilateral", "total"),
-    ]
-
-    result = await _propose(ctx, requirements, words=words, surface=surface)
-
-    assert result["outcome"] == Outcome.OK.value, result
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    differ = [d for d in plan.decisions if d.caveat == "providers_differ"]
-    if moved:
-        assert _pins(ctx)["total"] == _held(ctx, total["spec_id"], _BILATERAL)
-        assert differ == []
-    else:
-        assert _pins(ctx)["total"] == total["spec_id"]
-        assert surface.calls == []
-        assert len(differ) == 1
-
-
-async def test_a_second_figure_of_its_own_is_left_as_it_stands() -> None:
-    """ "How much bilateral aid does France give to Mali, and what is France's total
-    ODA?": two figures and no calculation; the total is read as DAC1 counts it."""
-    ctx = _Context()
-    total = dac1_with_contributions()
-    _show(ctx, _us_bilateral(), total)
-    surface = _Search(total)
-    requirements = [
-        _dataset("bilateral", HEALTH, "bilateral aid", donor="France", recipient="Mali"),
-        _dataset("total", total["spec_id"], "total ODA", donor="France"),
-    ]
-
-    result = await _propose(ctx, requirements, words=_FRANCE, surface=surface)
-
-    assert result["outcome"] == Outcome.OK.value, result
-    assert _pins(ctx) == {"bilateral": HEALTH, "total": total["spec_id"]}
-    assert surface.calls == []
 
 
 def _dac1_row(spec_id: str, active: str) -> dict[str, Any]:
@@ -689,8 +497,10 @@ def _dac1_row(spec_id: str, active: str) -> dict[str, Any]:
 
 
 async def test_core_contributions_over_their_total_stay_two_rows() -> None:
-    """ "What share of US ODA goes to multilaterals?": the numerator's `measure` names
-    DAC1's multilateral row, as the words do; the total stays on total ODA."""
+    """ "What share of US ODA goes to multilaterals?": declaring nothing, the
+    numerator on DAC1's multilateral row, as the words name it, and the total on total
+    ODA stay two rows, since alignment would divide one row by itself, and neither
+    row reads a line."""
     ctx = _Context()
     multilateral = _dac1_row(f"spec_{'8' * 32}", "provider:multilateral")
     total = _dac1_row(f"spec_{'9' * 32}", "provider:contributions")
@@ -707,84 +517,13 @@ async def test_core_contributions_over_their_total_stay_two_rows() -> None:
     assert result["outcome"] == Outcome.OK.value, result
     assert _pins(ctx) == {"multilateral": multilateral["spec_id"], "total": total["spec_id"]}
     assert surface.calls == []
-
-
-async def test_a_series_with_no_provider_choice_is_left_alone() -> None:
-    """ "Germany's bilateral ODA as a share of its GNI": the ODA is counted as
-    bilateral flows, and GNI, which has no provider choice, is read as it stands."""
-    ctx = _Context()
-    oda = dac1_with_contributions()
-    gni = basis_block(TOTAL, narrow=False, active="measure_basis:gross")
-    _show(ctx, oda, gni)
-    surface = _Search(oda)
-    requirements = [
-        _dataset("oda", oda["spec_id"], "bilateral ODA", donor="Germany"),
-        _dataset("gni", TOTAL, "GNI", donor="Germany"),
-        _share("oda", "gni"),
-    ]
-
-    result = await _propose(ctx, requirements, words=_GNI, surface=surface)
-
-    assert result["outcome"] == Outcome.OK.value, result
-    assert _pins(ctx) == {"oda": _held(ctx, oda["spec_id"], _BILATERAL), "gni": TOTAL}
-
-
-async def test_a_later_turn_whose_words_state_nothing_moves_nothing() -> None:
-    """A requirement whose `measure` still says "including imputed multilateral aid",
-    in a turn whose words name no provider scope: nothing is stated, nothing moves."""
-    ctx = _Context()
-    africa = _block("africa_bilateral")
-    _show(ctx, africa)
-    surface = _Search(africa)
-    requirement = _dataset("aid", africa["spec_id"], _STATED_INCLUSIVE, recipient="Africa")
-
-    result = await _propose(ctx, [requirement], words=_LATER, surface=surface, question=_G7)
-
-    assert result["outcome"] == Outcome.OK.value, result
-    assert _pins(ctx) == {"aid": africa["spec_id"]}
-    assert surface.calls == []
-
-
-# --- false refusals --------------------------------------------------------
-
-
-async def test_two_scopes_in_the_words_are_served_each_on_its_side() -> None:
-    """ "G7 bilateral aid to Africa as a share of G7 total aid to Africa including
-    imputed multilateral aid": the words state two scopes, so neither is the
-    question's; each side's `measure` states its own, both named in the words, and
-    the share states the difference with no ask and no refusal."""
-    ctx = _Context()
-    bilateral, inclusive = _block("bilateral_share_bilateral"), _block("bilateral_share_inclusive")
-    _show(ctx, bilateral, inclusive)
-    surface = _Search(bilateral, inclusive)
-    requirements = [
-        _dataset("bilateral", bilateral["spec_id"], "bilateral aid", recipient="Africa"),
-        _dataset(
-            "total",
-            inclusive["spec_id"],
-            "total aid including imputed multilateral aid",
-            recipient="Africa",
-        ),
-        _share("bilateral", "total"),
-    ]
-
-    result = await _propose(
-        ctx, requirements, words=_TWO_SCOPES, surface=surface, answer_mode="computed"
-    )
-
-    assert result["outcome"] == Outcome.OK.value, result
-    assert surface.calls == []
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    assert [d.caveat for d in plan.decisions if d.caveat == "providers_differ"] == [
-        "providers_differ"
-    ]
+    assert _notes(ctx) == {}
 
 
 async def test_bilateral_and_imputed_aid_shown_separately_are_served() -> None:
     """ "G7 bilateral aid and imputed multilateral aid to Africa separately": a bare
-    "multilateral" names no option, so the words state nothing and the omission
-    check is silent."""
+    "multilateral" names no option, so the words name nothing and no row reads a
+    line."""
     ctx = _Context()
     _show(ctx, _block("separate_bilateral"), _block("separate_imputed"))
     requirements = [
@@ -795,6 +534,7 @@ async def test_bilateral_and_imputed_aid_shown_separately_are_served() -> None:
     result = await _propose(ctx, requirements, words=_SEPARATELY)
 
     assert result["outcome"] == Outcome.OK.value, result
+    assert _notes(ctx) == {}
 
 
 async def test_bilateral_creditors_with_no_provider_choice_are_served() -> None:
@@ -811,16 +551,36 @@ async def test_bilateral_creditors_with_no_provider_choice_are_served() -> None:
     assert result["outcome"] == Outcome.OK.value, result
 
 
+@pytest.mark.parametrize("declares", [None, _BILATERAL], ids=["bare", "declared"])
+async def test_a_row_the_user_switched_reads_no_line(declares: str | None) -> None:
+    """The user switched G7 aid to Africa to bilateral flows on the plan card, and the
+    words ask for imputed multilateral aid. The row reads the user's choice: no line
+    that the words name another option, or that bilateral is not named."""
+    ctx = _Context()
+    switched = _block("africa_switched_bilateral")
+    _show(ctx, switched)
+    requirement = _dataset(
+        "aid", switched["spec_id"], "net ODA", recipient="Africa", declares=declares
+    )
+
+    result = await _propose(ctx, [requirement], words=_G7, surface=_Search(switched))
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _notes(ctx) == {}
+
+
 async def test_a_switch_on_the_plan_card_stands_through_an_amendment() -> None:
     """The user switched G7 aid to Africa to bilateral flows on the plan card, though
-    its `measure` still says "including imputed multilateral aid" as their words do.
-    The switch is their later word: nothing moves, and an amendment of the period
-    keeps it."""
+    the requirement still declares imputed multilateral aid as their words ask. The
+    switch is their later word: nothing moves, and an amendment of the period keeps
+    it."""
     ctx = _Context()
     switched = _block("africa_switched_bilateral")
     _show(ctx, switched)
     surface = _Search(switched)
-    requirement = _dataset("aid", switched["spec_id"], _STATED_INCLUSIVE, recipient="Africa")
+    requirement = _dataset(
+        "aid", switched["spec_id"], "net ODA", recipient="Africa", declares=_INCLUSIVE
+    )
 
     first = await _propose(ctx, [requirement], words=_G7, surface=surface)
     amended = await _propose(
@@ -838,240 +598,59 @@ async def test_a_switch_on_the_plan_card_stands_through_an_amendment() -> None:
     assert surface.calls == []
 
 
-# --- positives ---------------------------------------------------------------
-
-
-def _g7_share(*, numerator: str, denominator: str, **share: Any) -> list[dict[str, Any]]:
-    """G7 aid to Africa over G7 aid to developing countries, each a DAC2a bilateral
-    part as dev Search answered it, with the `measure` given for each side."""
-    return [
-        _dataset("africa", _spec("africa_bilateral"), numerator, recipient="Africa"),
-        _dataset(
-            "developing", _spec("g7_bilateral"), denominator, recipient="developing countries"
-        ),
-        _share("africa", "developing", **share),
-    ]
-
-
-def _g7_blocks() -> list[dict[str, Any]]:
-    return [_block(name) for name in ("africa_bilateral", "africa_imputed", "g7_bilateral")]
-
-
-@pytest.mark.parametrize(
-    ("numerator", "denominator", "accept"),
-    [
-        pytest.param(_STATED_INCLUSIVE, _STATED_INCLUSIVE, False, id="both-sides-state-it"),
-        pytest.param(_STATED_INCLUSIVE, "net ODA", False, id="the-numerator-states-it"),
-        pytest.param(_STATED_INCLUSIVE, _STATED_INCLUSIVE, True, id="accepting-a-difference"),
-        pytest.param(_MIXED, _MIXED, False, id="a-narrower-word-beside-it"),
-    ],
-)
-async def test_sides_stating_the_scope_are_counted_on_it_with_no_refusal(
-    numerator: str, denominator: str, accept: bool
-) -> None:
-    """G7 aid to Africa over G7 aid to developing countries, the user's words asking
-    for imputed multilateral aid. Each side whose `measure` says so is moved to its
-    DAC2a part's inclusive compile with no refusal; a side that does not is aligned
-    with the side that does. `accept_provider_difference` keeps no stated side off
-    the scope. A `measure` naming bilateral beside imputed multilateral aid, the
-    inclusive count's own label, states the inclusive option the user's words do."""
-    ctx = _Context()
-    blocks = _g7_blocks()
-    _show(ctx, *blocks)
-    surface = _Search(*blocks)
-    share = {"accept_provider_difference": True} if accept else {}
-
-    result = await _propose(
-        ctx,
-        _g7_share(numerator=numerator, denominator=denominator, **share),
-        words=_G7,
-        surface=surface,
-        answer_mode="computed",
-    )
-
-    assert result["outcome"] == Outcome.OK.value, result
-    assert _pins(ctx) == {
-        "africa": _spec("africa_inclusive"),
-        "developing": _spec("g7_inclusive"),
-    }
-    assert sorted(call["spec_id"] for call in surface.calls) == sorted(
-        [_spec("africa_bilateral"), _spec("g7_bilateral")]
-    )
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    (rationale,) = [d.rationale for d in plan.decisions if d.slot == "scope_provider_of_africa"]
-    assert rationale.startswith("The user's question asked for")
-
-
-async def test_a_plan_stating_the_scope_nowhere_is_refused_once() -> None:
-    """The plan for the G7 question that states imputed multilateral aid on no side
-    is refused once, naming the part that can count it; proposed again unchanged, it
-    is the planner's word that the scope qualifies none of its figures, and is
-    admitted as written."""
-    ctx = _Context()
-    blocks = _g7_blocks()
-    _show(ctx, *blocks)
-    surface = _Search(*blocks)
-    requirements = _g7_share(numerator="net ODA", denominator="net ODA")
-
-    first = await _propose(ctx, requirements, words=_G7, surface=surface, answer_mode="computed")
-    again = await _propose(ctx, requirements, words=_G7, surface=surface, answer_mode="computed")
-
-    assert first["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, first
-    assert first["detail"] == {
-        "requirement_id": "africa",
-        "option_id": _INCLUSIVE,
-        "offering": ["africa", "developing"],
-    }
-    assert again["outcome"] == Outcome.OK.value, again
-    assert _pins(ctx) == {"africa": _spec("africa_bilateral"), "developing": _spec("g7_bilateral")}
-    assert surface.calls == []
-
-
-async def test_a_changed_plan_after_the_omission_refusal_is_judged_again() -> None:
-    """The plan for the G7 question stating imputed multilateral aid on no side is
-    refused; the planner then changes a `measure`, still stating it nowhere. Only the
-    refused plan proposed again unchanged is the planner's word that the scope
-    qualifies none of its figures, so the changed one is refused again, and then
-    admitted unchanged."""
-    ctx = _Context()
-    blocks = _g7_blocks()
-    _show(ctx, *blocks)
-    surface = _Search(*blocks)
-    first_plan = _g7_share(numerator="net ODA", denominator="net ODA")
-    changed = _g7_share(numerator="ODA", denominator="net ODA")
-
-    first = await _propose(ctx, first_plan, words=_G7, surface=surface, answer_mode="computed")
-    second = await _propose(ctx, changed, words=_G7, surface=surface, answer_mode="computed")
-    third = await _propose(ctx, changed, words=_G7, surface=surface, answer_mode="computed")
-
-    assert first["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, first
-    assert second["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, second
-    assert third["outcome"] == Outcome.OK.value, third
-
-
-async def test_a_change_to_a_requirement_not_offering_the_option_draws_no_refusal_again() -> None:
-    """The plan first admitted for the G7 question is refused for stating imputed
-    multilateral aid nowhere, naming Africa's bilateral part, the one requirement whose
-    pin offers it. The planner proposes it again with the DAC1 total's `measure`
-    changed, a requirement no attribution rests on: the omission stands answered."""
-    ctx = _Context()
-    _show(ctx, *_g7_blocks(), _block("g7_imputed"), _block("dac1"))
-    requirements, decisions = _recorded()
-    first = await _propose(ctx, requirements, decisions, words=_G7, answer_mode="computed")
-    changed = copy.deepcopy(requirements)
-    (total,) = [r for r in changed if r["id"] == "g7_total_oda"]
-    total["measure"] = "total ODA"
-
-    again = await _propose(ctx, changed, decisions, words=_G7, answer_mode="computed")
-
-    assert first["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, first
-    assert again["outcome"] == Outcome.OK.value, again
-
-
-async def test_slots_an_earlier_release_wrote_in_another_shape_are_not_read() -> None:
-    """A paused turn's state outlives a deploy. The keep question, the omission
-    refusals and the refused combined compiles as earlier releases wrote them, each
-    under its own key, are neither misread nor fatal: the G7 proposal on DAC1 is asked
-    about, though the old keep slot holds DAC1 as kept."""
-    ctx = _Context()
-    ctx.state.update(
-        {
-            "planner:stated_scope_keep": {
-                "offered": [],
-                "asked_call_id": None,
-                "asked": [],
-                "kept": [[DAC1, _INCLUSIVE]],
-                "released": [],
-            },
-            "planner:stated_scope_unattributed": {_INCLUSIVE: [["g7_total", DAC1, "ODA"]]},
-            "planner:stated_scope_combined_refused": [
-                [DAC1, [_INCLUSIVE, "measure_basis:net"], "not_offered", "refused"]
-            ],
-        }
-    )
-    _show(ctx, _block("dac1"))
-
-    result = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
-
-    assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
-    assert _asked_now(ctx) == ((DAC1, _INCLUSIVE),)
-    assert unattributed_refused(ctx.state) == {}
-    assert combined_refused(ctx.state) == {}
-
-
 def _recorded() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The first plan admitted for the G7 question: Africa's bilateral part plus the
-    imputed series, over DAC1 total ODA, accepting a provider difference."""
+    imputed series, over DAC1 total ODA, less `accept_provider_difference`, which no
+    calculation takes."""
     proposal = copy.deepcopy(_RECORDED["proposal"])
+    for requirement in proposal["evidence_requirements"]:
+        requirement.pop("accept_provider_difference", None)
     return proposal["evidence_requirements"], proposal["decisions"]
 
 
-async def test_the_recorded_plan_is_refused_for_stating_the_scope_nowhere() -> None:
-    """The plan first admitted for the G7 question names imputed multilateral aid in
-    no `measure`, so it is refused once, though it accepts a provider difference."""
-    ctx = _Context()
-    _show(ctx, *_g7_blocks(), _block("g7_imputed"), _block("dac1"))
-
-    result = await _propose(ctx, *_recorded(), words=_G7, answer_mode="computed")
-
-    assert result["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, result
-    assert result["detail"]["offering"] == ["africa_bilateral"]
-
-
-def _africa_sum(bilateral_measure: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """G7 aid to Africa as its bilateral part, under `bilateral_measure`, plus the
-    imputed multilateral series, as the first plan for the G7 question summed them."""
+def _africa_sum(declares: str | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """G7 aid to Africa as its bilateral part, declaring `declares` where given, plus
+    the imputed multilateral series, as the first plan for the G7 question summed
+    them."""
     requirements, decisions = _recorded()
     kept = [
         r for r in requirements if r["id"] in {"africa_bilateral", "africa_imputed", "africa_total"}
     ]
     (bilateral,) = [r for r in kept if r["id"] == "africa_bilateral"]
-    bilateral["measure"] = bilateral_measure
+    if declares is not None:
+        bilateral["scope_options"] = [declares]
     return kept, [d for d in decisions if d["slot"] == "africa_total_method"]
 
 
 @pytest.mark.parametrize(
-    ("bilateral_measure", "denominator", "code", "step"),
+    ("declares", "denominator", "step"),
     [
-        pytest.param(
-            _STATED_INCLUSIVE,
-            None,
-            ProblemCode.PROVIDERS_UNALIGNED,
-            "africa_total",
-            id="the-summed-part-states-it",
-        ),
-        pytest.param(
-            "net ODA",
-            _STATED_INCLUSIVE,
-            ProblemCode.PROVIDERS_UNALIGNED,
-            "share",
-            id="the-other-side-states-it",
-        ),
-        pytest.param(
-            "bilateral aid", None, ProblemCode.STATED_SCOPE_UNATTRIBUTED, None, id="neither"
-        ),
+        pytest.param(_INCLUSIVE, None, "africa_total", id="the-summed-part-declares-it"),
+        pytest.param(None, _INCLUSIVE, "share", id="the-other-side-declares-it"),
     ],
 )
 async def test_bilateral_plus_imputed_aid_is_refused_toward_the_inclusive_dataset(
-    bilateral_measure: str, denominator: str | None, code: ProblemCode, step: str | None
+    declares: str | None, denominator: str | None, step: str
 ) -> None:
     """G7 aid to Africa as bilateral aid plus the imputed multilateral series, where
-    the user's words ask for imputed multilateral aid. Counting the bilateral part as
-    its `measure` or the other side states would add the imputed series to a figure
-    already holding it, so the plan is refused toward one requirement pinning the
-    part counted that way; a sum stating the scope nowhere is refused for that. No
-    compile is asked for."""
+    the user's words ask for imputed multilateral aid. Counting the bilateral part on
+    the inclusive option it or the other side declares would add the imputed series
+    to a figure already holding it, so the plan is refused toward one requirement
+    pinning the part counted that way. No compile is asked for."""
     ctx = _Context()
     blocks = [*_g7_blocks()]
     _show(ctx, *blocks)
     surface = _Search(*blocks)
-    requirements, decisions = _africa_sum(bilateral_measure)
+    requirements, decisions = _africa_sum(declares)
     if denominator is not None:
         requirements = [
             *requirements,
             _dataset(
-                "developing", _spec("g7_bilateral"), denominator, recipient="developing countries"
+                "developing",
+                _spec("g7_bilateral"),
+                "net ODA",
+                recipient="developing countries",
+                declares=denominator,
             ),
             _share("africa_total", "developing"),
         ]
@@ -1080,259 +659,33 @@ async def test_bilateral_plus_imputed_aid_is_refused_toward_the_inclusive_datase
         ctx, requirements, decisions, words=_G7, surface=surface, answer_mode="computed"
     )
 
-    assert result["code"] == code.value, result
-    if step is not None:
-        assert result["detail"]["provider"]["step_id"] == step
-        assert result["detail"]["provider"]["sum_id"] == "africa_total"
-        assert result["detail"]["provider"]["unchosen_id"] == "africa_imputed"
+    assert result["code"] == ProblemCode.PROVIDERS_UNALIGNED.value, result
+    assert result["detail"]["provider"]["step_id"] == step
+    assert result["detail"]["provider"]["sum_id"] == "africa_total"
+    assert result["detail"]["provider"]["unchosen_id"] == "africa_imputed"
+    # The repair names the field a declaration is made in.
+    assert "`scope_options`" in result["message"]
     assert surface.calls == []
     assert load_plan(ctx.state) is None
 
 
 async def test_two_sides_stating_one_scope_on_one_series_are_refused() -> None:
-    """A share both of whose `measure`s say bilateral, over DAC1 total ODA read the
-    same way on both sides: counted as stated, both read DAC1's bilateral row, and
+    """A share both of whose inputs declare bilateral, over DAC1 total ODA read the
+    same way on both sides: counted as declared, both read DAC1's bilateral row, and
     the share would answer 100%."""
     ctx = _Context()
     dac1 = _block("dac1")
     _show(ctx, dac1)
     surface = _Search(dac1)
     requirements = [
-        _dataset("bilateral", DAC1, "bilateral ODA"),
-        _dataset("total", DAC1, "bilateral ODA"),
+        _dataset("bilateral", DAC1, "bilateral ODA", declares=_BILATERAL),
+        _dataset("total", DAC1, "bilateral ODA", declares=_BILATERAL),
         _share("bilateral", "total"),
     ]
 
     result = await _propose(ctx, requirements, words=_G7_BILATERAL, surface=surface)
 
     assert result["code"] == ProblemCode.SHARE_OF_ITSELF.value, result
-
-
-_DAC1_STATED = "official development assistance including imputed multilateral aid"
-
-
-def _dac1_total(measure: str, *, period: tuple[int, int] = (1970, 2024)) -> dict[str, Any]:
-    return _dataset("g7_total", DAC1, measure, period=period)
-
-
-def _answered(
-    ctx: _Context, *, keep: bool, pairs: tuple[tuple[str, str], ...] = ((DAC1, _INCLUSIVE),)
-) -> None:
-    """The keep question about `pairs` asked earlier in the turn, and the user's
-    answer to it: kept as published when `keep`, else not
-    (`planner.stated_scope.record_keep_answer`)."""
-    record_keep_asked(ctx.state, call_id="propose-keep", pairs=pairs, proposal={})
-    assert record_keep_answer(ctx.state, call_id="propose-keep", keep=keep)
-
-
-def _asked_now(ctx: _Context) -> tuple[tuple[str, str], ...]:
-    """The pairs the keep question now with the user asks about, after asserting
-    that the proposal paused on it as a closed question under its own call's id."""
-    pending = load_pending_ask(ctx.state)
-    assert pending is not None, "the proposal should have paused on the keep question"
-    assert pending.call_id == ctx.function_call_id
-    assert pending.args["options"] == [dict(o) for o in STATED_SCOPE_OPTIONS]
-    assert pending.args["candidates"] == []
-    assert ctx.run_ended
-    question = keep_question(ctx.state)
-    assert question.asked_call_id == ctx.function_call_id
-    return question.asked
-
-
-@pytest.mark.parametrize(
-    ("shown", "numerator", "serving"),
-    [
-        pytest.param(("g7_bilateral",), False, ["g7_bilateral"], id="a-dataset-serves-it"),
-        pytest.param((), False, [], id="none-serves-it"),
-        pytest.param(
-            ("africa_bilateral", "africa_inclusive", "g7_bilateral"),
-            True,
-            ["g7_bilateral"],
-            id="the-plans-own-pins-and-their-compiles-serve-none",
-        ),
-    ],
-)
-async def test_a_pin_that_cannot_count_the_stated_scope_is_refused_then_asked_about(
-    shown: tuple[str, ...], numerator: bool, serving: list[str]
-) -> None:
-    """G7 total ODA on DAC1, whose `measure` says "including imputed multilateral
-    aid" as the user's words do: DAC1 cannot count it. Where a dataset on record
-    can, the refusal lists it, once, and asks the planner to repin; the Africa part
-    the plan pins for another figure, and its inclusive compile, measure that figure
-    and are not listed. Proposing DAC1 again, or with nothing serving at once,
-    `propose_plan` pauses on the question whether to keep it as published."""
-    ctx = _Context()
-    _show(ctx, _block("dac1"), *(_block(name) for name in shown))
-    requirements = [_dac1_total(_DAC1_STATED)]
-    if numerator:
-        africa, compiled = _block("africa_bilateral"), _block("africa_inclusive")
-        save_aligned_pin(
-            ctx.state,
-            AlignedPin(
-                origin=africa["spec_id"],
-                option_ids=(_INCLUSIVE,),
-                spec_id=compiled["spec_id"],
-                digest={"spec_block": compiled},
-            ),
-            warnings=(),
-        )
-        requirements.append(
-            _dataset("africa", africa["spec_id"], _STATED_INCLUSIVE, recipient="Africa")
-        )
-
-    result = await _propose(ctx, requirements, words=_G7)
-    if serving:
-        assert result["action"]["call"] == "propose_plan", result
-        assert load_pending_ask(ctx.state) is None
-        assert not ctx.run_ended
-        assert keep_question(ctx.state).offered == ((DAC1, _INCLUSIVE),)
-        listed = result
-        result = await _propose(ctx, requirements, words=_G7)
-        assert listed["detail"]["serving"] == [_spec(name) for name in serving]
-
-    assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
-    assert result["detail"]["unserved"] == [
-        {"requirement_id": "g7_total", "spec_id": DAC1, "option_id": _INCLUSIVE}
-    ]
-    assert "action" not in result
-    assert _asked_now(ctx) == ((DAC1, _INCLUSIVE),)
-    assert load_plan(ctx.state) is None
-
-
-@pytest.mark.parametrize(("keep", "admitted"), [(True, True), (False, False)], ids=["kept", "not"])
-async def test_the_users_keep_holds_through_an_amendment(keep: bool, admitted: bool) -> None:
-    """The user answered the question: keeping DAC1 as published admits it, and an
-    amendment changing the period later in the turn keeps it, the answer held in the
-    turn's state (`planner.stated_scope.KEEP_STATE_KEY`). Any other answer keeps
-    nothing, and DAC1 is refused with no question."""
-    ctx = _Context()
-    _answered(ctx, keep=keep)
-    _show(ctx, _block("dac1"))
-    measure = "official development assistance including imputed multilateral aid"
-
-    first = await _propose(ctx, [_dac1_total(measure)], words=_G7)
-
-    if not admitted:
-        assert first["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, first
-        assert first["action"]["call"] == "propose_plan", first
-        assert load_pending_ask(ctx.state) is None
-        return
-    assert first["outcome"] == Outcome.OK.value, first
-    amended = _dac1_total(measure, period=(1980, 2024))
-    second = await _propose(
-        ctx,
-        [amended],
-        words=_G7_AMENDED,
-        amends_version=1,
-        question=_G7,
-    )
-    assert second["outcome"] == Outcome.OK.value, second
-    assert _pins(ctx) == {"g7_total": DAC1}
-
-
-def _dac1_without_bilateral() -> dict[str, Any]:
-    """The recorded DAC1 total with its bilateral option unavailable, as one that
-    cannot count bilateral flows either."""
-    block = _block("dac1")
-    (choice,) = [
-        c for c in block["resolved"]["scope_choices"]["choices"] if c["axis"] == "provider"
-    ]
-    for option in choice["options"]:
-        if option["option_id"] == _BILATERAL:
-            option["availability"] = {"status": "unavailable", "code": "not_published"}
-    return block
-
-
-def _next_turn(ctx: _Context) -> _Context:
-    """The planner context of the conversation's next turn, after the turn `ctx`
-    ran: the conversation keeps the turn's records (`keep_turn_records`) and the next
-    turn opens on the state Studio builds for it (`harness.studio._turn_opening`)."""
-    conversation = ConversationState(conversation_id="conv_01keep")
-    keep_turn_records(conversation, ctx.state)
-    body = TurnRequest.model_validate(
-        {
-            "kind": "turn.request",
-            "schema_version": 1,
-            "conversation_id": "conv_01keep",
-            "message": _LATER,
-        }
-    )
-    _, state, _ = studio._turn_opening(conversation, body, None)
-    after = _Context()
-    after.state = state
-    return after
-
-
-_FRANCE_NEXT = "now for France"
-_ASKED_AGAIN = "Actually, count it including imputed multilateral aid"
-
-
-async def test_a_keep_holds_for_its_turn_only() -> None:
-    """The user kept DAC1 as published in turn 1. Turn 2, "now for France", names no
-    provider scope, so it states nothing and DAC1 is admitted, and the turn holds no
-    answer. Turn 3, "Actually, count it including imputed multilateral aid", states
-    the option again: DAC1 is asked about again."""
-    first = _Context()
-    _answered(first, keep=True)
-    _show(first, _block("dac1"))
-    kept = await _propose(first, [_dac1_total(_DAC1_STATED)], words=_G7)
-    assert kept["outcome"] == Outcome.OK.value, kept
-
-    second = _next_turn(first)
-    _show(second, _block("dac1"))
-    france = await _propose(second, [_dac1_total(_DAC1_STATED)], words=_FRANCE_NEXT, question=_G7)
-    assert france["outcome"] == Outcome.OK.value, france
-    assert keep_question(second.state) == KeepQuestion()
-
-    third = _next_turn(second)
-    _show(third, _block("dac1"))
-    again = await _propose(third, [_dac1_total(_DAC1_STATED)], words=_ASKED_AGAIN, question=_G7)
-    assert again["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, again
-    assert _asked_now(third) == ((DAC1, _INCLUSIVE),)
-
-
-async def test_a_keep_holds_for_its_own_option_only() -> None:
-    """The user kept DAC1 as published for imputed multilateral aid. An amendment
-    in the same turn asking for bilateral flows, which this DAC1 cannot count either,
-    is asked about: the keep was for the other option."""
-    ctx = _Context()
-    _answered(ctx, keep=True)
-    _show(ctx, _dac1_without_bilateral())
-    kept = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
-    assert kept["outcome"] == Outcome.OK.value, kept
-
-    result = await _propose(
-        ctx,
-        [_dac1_total("bilateral ODA")],
-        words=f"{_G7}\n(then: {_G7_BILATERAL})",
-        amends_version=1,
-        question=_G7,
-    )
-
-    assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
-    assert _asked_now(ctx) == ((DAC1, _BILATERAL),)
-
-
-async def test_an_unserved_stated_option_reads_as_words_with_the_code_in_detail() -> None:
-    """The refusal's text tells the planner why the pin cannot count the option as a
-    phrase; Search's availability code stays in `detail.causes`."""
-    ctx = _Context()
-    block = _dac1_without_bilateral()
-    (choice,) = [
-        c for c in block["resolved"]["scope_choices"]["choices"] if c["axis"] == "provider"
-    ]
-    for option in choice["options"]:
-        if option["option_id"] == _BILATERAL:
-            option["availability"] = {"status": "unavailable", "code": "provider_not_offered"}
-    _show(ctx, block)
-
-    result = await _propose(
-        ctx, [_dac1_total("bilateral ODA")], words=_G7_BILATERAL, question=_G7_BILATERAL
-    )
-
-    assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
-    assert "provider_not_offered" not in result["message"]
-    assert result["detail"]["causes"] == {"g7_total": "provider_not_offered"}
 
 
 @pytest.mark.parametrize(
@@ -1353,14 +706,17 @@ async def test_an_unserved_stated_option_reads_as_words_with_the_code_in_detail(
 async def test_a_stated_compile_search_refuses_cannot_count_the_scope(
     refusal: dict[str, str], code: ProblemCode
 ) -> None:
-    """G7 aid to Africa stating imputed multilateral aid, whose compile counted that
-    way Search refuses: the pin cannot count it, so the plan is refused with the
-    ask; where Search can answer later, it is asked to propose again."""
+    """G7 aid to Africa declaring imputed multilateral aid, whose compile counted that
+    way Search refuses: the pin cannot count it, so the plan is refused naming
+    Search's code in `detail`; where Search can answer later, it is asked to propose
+    again."""
     ctx = _Context()
     africa = _block("africa_bilateral")
     _show(ctx, africa)
     surface = _Search(africa, refusal=refusal)
-    requirement = _dataset("aid", africa["spec_id"], _STATED_INCLUSIVE, recipient="Africa")
+    requirement = _dataset(
+        "aid", africa["spec_id"], "net ODA", recipient="Africa", declares=_INCLUSIVE
+    )
 
     result = await _propose(ctx, [requirement], words=_G7, surface=surface)
 
@@ -1377,14 +733,16 @@ async def test_a_stated_compile_search_refuses_cannot_count_the_scope(
 
 
 async def test_a_stated_compile_with_no_part_records_no_one_dataset() -> None:
-    """G7 aid to Africa stating imputed multilateral aid, whose compile counted that
+    """G7 aid to Africa declaring imputed multilateral aid, whose compile counted that
     way Search answers with no part: no refusal of Search's, so the pin is recorded as
-    holding no one dataset counted that way, and refused with the question."""
+    holding no one dataset counted that way, and refused."""
     ctx = _Context()
     africa = _block("africa_bilateral")
     _show(ctx, africa)
     surface = _Search(africa, empty=True)
-    requirement = _dataset("aid", africa["spec_id"], _STATED_INCLUSIVE, recipient="Africa")
+    requirement = _dataset(
+        "aid", africa["spec_id"], "net ODA", recipient="Africa", declares=_INCLUSIVE
+    )
 
     result = await _propose(ctx, [requirement], words=_G7, surface=surface)
 
@@ -1394,7 +752,7 @@ async def test_a_stated_compile_with_no_part_records_no_one_dataset() -> None:
 
 
 async def test_a_stated_compile_that_cannot_reach_search_ends_the_entry() -> None:
-    """G7 aid to Africa stating imputed multilateral aid, whose compile counted that
+    """G7 aid to Africa declaring imputed multilateral aid, whose compile counted that
     way cannot reach Search for good: a fault of the system, no answer about the pin.
     The entry ends (`STATED_COMPILE_UNREACHABLE`, a terminal code) naming the compile,
     nothing is recorded against the option, and the user is asked nothing."""
@@ -1402,7 +760,9 @@ async def test_a_stated_compile_that_cannot_reach_search_ends_the_entry() -> Non
     africa = _block("africa_bilateral")
     _show(ctx, africa)
     surface = _Search(africa, unreachable_after=0)
-    requirement = _dataset("aid", africa["spec_id"], _STATED_INCLUSIVE, recipient="Africa")
+    requirement = _dataset(
+        "aid", africa["spec_id"], "net ODA", recipient="Africa", declares=_INCLUSIVE
+    )
 
     result = await _propose(ctx, [requirement], words=_G7, surface=surface)
 
@@ -1418,7 +778,7 @@ async def test_a_stated_compile_that_cannot_reach_search_ends_the_entry() -> Non
 
 
 async def test_a_compile_held_from_an_earlier_proposal_is_reused() -> None:
-    """A stated requirement whose compile the turn already holds is pinned to it
+    """A declared requirement whose compile the turn already holds is pinned to it
     with no new compile."""
     ctx = _Context()
     africa = _block("africa_bilateral")
@@ -1435,7 +795,9 @@ async def test_a_compile_held_from_an_earlier_proposal_is_reused() -> None:
         warnings=(),
     )
     surface = _Search(africa)
-    requirement = _dataset("aid", africa["spec_id"], _STATED_INCLUSIVE, recipient="Africa")
+    requirement = _dataset(
+        "aid", africa["spec_id"], "net ODA", recipient="Africa", declares=_INCLUSIVE
+    )
 
     result = await _propose(ctx, [requirement], words=_G7, surface=surface)
 
@@ -1455,10 +817,9 @@ async def test_a_revision_reads_the_stated_scope_before_admission(
     failing: bool, code: ProblemCode
 ) -> None:
     """A plan revised with no model call (`PlannerAdapter.revise`) reads the turn's
-    words and every `measure` it and the plan on record state before admission, as
-    `propose_plan` does: where the route does not answer, the revision is refused
-    for it; read, DAC1 under a `measure` stating imputed multilateral aid is refused
-    as one that cannot count it."""
+    words before admission, as `propose_plan` does: where the route does not answer,
+    the revision is refused for it; read, DAC1 declaring imputed multilateral aid is
+    refused as one that cannot count it."""
     planned = _Context()
     _show(planned, _block("dac1"))
     first = await _propose(planned, [_dac1_total("official development assistance")], words=None)
@@ -1479,23 +840,27 @@ async def test_a_revision_reads_the_stated_scope_before_admission(
         result = await adapter.revise(
             ctx=node_ctx(state=planned.state, message=_G7),
             prior_plan=plan.model_dump(mode="json"),
-            evidence_requirements=[_dac1_total(_DAC1_STATED)],
+            evidence_requirements=[_dac1_total("official development assistance", _INCLUSIVE)],
             inherits={},
         )
     finally:
         current_user_message.reset(token)
 
     assert result["refused"]["code"] == code.value, result
-    assert reader.calls == [[_G7, _DAC1_STATED, "official development assistance"]]
+    assert reader.calls == [[_G7]]
 
 
 _SUMMED = "US bilateral plus multilateral ODA"
 
 
-async def test_bilateral_plus_multilateral_words_name_dac1s_own_total() -> None:
+@pytest.mark.parametrize("declares", [None, _CONTRIBUTIONS], ids=["bare", "declared"])
+async def test_bilateral_plus_multilateral_words_name_dac1s_own_total(
+    declares: str | None,
+) -> None:
     """ "US bilateral plus multilateral ODA" on DAC1 total ODA: Search reads words
     summing the two lines as the dataset's own summing option, which on DAC1 is the
-    total it is counted on, so the pin stands with no ask and no compile."""
+    total it is counted on, so the pin stands with no ask, no compile and no line on
+    its row, bare or declaring that option as the brief asks."""
     ctx = _Context()
     total = dac1_with_contributions()
     _show(ctx, total)
@@ -1503,7 +868,7 @@ async def test_bilateral_plus_multilateral_words_name_dac1s_own_total() -> None:
 
     result = await _propose(
         ctx,
-        [_dataset("oda", total["spec_id"], _SUMMED, donor="United States")],
+        [_dataset("oda", total["spec_id"], _SUMMED, donor="United States", declares=declares)],
         words=_SUMMED,
         surface=surface,
     )
@@ -1511,123 +876,12 @@ async def test_bilateral_plus_multilateral_words_name_dac1s_own_total() -> None:
     assert result["outcome"] == Outcome.OK.value, result
     assert _pins(ctx) == {"oda": total["spec_id"]}
     assert surface.calls == []
-
-
-async def test_an_answer_not_to_keep_is_not_asked_again_in_the_turn() -> None:
-    """The user answered the question about DAC1 with anything but keeping it as
-    published. The answer is final for the turn: the planner proposing DAC1 again is
-    refused with no question, asking it to remove the figure or repin it to the
-    DAC2a total on record that counts the option."""
-    ctx = _Context()
-    _answered(ctx, keep=False)
-    _show(ctx, _block("dac1"), _block("g7_bilateral"))
-
-    result = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
-
-    assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
-    assert result["action"]["call"] == "propose_plan"
-    assert load_pending_ask(ctx.state) is None
-    assert f"did not keep {DAC1} counted as published" in result["message"]
-    assert result["detail"]["serving"] == [_spec("g7_bilateral")]
-    assert result["detail"]["unserved"] == [
-        {"requirement_id": "g7_total", "spec_id": DAC1, "option_id": _INCLUSIVE}
-    ]
-
-
-async def test_an_answer_not_to_keep_releases_a_keep_made_earlier_in_the_turn() -> None:
-    """A turn holding DAC1 kept for imputed multilateral aid, then asked about it
-    again and answered not to keep it: DAC1 is refused, and the plan repinned to the
-    DAC2a total counted that way is admitted."""
-    ctx = _Context()
-    _answered(ctx, keep=True)
-    _answered(ctx, keep=False)
-    g7 = _block("g7_bilateral")
-    _show(ctx, _block("dac1"), g7)
-    surface = _Search(g7)
-
-    refused = await _propose(ctx, [_dac1_total(_DAC1_STATED)], words=_G7)
-    repinned = await _propose(
-        ctx,
-        [_dataset("g7_total", g7["spec_id"], _DAC1_STATED, recipient="developing countries")],
-        words=_G7,
-        surface=surface,
-    )
-
-    assert refused["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, refused
-    assert repinned["outcome"] == Outcome.OK.value, repinned
-    assert _pins(ctx) == {"g7_total": _spec("g7_inclusive")}
-    assert keep_question(ctx.state).kept == ()
-
-
-_G7_TOTAL_INCLUSIVE = (
-    "What share of G7 total ODA, including imputed multilateral aid, goes to Africa?"
-)
-
-
-async def test_a_total_under_imputed_multilateral_aid_is_aligned() -> None:
-    """ "What share of G7 total ODA, including imputed multilateral aid, goes to
-    Africa?" with the numerator stating imputed multilateral aid and the denominator
-    "G7 total ODA" on DAC2a: bilateral plus imputed multilateral aid is itself a
-    count of total ODA, so the denominator holds nothing of its own and is aligned
-    with the numerator."""
-    ctx = _Context()
-    blocks = _g7_blocks()
-    _show(ctx, *blocks)
-    surface = _Search(*blocks)
-    requirements = _g7_share(
-        numerator="ODA to Africa including imputed multilateral aid", denominator="G7 total ODA"
-    )
-
-    result = await _propose(
-        ctx, requirements, words=_G7_TOTAL_INCLUSIVE, surface=surface, answer_mode="computed"
-    )
-
-    assert result["outcome"] == Outcome.OK.value, result
-    assert _pins(ctx) == {"africa": _spec("africa_inclusive"), "developing": _spec("g7_inclusive")}
-
-
-async def test_a_kept_total_holds_its_own_scope_in_a_share() -> None:
-    """G7 aid to Africa stating imputed multilateral aid over DAC1 total ODA, which
-    the user kept as published: the numerator is counted as stated, DAC1 holds what
-    it counts, and the share states the difference."""
-    ctx = _Context()
-    _answered(ctx, keep=True)
-    blocks = [_block("africa_bilateral"), _block("dac1")]
-    _show(ctx, *blocks)
-    surface = _Search(*blocks)
-    requirements = [
-        _dataset("africa", _spec("africa_bilateral"), _STATED_INCLUSIVE, recipient="Africa"),
-        _dac1_total(_DAC1_STATED),
-        _share("africa", "g7_total"),
-    ]
-
-    result = await _propose(ctx, requirements, words=_G7, surface=surface, answer_mode="computed")
-
-    assert result["outcome"] == Outcome.OK.value, result
-    assert _pins(ctx) == {"africa": _spec("africa_inclusive"), "g7_total": DAC1}
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    assert [d.caveat for d in plan.decisions if d.caveat == "providers_differ"] == [
-        "providers_differ"
-    ]
-
-
-async def test_a_pin_switched_on_the_plan_card_offers_no_omitted_scope() -> None:
-    """G7 aid to Africa switched to bilateral flows on the plan card, its `measure`
-    naming no scope, under words asking for imputed multilateral aid: the switch is
-    the user's later word, so the plan is not refused for leaving the scope out."""
-    ctx = _Context()
-    switched = _block("africa_switched_bilateral")
-    _show(ctx, switched)
-
-    result = await _propose(
-        ctx, [_dataset("aid", switched["spec_id"], "net ODA", recipient="Africa")], words=_G7
-    )
-
-    assert result["outcome"] == Outcome.OK.value, result
+    assert _notes(ctx) == {}
 
 
 _UNANSWERED_REFUSAL = {"code": "upstream_unavailable", "retry_mode": "retry_after_delay"}
+
+
 _REFUSED_FOR_GOOD = {"code": "requested_option_unavailable", "retry_mode": "do_not_retry"}
 
 
@@ -1660,13 +914,13 @@ _REFUSED_FOR_GOOD = {"code": "requested_option_unavailable", "retry_mode": "do_n
 async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_what_search_refuses(
     refusing: str | None, then: dict[str, str] | str | None, code: ProblemCode
 ) -> None:
-    """US aid to Kenya stating imputed multilateral aid, over a net total its share
+    """US aid to Kenya declaring imputed multilateral aid, over a net total its share
     counts it on: one compile moves it on both axes. Where Search refuses it, the
-    pin is compiled on the stated scope alone to find which move Search refuses. That
-    refused too, the pin cannot count what the user asked for and is refused with the
-    ask; served, the combined refusal stands, naming the share; not answered, the
+    pin is compiled on the declared option alone to find which move Search refuses.
+    That refused too, the pin cannot count what it declares and is refused; served,
+    the combined refusal stands, naming the share; not answered, the
     planner is asked to propose again; unreachable for good, the entry ends naming
-    that compile. None of those records anything against the stated scope."""
+    that compile. None of those records anything against the declared option."""
     ctx = _Context()
     aid = provider_block(HEALTH, narrow=True, active=_BILATERAL)
     total = basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance="explicit")
@@ -1679,7 +933,14 @@ async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_what_s
         unreachable_after=1 if then == "unreachable" else None,
     )
     requirements = [
-        _dataset("aid", HEALTH, _STATED_INCLUSIVE, donor="United States", recipient="Kenya"),
+        _dataset(
+            "aid",
+            HEALTH,
+            "net ODA",
+            donor="United States",
+            recipient="Kenya",
+            declares=_INCLUSIVE,
+        ),
         _dataset("total", TOTAL, "net ODA", donor="United States"),
         _share("aid", "total"),
     ]
@@ -1699,7 +960,6 @@ async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_what_s
         assert stated_uncompiled(ctx.state) == {}
         assert load_pending_ask(ctx.state) is None
     elif code is ProblemCode.STATED_PROVIDER_DROPPED:
-        assert _asked_now(ctx) == ((HEALTH, _INCLUSIVE),)
         assert stated_uncompiled(ctx.state) == {
             (HEALTH, _INCLUSIVE): "requested_option_unavailable"
         }
@@ -1719,14 +979,21 @@ async def test_a_compile_moving_more_than_the_stated_scope_is_refused_for_what_s
 
 
 def _aid_over_net_total() -> tuple[_Context, list[dict[str, Any]], Mapping[str, Any]]:
-    """US aid to Kenya stating imputed multilateral aid as a share of a net total:
+    """US aid to Kenya declaring imputed multilateral aid as a share of a net total:
     the context, the requirements and the aid block."""
     ctx = _Context()
     aid = provider_block(HEALTH, narrow=True, active=_BILATERAL)
     total = basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance="explicit")
     _show(ctx, aid, total)
     requirements = [
-        _dataset("aid", HEALTH, _STATED_INCLUSIVE, donor="United States", recipient="Kenya"),
+        _dataset(
+            "aid",
+            HEALTH,
+            "net ODA",
+            donor="United States",
+            recipient="Kenya",
+            declares=_INCLUSIVE,
+        ),
         _dataset("total", TOTAL, "net ODA", donor="United States"),
         _share("aid", "total"),
     ]
@@ -1757,22 +1024,6 @@ async def test_a_combined_compile_refused_for_good_is_not_posted_again_in_the_tu
     assert "measure_basis:net" not in {e["option_id"] for e in alone["scope_entries"]}
 
 
-async def test_a_sum_stating_the_scope_nowhere_is_refused_once_a_turn() -> None:
-    """Bilateral aid to Africa plus the imputed multilateral series, under words
-    asking for imputed multilateral aid, stating it in no `measure`: refused once,
-    and admitted proposed again unchanged, the planner's word that the user's words
-    qualify none of its figures."""
-    ctx = _Context()
-    _show(ctx, *_g7_blocks())
-    requirements, decisions = _africa_sum("bilateral aid")
-
-    first = await _propose(ctx, requirements, decisions, words=_G7, answer_mode="computed")
-    again = await _propose(ctx, requirements, decisions, words=_G7, answer_mode="computed")
-
-    assert first["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, first
-    assert again["outcome"] == Outcome.OK.value, again
-
-
 def test_an_option_with_no_label_and_no_words_is_named_by_its_scope() -> None:
     """An option no table names, no pin labels and no words state is still named, by
     its provider scope in words, and never by its id."""
@@ -1783,25 +1034,843 @@ def test_an_option_with_no_label_and_no_words_is_named_by_its_scope() -> None:
     assert "_" not in label
 
 
-def test_the_question_tells_untitled_datasets_apart() -> None:
-    """Two pins with no sentence or name of Search's: the question numbers them, and
-    names neither by its id."""
-    unserved = [
-        _Unserved(
-            requirement_id=requirement_id,
-            pin=pin,
-            option_id=_INCLUSIVE,
-            label="bilateral aid plus imputed multilateral aid",
-            words="including imputed multilateral aid",
-            cause="the dataset has no option counting it that way",
-            code="not_offered",
-        )
-        for requirement_id, pin in (("first", "spec_untitled_one"), ("second", "spec_untitled_two"))
+async def test_the_words_are_read_once_a_turn_and_no_measure_is_read() -> None:
+    """The turn's words go to the route once: a second proposal reads nothing, and no
+    requirement's `measure` is sent."""
+    ctx = _Context()
+    _show(ctx, _block("separate_bilateral"), _block("separate_imputed"))
+    reader = _Reader()
+    requirements = [
+        _dataset("bilateral", _spec("separate_bilateral"), "bilateral aid", recipient="Africa"),
+        _dataset("imputed", _spec("separate_imputed"), "imputed multilateral aid"),
     ]
 
-    refused = _stated_unserved(unserved, [], sources=SourceReadings.of_shown({}))
+    await _propose(ctx, requirements, words=_SEPARATELY, reader=reader)
+    await _propose(ctx, requirements, words=_SEPARATELY, reader=reader)
 
-    message = refused["detail"]["ask"]["message"]
-    assert "the first dataset chosen" in message
-    assert "the second dataset chosen" in message
-    assert "spec_untitled" not in message
+    assert reader.calls == [[_SEPARATELY]]
+
+
+# --- declared options --------------------------------------------------------
+
+
+def _g7_blocks() -> list[dict[str, Any]]:
+    return [_block(name) for name in ("africa_bilateral", "africa_imputed", "g7_bilateral")]
+
+
+def _g7_share(africa: str | None, developing: str | None) -> list[dict[str, Any]]:
+    """G7 aid to Africa over G7 aid to developing countries, each a DAC2a bilateral
+    part as dev Search answered it, declaring the option given for each side."""
+    return [
+        _dataset(
+            "africa", _spec("africa_bilateral"), "net ODA", recipient="Africa", declares=africa
+        ),
+        _dataset(
+            "developing",
+            _spec("g7_bilateral"),
+            "net ODA",
+            recipient="developing countries",
+            declares=developing,
+        ),
+        _share("africa", "developing"),
+    ]
+
+
+def _notes(ctx: _Context) -> dict[str, str]:
+    """The plan card's line on each requirement's provider row (`DecisionScope.line`),
+    by requirement id."""
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    rows = {decision.slot: decision for decision in plan.decisions}
+    return {
+        requirement.id: row.rationale
+        for requirement in plan.evidence_requirements
+        for slot in requirement.decision_ids
+        if (row := rows.get(slot)) is not None and row.scope is not None and row.scope.line
+    }
+
+
+async def test_the_g7_share_declared_on_both_sides_is_counted_inclusive() -> None:
+    """The G7 inclusive question with both sides declaring inclusive: each is moved to
+    its DAC2a part's inclusive compile with no refusal and no line on the card."""
+    ctx = _Context()
+    blocks = _g7_blocks()
+    _show(ctx, *blocks)
+
+    result = await _propose(
+        ctx,
+        _g7_share(_INCLUSIVE, _INCLUSIVE),
+        words=_G7,
+        surface=_Search(*blocks),
+        answer_mode="computed",
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == {
+        "africa": _spec("africa_inclusive"),
+        "developing": _spec("g7_inclusive"),
+    }
+    assert _notes(ctx) == {}
+
+
+@pytest.mark.parametrize(
+    ("africa", "developing"),
+    [
+        pytest.param(_INCLUSIVE, None, id="numerator-only"),
+        pytest.param(None, _INCLUSIVE, id="denominator-only"),
+    ],
+)
+async def test_a_share_declared_on_one_side_only_is_refused(
+    africa: str | None, developing: str | None
+) -> None:
+    """A share one of whose inputs declares a provider option and the other none is
+    refused once, naming both and the undeclared side's own option, and compiles
+    nothing."""
+    ctx = _Context()
+    blocks = _g7_blocks()
+    _show(ctx, *blocks)
+    surface = _Search(*blocks)
+
+    result = await _propose(
+        ctx, _g7_share(africa, developing), words=_G7, surface=surface, answer_mode="computed"
+    )
+
+    assert result["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, result
+    undeclared = "developing" if africa is not None else "africa"
+    assert result["detail"] == {
+        "requirement_id": "share",
+        "declared": ["africa" if africa is not None else "developing"],
+        "undeclared": [undeclared],
+    }
+    assert f"{undeclared!r} {_BILATERAL!r}" in result["message"]
+    assert surface.calls == []
+    assert load_plan(ctx.state) is None
+
+
+async def test_a_plan_declaring_nothing_reads_the_words_on_each_provider_row() -> None:
+    """The G7 inclusive question planned with no declaration: admitted on bilateral,
+    and each side's provider row on the plan card reads that the words name the
+    inclusive count and no figure is counted that way. The line is the rationale of the
+    pin's own provider row, which the requirement cites."""
+    ctx = _Context()
+    blocks = _g7_blocks()
+    _show(ctx, *blocks)
+
+    result = await _propose(
+        ctx, _g7_share(None, None), words=_G7, surface=_Search(*blocks), answer_mode="computed"
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == {"africa": _spec("africa_bilateral"), "developing": _spec("g7_bilateral")}
+    notes = _notes(ctx)
+    assert sorted(notes) == ["africa", "developing"]
+    assert all(
+        line.startswith("Your words name bilateral aid plus imputed") for line in notes.values()
+    )
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    by_slot = {decision.slot: decision for decision in plan.decisions}
+    for requirement_id, line in notes.items():
+        pin = plan.requirement(requirement_id).source_spec_id  # type: ignore[union-attr]
+        row = by_slot[scope_choice_slot(pin, "provider")]
+        assert row.rationale == line
+        assert row.slot in plan.requirement(requirement_id).decision_ids
+
+
+class _NoRevision:
+    """A `harness.graph.PlannerModel` that offers the plan it was given back."""
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        return {"plan": kwargs["prior_plan"], "summary": "revised"}
+
+
+async def test_a_row_reading_a_line_switches_on_the_plan_card() -> None:
+    """The G7 share planned with no declaration reads a line on Africa's provider row.
+    Switching that row to the inclusive count the words name posts Africa's pin to
+    Search on it, as a switch of any pin's own row does."""
+    ctx = _Context()
+    blocks = _g7_blocks()
+    _show(ctx, *blocks)
+    proposed = await _propose(
+        ctx, _g7_share(None, None), words=_G7, surface=_Search(*blocks), answer_mode="computed"
+    )
+    assert proposed["outcome"] == Outcome.OK.value, proposed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (row,) = [
+        d
+        for d in plan.decisions
+        if d.slot in plan.requirement("africa").decision_ids
+        and d.scope is not None
+        and d.scope.axis == "provider"
+    ]
+    assert row.rationale == _notes(ctx)["africa"]
+    surface = _Search(*blocks)
+
+    with suppress(SwitchFailedError):
+        await switch_module._switched_plan(
+            node_ctx(state=ctx.state),
+            plan,
+            choice_id=choice_id(plan, row),
+            option_id=_INCLUSIVE,
+            planner=cast(Any, _NoRevision()),
+            surface=cast(Any, surface),
+        )
+
+    assert [call["spec_id"] for call in surface.calls] == [
+        _block("africa_bilateral")["resolved"]["scope_choices"]["base"]["spec_id"]
+    ]
+
+
+async def test_a_declared_option_the_words_do_not_name_reads_so_on_its_row() -> None:
+    """ "What share of G7 ODA is bilateral?": the numerator declares bilateral and
+    moves; the total declares DAC1's own option and stays, its row reading that the
+    words do not name it."""
+    ctx = _Context()
+    dac1 = _block("dac1")
+    _show(ctx, dac1)
+    requirements = [
+        _dataset("bilateral", DAC1, "bilateral ODA", declares=_BILATERAL),
+        _dataset("total", DAC1, "official development assistance", declares=_CONTRIBUTIONS),
+        _share("bilateral", "total"),
+    ]
+
+    result = await _propose(ctx, requirements, words=_G7_BILATERAL, surface=_Search(dac1))
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == {"bilateral": _held(ctx, DAC1, _BILATERAL), "total": DAC1}
+    (line,) = _notes(ctx).values()
+    assert _notes(ctx)["total"] == line
+    assert line.startswith("Counted as bilateral aid plus core contributions")
+
+
+@pytest.mark.parametrize("total_declared", [True, False], ids=["total-declared", "total-bare"])
+async def test_a_total_beside_a_declared_part_declares_its_own_option(
+    total_declared: bool,
+) -> None:
+    """ "US bilateral aid to Kenya as a share of total US ODA": a total declaring
+    DAC1's contributions option holds it beside the bilateral part. A bare total is
+    the half-declared share, refused naming the total's own option."""
+    ctx = _Context()
+    total = dac1_with_contributions()
+    _show(ctx, _us_bilateral(), total)
+    surface = _Search(total)
+    requirements = [
+        _dataset(
+            "bilateral",
+            HEALTH,
+            "bilateral aid",
+            donor="United States",
+            recipient="Kenya",
+            declares=_BILATERAL,
+        ),
+        _dataset(
+            "total",
+            total["spec_id"],
+            "total ODA",
+            donor="United States",
+            declares=_CONTRIBUTIONS if total_declared else None,
+        ),
+        _share("bilateral", "total"),
+    ]
+
+    result = await _propose(ctx, requirements, words=_US_TOTAL, surface=surface)
+
+    if total_declared:
+        assert result["outcome"] == Outcome.OK.value, result
+        assert _pins(ctx)["total"] == total["spec_id"]
+        assert surface.calls == []
+    else:
+        assert result["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, result
+        assert f"'total' {_CONTRIBUTIONS!r}" in result["message"]
+
+
+async def test_inputs_declaring_different_options_keep_them_and_state_the_difference() -> None:
+    """G7 aid to Africa declared inclusive over DAC1 total ODA declared on its own
+    contributions option, as a user asking for the DAC1 total would: each keeps its
+    option, the share states that its inputs count different providers' spending,
+    and the DAC1 row reads that the words do not name its option."""
+    ctx = _Context()
+    blocks = [*_g7_blocks(), _block("dac1")]
+    _show(ctx, *blocks)
+    requirements = [
+        _dataset(
+            "africa", _spec("africa_bilateral"), "net ODA", recipient="Africa", declares=_INCLUSIVE
+        ),
+        _dataset("total", DAC1, "official development assistance", declares=_CONTRIBUTIONS),
+        _share("africa", "total"),
+    ]
+
+    result = await _propose(
+        ctx, requirements, words=_G7, surface=_Search(*blocks), answer_mode="computed"
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == {"africa": _spec("africa_inclusive"), "total": DAC1}
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [d.caveat for d in plan.decisions if d.caveat == "providers_differ"] == [
+        "providers_differ"
+    ]
+    assert list(_notes(ctx)) == ["total"]
+
+
+async def test_two_scopes_in_the_words_are_served_each_on_its_side() -> None:
+    """ "G7 bilateral aid to Africa as a share of G7 total aid to Africa including
+    imputed multilateral aid": each side declares its own option, both named in the
+    words, so nothing moves, no line is written, and the share states the
+    difference."""
+    ctx = _Context()
+    bilateral, inclusive = _block("bilateral_share_bilateral"), _block("bilateral_share_inclusive")
+    _show(ctx, bilateral, inclusive)
+    surface = _Search(bilateral, inclusive)
+    requirements = [
+        _dataset("bilateral", bilateral["spec_id"], "aid", recipient="Africa", declares=_BILATERAL),
+        _dataset("total", inclusive["spec_id"], "aid", recipient="Africa", declares=_INCLUSIVE),
+        _share("bilateral", "total"),
+    ]
+
+    result = await _propose(
+        ctx, requirements, words=_TWO_SCOPES, surface=surface, answer_mode="computed"
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert surface.calls == []
+    assert _notes(ctx) == {}
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [d.caveat for d in plan.decisions if d.caveat == "providers_differ"] == [
+        "providers_differ"
+    ]
+
+
+async def test_an_option_the_pin_does_not_count_is_refused_naming_what_it_offers() -> None:
+    """G7 aid to Africa declaring core contributions, which its DAC2a part does not
+    publish: refused, naming the options the pin offers and Search's code in
+    `detail`, with no compile."""
+    ctx = _Context()
+    africa = _block("africa_bilateral")
+    _show(ctx, africa)
+    surface = _Search(africa)
+    requirement = _dataset(
+        "aid", africa["spec_id"], "net ODA", recipient="Africa", declares=_CONTRIBUTIONS
+    )
+
+    result = await _propose(ctx, [requirement], words=_G7, surface=surface)
+
+    assert result["code"] == ProblemCode.STATED_PROVIDER_DROPPED.value, result
+    assert result["detail"]["unserved"] == [
+        {"requirement_id": "aid", "spec_id": africa["spec_id"], "option_id": _CONTRIBUTIONS}
+    ]
+    assert f"{_BILATERAL}, {_INCLUSIVE}" in result["message"]
+    assert surface.calls == []
+    # The planner may remove the figure and decline the part asking for it.
+    assert UnsupportedOperation.UNSUPPORTED_ASK in load_optional_declines(ctx.state)
+
+
+async def test_a_line_holds_through_an_amendment_whose_words_name_nothing() -> None:
+    """A total declaring an option the words do not name reads so on its row. An
+    amendment under words naming nothing is judged on the words of the last turn that
+    named an option, so the total's row reads the same line and no other row reads
+    one."""
+    ctx = _Context()
+    dac1 = _block("dac1")
+    _show(ctx, dac1)
+    surface = _Search(dac1)
+    requirements = [
+        _dataset("bilateral", DAC1, "bilateral ODA", declares=_BILATERAL),
+        _dataset("total", DAC1, "official development assistance", declares=_CONTRIBUTIONS),
+        _share("bilateral", "total"),
+    ]
+    first = await _propose(ctx, requirements, words=_G7_BILATERAL, surface=surface)
+    assert first["outcome"] == Outcome.OK.value, first
+    set_then = _notes(ctx)
+
+    amended = await _propose(
+        ctx,
+        [
+            *({**r, "period": {"start": 1980, "end": 2024}} for r in requirements[:2]),
+            requirements[2],
+        ],
+        words=_LATER,
+        surface=surface,
+        amends_version=1,
+        question=_G7_BILATERAL,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    assert list(set_then) == ["total"]
+    assert _notes(ctx) == set_then
+
+
+async def test_a_declaration_is_judged_on_the_words_of_the_turn_that_set_it() -> None:
+    """The G7 share declared inclusive on both sides, as the words ask: no line.
+    Amendments under words naming nothing are judged on the words of the first turn,
+    which name inclusive: declarations kept inclusive read no line, and declarations
+    changed to bilateral each read that their option is not named."""
+    ctx = _Context()
+    blocks = _g7_blocks()
+    _show(ctx, *blocks)
+    surface = _Search(*blocks)
+
+    first = await _propose(
+        ctx, _g7_share(_INCLUSIVE, _INCLUSIVE), words=_G7, surface=surface, answer_mode="computed"
+    )
+    carried = await _propose(
+        ctx,
+        _g7_share(_INCLUSIVE, _INCLUSIVE),
+        words=_LATER,
+        surface=surface,
+        answer_mode="computed",
+        amends_version=1,
+        question=_G7,
+    )
+    carried_notes = _notes(ctx)
+    changed = await _propose(
+        ctx,
+        _g7_share(_BILATERAL, _BILATERAL),
+        words=_LATER,
+        surface=surface,
+        answer_mode="computed",
+        amends_version=2,
+        question=_G7,
+    )
+
+    assert [first["outcome"], carried["outcome"], changed["outcome"]] == [Outcome.OK.value] * 3
+    assert carried_notes == {}
+    notes = _notes(ctx)
+    assert sorted(notes) == ["africa", "developing"]
+    assert all(line.startswith("Counted as bilateral aid only") for line in notes.values())
+
+
+async def test_a_declaration_under_words_naming_nothing_reads_so() -> None:
+    """A requirement declaring inclusive in a turn whose words name no provider
+    option: it is counted that way, and its row reads that the words do not name it."""
+    ctx = _Context()
+    africa = _block("africa_bilateral")
+    _show(ctx, africa)
+    requirement = _dataset(
+        "aid", africa["spec_id"], "net ODA", recipient="Africa", declares=_INCLUSIVE
+    )
+
+    result = await _propose(ctx, [requirement], words=_LATER, surface=_Search(africa), question=_G7)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == {"aid": _spec("africa_inclusive")}
+    assert list(_notes(ctx)) == ["aid"]
+
+
+_COUNT_INCLUSIVE = "Actually, count it including imputed multilateral aid"
+
+
+async def test_words_naming_a_new_option_judge_an_unchanged_declaration_afresh() -> None:
+    """The G7 share declared bilateral on both sides, as the words ask: no line. The
+    next turn asks to count it including imputed multilateral aid and the planner
+    carries the declarations: each row reads that its option is not named."""
+    ctx = _Context()
+    blocks = _g7_blocks()
+    _show(ctx, *blocks)
+    surface = _Search(*blocks)
+
+    first = await _propose(
+        ctx,
+        _g7_share(_BILATERAL, _BILATERAL),
+        words=_G7_BILATERAL,
+        surface=surface,
+        answer_mode="computed",
+    )
+    first_notes = _notes(ctx)
+    carried = await _propose(
+        ctx,
+        _g7_share(_BILATERAL, _BILATERAL),
+        words=_COUNT_INCLUSIVE,
+        surface=surface,
+        answer_mode="computed",
+        amends_version=1,
+        question=_G7_BILATERAL,
+    )
+
+    assert [first["outcome"], carried["outcome"]] == [Outcome.OK.value] * 2, carried
+    assert first_notes == {}
+    notes = _notes(ctx)
+    assert sorted(notes) == ["africa", "developing"]
+    assert all(line.startswith("Counted as bilateral aid only") for line in notes.values())
+
+
+async def test_a_line_is_dropped_once_its_input_is_pinned_elsewhere() -> None:
+    """The G7 share planned with no declaration reads a line on Africa's row, which is
+    counted bilateral. An amendment under words naming nothing pins Africa's inclusive
+    part directly: Africa is counted the way the words ask, so its row reads no line."""
+    ctx = _Context()
+    blocks = [*_g7_blocks(), _block("africa_inclusive")]
+    _show(ctx, *blocks)
+    surface = _Search(*blocks)
+
+    first = await _propose(
+        ctx, _g7_share(None, None), words=_G7, surface=surface, answer_mode="computed"
+    )
+    assert "africa" in _notes(ctx)
+    repinned = [
+        {**r, "source_spec_id": _spec("africa_inclusive")} if r["id"] == "africa" else r
+        for r in _g7_share(None, None)
+    ]
+    amended = await _propose(
+        ctx,
+        repinned,
+        words=_LATER,
+        surface=surface,
+        answer_mode="computed",
+        amends_version=1,
+        question=_G7,
+    )
+
+    assert [first["outcome"], amended["outcome"]] == [Outcome.OK.value] * 2
+    assert "africa" not in _notes(ctx)
+
+
+async def test_a_pin_with_no_provider_row_records_no_line() -> None:
+    """G7 aid to Africa declaring bilateral under words naming nothing, on a part whose
+    only other provider options Search does not publish: the pin states no provider
+    row, so the plan records no line for a row the card does not show."""
+    ctx = _Context()
+    africa = _block("africa_bilateral")
+    for choice in africa["resolved"]["scope_choices"]["choices"]:
+        for option in choice["options"] if choice["axis"] == "provider" else ():
+            if option["option_id"] != _BILATERAL:
+                option["availability"] = {"status": "unavailable", "code": "provider_not_offered"}
+    _show(ctx, africa)
+    requirement = _dataset(
+        "aid", africa["spec_id"], "net ODA", recipient="Africa", declares=_BILATERAL
+    )
+
+    result = await _propose(ctx, [requirement], words=_LATER, surface=_Search(africa), question=_G7)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert not [d for d in plan.decisions if d.scope is not None and d.scope.axis == "provider"]
+    assert _notes(ctx) == {}
+
+
+async def test_a_stored_plan_carrying_accept_provider_difference_still_loads() -> None:
+    """A plan stored with `accept_provider_difference` set on its share, a field the
+    share does not have, loads as the plan without it, so its turn amends it in place
+    of planning again."""
+    ctx = _Context()
+    blocks = _g7_blocks()
+    _show(ctx, *blocks)
+    result = await _propose(
+        ctx,
+        _g7_share(_INCLUSIVE, _INCLUSIVE),
+        words=_G7,
+        surface=_Search(*blocks),
+        answer_mode="computed",
+    )
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    stored = json.loads(ctx.state[PLAN_STATE_KEY])
+    (share,) = [r for r in stored["evidence_requirements"] if r["kind"] == "share_of"]
+    share["accept_provider_difference"] = True
+
+    assert stored_plan(json.dumps(stored), state_key=PLAN_STATE_KEY) == plan
+
+
+def test_every_provider_option_the_harness_reads_can_be_declared() -> None:
+    """A provider choice the harness reads holds options of its provider scopes alone
+    (`harness.scope_choices.ProviderScope`), so `scope_options` admits exactly one id
+    per scope and every option `_half_declared`'s repair names is declarable."""
+    assert set(get_args(ProviderOptionId)) == {
+        f"provider:{scope}" for scope in get_args(ProviderScope)
+    }
+
+
+async def test_a_line_naming_an_option_goes_once_another_figure_counts_it() -> None:
+    """G7 aid to Africa and to developing countries, two series planned with no
+    declaration under words asking for imputed multilateral aid: each row reads that no
+    figure is counted that way. An amendment under words naming nothing pins Africa's
+    inclusive part: a figure is counted that way, so neither row reads a line."""
+    ctx = _Context()
+    blocks = [*_g7_blocks(), _block("africa_inclusive")]
+    _show(ctx, *blocks)
+    surface = _Search(*blocks)
+    series = _g7_share(None, None)[:2]
+
+    first = await _propose(ctx, series, words=_G7, surface=surface)
+    assert sorted(_notes(ctx)) == ["africa", "developing"]
+    amended = await _propose(
+        ctx,
+        [
+            {**r, "source_spec_id": _spec("africa_inclusive")} if r["id"] == "africa" else r
+            for r in series
+        ],
+        words=_LATER,
+        surface=surface,
+        amends_version=1,
+        question=_G7,
+    )
+
+    assert [first["outcome"], amended["outcome"]] == [Outcome.OK.value] * 2, amended
+    assert _pins(ctx)["developing"] == _spec("g7_bilateral")
+    assert _notes(ctx) == {}
+
+
+def _provider_row(ctx: _Context, requirement_id: str) -> Any:
+    """The provider row requirement `requirement_id` of the plan on record cites."""
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (row,) = [
+        d
+        for d in plan.decisions
+        if d.slot in plan.requirement(requirement_id).decision_ids
+        and d.scope is not None
+        and d.scope.axis == "provider"
+    ]
+    return row
+
+
+async def test_a_carried_requirements_row_follows_a_figure_added_beside_it() -> None:
+    """G7 aid to developing countries planned with no declaration under words asking
+    for imputed multilateral aid: its row reads that no figure is counted that way. An
+    amendment under words naming nothing adds G7 aid to Africa counted inclusive and
+    leaves the developing requirement as it was: a figure is now counted that way, so
+    the carried requirement's row reads no line."""
+    ctx = _Context()
+    blocks = [*_g7_blocks(), _block("africa_inclusive")]
+    _show(ctx, *blocks)
+    surface = _Search(*blocks)
+    developing = _g7_share(None, None)[1]
+
+    first = await _propose(ctx, [developing], words=_G7, surface=surface)
+    line = _notes(ctx)["developing"]
+    amended = await _propose(
+        ctx,
+        [
+            _dataset(
+                "africa", _spec("africa_inclusive"), "net ODA including imputed", recipient="Africa"
+            )
+        ],
+        words=_LATER,
+        surface=surface,
+        amends_version=1,
+        question=_G7,
+    )
+
+    assert [first["outcome"], amended["outcome"]] == [Outcome.OK.value] * 2, amended
+    assert _notes(ctx) == {}
+    assert _provider_row(ctx, "developing").rationale != line
+
+
+async def test_words_naming_the_declared_option_clear_its_line() -> None:
+    """The G7 share declared bilateral on both sides under words asking for imputed
+    multilateral aid: each row reads that bilateral is not named. The user answers
+    with words naming bilateral, and the planner keeps the declarations: the words
+    name the option each figure is counted on, so no row reads a line."""
+    ctx = _Context()
+    blocks = _g7_blocks()
+    _show(ctx, *blocks)
+    surface = _Search(*blocks)
+
+    first = await _propose(
+        ctx, _g7_share(_BILATERAL, _BILATERAL), words=_G7, surface=surface, answer_mode="computed"
+    )
+    lines = _notes(ctx)
+    kept = await _propose(
+        ctx,
+        _g7_share(_BILATERAL, _BILATERAL),
+        words="bilateral aid",
+        surface=surface,
+        answer_mode="computed",
+        amends_version=1,
+        question=_G7,
+    )
+
+    assert [first["outcome"], kept["outcome"]] == [Outcome.OK.value] * 2, kept
+    assert sorted(lines) == ["africa", "developing"]
+    assert _notes(ctx) == {}
+    assert _provider_row(ctx, "africa").rationale not in lines.values()
+
+
+def _economic_activity(block: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `block` measuring economic activity, as GNI does, its donor still
+    bound on the giving side, as DAC1 reads GNI."""
+    block = copy.deepcopy(block)
+    block["resolved"]["shape"]["population_type"] = {
+        "ref": "EconomicActivity",
+        "label": "economic activity",
+    }
+    return block
+
+
+def _without_scope(block: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `block` measuring economic activity with no scope choices at all."""
+    block = _economic_activity(block)
+    del block["resolved"]["scope_choices"]
+    return block
+
+
+def _creditor_spelled(block: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `block`, a flow with no provider choice, its parties spelled as a
+    creditor and a debtor."""
+    block = copy.deepcopy(block)
+    roles = {"origin": "creditor", "destination": "debtor"}
+    for entity in block["resolved"]["entities"]:
+        entity["role"] = roles.get(entity["role"], entity["role"])
+    return block
+
+
+@pytest.mark.parametrize(
+    ("other", "caveats"),
+    [
+        pytest.param(_economic_activity, [], id="gni-on-dac1"),
+        pytest.param(_without_scope, [], id="gni-with-no-scope"),
+        pytest.param(_creditor_spelled, ["providers_differ"], id="flow-spelled-by-creditor"),
+    ],
+)
+async def test_a_series_with_no_provider_choice_is_left_alone(
+    other: Callable[[dict[str, Any]], dict[str, Any]], caveats: list[str]
+) -> None:
+    """ "Germany's bilateral ODA as a share of its GNI": the ODA declares bilateral and
+    is counted as bilateral flows, and GNI, which has no provider choice, is read as it
+    stands. GNI measures economic activity, so it takes no part in the providers the
+    share compares, whether DAC1 binds its donor or it states no scope at all. A
+    series with no provider choice that measures a flow, however its parties are
+    spelled, counts providers nothing records, so the share states the difference."""
+    ctx = _Context()
+    oda = dac1_with_contributions()
+    second = other(basis_block(TOTAL, narrow=False, active="measure_basis:gross"))
+    _show(ctx, oda, second)
+    surface = _Search(oda)
+    requirements = [
+        _dataset("oda", oda["spec_id"], "bilateral ODA", donor="Germany", declares=_BILATERAL),
+        _dataset("gni", TOTAL, "GNI", donor="Germany"),
+        _share("oda", "gni"),
+    ]
+
+    result = await _propose(ctx, requirements, words=_GNI, surface=surface)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == {"oda": _held(ctx, oda["spec_id"], _BILATERAL), "gni": TOTAL}
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [d.caveat for d in plan.decisions if d.caveat is not None] == caveats
+
+
+async def test_a_declaration_with_no_words_read_keeps_the_planners_sentence() -> None:
+    """A requirement declaring inclusive in an entry whose words were never read, as a
+    chip turn's, and read by no calculation: it is counted that way, its row
+    attributes the option to the plan's wording of the input, and it reads no
+    line."""
+    ctx = _Context()
+    blocks = _g7_blocks()
+    _show(ctx, *blocks)
+    requirement = _dataset(
+        "aid", _spec("africa_bilateral"), "net ODA", recipient="Africa", declares=_INCLUSIVE
+    )
+
+    result = await _propose(
+        ctx, [requirement], words=None, surface=_Search(*blocks), question="G7 aid to Africa"
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == {"aid": _spec("africa_inclusive")}
+    row = _provider_row(ctx, "aid")
+    assert row.resolved_by is ResolvedBy.PLANNER_DEFAULT
+    assert not row.scope.line
+    # No calculation reads it, so no alignment reason applies.
+    assert _ALIGNED_REASONS["provider"] not in row.rationale
+    assert _notes(ctx) == {}
+
+
+@pytest.mark.parametrize("declares", [None, _BILATERAL], ids=["bare", "declared"])
+async def test_words_naming_an_option_the_dataset_does_not_publish_read_so(
+    declares: str | None,
+) -> None:
+    """G7 aid to Africa under words asking for imputed multilateral aid, on a part that
+    publishes it only as unavailable and offers core contributions: the row reads that
+    the dataset does not publish it and what the figure is counted as, with no offer
+    to change it, and the requirement cites a caveat saying so, which the reply
+    states."""
+    ctx = _Context()
+    africa = _block("africa_bilateral")
+    for choice in africa["resolved"]["scope_choices"]["choices"]:
+        for option in choice["options"] if choice["axis"] == "provider" else ():
+            if option["option_id"] == _INCLUSIVE:
+                option["availability"] = {"status": "unavailable", "code": "provider_not_offered"}
+            if option["option_id"] == _CONTRIBUTIONS:
+                option["availability"] = {"status": "available", "detail": {}}
+    _show(ctx, africa)
+    requirement = _dataset(
+        "aid", africa["spec_id"], "net ODA", recipient="Africa", declares=declares
+    )
+
+    result = await _propose(ctx, [requirement], words=_G7, surface=_Search(africa))
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _provider_row(ctx, "aid").scope.line
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (caveat,) = [
+        d
+        for d in plan.decisions
+        if d.caveat == "scope_unpublished" and d.slot in plan.requirement("aid").decision_ids
+    ]
+    assert caveat.chosen != caveat.options[1]
+
+
+async def test_words_naming_an_option_blocked_by_another_choice_offer_it() -> None:
+    """G7 aid to Africa under words asking for imputed multilateral aid, on a part where
+    that option is blocked only by another choice the user can change
+    (`conflicts_with`): the card can reach it, so the row reads the line offering it
+    and the answer states no unpublished caveat."""
+    ctx = _Context()
+    africa = _block("africa_bilateral")
+    for choice in africa["resolved"]["scope_choices"]["choices"]:
+        for option in choice["options"] if choice["axis"] == "provider" else ():
+            if option["option_id"] == _INCLUSIVE:
+                option["availability"] = {"status": "unavailable", "code": "conflicts_with"}
+    _show(ctx, africa)
+    requirement = _dataset("aid", africa["spec_id"], "net ODA", recipient="Africa")
+
+    result = await _propose(ctx, [requirement], words=_G7, surface=_Search(africa))
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _provider_row(ctx, "aid").scope.line
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [d.caveat for d in plan.decisions if d.caveat is not None] == []
+
+
+async def test_a_planner_draft_on_the_unpublished_caveats_slot_gives_way_to_codes() -> None:
+    """A proposal whose own decision takes the slot of the caveat code writes where the
+    words name an option the dataset does not publish: code's caveat is written there
+    and the requirement cites it."""
+    ctx = _Context()
+    africa = _block("africa_bilateral")
+    for choice in africa["resolved"]["scope_choices"]["choices"]:
+        for option in choice["options"] if choice["axis"] == "provider" else ():
+            if option["option_id"] == _INCLUSIVE:
+                option["availability"] = {"status": "unavailable", "code": "provider_not_offered"}
+            if option["option_id"] == _CONTRIBUTIONS:
+                option["availability"] = {"status": "available", "detail": {}}
+    _show(ctx, africa)
+    slot = "scope_unpublished_of_aid"
+    requirement = _dataset(
+        "aid", africa["spec_id"], "net ODA", recipient="Africa", decision_ids=[slot]
+    )
+    draft = {
+        "slot": slot,
+        "description": "Whose spending the figure counts.",
+        "options": ["bilateral", "imputed"],
+        "chosen": "bilateral",
+        "resolved_by": "planner_default",
+        "rationale": "The planner's own words.",
+    }
+
+    result = await _propose(ctx, [requirement], [draft], words=_G7, surface=_Search(africa))
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (written,) = [d for d in plan.decisions if d.slot == slot]
+    assert written.caveat == "scope_unpublished"
+    assert slot in plan.requirement("aid").decision_ids
