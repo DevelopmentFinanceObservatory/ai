@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable, Iterable, MutableMapping, Seque
 from dataclasses import replace
 from typing import Any, cast
 
+from compiler.surface import TransientFaultError
 from google.genai import types
 from pydantic_ai import Tool
 from pydantic_ai.exceptions import UnexpectedModelBehavior
@@ -117,9 +118,11 @@ class RecordingState:
         return key in self._state
 
 
-class EmptyResponseError(UnexpectedModelBehavior):
+class EmptyResponseError(UnexpectedModelBehavior, TransientFaultError):
     """The model's response held neither answer text nor a function call
-    (`holds_no_answer`), so the run has nothing to go on with."""
+    (`holds_no_answer`), and the run produced nothing before it, so it has
+    nothing to go on with. The same request samples again on a later attempt,
+    so the fault is transient (`compiler.surface.TransientFaultError`)."""
 
 
 def holds_no_answer(response: ModelResponse) -> bool:
@@ -130,8 +133,9 @@ def holds_no_answer(response: ModelResponse) -> bool:
     would, with a retry prompt added to the instruction, which breaks the
     one request form (`harness.gemini_wire.in_canonical_form`) and the cached
     prefix, and which no Gemini model of the harness was ever sent. The
-    planner's run ends on it with no output (`planner.pydantic_agent`), and
-    the orchestrator's raises `EmptyResponseError` (`orchestrator.run`).
+    planner's run ends on it with no output (`planner.pydantic_agent`). The
+    orchestrator's ends answered when it streamed text or answered a call
+    before it, and otherwise raises `EmptyResponseError` (`orchestrator.run`).
     """
     return not any(
         isinstance(part, ToolCallPart) or (isinstance(part, TextPart) and part.content)

@@ -139,8 +139,10 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
         its call recorded (`ORCHESTRATOR_PENDING_KEY`) as the edge and the
         next node's input. Anything the run raises fails the turn: a model
         response Gemini blocked (`pydantic_ai.exceptions.ContentFilterError`)
-        and one that held no answer (`harness.gemini_agent.EmptyResponseError`)
-        included.
+        and one that held no answer in a run that had produced nothing
+        (`harness.gemini_agent.EmptyResponseError`, transient) included. A run
+        that held no answer after it streamed text or answered a call ends
+        answered (`orchestrator.run.run_orchestrator`).
 
         Raises:
             RuntimeError: A hand-back answers a call but no conversation

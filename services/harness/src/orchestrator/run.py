@@ -248,13 +248,16 @@ async def run_orchestrator(
 
     The first request opens with the date and the digests as one user content,
     then the user's message as its own, then the seed hand-back when there is
-    one. A response with neither answer text nor a function call ends the run
-    (`harness.gemini_agent.holds_no_answer`) and is not sent back for another
-    try. Any other exception the model or Pydantic AI raises propagates.
+    one. A response with neither answer text nor a function call
+    (`harness.gemini_agent.holds_no_answer`) is not sent back for another try.
+    It ends the run as `Answered`, on the text the run streamed, when the run
+    streamed text or answered a call before it, the hand-back's included: the
+    cards those calls landed and the text stand as the turn's answer. Any
+    other exception the model or Pydantic AI raises propagates.
 
     Raises:
         EmptyResponseError: A model response held neither answer text nor a
-            function call.
+            function call, and the run had produced nothing before it.
         StreamResumedError: google-genai resumed a stream over output no
             continuation token covers (`harness.gemini_wire.resumed_over_output`),
             a dropped connection a later attempt may not meet.
@@ -301,6 +304,11 @@ async def run_orchestrator(
             # The reply the harness writes for a lone removal, which ends the
             # run once the agent's run has closed.
             removal: str | None = None
+            # The text the run streamed, and whether it answered a call, which
+            # an empty response ends the run on (`holds_no_answer`).
+            streamed: list[str] = []
+            answered_any = False
+            ended_empty = False
             async for node in run:
                 if Agent.is_model_request_node(node):
                     deps.view = RecordingState(deps.state)
@@ -308,12 +316,24 @@ async def run_orchestrator(
                     async with node.stream(run.ctx) as stream:
                         async for event in stream:
                             if (text := _text(event)) is not None:
+                                streamed.append(text)
                                 yield TextDelta(text)
                         response = stream.response
                     if holds_no_answer(response):
-                        raise EmptyResponseError(
-                            "the model's response held neither answer text nor a function call"
+                        if not (streamed or answered_any):
+                            raise EmptyResponseError(
+                                "the model's response held neither answer text nor a "
+                                "function call, and the run produced nothing before it"
+                            )
+                        logger.warning(
+                            "orchestrator response held no answer; the run ends on what it "
+                            "produced turn_id=%s streamed_chars=%d answered_calls=%s",
+                            turn_id,
+                            sum(map(len, streamed)),
+                            answered_any,
                         )
+                        ended_empty = True
+                        break
                     yield ModelResponded(parts=response_parts(without_unsigned_thoughts(response)))
                     lone_removal, first = first and _lone_removal(response), False
                 elif Agent.is_call_tools_node(node):
@@ -324,6 +344,7 @@ async def run_orchestrator(
                             if isinstance(event, FunctionToolResultEvent)
                         ]
                     if answered:
+                        answered_any = True
                         yield ToolsAnswered(
                             answers=tuple(answered),
                             state=_written_state(deps, held),
@@ -344,6 +365,9 @@ async def run_orchestrator(
     if removal is not None:
         yield TextDelta(removal)
         yield Answered(text=removal)
+        return
+    if ended_empty:
+        yield Answered(text="".join(streamed))
         return
     assert result is not None
     output = result.output

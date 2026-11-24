@@ -545,24 +545,45 @@ async def test_a_resumed_run_names_the_conversation_its_caller_gives(
 
 @pytest.mark.parametrize(
     "replies",
-    [
-        [empty_reply()],
-        [reply(thought_part("Thinking."))],
-        [reply(_SEARCH), empty_reply()],
-    ],
-    ids=["no-parts", "thought-only", "after-a-tool"],
+    [[empty_reply()], [reply(thought_part("Thinking."))]],
+    ids=["no-parts", "thought-only"],
 )
-async def test_a_response_with_no_answer_ends_the_run_on_a_typed_failure(
+async def test_a_response_with_no_answer_in_a_run_that_produced_nothing_fails_transiently(
     replies: list[Any],
 ) -> None:
     """A response with neither answer text nor a function call is not retried:
-    no further request is sent and the run raises `EmptyResponseError`."""
+    no further request is sent. A run that had produced nothing raises
+    `EmptyResponseError`, a fault a later attempt may not meet."""
     scripted = ScriptedGenai(replies)
 
-    with pytest.raises(EmptyResponseError):
+    with pytest.raises(EmptyResponseError) as raised:
         await _run(scripted, budget=_budget())
 
+    assert transient(raised.value)
     assert len(scripted.requests) == len(replies)
+
+
+@pytest.mark.parametrize(
+    ("first", "text"),
+    [
+        pytest.param(reply(_SEARCH), "", id="after-a-call"),
+        pytest.param(
+            reply(text_part("Looking it up."), _SEARCH), "Looking it up.", id="after-text"
+        ),
+    ],
+)
+async def test_a_response_with_no_answer_after_a_call_ends_the_run_answered(
+    first: Any, text: str
+) -> None:
+    """A response with no answer after the run answered a call ends it answered on the
+    text it streamed, as the calls' work stands, and sends no further request."""
+    scripted = ScriptedGenai([first, empty_reply()])
+
+    events, _ = await _run(scripted, budget=_budget())
+
+    assert any(isinstance(event, ToolsAnswered) for event in events)
+    assert events[-1] == Answered(text=text)
+    assert len(scripted.requests) == 2
 
 
 async def test_a_hand_back_for_a_call_that_does_not_wait_is_refused() -> None:
