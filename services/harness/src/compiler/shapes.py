@@ -343,7 +343,7 @@ def _summed_cut_reads(
 
     A verb other than `filter` reading a retrieval the analysis runner sums
     over its StatVars (`planner.shapes.FrameShape.summed_on_read`), a family
-    counted above one, reads the sum. Over a retrieval without party totals
+    counted above one or whose source counts it as several (`SEVERAL`), reads the sum. Over a retrieval without party totals
     (`sources.cuts_party_totals`) the sum and the cut make a dataset version of
     their own. dfo-apis names no
     version that one derives from, since the cut can drop periods (dfo-apis
@@ -358,8 +358,10 @@ def _summed_cut_reads(
         if (
             isinstance(read, RetrieveOperation)
             and shape.summed_on_read
-            and isinstance(shape.measures, int)
-            and shape.measures > 1
+            and (
+                shape.measures == SEVERAL
+                or (isinstance(shape.measures, int) and shape.measures > 1)
+            )
             and cuts_party_totals(sources[input_id])
         ):
             found.add(read.requirement_id)
@@ -378,20 +380,21 @@ def _rolls_over_a_cut_sum(
     and analysis-mcp checks every root the step's call read against the
     versions that year was resolved over. The sum of a retrieval without party
     totals is a version of its own that no resolution names, so the call would
-    refuse `rolling_anchor_unresolved` at run time. Read summed at retrieval
-    (`stat_vars='sum'`), the newest year and the call read one version. Every
-    step but a filter gives the same figures, since it read the family summed
-    already; a filter reading the retrieval shows the total in place of each
-    StatVar. A filter between them leaves the family unsummed, and every verb
+    refuse `rolling_anchor_unresolved` at run time, since dfo-apis names no base
+    version for a sum over a cut rendering. Read summed at retrieval
+    (`stat_vars='sum'`), the newest year and the call read one version. Every step
+    but a filter gives the same figures, since it read the family summed already;
+    the retrieval itself, where it answers the question, and a filter reading it
+    show the total in place of each StatVar. A filter between them leaves the family unsummed, and every verb
     after it reads one measure (`planner.shapes._several_measures`), so a filter
     is no way round. Fixed years are the other: a step without `rolling` reads no
     newest year.
 
-    A user's pick of `separate` on the plan card cannot take either way, since a
-    replan for a pick states the picked option (`submission.service._picked_decision`),
-    so the entry ends `plan_not_ready` unless the planner drops `rolling`. dfo-apis
-    names no base version for a sum over a cut rendering; once it names the cut
-    version, the call's root is covered and this rule goes.
+    A user's pick of `separate` on the plan card holds in the replan
+    (`submission.service._picked_decision`), so the family cannot be read summed. The
+    replan can drop the step's `rolling` only where the step's requirement cites the
+    picked decision (`submission.service._outside_pick`); otherwise the entry ends
+    `plan_not_ready`.
     """
     if not summed_cut or not rolls(operation) or fixed_end:
         return None
@@ -399,9 +402,9 @@ def _rolls_over_a_cut_sum(
     return (
         f"this step follows the newest year, found over {named} as retrieved, but a step "
         "reads that family of StatVars summed, a version the newest year is not found over; "
-        f"read {named} summed (stat_vars='sum'), which changes the figures of a filter "
-        "reading it, from each StatVar to their total, and of no other step, since every "
-        "other step reads the family summed already; a filter before this step leaves "
+        f"read {named} summed (stat_vars='sum'), which changes what that retrieval and any "
+        "filter reading it show, from each StatVar to their total, and the figures of no "
+        "other step, since every other step reads the family summed already; a filter before this step leaves "
         "several StatVars, which this step refuses; or drop this step's `rolling` and state "
         "its years"
     )

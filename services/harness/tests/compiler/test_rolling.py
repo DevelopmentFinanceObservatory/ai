@@ -390,13 +390,19 @@ _REFUSED = [CompileIssueCode.INPUT_SHAPE_UNSUPPORTED]
             },
             [],
         ),
-        # A family whose membership is not settled may serve one StatVar, which the
-        # runner reads as it is.
+        # A family whose membership is not settled counts as several, and the runner
+        # sums it on read.
         (
             StatVarReading.SEPARATE,
             "growth",
             {"source": {"served_count": None, "stat_var_member_count": 1}},
-            [],
+            _REFUSED,
+        ),
+        (
+            StatVarReading.SEPARATE,
+            "growth",
+            {"source": {"served_count": None, "stat_var_member_count": None}},
+            _REFUSED,
         ),
         # A source searched with an end year refuses the rolling step on its own
         # account, and only that.
@@ -423,6 +429,7 @@ _REFUSED = [CompileIssueCode.INPUT_SHAPE_UNSUPPORTED]
         "fixed-growth-sums-on-read",
         "no-flow-role",
         "membership-unsettled",
+        "membership-uncounted",
         "closed-period",
     ],
 )
