@@ -70,6 +70,7 @@ from planner.records import SpecId, StrictModel
 from pydantic import AfterValidator, BaseModel, Field, JsonValue
 
 from executor.classify import ExecutorCode
+from executor.outcomes import SummedRead
 
 
 class RunStatus(StrEnum):
@@ -229,7 +230,9 @@ class RunRecord(StrictModel):
     no later turn carries a completed run on: the conversation recorded the
     hand-back of its result, or `undelivered` reached the delivery bound
     (`Undelivered`). `undelivered` counts the turns that carried a completed
-    run on without delivering its result."""
+    run on without delivering its result. `stat_vars_summed` holds, by step
+    id, the roots each step of `outcome` read summed, which a stored outcome
+    leaves out (`executor.outcomes.summed_reads`), recorded with it."""
 
     run_id: str
     idempotency_key: str
@@ -243,6 +246,7 @@ class RunRecord(StrictModel):
     pending: PendingHold | None = None
     failure: RunFailure | None = None
     outcome: JsonValue = None
+    stat_vars_summed: dict[str, tuple[SummedRead, ...]] = Field(default_factory=dict)
     resumes: int = 0
     delivered: bool = False
     undelivered: int = 0
@@ -288,10 +292,12 @@ class Seal:
 @dataclass(frozen=True)
 class Publishing:
     """`running` to `publishing` with the run's terminal frames and the
-    outcome that names them, once its inputs are sealed."""
+    outcome that names them, and the roots its steps read summed
+    (`RunRecord.stat_vars_summed`), once its inputs are sealed."""
 
     results: tuple[ResultFrame, ...]
     outcome: JsonValue = None
+    stat_vars_summed: dict[str, tuple[SummedRead, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -329,12 +335,13 @@ class Complete:
 @dataclass(frozen=True)
 class Fail:
     """Any unfinished run to `failed`, with the reason it cannot finish, and
-    the outcome of a computation that stopped. A run that already holds an
-    outcome keeps it."""
+    the outcome of a computation that stopped with the roots its steps read
+    summed. A run that already holds an outcome keeps it and its reads."""
 
     code: str
     reason: str
     outcome: JsonValue = None
+    stat_vars_summed: dict[str, tuple[SummedRead, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -593,7 +600,12 @@ def _with_results(run: RunRecord, change: Publishing) -> RunRecord:
         for frame in frames
     )
     return run.model_copy(
-        update={"status": RunStatus.PUBLISHING, "results": results, "outcome": change.outcome}
+        update={
+            "status": RunStatus.PUBLISHING,
+            "results": results,
+            "outcome": change.outcome,
+            "stat_vars_summed": change.stat_vars_summed,
+        }
     )
 
 
@@ -694,14 +706,15 @@ def advance(run: RunRecord, change: RunChange, *, now: datetime) -> RunRecord:  
             if waiting := _awaiting_publication(run):
                 raise IllegalTransitionError(run, change, f"{waiting} result(s) await publication")
             return run.model_copy(update={"status": RunStatus.COMPLETED})
-        case Fail(code=code, reason=reason, outcome=outcome):
+        case Fail(code=code, reason=reason, outcome=outcome, stat_vars_summed=reads):
             failure = RunFailure(code=code, reason=reason)
-            kept = run.outcome if run.outcome is not None else outcome
+            kept = run.outcome is not None
             return run.model_copy(
                 update={
                     "status": RunStatus.FAILED,
                     "failure": failure,
-                    "outcome": kept,
+                    "outcome": run.outcome if kept else outcome,
+                    "stat_vars_summed": run.stat_vars_summed if kept else reads,
                     "pending": None,
                 }
             )

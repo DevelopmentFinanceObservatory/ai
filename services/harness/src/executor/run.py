@@ -332,6 +332,8 @@ from executor.outcomes import (
     RunOutcome,
     StepRecord,
     outcome_from_json,
+    summed_reads,
+    with_summed_reads,
 )
 
 logger = logging.getLogger(__name__)
@@ -1074,9 +1076,7 @@ async def _compute(
         run = await record_change(ledger, run_id, Resume())
     if run.outcome is not None:
         publishing = run.status in (RunStatus.PUBLISHING, RunStatus.PENDING)
-        return (run if publishing else None), _recorded_outcome(
-            run.outcome, workflow=submission.workflow
-        )
+        return (run if publishing else None), _recorded_outcome(run, workflow=submission.workflow)
     if run.status is RunStatus.FAILED:
         assert run.failure is not None, "a failed run records its failure"
         return None, Refused(
@@ -1114,20 +1114,27 @@ async def _compute(
         for frame in outcome.results.values()
     )
     run = await record_change(
-        ledger, run_id, Publishing(results, outcome=outcome.model_dump(mode="json"))
+        ledger,
+        run_id,
+        Publishing(
+            results,
+            outcome=outcome.model_dump(mode="json"),
+            stat_vars_summed=summed_reads(outcome),
+        ),
     )
     return run, outcome
 
 
-def _recorded_outcome(raw: JsonValue, *, workflow: Workflow) -> RunOutcome:
-    """The outcome a run record holds, its frames by terminal step in
+def _recorded_outcome(run: RunRecord, *, workflow: Workflow) -> RunOutcome:
+    """The outcome `run` holds, with the roots its steps read summed
+    (`RunRecord.stat_vars_summed`), its frames by terminal step in
     `workflow`'s terminal order, the order the run produced them in. A store
     may hand a JSON object back in another key order (Postgres `jsonb` does)."""
 
     def ordered(frames: Mapping[str, FrameRef]) -> dict[str, FrameRef]:
         return {step: frames[step] for step in workflow.terminal_steps if step in frames}
 
-    outcome = outcome_from_json(raw)
+    outcome = with_summed_reads(outcome_from_json(run.outcome), run.stat_vars_summed)
     if isinstance(outcome, Accepted):
         return outcome.model_copy(update={"results": ordered(outcome.results)})
     also_stopped = tuple(
@@ -1172,7 +1179,14 @@ async def _failed(
     else:
         code, reason = outcome.kind, outcome.refusal.message or outcome.refusal.code
     await record_change(
-        ledger, outcome.run_id, Fail(code, reason, outcome=outcome.model_dump(mode="json"))
+        ledger,
+        outcome.run_id,
+        Fail(
+            code,
+            reason,
+            outcome=outcome.model_dump(mode="json"),
+            stat_vars_summed=summed_reads(outcome),
+        ),
     )
     return outcome
 
