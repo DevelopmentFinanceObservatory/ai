@@ -425,6 +425,9 @@ async def test_a_route_that_does_not_answer_ends_the_entry_on_a_retryable_refusa
     assert result["code"] in {code.value for code in TERMINAL_PROPOSE_CODES}
     assert FAILURE_CLASS[result["code"]] is FailureClass.TRANSIENT
     assert result["detail"] == {"read": "stated_scope", "status": 503, "code": "unavailable"}
+    assert "sound" not in result["message"]
+    assert "503" not in result["message"]
+    assert "unavailable" not in result["message"]
     assert load_plan(ctx.state) is None
 
 
