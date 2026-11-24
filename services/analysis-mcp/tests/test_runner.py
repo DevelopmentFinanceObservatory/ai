@@ -1679,6 +1679,37 @@ async def test_a_frame_the_runner_lost_is_fetched_again_at_its_newest_version(
     assert await store.get_mint_record(FrameRef(**_READ_FRAME)) == _READ_RECORD
 
 
+async def test_a_lost_frame_fetched_again_is_named_when_its_read_goes_unrecorded(
+    store: InMemoryMaterialisationStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With no time left to record the Spec read, the digest still says the lost frame was
+    fetched again at its newest version, naming the pair it had, and the cut is logged."""
+    await store.put_mint_record(_record({"format": "parquet"}))
+    lost = {"spec_id": _SPEC, "content_version": _DATASET_CV}
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if "tree" in body and "content_version" in body["tree"]["inputs"]["data"]:
+            return _problem(404, "snapshot_not_found", fix=lost)
+        return _reading_spec(body)
+
+    _install(answer)
+    # The deadline leaves the label read its time and the record step none.
+    deadline = CallDeadline(expires_at=NODES_READ_TIMEOUT_S, clock=lambda: 0.0)
+    with (
+        caplog.at_level(logging.WARNING, logger="analysis_mcp.tool_pipeline"),
+        use_call_deadline(deadline),
+    ):
+        result = await verbs.aggregate(
+            frame_ref=_FRAME, aggregation="sum", rebuild_lost_frames=True
+        )
+
+    assert result.is_error is False, _text(result)
+    assert _CV in _text(result)
+    assert _READ_FRAME["content_version"] not in _text(result)
+    assert await store.get_mint_record(FrameRef(**_READ_FRAME)) is None
+    assert [record.name for record in caplog.records] == ["analysis_mcp.tool_pipeline"]
+
+
 async def test_a_lost_frame_no_record_states_refuses_with_no_rebuild(
     store: InMemoryMaterialisationStore,
 ) -> None:
@@ -2150,7 +2181,10 @@ async def test_a_second_send_that_outruns_the_deadline_answers_the_first_refusal
 
     _install(answer)
     started = time.monotonic()
-    with use_call_deadline(CallDeadline.after(tool_pipeline._AFTER_ANSWER_S + 0.2)):
+    # The deadline's clock stands still, so the first send takes no time on it and the
+    # second gets 0.2 s of real time before the work after it is due.
+    deadline = CallDeadline(expires_at=tool_pipeline._AFTER_ANSWER_S + 0.2, clock=lambda: 0.0)
+    with use_call_deadline(deadline):
         result = await verbs.aggregate(
             frame_ref={"spec_id": _SPEC},
             aggregation="sum",
@@ -2185,7 +2219,8 @@ async def test_recording_a_spec_read_gives_way_to_the_deadline_and_the_answer_st
     monkeypatch.setattr(tool_pipeline, "record_spec_reads", slow_record)
     _install(httpx2.Response(200, json=_recorded_ready("aggregate")))
     started = time.monotonic()
-    with use_call_deadline(CallDeadline.after(NODES_READ_TIMEOUT_S + 0.2)):
+    deadline = CallDeadline(expires_at=NODES_READ_TIMEOUT_S + 0.2, clock=lambda: 0.0)
+    with use_call_deadline(deadline):
         result = await verbs.aggregate(
             frame_ref={"spec_id": _SPEC},
             aggregation="sum",

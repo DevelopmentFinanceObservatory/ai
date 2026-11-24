@@ -18,11 +18,11 @@ ends before the call's deadline, which the combined server starts for an outside
 time left, answers the call as the runner wrote it (`_sent_again_once`). A frame the runner
 no longer holds (`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_`
 frame as the Spec root that fetches it at its newest version in its recorded rendering
-(`runner_tree.spec_root`), an `ops_` frame as the pair the runner computes from its stored recipe on current data
-(`runner_client.replay_derived`). The runner names one lost dataset per refusal, so a
-call over two lost datasets is sent again once per side, at most once per distinct frame
-argument. A `spec_` frame whose rendering
-cannot be established refuses as `spec_root` says. A replay the runner cannot run
+(`runner_tree.spec_root`), an `ops_` frame as the pair the runner computes from its
+stored recipe on current data (`runner_client.replay_derived`). The runner names one
+lost dataset per refusal, so a call over two lost datasets is sent again once per side,
+at most once per distinct frame argument. A `spec_` frame whose rendering cannot be
+established refuses as `spec_root` says. A replay the runner cannot run
 yet refuses with its own delay. When any other replay fails, the call refuses with
 the lost-frame refusal and the sentence that says so (`ToolRefusal.not_rebuilt`). The
 call sent again keeps its own refusal, and gains that sentence only when it names a
@@ -30,12 +30,15 @@ frame still lost.
 The frame each bare `spec_id` and each fetched-again `spec_` frame was read as is
 recorded as its mint record (`runner_tree.record_spec_reads`), and the digest
 opens with a sentence naming that frame's pair, and one naming the pair each rebuilt
-frame was read as when it moved, since a replay can mint a new `ops_` id.
+frame was read as when it moved, since a replay can mint a new `ops_` id. A fetched-again
+`spec_` frame whose read went unrecorded, as when the call's deadline cuts the record step
+short, is named fetched again with no new pair.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -60,6 +63,8 @@ if TYPE_CHECKING:
     from common.place_type import PlaceLevel
 
     from analysis_mcp.identity import OpSpecVariant
+
+logger = logging.getLogger(__name__)
 
 
 def build_op_spec_or_refusal[T: BaseModel](build: Callable[[], T]) -> T | ToolResult:
@@ -134,13 +139,18 @@ def _seconds_left(reserve_s: float = 0.0) -> float | None:
     return None if deadline is None else deadline.remaining() - reserve_s
 
 
-async def _by_deadline[T](work: Awaitable[T], *, reserve_s: float, missed: T) -> T:
+async def _by_deadline[T](work: Awaitable[T], *, reserve_s: float, missed: T, what: str) -> T:
     """What `work` answers when it ends with `reserve_s` of the call's deadline still left,
-    else `missed`. A call with no deadline waits for `work`."""
+    else `missed`, logging that `what` was cut short. A call with no deadline waits for
+    `work`, and a `TimeoutError` of `work`'s own propagates."""
+    limit = asyncio.timeout(_seconds_left(reserve_s))
     try:
-        async with asyncio.timeout(_seconds_left(reserve_s)):
+        async with limit:
             return await work
     except TimeoutError:
+        if not limit.expired():
+            raise
+        logger.warning("%s cut short by the call's deadline", what)
         return missed
 
 
@@ -167,7 +177,9 @@ async def _sent_again_once[T](
         return answer
     if not _time_for(_now() - started + reserve_s):
         return answer
-    return await _by_deadline(send(), reserve_s=reserve_s, missed=answer)
+    return await _by_deadline(
+        send(), reserve_s=reserve_s, missed=answer, what="the second send of a refreshed call"
+    )
 
 
 async def _rebuilt(
@@ -193,8 +205,9 @@ def _pairs(frames: tuple[FrameRef, ...]) -> str:
 
 
 def _rebuilt_sentence(rebuilt: _Rebuilt, read: Mapping[str, tuple[FrameRef, ...]]) -> str | None:
-    """The sentence naming a rebuilt frame's old and new pair, `None` when its pair
-    did not move or the new one is unknown."""
+    """The sentence naming a rebuilt frame's old pair and its new one, `None` when its
+    pair did not move. A `spec_` frame whose read went unrecorded is named fetched again
+    with no new pair."""
     ref = rebuilt.ref
     if "content_version" in rebuilt.node:
         now = (FrameRef.model_validate(rebuilt.node),)
@@ -202,12 +215,10 @@ def _rebuilt_sentence(rebuilt: _Rebuilt, read: Mapping[str, tuple[FrameRef, ...]
     else:
         now = read.get(ref.spec_id, ())
         how = "fetched again at its newest version"
-    if not now or now == (ref,):
+    if now == (ref,):
         return None
-    return (
-        f"The frame {ref.spec_id}, {ref.content_version} was no longer held, so it was "
-        f"{how}: {_pairs(now)} in place of {ref.content_version}."
-    )
+    lost = f"The frame {ref.spec_id}, {ref.content_version} was no longer held, so it was {how}"
+    return f"{lost}: {_pairs(now)} in place of {ref.content_version}." if now else f"{lost}."
 
 
 def _newest_sentence(spec_id: str, read: Mapping[str, tuple[FrameRef, ...]]) -> str:
@@ -250,8 +261,9 @@ async def run_on_runner(
     upstream refreshed under is sent once more (see the module docstring). Without it,
     the runner's refusal is returned: the harness's executor sends again a step bound
     to no evidence and refers a bound one to the planner (`executor.run._repost_recovers`).
-    `refine`, when given, rewrites a runner refusal before it is returned. `heading`, when given, opens the digest of a
-    `sum_of` or `quotient_of` computed under another tool's name.
+    `refine`, when given, rewrites a runner refusal before it is returned. `heading`, when
+    given, opens the digest of a `sum_of` or `quotient_of` computed under another tool's
+    name.
 
     `structured_content` is the summary's `VerbResult` fields and `content` the
     digest rendered from its facts, as the in-process tools built both. A frame
@@ -339,6 +351,7 @@ async def run_on_runner(
             ),
             reserve_s=NODES_READ_TIMEOUT_S,
             missed={},
+            what="recording the Spec reads",
         )
         if sent is not None and sent.spec_roots
         else {}
@@ -353,7 +366,10 @@ async def run_on_runner(
     ]
     digest, cells = digest_cells(answer, heading=heading)
     labels = await _by_deadline(
-        label_cells(cells, read_nodes=read_graph_nodes), reserve_s=0.0, missed=NO_LABELS
+        label_cells(cells, read_nodes=read_graph_nodes),
+        reserve_s=0.0,
+        missed=NO_LABELS,
+        what="reading the cell labels",
     )
     if labels.labels:
         digest = render_summary_digest(answer, heading=heading, labels=labels)
