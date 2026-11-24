@@ -119,6 +119,7 @@ REQUEST_FIXTURES = {
     "request-18-interrupt-unit-pick.json": InterruptResponse,
     "request-19-turn-client-features.json": TurnRequest,
     "request-20-interrupt-switch-unit.json": InterruptResponse,
+    "request-21-cancel-turn.json": CancelRequest,
 }
 
 
@@ -319,6 +320,14 @@ def test_a_malformed_unit_question_is_refused(fault: Callable[[dict[str, Any]], 
 )
 def test_a_malformed_answer_is_refused(answer: dict[str, Any]) -> None:
     raw = _with(_load("request-15-interrupt-unit.json"), ("answers", "q1"), answer)
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
+@pytest.mark.parametrize("turn_index", [0, 2**31], ids=["zero", "past-postgres-int"])
+def test_a_cancel_naming_a_turn_out_of_range_is_refused(turn_index: int) -> None:
+    raw = {**_load("request-21-cancel-turn.json"), "turn_index": turn_index}
 
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python(raw)

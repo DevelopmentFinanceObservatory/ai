@@ -29,20 +29,27 @@ different groups never conflict:
   transaction, fenced on the segment.
 - `mutate_composition` writes the canvas column alone for each
   `/composition` edit, unfenced, and leaves `version` alone.
-- `renew` and `request_cancel` each update the lease columns in one
+- `renew` and `request_cancel` each update the lease columns with a
   conditional statement and leave `version` alone. `request_cancel` sets
-  the boolean `lease_cancel`, as does any writer that knows only that flag.
+  the boolean `lease_cancel`, as does any writer that knows only that flag,
+  or, given the turn the Stop is for, records the Stop itself, running its
+  update again when a lease on that turn goes live between statements.
 
-A Stop names a turn. The next write of the lease columns after
-`request_cancel` (a renewal, a claim save, a closing write, a dropped lease)
-clears `lease_cancel` and records the Stop as a fresh `stop_id` naming the
-row's turn index as stored before that write (`stop_turn`), in the same
-statement. Whether a Stop is live for the row's turn is one predicate
+A Stop names a turn. The next write of the lease columns after a
+`request_cancel` that set the flag (a renewal, a claim save, a closing
+write, a dropped lease) clears `lease_cancel` and records the Stop as a
+fresh `stop_id` naming the row's turn index as stored before that write
+(`stop_turn`), in the same statement. A `request_cancel` given a turn index
+writes `stop_id` and `stop_turn` at once, and only while the row's turn
+index is that turn. Whether a Stop is live for the row's turn is one predicate
 (`StopState.live`). Every reader locks the row first and reads the turn's
 cursor in a later statement, so it sees every write committed before its
 lock. Closing the turn ends its Stop, whatever the status, and no write marks
 a Stop read. A claim save that starts or resumes work refuses while a Stop is
-live (`StopPending`), so the turn index does not move past a live Stop.
+live (`StopPending`), so the turn index does not move past a live Stop. A
+Stop naming a turn that lands on a lease claimed for the next turn is acted
+on by the save that begins that turn, which closes the named turn
+`cancelled` (`stop_names_turn`).
 
 Every canvas writer holds the row lock, so each applies its change to the
 canvas as stored. Lease expiry is compared against the database's clock in
@@ -851,8 +858,10 @@ class StopPending(ConversationStale):
 
 class TurnMoved(Exception):  # noqa: N818 -- named for the wire 409
     """`StudioStore.claim_turn_lease` found the conversation's latest turn
-    is not the one the request names as the turn it follows (`after_turn`):
-    another request began a turn since. `latest` is the row's turn index."""
+    is not the one the request names as the turn it follows (`after_turn`),
+    or `StudioStore.request_cancel` found a live segment holding a turn
+    other than the one the Stop names: another request began a turn since.
+    `latest` is the row's turn index."""
 
     def __init__(self, conversation_id: str, *, latest: int) -> None:
         super().__init__(f"conversation {conversation_id}'s latest turn is {latest}")
@@ -1117,6 +1126,11 @@ class StopState:
         )
 
 
+# How many times `StudioStore.request_cancel` runs its update for a named turn
+# while each read after it finds a lease on that turn gone live since. Each
+# repeat needs another lease to land between two statements, so a few suffice.
+_STOP_TURN_ATTEMPTS = 3
+
 # The row's turn index, as stored in its turn state.
 _TURN_INDEX_SQL = f"COALESCE((turn_state ->> '{_KEY_TURN_INDEX}')::int, 0)"
 # Turns a set `lease_cancel` into a fresh Stop id naming the row's turn index
@@ -1152,6 +1166,22 @@ async def _stop_state(conn: AsyncConnection, row: Any, *, lease_live: bool) -> S
         taken_id=cursor.stop_taken_id if cursor is not None else None,
         lease_live=lease_live,
     )
+
+
+async def stop_names_turn(conn: AsyncConnection, pk: int, turn_index: int) -> bool:
+    """Whether the latest Stop on conversation row `pk`, which the caller
+    locked, names turn `turn_index` (`stop_turn`) and is not the one that
+    turn's `StopScope` answered. A `request_cancel` given the turn records
+    such a Stop, on a lease claimed for the next turn included."""
+    row = (
+        await conn.execute(
+            text("SELECT stop_id, stop_turn FROM conversations WHERE id = :pk"), {"pk": pk}
+        )
+    ).one()
+    if row.stop_id is None or row.stop_turn != turn_index:
+        return False
+    cursor = (await conn.execute(_TURN_AT, {"pk": pk, "turn_index": turn_index})).first()
+    return cursor is None or cursor.stop_taken_id != row.stop_id
 
 
 def _jsonb(value: Any) -> str | None:
@@ -3116,33 +3146,71 @@ class StudioStore:
                 segment_id,
             )
 
-    async def request_cancel(self, principal: str, conversation_id: str) -> bool:
+    async def request_cancel(
+        self, principal: str, conversation_id: str, *, turn_index: int | None = None
+    ) -> bool:
         """Record a Stop request on `conversation_id`'s live segment, whoever
-        owns it, this instance included, by setting `lease_cancel`. The
-        segment's next renewal (`renew`) records it under a fresh id and
-        reports it, and a segment that reads only the flag sees it as well.
-        One conditional update of the lease columns.
+        owns it, this instance included, with a conditional update of the
+        lease columns.
+
+        With no `turn_index`, it sets `lease_cancel`: the segment's next
+        lease write records it under a fresh id naming the row's turn index
+        as it then stands (`_STAMP_STOP`) and reports it, and a segment that
+        reads only the flag sees it as well. With `turn_index`, it records
+        the Stop itself, a fresh `stop_id` naming that turn in `stop_turn`,
+        and only while the row's turn index is `turn_index`. The Stop is then
+        live for that turn alone (`StopState.live`), so a turn begun after it
+        under the same lease runs on.
+
+        A lease on `turn_index` that went live after the update read the row
+        is found by the read that follows it, and the update runs again, up
+        to `_STOP_TURN_ATTEMPTS` times, so a Stop is refused only for a turn
+        other than the one it names.
 
         Returns whether a live segment was found and signalled. `False`
-        means there is none, or the one on record has already expired by the
-        database clock. The caller falls back to whatever cancellation means
-        with no active segment.
+        means the Stop is not recorded: no lease was live, the one on record
+        had expired by the database clock, or, given `turn_index`, each of
+        the `_STOP_TURN_ATTEMPTS` updates missed a lease on that turn that
+        went live or lapsed between statements, so one may be live now. The
+        caller decides again under the conversation lock, as `/cancel` does
+        (`harness.studio._stop_under_lock`), whose claim loses to a live
+        lease.
+
+        Raises:
+            TurnMoved: a live segment holds a turn other than `turn_index`.
         """
         entry = self._entry(principal, conversation_id)
+        live = (
+            "WHERE principal = :principal AND conversation_id = :conversation_id "
+            "AND lease_segment_id IS NOT NULL "
+            f"AND lease_expires_at > {self._time_sql} "
+        )
+        keys = {"principal": principal, "conversation_id": conversation_id}
+        if turn_index is None:
+            assign, guard, values = "lease_cancel = true", "", keys
+        else:
+            assign = "stop_id = :minted, stop_turn = :turn_index"
+            guard = f"AND {_TURN_INDEX_SQL} = :turn_index "
+            values = {**keys, "minted": _wire_id("stop"), "turn_index": turn_index}
+        update = text(
+            f"UPDATE conversations SET {assign} {live}{guard}"
+            "RETURNING lease_segment_id, lease_owner, lease_expires_at"
+        )
+        held_turn = text(f"SELECT {_TURN_INDEX_SQL} AS turn_index FROM conversations {live}")
         async with entry.write_lock:
             async with self._transaction() as conn:
-                row = (
-                    await conn.execute(
-                        text(
-                            "UPDATE conversations SET lease_cancel = true "
-                            "WHERE principal = :principal AND conversation_id = :conversation_id "
-                            "AND lease_segment_id IS NOT NULL "
-                            f"AND lease_expires_at > {self._time_sql} "
-                            "RETURNING lease_segment_id, lease_owner, lease_expires_at"
-                        ),
-                        {"principal": principal, "conversation_id": conversation_id},
-                    )
-                ).first()
+                for _ in range(_STOP_TURN_ATTEMPTS):
+                    row = (await conn.execute(update, values)).first()
+                    if row is not None or turn_index is None:
+                        break
+                    # Each statement reads the newest committed row, so a
+                    # claim that committed after the update read it shows
+                    # here, and the update runs again on it.
+                    held = (await conn.execute(held_turn, keys)).first()
+                    if held is None:
+                        break
+                    if held.turn_index != turn_index:
+                        raise TurnMoved(conversation_id, latest=held.turn_index)
             if row is None:
                 return False
             self._note_segment(
