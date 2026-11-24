@@ -154,20 +154,14 @@ def _key_text(
 # How a flow party role's pooled parties are named in a sum's private-party line, one and
 # several: its members, its private members, its whole totals and its private whole totals.
 # A pool of members beside whole totals names the totals `whole total` on every role.
+# A rank tags a private key pair by `_PRIVATE_PAIR_NOUNS`, since a rank's private pairs
+# hold private members and private whole totals alike.
 _MEMBER_NOUNS: dict[str, tuple[str, str]] = {"financingProvider": ("provider", "providers")}
 _OTHER_MEMBER_NOUNS = ("party", "parties")
 _PRIVATE_MEMBER_NOUNS: dict[str, tuple[str, str]] = {
     "financingProvider": ("private donor", "private donors")
 }
 _OTHER_PRIVATE_MEMBER_NOUNS = ("private party", "private parties")
-
-
-def _private_tag(column: str) -> str:
-    """` (private donor)` or ` (private party)`: what the private value of the party
-    role `column` is, so a tag beside a key pair names the party it describes."""
-    nouns = _PRIVATE_MEMBER_NOUNS.get(column, _OTHER_PRIVATE_MEMBER_NOUNS)
-    return f" ({nouns[0]})"
-
 
 _WHOLE_TOTAL_NOUNS: dict[str, tuple[str, str]] = {
     "financingProvider": ("whole total of providers", "whole totals of providers")
@@ -177,6 +171,16 @@ _PRIVATE_TOTAL_NOUNS: dict[str, tuple[str, str]] = {
     "financingProvider": ("total of private donors", "totals of private donors")
 }
 _OTHER_PRIVATE_TOTAL_NOUNS = ("private total", "private totals")
+# What a rank's tag calls a private key pair of a role: its party class, which a member
+# and a whole total of the private class share.
+_PRIVATE_PAIR_NOUNS: dict[str, str] = {"financingProvider": "private donor class"}
+_OTHER_PRIVATE_PAIR_NOUN = "private party class"
+
+
+def _private_tag(column: str) -> str:
+    """` (private donor class)` or ` (private party class)`: what the private value of
+    the party role `column` is, so a tag beside a key pair names the party it describes."""
+    return f" ({_PRIVATE_PAIR_NOUNS.get(column, _OTHER_PRIVATE_PAIR_NOUN)})"
 
 
 def _counted(count: int, nouns: tuple[str, str], *, qualifier: str = "") -> str:
@@ -978,7 +982,7 @@ def _partitioned_rank_block(
         )
     if omitted:
         named = "; ".join(
-            f"{_key_text(key, private=private)} ({size})" for key, size in omitted[:LIST_CAP]
+            f"{_key_text(key, private=private)} ({size} ranked)" for key, size in omitted[:LIST_CAP]
         )
         more = f"; and {len(omitted) - LIST_CAP} more" if len(omitted) > LIST_CAP else ""
         lines.append(f"  ... {len(omitted)} partitions not shown: {named}{more}.")

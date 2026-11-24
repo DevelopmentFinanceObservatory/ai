@@ -34,6 +34,7 @@ from analysis_mcp.summary import (
     GroupSummary,
     GrowthFacts,
     JoinFacts,
+    KeyPairs,
     MatchedKey,
     PeriodComparison,
     PeriodQuotient,
@@ -740,10 +741,10 @@ def test_a_partitioned_rank_digest_names_the_partitions_past_the_cap() -> None:
 
     assert f"destination=country/R{LIST_CAP - 1} (1 of 3 shown)" in digest
     assert f"#1 origin=donor/D{LIST_CAP}0" not in digest
-    assert f"2 partitions not shown: destination=country/R{LIST_CAP} (3)" in digest
+    assert f"2 partitions not shown: destination=country/R{LIST_CAP} (3 ranked)" in digest
 
 
-_TAG = re.compile(r"(\w+)=([^,()=\n]+?) \(private (donor|party)\)")
+_TAG = re.compile(r"(\w+)=([^,()=\n]+?) \(private (donor|party) class\)")
 
 
 def _private_tags(digest: str) -> list[tuple[str, str, str]]:
@@ -751,32 +752,36 @@ def _private_tags(digest: str) -> list[tuple[str, str, str]]:
     return _TAG.findall(digest)
 
 
-def _spaced_partitioned_digest(private: tuple[tuple[str, str], ...]) -> str:
-    """Two recipients, each partitioned by sector, ranking two donors by provider and
-    channel: every value holds a space, and each key has two pairs."""
+def _tagged_rank_digest(
+    keys: list[KeyPairs],
+    *,
+    rank_by: tuple[str, ...],
+    partition_by: tuple[str, ...],
+    private: tuple[tuple[str, str], ...],
+    per_period: bool = False,
+) -> str:
     ranks = tuple(
         EntityRank(
-            entity_key=(
-                ("destination", f"country/R {p}"),
-                ("sector", "sector 1"),
-                (PROVIDER, f"donor/D {d}"),
-                ("channel", "ch 0"),
-            ),
-            value=float(100 - d),
-            rank=d + 1,
+            entity_key=key,
+            value=float(100 - index),
+            rank=index + 1,
             row_count=1,
             coverage_fraction=1.0,
             time_period="2024",
         )
-        for p in range(2)
-        for d in range(2)
+        for index, key in enumerate(keys)
     )
-    result = _partitioned_ranks(2, 2).model_copy(
-        update={"entity_ranks": ranks, "private_parties": private}
+    result = _partitioned_ranks(1, 1).model_copy(
+        update={
+            "entity_ranks": ranks,
+            "private_parties": private,
+            "per_period": per_period,
+            "limit": None,
+        }
     )
     return render_rank_digest(
-        rank_by=(PROVIDER, "channel"),
-        partition_by=("destination", "sector"),
+        rank_by=rank_by,
+        partition_by=partition_by,
         result=result,
         op_spec_hash="ops_" + "a" * 32,
         content_version="ocv_" + "b" * 32,
@@ -784,28 +789,109 @@ def _spaced_partitioned_digest(private: tuple[tuple[str, str], ...]) -> str:
     )
 
 
+# Two recipients, each partitioned by sector, ranking two donors by provider and channel:
+# every value holds a space, and each key has two pairs.
+_SPACED_KEYS: list[KeyPairs] = [
+    (
+        ("destination", f"country/R {p}"),
+        ("sector", "sector 1"),
+        (PROVIDER, f"donor/D {d}"),
+        ("channel", "ch 0"),
+    )
+    for p in range(2)
+    for d in range(2)
+]
+RECIPIENT = "financingRecipient"
+# Two donors, each partitioned into the recipients it funds.
+_PROVIDER_KEYS: list[KeyPairs] = [
+    ((PROVIDER, f"donor/P {p}"), (RECIPIENT, f"country/R {r}")) for p in range(2) for r in range(2)
+]
 _R0 = ("destination", "country/R 0", "party")
 _SECTOR = ("sector", "sector 1", "party")
 _D1 = (PROVIDER, "donor/D 1", "donor")
+_P0 = (PROVIDER, "donor/P 0", "donor")
 
 
 @pytest.mark.parametrize(
-    ("private", "tagged"),
+    ("keys", "rank_by", "partition_by", "private", "per_period", "tagged"),
     [
-        ((("destination", "country/R 0"),), [_R0]),
-        ((("sector", "sector 1"),), [_SECTOR, _SECTOR]),
-        ((("destination", "country/R 0"), (PROVIDER, "donor/D 1")), [_R0, _D1, _D1]),
-        ((), []),
+        (
+            _SPACED_KEYS,
+            (PROVIDER, "channel"),
+            ("destination", "sector"),
+            (("destination", "country/R 0"),),
+            False,
+            [_R0],
+        ),
+        (
+            _SPACED_KEYS,
+            (PROVIDER, "channel"),
+            ("destination", "sector"),
+            (("sector", "sector 1"),),
+            False,
+            [_SECTOR, _SECTOR],
+        ),
+        (
+            _SPACED_KEYS,
+            (PROVIDER, "channel"),
+            ("destination", "sector"),
+            (("destination", "country/R 0"), (PROVIDER, "donor/D 1")),
+            False,
+            [_R0, _D1, _D1],
+        ),
+        (_SPACED_KEYS, (PROVIDER, "channel"), ("destination", "sector"), (), False, []),
+        (
+            _PROVIDER_KEYS,
+            (RECIPIENT,),
+            (PROVIDER,),
+            ((PROVIDER, "donor/P 0"),),
+            False,
+            [_P0],
+        ),
+        (
+            _PROVIDER_KEYS,
+            (RECIPIENT,),
+            (PROVIDER,),
+            ((PROVIDER, "donor/P 0"),),
+            True,
+            [_P0],
+        ),
+        (
+            [((PROVIDER, "DACOfficialDonors"),), ((PROVIDER, "DACPrivateDonors"),)],
+            (PROVIDER,),
+            (),
+            ((PROVIDER, "DACPrivateDonors"),),
+            False,
+            [(PROVIDER, "DACPrivateDonors", "donor")],
+        ),
     ],
-    ids=["private first column", "private second column", "partition and entity", "none"],
+    ids=[
+        "private first column",
+        "private second column",
+        "partition and entity",
+        "none",
+        "party-role partition",
+        "party-role partition per period",
+        "private whole total",
+    ],
 )
-def test_a_partitioned_rank_digest_tags_each_private_pair_beside_itself(
-    private: tuple[tuple[str, str], ...], tagged: list[tuple[str, str, str]]
+def test_a_rank_digest_tags_each_private_pair_beside_itself(
+    keys: list[KeyPairs],
+    rank_by: tuple[str, ...],
+    partition_by: tuple[str, ...],
+    private: tuple[tuple[str, str], ...],
+    per_period: bool,
+    tagged: list[tuple[str, str, str]],
 ) -> None:
-    """The tag names the party role and follows the pair it describes: a private
-    partition column is tagged on its heading, a private entity on its own line, and a
-    pair beside a private one carries no tag."""
-    assert _private_tags(_spaced_partitioned_digest(private)) == tagged
+    """The tag names the party class, not a donor count, and follows the pair it
+    describes: a private partition column is tagged on its heading, a private entity on
+    its own line, a pair beside a private one carries no tag, and a private whole
+    total reads as the class, not as one donor."""
+    digest = _tagged_rank_digest(
+        keys, rank_by=rank_by, partition_by=partition_by, private=private, per_period=per_period
+    )
+
+    assert _private_tags(digest) == tagged
 
 
 def test_a_partitioned_rank_digest_tags_a_private_partition_it_leaves_out() -> None:
@@ -825,6 +911,7 @@ def test_a_partitioned_rank_digest_tags_a_private_partition_it_leaves_out() -> N
     )
 
     assert _private_tags(digest) == [("destination", f"country/R{LIST_CAP}", "party")]
+    assert f"country/R{LIST_CAP + 1} (3 ranked)" in digest
 
 
 def _zero_denominator_digest(keys: int) -> str:
@@ -1642,9 +1729,9 @@ def test_a_rank_of_donors_tags_each_private_donor() -> None:
 
     lines = render_rank_digest(rank_by=(PROVIDER,), result=result, **_identity()).splitlines()
 
-    tagged = [line for line in lines if "(private donor)" in line]
+    tagged = [line for line in lines if "(private donor class)" in line]
     assert [line.split(":")[0] for line in tagged] == [
-        f"  #3 {PROVIDER}=GatesFoundation (private donor)"
+        f"  #3 {PROVIDER}=GatesFoundation (private donor class)"
     ]
 
 
