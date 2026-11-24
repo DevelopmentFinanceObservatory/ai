@@ -6,7 +6,7 @@ The planner declares the option the user's words ask a figure to count
 share, quotient or comparison only some of whose inputs declare one
 (`_half_declared`), refuses a sum adding such a requirement to imputed multilateral
 aid (`_stated_summed`), and writes a line on the plan card's provider row where the
-figure and the user's words part (`_scope_notes`). Search's reader reads the turn's
+figure and the user's words part (`_provider_line`). Search's reader reads the turn's
 words once (`planner.stated_scope`).
 
 The reader answers each text as dfo-apis' route recorded it
@@ -46,7 +46,9 @@ from planner.plan import (
     DatasetRequirement,
     PinSource,
     ProviderOptionId,
+    UnsupportedOperation,
     aligned_pins,
+    load_optional_declines,
     load_plan,
     save_pin_sources,
     scope_choice_slot,
@@ -1074,10 +1076,17 @@ def _g7_share(africa: str | None, developing: str | None) -> list[dict[str, Any]
 
 
 def _notes(ctx: _Context) -> dict[str, str]:
-    """The plan card's line on each requirement's provider row, by requirement id."""
+    """The plan card's line on each requirement's provider row (`DecisionScope.line`),
+    by requirement id."""
     plan = load_plan(ctx.state)
     assert plan is not None
-    return {note.requirement_id: note.line for note in plan.scope_notes}
+    rows = {decision.slot: decision for decision in plan.decisions}
+    return {
+        requirement.id: row.rationale
+        for requirement in plan.evidence_requirements
+        for slot in requirement.decision_ids
+        if (row := rows.get(slot)) is not None and row.scope is not None and row.scope.line
+    }
 
 
 async def test_the_g7_share_declared_on_both_sides_is_counted_inclusive() -> None:
@@ -1354,6 +1363,8 @@ async def test_an_option_the_pin_does_not_count_is_refused_naming_what_it_offers
     ]
     assert f"{_BILATERAL}, {_INCLUSIVE}" in result["message"]
     assert surface.calls == []
+    # The planner may remove the figure and decline the part asking for it.
+    assert UnsupportedOperation.UNSUPPORTED_ASK in load_optional_declines(ctx.state)
 
 
 async def test_a_line_holds_through_an_amendment_whose_words_name_nothing() -> None:
@@ -1676,3 +1687,92 @@ async def test_words_naming_the_declared_option_clear_its_line() -> None:
     assert sorted(lines) == ["africa", "developing"]
     assert _notes(ctx) == {}
     assert _provider_row(ctx, "africa").rationale not in lines.values()
+
+
+async def test_a_series_with_no_provider_choice_is_left_alone() -> None:
+    """ "Germany's bilateral ODA as a share of its GNI": the ODA declares bilateral and
+    is counted as bilateral flows, and GNI, which has no provider choice, is read as it
+    stands and takes no part in the providers the share compares, so the share states
+    no provider difference."""
+    ctx = _Context()
+    oda = dac1_with_contributions()
+    gni = basis_block(TOTAL, narrow=False, active="measure_basis:gross")
+    # GNI is a series about a place, with no giving or receiving side.
+    gni["resolved"]["entities"] = [
+        {"ref": "country/DEU", "label": "Germany", "entity_type": "Country", "role": "place"}
+    ]
+    _show(ctx, oda, gni)
+    surface = _Search(oda)
+    requirements = [
+        _dataset("oda", oda["spec_id"], "bilateral ODA", donor="Germany", declares=_BILATERAL),
+        _dataset("gni", TOTAL, "GNI", donor="Germany"),
+        _share("oda", "gni"),
+    ]
+
+    result = await _propose(ctx, requirements, words=_GNI, surface=surface)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == {"oda": _held(ctx, oda["spec_id"], _BILATERAL), "gni": TOTAL}
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [d.caveat for d in plan.decisions if d.caveat is not None] == []
+
+
+async def test_a_declaration_with_no_words_read_keeps_the_planners_sentence() -> None:
+    """A requirement declaring inclusive in an entry whose words were never read, as a
+    chip turn's: it is counted that way, and its row says what the planner's choice
+    says, not that the user's question asked for it, and reads no line."""
+    ctx = _Context()
+    blocks = _g7_blocks()
+    _show(ctx, *blocks)
+    requirement = _dataset(
+        "aid", _spec("africa_bilateral"), "net ODA", recipient="Africa", declares=_INCLUSIVE
+    )
+
+    result = await _propose(
+        ctx, [requirement], words=None, surface=_Search(*blocks), question="G7 aid to Africa"
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == {"aid": _spec("africa_inclusive")}
+    row = _provider_row(ctx, "aid")
+    assert not row.rationale.startswith("The user's question asked for")
+    assert _notes(ctx) == {}
+
+
+@pytest.mark.parametrize("declares", [None, _BILATERAL], ids=["bare", "declared"])
+async def test_words_naming_an_option_the_dataset_does_not_publish_read_so(
+    declares: str | None,
+) -> None:
+    """G7 aid to Africa under words asking for imputed multilateral aid, on a part that
+    publishes it only as unavailable and offers core contributions: the row reads that
+    the dataset does not publish it and what the figure is counted as, with no offer
+    to change it, and the requirement cites a caveat saying so, which the reply
+    states."""
+    ctx = _Context()
+    africa = _block("africa_bilateral")
+    for choice in africa["resolved"]["scope_choices"]["choices"]:
+        for option in choice["options"] if choice["axis"] == "provider" else ():
+            if option["option_id"] == _INCLUSIVE:
+                option["availability"] = {"status": "unavailable", "code": "provider_not_offered"}
+            if option["option_id"] == _CONTRIBUTIONS:
+                option["availability"] = {"status": "available", "detail": {}}
+    _show(ctx, africa)
+    requirement = _dataset(
+        "aid", africa["spec_id"], "net ODA", recipient="Africa", declares=declares
+    )
+
+    result = await _propose(ctx, [requirement], words=_G7, surface=_Search(africa))
+
+    assert result["outcome"] == Outcome.OK.value, result
+    line = _notes(ctx)["aid"]
+    assert "does not publish" in line
+    assert "Change it here" not in line
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (caveat,) = [
+        d
+        for d in plan.decisions
+        if d.caveat == "scope_unpublished" and d.slot in plan.requirement("aid").decision_ids
+    ]
+    assert caveat.chosen != caveat.options[1]

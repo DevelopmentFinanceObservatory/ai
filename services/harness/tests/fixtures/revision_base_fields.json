@@ -248,10 +248,6 @@
     "whole_id",
     "sum_id"
   ],
-  "planner.plan.ScopeNote": [
-    "requirement_id",
-    "line"
-  ],
   "planner.plan.ScopeOptionState": [
     "option_id",
     "status",

@@ -400,20 +400,21 @@ _LINE = "Your words name grant equivalents, and no figure in this plan is counte
 
 
 @pytest.mark.parametrize(
-    ("line", "reason"),
+    ("rationale", "line", "reason"),
     [
-        pytest.param(None, "", id="search-default"),
-        pytest.param(_LINE, _LINE, id="scope-note"),
+        pytest.param(None, False, "", id="search-default"),
+        pytest.param("Counted this way by default.", False, "", id="other-default-reason"),
+        pytest.param(_LINE, True, _LINE, id="scope-line"),
     ],
 )
 def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option(
-    line: str | None, reason: str
+    rationale: str | None, line: bool, reason: str
 ) -> None:
     """US health aid to Africa: each scope choice with another option to
     switch to is a card row naming the choice, its active option and every
     option, with why one out of reach is; a planner decision carries none. A row
-    Search's default settled shows no reason, unless it reads a line where the
-    user's words and its option part (`submission.service._scope_notes`)."""
+    Search's default settled shows no reason, unless it reads the card's line where
+    the user's words and its option part (`DecisionScope.line`)."""
     plan = scripted_plan("kenya life expectancy", spec_id=None)
     dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
     pin = "spec_" + "e" * 32
@@ -427,8 +428,18 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option(
     }
     block = {"spec_id": pin, "resolved": {"scope_choices": scope}}
     scoped = scope_choice_decisions({pin: PinSource(block=block, settled=True)})[pin]
-    if line is not None:
-        scoped = (*scoped[:2], scoped[2].model_copy(update={"rationale": line}))
+    if rationale is not None:
+        basis_row = scoped[2]
+        assert basis_row.scope is not None
+        scoped = (
+            *scoped[:2],
+            basis_row.model_copy(
+                update={
+                    "rationale": rationale,
+                    "scope": basis_row.scope.model_copy(update={"line": line}),
+                }
+            ),
+        )
     cited = dataset.model_copy(
         update={
             "decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped)),

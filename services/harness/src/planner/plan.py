@@ -770,12 +770,17 @@ class DecisionScope(StrictModel):
     holds one state per `Decision.options` label, in the same order.
     `provenance` is how the choice came to hold its option, `"default"` when
     Search's default settled it, and `None` on a decision recorded without it.
+    `line` says the decision's rationale is the plan card's line where the option
+    a figure is counted on and the user's words part
+    (`submission.service._provider_line`), which the card shows whoever settled
+    the choice.
     """
 
     choice_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)
     axis: ScopeAxis
     options: tuple[ScopeOptionState, ...] = Field(max_length=MAX_DECISION_OPTIONS)
     provenance: Annotated[ChoiceProvenance | None, HASHED_WHEN_SET] = None
+    line: Annotated[bool, HASHED_WHEN_SET] = Field(default=False, exclude_if=lambda line: not line)
 
 
 # How a calculation qualifies the answer where its inputs differ on one aligned
@@ -783,12 +788,14 @@ class DecisionScope(StrictModel):
 DifferenceCaveat = Literal["providers_differ", "bases_differ"]
 
 # How a decision `propose_plan` writes qualifies the answer (`Decision.caveat`): a
-# calculation's inputs differing on an axis, or a whole compiled from its part.
-DecisionCaveat = Literal[DifferenceCaveat, "derived_whole"]
+# calculation's inputs differing on an axis, a whole compiled from its part, or a
+# figure counted otherwise than the user's words ask because its dataset does not
+# publish it that way (`scope_unpublished`).
+DecisionCaveat = Literal[DifferenceCaveat, "derived_whole", "scope_unpublished"]
 
 # The most decisions qualifying the answer one requirement carries: a calculation
-# states at most one per axis its inputs differ on, and a whole, a dataset
-# requirement, only `derived_whole`.
+# states at most one per axis its inputs differ on, a whole, a dataset requirement,
+# only `derived_whole`, and any other dataset requirement only `scope_unpublished`.
 MAX_REQUIREMENT_CAVEATS = len(get_args(DifferenceCaveat))
 
 
@@ -4852,15 +4859,6 @@ def _serialised_chars(value: Any) -> int:
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
 
 
-class ScopeNote(StrictModel):
-    """The line the plan card's provider row for dataset requirement `requirement_id`
-    reads where the provider option the figure is counted on and the user's words
-    (`Plan.scope_words`) part (`submission.service._scope_notes`)."""
-
-    requirement_id: Identifier
-    line: str = Field(min_length=1, max_length=MAX_DECISION_RATIONALE_CHARS)
-
-
 # The most provider options one turn's words are read to name. Search names at most
 # one per provider scope, four today; the limit sits several times above that.
 MAX_SCOPE_MENTIONS = 16
@@ -4869,7 +4867,7 @@ MAX_SCOPE_MENTIONS = 16
 class ScopeWords(StrictModel):
     """The provider options the user's words name, as Search read the latest turn whose
     words name one (`planner.stated_scope.TextReading.mentions`), which the plan card's
-    lines are judged against (`submission.service._scope_notes`).
+    lines are judged against (`submission.service._provider_records`).
 
     `summing` is the option Search read where those words sum the bilateral and
     multilateral lines (`planner.stated_scope.StatedOption.sums_providers`), which a
@@ -5008,12 +5006,6 @@ class Plan(StrictModel):
             "The aggregates `propose_plan` added to sum the side a whole's dataset leaves "
             "open, each with its whole (`with_whole_sums`)."
         ),
-    )
-    # Where a dataset requirement's provider scope and the words of the turn that set
-    # it part, the line its provider row on the plan card reads
-    # (`submission.service._scope_notes`); the planner cannot set it.
-    scope_notes: Annotated[tuple[ScopeNote, ...], HASHED_WHEN_SET] = Field(
-        default=(), max_length=MAX_PLAN_REQUIREMENTS, exclude_if=lambda notes: not notes
     )
     # The provider options the user's words name, as the latest turn naming one
     # stated them (`submission.service.scope_words`); the planner cannot set it.

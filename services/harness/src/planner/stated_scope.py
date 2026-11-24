@@ -7,7 +7,7 @@ most one, whether it asks for a total, and every provider option it names.
 a turn and holds the reading in session state (`STATED_SCOPE_STATE_KEY`). The planner
 declares the provider option each dataset requirement counts
 (`planner.plan.DatasetRequirement.scope_options`), and admission compares the declarations
-with what is held (`stated_scope_record`, `submission.service._scope_notes`), so a figure
+with what is held (`stated_scope_record`, `submission.service._provider_records`), so a figure
 counted otherwise than the user's words name reads so on the plan card.
 
 A read that fails records nothing, so `propose_plan` admits a plan only on a reading it

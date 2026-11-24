@@ -1893,6 +1893,9 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
         # digest leaves them out.
         "rolling_copies",
         "first_years",
+        # Code writes it from the user's words (`Plan.scope_words`), so the digest
+        # leaves it out.
+        "scope_words",
         # The asks section marks each ask the user removed (`_asks_section`).
         "dropped_asks",
     }
