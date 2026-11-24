@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from orchestrator.run import ModelResponded, ReplyStreamed, TextDelta, ToolsAnswered
+from orchestrator.run import ModelResponded, TextDelta, ToolsAnswered
 
 if TYPE_CHECKING:
     # `planner.pydantic_agent` reaches this module through `planner.call` and
@@ -65,7 +65,6 @@ type GraphEvent = (
     AgentStatus
     | TextDelta
     | ModelResponded
-    | ReplyStreamed
     | ToolsAnswered
     | PlannerStarted
     | PlannerResponse

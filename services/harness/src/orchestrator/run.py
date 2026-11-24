@@ -15,6 +15,11 @@ they happen:
 - `Answered`: the run ended on the reply. Nothing is stored, and the next
   turn opens from the digests.
 
+A response with neither answer text nor a function call
+(`harness.gemini_agent.holds_no_answer`) is not sent back for another try.
+It ends the run `Answered`, with no text, when the turn answered the user all
+the same (`turn_answered`), and raises `EmptyResponseError` otherwise.
+
 A turn whose first response makes one `remove_cards` call and holds no
 answer text ends after that call: the harness writes the reply from the
 call's answer (`harness.orchestrator_tools.removal_reply`), streams it as a
@@ -209,24 +214,13 @@ class HandedOff:
 
 
 @dataclass(frozen=True)
-class ReplyStreamed:
-    """The run ended on a response with no answer after it streamed `text` beside its
-    calls, which stands as the turn's reply: the text has reached the user as
-    `TextDelta`s already, and the translator keeps it as the reply it records."""
-
-    text: str
-
-
-@dataclass(frozen=True)
 class Answered:
     """The run ended on the reply `text`, a bound's closing sentence included."""
 
     text: str
 
 
-type OrchestratorEvent = (
-    TextDelta | ModelResponded | ToolsAnswered | ReplyStreamed | HandedOff | Answered
-)
+type OrchestratorEvent = TextDelta | ModelResponded | ToolsAnswered | HandedOff | Answered
 
 
 class NoCallWaitsError(RuntimeError):
@@ -259,17 +253,14 @@ async def run_orchestrator(
 
     The first request opens with the date and the digests as one user content,
     then the user's message as its own, then the seed hand-back when there is
-    one. A response with neither answer text nor a function call
-    (`harness.gemini_agent.holds_no_answer`) is not sent back for another try.
-    Where the run streamed text beside its calls or drew a card on the canvas
-    (`harness.orchestrator_tools.drawn_card_ids`), what the user was shown
-    stands as the turn's answer: the run yields the streamed text, each
-    response's own paragraph, as `ReplyStreamed`, then ends `Answered` on it.
-    Any other exception the model or Pydantic AI raises propagates.
+    one. A response with neither answer text nor a function call ends the run
+    `Answered`, with no text, where the turn showed the user a card
+    (`turn_answered`). Any other exception the model or Pydantic AI raises
+    propagates.
 
     Raises:
         EmptyResponseError: A model response held neither answer text nor a
-            function call, and the run had streamed no text and drawn no card.
+            function call, and the turn showed the user no card.
         StreamResumedError: google-genai resumed a stream over output no
             continuation token covers (`harness.gemini_wire.resumed_over_output`),
             a dropped connection a later attempt may not meet.
@@ -316,42 +307,32 @@ async def run_orchestrator(
             # The reply the harness writes for a lone removal, which ends the
             # run once the agent's run has closed.
             removal: str | None = None
-            # The text each response of the run streamed, and the cards the turn
-            # drew before the run: an empty response (`holds_no_answer`) ends the
-            # run answered on the text, or on a card drawn since, and fails it
-            # otherwise.
-            streamed: list[str] = []
-            drawn_before = drawn_card_ids(deps.state, turn_id)
-            reply: str | None = None
+            # Whether the run ended on a response with no answer in a turn that
+            # answered the user all the same (`turn_answered`).
+            ended_empty = False
             async for node in run:
                 if Agent.is_model_request_node(node):
                     deps.view = RecordingState(deps.state)
                     held = dict(deps.state.get(ORCHESTRATOR_SPECS_KEY) or {})
-                    pieces: list[str] = []
                     async with node.stream(run.ctx) as stream:
                         async for event in stream:
                             if (text := _text(event)) is not None:
-                                pieces.append(text)
                                 yield TextDelta(text)
                         response = stream.response
                     if holds_no_answer(response):
-                        landed = drawn_card_ids(deps.state, turn_id) - drawn_before
-                        reply = "\n\n".join(text for text in streamed if text)
-                        if not (reply or landed):
+                        if not turn_answered(response, deps.state, turn_id):
                             raise EmptyResponseError(
                                 "the model's response held neither answer text nor a "
-                                "function call, and the run had streamed no text and "
-                                "drawn no card"
+                                "function call, and the turn showed the user no card"
                             )
                         logger.warning(
-                            "orchestrator response held no answer; the run ends on what it "
-                            "showed turn_id=%s reply_chars=%d cards_drawn=%d",
+                            "orchestrator response held no answer; the turn ends on the "
+                            "cards it showed turn_id=%s cards=%d",
                             turn_id,
-                            len(reply),
-                            len(landed),
+                            len(drawn_card_ids(deps.state, turn_id)),
                         )
+                        ended_empty = True
                         break
-                    streamed.append("".join(pieces))
                     yield ModelResponded(parts=response_parts(without_unsigned_thoughts(response)))
                     lone_removal, first = first and _lone_removal(response), False
                 elif Agent.is_call_tools_node(node):
@@ -383,9 +364,8 @@ async def run_orchestrator(
         yield TextDelta(removal)
         yield Answered(text=removal)
         return
-    if reply is not None:
-        yield ReplyStreamed(text=reply)
-        yield Answered(text=reply)
+    if ended_empty:
+        yield Answered(text="")
         return
     assert result is not None
     output = result.output
@@ -399,6 +379,18 @@ async def run_orchestrator(
         )
         return
     yield Answered(text=output)
+
+
+def turn_answered(final: ModelResponse, state: Mapping[str, Any], turn_id: str) -> bool:
+    """Whether turn `turn_id`, whose run ended on `final`, a response making no call,
+    answered the user: `final` holds answer text, or the turn showed the user a card.
+
+    Every card a turn shows is drawn by `make_charts`, in this run or one before a
+    hand-back (`harness.orchestrator_tools.drawn_card_ids`): the execute node of an
+    approved plan publishes frames, which the agent then draws. Text a response
+    streamed beside its calls ("Looking it up.") is narration, which answers
+    nothing."""
+    return not holds_no_answer(final) or bool(drawn_card_ids(state, turn_id))
 
 
 def _opening(opening: Opening) -> tuple[str, list[ModelMessage]]:
@@ -512,4 +504,5 @@ __all__ = [
     "TextDelta",
     "ToolsAnswered",
     "run_orchestrator",
+    "turn_answered",
 ]

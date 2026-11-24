@@ -908,16 +908,18 @@ class _HeldSends:
 
 @pytest.mark.parametrize(
     "shown",
-    ["text-beside-a-call", "a-card-drawn", "nothing"],
+    ["narration-beside-a-call", "a-card-drawn", "nothing"],
 )
-async def test_a_model_response_with_no_answer_ends_on_what_the_user_was_shown(
+async def test_a_model_response_with_no_answer_ends_on_whether_the_turn_answered(
     shown: str,
 ) -> None:
-    """A run ending on a response with no answer closes the turn on what the user was
-    shown: the text it streamed beside its calls, recorded as the reply, or the card it
-    drew. A run that showed nothing fails the turn, and the user is told to retry."""
+    """A run ending on a response with no answer closes the turn answered when the
+    turn drew a card, the card being the reply. Narration streamed beside a call
+    answers nothing, so such a turn fails, and the user is told to retry."""
     script = {
-        "text-beside-a-call": (reply(text_part("Looking it up."), search_call("aid to Kenya")),),
+        "narration-beside-a-call": (
+            reply(text_part("Looking it up."), search_call("aid to Kenya")),
+        ),
         "a-card-drawn": _card()[:3],
         "nothing": (search_call("aid to Kenya"),),
     }[shown]
@@ -928,16 +930,40 @@ async def test_a_model_response_with_no_answer_ends_on_what_the_user_was_shown(
         frames = await _stream(client, "/api/studio/turn", _turn_body())
 
     events = _events(frames)
-    if shown == "nothing":
+    if shown != "a-card-drawn":
         error = _frame(frames, "error")["error"]
         assert (error["error"], error["retry"]) == ("transient_unavailable", "retry_after_delay")
+        assert "message.complete" not in events
         return
     assert "error" not in events
     assert events[-1] == "done"
-    if shown == "text-beside-a-call":
-        assert _frame(frames, "message.complete")["text"].startswith("Looking it up.")
-    else:
-        assert "component.created" in events
+    assert "component.created" in events
+
+
+async def test_an_approved_plan_whose_closing_response_is_empty_ends_on_the_turns_card() -> None:
+    """A card the turn drew before handing a plan off is one it showed the user, so
+    once the plan is approved and run, an empty closing response ends the turn
+    answered and nothing advises a retry that would run the plan again."""
+    executor = ScriptedExecutor(_card_results())
+    app = _app(
+        *_card()[:3],
+        plan_call("q with forks"),
+        empty_reply(),
+        resolver=_search(),
+        executor=executor,
+        tool_surface=ScriptedSurface(),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        second = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+
+    assert "component.created" in _events(first)
+    events = _events(second)
+    assert "error" not in events
+    assert events[-1] == "done"
 
 
 async def test_the_stream_that_offers_a_card_closes_once_its_early_mints_are_posted() -> None:

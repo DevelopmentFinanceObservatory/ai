@@ -34,7 +34,6 @@ from orchestrator.run import (
     ModelResponded,
     NoCallWaitsError,
     Opening,
-    ReplyStreamed,
     StoredHistory,
     TextDelta,
     ToolsAnswered,
@@ -546,16 +545,21 @@ async def test_a_resumed_run_names_the_conversation_its_caller_gives(
 
 @pytest.mark.parametrize(
     "replies",
-    [[empty_reply()], [reply(thought_part("Thinking."))], [reply(_SEARCH), empty_reply()]],
-    ids=["no-parts", "thought-only", "after-a-call"],
+    [
+        [empty_reply()],
+        [reply(thought_part("Thinking."))],
+        [reply(_SEARCH), empty_reply()],
+        [reply(text_part("Looking it up."), _SEARCH), empty_reply()],
+    ],
+    ids=["no-parts", "thought-only", "after-a-call", "after-narration"],
 )
-async def test_a_response_with_no_answer_in_a_run_that_showed_nothing_fails_transiently(
+async def test_a_response_with_no_answer_in_a_turn_that_showed_no_card_fails_transiently(
     replies: list[Any],
 ) -> None:
     """A response with neither answer text nor a function call is not retried: no
-    further request is sent. A run that streamed no text and drew no card, whatever
-    calls it answered, raises `EmptyResponseError`, a fault a later attempt may not
-    meet."""
+    further request is sent. A turn that showed the user no card, whatever calls it
+    answered and whatever narration it streamed beside them, raises
+    `EmptyResponseError`, a fault a later attempt may not meet."""
     scripted = ScriptedGenai(replies)
 
     with pytest.raises(EmptyResponseError) as raised:
@@ -609,32 +613,12 @@ class _DrawingSearches(_Searches):
         return await super().__call__(**kwargs)
 
 
-@pytest.mark.parametrize(
-    ("replies", "drawing", "text"),
-    [
-        pytest.param(
-            [
-                reply(text_part("Looking it up."), _SEARCH),
-                reply(text_part("Found the series."), _SEARCH),
-            ],
-            False,
-            "Looking it up.\n\nFound the series.",
-            id="after-text",
-        ),
-        pytest.param([reply(_SEARCH)], True, "", id="after-a-card"),
-    ],
-)
-async def test_a_response_with_no_answer_after_the_run_showed_something_ends_it_answered(
-    replies: list[Any], drawing: bool, text: str
-) -> None:
-    """A response with no answer after the run streamed text beside its calls, or drew
-    a card, ends it answered on that text, each response's its own paragraph, and sends
-    no further request. The text stands as the reply (`ReplyStreamed`)."""
-    scripted = ScriptedGenai([*replies, empty_reply()])
+async def test_a_response_with_no_answer_after_a_card_drawn_this_run_ends_it_answered() -> None:
+    """A response with no answer after the run drew a card ends it answered, with no
+    text, and sends no further request: the card is the answer."""
+    scripted = ScriptedGenai([reply(text_part("Looking it up."), _SEARCH), empty_reply()])
     drawn: dict[str, Any] = {}
-    tools = build_orchestrator_tools(
-        resolver=_DrawingSearches(drawn) if drawing else _Searches(), executor=_no_executor
-    )
+    tools = build_orchestrator_tools(resolver=_DrawingSearches(drawn), executor=_no_executor)
 
     events, _ = await _run(
         scripted,
@@ -643,8 +627,47 @@ async def test_a_response_with_no_answer_after_the_run_showed_something_ends_it_
         held={_DRAWN_CARDS_KEY: {"turn": "turn-1", "drawn": drawn}},
     )
 
-    assert events[-2:] == [ReplyStreamed(text=text), Answered(text=text)]
-    assert len(scripted.requests) == len(replies) + 1
+    assert events[-1] == Answered(text="")
+    assert len(scripted.requests) == 2
+
+
+async def test_a_resumed_run_ends_answered_on_a_card_drawn_before_the_hand_back() -> None:
+    """A card drawn in the run before a hand-back is one the turn showed the user, so
+    a resumed run whose response holds no answer ends answered."""
+    asked = {"questions": [{"question": "Which Congo?", "options": [{"label": "DR Congo"}]}]}
+    scripted = ScriptedGenai(
+        [reply(_SEARCH), reply(call_part("ask_user", asked)), reply(thought_part("Hmm."))]
+    )
+    drawn: dict[str, Any] = {}
+    orchestrator = orchestrator_agent(
+        build_orchestrator_tools(resolver=_DrawingSearches(drawn), executor=_no_executor)
+    )
+    state: dict[str, Any] = {
+        "surface": "studio",
+        _DRAWN_CARDS_KEY: {"turn": "turn-1", "drawn": drawn},
+    }
+    model = orchestrator_model("gemini-test", client=scripted.client, budget=None)
+    (handed,) = [
+        e
+        async for e in run_orchestrator(
+            orchestrator, state=state, turn_id="turn-1", model=model, opening=Opening("q", TODAY)
+        )
+        if isinstance(e, HandedOff)
+    ]
+
+    resumed = [
+        e
+        async for e in run_orchestrator(
+            orchestrator,
+            state=state,
+            turn_id="turn-1",
+            model=model,
+            history=handed.history,
+            hand_back=HandBack(answers="ask_user", result={"result": "DR Congo"}),
+        )
+    ]
+
+    assert resumed[-1] == Answered(text="")
 
 
 async def test_a_hand_back_for_a_call_that_does_not_wait_is_refused() -> None:
