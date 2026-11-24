@@ -772,8 +772,7 @@ class DecisionScope(StrictModel):
     Search's default settled it, and `None` on a decision recorded without it.
     `line` says the decision's rationale is the plan card's line where the option
     a figure is counted on and the user's words part
-    (`submission.service._provider_line`), which the card shows whoever settled
-    the choice.
+    (`submission.service._provider_line`); the card shows it on the row.
     """
 
     choice_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)

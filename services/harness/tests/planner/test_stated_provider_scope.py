@@ -21,7 +21,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast, get_args
@@ -46,6 +46,7 @@ from planner.plan import (
     DatasetRequirement,
     PinSource,
     ProviderOptionId,
+    ResolvedBy,
     UnsupportedOperation,
     aligned_pins,
     load_optional_declines,
@@ -66,7 +67,7 @@ from planner.stated_scope import (
 from planner.tool_results import Outcome, ProblemCode
 from planner.tools import load_pending_ask
 from planner.workflow import ToolId
-from submission.service import _stated_label, save_aligned_pin
+from submission.service import _ALIGNED_REASONS, _stated_label, save_aligned_pin
 
 from ..basis_alignment import (
     HEALTH,
@@ -1689,19 +1690,55 @@ async def test_words_naming_the_declared_option_clear_its_line() -> None:
     assert _provider_row(ctx, "africa").rationale not in lines.values()
 
 
-async def test_a_series_with_no_provider_choice_is_left_alone() -> None:
+def _economic_activity(block: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `block` measuring economic activity, as GNI does, its donor still
+    bound on the giving side, as DAC1 reads GNI."""
+    block = copy.deepcopy(block)
+    block["resolved"]["shape"]["population_type"] = {
+        "ref": "EconomicActivity",
+        "label": "economic activity",
+    }
+    return block
+
+
+def _without_scope(block: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `block` measuring economic activity with no scope choices at all."""
+    block = _economic_activity(block)
+    del block["resolved"]["scope_choices"]
+    return block
+
+
+def _creditor_spelled(block: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `block`, a flow with no provider choice, its parties spelled as a
+    creditor and a debtor."""
+    block = copy.deepcopy(block)
+    roles = {"origin": "creditor", "destination": "debtor"}
+    for entity in block["resolved"]["entities"]:
+        entity["role"] = roles.get(entity["role"], entity["role"])
+    return block
+
+
+@pytest.mark.parametrize(
+    ("other", "caveats"),
+    [
+        pytest.param(_economic_activity, [], id="gni-on-dac1"),
+        pytest.param(_without_scope, [], id="gni-with-no-scope"),
+        pytest.param(_creditor_spelled, ["providers_differ"], id="flow-spelled-by-creditor"),
+    ],
+)
+async def test_a_series_with_no_provider_choice_is_left_alone(
+    other: Callable[[dict[str, Any]], dict[str, Any]], caveats: list[str]
+) -> None:
     """ "Germany's bilateral ODA as a share of its GNI": the ODA declares bilateral and
     is counted as bilateral flows, and GNI, which has no provider choice, is read as it
-    stands and takes no part in the providers the share compares, so the share states
-    no provider difference."""
+    stands. GNI measures economic activity, so it takes no part in the providers the
+    share compares, whether DAC1 binds its donor or it states no scope at all. A
+    series with no provider choice that measures a flow, however its parties are
+    spelled, counts providers nothing records, so the share states the difference."""
     ctx = _Context()
     oda = dac1_with_contributions()
-    gni = basis_block(TOTAL, narrow=False, active="measure_basis:gross")
-    # GNI is a series about a place, with no giving or receiving side.
-    gni["resolved"]["entities"] = [
-        {"ref": "country/DEU", "label": "Germany", "entity_type": "Country", "role": "place"}
-    ]
-    _show(ctx, oda, gni)
+    second = other(basis_block(TOTAL, narrow=False, active="measure_basis:gross"))
+    _show(ctx, oda, second)
     surface = _Search(oda)
     requirements = [
         _dataset("oda", oda["spec_id"], "bilateral ODA", donor="Germany", declares=_BILATERAL),
@@ -1715,13 +1752,14 @@ async def test_a_series_with_no_provider_choice_is_left_alone() -> None:
     assert _pins(ctx) == {"oda": _held(ctx, oda["spec_id"], _BILATERAL), "gni": TOTAL}
     plan = load_plan(ctx.state)
     assert plan is not None
-    assert [d.caveat for d in plan.decisions if d.caveat is not None] == []
+    assert [d.caveat for d in plan.decisions if d.caveat is not None] == caveats
 
 
 async def test_a_declaration_with_no_words_read_keeps_the_planners_sentence() -> None:
     """A requirement declaring inclusive in an entry whose words were never read, as a
-    chip turn's: it is counted that way, and its row says what the planner's choice
-    says, not that the user's question asked for it, and reads no line."""
+    chip turn's, and read by no calculation: it is counted that way, its row
+    attributes the option to the plan's wording of the input, and it reads no
+    line."""
     ctx = _Context()
     blocks = _g7_blocks()
     _show(ctx, *blocks)
@@ -1736,7 +1774,10 @@ async def test_a_declaration_with_no_words_read_keeps_the_planners_sentence() ->
     assert result["outcome"] == Outcome.OK.value, result
     assert _pins(ctx) == {"aid": _spec("africa_inclusive")}
     row = _provider_row(ctx, "aid")
-    assert not row.rationale.startswith("The user's question asked for")
+    assert row.resolved_by is ResolvedBy.PLANNER_DEFAULT
+    assert not row.scope.line
+    # No calculation reads it, so no alignment reason applies.
+    assert _ALIGNED_REASONS["provider"] not in row.rationale
     assert _notes(ctx) == {}
 
 
@@ -1765,9 +1806,7 @@ async def test_words_naming_an_option_the_dataset_does_not_publish_read_so(
     result = await _propose(ctx, [requirement], words=_G7, surface=_Search(africa))
 
     assert result["outcome"] == Outcome.OK.value, result
-    line = _notes(ctx)["aid"]
-    assert "does not publish" in line
-    assert "Change it here" not in line
+    assert _provider_row(ctx, "aid").scope.line
     plan = load_plan(ctx.state)
     assert plan is not None
     (caveat,) = [
@@ -1776,3 +1815,62 @@ async def test_words_naming_an_option_the_dataset_does_not_publish_read_so(
         if d.caveat == "scope_unpublished" and d.slot in plan.requirement("aid").decision_ids
     ]
     assert caveat.chosen != caveat.options[1]
+
+
+async def test_words_naming_an_option_blocked_by_another_choice_offer_it() -> None:
+    """G7 aid to Africa under words asking for imputed multilateral aid, on a part where
+    that option is blocked only by another choice the user can change
+    (`conflicts_with`): the card can reach it, so the row reads the line offering it
+    and the answer states no unpublished caveat."""
+    ctx = _Context()
+    africa = _block("africa_bilateral")
+    for choice in africa["resolved"]["scope_choices"]["choices"]:
+        for option in choice["options"] if choice["axis"] == "provider" else ():
+            if option["option_id"] == _INCLUSIVE:
+                option["availability"] = {"status": "unavailable", "code": "conflicts_with"}
+    _show(ctx, africa)
+    requirement = _dataset("aid", africa["spec_id"], "net ODA", recipient="Africa")
+
+    result = await _propose(ctx, [requirement], words=_G7, surface=_Search(africa))
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _provider_row(ctx, "aid").scope.line
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [d.caveat for d in plan.decisions if d.caveat is not None] == []
+
+
+async def test_a_planner_draft_on_the_unpublished_caveats_slot_gives_way_to_codes() -> None:
+    """A proposal whose own decision takes the slot of the caveat code writes where the
+    words name an option the dataset does not publish: code's caveat is written there
+    and the requirement cites it."""
+    ctx = _Context()
+    africa = _block("africa_bilateral")
+    for choice in africa["resolved"]["scope_choices"]["choices"]:
+        for option in choice["options"] if choice["axis"] == "provider" else ():
+            if option["option_id"] == _INCLUSIVE:
+                option["availability"] = {"status": "unavailable", "code": "provider_not_offered"}
+            if option["option_id"] == _CONTRIBUTIONS:
+                option["availability"] = {"status": "available", "detail": {}}
+    _show(ctx, africa)
+    slot = "scope_unpublished_of_aid"
+    requirement = _dataset(
+        "aid", africa["spec_id"], "net ODA", recipient="Africa", decision_ids=[slot]
+    )
+    draft = {
+        "slot": slot,
+        "description": "Whose spending the figure counts.",
+        "options": ["bilateral", "imputed"],
+        "chosen": "bilateral",
+        "resolved_by": "planner_default",
+        "rationale": "The planner's own words.",
+    }
+
+    result = await _propose(ctx, [requirement], [draft], words=_G7, surface=_Search(africa))
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (written,) = [d for d in plan.decisions if d.slot == slot]
+    assert written.caveat == "scope_unpublished"
+    assert slot in plan.requirement("aid").decision_ids

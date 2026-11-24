@@ -55,7 +55,6 @@ from itertools import chain
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, cast, get_args
 
 import rfc8785
-from common.place_type import FLOW_ROLE_COLUMNS
 from compiler.evidence import named_members, named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
@@ -4683,12 +4682,21 @@ def _scope_decisions(
         `evidence_requirements` citing them, with each carried calculation
         whose citations changed.
     """
-    # Code writes the decisions qualifying the answer, so a draft of the
-    # planner's restating one of their slots gives way to code's.
+    # Code writes the decisions qualifying the answer and the rows of the axes
+    # alignment moves, so a draft of the planner's restating one of their slots
+    # gives way to code's.
     derived_slots = {
-        derived.slot
-        for stated_by in (*wholes.values(), *calculations.values())
-        for derived in stated_by
+        *(
+            derived.slot
+            for stated_by in (*wholes.values(), *calculations.values())
+            for derived in stated_by
+        ),
+        *(caveat.slot for caveat in unpublished.values()),
+        *(
+            _moved_axis_slot(requirement_id, option_axis(option_id))
+            for requirement_id, pin in moved.items()
+            for option_id in pin.option_ids
+        ),
     }
     decisions = [decision for decision in decisions if decision.slot not in derived_slots]
     carried = previous.decisions if previous is not None else ()
@@ -4713,9 +4721,10 @@ def _scope_decisions(
         ),
     ]
     aligned = _moved_axis_decisions(moved, lines=lines)
-    # An input whose provider row reads a line and that alignment leaves on its pin
-    # reads it on its pin's own provider row, the one a switch on the card moves. A
-    # pin two such inputs state reads the first one's line.
+    # An input whose provider row reads a line and that alignment leaves on its
+    # pin's provider option reads it on its pin's own provider row, the one a switch
+    # on the card moves; one moved onto another provider option reads it on its
+    # moved row, or nowhere. A pin two such inputs state reads the first one's line.
     scopes = dict(scopes)
     lined: set[str] = set()
     for requirement in evidence_requirements:
@@ -4723,9 +4732,9 @@ def _scope_decisions(
         line = lines.get(requirement.id)
         if pin is None or line is None or pin in lined:
             continue
-        if any(
-            d.scope is not None and d.scope.axis == PROVIDER_AXIS
-            for d in aligned.get(requirement.id, ())
+        moved_to = moved.get(requirement.id)
+        if moved_to is not None and any(
+            option_axis(option_id) == PROVIDER_AXIS for option_id in moved_to.option_ids
         ):
             continue
         lined.add(pin)
@@ -7350,8 +7359,9 @@ class _ProviderRecord:
     Search's default. `words` says how the user's words (`Plan.scope_words`) stand to
     `counted`: they name it, name other options and not it, or were never read.
     `offered` are the options the words name that no figure of the plan is counted
-    on and the pin offers, and `unpublished` those the pin offers only as
-    unavailable, which the card cannot switch to.
+    on and the card can switch to (`_reachable`), and `unpublished` those the pin
+    offers only as unavailable, which it cannot. `combined` says a calculation reads
+    it.
     """
 
     basis: _InputBasis
@@ -7361,12 +7371,12 @@ class _ProviderRecord:
     words: _Words
     offered: tuple[str, ...]
     unpublished: tuple[str, ...]
+    combined: bool
 
 
 class _RowWords(NamedTuple):
-    """The words a provider row reads in place of its own sentence: `text`, and
-    whether it is the card's line where the figure and the user's words part
-    (`DecisionScope.line`), which the card shows whoever settled the row."""
+    """The words a provider row reads: `text`, and whether it is the card's line
+    where the figure and the user's words part (`DecisionScope.line`)."""
 
     text: str
     line: bool
@@ -7386,8 +7396,9 @@ def _provider_records(
 
     `counted` holds the option alignment moved each input to. `words` are the options
     the user's words name (`_scope_words`); words summing the bilateral and
-    multilateral lines name a choice's option counting core contributions in place of
-    the option Search read, as the brief does (`stated_scope_line`). An option is held
+    multilateral lines name a choice's option counting core contributions, which
+    stands for the option Search read, as the brief reads them
+    (`stated_scope_line`). An option is held
     when some figure is counted on it. An input a sum adds to a series with no
     provider choice, bilateral aid plus imputed multilateral aid, counts the words'
     option through the sum (`_summed_beside_unchosen`), so it is offered none.
@@ -7413,6 +7424,7 @@ def _provider_records(
     contributions = frozenset().union(*(summing_options(bases[r.id]) for r in dataset))
     summed = _summed_beside_unchosen(requirements, bases.keys())
     held = set(own.values())
+    combined = {input_id for requirement in requirements for input_id in inputs_of(requirement)}
 
     def named(basis: _InputBasis) -> frozenset[str]:
         options = summing_options(basis)
@@ -7457,14 +7469,20 @@ def _provider_records(
                 if counted_on in named(basis)
                 else "not_named"
             ),
-            offered=tuple(
-                sorted(o.option_id for o in wanted if o.availability.status != "unavailable")
-            ),
-            unpublished=tuple(
-                sorted(o.option_id for o in wanted if o.availability.status == "unavailable")
-            ),
+            offered=tuple(sorted(o.option_id for o in wanted if _reachable(o))),
+            unpublished=tuple(sorted(o.option_id for o in wanted if not _reachable(o))),
+            combined=requirement.id in combined,
         )
     return records
+
+
+def _reachable(option: Option) -> bool:
+    """Whether the plan card can switch to `option`: it is served, whole or for some
+    years, or blocked only by another choice the user can change (`conflicts_with`),
+    as `_scope_decision` reads it."""
+    return (
+        option.availability.status != "unavailable" or option.availability.code == "conflicts_with"
+    )
 
 
 def _provider_line(record: _ProviderRecord) -> _RowWords | None:
@@ -7476,9 +7494,12 @@ def _provider_line(record: _ProviderRecord) -> _RowWords | None:
     figure is counted as, with no offer to change it, since the card cannot switch to
     it, and the reply states it too (`_unpublished_caveat`); else, for a declared
     option the words do not name, that the planner chose it; and for a row declaring
-    none, that the words name an option the pin offers and no figure is counted on. A declared option the words name,
-    to which alignment moved the pin, reads that the user's question asked for it.
-    With no words read, a declaration keeps its own sentence.
+    none, that the words name an option the pin offers and no figure is counted on.
+    A declared option the words name, to which alignment moved the pin, reads that
+    the user's question asked for it. With no words read, a declaration moved onto
+    its option keeps the sentence of an axis the planner settled: an input of a
+    calculation the one alignment gives, and a lone figure that the plan's wording
+    asked for the option, since no other input is aligned with it.
     """
     if record.settled in ("switched", "stated"):
         return None
@@ -7509,6 +7530,13 @@ def _provider_line(record: _ProviderRecord) -> _RowWords | None:
         and record.counted != basis.choice.active
     ):
         return _RowWords(f"The user's question asked for {counted}.", line=False)
+    if (
+        record.declared is not None
+        and record.words == "not_read"
+        and record.counted != basis.choice.active
+        and not record.combined
+    ):
+        return _RowWords(f"The plan's wording of this input asked for {counted}.", line=False)
     return None
 
 
@@ -8167,11 +8195,10 @@ def _difference_decisions(
     one when two inputs' records hold different options on the axis, as when
     the user set its inputs to different ones or alignment kept two sides
     apart (`_alignment_targets`); on the provider axis the options are compared by
-    the scope they count (`Option.provider_scope`). An input whose dataset has no
-    choice on the axis takes no part, as GNI or population takes none on the
-    provider axis, unless it states a flow (`_states_a_flow`): an aid figure with no
-    provider choice, or one whose dataset states no scope at all, is unrecorded. On
-    the provider axis it states one too where an input declares its option
+    the scope they count (`Option.provider_scope`). On the provider axis an input
+    whose dataset has no provider choice takes part only where it measures a flow
+    (`_states_a_flow`), whose providers are then unrecorded; GNI or population takes
+    no part. There it states one too where an input declares its option
     (`DatasetRequirement.scope_options`) and another is unrecorded, since nothing
     says the second counts the same providers, led by `_UNRECORDED_PROVIDER_LEAD`. The decision says
     so in reader words, one sentence per input naming what it counts, or
@@ -8216,16 +8243,17 @@ def _difference_decisions(
             continue
         stated: list[Decision] = []
         for axis, difference in _DIFFERENCES.items():
-            # An input whose dataset has no choice on the axis takes no part there,
-            # unless it is an aid figure on the provider axis (`_states_a_flow`), whose
-            # provider breadth is then unknown (`None`), as is that of an input whose
-            # dataset states no scope at all.
+            # An input whose dataset has a choice on the axis takes part. On the
+            # provider axis, so does one with none that measures a flow
+            # (`_states_a_flow`), whose providers are then unknown (`None`); GNI or
+            # population takes no part. On another axis, an input whose dataset
+            # states no scope at all is unknown.
             held = [
                 (requirement, block, _active_option(scope, axis))
                 for requirement, block, scope in pinned
-                if scope is None
-                or any(choice.axis == axis for choice in scope.choices)
+                if any(choice.axis == axis for choice in (scope.choices if scope else ()))
                 or (axis == PROVIDER_AXIS and _states_a_flow(block))
+                or (axis != PROVIDER_AXIS and scope is None)
             ]
             differing: set[str] = set()
             # Whether two inputs' records differ, and whether a group is stated only
@@ -8300,18 +8328,23 @@ def _difference_decisions(
     return decisions
 
 
+# The population types of a statistical variable counting money a provider gives or
+# lends: a flow, as aid or lending is, or a position, as debt owed is. A series of
+# another, such as GNI's economic activity or a population's people, counts no
+# provider's spending.
+_PROVIDED_MONEY_POPULATIONS = frozenset({"FinancialFlow", "FinancialPosition"})
+
+
 def _states_a_flow(block: Mapping[str, Any] | None) -> bool:
-    """Whether `block`, a spec block, counts a flow: an entity it binds, or an axis it
-    leaves open (`open_entity_axes_of`), is a flow's giving or receiving side
-    (`FLOW_ROLE_COLUMNS`), as aid from a donor or to a recipient is and GNI or
-    population is not."""
-    resolved = (block or {}).get("resolved") or {}
-    roles = {
-        entity.get("role")
-        for entity in resolved.get("entities") or ()
-        if isinstance(entity, Mapping)
-    } | {axis.column for axis in open_entity_axes_of(resolved)}
-    return bool(roles & FLOW_ROLE_COLUMNS.keys())
+    """Whether `block`, a spec block, measures money a provider gives or lends, by the
+    population type of the statistical variable it measures
+    (`resolved.shape.population_type`, `_PROVIDED_MONEY_POPULATIONS`), however its
+    parties are spelled. A block that states no population type might, so it is
+    read as one that does."""
+    shape = ((block or {}).get("resolved") or {}).get("shape")
+    population = shape.get("population_type") if isinstance(shape, Mapping) else None
+    ref = population.get("ref") if isinstance(population, Mapping) else population
+    return not isinstance(ref, str) or ref in _PROVIDED_MONEY_POPULATIONS
 
 
 def _counted_as(option: Option | None, axis: str) -> object:

@@ -403,7 +403,12 @@ _LINE = "Your words name grant equivalents, and no figure in this plan is counte
     ("rationale", "line", "reason"),
     [
         pytest.param(None, False, "", id="search-default"),
-        pytest.param("Counted this way by default.", False, "", id="other-default-reason"),
+        pytest.param(
+            "Counted this way by default.",
+            False,
+            "Counted this way by default.",
+            id="other-default-reason",
+        ),
         pytest.param(_LINE, True, _LINE, id="scope-line"),
     ],
 )
@@ -413,8 +418,9 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option(
     """US health aid to Africa: each scope choice with another option to
     switch to is a card row naming the choice, its active option and every
     option, with why one out of reach is; a planner decision carries none. A row
-    Search's default settled shows no reason, unless it reads the card's line where
-    the user's words and its option part (`DecisionScope.line`)."""
+    Search's default settled leaves off a reason saying only that Search's default
+    holds; any other reason, the card's line where the user's words and its option
+    part among them (`DecisionScope.line`), shows."""
     plan = scripted_plan("kenya life expectancy", spec_id=None)
     dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
     pin = "spec_" + "e" * 32
