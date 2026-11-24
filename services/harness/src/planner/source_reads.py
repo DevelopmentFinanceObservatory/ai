@@ -40,6 +40,7 @@ from harness.scope_choices import (
     EntitiesBinding,
     PartScope,
     ScopeChoice,
+    dropped_changed_nothing,
     mark_planner_axes,
     mark_searched_axes,
     option_axis,
@@ -831,10 +832,6 @@ def _uncontained(part_pin: str, axis: str, held: Containment) -> tuple[str, str]
     )
 
 
-# Search's cause for an entry dropped because the part has no choice on its axis.
-_AXIS_ABSENT = "axis_absent"
-
-
 def _parties_outside(
     scope: PartScope, spec: Mapping[str, Any], column: str, *, part_block: Mapping[str, Any]
 ) -> Containment:
@@ -926,7 +923,9 @@ def _changed_nothing(
     axis, option_id = entry.get("axis"), entry.get("option_id")
     if (axis, option_id, choice_id) not in carried:
         return False
-    return dropped.get("cause") == _AXIS_ABSENT or answered.get(str(axis)) == option_id
+    return dropped_changed_nothing(
+        str(dropped.get("cause")), str(option_id), answered.get(str(axis))
+    )
 
 
 async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
