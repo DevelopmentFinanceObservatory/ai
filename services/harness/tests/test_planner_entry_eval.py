@@ -25,7 +25,7 @@ import datetime
 import importlib.util
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, get_args
