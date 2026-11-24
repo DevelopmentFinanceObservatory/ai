@@ -153,9 +153,10 @@ Verbs:
   It clears the pending interrupts of a ledger session paused on a turn
   this release resumed (its conversation's row holds another turn index,
   other pending interrupts, or an entry carrying an answer or a resuming
-  segment ADK's entry lacks, a resume it began), so the previous release shows no card for it
-  and its answer cannot resume that turn's ADK session a second time; the
-  previous release closes that turn as `abandoned` on the next turn. Each
+  segment ADK's entry lacks, a resume it began), so the previous release
+  shows no card for it and its answer cannot resume that turn's ADK
+  session a second time; the previous release closes that turn as
+  `abandoned` on the next turn. Each
   conversation runs in a transaction of its own. Under `--apply` it locks
   the ledger session `FOR UPDATE` first, so a turn the previous release
   claims commits its index before or after the read, and the session it
@@ -230,8 +231,8 @@ conversation no ledger session holds or two of them name one, or
 `discarded` column (`TableBusy`), which writes nothing, so rerun; 3 when
 `close-open-turns --apply` finds no `turn_cursors` table, so the next
 release has not started (`NextReleaseMissing`); 4 when a later release has
-archived ADK's tables, so no verb but `gate --adk-archived` runs again
-(`AdkArchived`); and 5 when `rollback-turn-sessions` leaves a conversation
+archived ADK's tables, so no verb but `gate` runs again (`AdkArchived`),
+and `gate` then exits 2 unless given `--adk-archived`; and 5 when `rollback-turn-sessions` leaves a conversation
 alone because a stream of this release holds its lease
 (`ROLLBACK_STREAMING_EXIT`). `gcloud run jobs execute --wait` exits 1 for
 any non-zero status; the execution's task records the job's own
@@ -1271,8 +1272,8 @@ async def _import_one(
     not hold, or the record kept one. A conversation the record keeps stays
     `discarded` once `discard` named it, whatever the tables hold since and
     whether or not `keep_tables` names it, until a copy or a conflict
-    rewrites the record. `keep_tables` naming a
-    conversation the tables do not hold or any other conversation, or
+    rewrites the record. `keep_tables` naming a conversation the tables do
+    not hold, unless `discard` gave it up, or any other conversation, or
     `discard` naming any other conversation, refuses it, with nothing
     written. Reading the open turn's session (`open_turn`) failing counts as
     a refusal `keep_tables` or `discard` can clear.
@@ -1333,7 +1334,7 @@ async def _import_one(
             # mark can be written without `--keep-tables` or `--discard`.
             marks = (await conn.execute(_HAS_DISCARDED_COLUMN)).scalar_one()
             if kept_here and not prefer:
-                if keep and absent:
+                if keep and absent and not was_discarded:
                     reasons = [_KEEP_ABSENT]
                     raise _Undo
                 if drop and not (absent or previous.discarded):
@@ -1379,7 +1380,11 @@ async def _import_one(
                 outcome, reasons = ("discarded" if drop or was_discarded else "kept"), []
                 if apply:
                     await _keep(
-                        conn, pk, created=created, params=kept, discarded=drop or was_discarded
+                        conn,
+                        pk,
+                        created=created,
+                        params=kept,
+                        discarded=(drop or was_discarded) if marks else None,
                     )
                 return _Copy(session, ledger, outcome, reasons, held, turn)
             if (
@@ -1426,7 +1431,13 @@ async def _import_one(
                     updated,
                 )
             elif apply and outcome in ("kept", "discarded"):
-                await _keep(conn, pk, created=created, params=kept, discarded=was_discarded)
+                await _keep(
+                    conn,
+                    pk,
+                    created=created,
+                    params=kept,
+                    discarded=was_discarded if marks else None,
+                )
             elif apply and outcome == "conflict":
                 await conn.execute(
                     text(
@@ -2579,24 +2590,18 @@ async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> Rollbac
     Raises:
         AdkArchived: a later release archived ADK's tables.
         AdkSchemaError: ADK's schema is not the one the job reads.
+        TablesMissing: `conversations` or `adk_ledger_imports` does not
+            resolve, so no lease can be read; nothing is deleted.
     """
-    async with engine.connect() as conn:
-        await _check_adk_schema(conn)
-        tables = (await conn.execute(text("SELECT to_regclass('conversations')"))).scalar()
-        imports = (await conn.execute(text("SELECT to_regclass('adk_ledger_imports')"))).scalar()
+    await _check_tables(engine)
     report = RollbackReport(apply=apply)
     lock = " FOR UPDATE" if apply else ""
     ledger_read = text(
-        _LEDGER_TURN_INDEX.format(
-            as_imported=_AS_IMPORTED if imports is not None else "false",
-            imports=_LEDGER_IMPORTS_JOIN if imports is not None else "",
-        )
+        _LEDGER_TURN_INDEX.format(as_imported=_AS_IMPORTED, imports=_LEDGER_IMPORTS_JOIN)
         + (" FOR UPDATE OF s" if apply else "")
     )
 
     async def held(conn: AsyncConnection, names: dict[str, str]) -> Any:
-        if tables is None:
-            return None
         return (await conn.execute(text(_CONVERSATION_LEASE + lock), names)).first()
 
     async def ledger_pass(key: Any) -> None:
@@ -2611,7 +2616,8 @@ async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> Rollbac
                 return
             here = await held(conn, names)
             if here is not None and here.live:
-                report.live.append(key.name)
+                if key.name not in report.live:
+                    report.live.append(key.name)
                 return
             ahead = (
                 (
@@ -2623,7 +2629,11 @@ async def rollback_turn_sessions(engine: AsyncEngine, *, apply: bool) -> Rollbac
                 .all()
             )
             if ahead:
-                report.ahead[key.name] = list(ahead)
+                # The unledgered pass may have deleted others of this
+                # conversation before its ledger session appeared.
+                report.ahead[key.name] = sorted(
+                    {*report.ahead.get(key.name, []), *ahead}, key=_turn_number
+                )
                 if apply:
                     await conn.execute(
                         text(
@@ -2689,9 +2699,9 @@ def _resumed_here(pending: object, turn_index: int, here: Any) -> bool:
     conversation's row, imported from that state, now holds another turn
     index or other pending interrupts, or an entry carrying an answer or a
     resuming segment that ADK's entry of the same id lacks, a resume this
-    release began. The previous release
-    would show the card again, and an answer would resume the turn's ADK
-    session, whose events already hold this release's resume."""
+    release began. The previous release would show the card again, and an
+    answer would resume the turn's ADK session, whose events already hold
+    this release's resume."""
     if not isinstance(pending, dict) or not pending or here is None:
         return False
     held_pending = here.pending if isinstance(here.pending, dict) else {}
@@ -2835,7 +2845,7 @@ class GateReport:
             if self.discarded:
                 lines += discarded
             return "\n".join(lines)
-        lines = discarded if self.discarded else []
+        lines: list[str] = []
         if self.streaming_on_adk:
             lines.append(
                 f"cutover gate: {len(self.streaming_on_adk)} ledger sessions hold a live "
@@ -2843,7 +2853,7 @@ class GateReport:
             )
             lines += [f"  {name}" for name in self.streaming_on_adk]
         if self.uncleared == 0:
-            return "\n".join(lines)
+            return "\n".join(lines + (discarded if self.discarded else []))
         lines.append(f"cutover gate: {self.uncleared} ledger sessions not cleared")
         lines += [f"  {name}" for name in self.first]
         if self.uncleared > len(self.first):
@@ -2855,7 +2865,7 @@ class GateReport:
             "(gives up a refused conversation they do not hold), then run the gate again:"
         )
         lines += [f"  {command}" for command in _GATE_COMMANDS]
-        return "\n".join(lines)
+        return "\n".join(lines + (discarded if self.discarded else []))
 
 
 async def cutover_gate(engine: AsyncEngine, *, adk_archived: bool = False) -> GateReport:

@@ -38,6 +38,7 @@ from harness.adk_import import (
     LEDGER_APP,
     AdkSchemaError,
     AdkTablesMissing,
+    GateReport,
     NamedTwice,
     NextReleaseMissing,
     TableBusy,
@@ -614,6 +615,7 @@ async def test_rollback_reads_a_ledger_session_that_appears_between_its_passes(
     ledger keys, so the unledgered pass skips it, and the ledger pass reads
     it in the same run. A new conversation has nothing ahead and passes. A
     conversation of this release has its turn session ahead deleted."""
+    await import_conversations(adk, apply=False)  # creates the tables only
     if ahead:
         await _add_turn_sessions(adk, PRINCIPAL, [f"{TEXT_ONLY}#t3"])
     _ledger_keys_without(monkeypatch, TEXT_ONLY)
@@ -632,6 +634,7 @@ async def test_rollback_reads_a_conversation_whose_ledger_session_appears_before
     run's read of the turn sessions with no ledger session and their
     delete: the delete takes none of them, and the ledger pass that
     follows deletes only the turn session above the ledger's index."""
+    await import_conversations(adk, apply=False)  # creates the tables only
     await _add_turn_sessions(adk, PRINCIPAL, [f"{TEXT_ONLY}#t3"])
     _ledger_keys_without(monkeypatch, TEXT_ONLY)
     # Read TEXT_ONLY's turn sessions as unledgered, as a read before its
@@ -1141,9 +1144,20 @@ async def _waiting_on_a_lock(engine: AsyncEngine) -> bool:
 async def test_verify_and_close_open_turns_neither_migrate_nor_use_adks_session_service(
     adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for job in (verify(adk), close_open_turns(adk, apply=False)):
+    """Before `import` creates the tables, the verbs that read them refuse,
+    and `rollback-turn-sessions --apply`, which reads leases there, deletes
+    no turn session."""
+    await _add_turn_sessions(adk, PRINCIPAL, [f"{FULL}#t9", "conv_unledgered#t1"])
+    sessions = await _turn_session_ids(adk)
+    jobs = (
+        verify(adk),
+        close_open_turns(adk, apply=False),
+        rollback_turn_sessions(adk, apply=True),
+    )
+    for job in jobs:
         with pytest.raises(TablesMissing):
             await job
+    assert await _turn_session_ids(adk) == sessions
     async with adk.connect() as conn:
         assert (await conn.execute(text("SELECT to_regclass('conversations')"))).scalar() is None
 
@@ -2684,9 +2698,10 @@ async def test_a_refused_conversation_the_tables_lack_is_discarded_only_by_name_
         )
         await reader.rollback()
     assert again.discarded == [name]
-    # The record keeps nothing of a conversation the tables lack.
+    # `--keep-tables` on it stays discarded, and the record keeps nothing
+    # of a conversation the tables lack.
     kept_absent = await import_conversations(pg_empty_engine, apply=True, keep_tables=keep)
-    assert (list(kept_absent.refused), len(kept_absent.refused[name])) == ([name], 1)
+    assert (kept_absent.discarded, kept_absent.refused) == ([name], {})
     gate = await cutover_gate(pg_empty_engine)
     assert (gate.clean, gate.discarded) == (True, [name])
     assert await _count(pg_empty_engine) == 2
@@ -2851,6 +2866,17 @@ async def test_verify_reports_and_the_gate_fails_on_a_ledger_session_that_holds_
         # gate then lists as not cleared.
         assert (gate.clean, gate.uncleared) == (not streaming, 0)
     assert ("1 stream holds its lease on ADK" in report.render().splitlines()) == streaming
+
+
+def test_a_failing_gate_prints_its_failure_before_the_discarded_list() -> None:
+    lines = GateReport(uncleared=1, first=["p/a"], discarded=["p/b"]).render().splitlines()
+
+    assert lines[0] == "cutover gate: 1 ledger sessions not cleared"
+    assert lines[-2:] == [
+        "cutover gate: 1 cleared ledger sessions given up with --discard, "
+        "ADK's copy of each not imported:",
+        "  p/b",
+    ]
 
 
 async def test_adding_the_discarded_column_gives_up_on_a_table_another_reader_holds(
