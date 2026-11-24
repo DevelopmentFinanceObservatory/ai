@@ -361,30 +361,34 @@ SERVICE_AI=$(gh variable get SERVICE_AI --env dev)
 
 For production, the same with `--env production`.
 
-Before this image merges in an environment, delete every revision of the service whose image is not the serving release's: the revisions of the release that added the conversation tables, which read ADK's tables, and any revision a rollback redeployed. One at 0% traffic still serves a client whose session-affinity cookie routes it there. The release before this one reads the harness tables only, so its revisions stay, and on the normal path the release before it already deleted every other one, so nothing is deleted. List the revisions, newest first, with their images:
+Before this image merges in an environment, delete every revision of the service whose image is not the serving release's: the revisions of the release that added the conversation tables, which read ADK's tables, and any revision a rollback redeployed. One at 0% traffic still serves a client whose session-affinity cookie routes it there. The release before this one reads the harness tables only, so its revisions stay. On the normal path the release before it already deleted every other one, so nothing is deleted. A release deployed between the two, or a rerun of a deploy that built a second image, leaves revisions of other digests, which the command deletes, and the drain check then waits out their timeout. List the revisions, newest first, with their images:
 
 ```
 gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
   --sort-by=~metadata.creationTimestamp --format='table(metadata.name,metadata.creationTimestamp,status.imageDigest)'
 ```
 
-Set `KEEP` to the serving revision of the release before this one, or, when a rerun of its deploy created revisions of more than one image, to one revision of each, separated by spaces. The command deletes every revision of the service whose image digest (`status.imageDigest`) is not one of theirs, oldest first, any revision a rollback redeployed included, and refuses when one of them holds traffic. It prints each revision as it deletes it, with its image and timeout, confirms that no revision of another image is left, and prints three values to set in the shell for the check: `DELETED`, the names it deleted; `DELETED_AT`, the time before the first delete; and `DRAINED_AT`, the latest of each delete's time plus its revision's timeout (`spec.timeoutSeconds`) plus 10 seconds. The 10 seconds are the shutdown grace Cloud Run gives an instance after SIGTERM. CPU is throttled outside requests, so a write that a request cut at its timeout still makes runs in that grace at the latest. When every revision runs a kept image it deletes nothing and prints `DRAINED_AT` as the time it ran. When a delete fails it prints the values for the revisions already deleted: rerun it, then set `DELETED` to both runs' names and `DRAINED_AT` to the later of the two. A rollback to a deleted revision is a redeploy of its image by digest:
+Set `KEEP` to the serving revision of the release before this one and `KEEP_DIGEST` to the digest the guarded `close-open-turns --apply` printed when it last exited 0 with `NEXT` set to that revision, which this image's merge requires (above). The command refuses unless each revision `KEEP` names runs `KEEP_DIGEST`. It deletes every revision of the service whose image digest (`status.imageDigest`) is another, oldest first, any revision a rollback redeployed included. It refuses before any delete when one of them holds traffic, or is the service's latest revision (`status.latestCreatedRevisionName`), which Cloud Run does not delete: redeploy the kept image with `--no-traffic` first. It prints each revision as it deletes it, with its image and timeout, confirms that no revision of another image is left, and prints three values to set in the shell for the check: `DELETED`, the names it deleted; `DELETED_AT`, the time before the first delete; and `DRAINED_AT`, the latest of each delete's time plus its revision's timeout (`spec.timeoutSeconds`) plus 10 seconds. The 10 seconds are the shutdown grace Cloud Run gives an instance after SIGTERM. CPU is throttled outside requests, so a write that a request cut at its timeout still makes runs in that grace at the latest. When every revision runs `KEEP_DIGEST` it deletes nothing and prints `DRAINED_AT` as the time it ran. When a delete fails it prints the values for the revisions already deleted: rerun it, then set `DELETED` to both runs' names and `DRAINED_AT` to the later of the two. A rollback to a deleted revision is a redeploy of its image by digest:
 
 ```
 (
   set -euo pipefail
-  : "${KEEP:?set it to the serving revision of the release before this one}"
+  : "${KEEP:?set it to the serving revision of the release before this one}" "${KEEP_DIGEST:?set it to the digest the guarded close printed}"
   REVS=$(gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json)
-  KEPT=$(jq -c --arg keep "$KEEP" '($keep | split(" ") | map(select(length > 0)) | unique) as $k
+  KEPT=$(jq -c --arg keep "$KEEP" --arg digest "${KEEP_DIGEST##*@}" '($keep | split(" ") | map(select(length > 0)) | unique) as $k
     | [.[] | select(.metadata.name as $n | $k | index($n))] as $r
     | if ($r | length) != ($k | length) then error("KEEP names a revision the service does not hold")
-      elif any($r[]; (.status.imageDigest // "") == "") then error("a revision KEEP names records no image digest")
+      elif any($r[]; (.status.imageDigest // "" | split("@") | last) != $digest) then
+        error("a revision KEEP names does not run \($digest): \($r | map({(.metadata.name): .status.imageDigest}) | add)")
       else $r | map(.status.imageDigest) | unique end' <<<"$REVS")
-  SERVED=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
-    | jq -c '[.status.traffic[] | select((.percent // 0) > 0) | .revisionName]')
-  OLD=$(jq -r --argjson kept "$KEPT" --argjson served "$SERVED" '[.[] | select((.status.imageDigest // "") as $i | $kept | index($i) | not)]
+  SERVICE=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json)
+  SERVED=$(jq -c '[.status.traffic[] | select((.percent // 0) > 0) | .revisionName]' <<<"$SERVICE")
+  LATEST=$(jq -r '.status.latestCreatedRevisionName' <<<"$SERVICE")
+  OLD=$(jq -r --argjson kept "$KEPT" --argjson served "$SERVED" --arg latest "$LATEST" '[.[] | select((.status.imageDigest // "") as $i | $kept | index($i) | not)]
     | sort_by(.metadata.creationTimestamp)
     | if any(.[]; .metadata.name as $n | $served | index($n)) then error("a revision to delete holds traffic")
+      elif any(.[]; .metadata.name == $latest) then
+        error("\($latest), the latest revision, is to be deleted, which Cloud Run refuses: redeploy the image KEEP runs with --no-traffic first")
       else .[] | "\(.metadata.name) \(.spec.timeoutSeconds // 300) \(.status.imageDigest // "none")" end' <<<"$REVS")
   NAMES="" DELETED_AT=$(date -u +%FT%TZ) UNTIL=$(date -u +%s)
   report() {
