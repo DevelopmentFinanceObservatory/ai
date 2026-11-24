@@ -8,6 +8,7 @@ declares is an `ArtifactError` for the run to stop on.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping
 
 from common.materialisation import FrameRef
@@ -16,6 +17,10 @@ from compiler.frame_columns import FrameColumns, frame_columns
 from data_mcp.manifest import Manifest
 from dfo_frame_grammar.grammar import FrameError, normalize_role_keys
 from pydantic import ValidationError
+
+from executor.outcomes import SummedRead
+
+logger = logging.getLogger(__name__)
 
 
 class ArtifactError(ValueError):
@@ -157,6 +162,25 @@ def declared_ranked_before_limit(structured_content: Mapping[str, object] | None
     if isinstance(count, bool) or not isinstance(count, int):
         return None
     return count
+
+
+def declared_stat_vars_summed(
+    structured_content: Mapping[str, object] | None,
+) -> tuple[SummedRead, ...]:
+    """The roots a successful call declared it read summed over several
+    StatVars (`analysis_mcp.result.VerbResult.stat_vars_summed`), or `()` when it
+    declared none. An entry `SummedRead` does not read is left out and logged,
+    and its retrieval is then counted as retrieved."""
+    entries = (structured_content or {}).get("stat_vars_summed")
+    if not isinstance(entries, list | tuple):
+        return ()
+    reads: list[SummedRead] = []
+    for entry in entries:
+        try:
+            reads.append(SummedRead.model_validate(entry))
+        except ValidationError as exc:
+            logger.warning("stat_vars_summed entry %r left out: %s", entry, exc)
+    return tuple(reads)
 
 
 def retrieved_frame_columns(
