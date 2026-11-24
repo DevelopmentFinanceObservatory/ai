@@ -188,6 +188,7 @@ from functools import partial
 
 import httpx2
 import pyarrow as pa
+from common.breakdown_labels import Cell, breakdown_axis, code_label
 from common.materialisation import FrameRef
 from common.refusal import internal_error_message
 from common.telemetry import current_trace_id
@@ -201,7 +202,7 @@ from compiler.evidence import (
     errors,
     evidence_from_manifest,
     left_out_entities,
-    unlabelled_series_refs,
+    unlabelled_series_cells,
     with_series_labels,
 )
 from compiler.frame_columns import (
@@ -237,6 +238,7 @@ from compiler.surface import (
 )
 from data_mcp.artifact_resource import ArtifactRefusalError
 from data_mcp.deadline import CallDeadline
+from data_mcp.graph_wire import NotHeldEntry
 from data_mcp.manifest import Manifest
 from data_mcp.node_lookup import describe_nodes
 from data_mcp.series_statistics import (
@@ -451,14 +453,15 @@ Sleep = Callable[[float], Awaitable[None]]
 # already supplies its own `surface`/`executor`/`resolver` in place of the real ones.
 FetchSeriesStats = Callable[[Manifest], Awaitable[pa.Table | None]]
 
-# The names the graph gives each of some entity dcids, keyed by dcid (the entity
-# ref without its `dcid:` marker); a dcid it names none for is absent. Injectable as `FetchSeriesStats` is. One that
-# raises or runs past its deadline names nothing (`_series_labels`).
-LabelRefs = Callable[[Sequence[str]], Awaitable[Mapping[str, str]]]
+# The names the graph gives some series entities, each a `(role, dcid)` cell, the dcid
+# without its `dcid:` marker (`compiler.evidence.unlabelled_series_cells`); a cell it names
+# none for is absent. Injectable as `FetchSeriesStats` is. One that raises or runs past its
+# deadline names nothing (`_series_labels`).
+LabelRefs = Callable[[Sequence[Cell]], Awaitable[Mapping[Cell, str]]]
 
-# The most entity dcids one evidence check asks names for: two requests of
+# The most entity cells one evidence check asks names for: two requests of
 # `describe_nodes`' 50. The largest short series' come first
-# (`unlabelled_series_refs`), and an answer names three of them.
+# (`unlabelled_series_cells`), and an answer names three of them.
 LABELLED_REFS = 100
 
 # The most seconds that lookup may take. Past it the series stay unlabelled,
@@ -607,22 +610,35 @@ async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
         raise StatisticsUnusableError(detail) from exc
 
 
-async def default_label_refs(refs: Sequence[str]) -> Mapping[str, str]:
-    """The names the graph gives `refs`, through `data_mcp.node_lookup.describe_nodes`, keyed
-    by the ref as given: `execute_approved_plan`'s default `label_refs`."""
-    nodes = await describe_nodes(refs)
-    return {ref: label for ref, node in nodes.items() if (label := getattr(node, "label", None))}
+async def default_label_refs(cells: Sequence[Cell]) -> Mapping[Cell, str]:
+    """The names the graph gives `cells`, through `data_mcp.node_lookup.describe_nodes`:
+    `execute_approved_plan`'s default `label_refs`. A breakdown cell takes the label of a
+    code of its own axis, as the figures name it (`common.breakdown_labels.code_label`), and
+    any other cell its node's label."""
+    nodes = await describe_nodes(list(dict.fromkeys(dcid for _, dcid in cells)))
+    labels: dict[Cell, str] = {}
+    for role, dcid in cells:
+        node = nodes.get(dcid)
+        if node is None or isinstance(node, NotHeldEntry):
+            continue
+        if (axis := breakdown_axis(role)) is not None:
+            label = code_label(node.model_dump(mode="json"), axis=axis)
+        else:
+            label = getattr(node, "label", None)
+        if label:
+            labels[role, dcid] = label
+    return labels
 
 
-async def no_label_refs(refs: Sequence[str]) -> Mapping[str, str]:
+async def no_label_refs(cells: Sequence[Cell]) -> Mapping[Cell, str]:
     """The `LabelRefs` that names nothing, for a read no answer is written from
     (`read_anchors`) and a caller that makes no upstream call."""
-    del refs
+    del cells
     return {}
 
 
-async def _series_labels(label_refs: LabelRefs, refs: Sequence[str]) -> Mapping[str, str]:
-    """The names `label_refs` gives `refs`, or none where it fails or outruns its deadline.
+async def _series_labels(label_refs: LabelRefs, cells: Sequence[Cell]) -> Mapping[Cell, str]:
+    """The names `label_refs` gives `cells`, or none where it fails or outruns its deadline.
 
     A name labels a series in an answer's notes and nothing else, so the
     step goes on without it, and its series are counted. The deadline is
@@ -638,9 +654,9 @@ async def _series_labels(label_refs: LabelRefs, refs: Sequence[str]) -> Mapping[
     # Whatever an injected dependency raises, only the names go unread, so the catch is broad.
     try:
         async with asyncio.timeout(allowance_s):
-            return await label_refs(refs)
+            return await label_refs(cells)
     except Exception as exc:
-        logger.warning("executor: could not read names for %d entity refs: %r", len(refs), exc)
+        logger.warning("executor: could not read names for %d entity refs: %r", len(cells), exc)
         return {}
 
 
@@ -2946,8 +2962,8 @@ class _Run:
                 issues=tuple(findings),
                 spec_id=self.evidence_bindings[step.id].spec_id,
             )
-        if refs := unlabelled_series_refs(findings, limit=LABELLED_REFS):
-            findings = with_series_labels(findings, await _series_labels(self.label_refs, refs))
+        if cells := unlabelled_series_cells(findings, limit=LABELLED_REFS):
+            findings = with_series_labels(findings, await _series_labels(self.label_refs, cells))
         self.left_out[step.id] = {
             (entity.role, entity.ref): issue
             for entity, issue in left_out_entities(requirement, evidence, approved).items()

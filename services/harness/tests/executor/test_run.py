@@ -16,6 +16,7 @@ import ssl
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import httpx2
@@ -37,7 +38,7 @@ from data_mcp import stat_var_list
 from data_mcp.client import UpstreamClient
 from data_mcp.deadline import CallDeadline
 from data_mcp.errors import UpstreamError
-from data_mcp.graph_wire import CodeNode, NotHeldEntry, OrganisationNode
+from data_mcp.graph_wire import CodeNode, NotHeldEntry, OrganisationNode, OtherNode
 from data_mcp.manifest import strip_manifest
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA
 from data_mcp.settings import Settings as DataMcpSettings
@@ -1548,8 +1549,8 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
             "donor/XYZ": NotHeldEntry(ref="donor/XYZ", status="not_held"),
         }
 
-    async def injected(refs: Sequence[str]) -> Mapping[str, str]:
-        asked.append(list(refs))
+    async def injected(cells: Sequence[tuple[str, str]]) -> Mapping[tuple[str, str], str]:
+        asked.append([dcid for _, dcid in cells])
         if lookup == "raises":
             raise RuntimeError("a lookup's own defect")
         await asyncio.Event().wait()
@@ -1573,38 +1574,43 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
     ]
 
 
+# Graph nodes recorded from the nodes route: a CRS purpose code, whose label carries its
+# code system after it, and a node of another kind.
+_NODES = Path(__file__).resolve().parents[3] / "data-mcp" / "tests" / "fixtures"
+_CODE_NODE = CodeNode.model_validate_json((_NODES / "node_code.json").read_text())
+_OTHER_NODE = OtherNode.model_validate_json((_NODES / "node_other.json").read_text())
+
+
 @pytest.mark.parametrize(
-    ("cell", "asked", "label"),
+    ("cell", "label"),
     [
         # Text the nodes route refuses as a dcid is not asked for.
-        pytest.param("humanitarian aid", ["donor/DEU"], None, id="text"),
-        # A decoded code axis's cell holds the code's dcid (dfo-apis
-        # `capabilities.decode_code_systems`), which the graph names.
+        pytest.param("humanitarian aid", None, id="text"),
+        # A breakdown cell holds the code's dcid (dfo-apis `datasets_api.decode`). It
+        # takes the code's label without its code system, as the figures name it.
         pytest.param(
-            "CRSPurposeCode11220", ["CRSPurposeCode11220", "donor/DEU"], "Education", id="code-dcid"
+            _CODE_NODE.ref,
+            "civilian peace-building, conflict prevention and resolution",
+            id="code-dcid",
         ),
         # A code dcid the graph does not name keeps no label, so a note counts its series.
-        pytest.param(
-            "CRSPurposeCode99999",
-            ["CRSPurposeCode99999", "donor/DEU"],
-            None,
-            id="code-dcid-unnamed",
-        ),
+        pytest.param("CRSPurposeCode99999", None, id="code-dcid-unnamed"),
+        # A dcid the graph holds as no code of the cell's axis keeps no label.
+        pytest.param(_OTHER_NODE.ref, None, id="not-a-code"),
     ],
 )
-async def test_a_series_breakdown_cell_is_named_by_the_graph_only_when_it_is_a_dcid(
+async def test_a_series_breakdown_cell_is_named_by_the_graph_only_as_a_code_of_its_axis(
     approved_plan: PlanFactory,
     manifest: ManifestFactory,
     real_schemas: list[ToolSchema],
     requirement: RequirementFactory,
     monkeypatch: pytest.MonkeyPatch,
     cell: str,
-    asked: list[str],
     label: str | None,
 ) -> None:
     """Two series miss years: one from a donor, one under a breakdown's sector cell.
-    The donor is named by the graph in both cases, and the sector when its cell is a
-    dcid the graph holds."""
+    The donor is named by the graph in every case, and the sector when its cell is
+    the dcid of a code of its axis."""
     sparse = manifest()
     (row,) = sparse["statistics"]
     row["observations"] = 7
@@ -1617,12 +1623,12 @@ async def test_a_series_breakdown_cell_is_named_by_the_graph_only_when_it_is_a_d
 
     async def describe(dcids: list[str]) -> dict[str, Any]:
         lookups.append(list(dcids))
-        return {
+        held = {
             "donor/DEU": OrganisationNode.model_construct(ref="donor/DEU", label="Germany"),
-            "CRSPurposeCode11220": CodeNode.model_construct(
-                ref="CRSPurposeCode11220", label="Education"
-            ),
+            _CODE_NODE.ref: _CODE_NODE,
+            _OTHER_NODE.ref: _OTHER_NODE,
         }
+        return {dcid: held.get(dcid, NotHeldEntry(ref=dcid, status="not_held")) for dcid in dcids}
 
     monkeypatch.setattr("executor.run.describe_nodes", describe)
     plan = approved_plan(requirement=requirement(coverage=Coverage(on_missing="report_gaps")))
@@ -1630,7 +1636,7 @@ async def test_a_series_breakdown_cell_is_named_by_the_graph_only_when_it_is_a_d
     outcome = await _run(plan, surface=_surface(real_schemas, sparse), sleep=_Sleeps())
 
     assert isinstance(outcome, Accepted), outcome
-    assert lookups == [asked]
+    assert sorted(lookups[0]) == sorted({"donor/DEU", cell} - {"humanitarian aid"})
     gaps = [gap for gap in outcome.evidence[0].gaps if gap.code.value == "coverage_gaps"]
     named = {e.ref: e.label for gap in gaps for e in gap.entities}
     assert named["donor/DEU"] == "Germany"
