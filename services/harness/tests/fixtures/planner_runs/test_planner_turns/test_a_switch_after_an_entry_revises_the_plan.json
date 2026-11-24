@@ -3329,10 +3329,10 @@
         "approved_at": null,
         "summary": {
           "version": 2,
-          "revision": "76d6c3c996de30f4aab1a79eaf793866d4c896f0e2ecd192b5cf28cbf53b8df1",
+          "revision": "049c35904da4f4c4929e6058c2150d9c63a74aa34b938aea000f47a726203825",
           "warnings": []
         },
-        "revision": "76d6c3c996de30f4aab1a79eaf793866d4c896f0e2ecd192b5cf28cbf53b8df1",
+        "revision": "049c35904da4f4c4929e6058c2150d9c63a74aa34b938aea000f47a726203825",
         "moved": [
           {
             "choice_id": "spending:measure_basis",
@@ -3713,10 +3713,10 @@
                   "approved_at": null,
                   "summary": {
                     "version": 2,
-                    "revision": "76d6c3c996de30f4aab1a79eaf793866d4c896f0e2ecd192b5cf28cbf53b8df1",
+                    "revision": "049c35904da4f4c4929e6058c2150d9c63a74aa34b938aea000f47a726203825",
                     "warnings": []
                   },
-                  "revision": "76d6c3c996de30f4aab1a79eaf793866d4c896f0e2ecd192b5cf28cbf53b8df1",
+                  "revision": "049c35904da4f4c4929e6058c2150d9c63a74aa34b938aea000f47a726203825",
                   "moved": [
                     {
                       "choice_id": "spending:measure_basis",
@@ -4939,10 +4939,10 @@
           "approved_at": null,
           "summary": {
             "version": 2,
-            "revision": "76d6c3c996de30f4aab1a79eaf793866d4c896f0e2ecd192b5cf28cbf53b8df1",
+            "revision": "049c35904da4f4c4929e6058c2150d9c63a74aa34b938aea000f47a726203825",
             "warnings": []
           },
-          "revision": "76d6c3c996de30f4aab1a79eaf793866d4c896f0e2ecd192b5cf28cbf53b8df1",
+          "revision": "049c35904da4f4c4929e6058c2150d9c63a74aa34b938aea000f47a726203825",
           "moved": [
             {
               "choice_id": "spending:measure_basis",
