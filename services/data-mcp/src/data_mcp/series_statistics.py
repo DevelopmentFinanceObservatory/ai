@@ -66,12 +66,12 @@ from typing import Any, NamedTuple
 import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
+from common.call_limit import CallDeadline
 from common.caller import current_surface, shared_work_context
 from dfo_frame_grammar.columnar import array_kernel
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from data_mcp.client_holder import get_client
-from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import (
     ArtifactEntry,
     Manifest,

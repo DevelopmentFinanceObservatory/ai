@@ -38,7 +38,7 @@ from pydantic import ValidationError
 
 from common.materialisation.frame_ref import FrameRef
 from common.materialisation.holder import get_store
-from common.materialisation.mint_record import MintRecord
+from common.materialisation.mint_record import MintRecord, normal_groupby
 from common.materialisation.store import FrameIntegrityError
 
 # The mint options a root is read with: the frame-layout Parquet, its enrichment
@@ -63,22 +63,26 @@ DEFAULT_MINT_OPTIONS: Mapping[str, Any] = MappingProxyType(
 )
 
 # How long a reply waits on the store for a best-effort record write.
-_RECORD_WRITE_TIMEOUT_S = 2.0
+RECORD_WRITE_TIMEOUT_S = 2.0
 
 
 def root_rendering(record: MintRecord, *, default_enrichment: bool = False) -> dict[str, Any]:
-    """The rendering of a root read as `record`'s options state, its `columns` in the
-    record's order with repeats dropped, so a record listing a column twice stays
-    within dfo-apis' cap on `RootRendering.columns`. dfo-apis sorts them on receipt
-    (`analysis_roots.mint_options`). With `default_enrichment`, a record of the plain
-    rendering leaves `columns` out, which takes the default enrichment (dfo-apis
+    """The rendering of a root read as `record`'s options state, its `columns` sorted
+    and each listed once and its `groupby.by` sorted, as dfo-apis keeps a root's
+    rendering (`analysis_roots.mint_options`), a record written before `get_data`
+    sorted `by` included. dfo-apis tells two request roots apart by their
+    JSON before it sorts them (`analysis.merged_roots`), so a root in the record's
+    order and the same root read from a stored recipe would be two roots of one
+    frame, and the recipe of a call reading both would not be the one its key
+    names. With `default_enrichment`, a record of the plain rendering leaves
+    `columns` out, which takes the default enrichment (dfo-apis
     `RootRendering.columns`)."""
     rendering: dict[str, Any] = {
         "without_party_totals": record.options.get("without_party_totals") is True,
-        "columns": list(dict.fromkeys(record.options.get("columns") or ())),
+        "columns": sorted(set(record.options.get("columns") or ())),
     }
     if (groupby := record.options.get("groupby")) is not None:
-        rendering["groupby"] = groupby
+        rendering["groupby"] = normal_groupby(groupby)
     if default_enrichment and rendering == {"without_party_totals": False, "columns": []}:
         del rendering["columns"]
     return rendering
@@ -153,10 +157,10 @@ async def frame_rendering(
 
 async def write_mint_record(record: MintRecord, *, logger: logging.Logger) -> bool:
     """Write `record`, reporting whether the store took it within
-    `_RECORD_WRITE_TIMEOUT_S`, for a reply that stands either way. A failed write is
+    `RECORD_WRITE_TIMEOUT_S`, for a reply that stands either way. A failed write is
     logged on `logger`, the caller's own."""
     try:
-        async with asyncio.timeout(_RECORD_WRITE_TIMEOUT_S):
+        async with asyncio.timeout(RECORD_WRITE_TIMEOUT_S):
             await get_store().put_mint_record(record)
     except Exception:
         # Broad on purpose, as `frame_rendering` reads it. The store's failures belong

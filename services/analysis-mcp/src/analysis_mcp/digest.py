@@ -136,13 +136,24 @@ def _cell(column: str, value: str) -> str:
     return text + suffix
 
 
-def _key_text(key: Sequence[tuple[str, str]]) -> str:
+# Follows a rank key pair whose party the frame's `{role}_party_class` column marks
+# `private`, a member or a whole total alike (`dfo_analysis_engine.engine.common.private_parties`).
+PRIVATE_TAG = " (party_class=private)"
+
+
+def _key_text(
+    key: Sequence[tuple[str, str]], *, private: frozenset[tuple[str, str]] = frozenset()
+) -> str:
     """The `column=value, ...` text for an entity/group key tuple, each cell
     named by `_cell`. Each column name is left uncapped, since a column name
-    is schema, not a per-row data value."""
+    is schema, not a per-row data value. A pair in `private` is followed by
+    `PRIVATE_TAG`."""
     if not key:
         return "(all rows)"
-    return ", ".join(f"{column}={_cell(column, value)}" for column, value in key)
+    return ", ".join(
+        f"{column}={_cell(column, value)}{PRIVATE_TAG if (column, value) in private else ''}"
+        for column, value in key
+    )
 
 
 # How a flow party role's pooled parties are named in a sum's private-party line, one and
@@ -909,10 +920,9 @@ def _rank_line(
 ) -> str:
     """One entity's rank, value, rows and coverage, its key less the `within`
     columns its partition's heading names."""
-    key_text = _key_text(tuple(pair for pair in rank.entity_key if pair[0] not in within))
-    tag = " (private)" if any(pair in private for pair in rank.entity_key) else ""
+    own = tuple(pair for pair in rank.entity_key if pair[0] not in within)
     return (
-        f"  #{rank.rank} {key_text}{tag}: {_format_number(rank.value)} "
+        f"  #{rank.rank} {_key_text(own, private=private)}: {_format_number(rank.value)} "
         f"[{_rows(rank.row_count)}, coverage={rank.coverage_fraction:.0%}]"
     )
 
@@ -958,12 +968,14 @@ def _partitioned_rank_block(
         if not count:
             omitted.append((key, len(group)))
             continue
-        lines.append(f"  {_key_text(key)} ({count} of {len(group)} shown):")
+        lines.append(f"  {_key_text(key, private=private)} ({count} of {len(group)} shown):")
         lines.extend(
             "  " + _rank_line(rank, private=private, within=within) for rank in group[:count]
         )
     if omitted:
-        named = "; ".join(f"{_key_text(key)} ({size})" for key, size in omitted[:LIST_CAP])
+        named = "; ".join(
+            f"{_key_text(key, private=private)} ({size} ranked)" for key, size in omitted[:LIST_CAP]
+        )
         more = f"; and {len(omitted) - LIST_CAP} more" if len(omitted) > LIST_CAP else ""
         lines.append(f"  ... {len(omitted)} partitions not shown: {named}{more}.")
     if sum(counts) < len(ranks):

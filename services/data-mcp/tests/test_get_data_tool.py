@@ -19,6 +19,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from common.apis_auth import AuthProvider
+from common.call_limit import CallDeadline
 from common.caller import conversation_caller, supplied_caller
 from common.materialisation import (
     DEFAULT_MINT_OPTIONS,
@@ -33,7 +34,7 @@ from common.materialisation import set_store as set_frame_store
 from common.place_type import PARTY_KINDS
 from data_mcp import client_holder, get_data_tool, mint_admission
 from data_mcp.client import UpstreamClient
-from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallBudget, CallDeadline, use_call_budget
+from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallBudget, use_call_budget
 from data_mcp.definition_store import (
     DefinitionStoreUnavailable,
     IdentityMismatch,

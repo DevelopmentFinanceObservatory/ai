@@ -16,6 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from common.apis_auth import TOKEN_HEADER
+from common.call_limit import CallDeadline
 from common.materialisation import (
     FrameIntegrityError,
     FrameRef,
@@ -35,7 +36,6 @@ from common.materialisation.memory_store import FRAME_TTL
 from common.materialisation.mint_record import encode_mint_record
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget, set_row_budget
 from data_mcp import client_holder, frame_materialisation
-from data_mcp.deadline import CallDeadline
 from data_mcp.frame_materialisation import (
     _ARTIFACT_GET_ATTEMPTS,
     CANONICAL_FRAME_RENDERING,
