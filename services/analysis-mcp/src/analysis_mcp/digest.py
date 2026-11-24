@@ -136,13 +136,19 @@ def _cell(column: str, value: str) -> str:
     return text + suffix
 
 
-def _key_text(key: Sequence[tuple[str, str]]) -> str:
+def _key_text(
+    key: Sequence[tuple[str, str]], *, private: frozenset[tuple[str, str]] = frozenset()
+) -> str:
     """The `column=value, ...` text for an entity/group key tuple, each cell
     named by `_cell`. Each column name is left uncapped, since a column name
-    is schema, not a per-row data value."""
+    is schema, not a per-row data value. A pair in `private` is followed by the
+    noun for its private party (`_private_tag`)."""
     if not key:
         return "(all rows)"
-    return ", ".join(f"{column}={_cell(column, value)}" for column, value in key)
+    return ", ".join(
+        f"{column}={_cell(column, value)}{_private_tag(column) if (column, value) in private else ''}"
+        for column, value in key
+    )
 
 
 # How a flow party role's pooled parties are named in a sum's private-party line, one and
@@ -154,6 +160,15 @@ _PRIVATE_MEMBER_NOUNS: dict[str, tuple[str, str]] = {
     "financingProvider": ("private donor", "private donors")
 }
 _OTHER_PRIVATE_MEMBER_NOUNS = ("private party", "private parties")
+
+
+def _private_tag(column: str) -> str:
+    """` (private donor)` or ` (private party)`: what the private value of the party
+    role `column` is, so a tag beside a key pair names the party it describes."""
+    nouns = _PRIVATE_MEMBER_NOUNS.get(column, _OTHER_PRIVATE_MEMBER_NOUNS)
+    return f" ({nouns[0]})"
+
+
 _WHOLE_TOTAL_NOUNS: dict[str, tuple[str, str]] = {
     "financingProvider": ("whole total of providers", "whole totals of providers")
 }
@@ -909,11 +924,9 @@ def _rank_line(
 ) -> str:
     """One entity's rank, value, rows and coverage, its key less the `within`
     columns its partition's heading names."""
-    key_text = _key_text(tuple(pair for pair in rank.entity_key if pair[0] not in within))
     own = tuple(pair for pair in rank.entity_key if pair[0] not in within)
-    tag = " (private)" if any(pair in private for pair in own) else ""
     return (
-        f"  #{rank.rank} {key_text}{tag}: {_format_number(rank.value)} "
+        f"  #{rank.rank} {_key_text(own, private=private)}: {_format_number(rank.value)} "
         f"[{_rows(rank.row_count)}, coverage={rank.coverage_fraction:.0%}]"
     )
 
@@ -959,13 +972,14 @@ def _partitioned_rank_block(
         if not count:
             omitted.append((key, len(group)))
             continue
-        tag = " (private)" if any(pair in private for pair in key) else ""
-        lines.append(f"  {_key_text(key)}{tag} ({count} of {len(group)} shown):")
+        lines.append(f"  {_key_text(key, private=private)} ({count} of {len(group)} shown):")
         lines.extend(
             "  " + _rank_line(rank, private=private, within=within) for rank in group[:count]
         )
     if omitted:
-        named = "; ".join(f"{_key_text(key)} ({size})" for key, size in omitted[:LIST_CAP])
+        named = "; ".join(
+            f"{_key_text(key, private=private)} ({size})" for key, size in omitted[:LIST_CAP]
+        )
         more = f"; and {len(omitted) - LIST_CAP} more" if len(omitted) > LIST_CAP else ""
         lines.append(f"  ... {len(omitted)} partitions not shown: {named}{more}.")
     if sum(counts) < len(ranks):
