@@ -70,10 +70,12 @@ ANSWER = "Life expectancy in Kenya rose."
 MODEL_CALL = "generate_content gemini-x"
 
 
-def _attribute(span: Span, key: str) -> str | int | float | bool | None:
+def _attribute(span: Span, key: str) -> object:
     for attribute in span.attributes:
         if attribute.key == key:
-            return getattr(attribute.value, attribute.value.WhichOneof("value"))
+            value = getattr(attribute.value, attribute.value.WhichOneof("value"))
+            # The SDK JSON-encodes `langfuse.*.metadata.*` values.
+            return json.loads(value) if ".metadata." in key else value
     return None
 
 

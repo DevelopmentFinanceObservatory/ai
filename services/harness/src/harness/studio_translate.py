@@ -875,6 +875,7 @@ class _RecordingSurface:
         stat_var_count: int | None,
         carried_frame_refs: Sequence[Mapping[str, str | None]],
         summed_frame_refs: Sequence[Sequence[Mapping[str, str | None]]] = (),
+        summed_reads: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         """Write `frame_ref`'s lineage from the retrieval frames in `evidence_frame_refs`.
 
@@ -892,7 +893,11 @@ class _RecordingSurface:
         StatVars it sums, and each ref a `sum_of`, `quotient_of` or
         `share_of` wrote for its own result that the frame carries as the
         distinct StatVars of its entry in `summed_frame_refs`, the
-        retrievals under that verb's sides. Called once per terminal frame from
+        retrievals under that verb's sides. `summed_reads` names each
+        retrieval in `carried_frame_refs`, by its frame pair, that reaches the
+        frame only through an analysis call that added up its StatVars, with
+        how many it added (`harness.graph.answer._carried_parts`), and counts
+        it as that many. Called once per terminal frame from
         `harness.graph.answer.link_evidence_to_terminal_frames`.
 
         A no-op when `provenance` was never given. All-or-nothing: when any
@@ -919,6 +924,9 @@ class _RecordingSurface:
                 [(ref.get("spec_id"), ref.get("content_version")) for ref in under]
                 for under in summed_frame_refs
             ],
+            summed_reads={
+                (read["spec_id"], read["content_version"]): read["count"] for read in summed_reads
+            },
         )
         if not linked:
             logger.warning(

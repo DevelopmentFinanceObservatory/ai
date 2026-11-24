@@ -60,7 +60,7 @@ from planner.plan import (
     Plan,
     PlanStatus,
 )
-from planner.records import PlaceLevel, PlaceType
+from planner.records import PlaceLevel, PlaceType, StatVarReading
 from planner.workflow import OpenAxis, OpenEntityAxis, SelectedSource, ToolId
 from translator.mechanical import build_translation
 
@@ -475,34 +475,76 @@ async def test_a_single_source_chain_states_exactly_its_one_retrievals_provenanc
     }
 
 
+# The version dfo-apis renders for an implied sum of a retrieval's StatVars, which an
+# analysis answer's `stat_vars_summed` names in place of the version the call read
+# (dfo-apis `scripts/local-stack/smoke.py` `check_summed`).
+_SUMMED_RENDERING = "cv_" + "5" * 32
+
+
+@pytest.mark.parametrize(
+    ("summed_by", "frame_ref"),
+    [
+        pytest.param("retrieval", None, id="summed-by-the-retrieval"),
+        pytest.param("aggregate", None, id="summed-by-the-aggregate"),
+        # A frame minted with extra columns is held under a pair of its own.
+        pytest.param(
+            "aggregate",
+            {"spec_id": SPEC_KENYA, "content_version": "cv_" + "9" * 32},
+            id="summed-by-the-aggregate-over-a-frame-with-extra-columns",
+        ),
+    ],
+)
 async def test_a_card_counts_the_stat_vars_of_the_frame_it_draws_from(
     approved_plan: PlanFactory,
     source: Callable[..., SelectedSource],
     manifest_for: ManifestFactory,
     real_schemas: list[ToolSchema],
+    requirement: Callable[..., DatasetRequirement],
+    summed_by: str,
+    frame_ref: dict[str, str] | None,
 ) -> None:
-    """The retrieval sums a family of three StatVars, so its frame and the
-    aggregate over it each declare one StatVar, the family ref. A card over
-    either frame counts the three the sum added, which the summed retrieval's
-    manifest states and the lineage link carries to the aggregate's frame."""
+    """A family of StatVars summed into one series, either by the retrieval or
+    by the aggregate over it, so the aggregate's frame declares one StatVar,
+    the family ref. A card over the aggregate counts the StatVars the sum
+    added, which the summed retrieval's manifest states, or the aggregate's
+    answer does as dfo-apis writes it, naming the version it rendered for the
+    sum (`stat_vars_summed`). A card over the retrieval counts the same."""
+    members = ["Debt_0", "Debt_1", "Debt_2"]
     family = source(
         served_count=3,
         shape_member_count=3,
-        shape_member_digest=member_digest(["Debt_0", "Debt_1", "Debt_2"]),
+        shape_member_digest=member_digest(members),
         open_axes=(OpenAxis(property="crsPurpose", summable=True),),
     )
-    summed = manifest_for(family) | {"stat_var_count": 1, "summed_stat_var_count": 3}
+    aggregate = RESULT_FRAME
+    dataset = requirement()
+    if summed_by == "retrieval":
+        retrieved = manifest_for(family) | {"stat_var_count": 1, "summed_stat_var_count": 3}
+    else:
+        # Read separately, the family reaches the aggregate unsummed, and the runner
+        # sums it on read (`planner.shapes.FrameShape.summed_on_read`).
+        dataset = requirement(stat_vars=StatVarReading.SEPARATE)
+        trace = manifest_for(family)["trace"] | {
+            "resolved_stat_vars": [
+                {"ref": f"dcid:{ref}", "roles": [], "observation_count": 10} for ref in members
+            ]
+        }
+        retrieved = manifest_for(family) | {"stat_var_count": 3, "trace": trace}
+        read = {"spec_id": SPEC_KENYA, "content_version": _SUMMED_RENDERING, "count": 3}
+        aggregate = RESULT_FRAME | {"stat_vars_summed": [read]}
+    if frame_ref is not None:
+        retrieved |= {"frame_ref": frame_ref}
     scripted = ScriptedSurface(
         schemas=real_schemas,
-        responses={"get_data": [ok(summed)], "aggregate": [ok(RESULT_FRAME)]},
+        responses={"get_data": [ok(retrieved)], "aggregate": [ok(aggregate)]},
     )
     store = ProvenanceStore()
     surface = _RecordingSurface(scripted, provenance=store)
-    plan = approved_plan(source=family)
+    plan = approved_plan(source=family, requirement=dataset)
     _finished, outcome = await execute_approved_plan(plan, surface=surface)
     assert isinstance(outcome, Accepted), outcome
     assert plan.workflow is not None
-    assert [record.stat_var_count for record in outcome.steps] == [1, 1]
+    assert outcome.steps[-1].stat_var_count == 1
     link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
 
     over_aggregate = await _assemble(store, outcome.results["totals"].model_dump())
@@ -1001,6 +1043,7 @@ async def test_the_linked_retrievals_follow_workflow_order_whatever_the_set_iter
             "stat_var_count": _TERMINAL_FRAMES["join"]["stat_var_count"],
             "carried_frame_refs": [_DEBT_FRAME, _GDP_FRAME],
             "summed_frame_refs": [],
+            "summed_reads": [],
         }
     ]
 

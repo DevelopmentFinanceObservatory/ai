@@ -151,10 +151,15 @@ def _join_auth_check_thread() -> None:
             assert not thread.is_alive()
 
 
-def _attribute(span: Span, key: str) -> str | int | float | bool | None:
+def _attribute(span: Span, key: str) -> object:
+    """The attribute's value. The SDK JSON-encodes `langfuse.*.metadata.*` values, so
+    they are decoded here."""
     for attribute in span.attributes:
         if attribute.key == key:
-            return getattr(attribute.value, attribute.value.WhichOneof("value"))
+            value = getattr(attribute.value, attribute.value.WhichOneof("value"))
+            if ".metadata." in key:
+                return json.loads(value)
+            return value
     return None
 
 
@@ -793,14 +798,24 @@ def _sdk_default_exporter() -> OTLPSpanExporter:
 
 @pytest.mark.parametrize(
     "env",
-    [{}, {"LANGFUSE_TIMEOUT": "7", "LANGFUSE_OTEL_TRACES_EXPORT_PATH": "custom/v1/traces"}],
+    [
+        {},
+        {"LANGFUSE_TIMEOUT": "7", "LANGFUSE_OTEL_TRACES_EXPORT_PATH": "custom/v1/traces"},
+        {"LANGFUSE_OTEL_MAX_BATCH_SIZE_BYTES": "1000000"},
+    ],
 )
 def test_the_langfuse_exporter_matches_the_one_the_sdk_builds_by_default(
     fake_langfuse: FakeLangfuse, monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
 ) -> None:
     """`_langfuse_exporter` copies the SDK's defaults and adds the v4
-    ingestion header, so an SDK upgrade that changes the endpoint, headers or
-    timeout it would use fails here."""
+    ingestion header, so an SDK upgrade that changes the endpoint, headers,
+    timeout, compression or request-size cap it would use fails here."""
+    for name in (
+        "LANGFUSE_OTEL_COMPRESSION",
+        "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
+        "OTEL_EXPORTER_OTLP_COMPRESSION",
+    ):
+        monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
 
@@ -816,6 +831,18 @@ def test_the_langfuse_exporter_matches_the_one_the_sdk_builds_by_default(
         "x-langfuse-ingestion-version": "4",
     }
     assert inner._client._timeout == sdk._client._timeout
+    assert inner._compression.value == sdk._compression.value
+    assert inner._max_request_size == sdk._max_request_size
+
+
+def test_the_langfuse_exporter_sends_no_compression_when_the_setting_says_none(
+    fake_langfuse: FakeLangfuse, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LANGFUSE_OTEL_COMPRESSION", "none")
+
+    exporter = telemetry._langfuse_exporter()
+
+    assert exporter._exporter._compression.value == "none"
 
 
 # --- one Langfuse session per conversation ------------------------------------
