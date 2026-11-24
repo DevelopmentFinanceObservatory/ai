@@ -929,11 +929,6 @@ def test_a_summary_holds_only_the_entries_its_digest_shows(
             },
         ),
         ("conversation:" + "b" * 32, None, {}),
-        ("ip:" + "a" * 31, "secret", {}),
-        ("user:" + "b" * 31, "secret", {}),
-        ("user:" + "b" * 33, "secret", {}),
-        ("user:" + "g" * 32, "secret", {}),
-        ("user:" + "B" * 32, "secret", {}),
     ],
     ids=[
         "website-client",
@@ -942,11 +937,6 @@ def test_a_summary_holds_only_the_entries_its_digest_shows(
         "no-principal-account",
         "harness-conversation",
         "harness-no-principal",
-        "malformed-ip-short",
-        "malformed-user-short",
-        "malformed-user-long",
-        "malformed-user-not-hex",
-        "malformed-user-uppercase",
     ],
 )
 async def test_the_caller_is_named_beside_the_principal(

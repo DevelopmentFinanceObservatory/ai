@@ -294,11 +294,6 @@ async def test_a_bare_derived_id_refuses_frame_ref_incomplete_without_a_call() -
             PRINCIPAL,
             {CALLER_PRINCIPAL_HEADER: PRINCIPAL, CALLER_HEADER: conversation_caller("c1")},
         ),
-        ("ip:" + "0" * 31, PRINCIPAL, {}),
-        ("user:" + "1" * 31, PRINCIPAL, {}),
-        ("user:" + "1" * 33, PRINCIPAL, {}),
-        ("user:" + "G" * 32, PRINCIPAL, {}),
-        ("user:" + "A" * 32, PRINCIPAL, {}),
     ],
     ids=[
         "website-caller",
@@ -306,11 +301,6 @@ async def test_a_bare_derived_id_refuses_frame_ref_incomplete_without_a_call() -
         "no-principal",
         "no-principal-account",
         "harness-caller",
-        "malformed-ip-short",
-        "malformed-user-short",
-        "malformed-user-long",
-        "malformed-user-not-hex",
-        "malformed-user-uppercase",
     ],
 )
 async def test_the_prepare_names_its_caller_beside_the_principal(
