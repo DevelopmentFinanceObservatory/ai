@@ -269,7 +269,7 @@ The first number is the frames whose cards can be refreshed after the bucket's o
 
 `python -m harness.adk_import` copies every saved Studio conversation from ADK's ledger sessions (app `dfo_analyst_graph.ledger` in the `sessions` table) into the harness's own tables (`harness/db/migrations`). The release that reads conversations from those tables copies a conversation itself when it reads one whose ADK ledger session moved since the job last copied it, so a turn the previous revision serves after the job ran is in the tables before the release's next request on that conversation reads them (`harness.adk_import.reimport_on_access`). That check is one lookup of ADK's `sessions` by its primary key per read, and the copy runs only when the session moved since it was last read. A copy that fails on a database fault fails the request before it writes anything, and the client's retry copies again. A conversation changed on both sides since the copy is diverged: the release answers every request on it with a 409 `conversation_diverged` refusal, which the client does not retry, and logs an error naming it and the `--prefer-adk` and `--keep-tables` commands that repair it. A conversation whose ledger session the job would refuse is served as the tables hold it, and logged as an error once per ADK write on each instance; when the tables hold none of it, its next turn starts it afresh. The job copies every conversation in bulk before the release takes traffic, and its report and `--verify` are the evidence that every conversation opens as the previous release opened it. The module docstring describes what is copied, what refuses a conversation and how a rerun decides.
 
-The job reads the database from the settings the service uses: `DATABASE_URL`, or `SESSION_STORE_INSTANCE_CONNECTION_NAME`, `SESSION_STORE_DATABASE` and `SESSION_STORE_RUNTIME_DB_USER`. On dev and production the only database user is the `ai` service's runtime service account, connecting over IAM auth, and the instance is reachable only through the service's PSC network, so the job runs as a Cloud Run job execution under that service account, on that network, on the release's image. A workstation cannot reach it. The job reads ADK's tables by SQL. It exits 2 on a fault to repair: `adk_internal_metadata` names a schema version other than 1, no database is configured, a migration file is refused, `--verify` or `close-open-turns` finds the harness's tables missing, or `gate` finds no ADK `sessions` table and is not given `--adk-archived`, or is given it and no `adk_archive_sessions` resolves. It exits 3 when `close-open-turns --apply` finds no `turn_cursors` table: the next release has not started, so rerun once it has. It exits 4 when `adk_archive_adk_ledger_imports` resolves: the release that archives ADK's tables has started, every verb but `gate --adk-archived` has passed its window, and a rerun cannot succeed. It exits 5 when `rollback-turn-sessions` leaves a conversation alone because a stream of this release holds its lease, live on the database's clock: rerun once it ends. Only `import` applies the harness's migrations, so it can run before the release has started, and the other verbs run from an image older than the database's schema.
+The job reads the database from the settings the service uses: `DATABASE_URL`, or `SESSION_STORE_INSTANCE_CONNECTION_NAME`, `SESSION_STORE_DATABASE` and `SESSION_STORE_RUNTIME_DB_USER`. On dev and production the only database user is the `ai` service's runtime service account, connecting over IAM auth, and the instance is reachable only through the service's PSC network, so the job runs as a Cloud Run job execution under that service account, on that network, on the release's image. A workstation cannot reach it. The job reads ADK's tables by SQL. It exits 2 on a fault to repair: `adk_internal_metadata` names a schema version other than 1, no database is configured, a migration file is refused, `--verify` or `close-open-turns` finds the harness's tables missing, or `gate` finds no ADK `sessions` table and is not given `--adk-archived`, or is given it and no `adk_archive_sessions` resolves. It also exits 2 when `adk_ledger_imports` stays locked past 10 seconds while `--apply` adds its `discarded` column: it writes nothing, so rerun it once the serving release's reads let go. It exits 3 when `close-open-turns --apply` finds no `turn_cursors` table: the next release has not started, so rerun once it has. It exits 4 when `adk_archive_adk_ledger_imports` resolves: the release that archives ADK's tables has started, every verb but `gate --adk-archived` has passed its window, and a rerun cannot succeed. It exits 5 when `rollback-turn-sessions` leaves a conversation alone because a stream of this release holds its lease, live on the database's clock: rerun once it ends. Only `import` applies the harness's migrations, so it can run before the release has started, and the other verbs run from an image older than the database's schema.
 
 `gcloud run jobs execute --wait` exits 1 for every non-zero status of the job. The job's own status is its task's `status.lastAttemptResult.exitCode`, which this prints for the job's newest execution, and prints nothing for 0:
 
@@ -290,12 +290,12 @@ uv run --package harness python -m harness.adk_import import --apply --discard P
 uv run --package harness python -m harness.adk_import close-open-turns         # dry run
 uv run --package harness python -m harness.adk_import close-open-turns --apply # once the next release serves
 uv run --package harness python -m harness.adk_import rollback-turn-sessions   # dry run
-uv run --package harness python -m harness.adk_import rollback-turn-sessions --apply
+uv run --package harness python -m harness.adk_import rollback-turn-sessions --apply # only through the guarded blocks of step 6
 uv run --package harness python -m harness.adk_import gate                    # reads only
 uv run --package harness python -m harness.adk_import gate --adk-archived     # passes with ADK's tables archived
 ```
 
-The import report lists each conversation as imported, re-imported, unchanged, in conflict or refused, by `principal/conversation_id`. A refusal names every structural fault of the conversation (a key the job does not know, a gap in the turn or approval positions, a run-ledger item naming a run the ledger lacks) or the error that stopped its write, and writes none of it. The job goes on with the rest and exits 1. The dry run builds every row the write would write, without locking or writing anything, so it reports the same refusals `--apply` would. Records the load from ADK skips or fails on, such as a plan record its model refuses or a spec block whose `_bound_refs` does not convert, are listed under "copied as stored" and copied verbatim. Under `--apply` a conflict marks the conversation diverged, and the release refuses it until `--prefer-adk` re-imports it. `--prefer-adk` refuses a conversation whose lease a stream holds, since taking ADK's copy ends that stream, unless `--force` is added; a name that matches no ledger session stops the job with exit status 2 before it writes anything. `--keep-tables` names a refused or diverged conversation the tables hold, whose tables' copy the operator keeps, giving up ADK's: the job records it as kept at the ledger session's current `update_time`, leaves the rows as they are, and the release serves them. `--discard` names a refused conversation the tables do not hold, which the operator gives up: the job records it the same way and marks the record discarded, the report lists it as discarded, the gate and `--verify` list it apart, and its next turn starts it afresh. The mark stays once its user starts it afresh, so the gate's list at the last step matches the one at the first. The job adds the mark's column, `adk_ledger_imports.discarded`, at its first `--apply` given `--keep-tables` or `--discard`; no migration file holds it, since only this job reads it and a file below `0003_turns.sql` would have to ship in every later image. `--keep-tables` refuses a conversation the tables do not hold, since keeping their copy would discard it, and both refuse any conversation they do not fit. When ADK's ledger session moves again the record is no longer current: the conversation is refused or in conflict again and the gate fails on it.
+The import report lists each conversation as imported, re-imported, unchanged, in conflict or refused, by `principal/conversation_id`. A refusal names every structural fault of the conversation (a key the job does not know, a gap in the turn or approval positions, a run-ledger item naming a run the ledger lacks) or the error that stopped its write, and writes none of it. The job goes on with the rest and exits 1. The dry run builds every row the write would write, without locking or writing anything, so it reports the same refusals `--apply` would. Records the load from ADK skips or fails on, such as a plan record its model refuses or a spec block whose `_bound_refs` does not convert, are listed under "copied as stored" and copied verbatim. Under `--apply` a conflict marks the conversation diverged, and the release refuses it until `--prefer-adk` re-imports it. `--prefer-adk` refuses a conversation whose lease a stream holds, since taking ADK's copy ends that stream, unless `--force` is added; a name that matches no ledger session stops the job with exit status 2 before it writes anything. `--keep-tables` names a refused or diverged conversation the tables hold, whose tables' copy the operator keeps, giving up ADK's: the job records it as kept at the ledger session's current `update_time`, leaves the rows as they are, and the release serves them. `--discard` names a refused conversation the tables do not hold, which the operator gives up: the job records it the same way and marks the record discarded, the report lists it as discarded, the gate and `--verify` list it apart, and its next turn starts it afresh. The mark stays once its user starts it afresh, and when `--keep-tables` names it later, which the report then lists as discarded, so the gate's list at the last step matches the one at the first. A later copy or conflict replaces the record and ends the mark. The job adds the mark's column, `adk_ledger_imports.discarded`, at its first `--apply` given `--keep-tables` or `--discard`; no migration file holds it, since only this job reads it and a file below `0003_turns.sql` would have to ship in every later image. `--keep-tables` refuses a conversation the tables do not hold, since keeping their copy would discard it, and both refuse any conversation they do not fit. When ADK's ledger session moves again the record is no longer current: the conversation is refused or in conflict again and the gate fails on it.
 
 A refused conversation is repaired in one of three ways, chosen by what its reasons name. A key the job does not know, or a value shape it does not read, that a release really wrote is a gap in the job: the repair is a change to `harness.adk_import` on this release's branch, a new image, and a rerun. A fault in the data itself, such as a gap in the turn positions or a run-ledger item naming a run the ledger lacks, cannot be copied whole: `--keep-tables` keeps the tables' copy when an earlier import wrote one, and otherwise `--discard` gives the conversation up, and the report and the gate count it. Only `rollback-turn-sessions --apply` writes ADK's state: it deletes turn sessions and clears a ledger session's pending interrupts.
 
@@ -321,7 +321,7 @@ SERVICE_AI=$(gh variable get SERVICE_AI --env dev)
 
 For production, the same with `--env production`.
 
-Before step 1, confirm that ADK's tables use schema version 1, the one the job reads, so the job does not first refuse after the merge. Only the service's identity on its network reaches the database, and the release's image exists only after the merge, so the check runs as the import job on the serving revision's image, which reads the same settings. It prints the version, and the execution fails unless it is `1`. The `jq` step for the variables is step 3's; the script reaches the database through the serving image's own session-store settings (`harness.session_store.build_session_service`). A failure means the database holds ADK's v0 schema, or none: stop here and migrate ADK's tables to v1 with ADK's own migration before the merge.
+Before step 1, confirm that ADK's tables use schema version 1, the one the job reads, so the job does not first refuse after the merge. Only the service's identity on its network reaches the database, and the release's image exists only after the merge, so the check runs as the import job on the serving revision's image, which reads the same settings. It prints the version as `ADK schema version: ...`, and the execution fails unless it is `1`. The `jq` step for the variables is step 3's; the script reaches the database through the serving image's own session-store settings (`harness.session_store.build_session_service`). On a failure, read the execution's log. A version line naming anything but `1` means the database holds ADK's v0 schema, or none (`None`): stop here and migrate ADK's tables to v1 with ADK's own migration before the merge. A failure with no version line is a fault before the read, such as the connection, IAM or the settings: repair it and rerun the check, and migrate nothing.
 
 ```
 CHECK=$(cat <<'PY'
@@ -437,15 +437,15 @@ SERVING=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --projec
 
    Conflicts are expected to be few. The release copies a conversation from ADK before it serves any request on it, so every write it makes lands on a copy that holds every turn the previous revision had written by then. Three sources remain. One is a canvas edit served by the release while a stream on the previous revision runs: the release's read copied that stream's live lease, so no turn can start, but a canvas edit lands under the row lock, and the release's next copy after the stream writes again finds both sides changed. The other is a `/turn` that reaches both revisions at once and the release creates the turn session first: the previous revision answers a retryable 409 and leaves its claim on ADK beside the release's turn. When the previous revision creates it first, the release meets that session before it claims anything and answers a retryable 409; the retry re-imports the previous revision's turn and answers 409 `transient_unavailable` while that turn streams, with no conflict. The third is `/interrupt`: an answer to a paused card that reaches the previous revision after the release committed an answer to the same pause, during the traffic switch or from a client whose session affinity still routes it there. The previous revision's claim reads only ADK's ledger session, which the release's answer never wrote, so both commit. A Stop causes no conflict. The previous revision's stream reads its cancel flag from ADK, so a Stop sent to the release does not reach it, and the flag it sets on the copied lease is left out of the comparison. The release logs each conflict it meets as an error naming the conversation and the command below, refuses every request on it with 409 `conversation_diverged`, and both `--apply` and `--verify` list it and exit 1. The conflict shows as `conversation_diverged` and is resolved, given the name the report prints, with one of two commands. `--prefer-adk` takes ADK's copy, which drops everything the release wrote for that conversation (its turns, canvas edits, approvals and runs, and for an `/interrupt` conflict the release's answer and the cards its run drew) and serves the conversation again. It refuses while a stream holds the conversation's lease. Rerun it once the stream has ended. `--keep-tables` keeps the tables' copy, which drops what the previous revision wrote to that conversation's ledger session since the last copy (for an `/interrupt` conflict, the previous revision's answer), and serves the conversation again.
 
-   A rollback to the previous revision after this step has a repair step and a loss. The release runs each turn on an ADK turn session `{conversation_id}#t{n}` but writes the conversation's ledger to the tables only, so ADK's ledger session keeps the turn index it had before the release served the conversation. The previous revision would claim the next index after that one, find the release's turn session of that number, and answer 409 to every new turn on the conversation until its index passed the release's. A conversation started on the release has no ADK ledger session at all, so the previous revision numbers its turns from 1 and meets the release's turn sessions the same way. So move traffic back and note the time:
+   A rollback to the previous revision after this step has a repair step and a loss. The release runs each turn on an ADK turn session `{conversation_id}#t{n}` but writes the conversation's ledger to the tables only, so ADK's ledger session keeps the turn index it had before the release served the conversation. The previous revision would claim the next index after that one, find the release's turn session of that number, and answer 409 to every new turn on the conversation until its index passed the release's. A conversation started on the release has no ADK ledger session at all, so the previous revision numbers its turns from 1 and meets the release's turn sessions the same way. So move traffic back and note the time. `SERVING` is the revision step 1 printed. After step 7 that revision is deleted: first redeploy the image digest step 1 printed with no traffic, `gcloud run deploy "$SERVICE_AI" --image=IMAGE@DIGEST --region="$REGION" --project="$PROJECT_ID" --no-traffic`, and set `SERVING` to the revision it creates:
 
    ```
    gcloud run services update-traffic "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
-     --to-revisions="${SERVING:?set it to the revision step 1 printed}=100" \
+     --to-revisions="${SERVING:?set it to the revision of the previous release}=100" \
    && echo "traffic moved back at $(date -u +%FT%TZ)"
    ```
 
-   Run the `rollback-turn-sessions` dry run and read what it would do. Then run it with `--apply`. Each conversation runs in its own transaction, which locks the conversation's ledger session and its row in the tables. `--apply` deletes each turn session numbered above its ledger session's `studio:turn_index`, and every turn session of a conversation with no ledger session. A ledger session paused on a plan or question card whose pause the release resumed has its pending interrupts cleared. The run reads it so only while the ledger session is as the import copied it and the tables hold another turn index or other pending interrupts, so a card the previous revision pauses on after the traffic move stands. A cleared pause means: the previous revision shows no card for that turn, which its user already answered on the release, and closes the turn as `abandoned` on the conversation's next turn. A conversation whose lease a stream of the release holds, live on the database's clock, is left alone and listed, and the run exits 5; such a stream ends within the 900-second request timeout and its lease lapses 45 seconds after its last renewal. The release's revision keeps serving a client whose session-affinity cookie routes it there, and each turn it serves creates a turn session again. So once `--apply` stops exiting 5, delete the release's revision (a roll-forward then deploys its image again by digest) and rerun `--apply` until it exits 0. It lists a ledger session whose `studio:turn_index` is not a whole number as left alone without failing, since a rerun cannot change it: delete that conversation's turn sessions numbered above the index the previous revision reads by hand. A turn on such a conversation between the traffic move and the repair answers that 409, and each retry leaves an abandoned turn in the conversation's history on ADK.
+   Run the `rollback-turn-sessions` dry run and read what it would do. Then run it with `--apply`. Each conversation runs in its own transaction, which locks the conversation's ledger session and its row in the tables. `--apply` deletes each turn session numbered above its ledger session's `studio:turn_index`, and every turn session of a conversation with no ledger session. A ledger session paused on a plan or question card whose pause the release resumed has its pending interrupts cleared. The run reads it so only while the ledger session is as the import copied it and the tables hold another turn index or other pending interrupts, so a card the previous revision pauses on after the traffic move stands. A cleared pause means: the previous revision shows no card for that turn, which its user already answered on the release, and closes the turn as `abandoned` on the conversation's next turn. A conversation whose lease a stream of the release holds, live on the database's clock, is left alone and listed, and the run exits 5; such a stream ends within the 900-second request timeout and its lease lapses 45 seconds after its last renewal. The release's revision keeps serving a client whose session-affinity cookie routes it there, and each turn it serves creates a turn session again. A turn the release opens while `--apply` runs creates its turn session before it claims the lease, so the run can delete that session, and the turn then fails on it. So once `--apply` stops exiting 5, delete the release's revisions, wait until they drained, and rerun `--apply` until it exits 0. A roll-forward then deploys the release's image again by digest. It lists a ledger session whose `studio:turn_index` is not a whole number as left alone without failing, since a rerun cannot change it: delete that conversation's turn sessions numbered above the index the previous revision reads by hand. A turn on such a conversation between the traffic move and the repair answers that 409, and each retry leaves an abandoned turn in the conversation's history on ADK.
 
    The dry run:
 
@@ -454,12 +454,12 @@ SERVING=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --projec
      --args=-m,harness.adk_import,rollback-turn-sessions
    ```
 
-   Then `--apply`, until it no longer exits 5. It runs only while `SERVING` holds all traffic, so it never deletes the turn sessions of a release that still serves:
+   Then `--apply`, rerun while the job's own status, which the command in the import section above prints, is 5. It runs only while `SERVING` holds all traffic, so it never deletes the turn sessions of a release that still serves:
 
    ```
    (
      set -euo pipefail
-     : "${SERVING:?set it to the revision step 1 printed}"
+     : "${SERVING:?set it to the revision of the previous release}"
      gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
      | jq -er --arg r "$SERVING" '[.status.traffic[] | select((.percent // 0) > 0)]
        | if length == 1 and .[0].revisionName == $r then "\($r) holds all traffic"
@@ -469,76 +469,142 @@ SERVING=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --projec
    )
    ```
 
-   Then delete the release's revision, set as `RELEASE`, and run `--apply` again until it exits 0:
+   Then delete the release's revisions with the command below, `KEEP` set to `$SERVING`, and set the three values it prints. It is step 7's delete command without the gate, so it deletes every revision whose image is not the previous release's, and once they are gone a rerun deletes nothing and succeeds:
 
    ```
    (
      set -euo pipefail
-     : "${SERVING:?set it to the revision step 1 printed}"
-     gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
-     | jq -er --arg r "$SERVING" '[.status.traffic[] | select((.percent // 0) > 0)]
-       | if length == 1 and .[0].revisionName == $r then "\($r) holds all traffic"
-         else error("traffic is not all on \($r): move it back first") end'
-     gcloud run revisions delete "${RELEASE:?set it to the revision of the release}" --region="$REGION" --project="$PROJECT_ID" --quiet
-     gcloud run jobs execute "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --wait \
-       --args=-m,harness.adk_import,rollback-turn-sessions,--apply
-   )
-   ```
-
-   The losses. The previous revision serves each conversation as ADK last held it, so everything the release wrote is out of its view, namely each turn it served, each canvas edit, approval and run, and each answer to a pause, and a conversation started on the release is new to it. The tables keep all of it. One case stays broken: a user who answers on the previous revision, between the traffic move and `--apply`, a card the release already resumed. That answer writes the ledger session, so the run no longer reads the pause as the release's and leaves it, and the answer resumes a turn session whose events already hold the release's resume, so the turn errors or runs twice. The delete also takes the turn sessions the release's own turns need: a turn the release left paused on a plan or question card, or a pause of the previous revision it resumed, cannot resume after a roll-forward, so its user's approval or answer fails, and the release's copy that `--keep-tables` keeps holds that turn as it stood, paused, with no session to resume it. Rolling forward again turns every conversation both revisions served into a conflict: the post-drain `--apply` marks each one diverged and the release refuses it. Take the conflict list from that `--apply` report and pass every name to one `--prefer-adk` run (`--prefer-adk` takes a list), which takes ADK's copy of each and drops what the release wrote before the rollback; `--keep-tables` on a name keeps the release's copy and drops what the previous revision wrote after the rollback.
-
-1. Before the release that removes ADK from the turn path merges, execute `--apply` and then `--verify` (the two commands of the previous step), rerunning both until each exits 0 with no conflict. That release serves a diverged conversation from the tables and loses the previous revision's turns, and `--apply` copies any conversation ADK moved since the last copy. Then run the gate, delete every revision of the service older than the release's, check that they drained, and run the gate again. Each of those revisions reads ADK, and one at 0% traffic still serves a client whose session-affinity cookie routes it there. The gate, the deletes and the second gate complete before that release merges, in each environment: merging it deploys it, and its first migration runs the gate's predicate at startup. While the predicate fails, that release's startup refuses and this release's revision keeps serving. The gate also fails while a stream of the previous revision holds a live lease on an ADK ledger session, and lists those sessions, so the delete cuts no running stream: wait for the streams to end and rerun the first gate until it exits 0. Such a lease lapses 45 seconds after its stream last renewed it. The command below runs the gate first, so a failed gate stops the deletes, and a gate that finds no ADK `sessions` table, as when the job reads the wrong database, exits 2 and stops them too. After the deletes, a rollback to the previous revision is a redeploy of its image by digest.
-
-   Set `KEEP_FROM` to the release's revision, which holds all traffic since step 5. The command deletes every revision of the service created before it, oldest first, and refuses when none exists or one of them holds traffic. It confirms that none is left and prints three values to set in the shell for the check: `DELETED`, the names it deleted; `DELETED_AT`, the time before the first delete; and `DRAINED_AT`, the last delete's time plus the longest timeout (`spec.timeoutSeconds`) among the deleted revisions:
-
-   ```
-   (
-     set -euo pipefail
-     : "${KEEP_FROM:?set it to the revision of the release}"
-     gcloud run jobs execute "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --wait \
-       --args=-m,harness.adk_import,gate
-     CUT=$(gcloud run revisions describe "$KEEP_FROM" --region="$REGION" --project="$PROJECT_ID" \
-       --format='value(metadata.creationTimestamp)')
+     : "${KEEP:?set it to the revision of the previous release}"
+     REVS=$(gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json)
+     KEPT=$(jq -c --arg keep "$KEEP" '($keep | split(" ") | map(select(length > 0)) | unique) as $k
+       | [.[] | select(.metadata.name as $n | $k | index($n))] as $r
+       | if ($r | length) != ($k | length) then error("KEEP names a revision the service does not hold")
+         elif any($r[]; (.status.imageDigest // "") == "") then error("a revision KEEP names records no image digest")
+         else $r | map(.status.imageDigest) | unique end' <<<"$REVS")
      SERVED=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
        | jq -c '[.status.traffic[] | select((.percent // 0) > 0) | .revisionName]')
-     OLD=$(gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
-       | jq -er --arg cut "$CUT" --argjson served "$SERVED" '[.[] | select(.metadata.creationTimestamp < $cut)]
-         | sort_by(.metadata.creationTimestamp)
-         | if length == 0 then error("no revision is older than \($cut)")
-           elif any(.[]; .metadata.name as $n | $served | index($n)) then error("a revision to delete holds traffic")
-           else .[] | "\(.metadata.name) \(.spec.timeoutSeconds // 300)" end')
-     DELETED_AT=$(date -u +%FT%TZ)
-     NAMES="" WAIT=0
-     while read -r REV LIMIT; do
-       gcloud run revisions delete "$REV" --region="$REGION" --project="$PROJECT_ID" --quiet
+     OLD=$(jq -r --argjson kept "$KEPT" --argjson served "$SERVED" '[.[] | select((.status.imageDigest // "") as $i | $kept | index($i) | not)]
+       | sort_by(.metadata.creationTimestamp)
+       | if any(.[]; .metadata.name as $n | $served | index($n)) then error("a revision to delete holds traffic")
+         else .[] | "\(.metadata.name) \(.spec.timeoutSeconds // 300) \(.status.imageDigest // "none")" end' <<<"$REVS")
+     NAMES="" DELETED_AT=$(date -u +%FT%TZ) UNTIL=$(date -u +%s)
+     report() {
+       printf 'DELETED="%s" DELETED_AT=%s DRAINED_AT=%s\n' "${NAMES# }" "$DELETED_AT" \
+         "$(jq -rn --argjson s "$UNTIL" '$s | todateiso8601')"
+     }
+     while read -r REV LIMIT DIGEST; do
+       [ -n "$REV" ] || continue
+       gcloud run revisions delete "$REV" --region="$REGION" --project="$PROJECT_ID" --quiet </dev/null \
+       || { echo "the delete of $REV failed; after a rerun, set DELETED to both runs' names and DRAINED_AT to the later time:" >&2; report >&2; exit 1; }
+       END=$(( $(date -u +%s) + LIMIT + 10 ))
+       if [ "$END" -gt "$UNTIL" ]; then UNTIL=$END; fi
        NAMES="$NAMES $REV"
-       if [ "$LIMIT" -gt "$WAIT" ]; then WAIT=$LIMIT; fi
+       echo "deleted $REV, image $DIGEST, timeout ${LIMIT}s"
      done <<<"$OLD"
-     LAST=$(date -u +%FT%TZ)
      LEFT=$(gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
-       | jq --arg cut "$CUT" '[.[] | select(.metadata.creationTimestamp < $cut)] | length')
-     [ "$LEFT" -eq 0 ] || { echo "$LEFT revisions older than $KEEP_FROM remain" >&2; exit 1; }
-     NAMES=${NAMES# }
-     DRAINED_AT=$(jq -rn --arg t "$LAST" --argjson s "$WAIT" '$t | fromdateiso8601 + $s | todateiso8601')
-     echo "deleted $(jq -rn --arg n "$NAMES" '$n | split(" ") | length') revisions; set these for the check:"
-     printf 'DELETED="%s" DELETED_AT=%s DRAINED_AT=%s\n' "$NAMES" "$DELETED_AT" "$DRAINED_AT"
+       | jq -r --argjson kept "$KEPT" '[.[] | select((.status.imageDigest // "") as $i | $kept | index($i) | not) | .metadata.name] | join(" ")')
+     [ -z "$LEFT" ] || { echo "revisions of another image remain: $LEFT" >&2; report >&2; exit 1; }
+     if [ -z "$NAMES" ]; then echo "every revision runs an image KEEP names, so none was deleted; set these for the check:"
+     else echo "deleted every revision of another image; set these for the check:"; fi
+     report
    )
    ```
 
-   Then check that the deleted revisions drained, and confirm with the gate. A request a revision held at its delete ends within that revision's timeout, so the check refuses until `DRAINED_AT`. It then requires Cloud Run's audit log to record the delete of each name in `DELETED`, and prints, for reference, the requests the deleted revisions logged after `DELETED_AT`. The gate after it is the evidence. It fails while a ledger session holds a live `studio:segment` lease, which only a stream of a deleted revision still running could hold, and while a ledger session moved since its import, which every other write of a deleted revision causes. Each path of the previous release that opens, pauses or resumes a turn holds that lease while it writes, and its canvas edits and Stops move the ledger session's `update_time`. Resolve each name the gate prints with the command it names, and rerun it until it exits 0. The check needs `roles/logging.viewer` and `roles/run.viewer`:
+   Then run the command below until the job exits 0. It refuses until `DRAINED_AT`, when every request of a deleted revision has ended, checks the deletes as step 7's check does, and runs `--apply` while `SERVING` holds all traffic:
 
    ```
    (
      set -euo pipefail
-     : "${DELETED:?set it to the names the delete printed}" "${DELETED_AT:?set it to the time the delete printed}" \
+     : "${DELETED?set it to the names the delete printed}" "${DELETED_AT:?set it to the time the delete printed}" \
        "${DRAINED_AT:?set it to the time the delete printed}"
      [ "$(date -u +%s)" -ge "$(jq -rn --arg t "$DRAINED_AT" '$t | fromdateiso8601')" ] \
      || { echo "a request of a deleted revision can run until $DRAINED_AT; rerun then" >&2; exit 1; }
+     if [ -z "$DELETED" ]; then echo "the delete removed no revision"; exit 0; fi
      AUDIT=$(gcloud logging read "logName=\"projects/$PROJECT_ID/logs/cloudaudit.googleapis.com%2Factivity\" AND protoPayload.methodName:\"DeleteRevision\" AND timestamp>=\"$(jq -rn --arg t "$DELETED_AT" '$t | fromdateiso8601 - 3600 | todateiso8601')\"" \
        --project="$PROJECT_ID" --format=json) \
      || { echo "gcloud logging read failed: check roles/logging.viewer and PROJECT_ID" >&2; exit 1; }
-     jq -er --arg d "$DELETED" '($d | split(" ")) - [.[] | (.protoPayload.resourceName // "") | split("/") | last]
-       | if length == 0 then "the audit log records every delete" else error("no audit log entry deletes \(join(", "))") end' <<<"$AUDIT"
+     jq -er --arg d "$DELETED" '($d | split(" ")) - [.[] | select((.protoPayload.status.code // 0) == 0) | (.protoPayload.resourceName // "") | split("/") | last]
+       | if length == 0 then "the audit log records every delete" else error("no audit log entry records a delete of \(join(", "))") end' <<<"$AUDIT"
+     echo "requests the deleted revisions logged after the delete, for reference:"
+     gcloud logging read "logName=\"projects/$PROJECT_ID/logs/run.googleapis.com%2Frequests\" AND resource.labels.revision_name=($(jq -rn --arg d "$DELETED" '$d | split(" ") | map("\"\(.)\"") | join(" OR ")')) AND receiveTimestamp>=\"$DELETED_AT\"" \
+       --project="$PROJECT_ID" --format='value(receiveTimestamp,resource.labels.revision_name,httpRequest.status,httpRequest.requestUrl)' \
+     || echo "the request log could not be read" >&2
+   ) \
+   && (
+     set -euo pipefail
+     : "${SERVING:?set it to the revision of the previous release}"
+     gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
+     | jq -er --arg r "$SERVING" '[.status.traffic[] | select((.percent // 0) > 0)]
+       | if length == 1 and .[0].revisionName == $r then "\($r) holds all traffic"
+         else error("traffic is not all on \($r): move it back first") end'
+     gcloud run jobs execute "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --wait \
+       --args=-m,harness.adk_import,rollback-turn-sessions,--apply
+   )
+
+   ```
+
+   The losses. The previous revision serves each conversation as ADK last held it, so everything the release wrote is out of its view, namely each turn it served, each canvas edit, approval and run, and each answer to a pause, and a conversation started on the release is new to it. The tables keep all of it. A card the release already resumed stays on the previous revision when its ledger session is no longer as the import copied it, since the run then reads the pause as the previous revision's own and leaves it: a user answers that card on the previous revision between the traffic move and `--apply`; a canvas edit or a Stop on the previous revision after the move writes the ledger session before the user answers the card; or the conversation was diverged, or kept with `--keep-tables`, when the release resumed the card. The answer then resumes a turn session whose events already hold the release's resume, so the turn errors or runs twice. The delete also takes the turn sessions the release's own turns need: a turn the release left paused on a plan or question card, or a pause of the previous revision it resumed, cannot resume after a roll-forward, so its user's approval or answer fails, and the release's copy that `--keep-tables` keeps holds that turn as it stood, paused, with no session to resume it. Rolling forward again turns every conversation both revisions served into a conflict: the post-drain `--apply` marks each one diverged and the release refuses it. Take the conflict list from that `--apply` report and pass every name to one `--prefer-adk` run (`--prefer-adk` takes a list), which takes ADK's copy of each and drops what the release wrote before the rollback; `--keep-tables` on a name keeps the release's copy and drops what the previous revision wrote after the rollback.
+
+1. Before the release that removes ADK from the turn path merges, execute `--apply` and then `--verify` (the two commands of the previous step), rerunning both until each exits 0 with no conflict. That release serves a diverged conversation from the tables and loses the previous revision's turns, and `--apply` copies any conversation ADK moved since the last copy. Then run the gate, delete every revision of the service whose image is not the release's, check that they drained, and run the gate again. Each of those revisions reads ADK, and one at 0% traffic still serves a client whose session-affinity cookie routes it there. The gate, the deletes and the second gate complete before that release merges, in each environment: merging it deploys it, and its first migration runs the gate's predicate at startup. While the predicate fails, that release's startup refuses and this release's revision keeps serving. The gate also fails while a stream of the previous revision holds a live lease on an ADK ledger session, and lists those sessions, so the delete cuts no running stream: wait for the streams to end and rerun the first gate until it exits 0. Such a lease lapses 45 seconds after its stream last renewed it. The command below runs the gate first, so a failed gate stops the deletes, and a gate that finds no ADK `sessions` table, as when the job reads the wrong database, exits 2 and stops them too. After the deletes, a rollback to the previous revision is a redeploy of its image by digest.
+
+   Set `KEEP` to the release's revision, which holds all traffic since step 5, or, when a rerun of the release's deploy created more than one revision, to each of them, separated by spaces. The command deletes every revision of the service whose image digest (`status.imageDigest`) is not one of theirs, oldest first, any revision a rollback redeployed included, and refuses when one of them holds traffic. It prints each revision as it deletes it, with its image and timeout, confirms that no revision of another image is left, and prints three values to set in the shell for the check: `DELETED`, the names it deleted; `DELETED_AT`, the time before the first delete; and `DRAINED_AT`, the latest of each delete's time plus its revision's timeout (`spec.timeoutSeconds`) plus 10 seconds. The 10 seconds are the shutdown grace Cloud Run gives an instance after SIGTERM. CPU is throttled outside requests, so a write that a request cut at its timeout still makes runs in that grace at the latest. When every revision runs a kept image it deletes nothing and prints `DRAINED_AT` as the time it ran. When a delete fails it prints the values for the revisions already deleted: rerun it, then set `DELETED` to both runs' names and `DRAINED_AT` to the later of the two.
+
+   ```
+   (
+     set -euo pipefail
+     : "${KEEP:?set it to the revision of the release}"
+     gcloud run jobs execute "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --wait \
+       --args=-m,harness.adk_import,gate
+     REVS=$(gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json)
+     KEPT=$(jq -c --arg keep "$KEEP" '($keep | split(" ") | map(select(length > 0)) | unique) as $k
+       | [.[] | select(.metadata.name as $n | $k | index($n))] as $r
+       | if ($r | length) != ($k | length) then error("KEEP names a revision the service does not hold")
+         elif any($r[]; (.status.imageDigest // "") == "") then error("a revision KEEP names records no image digest")
+         else $r | map(.status.imageDigest) | unique end' <<<"$REVS")
+     SERVED=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
+       | jq -c '[.status.traffic[] | select((.percent // 0) > 0) | .revisionName]')
+     OLD=$(jq -r --argjson kept "$KEPT" --argjson served "$SERVED" '[.[] | select((.status.imageDigest // "") as $i | $kept | index($i) | not)]
+       | sort_by(.metadata.creationTimestamp)
+       | if any(.[]; .metadata.name as $n | $served | index($n)) then error("a revision to delete holds traffic")
+         else .[] | "\(.metadata.name) \(.spec.timeoutSeconds // 300) \(.status.imageDigest // "none")" end' <<<"$REVS")
+     NAMES="" DELETED_AT=$(date -u +%FT%TZ) UNTIL=$(date -u +%s)
+     report() {
+       printf 'DELETED="%s" DELETED_AT=%s DRAINED_AT=%s\n' "${NAMES# }" "$DELETED_AT" \
+         "$(jq -rn --argjson s "$UNTIL" '$s | todateiso8601')"
+     }
+     while read -r REV LIMIT DIGEST; do
+       [ -n "$REV" ] || continue
+       gcloud run revisions delete "$REV" --region="$REGION" --project="$PROJECT_ID" --quiet </dev/null \
+       || { echo "the delete of $REV failed; after a rerun, set DELETED to both runs' names and DRAINED_AT to the later time:" >&2; report >&2; exit 1; }
+       END=$(( $(date -u +%s) + LIMIT + 10 ))
+       if [ "$END" -gt "$UNTIL" ]; then UNTIL=$END; fi
+       NAMES="$NAMES $REV"
+       echo "deleted $REV, image $DIGEST, timeout ${LIMIT}s"
+     done <<<"$OLD"
+     LEFT=$(gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
+       | jq -r --argjson kept "$KEPT" '[.[] | select((.status.imageDigest // "") as $i | $kept | index($i) | not) | .metadata.name] | join(" ")')
+     [ -z "$LEFT" ] || { echo "revisions of another image remain: $LEFT" >&2; report >&2; exit 1; }
+     if [ -z "$NAMES" ]; then echo "every revision runs an image KEEP names, so none was deleted; set these for the check:"
+     else echo "deleted every revision of another image; set these for the check:"; fi
+     report
+   )
+   ```
+
+   Then check that the deleted revisions drained, and confirm with the gate. A request a revision held at its delete ends within that revision's timeout, so the check refuses until `DRAINED_AT`. It then requires Cloud Run's audit log to record a successful delete of each name in `DELETED`, a record of each delete that outlasts the shell, and prints, for reference, the requests the deleted revisions logged after `DELETED_AT`. With `DELETED` empty it checks the time only. The gate after it is the evidence. It fails while a ledger session holds a live `studio:segment` lease, which only a stream of a deleted revision still running could hold, and while a ledger session moved since its import, which every other write of a deleted revision causes. Each path of the previous release that opens, pauses or resumes a turn holds that lease while it writes, and its canvas edits and Stops move the ledger session's `update_time`. Writes fence on the lease's id alone, so a lapsed lease shows only that no renewal landed in 45 seconds. The drain, which ends every request of a deleted revision, is what shows that no stream runs. Resolve each name the gate prints with the command it names, and rerun it until it exits 0. The check needs `roles/logging.viewer` and `roles/run.viewer`:
+
+   ```
+   (
+     set -euo pipefail
+     : "${DELETED?set it to the names the delete printed}" "${DELETED_AT:?set it to the time the delete printed}" \
+       "${DRAINED_AT:?set it to the time the delete printed}"
+     [ "$(date -u +%s)" -ge "$(jq -rn --arg t "$DRAINED_AT" '$t | fromdateiso8601')" ] \
+     || { echo "a request of a deleted revision can run until $DRAINED_AT; rerun then" >&2; exit 1; }
+     if [ -z "$DELETED" ]; then echo "the delete removed no revision"; exit 0; fi
+     AUDIT=$(gcloud logging read "logName=\"projects/$PROJECT_ID/logs/cloudaudit.googleapis.com%2Factivity\" AND protoPayload.methodName:\"DeleteRevision\" AND timestamp>=\"$(jq -rn --arg t "$DELETED_AT" '$t | fromdateiso8601 - 3600 | todateiso8601')\"" \
+       --project="$PROJECT_ID" --format=json) \
+     || { echo "gcloud logging read failed: check roles/logging.viewer and PROJECT_ID" >&2; exit 1; }
+     jq -er --arg d "$DELETED" '($d | split(" ")) - [.[] | select((.protoPayload.status.code // 0) == 0) | (.protoPayload.resourceName // "") | split("/") | last]
+       | if length == 0 then "the audit log records every delete" else error("no audit log entry records a delete of \(join(", "))") end' <<<"$AUDIT"
      echo "requests the deleted revisions logged after the delete, for reference:"
      gcloud logging read "logName=\"projects/$PROJECT_ID/logs/run.googleapis.com%2Frequests\" AND resource.labels.revision_name=($(jq -rn --arg d "$DELETED" '$d | split(" ") | map("\"\(.)\"") | join(" OR ")')) AND receiveTimestamp>=\"$DELETED_AT\"" \
        --project="$PROJECT_ID" --format='value(receiveTimestamp,resource.labels.revision_name,httpRequest.status,httpRequest.requestUrl)' \
@@ -549,7 +615,7 @@ SERVING=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --projec
 
    ```
 
-   Then execute the `close-open-turns` dry run from this release's image and read what it would close. Run it with `--apply` only once the next release, which runs turns without ADK, takes all traffic, and then at once: while this release serves, a turn it paused on a plan or question card holds no lease and fits the close, and once it is closed the user's approval or answer gets a 404. Set `NEXT` to the next release's revision and `NEXT_SHA` to the commit its deploy built (the merge commit on the branch the environment deploys from). The command below runs `--apply` only when `NEXT` holds all of the service's traffic, the commit holds `0003_turns.sql`, and `NEXT` runs that commit's build: its image digest is the linux/amd64 manifest of the image index the deploy tagged with the commit. A revert, a hotfix or a redeploy of this release by digest fails one of those. A rerun of the deploy for the same commit pushes a new image index under the same tag, so a revision of the first run then fails this check: set the variable to the revision the latest deploy of that commit created. The job itself refuses with exit status 3 until the `turn_cursors` table exists, which the next release's first migration creates as its revision starts. The next release's migration can commit and its revision still fail to take traffic, and `turn_cursors` stays after a rollback to this release, so the table alone does not show that the next release serves. It runs only while the next release serves and the release that archives ADK's tables has not started: once that release starts, the job exits 4, so `close-open-turns` must exit 0 before it merges. Between the next release taking traffic and the `--apply`, a new turn on a conversation whose turn this release left paused closes that turn as `abandoned` without the source blocks `close-open-turns` keeps, so later turns cannot read the sources it resolved. Rerun `--apply` until it exits 0. This release's revision keeps serving a client whose session-affinity cookie routes it there, and can open or pause a turn on ADK after that exit 0, so the next release's runbook deletes this release's revisions, waits until they drained, and runs this `--apply` again until it exits 0.
+   Then execute the `close-open-turns` dry run from this release's image and read what it would close. Run it with `--apply` only once the next release, which runs turns without ADK, takes all traffic, and then at once: while this release serves, a turn it paused on a plan or question card holds no lease and fits the close, and once it is closed the user's approval or answer gets a 404. Set `NEXT` to the next release's revision, `NEXT_SHA` to the commit its deploy built (the merge commit on the branch the environment deploys from), and `DRAINED_AT` to the time the latest delete of earlier revisions printed, this step's or one in the next release's runbook. The command refuses until `DRAINED_AT`, so it never closes a turn that a request of a deleted revision can still write. The command below runs `--apply` only when `NEXT` holds all of the service's traffic, the commit holds `0003_turns.sql`, and `NEXT` runs that commit's build: its image digest is the manifest the deploy tagged with the commit, or a manifest of that image index, such as its linux/amd64 one. A revert, a hotfix or a redeploy of this release by digest fails one of those. A rerun of the deploy for the same commit pushes a new image index under the same tag, so a revision of the first run then fails this check: set the variable to the revision the latest deploy of that commit created. The job itself refuses with exit status 3 until the `turn_cursors` table exists, which the next release's first migration creates as its revision starts. The next release's migration can commit and its revision still fail to take traffic, and `turn_cursors` stays after a rollback to this release, so the table alone does not show that the next release serves. It runs only while the next release serves and the release that archives ADK's tables has not started: once that release starts, the job exits 4, so `close-open-turns` must exit 0 before it merges. Between the next release taking traffic and the `--apply`, a new turn on a conversation whose turn this release left paused closes that turn as `abandoned` without the source blocks `close-open-turns` keeps, so later turns cannot read the sources it resolved. Rerun `--apply` until it exits 0. This release's revision keeps serving a client whose session-affinity cookie routes it there, and can open or pause a turn on ADK after that exit 0, so the next release's runbook deletes this release's revisions, waits until they drained, and runs this `--apply` again until it exits 0.
 
    ```
    gcloud run jobs execute "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --wait \
@@ -561,7 +627,10 @@ SERVING=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --projec
    ```
    (
      set -euo pipefail
-     : "${NEXT:?set it to the revision of the next release}" "${NEXT_SHA:?set it to the commit the next release deployed}"
+     : "${NEXT:?set it to the revision of the next release}" "${NEXT_SHA:?set it to the commit the next release deployed}" \
+      "${DRAINED_AT:?set it to the time the latest revision delete printed}"
+    [ "$(date -u +%s)" -ge "$(jq -rn --arg t "$DRAINED_AT" '$t | fromdateiso8601')" ] \
+    || { echo "a request of a deleted revision can run until $DRAINED_AT; rerun then" >&2; exit 1; }
      gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
      | jq -er --arg r "$NEXT" '[.status.traffic[] | select((.percent // 0) > 0)]
        | if length == 1 and .[0].percent == 100 and .[0].revisionName == $r then "\($r) holds all traffic"
@@ -573,23 +642,25 @@ SERVING=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --projec
          else error("the commit holds no 0003_turns.sql: it is not the next release") end'
      DIGEST=$(gcloud run revisions describe "$NEXT" --region="$REGION" --project="$PROJECT_ID" --format='value(status.imageDigest)')
      IMAGE=${DIGEST%@*}
-     curl -fsS -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-       -H "Accept: application/vnd.oci.image.index.v1+json" \
-       "https://${IMAGE%%/*}/v2/${IMAGE#*/}/manifests/$NEXT_SHA" \
-     | jq -er --arg d "${DIGEST#*@}" 'if any(.manifests[]?; .digest == $d) then "the revision runs the build of that commit"
+     URL="https://${IMAGE%%/*}/v2/${IMAGE#*/}/manifests/$NEXT_SHA" TOKEN=$(gcloud auth print-access-token)
+     ACCEPT="Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+     TAGGED=$(curl -fsSI -H "Authorization: Bearer $TOKEN" -H "$ACCEPT" "$URL" \
+       | tr -d '\r' | awk -F': ' 'tolower($1) == "docker-content-digest" {print $2}')
+     curl -fsS -H "Authorization: Bearer $TOKEN" -H "$ACCEPT" "$URL" \
+     | jq -er --arg d "${DIGEST#*@}" --arg t "$TAGGED" 'if $t == $d or any(.manifests[]?; .digest == $d) then "the revision runs the build of that commit"
          else error("the revision does not run the build of that commit") end'
      gcloud run jobs execute "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --wait \
        --args=-m,harness.adk_import,close-open-turns,--apply
    )
    ```
 
-   It closes every turn left open on a pause, with no stream holding its lease, as `abandoned`, the way the next turn would have closed it, keeping the blocks of the sources its plans used from the turn's ADK session, converted as the import converts them. A turn a stream still holds is left open and listed in one of two groups: live on ADK, when its ADK turn session exists and `turn_cursors` holds no row for it (a stream of this release), and live elsewhere (a turn of the next release). A turn live on ADK fails the run, so its exit 0 shows that every stream of this release has ended. A stream of the previous release writes its lease only to ADK's ledger session, so a conversation whose ledger session holds a live `studio:segment` lease is also left open and listed as live on ADK, whatever the tables hold, and fails the run. A conversation whose import record is not current, because ADK wrote its ledger session after the import, is left open and listed as imported before ADK's last write, and fails the run too: run `import --apply`, then `close-open-turns` again. A conversation with no ADK ledger session is judged on the tables alone. A turn with no ADK turn session (started by a release that runs turns without ADK) is listed and left open. So is a turn the `turn_cursors` table holds a row for, by conversation and `turn_index`, opened there under the number of an ADK turn session left behind. A turn opens in `turn_cursors` only under the conversation's lease: its writer first commits the lease and the turn index on the conversation's row, then inserts the turn's row under `FOR SHARE` on the conversation's row where `lease_segment_id` is its lease. The job's closing write refuses a live lease it does not hold and a row whose turn index moved since its load, listing each conversation as changed, reads `turn_cursors` under its `FOR UPDATE` on the same row, and writes the lease columns null. A turn whose row committed, or waits to commit, before that lock is left open, and an insert that waits behind the lock finds the lease gone and opens no turn. The job reads whether `turn_cursors` exists under the same lock, on every closing write. A diverged conversation is listed and left alone, and the run exits 1. Run `--prefer-adk` or `--keep-tables` on it first. A block that does not convert is kept as stored, as the import keeps one, and listed.
+   It closes every turn left open on a pause, with no stream holding its lease, as `abandoned`, the way the next turn would have closed it, keeping the blocks of the sources its plans used from the turn's ADK session, converted as the import converts them. A turn a stream still holds is left open and listed in one of two groups: live on ADK, when its ADK turn session exists and `turn_cursors` holds no row for it (a stream of this release), and live elsewhere (a turn of the next release). A turn live on ADK fails the run, so its exit 0 shows that every stream of this release has ended. A stream of the previous release writes its lease only to ADK's ledger session, so a conversation whose ledger session holds a live `studio:segment` lease is also left open and listed as live on ADK, whatever the tables hold, and fails the run. A conversation whose import record is not current, because ADK wrote its ledger session after the import, is left open and listed as imported before ADK's last write, and fails the run too: run `import --apply`, then `close-open-turns` again. A conversation with no ADK ledger session is judged on the tables alone. A `/turn` of this release that died between creating its ADK turn session and claiming the lease leaves a turn session one above the tables' turn index. The next release opens that turn number with the lease and turn index first and its `turn_cursors` row after, so between those commits the run lists the turn as live on ADK and fails, and when that request dies between them the run closes it as a turn of this release with the leftover session's blocks. A turn with no ADK turn session (started by a release that runs turns without ADK) is listed and left open. So is a turn the `turn_cursors` table holds a row for, by conversation and `turn_index`, opened there under the number of an ADK turn session left behind. A turn opens in `turn_cursors` only under the conversation's lease: its writer first commits the lease and the turn index on the conversation's row, then inserts the turn's row under `FOR SHARE` on the conversation's row where `lease_segment_id` is its lease. The job's closing write refuses a live lease it does not hold and a row whose turn index moved since its load, listing each conversation as changed, reads `turn_cursors` under its `FOR UPDATE` on the same row, and writes the lease columns null. A turn whose row committed, or waits to commit, before that lock is left open, and an insert that waits behind the lock finds the lease gone and opens no turn. The job reads whether `turn_cursors` exists under the same lock, on every closing write. A diverged conversation is listed and left alone, and the run exits 1. Run `--prefer-adk` or `--keep-tables` on it first. A block that does not convert is kept as stored, as the import keeps one, and listed.
 
 1. Keep the job until the release that archives ADK's tables has started, since `gate`, `--prefer-adk`, `--keep-tables` and `--discard` are the repairs for what its migration refuses, and `rollback-turn-sessions` is the repair a rollback to the previous release needs. Once that release has archived ADK's tables, every verb but `gate` exits 4, and `gate` exits 2 unless given `--adk-archived`, which passes only while `adk_archive_sessions` resolves. Before deleting it, record the image it ran on with `gcloud run jobs describe "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --format='value(spec.template.spec.template.spec.containers[0].image)'`, since a later release recreates the job from it. Then delete it: `gcloud run jobs delete "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --quiet`.
 
 ### Backing out before traffic moves
 
-When a step before step 5 cannot pass, such as a dry run whose refusals need a change to the job, back the release out. Traffic left pinned holds every dfo-infra apply to the `ai` service, and any such apply, or a stray `--to-latest`, puts the release on traffic without its import. Revert the merge on the branch the environment deploys from (`dev` for dev, `main` for production) through a pull request, and wait for its deploy: it creates a revision of the code that serves now, with no traffic, since traffic is still pinned. Then move traffic to that revision by name, delete the release's revision, which never served, and let traffic follow the latest revision again. Set `RELEASE` to the release's revision name and `REVERT` to the revert's from the revision list, and `REVERT_SHA` to the revert's merge commit. The command, run from a checkout of this repository, refuses unless the two revisions differ, `REVERT` is the service's newest revision, created and ready, the commit holds none of the harness migrations the release added, and `REVERT` runs that commit's build (its image digest is the linux/amd64 manifest of the image index the deploy tagged with the commit), so the release cannot take traffic. A rerun of the deploy for the same commit pushes a new image index under the same tag, so a revision of the first run then fails this check: set `REVERT` to the revision the latest deploy of that commit created:
+When a step before step 5 cannot pass, such as a dry run whose refusals need a change to the job, back the release out. Traffic left pinned holds every dfo-infra apply to the `ai` service, and any such apply, or a stray `--to-latest`, puts the release on traffic without its import. Revert the merge on the branch the environment deploys from (`dev` for dev, `main` for production) through a pull request, and wait for its deploy: it creates a revision of the code that serves now, with no traffic, since traffic is still pinned. Then move traffic to that revision by name, delete the release's revision, which never served, and let traffic follow the latest revision again. Set `RELEASE` to the release's revision name and `REVERT` to the revert's from the revision list, and `REVERT_SHA` to the revert's merge commit. The command, run from a checkout of this repository, refuses unless the two revisions differ, `REVERT` is the service's newest revision, created and ready, the commit holds none of the harness migrations the release added, and `REVERT` runs that commit's build (its image digest is the manifest the deploy tagged with the commit, or a manifest of that image index, such as its linux/amd64 one), so the release cannot take traffic. A rerun of the deploy for the same commit pushes a new image index under the same tag, so a revision of the first run then fails this check: set `REVERT` to the revision the latest deploy of that commit created:
 
 ```
 gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
@@ -613,10 +684,12 @@ gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="
       else "the commit holds no harness migrations" end'
   DIGEST=$(gcloud run revisions describe "$REVERT" --region="$REGION" --project="$PROJECT_ID" --format='value(status.imageDigest)')
   IMAGE=${DIGEST%@*}
-  curl -fsS -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-    -H "Accept: application/vnd.oci.image.index.v1+json" \
-    "https://${IMAGE%%/*}/v2/${IMAGE#*/}/manifests/$REVERT_SHA" \
-  | jq -er --arg d "${DIGEST#*@}" 'if any(.manifests[]?; .digest == $d) then "the revision runs the build of the revert"
+  URL="https://${IMAGE%%/*}/v2/${IMAGE#*/}/manifests/$REVERT_SHA" TOKEN=$(gcloud auth print-access-token)
+  ACCEPT="Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+  TAGGED=$(curl -fsSI -H "Authorization: Bearer $TOKEN" -H "$ACCEPT" "$URL" \
+    | tr -d '\r' | awk -F': ' 'tolower($1) == "docker-content-digest" {print $2}')
+  curl -fsS -H "Authorization: Bearer $TOKEN" -H "$ACCEPT" "$URL" \
+  | jq -er --arg d "${DIGEST#*@}" --arg t "$TAGGED" 'if $t == $d or any(.manifests[]?; .digest == $d) then "the revision runs the build of the revert"
       else error("the revision does not run the build of the revert") end'
   gcloud run services update-traffic "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --to-revisions="$REVERT=100"
   gcloud run revisions delete "$RELEASE" --region="$REGION" --project="$PROJECT_ID" --quiet
