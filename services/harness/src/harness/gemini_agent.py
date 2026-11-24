@@ -120,8 +120,8 @@ class RecordingState:
 
 class EmptyResponseError(UnexpectedModelBehavior, TransientFaultError):
     """The model's response held neither answer text nor a function call
-    (`holds_no_answer`), and the run produced nothing before it, so it has
-    nothing to go on with. The same request samples again on a later attempt,
+    (`holds_no_answer`), and the run had shown the user nothing before it, so
+    it has nothing to go on with. The same request samples again on a later attempt,
     so the fault is transient (`compiler.surface.TransientFaultError`)."""
 
 
@@ -134,8 +134,8 @@ def holds_no_answer(response: ModelResponse) -> bool:
     one request form (`harness.gemini_wire.in_canonical_form`) and the cached
     prefix, and which no Gemini model of the harness was ever sent. The
     planner's run ends on it with no output (`planner.pydantic_agent`). The
-    orchestrator's ends answered when it streamed text or answered a call
-    before it, and otherwise raises `EmptyResponseError` (`orchestrator.run`).
+    orchestrator's ends answered when it streamed text or drew a card before
+    it, and otherwise raises `EmptyResponseError` (`orchestrator.run`).
     """
     return not any(
         isinstance(part, ToolCallPart) or (isinstance(part, TextPart) and part.content)

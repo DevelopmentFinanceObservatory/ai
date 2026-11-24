@@ -176,7 +176,7 @@ from .failure_text import classed_sentence, is_user_sentence
 from .graph_turns import agent_read
 from .resolved_revision import resolved_revision
 from .scope_scenarios import _hashed_scope, _switched_answer
-from .scripted_genai import ScriptedGenai, call_part, reply, text_part
+from .scripted_genai import ScriptedGenai, call_part, empty_reply, reply, text_part
 from .scripted_tools import (
     CannedSearch,
     chart,
@@ -904,6 +904,40 @@ class _HeldSends:
         self.sent.append(args)
         await self.release.wait()
         return "posted"
+
+
+@pytest.mark.parametrize(
+    "shown",
+    ["text-beside-a-call", "a-card-drawn", "nothing"],
+)
+async def test_a_model_response_with_no_answer_ends_on_what_the_user_was_shown(
+    shown: str,
+) -> None:
+    """A run ending on a response with no answer closes the turn on what the user was
+    shown: the text it streamed beside its calls, recorded as the reply, or the card it
+    drew. A run that showed nothing fails the turn, and the user is told to retry."""
+    script = {
+        "text-beside-a-call": (reply(text_part("Looking it up."), search_call("aid to Kenya")),),
+        "a-card-drawn": _card()[:3],
+        "nothing": (search_call("aid to Kenya"),),
+    }[shown]
+    app = _app(
+        *script, empty_reply(), resolver=_search(), executor=ScriptedExecutor(_card_results())
+    )
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body())
+
+    events = _events(frames)
+    if shown == "nothing":
+        error = _frame(frames, "error")["error"]
+        assert (error["error"], error["retry"]) == ("transient_unavailable", "retry_after_delay")
+        return
+    assert "error" not in events
+    assert events[-1] == "done"
+    if shown == "text-beside-a-call":
+        assert _frame(frames, "message.complete")["text"].startswith("Looking it up.")
+    else:
+        assert "component.created" in events
 
 
 async def test_the_stream_that_offers_a_card_closes_once_its_early_mints_are_posted() -> None:

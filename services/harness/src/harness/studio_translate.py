@@ -66,7 +66,7 @@ from executor.artifacts import declared_ranked_before_limit
 from executor.outcomes import RefusalKind
 from executor.run import RESULT_RECEIVED, current_step_id
 from google.genai import types
-from orchestrator.run import ModelResponded, TextDelta, ToolsAnswered
+from orchestrator.run import ModelResponded, ReplyStreamed, TextDelta, ToolsAnswered
 from planner.phrasing import entities_phrase
 from planner.plan import PLAN_STATE_KEY, DatasetRequirement, Decision
 from planner.plan import Plan as PlannerPlan
@@ -1842,6 +1842,9 @@ class _Translator:
                 frames.extend(self._agent_text(text))
             case ModelResponded(parts=parts):
                 frames.extend(self._agent_response(parts))
+            case ReplyStreamed(text=text):
+                # Shown already as it streamed; it stands as the reply.
+                self._final_text = text
             case _:
                 frames.extend(self._plan_path_frames(event))
         return frames

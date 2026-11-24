@@ -208,6 +208,21 @@ _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # could not read back also holds "unreadable": True and is not on the canvas.
 # `remove_cards` drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
+
+
+def drawn_card_ids(state: Mapping[str, Any], turn_id: str) -> frozenset[str]:
+    """The component ids of the cards `make_charts` drew in turn `turn_id` that are
+    on the canvas (`_DRAWN_CARDS_KEY`), less any it could not read back."""
+    held = state.get(_DRAWN_CARDS_KEY) or {}
+    if held.get("turn") != turn_id:
+        return frozenset()
+    return frozenset(
+        card["component_id"]
+        for card in held["drawn"].values()
+        if not card.get("unreadable") and card.get("component_id")
+    )
+
+
 # The identity member each `get_data` scope member replaces.
 _SCOPE_REPLACES = {"entities": "entities", "window": "requested_window", "facets": "facets"}
 # Skills a search result names, as shown to the model, as data-mcp's search

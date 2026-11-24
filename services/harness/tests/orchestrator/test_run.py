@@ -19,7 +19,7 @@ from google.genai import types
 from harness.gemini_agent import EmptyResponseError
 from harness.gemini_wire import StreamResumedError
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
-from harness.orchestrator_tools import build_orchestrator_tools
+from harness.orchestrator_tools import _DRAWN_CARDS_KEY, build_orchestrator_tools
 from harness.prefix_cache import PrefixCache
 from harness.sentences import StopCode, refusal_sentence
 from harness.studio_state import CardRemoval, ConversationState, land_component, remove_cards
@@ -34,6 +34,7 @@ from orchestrator.run import (
     ModelResponded,
     NoCallWaitsError,
     Opening,
+    ReplyStreamed,
     StoredHistory,
     TextDelta,
     ToolsAnswered,
@@ -545,15 +546,16 @@ async def test_a_resumed_run_names_the_conversation_its_caller_gives(
 
 @pytest.mark.parametrize(
     "replies",
-    [[empty_reply()], [reply(thought_part("Thinking."))]],
-    ids=["no-parts", "thought-only"],
+    [[empty_reply()], [reply(thought_part("Thinking."))], [reply(_SEARCH), empty_reply()]],
+    ids=["no-parts", "thought-only", "after-a-call"],
 )
-async def test_a_response_with_no_answer_in_a_run_that_produced_nothing_fails_transiently(
+async def test_a_response_with_no_answer_in_a_run_that_showed_nothing_fails_transiently(
     replies: list[Any],
 ) -> None:
-    """A response with neither answer text nor a function call is not retried:
-    no further request is sent. A run that had produced nothing raises
-    `EmptyResponseError`, a fault a later attempt may not meet."""
+    """A response with neither answer text nor a function call is not retried: no
+    further request is sent. A run that streamed no text and drew no card, whatever
+    calls it answered, raises `EmptyResponseError`, a fault a later attempt may not
+    meet."""
     scripted = ScriptedGenai(replies)
 
     with pytest.raises(EmptyResponseError) as raised:
@@ -563,27 +565,86 @@ async def test_a_response_with_no_answer_in_a_run_that_produced_nothing_fails_tr
     assert len(scripted.requests) == len(replies)
 
 
+async def test_a_resumed_run_whose_first_response_holds_no_answer_fails_transiently() -> None:
+    """The hand-back that opens a resumed run is no answer the user sees: a resumed
+    run whose response holds no answer fails, so the user's answer is not met with
+    silence."""
+    asked = {"questions": [{"question": "Which Congo?", "options": [{"label": "DR Congo"}]}]}
+    scripted = ScriptedGenai([reply(call_part("ask_user", asked)), reply(thought_part("Hmm."))])
+    orchestrator = orchestrator_agent(
+        build_orchestrator_tools(resolver=_Searches(), executor=_no_executor)
+    )
+    state: dict[str, Any] = {"surface": "studio"}
+    model = orchestrator_model("gemini-test", client=scripted.client, budget=None)
+    (handed,) = [
+        e
+        async for e in run_orchestrator(
+            orchestrator, state=state, turn_id="turn-1", model=model, opening=Opening("q", TODAY)
+        )
+        if isinstance(e, HandedOff)
+    ]
+
+    with pytest.raises(EmptyResponseError):
+        async for _ in run_orchestrator(
+            orchestrator,
+            state=state,
+            turn_id="turn-1",
+            model=model,
+            history=handed.history,
+            hand_back=HandBack(answers="ask_user", result={"result": "DR Congo"}),
+        ):
+            pass
+
+
+class _DrawingSearches(_Searches):
+    """`_Searches` whose every search also records a card drawn this turn in `drawn`,
+    the turn's drawn cards as `make_charts` keeps them."""
+
+    def __init__(self, drawn: dict[str, Any]) -> None:
+        super().__init__()
+        self.drawn = drawn
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.drawn[f"card-{self.calls}"] = {"component_id": f"cmp_{self.calls}", "revision": 1}
+        return await super().__call__(**kwargs)
+
+
 @pytest.mark.parametrize(
-    ("first", "text"),
+    ("replies", "drawing", "text"),
     [
-        pytest.param(reply(_SEARCH), "", id="after-a-call"),
         pytest.param(
-            reply(text_part("Looking it up."), _SEARCH), "Looking it up.", id="after-text"
+            [
+                reply(text_part("Looking it up."), _SEARCH),
+                reply(text_part("Found the series."), _SEARCH),
+            ],
+            False,
+            "Looking it up.\n\nFound the series.",
+            id="after-text",
         ),
+        pytest.param([reply(_SEARCH)], True, "", id="after-a-card"),
     ],
 )
-async def test_a_response_with_no_answer_after_a_call_ends_the_run_answered(
-    first: Any, text: str
+async def test_a_response_with_no_answer_after_the_run_showed_something_ends_it_answered(
+    replies: list[Any], drawing: bool, text: str
 ) -> None:
-    """A response with no answer after the run answered a call ends it answered on the
-    text it streamed, as the calls' work stands, and sends no further request."""
-    scripted = ScriptedGenai([first, empty_reply()])
+    """A response with no answer after the run streamed text beside its calls, or drew
+    a card, ends it answered on that text, each response's its own paragraph, and sends
+    no further request. The text stands as the reply (`ReplyStreamed`)."""
+    scripted = ScriptedGenai([*replies, empty_reply()])
+    drawn: dict[str, Any] = {}
+    tools = build_orchestrator_tools(
+        resolver=_DrawingSearches(drawn) if drawing else _Searches(), executor=_no_executor
+    )
 
-    events, _ = await _run(scripted, budget=_budget())
+    events, _ = await _run(
+        scripted,
+        budget=_budget(),
+        tools=tools,
+        held={_DRAWN_CARDS_KEY: {"turn": "turn-1", "drawn": drawn}},
+    )
 
-    assert any(isinstance(event, ToolsAnswered) for event in events)
-    assert events[-1] == Answered(text=text)
-    assert len(scripted.requests) == 2
+    assert events[-2:] == [ReplyStreamed(text=text), Answered(text=text)]
+    assert len(scripted.requests) == len(replies) + 1
 
 
 async def test_a_hand_back_for_a_call_that_does_not_wait_is_refused() -> None:

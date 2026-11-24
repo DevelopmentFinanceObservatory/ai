@@ -141,7 +141,7 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
         response Gemini blocked (`pydantic_ai.exceptions.ContentFilterError`)
         and one that held no answer in a run that had produced nothing
         (`harness.gemini_agent.EmptyResponseError`, transient) included. A run
-        that held no answer after it streamed text or answered a call ends
+        that held no answer after it streamed text or drew a card ends
         answered (`orchestrator.run.run_orchestrator`).
 
         Raises:
