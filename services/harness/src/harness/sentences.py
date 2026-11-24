@@ -96,6 +96,7 @@ TERMINAL_PROPOSE_CODES = frozenset(
         ProblemCode.NOTHING_TO_PLAN,
         ProblemCode.PRICES_UNSERVED,
         ProblemCode.STATED_SCOPE_UNREADABLE,
+        ProblemCode.STATED_SCOPE_UNAVAILABLE,
         ProblemCode.STATED_COMPILE_UNREACHABLE,
     }
 )
@@ -348,6 +349,10 @@ STOP_SENTENCES: Mapping[StopCode | ProblemCode, str] = {
         "reading it again fails the same way, so nothing was recorded. The fault is in the "
         "system, not the request."
     ),
+    ProblemCode.STATED_SCOPE_UNAVAILABLE: (
+        "The providers' spending the question asks for could not be read from Search, so "
+        "nothing was recorded. The service is unavailable; try again shortly."
+    ),
     ProblemCode.STATED_COMPILE_UNREACHABLE: (
         "The data could not be fetched from Search counted the way the question asks, and "
         "fetching it again fails the same way, so nothing was recorded. The fault is in the "
@@ -424,6 +429,9 @@ STOP_REASONS: Mapping[StopCode | ProblemCode, str] = {
     ProblemCode.PRICES_UNSERVED: "{lead}no series found is in the prices chosen",
     ProblemCode.STATED_SCOPE_UNREADABLE: (
         "the providers' spending the question asks for could not be read from Search"
+    ),
+    ProblemCode.STATED_SCOPE_UNAVAILABLE: (
+        "the providers' spending the question asks for could not be read from Search just now"
     ),
     ProblemCode.STATED_COMPILE_UNREACHABLE: (
         "the data could not be fetched from Search counted the way the question asks"
@@ -772,6 +780,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ExecutorCode.LEDGER_UNAVAILABLE,
             StopCode.DISCOVERY_UNAVAILABLE,
             ProblemCode.SURFACE_UNAVAILABLE,
+            ProblemCode.STATED_SCOPE_UNAVAILABLE,
         }
     ),
     FailureClass.TOO_BIG: frozenset(

@@ -55,7 +55,7 @@ from contextlib import (
     suppress,
 )
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from common.caller import ADDRESS_CALLER, set_supplied_caller, set_supplied_turn
 from common.telemetry import flush_telemetry
@@ -74,6 +74,7 @@ from planner.plan import (
 )
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
+from starlette.types import Receive, Scope
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
@@ -120,6 +121,7 @@ from harness.studio_state import (
     _next_manifest,
     _PendingInterrupt,
     _PendingQuestion,
+    _recorded_reply,
     _tool_error_response,
     _wire_id,
     record_unstreamed_span,
@@ -190,7 +192,9 @@ from harness.unit_offer import (
 )
 from harness.wire import (
     MAX_CLOSED_SINCE,
+    MAX_INTERRUPT_REQUEST_BYTES,
     MAX_TURN_REQUEST_BYTES,
+    STORED_INTERRUPT,
     AddOp,
     ApplyChoice,
     ApplyUnit,
@@ -301,10 +305,15 @@ _ANSWER_KINDS: dict[ElicitationInput, frozenset[str]] = {
 def _answer_kinds(question: _PendingQuestion) -> frozenset[str]:
     """The answer kinds `question` takes: those of the input its frame sent
     (`_ANSWER_KINDS`), save free text on a unit question sent as a
-    `single_select`, which offers none."""
+    `single_select`, which offers none. A unit question that lists its whole units
+    as options, as one restored from the conversation row does
+    (`harness.studio_store`), also takes a pick of one, the answer of a page that
+    was sent it as a `single_select`."""
     kinds = _ANSWER_KINDS[question.input]
     if question.native_input is ElicitationInput.UNIT:
         return kinds - {"text"}
+    if question.input is ElicitationInput.UNIT and question.options:
+        return kinds | {"option"}
     return kinds
 
 
@@ -756,17 +765,23 @@ def _given_answers(
     (question,) = pending.questions
     if body.payload in question.options:
         return {question.id: OptionAnswer(kind="option", option_id=body.payload)}
-    return {question.id: TextAnswer(kind="text", text=body.payload)}
+    # `body` holds the payload within the cap on a request's own words, or is rebuilt
+    # from a stored answer, which is carried whole (`STORED_INTERRUPT`).
+    return {
+        question.id: TextAnswer.model_validate(
+            {"kind": "text", "text": body.payload}, context={STORED_INTERRUPT: True}
+        )
+    }
 
 
 def _native_answer(question: _PendingQuestion, answer: ElicitationAnswer) -> ElicitationAnswer:
-    """`answer` in the form of `question`'s own input. A pick on a question
-    sent in another form (`_PendingQuestion.native_input`) is, on a unit
-    question, the whole unit the option names (`whole_units`), and on a
+    """`answer` in the form of `question`'s own input. A pick on a unit question,
+    sent as one (`_answer_kinds`) or in another form (`_PendingQuestion.native_input`),
+    is the whole unit the option names (`whole_units`), and on a question sent as a
     `multi_select` one, one tick. Any other answer is itself."""
     if not isinstance(answer, OptionAnswer):
         return answer
-    if question.native_input is ElicitationInput.UNIT and question.unit is not None:
+    if ElicitationInput.UNIT in (question.input, question.native_input) and question.unit:
         unit = whole_units(question.unit)[answer.option_id]
         return UnitAnswer(kind="unit", **unit.model_dump())
     if question.native_input is ElicitationInput.MULTI_SELECT:
@@ -1378,54 +1393,58 @@ def _streaming_conflict_response(detail: str, *, retry_after_seconds: int = 5) -
 
 
 class _BodyTooLarge(HTTPException):
-    """A `/turn` body past `MAX_TURN_REQUEST_BYTES`. An `HTTPException`, since
-    FastAPI re-raises those from its body read and turns any other exception
-    there into a 400."""
+    """A body past its route's cap (`_BoundedRoute.max_body_bytes`). An
+    `HTTPException`, since FastAPI re-raises those from its body read and turns
+    any other exception there into a 400."""
 
-    def __init__(self, size: str) -> None:
+    def __init__(self, size: str, cap: int) -> None:
         super().__init__(
             status_code=413,
-            detail=f"the request body is {size} bytes, past the {MAX_TURN_REQUEST_BYTES:,}-byte cap",
+            detail=f"the request body is {size} bytes, past the {cap:,}-byte cap",
         )
 
 
 class _BoundedRequest(Request):
-    """A request whose body read stops at `MAX_TURN_REQUEST_BYTES`.
+    """A request whose body read stops at `cap` bytes.
 
     A declared `Content-Length` past the cap is refused before anything is
     read; a body sent without one is refused as soon as it crosses the cap.
     """
 
+    def __init__(self, scope: Scope, receive: Receive, *, cap: int) -> None:
+        super().__init__(scope, receive)
+        self._cap = cap
+
     async def body(self) -> bytes:
         if not hasattr(self, "_body"):
             declared = self.headers.get("content-length", "")
-            if declared.isdigit() and int(declared) > MAX_TURN_REQUEST_BYTES:
-                raise _BodyTooLarge(f"{int(declared):,}")
+            if declared.isdigit() and int(declared) > self._cap:
+                raise _BodyTooLarge(f"{int(declared):,}", self._cap)
             chunks: list[bytes] = []
             size = 0
             async for chunk in self.stream():
                 size += len(chunk)
-                if size > MAX_TURN_REQUEST_BYTES:
-                    raise _BodyTooLarge(f"more than {MAX_TURN_REQUEST_BYTES:,}")
+                if size > self._cap:
+                    raise _BodyTooLarge(f"more than {self._cap:,}", self._cap)
                 chunks.append(chunk)
             # Starlette's own cache for the body, which `Request.body` reads back.
             self._body = b"".join(chunks)
         return self._body
 
 
-class _BoundedTurnRoute(APIRoute):
-    """The `/turn` route, whose body is read through `_BoundedRequest`, so a
-    request past the size cap is refused before FastAPI parses it. Each seed
-    is checked on its own (`harness.seeds.seeds_slot`) and refused in its own
-    step; this bound is what keeps an oversized request from being parsed at
-    all."""
+class _BoundedRoute(APIRoute):
+    """A route whose body is read through `_BoundedRequest`, so a request past
+    `max_body_bytes` is refused 413 `resource_exhausted` before FastAPI parses it."""
+
+    max_body_bytes: ClassVar[int]
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         handler = super().get_route_handler()
+        cap = self.max_body_bytes
 
         async def bounded(request: Request) -> Response:
             try:
-                return await handler(_BoundedRequest(request.scope, request.receive))
+                return await handler(_BoundedRequest(request.scope, request.receive, cap=cap))
             except _BodyTooLarge as exc:
                 return _tool_error_response(
                     ToolError(
@@ -1437,6 +1456,23 @@ class _BoundedTurnRoute(APIRoute):
                 )
 
         return bounded
+
+
+class _BoundedTurnRoute(_BoundedRoute):
+    """The `/turn` route, bounded at `MAX_TURN_REQUEST_BYTES`. Each seed is
+    checked on its own (`harness.seeds.seeds_slot`) and refused in its own
+    step; this bound is what keeps an oversized request from being parsed at
+    all."""
+
+    max_body_bytes = MAX_TURN_REQUEST_BYTES
+
+
+class _BoundedInterruptRoute(_BoundedRoute):
+    """The `/interrupt` route, bounded at `MAX_INTERRUPT_REQUEST_BYTES`, so the
+    answers, the amendment text and the lists a client posts are bounded before
+    they are parsed."""
+
+    max_body_bytes = MAX_INTERRUPT_REQUEST_BYTES
 
 
 def _resume_refusal(standing: TurnStanding, turn_index: int) -> JSONResponse | None:
@@ -1621,26 +1657,14 @@ def _open_user_message(state: ConversationState) -> str:
 def _closed_turn(turn_index: int, state: ConversationState) -> ClosedTurn:
     """Turn `turn_index` of `state` as its stored record holds it, with the
     stored card of each card it made (`_stored_card`). The reply is the
-    answer with the notes and the basis line the stream appended to it
-    (`ConversationState.close_turn`), as its `message.complete` sent it,
-    and empty for a record whose stream sent none (`reply_shown: false`).
+    answer the user was shown with the notes and the basis line the stream
+    appended to it (`harness.studio_state._recorded_reply`), as its
+    `message.complete` sent it, and empty for a record whose stream sent none
+    (`reply_shown: false`).
     The user's message is the record's display line where it keeps one
     (`user_display`), else its `user` line."""
     record = state.turns[turn_index - 1]
-    reply = (
-        ""
-        if record.get("reply_shown") is False
-        else "".join(
-            [
-                record.get("assistant") or "",
-                *(
-                    f"\n\n{block}"
-                    for key in ("match_notes", "basis_line")
-                    if (block := record.get(key))
-                ),
-            ]
-        )
-    )
+    reply = "" if record.get("reply_shown") is False else _recorded_reply(record)
     listed = [
         card
         for card in record.get("cards") or []
@@ -1691,6 +1715,7 @@ def _answer_again(
     names the revision of the plan it switched on, the entry's own."""
     answer = pending.answer or {}
     switch = answer.get("switch") or {}
+    # A stored answer is carried whole, whatever its length (`STORED_INTERRUPT`).
     return InterruptResponse.model_validate(
         {
             "kind": "interrupt.response",
@@ -1701,7 +1726,8 @@ def _answer_again(
             **({"payload": answer["payload"]} if answer.get("payload") is not None else {}),
             **({"answers": answer["answers"]} if "answers" in answer else {}),
             **({**switch, "plan_revision": pending.plan_revision} if switch else {}),
-        }
+        },
+        context={STORED_INTERRUPT: True},
     )
 
 
@@ -2984,7 +3010,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if loop.time() >= deadline:
                 return busy
 
-    @router.post("/interrupt")
     async def interrupt(  # noqa: PLR0911 -- one distinct refusal per claim guard the route enforces
         body: InterruptResponse,
         authorization: str | None = Header(default=None),
@@ -3491,6 +3516,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 turn=claiming,
             )
             raise
+
+    router.add_api_route(
+        "/interrupt", interrupt, methods=["POST"], route_class_override=_BoundedInterruptRoute
+    )
 
     @router.post("/resume")
     async def resume(  # noqa: PLR0911 -- one distinct refusal per claim guard the route enforces

@@ -212,6 +212,7 @@ async def test_a_model_response_with_no_answer_fails_the_turn_at_orchestrate(
     else:
         assert isinstance(failed.error, EmptyResponseError)
         assert run.cursor.error["type"] == "EmptyResponseError"
+        assert run.cursor.error["transient"] is True
         assert len(models.orchestrator.requests) == 1
 
 

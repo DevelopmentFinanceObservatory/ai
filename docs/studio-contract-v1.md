@@ -146,7 +146,7 @@ pause; `plan.proposed` has a second showing a failed switch).
 | `event`               | What it is                                                                                                                                                                                                                                      |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `message.delta`       | append to the streaming assistant message; text is GitHub-flavored Markdown (delta 15)                                                                                                                                                          |
-| `message.complete`    | final text for the turn's message                                                                                                                                                                                                               |
+| `message.complete`    | final text for the turn's message. A turn its cards answer sends the text streamed beside its calls, the notes and the basis line, and none when it has none of these.                                                                          |
 | `plan.proposed`       | the plan awaiting approval; **pauses and ends the stream** (delta 1)                                                                                                                                                                            |
 | `plan.versioned`      | a new plan replaces the one `supersedes` names; a fresh `plan.proposed` follows. `version` can be lower than the superseded one (see below)                                                                                                     |
 | `plan.approved`       | the plan the user approved; sent by the segment whose `approve` node takes the approval, and again as the first frame of an answer retry or `turn.resume` that carries on a turn which already took it; a page keys it by `revision` (delta 22) |
@@ -506,6 +506,8 @@ An elicitation opened before this delta and still paused takes its one
 answer as `payload` (an offered option id, or free text). Any other
 elicitation refuses `payload`. `schema_version` stays 1.
 
+`/interrupt` reads at most 641,536 bytes of body and refuses more with 413 `resource_exhausted` before parsing. `payload` and a `text` answer take at most 16,000 characters each. A longer one gets a 422 `string_too_long` on the field. `/resume` carries a stored answer whole, whatever its length.
+
 ## Plan summary, answer step, failed switch and approval (delta 22, v1.7)
 
 Every addition is optional, so a client built against an earlier contract
@@ -762,7 +764,7 @@ A `multi_select` question has `options` set and `allow_free_text` is `true`. Its
 
 ### Question forms a client declares
 
-`turn.request` and `interrupt.response` gain `client_features`, an optional list of strings: `"unit_question"` when the client renders a question whose `input` is `unit`, and `"multi_select"` when it renders one whose `input` is `multi_select`. The harness ignores a value it does not know. The conversation stores the list the latest request carrying the field declared (`ConversationState.client_features`); a request without it leaves the list as it was, empty on a new conversation, and every question the turn asks, before and after a resume and on any instance, takes the forms it names (`harness.studio_translate._asked_question`).
+`turn.request` and `interrupt.response` gain `client_features`, an optional list of at most 16 strings: `"unit_question"` when the client renders a question whose `input` is `unit`, and `"multi_select"` when it renders one whose `input` is `multi_select`. The harness ignores a value it does not know, and refuses a longer list with 422. The conversation stores the list the latest request carrying the field declared (`ConversationState.client_features`); a request without it leaves the list as it was, empty on a new conversation, and every question the turn asks, before and after a resume and on any instance, takes the forms it names (`harness.studio_translate._asked_question`).
 
 Without `"unit_question"`, a unit question is sent as `input: "single_select"` with no `unit` and `allow_free_text: false`. Its options are both price bases of the offer's start currency, or, when that currency serves one basis, of the first offered currency that serves both, the start's basis first, each id naming its unit (`harness.unit_offer.whole_units`). A constant unit takes the start's base year when the currency's range holds it, else the currency's latest.
 
