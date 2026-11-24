@@ -1735,6 +1735,9 @@ class _Translator:
         # at its first frame, so its later frames update the same line.
         self._wire_step_ids: dict[str, str] = {}
         self._final_text = ""
+        # The text each response of the agent's run streamed beside its calls,
+        # which stands as the reply of a turn whose cards answer it (`finish`).
+        self._narration: list[str] = []
         self.paused = False
         # Whether the planner's latest entry replans for a pick on the plan
         # card (`PlannerStarted.pick`). Its drafted plan keeps the planner
@@ -2750,6 +2753,7 @@ class _Translator:
         the agent wrote before was interim. A plan hand-back with no plan
         shows the failed step first."""
         self._final_text = ""
+        self._narration = []
         self._unanswered = []
         frames: list[ActivityStep] = []
         if event.text == ORCHESTRATOR_PLAN_FAILED_STATUS:
@@ -2794,6 +2798,8 @@ class _Translator:
         calls = [part.function_call for part in parts if part.function_call is not None]
         self._unanswered = [(call.id or "", call.name or "") for call in calls]
         if calls:
+            if self._final_text.strip():
+                self._narration.append(self._final_text.strip())
             self._final_text = ""
             # A skill read shows no step, so the line it ran under keeps
             # running and notes the read until its answer comes.
@@ -3159,6 +3165,11 @@ class _Translator:
         (`ConversationState.close_turn`), so a later turn's model reads the
         answer alone, with no text of the code's own to restate.
 
+        A turn whose agent closed with no text after the turn drew cards is
+        answered by its cards. Its reply is the text the agent streamed beside
+        its calls, each response's own paragraph, followed by the same notes, line
+        and chips; a turn with none of these sends no `message.complete`.
+
         `new_question` is the user's words a turn ended on when the planner
         read them, typed on the plan card, as a different question
         (`harness.graph.state.NEW_QUESTION_KEY`). The turn's record says it
@@ -3194,10 +3205,16 @@ class _Translator:
             # The planner ended the turn on a new question no message states:
             # the reply asks the user to send it.
             self._final_text = ASK_FOR_QUESTION_REPLY
+        # A turn whose cards answer it, the agent closing with no text, keeps what
+        # it streamed beside its calls as its reply, so a reload shows what the
+        # user saw, and closes with the same notes and line as one with text.
+        shown_cards = bool(self._conversation.turn_components) and not set_aside
+        if not self._final_text and shown_cards:
+            self._final_text = "\n\n".join(self._narration)
         answer, notes, basis = self._final_text, None, None
         # A set-aside turn's reply is the code's own, with no figures to note.
-        answered = bool(self._final_text) and not set_aside
-        if self._final_text:
+        answered = (bool(self._final_text) or shown_cards) and not set_aside
+        if answered or self._final_text:
             notes = (
                 None
                 if not answered
@@ -3219,7 +3236,12 @@ class _Translator:
                 if answered
                 else None
             )
-            closing = "".join(f"\n\n{block}" for block in (notes, basis) if block)
+            blocks = [block for block in (notes, basis) if block]
+            closing = (
+                "".join(f"\n\n{block}" for block in blocks)
+                if self._final_text
+                else "\n\n".join(blocks)
+            )
             if closing:
                 self._final_text += closing
                 frames.append(
@@ -3227,6 +3249,7 @@ class _Translator:
                         event="message.delta", seq=self._conversation.next_seq(), text=closing
                     )
                 )
+        if self._final_text:
             self._conversation.turn_final_text = self._final_text
             frames.append(
                 MessageComplete(
