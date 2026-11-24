@@ -1387,8 +1387,8 @@ class GrowthRequirement(TaggedModel):
 class _ProviderAligned(TaggedModel):
     """A calculation whose inputs alignment counts on one provider scope.
 
-    A stored plan, or a proposal resent from one, may still carry
-    `accept_provider_difference`, a field these calculations no longer have; it is
+    A stored plan, or a proposal resent from one, can carry
+    `accept_provider_difference`, a field these calculations do not have; it is
     dropped on read, so such a plan validates and its turn amends it.
     """
 
@@ -4854,19 +4854,32 @@ def _serialised_chars(value: Any) -> int:
 
 class ScopeNote(StrictModel):
     """The line the plan card's provider row for dataset requirement `requirement_id`
-    reads where the provider option the figure is counted on and the words of the
-    turn that set it part (`submission.service._scope_notes`).
-
-    `pin` is the spec_id the requirement states and `counted` the provider option it
-    is counted on when the line was written, and `named`, for a line saying the words
-    name an option no figure is counted on, that option. A later plan carries the line
-    only while `pin` and `counted` hold and no figure is counted on `named`."""
+    reads where the provider option the figure is counted on and the user's words
+    (`Plan.scope_words`) part (`submission.service._scope_notes`)."""
 
     requirement_id: Identifier
     line: str = Field(min_length=1, max_length=MAX_DECISION_RATIONALE_CHARS)
-    pin: SpecId
-    counted: str = Field(max_length=MAX_SCOPE_ID_CHARS)
-    named: str | None = Field(default=None, max_length=MAX_SCOPE_ID_CHARS)
+
+
+# The most provider options one turn's words are read to name. Search names at most
+# one per provider scope, four today; the limit sits several times above that.
+MAX_SCOPE_MENTIONS = 16
+
+
+class ScopeWords(StrictModel):
+    """The provider options the user's words name, as Search read the latest turn whose
+    words name one (`planner.stated_scope.TextReading.mentions`), which the plan card's
+    lines are judged against (`submission.service._scope_notes`).
+
+    `summing` is the option Search read where those words sum the bilateral and
+    multilateral lines (`planner.stated_scope.StatedOption.sums_providers`), which a
+    dataset reads as its own option counting core contributions; `None` otherwise.
+    """
+
+    mentions: tuple[Annotated[str, Field(max_length=MAX_SCOPE_ID_CHARS)], ...] = Field(
+        default=(), max_length=MAX_SCOPE_MENTIONS
+    )
+    summing: str | None = Field(default=None, max_length=MAX_SCOPE_ID_CHARS)
 
 
 class Plan(StrictModel):
@@ -5002,6 +5015,11 @@ class Plan(StrictModel):
     scope_notes: Annotated[tuple[ScopeNote, ...], HASHED_WHEN_SET] = Field(
         default=(), max_length=MAX_PLAN_REQUIREMENTS, exclude_if=lambda notes: not notes
     )
+    # The provider options the user's words name, as the latest turn naming one
+    # stated them (`submission.service.scope_words`); the planner cannot set it.
+    scope_words: Annotated[ScopeWords | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda words: words is None
+    )
     translation: Translation | None = None
     workflow: Workflow | None = None
     version: int = 1
@@ -5009,6 +5027,28 @@ class Plan(StrictModel):
     status: PlanStatus = PlanStatus.DRAFT
     approved_revision: str | None = None
     approved_at: Annotated[datetime | None, HASHED_WHEN_SET] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reopen_approval_over_accept_provider_difference(cls, data: Any) -> Any:
+        """An approved plan stored with `accept_provider_difference` on a requirement
+        reads without it (`_ProviderAligned`), so its content hashes to another revision
+        than the one the user approved. It loads awaiting approval, with no approval
+        recorded, and the `execute` node offers its card again
+        (`harness.graph.execute`)."""
+        if not isinstance(data, dict) or data.get("status") != PlanStatus.APPROVED:
+            return data
+        requirements = data.get("evidence_requirements")
+        if not isinstance(requirements, list | tuple) or not any(
+            isinstance(r, dict) and "accept_provider_difference" in r for r in requirements
+        ):
+            return data
+        return {
+            **data,
+            "status": PlanStatus.PENDING_APPROVAL,
+            "approved_revision": None,
+            "approved_at": None,
+        }
 
     @field_validator("question")
     @classmethod

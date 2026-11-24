@@ -1358,8 +1358,9 @@ async def test_an_option_the_pin_does_not_count_is_refused_naming_what_it_offers
 
 async def test_a_line_holds_through_an_amendment_whose_words_name_nothing() -> None:
     """A total declaring an option the words do not name reads so on its row. An
-    amendment under words naming nothing carries the declaration and the line, and
-    adds none."""
+    amendment under words naming nothing is judged on the words of the last turn that
+    named an option, so the total's row reads the same line and no other row reads
+    one."""
     ctx = _Context()
     dac1 = _block("dac1")
     _show(ctx, dac1)
@@ -1391,10 +1392,10 @@ async def test_a_line_holds_through_an_amendment_whose_words_name_nothing() -> N
 
 
 async def test_a_declaration_is_judged_on_the_words_of_the_turn_that_set_it() -> None:
-    """The G7 share declared inclusive on both sides, as the words ask: no line. An
-    amendment under words naming nothing that carries the declarations raises none;
-    one that changes them to bilateral is judged on its own words, which name
-    nothing, so each row reads that its option is not named."""
+    """The G7 share declared inclusive on both sides, as the words ask: no line.
+    Amendments under words naming nothing are judged on the words of the first turn,
+    which name inclusive: declarations kept inclusive read no line, and declarations
+    changed to bilateral each read that their option is not named."""
     ctx = _Context()
     blocks = _g7_blocks()
     _show(ctx, *blocks)
@@ -1487,7 +1488,7 @@ async def test_words_naming_a_new_option_judge_an_unchanged_declaration_afresh()
 async def test_a_line_is_dropped_once_its_input_is_pinned_elsewhere() -> None:
     """The G7 share planned with no declaration reads a line on Africa's row, which is
     counted bilateral. An amendment under words naming nothing pins Africa's inclusive
-    part directly: the old line no longer describes the figure, so it goes."""
+    part directly: Africa is counted the way the words ask, so its row reads no line."""
     ctx = _Context()
     blocks = [*_g7_blocks(), _block("africa_inclusive")]
     _show(ctx, *blocks)
@@ -1541,7 +1542,7 @@ async def test_a_pin_with_no_provider_row_records_no_line() -> None:
 
 async def test_a_stored_plan_carrying_accept_provider_difference_still_loads() -> None:
     """A plan stored with `accept_provider_difference` set on its share, a field the
-    share no longer has, loads as the plan without it, so its turn amends it in place
+    share does not have, loads as the plan without it, so its turn amends it in place
     of planning again."""
     ctx = _Context()
     blocks = _g7_blocks()
@@ -1575,7 +1576,7 @@ async def test_a_line_naming_an_option_goes_once_another_figure_counts_it() -> N
     """G7 aid to Africa and to developing countries, two series planned with no
     declaration under words asking for imputed multilateral aid: each row reads that no
     figure is counted that way. An amendment under words naming nothing pins Africa's
-    inclusive part: the developing row's line is no longer true, so it goes."""
+    inclusive part: a figure is counted that way, so neither row reads a line."""
     ctx = _Context()
     blocks = [*_g7_blocks(), _block("africa_inclusive")]
     _show(ctx, *blocks)
@@ -1599,3 +1600,79 @@ async def test_a_line_naming_an_option_goes_once_another_figure_counts_it() -> N
     assert [first["outcome"], amended["outcome"]] == [Outcome.OK.value] * 2, amended
     assert _pins(ctx)["developing"] == _spec("g7_bilateral")
     assert _notes(ctx) == {}
+
+
+def _provider_row(ctx: _Context, requirement_id: str) -> Any:
+    """The provider row requirement `requirement_id` of the plan on record cites."""
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (row,) = [
+        d
+        for d in plan.decisions
+        if d.slot in plan.requirement(requirement_id).decision_ids
+        and d.scope is not None
+        and d.scope.axis == "provider"
+    ]
+    return row
+
+
+async def test_a_carried_requirements_row_follows_a_figure_added_beside_it() -> None:
+    """G7 aid to developing countries planned with no declaration under words asking
+    for imputed multilateral aid: its row reads that no figure is counted that way. An
+    amendment under words naming nothing adds G7 aid to Africa counted inclusive and
+    leaves the developing requirement as it was: a figure is now counted that way, so
+    the carried requirement's row reads no line."""
+    ctx = _Context()
+    blocks = [*_g7_blocks(), _block("africa_inclusive")]
+    _show(ctx, *blocks)
+    surface = _Search(*blocks)
+    developing = _g7_share(None, None)[1]
+
+    first = await _propose(ctx, [developing], words=_G7, surface=surface)
+    line = _notes(ctx)["developing"]
+    amended = await _propose(
+        ctx,
+        [
+            _dataset(
+                "africa", _spec("africa_inclusive"), "net ODA including imputed", recipient="Africa"
+            )
+        ],
+        words=_LATER,
+        surface=surface,
+        amends_version=1,
+        question=_G7,
+    )
+
+    assert [first["outcome"], amended["outcome"]] == [Outcome.OK.value] * 2, amended
+    assert _notes(ctx) == {}
+    assert _provider_row(ctx, "developing").rationale != line
+
+
+async def test_words_naming_the_declared_option_clear_its_line() -> None:
+    """The G7 share declared bilateral on both sides under words asking for imputed
+    multilateral aid: each row reads that bilateral is not named. The user answers
+    with words naming bilateral, and the planner keeps the declarations: the words
+    name the option each figure is counted on, so no row reads a line."""
+    ctx = _Context()
+    blocks = _g7_blocks()
+    _show(ctx, *blocks)
+    surface = _Search(*blocks)
+
+    first = await _propose(
+        ctx, _g7_share(_BILATERAL, _BILATERAL), words=_G7, surface=surface, answer_mode="computed"
+    )
+    lines = _notes(ctx)
+    kept = await _propose(
+        ctx,
+        _g7_share(_BILATERAL, _BILATERAL),
+        words="bilateral aid",
+        surface=surface,
+        answer_mode="computed",
+        amends_version=1,
+        question=_G7,
+    )
+
+    assert [first["outcome"], kept["outcome"]] == [Outcome.OK.value] * 2, kept
+    assert sorted(lines) == ["africa", "developing"]
+    assert _notes(ctx) == {}
+    assert _provider_row(ctx, "africa").rationale not in lines.values()

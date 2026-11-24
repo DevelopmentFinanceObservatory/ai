@@ -250,16 +250,17 @@
   ],
   "planner.plan.ScopeNote": [
     "requirement_id",
-    "line",
-    "pin",
-    "counted",
-    "named"
+    "line"
   ],
   "planner.plan.ScopeOptionState": [
     "option_id",
     "status",
     "years",
     "code"
+  ],
+  "planner.plan.ScopeWords": [
+    "mentions",
+    "summing"
   ],
   "planner.plan.ShareOfRequirement": [
     "kind",
