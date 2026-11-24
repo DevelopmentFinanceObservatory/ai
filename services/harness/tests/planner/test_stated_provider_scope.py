@@ -420,10 +420,82 @@ async def test_a_retryable_failure_asks_to_propose_again_without_vouching_for_th
     assert "unavailable" not in result["message"]
 
 
+async def test_a_second_retryable_failure_in_a_turn_stops_the_entry_naming_the_read() -> None:
+    """The turn's first read that can pass asks the planner to propose again; the next
+    failure ends the entry on a terminal refusal, so a route that stays down does not
+    keep the planner proposing until the turn's budget runs out."""
+    ctx = _Context()
+    _show(ctx, _block("africa_bilateral"))
+    reader = _Reader(failing=True)
+    requirements = [_dataset("aid", _spec("africa_bilateral"), "net ODA", recipient="Africa")]
+
+    first = await _propose(ctx, requirements, words=_G7, reader=reader)
+    second = await _propose(ctx, requirements, words=_G7, reader=reader)
+
+    assert first["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, first
+    assert second["code"] == ProblemCode.STATED_SCOPE_UNREADABLE.value, second
+    assert second["code"] in {code.value for code in TERMINAL_PROPOSE_CODES}
+    assert second["detail"] == {"read": "stated_scope", "status": 503, "code": "unavailable"}
+    assert len(reader.calls) == 2
+    assert load_plan(ctx.state) is None
+
+
 @pytest.mark.parametrize(
     "refusing",
     [
-        pytest.param((404, {"detail": "not found"}), id="route-not-deployed"),
+        pytest.param((404, {"detail": "not found"}), id="bare-404"),
+        pytest.param(
+            (404, {"code": "not_found", "status": 404, "retryable": False}), id="apis-not-found"
+        ),
+    ],
+)
+async def test_an_apis_without_the_route_admits_the_plan_with_no_stated_scope(
+    refusing: tuple[int, dict[str, Any]], caplog: pytest.LogCaptureFixture
+) -> None:
+    """An apis deployed before the stated-scope route, or rolled back past it, answers
+    the route 404. That reads as no reading held: each turn's plan is admitted as a
+    turn with no words of the user's is, on the pin the planner chose, and the process's
+    reader logs the missing route once, however many turns find it missing."""
+    reader = _Reader(refusing=refusing)
+    tools = {
+        spec.name: spec
+        for spec in planner_tool_specs(surface=_Search(), stated_scope=reader.reader())
+    }
+    turns = [_Context(), _Context()]
+    token = current_user_message.set(_G7)
+    try:
+        results = []
+        for ctx in turns:
+            _show(ctx, _block("africa_bilateral"))
+            results.append(
+                await call_planner_tool(
+                    tools["propose_plan"],
+                    question=_G7,
+                    answer_mode="series",
+                    decisions=[],
+                    evidence_requirements=[
+                        _dataset(
+                            "aid", _spec("africa_bilateral"), _STATED_INCLUSIVE, recipient="Africa"
+                        )
+                    ],
+                    tool_context=ctx,
+                )
+            )
+    finally:
+        current_user_message.reset(token)
+
+    assert [result["outcome"] for result in results] == [Outcome.OK.value] * 2, results
+    for ctx in turns:
+        assert _pins(ctx) == {"aid": _spec("africa_bilateral")}
+        assert ctx.state[STATED_SCOPE_STATE_KEY] is None
+    assert len(reader.calls) == 2
+    missing = [r for r in caplog.records if r.getMessage().startswith("stated scope not served")]
+    assert len(missing) == 1
+
+
+@pytest.mark.parametrize(
+    "refusing",
+    [
         pytest.param((422, {"code": "request_invalid", "retryable": False}), id="request-refused"),
     ],
 )

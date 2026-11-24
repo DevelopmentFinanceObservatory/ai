@@ -11,10 +11,13 @@ provider option when Search reads it from the requirement's `measure` and the tu
 name it (`submission.service._stated_reading`).
 
 A read that fails records nothing, so `propose_plan` admits a plan only on a reading it
-holds. A failure that can pass answers `SURFACE_UNAVAILABLE`, asking the planner to
-propose again. A failure no retry changes (a 404, a refused request) ends the entry on
-`STATED_SCOPE_UNREADABLE`. A turn with no words of the user's, such as a chip's or one
-outside Studio, holds no reading, and admission applies no stated scope.
+holds. The turn's first failure that can pass answers `SURFACE_UNAVAILABLE`, asking the
+planner to propose again; its second (`UNREAD_STATE_KEY`, `_UNREAD_ALLOWED`), and a
+failure no retry changes (a refused request), end the entry on
+`STATED_SCOPE_UNREADABLE`. An apis that serves no stated-scope route (404,
+`StatedScopeNotServedError`), one deployed before the route or rolled back past it,
+reads as holding no reading: admission applies no stated scope, as it does for a turn
+with no words of the user's, such as a chip's or one outside Studio.
 
 Four more slots belong to the rule, each holding for the turn: where the question
 whether to keep a dataset that cannot count the provider scope the user's words ask
@@ -68,6 +71,15 @@ UNCOMPILED_STATE_KEY = "planner:stated_scope_uncompiled"
 # calculation's axis together that Search refused for good this turn, as
 # `[spec_id, option_ids, code, reason, unanswered]` (`combined_refused`).
 COMBINED_REFUSED_STATE_KEY = "planner:stated_scope_combined_refusals"
+
+# The session-state slot holding how many reads of the stated scope failed this turn in a
+# way that can pass (`read_stated_scope`).
+UNREAD_STATE_KEY = "planner:stated_scope_unread"
+
+# The failed reads that can pass a turn answers `SURFACE_UNAVAILABLE` for, asking the
+# planner to propose again. The next ends the entry: each read already makes
+# `_READ_ATTEMPTS` attempts, so a route that failed twice in a turn is down for it.
+_UNREAD_ALLOWED = 1
 
 # The most texts Search's reader takes in one call (`StatedScopeRequest` in dfo-apis).
 _MAX_TEXTS = 64
@@ -133,23 +145,53 @@ class StatedScopeRecord(StrictModel):
     readings: dict[str, TextReading]
 
 
+class StatedScopeNotServedError(Exception):
+    """The apis read serves no stated-scope route: it answered the route 404, as an apis
+    deployed before the route, or rolled back past it, answers an unknown path."""
+
+
 class StatedScopeReader(Protocol):
     """Search's reader of the scope words of `texts`, one reading per text, in order.
 
-    Raises `LiveApisError` when Search does not answer."""
+    Raises `StatedScopeNotServedError` when the apis read serves no stated-scope route,
+    and `LiveApisError` when Search does not answer otherwise."""
 
     async def __call__(self, texts: Sequence[str]) -> Sequence[TextReading]: ...
 
 
+# The status an apis answers a path it does not route with. The route itself answers
+# none: it reads any text it is given, and refuses a request outside its bounds 400.
+_NOT_SERVED_STATUS = 404
+
+
 class ApisStatedScopeReader:
-    """`StatedScopeReader` over dfo-apis' route, through `LiveApisClient`."""
+    """`StatedScopeReader` over dfo-apis' route, through `LiveApisClient`.
+
+    The reader logs a warning when it first finds the route missing, and again only
+    after a read has succeeded since, so a process reading an apis without the route
+    logs it once, not once a turn."""
 
     def __init__(self, client: LiveApisClient) -> None:
         self._client = client
+        self._not_served_logged = False
 
     async def __call__(self, texts: Sequence[str]) -> Sequence[TextReading]:
         """Search's readings of `texts`, in order."""
-        readings = await self._client.read_stated_scopes(texts=texts)
+        try:
+            readings = await self._client.read_stated_scopes(texts=texts)
+        except LiveApisError as exc:
+            if exc.status != _NOT_SERVED_STATUS:
+                raise
+            if not self._not_served_logged:
+                self._not_served_logged = True
+                logger.warning(
+                    "stated scope not served: apis answered the route %s (code=%s); "
+                    "plans are admitted with no stated scope until it serves one",
+                    exc.status,
+                    exc.code,
+                )
+            raise StatedScopeNotServedError from exc
+        self._not_served_logged = False
         return [TextReading.of(reading) for reading in readings]
 
     async def aclose(self) -> None:
@@ -226,11 +268,13 @@ async def read_stated_scope(
     """Read the turn's words and `measures` with `reader`, each text once a turn,
     and hold the readings (`STATED_SCOPE_STATE_KEY`).
 
-    A turn with no words of the user's holds nothing, so admission applies no stated
-    scope. Returns `None` once every reading is held. A read Search did not answer holds
-    nothing new and returns the `SURFACE_UNAVAILABLE` refusal where the failure can pass
-    (`LiveApisError.retryable`), and the `STATED_SCOPE_UNREADABLE` refusal, which ends the
-    entry, where no retry changes it.
+    A turn with no words of the user's holds nothing, and neither does one read from an
+    apis that serves no stated-scope route (`StatedScopeNotServedError`), so admission
+    applies no stated scope. Returns `None` once every reading is held. A read Search did not
+    answer holds nothing new and returns the `SURFACE_UNAVAILABLE` refusal where the
+    failure can pass (`LiveApisError.retryable`) and the turn has failed no more than
+    `_UNREAD_ALLOWED` such reads, and otherwise the `STATED_SCOPE_UNREADABLE` refusal,
+    which ends the entry.
     """
     words = _turn_words(current_user_message.get())
     if words is None:
@@ -244,17 +288,25 @@ async def read_stated_scope(
             texts = wanted[start : start + _MAX_TEXTS]
             read = await reader(texts)
             readings.update(zip(texts, read, strict=True))
+    except StatedScopeNotServedError:
+        state[STATED_SCOPE_STATE_KEY] = None
+        return None
     except LiveApisError as exc:
+        unread = int(state.get(UNREAD_STATE_KEY) or 0) + (1 if exc.retryable else 0)
+        state[UNREAD_STATE_KEY] = unread
         logger.warning(
-            "stated scope not read: status=%s code=%s retryable=%s texts=%d",
+            "stated scope not read: status=%s code=%s retryable=%s texts=%d unread=%d",
             exc.status,
             exc.code,
             exc.retryable,
             len(wanted),
+            unread,
         )
-        if exc.retryable:
-            return stated_scope_unread()
-        return _stated_scope_unreadable(status=exc.status, code=exc.code)
+        if not exc.retryable:
+            return _stated_scope_unreadable(status=exc.status, code=exc.code, retried=False)
+        if unread > _UNREAD_ALLOWED:
+            return _stated_scope_unreadable(status=exc.status, code=exc.code, retried=True)
+        return stated_scope_unread()
     state[STATED_SCOPE_STATE_KEY] = StatedScopeRecord(words=words, readings=readings).model_dump(
         mode="json"
     )
@@ -274,15 +326,21 @@ def stated_scope_unread() -> dict[str, object]:
     )
 
 
-def _stated_scope_unreadable(*, status: int | None, code: str | None) -> dict[str, object]:
+def _stated_scope_unreadable(
+    *, status: int | None, code: str | None, retried: bool
+) -> dict[str, object]:
     """The `STATED_SCOPE_UNREADABLE` problem for a read Search refused in a way no retry
-    changes. It ends the entry (`harness.sentences.TERMINAL_PROPOSE_CODES`), since every
-    proposal of the turn would be refused the same way. `detail` names the read and
-    Search's answer for the logs."""
+    changes, or that failed again after the turn's allowed retries (`retried`). It ends
+    the entry (`harness.sentences.TERMINAL_PROPOSE_CODES`), since every proposal of the
+    turn would be refused the same way. `detail` names the read and Search's answer for
+    the logs."""
+    why = (
+        "and it failed again after a retry" if retried else "and proposing again fails the same way"
+    )
     return problem(
         ProblemCode.STATED_SCOPE_UNREADABLE,
-        "Whose spending the user's words ask for cannot be read from Search, and proposing "
-        "again fails the same way, so nothing was recorded.",
+        f"Whose spending the user's words ask for cannot be read from Search, {why}, so "
+        "nothing was recorded.",
         outcome=Outcome.REFUSED,
         detail={"read": "stated_scope", "status": status, "code": code},
     )
