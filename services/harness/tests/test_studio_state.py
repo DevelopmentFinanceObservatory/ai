@@ -92,6 +92,7 @@ from harness.wire import (
     CompositionBlock,
     CompositionManifest,
     ElicitationInput,
+    ElicitationRequest,
     ErrorCode,
     MessageComplete,
     MutationOp,
@@ -1906,6 +1907,29 @@ def test_a_stored_pending_card_keeps_each_decision_s_unit_beside_the_card_and_fr
     stored = [entry["card"], *entry["frames"]]
     assert all("unit" not in d for frame in stored for d in frame.get("decisions") or ())
     assert (restored.card, restored.frames) == (card, (note, card))
+
+
+def test_a_stored_unit_question_keeps_its_offer_beside_the_frame() -> None:
+    """A unit question marks the emitted frame with the `unit` input and its offer. An
+    instance rolled back to a model without them cannot load a stored frame that holds
+    them, so the frame is stored with a single-select question and no offer, the offer
+    beside it, and restored on load."""
+    raw = json.loads(
+        (
+            Path(__file__).parent / "wire_fixtures" / "studio" / "event-18-elicitation-unit.json"
+        ).read_text()
+    )
+    asked = ElicitationRequest.model_validate(raw)
+    note = MessageComplete(event="message.complete", seq=4, text="One question first.")
+    pending = _PendingInterrupt(adk_id="adk_1", kind="elicitation", frames=(note, asked))
+
+    entry = studio_store._serialize_pending({"int_1": pending})["int_1"]
+    restored = studio_store._deserialize_entry(json.loads(json.dumps(entry)))
+
+    (stored,) = [q for frame in entry["frames"] for q in frame.get("questions") or ()]
+    assert "unit" not in stored
+    assert stored["input"] == ElicitationInput.SINGLE_SELECT.value
+    assert restored.frames == (note, asked)
 
 
 def test_awaiting_answer_excludes_an_entry_marked_resuming() -> None:

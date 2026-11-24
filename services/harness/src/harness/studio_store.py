@@ -387,9 +387,10 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 for choice_id, choice in p.choices.items()
             },
             # `new_plan` is stored beside the card, and each decision's `unit`
-            # beside the card and the frames (`_units_apart`). An instance
-            # rolled back to a model without them cannot load a stored card or
-            # frame that holds them, and ignores an unknown key of the entry.
+            # and each unit question's offer beside the card and the frames
+            # (`_units_apart`). An instance rolled back to a model without them
+            # cannot load a stored card or frame that holds them, and ignores
+            # an unknown key of the entry.
             **_units_apart(
                 "card",
                 p.card.model_dump(mode="json", exclude_none=True, exclude={"new_plan"})
@@ -412,25 +413,50 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
     }
 
 
+# The lists of a stored frame whose members can carry a `unit` (`_units_apart`): a
+# plan card's decisions, for a unit row's offer, and an elicitation's questions, for a
+# unit question's offer. A frame holds one of the two, so one map by id serves both.
+_UNIT_LISTS = ("decisions", "questions")
+
+
+def _unit_free(member: dict[str, Any]) -> dict[str, Any]:
+    """`member` with no `unit`. A unit question also takes `single_select` as its
+    `input`, since the earlier release's model has no `unit` input."""
+    free = {k: v for k, v in member.items() if k != "unit"}
+    if free.get("input") == ElicitationInput.UNIT.value:
+        free["input"] = ElicitationInput.SINGLE_SELECT.value
+    return free
+
+
 def _units_apart(key: str, frame: dict[str, Any] | None) -> dict[str, Any]:
-    """`frame` under `key` with no decision's `unit`, and each unit taken out,
-    by its decision's id, under `<key>_units` when there is one; `_units_back`
-    puts them back."""
-    if frame is None or not any("unit" in d for d in frame.get("decisions") or ()):
+    """`frame` under `key` with no decision's or question's `unit` (`_unit_free`), and
+    each unit taken out, by its member's id, under `<key>_units` when there is one;
+    `_units_back` puts them back. An instance rolled back to a release whose models
+    lack the unit row and the unit question loads the frame without them."""
+    units = {
+        member["id"]: member["unit"]
+        for name in _UNIT_LISTS
+        for member in (frame or {}).get(name) or ()
+        if "unit" in member
+    }
+    if frame is None or not units:
         return {key: frame}
-    decisions = frame["decisions"]
     return {
         key: {
             **frame,
-            "decisions": [{k: v for k, v in d.items() if k != "unit"} for d in decisions],
+            **{
+                name: [_unit_free(member) for member in frame[name]]
+                for name in _UNIT_LISTS
+                if frame.get(name)
+            },
         },
-        f"{key}_units": {d["id"]: d["unit"] for d in decisions if "unit" in d},
+        f"{key}_units": units,
     }
 
 
 def _frames_apart(frames: list[dict[str, Any]]) -> dict[str, Any]:
-    """`frames` under `"frames"`, each with no decision's `unit`, and each
-    frame's units taken out, by its index, under `"frames_units"` when there
+    """`frames` under `"frames"`, each with no decision's or question's `unit`, and
+    each frame's units taken out, by its index, under `"frames_units"` when there
     is one (`_units_apart`)."""
     apart = [_units_apart("frame", frame) for frame in frames]
     units = {
@@ -440,16 +466,25 @@ def _frames_apart(frames: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _units_back(frame: dict[str, Any], units: Mapping[str, Any] | None) -> dict[str, Any]:
-    """`frame` with each decision's `unit` from `units`, by the decision's id."""
+    """`frame` with each decision's and question's `unit` from `units`, by the
+    member's id, a question taking `input` `unit` with it."""
     if not units:
         return frame
-    return {
-        **frame,
-        "decisions": [
-            {**d, "unit": units[d["id"]]} if d.get("id") in units else d
-            for d in frame.get("decisions") or ()
-        ],
-    }
+    restored = dict(frame)
+    for name in _UNIT_LISTS:
+        if not frame.get(name):
+            continue
+        restored[name] = [
+            member
+            if member.get("id") not in units
+            else {
+                **member,
+                **({"input": ElicitationInput.UNIT.value} if name == "questions" else {}),
+                "unit": units[member["id"]],
+            }
+            for member in frame[name]
+        ]
+    return restored
 
 
 def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
