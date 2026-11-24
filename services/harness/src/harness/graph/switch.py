@@ -212,14 +212,16 @@ _OPTION_UNAVAILABLE = "requested_option_unavailable"
 _SCOPE_REFUSALS = frozenset({_OPTION_UNAVAILABLE, "conflicting_requested_options"})
 
 # The revision refusals a later switch to the same option can escape: the
-# request ran out of wall-clock time, a search could not reach Search, or a
-# compile could not reach the calculation service. Every other refusal of a
+# request ran out of wall-clock time, a search could not reach Search, a
+# compile could not reach the calculation service, or Search's reader of the
+# provider scope the user stated did not answer. Every other refusal of a
 # revision, which calls no model, repeats.
 _RETRYABLE_REVISION_CODES = frozenset(
     {
         StopCode.TURN_WALL_TIME_SPENT.value,
         StopCode.DISCOVERY_UNAVAILABLE.value,
         ProblemCode.SURFACE_UNAVAILABLE.value,
+        ProblemCode.STATED_SCOPE_UNAVAILABLE.value,
     }
 )
 

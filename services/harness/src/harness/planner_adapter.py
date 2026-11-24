@@ -937,6 +937,7 @@ class PlannerAdapter:
             StopCode.PLANNER_TOOL_FAILED,
             ProblemCode.NOTHING_TO_PLAN,
             ProblemCode.STATED_SCOPE_UNREADABLE,
+            ProblemCode.STATED_SCOPE_UNAVAILABLE,
             ProblemCode.STATED_COMPILE_UNREACHABLE,
         }
     )

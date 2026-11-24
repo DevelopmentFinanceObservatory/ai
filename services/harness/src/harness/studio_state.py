@@ -504,6 +504,8 @@ _SET_ASIDE = "The user set this plan aside unapproved and asked a new question."
 ASKED_FOR_QUESTION = "asked_for_question"
 # The reply such a turn closes on.
 ASK_FOR_QUESTION_REPLY = "The plan was set aside. What would you like to ask?"
+
+
 # What the conversation digest says of such a turn (`_history_turn`).
 _ASKED_FOR = (
     "The user set this plan aside unapproved to ask a new question, and was asked to send it."
@@ -988,6 +990,37 @@ class ConversationState:
         if user_words:
             self.turn_user_words += f"\n(then: {line})"
 
+    def turn_cards_shown(self) -> list[dict[str, Any]]:
+        """The cards the open turn made that the user still sees, once each, in landing
+        order: each `turn_components` entry whose block is on the canvas, or every
+        entry where the conversation holds its cards off the canvas (`auto_add`)."""
+        on_canvas = set(_block_ids(self.composition)) if self.auto_add else None
+        shown: dict[str, dict[str, Any]] = {}
+        for card in self.turn_components:
+            component_id = card.get("component_id")
+            if component_id and (on_canvas is None or component_id in on_canvas):
+                shown.setdefault(str(component_id), card)
+        return list(shown.values())
+
+    def cards_answer(self) -> str:
+        """The answer the record keeps for an open turn its cards answered, the agent
+        closing with no text (`harness.studio_translate._Translator.finish`): the cards
+        the user still sees (`turn_cards_shown`), by title, or by type where a card has
+        none, within the conversation digest's bounds on a turn's cards
+        (`_HISTORY_CARD_CAP`, `_HISTORY_CARD_TITLE_BYTE_CAP`), for a later turn's model
+        to read."""
+        cards = self.turn_cards_shown()
+        names = [
+            _cut_text(
+                str(card.get("title") or f"a {card.get('type') or 'card'}"),
+                _HISTORY_CARD_TITLE_BYTE_CAP,
+            )
+            for card in cards[:_HISTORY_CARD_CAP]
+        ]
+        more = len(cards) - len(names)
+        listed = "; ".join(names) + (f"; and {more} more" if more else "")
+        return f"Answered with the cards drawn: {listed}."
+
     def close_turn(
         self,
         *,
@@ -999,6 +1032,7 @@ class ConversationState:
         asked_for_question: bool = False,
         reply_shown: bool = True,
         user_display: str | None = None,
+        shown_answer: str | None = None,
     ) -> None:
         """Append the turn's record, once, since the resume protocol can end a
         turn from more than one code path. A turn recorded with an `error`
@@ -1029,6 +1063,10 @@ class ConversationState:
         A turn whose stream sent no `message.complete` (`reply_shown` false)
         keeps `final_text` for later turns' models and is marked
         `reply_shown: false`, so a state read gives its reply as empty.
+        `shown_answer` is the text `message.complete` began with where it differs
+        from the answer a later turn's model reads, as for a turn its cards answered
+        (`ConversationState.cards_answer`): a state read gives it in place of
+        `final_text`.
         `user_display` is the line a state read shows as the user's message
         where the record's `user` line is written for a model, such as a
         unit change naming its spec_id (`harness.studio_edit.unit_events`)."""
@@ -1070,6 +1108,8 @@ class ConversationState:
             record["reply_shown"] = False
         if user_display:
             record["user_display"] = user_display
+        if shown_answer is not None:
+            record["shown_answer"] = shown_answer
         record["trace_id"] = self.trace_id
         record["usage"] = dataclasses.asdict(self.turn_usage)
         self.turns.append(record)
@@ -1455,9 +1495,11 @@ def record_unstreamed_span(
 
 
 def _recorded_reply(record: Mapping[str, Any]) -> str:
-    """The reply a turn record holds: the model's answer and the text the
-    code appended to it, in that order (`ConversationState.close_turn`)."""
-    parts = [record.get("assistant") or "", record.get("match_notes"), record.get("basis_line")]
+    """The reply a turn record holds, as its `message.complete` sent it: the answer
+    the user was shown and the text the code appended to it, in that order
+    (`ConversationState.close_turn`)."""
+    shown = record["shown_answer"] if "shown_answer" in record else record.get("assistant")
+    parts = [shown, record.get("match_notes"), record.get("basis_line")]
     return "\n\n".join(part for part in parts if part)
 
 

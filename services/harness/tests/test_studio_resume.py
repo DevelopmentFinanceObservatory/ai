@@ -25,12 +25,19 @@ from google.genai import types
 from harness import studio as studio_module
 from harness.scripted import ScriptedSurface
 from harness.studio import (
+    _answer_again,
     _carried_answer,
     _conversation_read,
+    _given_answers,
     _read_status,
     _resume_refusal,
 )
-from harness.studio_state import SEGMENT_TTL_S, ConversationState, _PendingInterrupt
+from harness.studio_state import (
+    SEGMENT_TTL_S,
+    ConversationState,
+    _PendingInterrupt,
+    _PendingQuestion,
+)
 from harness.studio_store import (
     SegmentClose,
     Standing,
@@ -43,9 +50,11 @@ from harness.studio_store import (
 )
 from harness.turn.store import TurnStatus, TurnStore
 from harness.wire import (
+    MAX_INTERRUPT_TEXT_CHARS,
     TURN_INDEX_HEADER,
     CompositionManifest,
     MessageComplete,
+    TextAnswer,
     UnitChoice,
     UnitPrices,
 )
@@ -1450,6 +1459,44 @@ def test_a_carried_answers_refusal_is_the_resumes_own(
     if answered == "edit_conflict":
         assert response.status_code == 409
         assert body["pointer"] == "/turn_index"
+
+
+_PAST_THE_CAP = "w" * (MAX_INTERRUPT_TEXT_CHARS + 1)
+
+
+@pytest.mark.parametrize(
+    ("answer", "legacy"),
+    [
+        pytest.param({"decision": "amend", "payload": _PAST_THE_CAP}, False, id="amendment"),
+        pytest.param(
+            {"decision": "answer", "answers": {"q1": {"kind": "text", "text": _PAST_THE_CAP}}},
+            False,
+            id="text-answer",
+        ),
+        pytest.param({"decision": "answer", "payload": _PAST_THE_CAP}, True, id="legacy-payload"),
+    ],
+)
+def test_a_carried_answer_stored_past_the_word_cap_is_carried_whole(
+    answer: dict[str, Any],
+    legacy: bool,
+) -> None:
+    """The cap on a request's own words (`MAX_INTERRUPT_TEXT_CHARS`) holds for new
+    input only: an answer `/interrupt` stored past the cap is rebuilt for `/resume`
+    in full, and a legacy entry's free-text payload answers its one question whole."""
+    pending = _PendingInterrupt(
+        adk_id="int_1",
+        kind="elicitation" if legacy else "plan",
+        resuming_segment="seg_left",
+        answer=answer,
+        questions=(_PendingQuestion(id="q1", question="", options={}),) if legacy else (),
+        legacy=legacy,
+    )
+
+    carried = _answer_again(CONVERSATION, "int_1", pending)
+
+    given = (_given_answers(pending, carried) if legacy else carried.answers or {}).get("q1")
+    words = given.text if isinstance(given, TextAnswer) else carried.payload
+    assert words == _PAST_THE_CAP
 
 
 async def test_a_follow_up_sent_from_two_pages_begins_one_turn(pg_engine: AsyncEngine) -> None:
