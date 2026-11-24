@@ -233,7 +233,7 @@ async def rank(
         rolling: Which window years follow the latest period, and the
             populations that period is taken over.
         anchor_key: The handle of the stored latest period, set on a rolling call.
-        allow_sparse_breakdowns: Count an empty breakdown cell as no flow.
+        allow_sparse_breakdowns: Let empty breakdown cells pass the coverage check.
 
     Returns:
         A digest: each entity's rank, value, and coverage, the resolved

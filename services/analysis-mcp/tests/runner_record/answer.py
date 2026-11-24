@@ -99,7 +99,12 @@ class _RenderedRoots(FakeRootSource):
         self.rendered = dict(rendered)
 
     def resolve(
-        self, root: SpecRoot | DatasetRoot, *, latest: bool, trace_id: str | None
+        self,
+        root: SpecRoot | DatasetRoot,
+        *,
+        latest: bool,
+        trace_id: str | None,
+        **planned: Any,
     ) -> ResolvedRoot:
         if root.rendering.columns is None:
             columns = tuple(
@@ -107,7 +112,9 @@ class _RenderedRoots(FakeRootSource):
             )
             rendering = root.rendering.model_copy(update={"columns": columns})
             root = root.model_copy(update={"rendering": rendering})
-        resolved = super().resolve(root, latest=latest, trace_id=trace_id)
+        # What the planner passes beside the root, such as `path_words` and `codes`, which
+        # each dfo-apis release may extend.
+        resolved = super().resolve(root, latest=latest, trace_id=trace_id, **planned)
         columns = tuple(root.rendering.columns or ())
         groupby = (
             root.rendering.groupby.model_dump(mode="json", exclude_none=True)

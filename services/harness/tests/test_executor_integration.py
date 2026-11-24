@@ -23,6 +23,7 @@ import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from common.call_limit import CallDeadline
 from common.materialisation import FrameRef
 from common.materialisation import get_store as get_frame_store
 from common.row_budget import RowBudget
@@ -36,7 +37,6 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
 )
 from data_mcp import client_holder, frame_materialisation
-from data_mcp.deadline import CallDeadline
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
 from data_mcp.manifest import SeriesStatisticsModel

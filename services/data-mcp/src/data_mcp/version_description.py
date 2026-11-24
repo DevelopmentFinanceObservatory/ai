@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import logging
 
+from common.call_limit import CallDeadline
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from data_mcp.client_holder import get_client
-from data_mcp.deadline import CallDeadline
 from data_mcp.errors import UpstreamError
 
 logger = logging.getLogger(__name__)

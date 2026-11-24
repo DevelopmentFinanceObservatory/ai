@@ -110,9 +110,11 @@ AGGREGATIONS: tuple[str, ...] = ("sum", "mean", "max", "min")
 
 # What the `aggregate` and `rank` tools tell a caller about `allow_sparse_breakdowns`.
 ALLOW_SPARSE_BREAKDOWNS_DESCRIPTION = (
-    "True counts an empty cell of a breakdown column (stat_var_<axis>, such as "
-    "stat_var_crsPurpose) as no flow, not a coverage gap. Set it for a flow that adds up, "
+    "True stops empty cells of a breakdown column (stat_var_<axis>, such as "
+    "stat_var_crsPurpose) from failing the coverage check. Set it for a flow that adds up, "
     "such as aid by purpose, or when a coverage_insufficient refusal's fix names it. "
+    "Empty cells are not read as 0: each aggregation reads only the rows present, so 100 "
+    "for one purpose in a year and no row for it the next averages 100, not 50. "
     "Recipients, donors, years and stat_var still count every missing cell."
 )
 # The furthest a rolling period can sit behind the latest one, since the frame
@@ -630,6 +632,8 @@ class AggregateOpSpec(_OpSpecBase):
     the coverage grid. Set, the runner leaves the `stat_var_<axis>` columns a
     summed breakdown keeps out of the grid, so a breakdown cell no row fills
     counts as no gap. Every other column, `stat_var` included, still counts.
+    The reduction reads only the rows present either way, so an empty cell
+    adds nothing to a sum and is left out of a mean, a min and a max.
     """
 
     verb: Literal[Verb.AGGREGATE] = Verb.AGGREGATE

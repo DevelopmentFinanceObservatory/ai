@@ -30,11 +30,12 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from common.call_limit import CallDeadline
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from data_mcp.client import SleepFn, UpstreamClient, is_retryable
-from data_mcp.deadline import DEADLINE_RETRY_AFTER_S, CallDeadline, current_call_budget
+from data_mcp.deadline import DEADLINE_RETRY_AFTER_S, current_call_budget
 from data_mcp.errors import UpstreamError
 from data_mcp.tool_errors import ToolRefusal, from_upstream_error, to_tool_result
 
