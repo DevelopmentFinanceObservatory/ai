@@ -7323,15 +7323,15 @@ def _half_declared(
 
 def _scope_words(record: StatedScopeRecord | None, previous: Plan | None) -> ScopeWords | None:
     """The provider options the user's words name, which the plan card's lines are
-    judged against (`_provider_records`): those of this turn's words where they name one
-    (`record`, `TextReading.mentions`), else those the plan this call amends
-    (`previous`) holds. A first plan whose words name none holds none, read; `None`
-    where no words were read at all."""
+    judged against (`_provider_records`): those of this turn's words where they name an
+    option or ask for a total (`record`, `TextReading.mentions`, `TextReading.total`),
+    else those the plan this call amends (`previous`) holds. A first plan whose words
+    name none holds none, read; `None` where no words were read at all."""
     turn = record.readings.get(record.words) if record is not None else None
     held = previous.scope_words if previous is not None else None
     if turn is None:
         return held
-    if not turn.mentions and held is not None:
+    if not turn.mentions and not turn.total and held is not None:
         return held
     stated = turn.stated
     return ScopeWords(
@@ -7383,6 +7383,27 @@ class _RowWords(NamedTuple):
     line: bool
 
 
+def _total_datasets(requirements: Sequence[EvidenceRequirement]) -> frozenset[str]:
+    """The dataset requirements words asking for a total can name an option for: those
+    a share's denominators read, or every dataset requirement where the plan holds no
+    share."""
+    by_id = {requirement.id: requirement for requirement in requirements}
+    shares = [r for r in requirements if isinstance(r, ShareOfRequirement)]
+    if not shares:
+        return frozenset(r.id for r in requirements if isinstance(r, DatasetRequirement))
+    found: set[str] = set()
+    pending = [share.denominator.input_id for share in shares]
+    while pending:
+        node = by_id.get(pending.pop())
+        if node is None:
+            continue
+        if isinstance(node, DatasetRequirement):
+            found.add(node.id)
+        else:
+            pending.extend(inputs_of(node))
+    return frozenset(found)
+
+
 def _provider_records(
     requirements: Sequence[EvidenceRequirement],
     bases: Mapping[str, _InputBasis],
@@ -7417,7 +7438,9 @@ def _provider_records(
     own = {r.id: counted.get(r.id, bases[r.id].choice.active) for r in dataset}
     mentions = frozenset(words.mentions) if words is not None else frozenset()
     summing = words.summing if words is not None else None
-    total = words is not None and words.total
+    # Words asking for a total name contributions on the figure that is the total:
+    # a share's denominator, else every figure of a plan holding no share.
+    totals = _total_datasets(requirements) if words is not None and words.total else frozenset()
 
     def summing_options(basis: _InputBasis) -> frozenset[str]:
         return frozenset(
@@ -7471,7 +7494,8 @@ def _provider_records(
                 "not_read"
                 if words is None
                 else "named"
-                if counted_on in named(basis) or (total and counted_on in summing_options(basis))
+                if counted_on in named(basis)
+                or (requirement.id in totals and counted_on in summing_options(basis))
                 else "not_named"
             ),
             offered=tuple(sorted(o.option_id for o in wanted if _reachable(o))),

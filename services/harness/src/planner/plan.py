@@ -4881,7 +4881,10 @@ class ScopeWords(StrictModel):
         default=(), max_length=MAX_SCOPE_MENTIONS
     )
     summing: str | None = Field(default=None, max_length=MAX_SCOPE_ID_CHARS)
-    total: bool = False
+    # Left out of every dump while unset, so a stored plan keeps its revision.
+    total: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False, exclude_if=lambda total: not total
+    )
 
 
 class Plan(StrictModel):

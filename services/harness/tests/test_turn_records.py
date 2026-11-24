@@ -1590,12 +1590,17 @@ def test_a_partial_option_and_a_dropped_entry_say_why(
     )
 
 
-def test_carried_entries_that_changed_nothing_add_no_clause() -> None:
-    # A second search of a turn carries the first search's choices in. Search drops
-    # a carried entry for a region the part has no choice on (`axis_absent`) and one
-    # whose option the part already holds (`entry_on_axis`); neither changed
-    # the figures, so the line says nothing of them.
+@pytest.mark.parametrize("from_this_turn", [True, False], ids=["turn-own-search", "user-choice"])
+def test_a_carried_entry_that_changed_nothing_adds_no_clause_unless_the_user_made_it(
+    from_this_turn: bool,
+) -> None:
+    # A second search of a turn carries the first search's choices in. Search drops a
+    # carried entry for an axis the part has no choice on (`axis_absent`) and one whose
+    # option the part already holds (`entry_on_axis`); neither changed the figures, so
+    # the line says nothing of them when the turn's own search carried them. An entry
+    # carried from an earlier turn's choice is the user's, and its clause stays.
     part = _example_part()
+    own = f"{part['scope']['id']}:region"
 
     def carried(axis: str, option_id: str, cause: str) -> dict[str, Any]:
         return {
@@ -1603,7 +1608,10 @@ def test_carried_entries_that_changed_nothing_add_no_clause() -> None:
                 "axis": axis,
                 "option_id": option_id,
                 "provenance": "carried",
-                "origin": {"kind": "choice", "choice_id": f"earlier:{axis}"},
+                "origin": {
+                    "kind": "choice",
+                    "choice_id": own if from_this_turn else "earlier_turn:region",
+                },
             },
             "code": "carried_choice_not_applied",
             "cause": cause,
@@ -1614,7 +1622,13 @@ def test_carried_entries_that_changed_nothing_add_no_clause() -> None:
         carried("region", "region:members_and_residuals", "entry_on_axis"),
     ]
 
-    assert basis_line([_fetched(part)], specs={}, plans=[]) == _EXAMPLE_LINE
+    line = basis_line([_fetched(part)], specs={}, plans=[])
+
+    clause = REASON_COPY["carried_choice_not_applied"]
+    if from_this_turn:
+        assert line == _EXAMPLE_LINE
+    else:
+        assert clause in line
 
 
 def _filtered_top_donors(role: str, *, names: list[str] | None = None) -> dict[str, Any]:

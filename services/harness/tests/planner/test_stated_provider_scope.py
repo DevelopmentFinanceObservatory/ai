@@ -24,6 +24,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast, get_args
 
 import httpx2
@@ -47,6 +48,7 @@ from planner.plan import (
     PinSource,
     ProviderOptionId,
     ResolvedBy,
+    ScopeWords,
     UnsupportedOperation,
     aligned_pins,
     load_optional_declines,
@@ -62,12 +64,19 @@ from planner.stated_scope import (
     STATED_SCOPE_STATE_KEY,
     ApisStatedScopeReader,
     StatedScopeReader,
+    StatedScopeRecord,
+    TextReading,
     stated_uncompiled,
 )
 from planner.tool_results import Outcome, ProblemCode
 from planner.tools import load_pending_ask
 from planner.workflow import ToolId
-from submission.service import _ALIGNED_REASONS, _stated_label, save_aligned_pin
+from submission.service import (
+    _ALIGNED_REASONS,
+    _scope_words,
+    _stated_label,
+    save_aligned_pin,
+)
 
 from ..basis_alignment import (
     HEALTH,
@@ -1286,6 +1295,71 @@ async def test_a_total_beside_a_declared_part_declares_its_own_option(
     else:
         assert result["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, result
         assert f"'total' {_CONTRIBUTIONS!r}" in result["message"]
+
+
+async def test_a_total_in_the_words_names_the_denominator_and_not_the_numerator() -> None:
+    """ "Share of total US ODA": the words ask for a total, which names contributions
+    for the denominator only. A numerator the planner also declared on contributions
+    keeps the line that the words do not name it."""
+    ctx = _Context()
+    total = dac1_with_contributions()
+    dac1 = _block("dac1")
+    _show(ctx, dac1, total)
+    requirements = [
+        _dataset(
+            "numerator",
+            DAC1,
+            "ODA",
+            donor="United States",
+            recipient="Kenya",
+            declares=_CONTRIBUTIONS,
+        ),
+        _dataset(
+            "total", total["spec_id"], "total ODA", donor="United States", declares=_CONTRIBUTIONS
+        ),
+        _share("numerator", "total"),
+    ]
+
+    result = await _propose(ctx, requirements, words=_US_NO_SCOPE, surface=_Search(dac1, total))
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert set(_notes(ctx)) == {"numerator"}
+    assert "your words do not name" in _notes(ctx)["numerator"]
+
+
+def _record(words: str, **reading: Any) -> StatedScopeRecord:
+    return StatedScopeRecord(words=words, readings={words: TextReading(**reading)})
+
+
+@pytest.mark.parametrize(
+    ("turn", "held", "expected"),
+    [
+        pytest.param(
+            _record("compare it with total US ODA", total=True),
+            ScopeWords(mentions=(_BILATERAL,)),
+            ScopeWords(total=True),
+            id="a-total-alone-is-recorded",
+        ),
+        pytest.param(
+            _record("only bilateral", mentions=(_BILATERAL,)),
+            ScopeWords(total=True),
+            ScopeWords(mentions=(_BILATERAL,)),
+            id="an-option-alone-drops-a-stale-total",
+        ),
+        pytest.param(
+            _record("start in 1980"),
+            ScopeWords(mentions=(_BILATERAL,), total=True),
+            ScopeWords(mentions=(_BILATERAL,), total=True),
+            id="words-naming-neither-keep-the-held-ones",
+        ),
+    ],
+)
+def test_the_scope_words_are_those_of_the_latest_turn_naming_an_option_or_a_total(
+    turn: StatedScopeRecord, held: ScopeWords, expected: ScopeWords
+) -> None:
+    previous = SimpleNamespace(scope_words=held)
+
+    assert _scope_words(turn, previous) == expected  # ty: ignore[invalid-argument-type]
 
 
 async def test_inputs_declaring_different_options_keep_them_and_state_the_difference() -> None:
