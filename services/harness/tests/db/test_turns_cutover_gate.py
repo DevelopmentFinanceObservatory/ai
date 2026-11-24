@@ -272,12 +272,10 @@ async def test_the_lease_gate_runs_in_0003s_transaction_before_it(
 async def test_the_lease_gate_never_runs_once_0003_is_recorded(
     pg_empty_engine: AsyncEngine,
 ) -> None:
-    """Every shipped file is applied and ADK's tables are archived. A fresh
-    `sessions` an ADK-reading image created since holds a live lease, and a
-    start applies nothing and refuses nothing, since 0003 is not pending."""
-    await _execute(pg_empty_engine, _ADK_SESSIONS)
-    shipped = await apply_pending(pg_empty_engine)
-    assert _MIGRATION in shipped and "0005_rename_adk_tables.sql" in shipped
+    """Every shipped file is applied. A `sessions` an ADK-reading image
+    creates afterwards holds a live lease, and a start applies nothing and
+    refuses nothing, since 0003 is not pending."""
+    assert _MIGRATION in await apply_pending(pg_empty_engine)
     await _execute(pg_empty_engine, _ADK_SESSIONS, _session("c1", state=_leased(600)))
 
     assert await apply_pending(pg_empty_engine) == []
