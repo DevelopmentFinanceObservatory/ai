@@ -46,7 +46,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from common.period_note import period_note
@@ -102,7 +102,8 @@ from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
 from harness.sentences import DROPPED_REASON, MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
     ConversationState,
-    StudioStore,
+    DatabaseUnavailable,
+    SegmentLost,
     _PendingChoice,
     _PendingInterrupt,
     _PendingOption,
@@ -112,6 +113,7 @@ from harness.studio_state import (
 from harness.studio_state import (
     land_component as state_land_component,
 )
+from harness.studio_store import StudioStore
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
@@ -283,6 +285,11 @@ def _timeout_refusal(conversation: ConversationState, *, tool: str, key: str) ->
     }
 
 
+# How long a client waits before retrying a stream that ended on a fault a
+# retry may outlast: a stream-fatal frame of mode `retry_after_delay`.
+STREAM_RETRY_AFTER_S = 30
+
+
 def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame:
     """A stream-fatal error frame. A resolver refusal keeps its real code
     when the wire grammar knows it (e.g. `capability_unavailable` on an
@@ -343,7 +350,69 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
             error=error_code,
             retry=retry,
             detail=detail,
-            retry_after_seconds=30 if retry is RetryMode.RETRY_AFTER_DELAY else None,
+            retry_after_seconds=STREAM_RETRY_AFTER_S
+            if retry is RetryMode.RETRY_AFTER_DELAY
+            else None,
+        ),
+    )
+
+
+# What a user reads when a stream's segment is lost (`segment_lost_frame`).
+SEGMENT_LOST_DETAIL = failure_sentence(ErrorCode.TRANSIENT_UNAVAILABLE, RetryMode.RETRY_AFTER_DELAY)
+
+
+def segment_lost_frame(conversation: ConversationState) -> ErrorFrame:
+    """The frame that ends a stream whose segment is lost: another instance
+    took it over, or this one could not reach the database before the
+    lease's deadline (`DatabaseUnavailable`). Either way the turn is left as
+    stored, so the client retries after a delay. One frame for every place
+    that loss surfaces: the heartbeat (`_sse_stream`), a checkpoint, a
+    frame-number reservation and a canvas write."""
+    return ErrorFrame(
+        event="error",
+        seq=conversation.next_seq(),
+        error=ToolError(
+            error=ErrorCode.TRANSIENT_UNAVAILABLE,
+            retry=RetryMode.RETRY_AFTER_DELAY,
+            detail=SEGMENT_LOST_DETAIL,
+            retry_after_seconds=STREAM_RETRY_AFTER_S,
+        ),
+    )
+
+
+def _checkpoint_failed_frame(conversation: ConversationState, exc: Exception) -> ErrorFrame:
+    """The stream-fatal frame a stream yields when its state cannot be saved.
+    `StudioRunner._checkpointed` yields it, in place of the frame it would
+    have carried, when a checkpoint before a pause or terminal frame, or a
+    frame-number reservation, fails. It also ends a turn or edit stream when
+    a card's canvas write (`StudioStore.change_canvas`) raises `SegmentLost`
+    or `DatabaseUnavailable`.
+
+    `SegmentLost` means another instance's claim has outlived this one's TTL
+    and owns the conversation. `DatabaseUnavailable` means the database
+    stayed unreachable until the lease's deadline, so no close could be
+    saved. In both cases the turn is left as stored and the stream ends as
+    it does when the heartbeat's renewals fail (`segment_lost_frame`).
+    Anything else (a database error) closes the turn, since nothing else
+    will finish it. The turn's record names `state_not_saved`, and the
+    frame, whose grammar has no such member, the transient code."""
+    if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
+        return segment_lost_frame(conversation)
+    refusal = harness_refusal(
+        code=HarnessCode.STATE_NOT_SAVED, message=f"the turn's state could not be saved: {exc}"
+    )
+    detail = failure_detail(refusal)
+    conversation.close_turn(
+        final_text=conversation.turn_final_text or detail, error=refusal["code"]
+    )
+    return ErrorFrame(
+        event="error",
+        seq=conversation.next_seq(),
+        error=ToolError(
+            error=ErrorCode.TRANSIENT_UNAVAILABLE,
+            retry=RetryMode.RETRY_AFTER_DELAY,
+            detail=detail,
+            retry_after_seconds=STREAM_RETRY_AFTER_S,
         ),
     )
 
@@ -407,13 +476,18 @@ class _RecordingExecutor:
     conversation the lock serialises turns and the graph runs nodes
     sequentially.
 
-    `store` is where `_keep_write_token` finds the current conversation.
+    `store` is where `_keep_write_token` finds the current conversation and
+    where the translator writes the cards a drain lands.
     """
 
     def __init__(self, executor: Executor, *, store: StudioStore) -> None:
         self._executor = executor
         self._store = store
         self._records: list[_ExecutorRecord] = []
+
+    @property
+    def store(self) -> StudioStore:
+        return self._store
 
     def land_component(self, component: dict[str, Any]) -> None:
         """The synchronous stamping capability `make_charts` calls right after
@@ -490,7 +564,10 @@ class _RecordingExecutor:
         no conversation to hold it is dropped, and that component's later
         edits recreate it instead. A successful create that returns no
         token is logged at error level, since that card is rebuilt as a
-        new card on its next edit."""
+        new card on its next edit. The token is set on the live state, so
+        the card's own write (`StudioStore.change_canvas`, which commits
+        every durable field the live state changed) stores it with the
+        card."""
         token = result.pop(WRITE_TOKEN_KEY, None)
         component = result.get("component")
         if not isinstance(component, dict):
@@ -1458,7 +1535,7 @@ class _Translator:
         # The highest composition revision this stream has sent.
         self._sent_revision = 0
 
-    def _plan_path_frames(self, event: Event) -> list[Any]:
+    async def _plan_path_frames(self, event: Event) -> list[Any]:
         """Frames for an event of the plan path: the planner's status lines,
         a plan step's progress, the approval and clarify interrupts."""
         step_progress = (
@@ -1472,7 +1549,7 @@ class _Translator:
             # may still amend a finished step's record
             # (`_RecordingSurface.mark_step_failed`) once the whole run is over.
             return [*self._close_starting(), self._running_step(step_progress)]
-        frames: list[Any] = list(self._drain_recorder())
+        frames: list[Any] = await self._drain_recorder()
         interrupt = _request_input_call(event)
         if interrupt is not None:
             adk_id, args = interrupt
@@ -1731,9 +1808,9 @@ class _Translator:
         self._running_plan_steps.clear()
         return frames
 
-    def _drain_recorder(self) -> list[Any]:
+    async def _drain_recorder(self) -> list[Any]:
         """Frames for every call recorded since the last drain."""
-        return self._record_frames(self._take_records())
+        return await self._record_frames(self._take_records())
 
     def _take_records(self) -> list[_ExecutorRecord]:
         """Every call recorded since the last drain, plan steps first."""
@@ -1759,7 +1836,7 @@ class _Translator:
             records = [*surface_records, *records]
         return records
 
-    def _record_frames(self, records: list[_ExecutorRecord]) -> list[Any]:
+    async def _record_frames(self, records: list[_ExecutorRecord]) -> list[Any]:
         """Frames for `records`, after one `composition.updated` for each
         removal since the last drain. Every record of one step, retries
         included, shares that step's wire id."""
@@ -1770,12 +1847,13 @@ class _Translator:
         )
         frames: list[Any] = self._close_starting() if records else []
         # A removal changed the canvas as its tool ran, before any landing
-        # below, so its frame goes first. It carries the manifest stored now
-        # rather than the one the removal wrote: `/composition` may have
-        # committed a newer revision since (`StudioStore.mutate_composition`
-        # rebuilds on the removal), and the client renders every update, so
-        # an older one would undo that edit on screen. One frame stands for
-        # every removal since the last drain.
+        # below, so its frame goes first. It carries the live canvas, the
+        # latest one this instance wrote, rather than the one the removal
+        # wrote: a `/composition` edit may have written a newer revision on
+        # top of the removal since (`StudioStore.mutate_composition`), and
+        # the client renders every update, so an older one would undo that
+        # edit on screen. One frame stands for every removal since the last
+        # drain.
         if self._conversation.take_unreported_removal():
             frames.extend(self._composition_update())
         for record in records:
@@ -1828,7 +1906,7 @@ class _Translator:
             )
             if isinstance(component, dict) and created is not None:
                 frames.extend(
-                    self._component_frames(
+                    await self._component_frames(
                         component,
                         land=record.land,
                         intent=record.args.get("intent"),
@@ -1837,7 +1915,7 @@ class _Translator:
                 )
         return frames
 
-    def _component_frames(
+    async def _component_frames(
         self,
         component: dict[str, Any],
         *,
@@ -1850,20 +1928,37 @@ class _Translator:
         A component stamped `land=True`
         (`_RecordingExecutor.land_component`, called by `make_charts` right
         after the write returned) is landed. Its block is appended to the
-        canvas and the `intent` it was written from is kept with it
+        canvas as stored, and written, before its frames go out, and the
+        `intent` it was written from is kept with it
         (`harness.studio_state.land_component`). `land=False` with a valid
-        component (a bare executor with no `land_component` capability at all)
-        means no block exists to report, so only `component.created` goes out. `land=True`
-        against an `auto_add=False` conversation resolves to `"held"` inside
-        `harness.studio_state.land_component` itself, also only
-        `component.created`."""
+        component (a bare executor with no `land_component` capability at
+        all) means no block exists to report, so only `component.created`
+        goes out. `land=True` against an `auto_add=False` conversation
+        resolves to `"held"` inside `harness.studio_state.land_component`
+        itself, also only `component.created`, and writes the card's entry
+        with no block."""
         created.seq = self._conversation.next_seq()
         if not land:
             return [created]
-        if state_land_component(self._conversation, component, intent=intent) != "created":
+        if await self._land(component, intent=intent) != "created":
             return [created]
         # Read with no await since the landing, so this is the manifest it wrote.
         return [created, *self._composition_update()]
+
+    async def _land(
+        self, component: dict[str, Any], *, intent: dict[str, Any] | None
+    ) -> Literal["created", "held"]:
+        """`harness.studio_state.land_component` on the current
+        conversation, inside the store's card write
+        (`StudioStore.change_canvas`), which hands it the canvas as stored
+        and commits the block it appends with the card's digest entry, turn
+        line and write token. A held card appends no block, and its entry,
+        line and token commit the same way."""
+        key = current_conversation_key.get()
+        assert key is not None, "a card lands only inside a conversation's stream"
+        return await self._recorder.store.change_canvas(
+            *key, lambda work: state_land_component(work, component, intent=intent)
+        )
 
     def _composition_update(self) -> list[CompositionUpdated]:
         """The `composition.updated` frame for the conversation's stored
@@ -2254,7 +2349,7 @@ class _Translator:
             and record.result.get("outcome") != "refusal"
         )
 
-    def translate(self, event: Event) -> list[Any]:
+    async def translate(self, event: Event) -> list[Any]:
         # A paused segment ends on its pause frame; the planner relays its
         # queued progress after pausing.
         if self.paused:
@@ -2266,7 +2361,7 @@ class _Translator:
             # An agent run starts: whatever it wrote before was interim.
             self._final_text = ""
             self._handed_off = None
-            frames = list(self._drain_recorder())
+            frames = await self._drain_recorder()
             if status == ORCHESTRATOR_PLAN_FAILED_STATUS:
                 frames.extend(self._close_status())
                 failure = (event.custom_metadata or {}).get(ORCHESTRATOR_STATUS_FAILURE_KEY)
@@ -2285,7 +2380,7 @@ class _Translator:
                 frames.extend(self._open_status(status))
             return frames
         if event.author != ORCHESTRATOR_AGENT_NAME:
-            frames = self._plan_path_frames(event)
+            frames = await self._plan_path_frames(event)
             if _node_name(event) == "execute" and event.output is not None:
                 # `_plan_path_frames` drained the run's records, so a line
                 # still running belongs to a step that recorded nothing.
@@ -2303,7 +2398,7 @@ class _Translator:
                 self._wire_step_ids.clear()
             return frames
         records = self._take_records()
-        frames: list[Any] = self._record_frames(records)
+        frames: list[Any] = await self._record_frames(records)
         parts = event.content.parts if event.content and event.content.parts else []
         text = "".join(part.text or "" for part in parts if part.text and not part.thought)
         if event.partial:
@@ -2643,7 +2738,7 @@ class _Translator:
             },
         )
 
-    def finish(self) -> list[Any]:
+    async def finish(self) -> list[Any]:
         """Frames that close a segment that ran to the end of its events. A
         segment that did not pause closes the turn on the agent's answer,
         followed by one sentence for each loose match the turn used
@@ -2654,7 +2749,7 @@ class _Translator:
         record keeps the notes and the line apart from the answer
         (`ConversationState.close_turn`), so a later turn's model reads the
         answer alone, with no text of the code's own to restate."""
-        frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
+        frames: list[Any] = [*await self._drain_recorder(), *self._close_status()]
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
             self._step(

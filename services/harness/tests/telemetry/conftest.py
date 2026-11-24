@@ -15,8 +15,8 @@ cannot be imported across suites.
 whose `assert_quiescent()` a test calls after each response: no span is open,
 no span was ended twice, and the `turn` observations exported so far match the
 `studio.turn` lines logged so far, one for one and in order, pauses and closes
-apart. `assert_ledger_agrees` adds the third list: the closes match the turn
-records the ledger holds, read through a fresh `StudioStore`.
+apart. `assert_store_agrees` adds the third list: the closes match the turn
+records the store holds, read through a fresh `StudioStore`.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from typing import Any
 import pytest
 from common import telemetry
 from common.logging import JSON_FIELDS
-from harness.studio_state import StudioStore
+from harness.studio_store import StudioStore
 from langfuse._client.resource_manager import LangfuseResourceManager
 from opentelemetry import trace
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
@@ -43,6 +43,9 @@ from opentelemetry.proto.trace.v1.trace_pb2 import Span
 from opentelemetry.sdk import trace as sdk_trace
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.util._once import Once
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from ..orchestrator_fakes import NO_ADK, no_turn_specs
 
 _PROJECTS_BODY = {
     "data": [
@@ -283,16 +286,17 @@ class Quiescence:
         assert self.outcomes() == self.lines()
         assert self.outcomes("paused") == self.lines("paused")
 
-    async def assert_ledger_agrees(
-        self, session_service: Any, *, app_name: str, principal: str, conversation_id: str
+    async def assert_store_agrees(
+        self, engine: AsyncEngine, *, principal: str, conversation_id: str
     ) -> None:
-        """`assert_quiescent`, and the closes are the turn records the ledger
-        of `conversation_id` holds, read through a fresh `StudioStore`."""
+        """`assert_quiescent`, and the closes are the turn records the store
+        on `engine` holds for `conversation_id`, read through a fresh
+        `StudioStore`."""
         self.assert_quiescent()
-        ledger = await StudioStore(session_service, app_name=app_name).load(
+        stored = await StudioStore(engine, adk=NO_ADK, turn_specs=no_turn_specs).load(
             principal, conversation_id
         )
-        records = ledger.turns if ledger is not None else []
+        records = stored.turns if stored is not None else []
         assert [(record.get("trace_id"), record.get("error")) for record in records] == (
             self.lines()
         )
@@ -304,7 +308,7 @@ def quiescence(
 ) -> Iterator[Quiescence]:
     # `set_level` also sets the capture handler's level, so the lowest goes last.
     caplog.set_level(logging.WARNING, logger="opentelemetry.sdk.trace")
-    caplog.set_level(logging.INFO, logger="harness.studio_state")
+    caplog.set_level(logging.INFO, logger="harness.studio_store")
     telemetry.init_telemetry(service_name="harness")
     provider = trace.get_tracer_provider()
     assert isinstance(provider, sdk_trace.TracerProvider)

@@ -16,6 +16,7 @@ import pytest
 from common.materialisation import FrameRef
 from compiler.compile import compile_plan
 from compiler.surface import ProgressCallback, ToolCallResult, ToolSchema
+from executor.classify import ExecutorCode
 from executor.completion import (
     PUBLISH_ATTEMPTS,
     FramePublished,
@@ -29,6 +30,7 @@ from executor.ledger import (
     Fail,
     InMemoryRunLedger,
     LedgerUnavailableError,
+    NonFiniteJsonError,
     PlanApproval,
     Published,
     Publishing,
@@ -45,6 +47,7 @@ from executor.ledger import (
 from executor.outcomes import Accepted, RefusalKind, Refused
 from executor.run import (
     PLAN_APPROVAL_TTL,
+    RunAbandonedError,
     Submission,
     current_step_id,
     default_fetch_series_stats,
@@ -974,6 +977,34 @@ async def test_a_ledger_fault_mid_run_leaves_the_run_unfinished_for_the_next_res
     assert isinstance(resumed, Accepted), resumed
     finished = await alive.get(left.run_id)
     assert finished is not None and finished.status is RunStatus.COMPLETED
+
+
+async def test_a_non_finite_value_in_a_seal_fails_the_run_as_a_defect(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A NaN in the retrievals is the code's defect, not a store outage: the
+    run is recorded failed, so no resume retries a write that cannot succeed."""
+    alive = InMemoryRunLedger()
+    plan = approved_plan()
+    submission = _submission(plan)
+
+    with pytest.raises(RunAbandonedError) as raised:
+        await execute_authorised(
+            submission,
+            authorisation=_approval(
+                plan, submission.source_policy(), expires_at=datetime.now(UTC) + HOUR
+            ),
+            idempotency_key=idempotency_key(caller="u", conversation_id="c", task="t"),
+            ledger=_Flaky(alive, NonFiniteJsonError("nan"), at=Seal),  # type: ignore[arg-type] -- the ledger's protocol, structurally
+            surface=_surface(real_schemas, manifest()),
+            publisher=_Publisher(FramePublished(replay_key=REPLAY_KEY)),
+        )
+
+    run = await alive.get(raised.value.run_id)
+    assert run is not None and run.status is RunStatus.FAILED
+    assert run.failure is not None and run.failure.code == ExecutorCode.INTERNAL_ERROR
 
 
 @pytest.mark.parametrize("route", ["planned", "authorised"])

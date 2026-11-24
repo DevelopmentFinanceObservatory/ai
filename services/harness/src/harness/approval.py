@@ -7,9 +7,9 @@ whether the graph goes on to execute the revision named is the `approve`
 node's business, decided one step later against the same revision.
 
 The record persists with the rest of the conversation. `StudioStore`
-(`studio_state.py`) mirrors every `ApprovalRecord` a conversation
-accumulates into its ADK ledger session, so it survives a restart and
-reaches whichever instance next loads the conversation, the same as
+(`studio_store.py`) writes every `ApprovalRecord` a conversation
+accumulates to its `conversation_approvals` table, so it survives a restart
+and reaches whichever instance next loads the conversation, the same as
 `ConversationState`'s other durable fields.
 
 `approver` is not a person. It is `harness.auth.principal_for`'s return

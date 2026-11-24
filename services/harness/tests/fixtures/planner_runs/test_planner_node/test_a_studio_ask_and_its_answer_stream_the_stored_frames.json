@@ -59,36 +59,36 @@
   [
     {
       "event": "activity.step",
-      "seq": 5,
-      "step_id": "s5",
+      "seq": 256,
+      "step_id": "s256",
       "label": "Working on a plan",
       "status": "running"
     },
     {
       "event": "activity.step",
-      "seq": 6,
-      "step_id": "s5",
+      "seq": 257,
+      "step_id": "s256",
       "label": "Working on a plan",
       "status": "complete"
     },
     {
       "event": "activity.step",
-      "seq": 7,
-      "step_id": "s7",
+      "seq": 258,
+      "step_id": "s258",
       "label": "Checking the plan against the data",
       "status": "running"
     },
     {
       "event": "activity.step",
-      "seq": 8,
-      "step_id": "s7",
+      "seq": 259,
+      "step_id": "s258",
       "label": "Checking the plan against the data",
       "status": "complete",
       "detail": "external debt service paid for Kenya"
     },
     {
       "event": "plan.proposed",
-      "seq": 9,
+      "seq": 260,
       "interrupt_id": "interrupt_id-0",
       "plan_version_id": "plan_version_id-1",
       "version": 1,

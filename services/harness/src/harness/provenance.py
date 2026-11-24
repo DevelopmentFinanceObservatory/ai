@@ -32,15 +32,16 @@ Scoped per conversation (`harness.conversation.current_conversation_id`),
 like `McpExecutor`'s other per-conversation state. Bounded two ways: an LRU
 cap on frame keys within one conversation, and an LRU cap on the number of
 conversation buckets held at once. The conversation-count cap does the
-bounding. Nothing in this process observes a conversation ending
-(`harness.studio_state.StudioStore` has the same gap) and the studio CLI
-mints a fresh conversation id per run, so each run opens one more bucket
-that nothing closes. A single conversation rarely holds more than a handful
-of frames awaiting a `write_component`, so the per-bucket cap is headroom.
+bounding. Nothing in this process observes a conversation ending (the
+runtime entries `harness.studio_store.StudioStore` keeps in process have the
+same gap) and the studio CLI mints a fresh conversation id per run, so each
+run opens one more bucket that nothing closes. A single conversation rarely
+holds more than a handful of frames awaiting a `write_component`, so the
+per-bucket cap is headroom.
 
-The store is in-process, like `StudioStore` and the default in-memory
-session service. A multi-replica deployment moves all of them behind a
-shared backend at once.
+The store is in-process, so a frame's provenance lives on the instance that
+recorded it. `StudioStore` keeps conversations in Postgres, where any
+instance reads them; this store has no shared backend.
 """
 
 from __future__ import annotations

@@ -1,16 +1,12 @@
-"""`StudioRunLedger`: runs kept in the conversation's ledger session.
-
-Durability and the run items' isolation from `ConversationState` run over
-both session backends. Fencing and the stale-retry admission run over the
-database backend, where two `StudioStore`s sharing one session service can
-race (`InMemorySessionService.append_event` has no compare-and-swap check).
-"""
+"""`StudioRunLedger`: runs kept in the harness's own tables, on Postgres
+(the `pg_engine` fixture), each test in a schema of its own."""
 
 from __future__ import annotations
 
 import asyncio
-import logging
-from collections.abc import Iterator
+import json
+import time
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -20,6 +16,7 @@ from executor.ledger import (
     Complete,
     Delivered,
     ManifestEntry,
+    NonFiniteJsonError,
     PlanApproval,
     Published,
     Publishing,
@@ -32,14 +29,16 @@ from executor.ledger import (
     idempotency_key,
     new_run,
 )
-from google.adk.events import Event, EventActions
-from google.adk.sessions import InMemorySessionService
-from harness import studio_state
+from harness import studio_state, studio_store
 from harness.conversation import current_conversation_key
 from harness.run_ledger import StudioRunLedger
-from harness.studio_state import SegmentLost, StudioStore
+from harness.studio_state import SegmentLost
+from harness.studio_store import DATABASE_NOW, StudioStore
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from .sqlite_session import sqlite_session_service
+from .orchestrator_fakes import NO_ADK, no_turn_specs
+from .store_clock import StoreClock
 
 PRINCIPAL = "principal"
 CONVERSATION = "conv_01run00000"
@@ -61,11 +60,32 @@ def conversation() -> Iterator[None]:
     current_conversation_key.reset(token)
 
 
-@pytest.fixture(params=["memory", "database"])
-def session_service(request, tmp_path) -> Any:
-    if request.param == "memory":
-        return InMemorySessionService()
-    return sqlite_session_service(tmp_path / "studio.db")
+def _store(
+    engine: AsyncEngine,
+    *,
+    clock: Callable[[], float] = time.time,
+    time_sql: str = DATABASE_NOW,
+) -> StudioStore:
+    return StudioStore(
+        engine,
+        adk=NO_ADK,
+        turn_specs=no_turn_specs,
+        clock=clock,
+        time_sql=time_sql,
+    )
+
+
+async def _another_engine(engine: AsyncEngine) -> AsyncEngine:
+    """A second engine on `engine`'s database and schema, standing for
+    another instance's connection pool."""
+    async with engine.connect() as conn:
+        schema = (await conn.execute(text("SELECT current_schema()"))).scalar_one()
+    return create_async_engine(
+        engine.url,
+        pool_size=2,
+        max_overflow=0,
+        connect_args={"server_settings": {"search_path": schema}},
+    )
 
 
 def _candidate() -> RunRecord:
@@ -86,10 +106,19 @@ def _candidate() -> RunRecord:
     )
 
 
-async def _streaming_store(service: Any, clock: list[float]) -> StudioStore:
+def _other_candidate() -> RunRecord:
+    """A candidate under a key `_candidate` does not hold, so it admits a new run."""
+    return _candidate().model_copy(update={"idempotency_key": "another-key"})
+
+
+async def _streaming_store(service: Any, clock: list[float] | StoreClock) -> StudioStore:
     """A store holding `CONVERSATION` with a claimed, saved segment, as a
-    streaming turn does."""
-    store = StudioStore(service, app_name="app", clock=lambda: clock[0])
+    streaming turn does. A `StoreClock` moves its leases' time too. A list
+    holds its instance clock's reading alone."""
+    if isinstance(clock, StoreClock):
+        store = _store(service, **clock.store_kwargs)
+    else:
+        store = _store(service, clock=lambda: clock[0])
     if await store.load(PRINCIPAL, CONVERSATION) is None:
         await store.create(PRINCIPAL, CONVERSATION)
     store.claim_segment(PRINCIPAL, CONVERSATION)
@@ -98,9 +127,9 @@ async def _streaming_store(service: Any, clock: list[float]) -> StudioStore:
 
 
 async def test_a_run_and_its_key_survive_into_a_fresh_store_over_the_same_service(
-    session_service,
+    pg_engine,
 ) -> None:
-    store = await _streaming_store(session_service, [START])
+    store = await _streaming_store(pg_engine, [START])
     ledger = StudioRunLedger(store)
     run = (await ledger.admit(_candidate(), submission=SUBMISSION)).run
     await ledger.record(run.run_id, Start())
@@ -110,7 +139,7 @@ async def test_a_run_and_its_key_survive_into_a_fresh_store_over_the_same_servic
     await ledger.store_plan("rev-1", "another plan")
     await store.release(PRINCIPAL, CONVERSATION, store.current(PRINCIPAL, CONVERSATION).segment.id)
 
-    fresh = StudioRunLedger(await _streaming_store(session_service, [START]))
+    fresh = StudioRunLedger(await _streaming_store(pg_engine, [START]))
 
     reloaded = await fresh.get(run.run_id)
     assert reloaded is not None
@@ -126,9 +155,9 @@ async def test_a_run_and_its_key_survive_into_a_fresh_store_over_the_same_servic
 
 
 async def test_a_completed_run_stays_unfinished_until_its_delivery_is_recorded(
-    session_service,
+    pg_engine,
 ) -> None:
-    ledger = StudioRunLedger(await _streaming_store(session_service, [START]))
+    ledger = StudioRunLedger(await _streaming_store(pg_engine, [START]))
     run = (await ledger.admit(_candidate(), submission=SUBMISSION)).run
     for change in (Start(), Seal(INPUTS), Publishing((ROOT,)), Complete()):
         run = await ledger.record(run.run_id, change)
@@ -140,46 +169,56 @@ async def test_a_completed_run_stays_unfinished_until_its_delivery_is_recorded(
 
 
 async def test_run_items_stay_out_of_conversation_state_and_survive_its_saves(
-    session_service, caplog
+    pg_engine,
 ) -> None:
-    store = await _streaming_store(session_service, [START])
+    store = await _streaming_store(pg_engine, [START])
     ledger = StudioRunLedger(store)
     run = (await ledger.admit(_candidate(), submission=SUBMISSION)).run
     state = store.current(PRINCIPAL, CONVERSATION)
     segment_id = state.segment.id
 
-    with caplog.at_level(logging.WARNING, logger=studio_state.__name__):
-        state.turn_final_text = "answered"
-        await store.save(PRINCIPAL, CONVERSATION)
-        await store.checkpoint(PRINCIPAL, CONVERSATION, segment_id)
-        await StudioStore(session_service, app_name="app").load(PRINCIPAL, CONVERSATION)
+    state.turn_final_text = "answered"
+    await store.save(PRINCIPAL, CONVERSATION)
+    await store.checkpoint(PRINCIPAL, CONVERSATION, segment_id)
 
-    assert not [r for r in caplog.records if "unknown state key" in r.getMessage()]
+    async with pg_engine.connect() as conn:
+        stored_keys = (
+            await conn.execute(text("SELECT turn_state FROM conversations"))
+        ).scalar_one()
+    assert set(stored_keys) <= studio_store._SCALAR_KEYS
     assert await ledger.get(run.run_id) == run
 
 
-async def test_a_writer_fenced_out_by_a_takeover_cannot_record_publication(tmp_path) -> None:
-    service = sqlite_session_service(tmp_path / "studio.db")
-    clock = [START]
+async def test_a_writer_fenced_out_by_a_takeover_cannot_record_publication(
+    pg_engine,
+) -> None:
+    service = pg_engine
+    clock = await StoreClock.start(service, START)
     store_a = await _streaming_store(service, clock)
     ledger_a = StudioRunLedger(store_a)
     run = (await ledger_a.admit(_candidate(), submission=SUBMISSION)).run
     for change in (Start(), Seal(INPUTS), Publishing((DERIVED,))):
         await ledger_a.record(run.run_id, change)
 
-    clock[0] += studio_state.SEGMENT_TTL_S + 1  # A's segment has expired
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)  # A's segment has expired
     await _streaming_store(service, clock)  # B takes the conversation over
+    streaming = store_a.current(PRINCIPAL, CONVERSATION)
+    streaming.cancel_event = asyncio.Event()
 
     with pytest.raises(SegmentLost):
         await ledger_a.record(run.run_id, Published(DERIVED, "rpk_1"))
 
-    recorded = await StudioRunLedger(StudioStore(service, app_name="app")).get(run.run_id)
+    # A's stream ends as lost, since the graph reports the ledger's failure
+    # to the model as data and would otherwise run on.
+    assert streaming.cancel_event.is_set()
+    assert streaming.cancel_reason == "segment_lost"
+    recorded = await StudioRunLedger(_store(service)).get(run.run_id)
     assert recorded.status is RunStatus.PUBLISHING
     assert recorded.results[0].replay_key is None
 
 
-async def test_concurrent_admissions_of_one_key_settle_on_one_run(session_service) -> None:
-    ledger = StudioRunLedger(await _streaming_store(session_service, [START]))
+async def test_concurrent_admissions_of_one_key_settle_on_one_run(pg_engine) -> None:
+    ledger = StudioRunLedger(await _streaming_store(pg_engine, [START]))
 
     first, second = await asyncio.gather(
         ledger.admit(_candidate(), submission=SUBMISSION),
@@ -190,53 +229,102 @@ async def test_concurrent_admissions_of_one_key_settle_on_one_run(session_servic
     assert sorted([first.resumed, second.resumed]) == [False, True]
 
 
-async def test_an_admission_gone_stale_decides_again_against_the_other_writers_run(
-    tmp_path,
+async def test_an_admission_racing_another_decides_against_the_other_writers_run(
+    pg_engine: AsyncEngine,
 ) -> None:
-    """Another instance admits the same key between this admission's fetch
-    and its append; the retry finds that run and resumes it rather than
-    writing a second run under the key."""
-    service = sqlite_session_service(tmp_path / "studio.db")
-    store = await _streaming_store(service, [START])
-    ledger = StudioRunLedger(store)
-    other = _candidate()
-    real_append_event = service.append_event
-    appends = 0
-
-    async def append_event_after_another_admission(session: Any, event: Any) -> Any:
-        nonlocal appends
-        appends += 1
-        if appends == 1:
-            fresh = await service.get_session(
-                app_name="app.ledger", user_id=PRINCIPAL, session_id=CONVERSATION
+    """Another instance admits the same key and has not committed when this
+    admission inserts its key. This one waits on the key row, then finds that
+    run and resumes it rather than writing a second run under the key."""
+    second = await _another_engine(pg_engine)
+    try:
+        store = await _streaming_store(pg_engine, [START])
+        ledger = StudioRunLedger(store)
+        other = _candidate()
+        segment_id = store.current(PRINCIPAL, CONVERSATION).segment.id
+        other_store = _store(second, clock=lambda: START)
+        async with other_store.fenced(PRINCIPAL, CONVERSATION, segment_id) as (conn, pk):
+            await conn.execute(
+                text(
+                    "INSERT INTO run_keys (conversation, idempotency_key, run_id) "
+                    "VALUES (:pk, :key, :run_id)"
+                ),
+                {"pk": pk, "key": other.idempotency_key, "run_id": other.run_id},
             )
-            await real_append_event(fresh, _admission_event(other))
-        return await real_append_event(session, event)
+            await conn.execute(
+                text(
+                    "INSERT INTO runs (conversation, run_id, record) "
+                    "VALUES (:pk, :run_id, CAST(:record AS jsonb))"
+                ),
+                {"pk": pk, "run_id": other.run_id, "record": other.model_dump_json()},
+            )
+            admitting = asyncio.ensure_future(ledger.admit(_candidate(), submission=SUBMISSION))
+            await asyncio.sleep(0.2)
+            assert not admitting.done()  # waiting on the uncommitted key row
 
-    service.append_event = append_event_after_another_admission
+        admission = await asyncio.wait_for(admitting, timeout=5)
 
-    admission = await ledger.admit(_candidate(), submission=SUBMISSION)
-
-    assert admission.resumed
-    assert admission.run.run_id == other.run_id
-    service.append_event = real_append_event
-    assert [run.run_id for run in await ledger.unfinished()] == [other.run_id]
-
-
-def _admission_event(run: RunRecord) -> Event:
-    return Event(
-        author="studio",
-        actions=EventActions(
-            state_delta={
-                f"{studio_state.RUN_ITEM_PREFIX}{run.run_id}": run.model_dump(mode="json"),
-                f"{studio_state.RUN_KEY_ITEM_PREFIX}{run.idempotency_key}": run.run_id,
-            }
-        ),
-    )
+        assert admission.resumed
+        assert admission.run.run_id == other.run_id
+        assert [run.run_id for run in await ledger.unfinished()] == [other.run_id]
+    finally:
+        await second.dispose()
 
 
-async def test_outside_a_conversation_reads_find_nothing_and_writes_are_refused() -> None:
-    ledger = StudioRunLedger(StudioStore(InMemorySessionService(), app_name="app"))
+async def test_an_admission_waiting_while_another_replaces_a_failed_run_resumes_the_new_one(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The key's run failed. Another instance admits the key again: it locks
+    the key, this admission waits on it, and it moves the key to a new run
+    and commits. This one then finds the new run and resumes it."""
+    second = await _another_engine(pg_engine)
+    try:
+        store = await _streaming_store(pg_engine, [START])
+        ledger = StudioRunLedger(store)
+        failed = (await ledger.admit(_candidate(), submission=SUBMISSION)).run
+        await _store_run_item(
+            store, failed.run_id, {**failed.model_dump(mode="json"), "status": "failed"}
+        )
+        other = _candidate()
+        segment_id = store.current(PRINCIPAL, CONVERSATION).segment.id
+        other_store = _store(second, clock=lambda: START)
+        async with other_store.fenced(PRINCIPAL, CONVERSATION, segment_id) as (conn, pk):
+            key = {"pk": pk, "key": other.idempotency_key}
+            await conn.execute(
+                text(
+                    "SELECT run_id FROM run_keys "
+                    "WHERE conversation = :pk AND idempotency_key = :key FOR UPDATE"
+                ),
+                key,
+            )
+            admitting = asyncio.ensure_future(ledger.admit(_candidate(), submission=SUBMISSION))
+            await asyncio.sleep(0.2)
+            assert not admitting.done()  # waiting on the locked key row
+            await conn.execute(
+                text(
+                    "INSERT INTO runs (conversation, run_id, record) "
+                    "VALUES (:pk, :run_id, CAST(:record AS jsonb))"
+                ),
+                {"pk": pk, "run_id": other.run_id, "record": other.model_dump_json()},
+            )
+            await conn.execute(
+                text(
+                    "UPDATE run_keys SET run_id = :run_id "
+                    "WHERE conversation = :pk AND idempotency_key = :key"
+                ),
+                {**key, "run_id": other.run_id},
+            )
+
+        admission = await asyncio.wait_for(admitting, timeout=5)
+
+        assert (admission.resumed, admission.run.run_id) == (True, other.run_id)
+    finally:
+        await second.dispose()
+
+
+async def test_outside_a_conversation_reads_find_nothing_and_writes_are_refused(
+    pg_engine,
+) -> None:
+    ledger = StudioRunLedger(_store(pg_engine))
     token = current_conversation_key.set(None)
     try:
         assert await ledger.unfinished() == ()
@@ -246,40 +334,92 @@ async def test_outside_a_conversation_reads_find_nothing_and_writes_are_refused(
         current_conversation_key.reset(token)
 
 
-async def test_an_unreadable_stored_run_is_recorded_failed_and_left_out(session_service) -> None:
-    store = await _streaming_store(session_service, [START])
+async def test_an_unreadable_stored_run_is_recorded_failed_and_left_out(pg_engine) -> None:
+    store = await _streaming_store(pg_engine, [START])
     ledger = StudioRunLedger(store)
     readable = (await ledger.admit(_candidate(), submission=SUBMISSION)).run
-    item = f"{studio_state.RUN_ITEM_PREFIX}run_old"
     stored = {"run_id": "run_old", "status": "running", "shape": "of an older release"}
-    await store.append_run_items(
-        PRINCIPAL,
-        CONVERSATION,
-        store.current(PRINCIPAL, CONVERSATION).segment.id,
-        lambda items: {item: stored},
-    )
+    await _store_run_item(store, "run_old", stored)
 
     assert await ledger.unfinished() == (readable,)
 
-    failed = (await store.run_items(PRINCIPAL, CONVERSATION))[item]
+    failed = await _stored_record(store, "run_old")
     assert failed["status"] == "failed"
     assert failed["failure"]["code"] == "run_record_unreadable"
     assert await ledger.unfinished() == (readable,)
 
 
 async def _store_run_item(store: StudioStore, run_id: str, raw: dict[str, Any]) -> None:
-    await store.append_run_items(
-        PRINCIPAL,
-        CONVERSATION,
-        store.current(PRINCIPAL, CONVERSATION).segment.id,
-        lambda items: {f"{studio_state.RUN_ITEM_PREFIX}{run_id}": raw},
-    )
+    """Write `raw` as run `run_id`'s stored record, as another release would."""
+    segment_id = store.current(PRINCIPAL, CONVERSATION).segment.id
+    async with store.fenced(PRINCIPAL, CONVERSATION, segment_id) as (conn, pk):
+        await conn.execute(
+            text(
+                "INSERT INTO runs (conversation, run_id, record) "
+                "VALUES (:pk, :run_id, CAST(:record AS jsonb)) "
+                "ON CONFLICT (conversation, run_id) DO UPDATE SET record = EXCLUDED.record"
+            ),
+            {"pk": pk, "run_id": run_id, "record": json.dumps(raw)},
+        )
+
+
+async def _stored_record(store: StudioStore, run_id: str) -> dict[str, Any]:
+    async with store.engine.connect() as conn:
+        record = (
+            await conn.execute(
+                text("SELECT record FROM runs WHERE run_id = :run_id"), {"run_id": run_id}
+            )
+        ).scalar_one()
+    return json.loads(record) if isinstance(record, str) else record
+
+
+NON_FINITE = [float("nan"), float("inf"), float("-inf")]
+
+
+@pytest.mark.parametrize("bad", NON_FINITE, ids=["nan", "inf", "-inf"])
+@pytest.mark.parametrize("site", ["submission", "plan", "retrievals"])
+async def test_a_non_finite_float_is_refused_before_any_row_is_written(
+    pg_engine, site: str, bad: float
+) -> None:
+    store = await _streaming_store(pg_engine, [START])
+    ledger = StudioRunLedger(store)
+    run = (await ledger.admit(_candidate(), submission=SUBMISSION)).run
+    await ledger.record(run.run_id, Start())
+
+    with pytest.raises(NonFiniteJsonError):
+        if site == "submission":
+            await ledger.admit(_other_candidate(), submission={"value": bad})
+        elif site == "plan":
+            await ledger.store_plan("rev-1", {"value": bad})
+        else:
+            await ledger.record(run.run_id, Seal(INPUTS, retrievals=({"value": bad},)))
+
+    after = await ledger.get(run.run_id)
+    assert after is not None and after.manifest is None
+    assert await ledger.retrievals(run.run_id) is None
+    assert await ledger.plan("rev-1") is None
+    assert await ledger.unfinished() == (after,)
+
+
+@pytest.mark.parametrize("bad", NON_FINITE, ids=["nan", "inf", "-inf"])
+@pytest.mark.parametrize(
+    "delta",
+    [
+        pytest.param(lambda bad: {"trace_id": bad}, id="scalar"),
+        pytest.param(lambda bad: {"component:c1": {"value": bad}}, id="item row"),
+    ],
+)
+def test_the_studio_store_refuses_a_non_finite_float_before_building_a_statement(
+    delta: Callable[[float], dict[str, Any]], bad: float
+) -> None:
+    with pytest.raises(NonFiniteJsonError):
+        studio_store._delta_write(delta(bad))
 
 
 async def test_a_run_another_release_stored_with_more_keys_is_read_and_carried_on(
-    session_service,
+    pg_engine,
 ) -> None:
-    store = await _streaming_store(session_service, [START])
+    store = await _streaming_store(pg_engine, [START])
     ledger = StudioRunLedger(store)
     run = (await ledger.admit(_candidate(), submission=SUBMISSION)).run
     raw = run.model_dump(mode="json")
@@ -293,8 +433,8 @@ async def test_a_run_another_release_stored_with_more_keys_is_read_and_carried_o
     assert (await ledger.record(run.run_id, Start())).status is RunStatus.RUNNING
 
 
-async def test_a_key_whose_stored_run_is_unreadable_admits_a_new_run(session_service) -> None:
-    store = await _streaming_store(session_service, [START])
+async def test_a_key_whose_stored_run_is_unreadable_admits_a_new_run(pg_engine) -> None:
+    store = await _streaming_store(pg_engine, [START])
     ledger = StudioRunLedger(store)
     old = (await ledger.admit(_candidate(), submission=SUBMISSION)).run
     await _store_run_item(store, old.run_id, {"run_id": old.run_id, "status": "running"})
@@ -303,8 +443,6 @@ async def test_a_key_whose_stored_run_is_unreadable_admits_a_new_run(session_ser
 
     assert not admitted.resumed
     assert admitted.run.run_id != old.run_id
-    failed = (await store.run_items(PRINCIPAL, CONVERSATION))[
-        f"{studio_state.RUN_ITEM_PREFIX}{old.run_id}"
-    ]
+    failed = await _stored_record(store, old.run_id)
     assert (failed["status"], failed["failure"]["code"]) == ("failed", "run_record_unreadable")
     assert (await ledger.admit(_candidate(), submission=SUBMISSION)).run == admitted.run

@@ -29,7 +29,14 @@ routes (`create_studio_router`), the surface a browser uses.
 from __future__ import annotations
 
 import copy
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Mapping,
+    Sequence,
+)
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -44,8 +51,10 @@ from executor.run import no_label_refs
 from fastapi import FastAPI
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import BaseSessionService, InMemorySessionService
+from google.adk.sessions.base_session_service import GetSessionConfig
 from google.genai import types
+from harness.graph.state import AGENT_NAME, ORCHESTRATOR_SPECS_KEY
 from harness.graph.workflow import create_root_workflow
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_adapter import PlannerAdapter
@@ -61,6 +70,7 @@ from harness.scripted import (
 from harness.scripted_plan import scripted_fetch_series_stats, scripted_plan
 from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
+from harness.studio_store import StudioStore
 from harness.tool_contracts import ResolverError, resolver_digest
 from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import create_orchestrator_agent
@@ -68,6 +78,7 @@ from planner.plan import Plan, SessionState, save_plan
 from planner.specs import planner_specs
 from planner.tool_spec import ToolSpec
 from pydantic import Field
+from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.tool import build_translate
 
 # What a model says once its script runs out. The run records the exhaustion
@@ -459,10 +470,44 @@ def _planner_adapter(
     )
 
 
+class _NoAdk:
+    """The eval's conversations start in the tables, and ADK never held them."""
+
+    async def reimport(self, principal: str, conversation_id: str) -> None:
+        del principal, conversation_id
+
+    async def moved(self, principal: str, conversation_id: str) -> bool:
+        del principal, conversation_id
+        return False
+
+    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
+        del session_id
+        return specs
+
+
+def _session_turn_specs(
+    sessions: BaseSessionService,
+) -> Callable[[str, str], Awaitable[dict[str, Any]]]:
+    """The store's `turn_specs` reader over the eval's own session service:
+    the spec blocks turn session `session_id` holds, as stored."""
+
+    async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
+        session = await sessions.get_session(
+            app_name=AGENT_NAME,
+            user_id=principal,
+            session_id=session_id,
+            config=GetSessionConfig(num_recent_events=0),
+        )
+        return dict((session.state.get(ORCHESTRATOR_SPECS_KEY) or {}) if session else {})
+
+    return turn_specs
+
+
 def build_studio(
-    scenario: Mapping[str, Any], *, log: Log
+    scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine
 ) -> tuple[FastAPI, OrchestratorLlm, CannedResolver]:
-    """The studio for one case: the app, its model and its resolver."""
+    """The studio for one case: the app, its model and its resolver. Its
+    conversations are stored on `engine`."""
     settings = Settings()
     sessions = InMemorySessionService()
 
@@ -522,6 +567,11 @@ def build_studio(
         create_workflow=create_workflow,
         executor=LoggingExecutor(log=log),
         session_service=sessions,
+        store=StudioStore(
+            engine,
+            adk=_NoAdk(),
+            turn_specs=_session_turn_specs(sessions),
+        ),
         tool_surface=surface,
     )
     app = FastAPI()
@@ -532,11 +582,12 @@ def build_studio(
 
 @asynccontextmanager
 async def orchestrator_client(
-    scenario: Mapping[str, Any],
+    scenario: Mapping[str, Any], *, engine: AsyncEngine
 ) -> AsyncIterator[tuple[httpx2.AsyncClient, Log]]:
-    """An in-process client on the studio for `scenario`, and its log."""
+    """An in-process client on the studio for `scenario`, and its log. The
+    studio stores its conversations on `engine`."""
     log = Log()
-    app, _llm, _resolver = build_studio(scenario, log=log)
+    app, _llm, _resolver = build_studio(scenario, log=log, engine=engine)
     token = app.state.settings.studio_api_token or _TOKEN
     transport = httpx2.ASGITransport(app=app)
     async with httpx2.AsyncClient(

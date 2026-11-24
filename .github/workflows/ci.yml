@@ -74,11 +74,26 @@ jobs:
       (github.event_name != 'pull_request' || github.event.pull_request.state == 'open')
     runs-on: ubuntu-latest
     # The suite takes about 12 minutes here in one process; four xdist
-    # workers run it 4.5 times faster on a laptop. faulthandler_timeout in pyproject.toml ends a run
-    # whose test hangs before failing; this cap ends every other hang.
+    # workers run it 4.5 times faster on a laptop. faulthandler_timeout in
+    # pyproject.toml ends a run whose test hangs before failing; this cap
+    # ends every other hang.
     timeout-minutes: 20
     env:
       UV_FROZEN: "1"
+      # The Postgres-backed fixtures in services/harness/tests/conftest.py.
+      HARNESS_TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/postgres
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v6
 
@@ -98,6 +113,16 @@ jobs:
       # headless Chromium, and fail without it.
       - name: Install Chromium
         run: uv run playwright install --with-deps --only-shell chromium
+
+      # The test database is thrown away with the runner, so durability buys
+      # nothing; these cut the time of every CREATE DATABASE and commit.
+      - name: Turn off Postgres durability
+        run: >-
+          docker exec ${{ job.services.postgres.id }} psql -U postgres
+          -c "ALTER SYSTEM SET fsync = off"
+          -c "ALTER SYSTEM SET synchronous_commit = off"
+          -c "ALTER SYSTEM SET full_page_writes = off"
+          -c "SELECT pg_reload_conf()"
 
       # `ubuntu-latest` in a public repository is a 4 vCPU runner, so `-n auto`
       # starts four workers. It lives here rather than in addopts so a targeted

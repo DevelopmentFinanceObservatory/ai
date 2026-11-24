@@ -33,9 +33,7 @@ from common.logging import JSON_FIELDS
 from common.telemetry import init_telemetry
 from compiler.surface import record_tool_result
 from data_mcp.mint_admission import BACKGROUND_OUTCOME_KEY
-from google.adk.errors import StaleSessionError
-from google.adk.errors.already_exists_error import AlreadyExistsError
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import DatabaseSessionService
 from google.genai import types
 from harness.conversation import current_conversation_caller
 from harness.early_mint import EarlyMints
@@ -44,15 +42,23 @@ from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.scripted import ScriptedExecutor, ScriptedSurface
 from harness.settings import Settings
 from harness.studio import SSE_MEDIA_TYPE, StudioRunner, _sse_stream
-from harness.studio_state import ConversationState, StudioStore, TurnUsage
+from harness.studio_state import ConversationState, TurnUsage
+from harness.studio_store import ConversationStale, StudioStore
 from harness.wire import MessageDelta
 from langfuse import Langfuse, get_client
 from opentelemetry import trace
 from opentelemetry.proto.trace.v1.trace_pb2 import Span
+from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.responses import StreamingResponse
 
-from ..orchestrator_fakes import AGENT_NAME, orchestrator_app, plan_call
-from ..sqlite_session import sqlite_session_service
+from ..orchestrator_fakes import (
+    AGENT_NAME,
+    NO_ADK,
+    no_turn_specs,
+    orchestrator_app,
+    plan_call,
+    session_turn_specs,
+)
 from .conftest import Quiescence
 
 CONVERSATION = "conv_trace_export_01"
@@ -117,9 +123,10 @@ def _abandoned_streams() -> Iterator[Callable[[], list[AsyncGeneratorType]]]:
     taken over for closing: a generator dropped while suspended is handed to
     the loop, which closes it later on a task of its own. The loop takes over
     only the response's outermost generator: `_sse_stream` when a test serves
-    it bare, `StudioRunner._settling` when a Studio route wraps it, in which
-    case `_settling` closes `_sse_stream` itself on the loop's task. Only
-    generators first iterated inside the block are seen."""
+    it bare through a plain `StreamingResponse`. A Studio route's response
+    (`harness.studio._ClaimedStream`) closes its body itself as it ends, so
+    the loop takes over none of it. Only generators first iterated inside the
+    block are seen."""
     hooks = sys.get_asyncgen_hooks()
     handed_over: list[AsyncGeneratorType] = []
 
@@ -136,6 +143,26 @@ def _abandoned_streams() -> Iterator[Callable[[], list[AsyncGeneratorType]]]:
         sys.set_asyncgen_hooks(firstiter=hooks.firstiter, finalizer=hooks.finalizer)
 
 
+@contextmanager
+def _route_bodies() -> Iterator[Callable[[], list[AsyncGeneratorType]]]:
+    """Yield a function returning the Studio route bodies
+    (`StudioRunner._settling`) first iterated inside the block."""
+    hooks = sys.get_asyncgen_hooks()
+    started: list[AsyncGeneratorType] = []
+
+    def firstiter(generator: AsyncGeneratorType) -> None:
+        if generator.ag_code is StudioRunner._settling.__code__:
+            started.append(generator)
+        if hooks.firstiter is not None:
+            hooks.firstiter(generator)
+
+    sys.set_asyncgen_hooks(firstiter=firstiter, finalizer=hooks.finalizer)
+    try:
+        yield lambda: list(started)
+    finally:
+        sys.set_asyncgen_hooks(firstiter=hooks.firstiter, finalizer=hooks.finalizer)
+
+
 async def _abandon_a_response_at_its_second_frame(
     conversation: ConversationState, *, how: str
 ) -> None:
@@ -147,11 +174,15 @@ async def _abandon_a_response_at_its_second_frame(
     second `yield`; nothing here closes it, so the event loop does."""
 
     async def segment() -> AsyncGenerator[MessageDelta]:
-        with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
-            span.set_attribute("gen_ai.operation.name", "generate_content")
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-        conversation.close_turn(final_text="one")
-        yield MessageDelta(event="message.delta", seq=1, text="two")
+        try:
+            with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
+                span.set_attribute("gen_ai.operation.name", "generate_content")
+            yield MessageDelta(event="message.delta", seq=0, text="one")
+            conversation.close_turn(final_text="one")
+            yield MessageDelta(event="message.delta", seq=1, text="two")
+        finally:
+            # The segment's end, as `StudioRunner._locked` ends it.
+            conversation.end_segment_span("saved")
 
     response = StreamingResponse(
         _sse_stream(segment(), conversation=conversation), media_type=SSE_MEDIA_TYPE
@@ -191,9 +222,9 @@ async def test_a_response_torn_down_at_a_frame_still_exports_the_turn_once_and_c
     quiescence: Quiescence, caplog: pytest.LogCaptureFixture, how: str
 ) -> None:
     """The response task ends while the stream generator sits at a `yield`, so
-    the event loop closes it later in a context of its own. The segment span
-    ends as the generator closes and is exported by the flush in the
-    generator's `finally`, and leaving the telemetry scope there does not make
+    the event loop closes it later in a context of its own. The segment span,
+    ended by the segment, is exported by the flush in the generator's
+    `finally`, and leaving the telemetry scope there does not make
     OpenTelemetry log a failed detach. The close, which no store saves, writes
     no `turn` outcome."""
     fake_langfuse = quiescence.fake
@@ -205,8 +236,8 @@ async def test_a_response_torn_down_at_a_frame_still_exports_the_turn_once_and_c
     # failed detach logs at.
     with _abandoned_streams() as abandoned:
         await _abandon_a_response_at_its_second_frame(conversation, how=how)
-        # The segment reaches the wire from the flush in the generator's
-        # `finally`, after the scope exit that would log a failed detach, so
+        # The segment reaches the wire from the flush inside the generator's
+        # `finally`, before the scope exit that would log a failed detach, so
         # the log is read once the generator has finished closing.
         await _until(
             lambda: any(
@@ -230,7 +261,9 @@ async def test_a_response_torn_down_at_a_frame_still_exports_the_turn_once_and_c
 # --- a turn that pauses for approval and resumes ---------------------------------
 
 
-def _planned_app(surface: ScriptedSurface | None = None, *, open_auth: bool = False) -> Any:
+def _planned_app(
+    engine: AsyncEngine, surface: ScriptedSurface | None = None, *, open_auth: bool = False
+) -> Any:
     """The studio with an agent that hands the question to the scripted
     planner, then answers once the approved plan is handed back."""
     app, _model = orchestrator_app(
@@ -238,6 +271,7 @@ def _planned_app(surface: ScriptedSurface | None = None, *, open_auth: bool = Fa
         types.Part.from_text(text=ANSWER),
         executor=ScriptedExecutor(),
         tool_surface=surface or ScriptedSurface(),
+        engine=engine,
         settings=Settings(studio_api_token=None if open_auth else "test"),
     )
     return app
@@ -261,6 +295,7 @@ async def _stream(
 
 
 async def _approve_a_planned_turn(
+    engine: AsyncEngine,
     *,
     headers: dict[str, str] | None = None,
     interrupt_headers: dict[str, str] | None = None,
@@ -272,7 +307,7 @@ async def _approve_a_planned_turn(
     token, approve the plan it proposes with `interrupt_headers`, and return
     the frames of the approval's stream. `after_each` runs once each
     response has ended."""
-    app = _planned_app(surface, open_auth=open_auth)
+    app = _planned_app(engine, surface, open_auth=open_auth)
     base = {"schema_version": 1, "conversation_id": CONVERSATION}
     async with httpx2.AsyncClient(
         transport=httpx2.ASGITransport(app=app), base_url="http://studio.test"
@@ -287,9 +322,9 @@ async def _approve_a_planned_turn(
             },
             headers,
         )
+        after_each()
         plan = first[-1]
         assert plan["event"] == "plan.proposed"
-        after_each()
         second = await _stream(
             client,
             "/api/studio/interrupt",
@@ -365,6 +400,7 @@ def _tags(span: Span) -> list[str] | None:
 async def test_a_studio_turn_names_who_asked_it_on_its_trace_and_its_log_line(
     fake_langfuse: Any,
     caplog: pytest.LogCaptureFixture,
+    pg_engine: AsyncEngine,
     identity: dict[str, str],
     user_id: str,
     account: str | None,
@@ -376,8 +412,8 @@ async def test_a_studio_turn_names_who_asked_it_on_its_trace_and_its_log_line(
     id, and the spec each `get_data` of the plan fetched."""
     init_telemetry(service_name="harness")
     surface = _ProbedSurface()
-    with caplog.at_level(logging.INFO, logger="harness.studio_state"):
-        second = await _approve_a_planned_turn(headers=identity, surface=surface)
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        second = await _approve_a_planned_turn(pg_engine, headers=identity, surface=surface)
 
     (turn,) = _closes(fake_langfuse.spans())
     assert _attribute(turn, "user.id") == user_id
@@ -395,14 +431,14 @@ async def test_a_studio_turn_names_who_asked_it_on_its_trace_and_its_log_line(
 
 
 async def test_an_open_studio_names_nobody_whatever_the_headers_say(
-    fake_langfuse: Any, caplog: pytest.LogCaptureFixture
+    fake_langfuse: Any, caplog: pytest.LogCaptureFixture, pg_engine: AsyncEngine
 ) -> None:
     """With `STUDIO_API_TOKEN` unset no proxy vouches for the identity
     headers, so the turn has no account, no visitor and no Langfuse user."""
     init_telemetry(service_name="harness")
-    with caplog.at_level(logging.INFO, logger="harness.studio_state"):
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
         await _approve_a_planned_turn(
-            headers={"x-dfo-account": ACCOUNT, "x-dfo-caller": VISITOR}, open_auth=True
+            pg_engine, headers={"x-dfo-account": ACCOUNT, "x-dfo-caller": VISITOR}, open_auth=True
         )
 
     (turn,) = _closes(fake_langfuse.spans())
@@ -412,17 +448,21 @@ async def test_an_open_studio_names_nobody_whatever_the_headers_say(
 
 
 async def test_a_resumed_turn_that_recorded_no_usage_takes_it_from_the_interrupt(
-    fake_langfuse: Any, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    fake_langfuse: Any,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    pg_engine: AsyncEngine,
 ) -> None:
-    """A paused turn whose ledger holds no usage, as one an older revision
-    paused, takes the `/interrupt` request's account and visitor, the caller
-    its MCP calls name, and the surface its own session states, and still
-    hears the spec each `get_data` of the resumed plan fetched."""
+    """A paused turn whose stored usage names no one, as one paused before
+    `TurnUsage` was stored, takes the `/interrupt` request's account and visitor,
+    the caller its MCP calls name, and the surface, and still hears the spec
+    each `get_data` of the resumed plan fetched."""
     monkeypatch.setattr(studio_module, "TurnUsage", lambda **_: TurnUsage())
     init_telemetry(service_name="harness")
     surface = _ProbedSurface()
-    with caplog.at_level(logging.INFO, logger="harness.studio_state"):
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
         await _approve_a_planned_turn(
+            pg_engine,
             interrupt_headers={"x-dfo-account": ACCOUNT, "x-dfo-caller": VISITOR},
             surface=surface,
         )
@@ -439,7 +479,7 @@ async def test_a_resumed_turn_that_recorded_no_usage_takes_it_from_the_interrupt
 
 
 async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
-    quiescence: Quiescence,
+    quiescence: Quiescence, pg_engine: AsyncEngine
 ) -> None:
     """Both segments of a turn run ADK's real workflow, each inside a
     `turn.segment` span of its own request, and no span is open once either
@@ -451,7 +491,7 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
     so only a close is a `turn` to a reader that sees names alone. Every
     exported span is the SDK's own or carries `gen_ai.*` attributes. The
     close's `turn` carries the question and the answer as its input and
-    output."""
+    output, and the segments carry neither."""
     outcomes_after_each: list[list[str]] = []
 
     def after_each() -> None:
@@ -462,7 +502,7 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
             )
         )
 
-    second = await _approve_a_planned_turn(after_each=after_each)
+    second = await _approve_a_planned_turn(pg_engine, after_each=after_each)
 
     assert outcomes_after_each == [["turn.pause"], ["turn", "turn.pause"]]
 
@@ -471,8 +511,8 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
     (turn,) = _closes(spans)
     segments = [span for span in spans if span.name == "turn.segment"]
     assert len(segments) == 2
-    assert turn.trace_id.hex() == Langfuse.create_trace_id(seed=second[-1]["trace_id"])
-    assert {span.trace_id for span in spans} == {turn.trace_id}
+    trace_id = Langfuse.create_trace_id(seed=second[-1]["trace_id"])
+    assert {span.trace_id.hex() for span in spans} == {trace_id}
     workflows = [span for span in spans if span.name.startswith("invoke_workflow")]
     assert len(workflows) == 2
     assert sorted(span.parent_span_id for span in workflows) == sorted(
@@ -497,14 +537,16 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
         ), (scope, span.name)
 
 
-async def test_a_model_call_exports_its_prompt_and_response(fake_langfuse: Any) -> None:
+async def test_a_model_call_exports_its_prompt_and_response(
+    fake_langfuse: Any, pg_engine: AsyncEngine
+) -> None:
     """With no content setting in the environment, the `generate_content` span
     of the orchestrator's first call carries the user's question in its input
     messages and the `plan` call it made in its output messages, and the span
     of its last call carries the answer, so Langfuse shows each generation's
     prompt and response."""
     init_telemetry(service_name="harness")
-    await _approve_a_planned_turn()
+    await _approve_a_planned_turn(pg_engine)
 
     calls = sorted(
         (span for span in fake_langfuse.spans() if span.name.startswith("generate_content")),
@@ -535,8 +577,9 @@ async def _post_and_leave_at_the_pause(
     `how="cancel"` cancels the response task while the stream awaits its next
     frame (`asyncio.CancelledError` at the wait); `how="close"` lets the stream
     emit a heartbeat that never finishes sending, then cancels the response
-    task, so the event loop closes the abandoned generator at the heartbeat
-    `yield` (`GeneratorExit`)."""
+    task while the generator sits at the heartbeat `yield`, so the response
+    (`harness.studio._ClaimedStream`) closes it there as it ends
+    (`GeneratorExit`)."""
     raw = json.dumps(body).encode()
     sent = False
     disconnect = asyncio.Event()
@@ -598,15 +641,16 @@ async def _post_and_leave_at_the_pause(
 
 @pytest.mark.parametrize("how", ["cancel", "close"])
 async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_trace(
-    fake_langfuse: Any, monkeypatch: pytest.MonkeyPatch, how: str
+    fake_langfuse: Any, monkeypatch: pytest.MonkeyPatch, how: str, pg_engine: AsyncEngine
 ) -> None:
     """The client goes away right after `plan.proposed`, while the stream
     awaits the next frame. The turn stays open and unrecorded, so the
-    `/interrupt` that approves the plan resumes it on the same trace: one
-    closing `turn` outcome, the execution spans on that trace, and no
+    `/interrupt` that approves the plan resumes it on the same trace: the
+    paused segment's `turn.segment` span and the resumed one's, each ended,
+    one closing `turn` outcome, the execution spans on that trace, and no
     cancellation on the turn's record."""
     init_telemetry(service_name="harness")
-    app = _planned_app()
+    app = _planned_app(pg_engine)
     studio: StudioRunner = app.state.studio
     at_pause = asyncio.Event()
     paused_once = False
@@ -631,18 +675,17 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
         "message": "comprehensive overview of life expectancy in Kenya",
     }
 
-    with _abandoned_streams() as abandoned:
+    with _abandoned_streams() as abandoned, _route_bodies() as bodies:
         interrupt_id = await _post_and_leave_at_the_pause(app, body, how=how, at_pause=at_pause)
         conversation = studio.store.current(PRINCIPAL, CONVERSATION)
         assert conversation is not None
         await _until(lambda: not conversation.lock.locked() and conversation.cancel_event is None)
         if how == "close":
-            await _until(
-                lambda: any(
-                    inspect.getasyncgenstate(generator) == inspect.AGEN_CLOSED
-                    for generator in abandoned()
-                )
-            )
+            # The response closed the body as it ended, in the request task,
+            # so the event loop was handed none of it to close.
+            (route_body,) = bodies()
+            assert inspect.getasyncgenstate(route_body) == inspect.AGEN_CLOSED
+            assert abandoned() == []
     assert conversation.awaiting_answer
 
     async with httpx2.AsyncClient(
@@ -662,33 +705,39 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
     assert resumed[-1]["event"] == "done"
 
     spans = fake_langfuse.spans()
+    segments = [span for span in spans if span.name == "turn.segment"]
+    assert len(segments) == 2
+    assert all(segment.end_time_unix_nano > 0 for segment in segments)
     (turn,) = _closes(spans)
     assert turn.end_time_unix_nano > 0
-    assert {span.trace_id for span in spans} == {turn.trace_id}
-    assert turn.trace_id.hex() == Langfuse.create_trace_id(seed=resumed[-1]["trace_id"])
+    trace_id = Langfuse.create_trace_id(seed=resumed[-1]["trace_id"])
+    assert {span.trace_id.hex() for span in spans} == {trace_id}
     assert any(span.name.startswith("invoke_node execute") for span in spans)
     (record,) = conversation.turns
     assert "error" not in record
 
 
 async def test_a_client_that_leaves_while_the_turn_runs_writes_its_outcome_as_cancelled(
-    quiescence: Quiescence, caplog: pytest.LogCaptureFixture
+    quiescence: Quiescence, caplog: pytest.LogCaptureFixture, pg_engine: AsyncEngine
 ) -> None:
     """A turn that has not paused is closed by the disconnect: the segment
-    ends once, parenting the segment's own spans, the turn writes one `turn`
-    outcome at `ERROR` naming the cancellation, the record carries it, and
-    the turn writes one `studio.turn` line."""
+    ends once, parenting the segment's own spans, the release save that
+    commits the close writes one `turn` outcome at `WARNING` naming the
+    cancellation and one `studio.turn` line, and the record carries it. The
+    stream records that the client left on its `_StreamEnding`, and the
+    segment closes the turn, releases it and ends its span as
+    `StudioRunner._locked` does."""
     fake_langfuse = quiescence.fake
-    store = StudioStore(InMemorySessionService(), app_name="app")
+    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
     conversation = await store.create("principal", CONVERSATION)
-    segment_id = store.claim_segment("principal", CONVERSATION)
     conversation.begin_turn()
     conversation.turn_user_message = "q"
+    segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
     running = asyncio.Event()
+    ending = studio_module._StreamEnding()
 
     async def segment() -> AsyncGenerator[MessageDelta]:
-        # Released on the way out, as `StudioRunner._locked` releases it.
         try:
             with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
                 span.set_attribute("gen_ai.operation.name", "generate_content")
@@ -697,10 +746,18 @@ async def test_a_client_that_leaves_while_the_turn_runs_writes_its_outcome_as_ca
             await asyncio.Event().wait()  # a slow tool call
             yield MessageDelta(event="message.delta", seq=1, text="two")
         finally:
-            await store.release("principal", CONVERSATION, segment_id)
+            # The segment's end, as `StudioRunner._locked` ends it.
+            if ending.client_gone and not conversation.awaiting_answer:
+                conversation.close_turn(final_text="", error="cancelled")
+            try:
+                await store.release("principal", CONVERSATION, segment_id)
+            finally:
+                conversation.end_segment_span("disconnected")
 
     async def consume() -> None:
-        async for _ in _sse_stream(segment(), conversation=conversation, heartbeat_seconds=15):
+        async for _ in _sse_stream(
+            segment(), conversation=conversation, heartbeat_seconds=15, ending=ending
+        ):
             pass
 
     task = asyncio.create_task(consume())
@@ -713,19 +770,20 @@ async def test_a_client_that_leaves_while_the_turn_runs_writes_its_outcome_as_ca
 
     spans = fake_langfuse.spans()
     (segment_span,) = [span for span in spans if span.name == "turn.segment"]
-    (turn,) = [span for span in spans if span.name == "turn"]
+    (turn,) = _closes(spans)
     (call,) = [span for span in spans if span.name == MODEL_CALL]
     assert segment_span.end_time_unix_nano > 0
     assert call.parent_span_id == segment_span.span_id
-    assert _attribute(turn, "langfuse.observation.level") == "ERROR"
+    assert _attribute(turn, "langfuse.observation.level") == "WARNING"
     assert _attribute(turn, "langfuse.observation.status_message") == "cancelled"
-    quiescence.assert_quiescent()
     assert conversation.turn_recorded
     (record,) = conversation.turns
     assert (record["user"], record["assistant"], record["error"]) == ("q", "", "cancelled")
     (line,) = _turn_lines(caplog)
-    assert line["trace_id"] == conversation.trace_id
-    assert line["error"] == "cancelled"
+    assert (line["trace_id"], line["error"]) == (conversation.trace_id, "cancelled")
+    await quiescence.assert_store_agrees(
+        pg_engine, principal="principal", conversation_id=CONVERSATION
+    )
 
 
 # --- no span outlives its request -------------------------------------------------
@@ -756,27 +814,33 @@ def _client(app: Any) -> httpx2.AsyncClient:
     )
 
 
-def _instance(session_service: Any, *script: types.Part) -> Any:
-    """One harness instance on the shared `session_service`, with a store of
-    its own, its agent answering from `script`."""
+def _instance(engine: AsyncEngine, *script: types.Part) -> Any:
+    """One harness instance on the shared database `engine`, with a store and
+    an ADK session service of its own on it, its agent answering from
+    `script`."""
+    session_service = DatabaseSessionService(db_engine=engine)
     app, _model = orchestrator_app(
         *script,
         executor=ScriptedExecutor(),
         tool_surface=ScriptedSurface(),
         session_service=session_service,
-        store=StudioStore(session_service, app_name=AGENT_NAME),
+        store=StudioStore(
+            engine,
+            adk=NO_ADK,
+            turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        ),
         settings=Settings(studio_api_token="test"),
     )
     return app
 
 
 async def test_a_turn_whose_claim_save_is_stale_writes_no_outcome_and_holds_no_span(
-    quiescence: Quiescence,
+    quiescence: Quiescence, pg_engine: AsyncEngine
 ) -> None:
     """A `/turn` on a paused conversation whose claim save meets another
     instance's write answers 409 and leaves nothing behind: no open span, no
     `turn` outcome for the paused turn it would have abandoned, and no line."""
-    app = _planned_app()
+    app = _planned_app(pg_engine)
     studio: StudioRunner = app.state.studio
     async with _client(app) as client:
         paused = await _stream(client, "/api/studio/turn", _turn_body(QUESTION))
@@ -784,9 +848,9 @@ async def test_a_turn_whose_claim_save_is_stale_writes_no_outcome_and_holds_no_s
         quiescence.assert_quiescent()
         real_save = studio.store.save
 
-        async def stale_save(principal: str, conversation_id: str) -> None:
+        async def stale_save(*args: Any, **kwargs: Any) -> bool:
             studio.store.save = real_save  # type: ignore[method-assign]
-            raise StaleSessionError("another instance wrote first")
+            raise ConversationStale(CONVERSATION)
 
         studio.store.save = stale_save  # type: ignore[method-assign]
         response = await client.post(
@@ -799,17 +863,16 @@ async def test_a_turn_whose_claim_save_is_stale_writes_no_outcome_and_holds_no_s
 
 
 async def test_a_turn_resumed_on_another_instance_is_one_trace_with_one_outcome(
-    quiescence: Quiescence, tmp_path: Any
+    quiescence: Quiescence, pg_engine: AsyncEngine
 ) -> None:
-    """Two instances share one ledger. A takes a turn to the approval pause,
+    """Two instances share one database. A takes a turn to the approval pause,
     B answers the `/interrupt` through `done`, and A takes the next turn. Each
     response leaves no span open on the process, and each instance's spans
     end in its own request. The first turn's trace holds one `turn` outcome
     carrying the question and the answer and one `turn.segment` per instance,
     and every exported span has its parent on the wire or is a root."""
-    session_service = sqlite_session_service(tmp_path / "shared.db")
-    app_a = _instance(session_service, plan_call(QUESTION), types.Part.from_text(text=ANSWER))
-    app_b = _instance(session_service)
+    app_a = _instance(pg_engine, plan_call(QUESTION), types.Part.from_text(text=ANSWER))
+    app_b = _instance(pg_engine)
 
     async with _client(app_a) as client_a:
         paused = await _stream(client_a, "/api/studio/turn", _turn_body(QUESTION))
@@ -843,87 +906,87 @@ async def test_a_turn_resumed_on_another_instance_is_one_trace_with_one_outcome(
         assert _attribute(span, "langfuse.internal.is_app_root") is True, span.name
 
 
-async def test_a_close_the_ledger_never_saw_writes_one_outcome_as_abandoned(
-    quiescence: Quiescence,
+async def test_a_close_the_store_never_saw_writes_one_outcome_as_abandoned(
+    quiescence: Quiescence, pg_engine: AsyncEngine
 ) -> None:
-    """A turn closes, but the close never reaches the ledger, so it writes no
-    line and no outcome. Reloaded from that ledger, the next `/turn`'s
-    `begin_turn` closes it as `abandoned`, and its claim save writes the one
-    `turn` outcome, at `ERROR`, and the one line the ledger's record agrees
-    with."""
-    session_service = InMemorySessionService()
-    store = StudioStore(session_service, app_name="app")
+    """A turn closes, but the close never reaches the store, so it writes no
+    line and no outcome. Reloaded from the store, the next turn's
+    `begin_turn` closes it as `abandoned`, and its save writes the one `turn`
+    outcome, at `WARNING`, and the one line the stored record agrees with."""
+    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
     conversation = await store.create("principal", CONVERSATION)
     conversation.begin_turn()
     conversation.turn_user_message = "q"
     await store.save("principal", CONVERSATION)
     trace_id = conversation.trace_id
     conversation.close_turn(final_text="a")  # its save never lands
+    conversation.end_segment_span("done")
 
-    reloaded = await store.load("principal", CONVERSATION)
+    reloaded = await StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs).load(
+        "principal", CONVERSATION
+    )
     assert reloaded is not None
     assert not reloaded.turn_recorded
     get_client().flush()
     assert quiescence.outcomes() == []
-    reloaded.begin_turn()
-    await store.save("principal", CONVERSATION)
+    other = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
+    fresh = await other.load("principal", CONVERSATION)
+    assert fresh is not None
+    fresh.begin_turn()
+    await other.save("principal", CONVERSATION)
+    fresh.end_segment_span("not_started")
     get_client().flush()
 
     assert quiescence.outcomes() == [(trace_id, "abandoned")]
-    await quiescence.assert_ledger_agrees(
-        session_service, app_name="app", principal="principal", conversation_id=CONVERSATION
+    await quiescence.assert_store_agrees(
+        pg_engine, principal="principal", conversation_id=CONVERSATION
     )
     (turn,) = _closes(quiescence.fake.spans())
-    assert _attribute(turn, "langfuse.observation.level") == "ERROR"
+    assert _attribute(turn, "langfuse.observation.level") == "WARNING"
 
 
 async def test_a_streams_last_flush_already_holds_its_segment(
-    quiescence: Quiescence, monkeypatch: pytest.MonkeyPatch
+    quiescence: Quiescence, monkeypatch: pytest.MonkeyPatch, pg_engine: AsyncEngine
 ) -> None:
-    """The segment span ends before the stream's final `flush_telemetry`, so
-    that flush exports it with its children. Left for a later flush, a
-    throttled instance would hold it and orphan every span under it. The
-    close, which no store saves, writes no `turn`."""
+    """The segment span ends in `StudioRunner._locked`, before the stream's
+    final `flush_telemetry`, so that flush exports it with its children. Left
+    for a later flush, a throttled instance would hold it and orphan every
+    span under it."""
     real_flush = studio_module.flush_telemetry
     seen_at_flush: list[list[str]] = []
 
     async def recording_flush(*args: Any, **kwargs: Any) -> None:
         await real_flush(*args, **kwargs)
-        seen_at_flush.append(sorted(span.name for span in quiescence.fake.spans()))
+        seen_at_flush.append([span.name for span in quiescence.fake.spans()])
 
     monkeypatch.setattr(studio_module, "flush_telemetry", recording_flush)
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    conversation.begin_turn()
-    conversation.turn_user_message = "q"
+    app = _planned_app(pg_engine)
+    async with _client(app) as client:
+        paused = await _stream(client, "/api/studio/turn", _turn_body(QUESTION))
+    assert paused[-1]["event"] == "plan.proposed"
 
-    async def segment() -> AsyncGenerator[MessageDelta]:
-        with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
-            span.set_attribute("gen_ai.operation.name", "generate_content")
-        conversation.close_turn(final_text="one")
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-
-    async for _ in _sse_stream(segment(), conversation=conversation):
-        pass
-
-    assert seen_at_flush == [[MODEL_CALL, "turn.segment"]]
+    last = seen_at_flush[-1]
+    assert last.count("turn.segment") == 1
+    assert any(name.startswith("invoke_workflow") for name in last)
     quiescence.assert_quiescent()
 
 
 async def test_a_cancel_on_an_instance_that_never_ran_the_paused_turn_writes_its_outcome(
-    quiescence: Quiescence, tmp_path: Any
+    quiescence: Quiescence, pg_engine: AsyncEngine
 ) -> None:
     """`/cancel` reaches a paused turn on an instance that loads it fresh from
-    the ledger. That instance never held anything for the turn, and still
-    writes its one `turn` outcome at `ERROR` naming the cancellation."""
-    session_service = sqlite_session_service(tmp_path / "shared.db")
-    app_a = _instance(session_service, plan_call(QUESTION))
-    app_b = _instance(session_service)
+    the store. That instance never held anything for the turn, and still
+    writes its one `turn` outcome at `WARNING` naming the cancellation."""
+    app_a = _instance(pg_engine, plan_call(QUESTION))
+    app_b = _instance(pg_engine)
 
     async with _client(app_a) as client_a:
         paused = await _stream(client_a, "/api/studio/turn", _turn_body(QUESTION))
     assert paused[-1]["event"] == "plan.proposed"
-    ledger = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
-    assert ledger is not None
+    stored = await StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs).load(
+        PRINCIPAL, CONVERSATION
+    )
+    assert stored is not None
     async with _client(app_b) as client_b:
         cancel = await client_b.post(
             "/api/studio/cancel",
@@ -932,22 +995,22 @@ async def test_a_cancel_on_an_instance_that_never_ran_the_paused_turn_writes_its
         )
     assert cancel.status_code == 204
 
-    assert quiescence.outcomes() == [(ledger.trace_id, "cancelled")]
-    await quiescence.assert_ledger_agrees(
-        session_service, app_name=AGENT_NAME, principal=PRINCIPAL, conversation_id=CONVERSATION
+    assert quiescence.outcomes() == [(stored.trace_id, "cancelled")]
+    await quiescence.assert_store_agrees(
+        pg_engine, principal=PRINCIPAL, conversation_id=CONVERSATION
     )
     (turn,) = _closes(quiescence.fake.spans())
-    assert _attribute(turn, "langfuse.observation.level") == "ERROR"
+    assert _attribute(turn, "langfuse.observation.level") == "WARNING"
     assert _attribute(turn, "langfuse.observation.input") == QUESTION
 
 
 async def test_a_rejected_plan_streams_inside_a_segment_of_its_own(
-    quiescence: Quiescence,
+    quiescence: Quiescence, pg_engine: AsyncEngine
 ) -> None:
     """The `/interrupt` that rejects a plan runs no workflow, and still streams
     inside a `turn.segment`: one segment per stream, beside the one `turn`
     outcome the rejection writes."""
-    app = _planned_app()
+    app = _planned_app(pg_engine)
     async with _client(app) as client:
         paused = await _stream(client, "/api/studio/turn", _turn_body(QUESTION))
         assert paused[-1]["event"] == "plan.proposed"
@@ -970,47 +1033,46 @@ async def test_a_rejected_plan_streams_inside_a_segment_of_its_own(
 
 
 @pytest.mark.parametrize(
-    "failure", ["session-exists", "session-create-fails", "claim-committed-then-fails"]
+    "failure", ["leftover-session-replace-fails", "claim-committed-then-fails"]
 )
 async def test_a_turn_that_ends_with_no_stream_flushes_the_abandoned_close_it_wrote(
-    quiescence: Quiescence, failure: str
+    quiescence: Quiescence, pg_engine: AsyncEngine, failure: str
 ) -> None:
     """A `/turn` on a paused conversation writes the paused turn's `abandoned`
-    close as its claim lands, then ends with no stream: a 409 because the
-    turn's session already exists, a failure creating it, or a claim save that
-    raised after it committed. The claim save flushes the outcome itself, so
-    it reaches the wire with no stream's flush to carry it."""
-    app = _planned_app()
+    close as its claim save commits, then ends with no stream: replacing a
+    leftover session of the new turn fails, or the claim save raised after it
+    committed. The close's outcome reaches the wire with no stream's flush to
+    carry it."""
+    app = _planned_app(pg_engine)
     studio: StudioRunner = app.state.studio
     async with _client(app) as client:
         paused = await _stream(client, "/api/studio/turn", _turn_body(QUESTION))
         assert paused[-1]["event"] == "plan.proposed"
-        paused_trace_id = studio.store.current(PRINCIPAL, CONVERSATION).trace_id
+        live = studio.store.current(PRINCIPAL, CONVERSATION)
+        assert live is not None
+        paused_trace_id = live.trace_id
         if failure == "claim-committed-then-fails":
             real_save = studio.store.save
 
-            async def save_then_fail(principal: str, conversation_id: str) -> None:
+            async def save_then_fail(*args: Any, **kwargs: Any) -> bool:
                 studio.store.save = real_save  # type: ignore[method-assign]
-                await real_save(principal, conversation_id)
-                raise RuntimeError("ledger answered late")
+                await real_save(*args, **kwargs)
+                raise RuntimeError("the store answered late")
 
             studio.store.save = save_then_fail  # type: ignore[method-assign]
         else:
+            # The new turn's session exists, as one a crash left, so the
+            # claim save is followed by its replacement, which fails.
+            await studio.runner.session_service.create_session(
+                app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t2"
+            )
 
-            async def no_session(**_: Any) -> None:
-                if failure == "session-exists":
-                    raise AlreadyExistsError("the turn's session exists")
+            async def replace_fails(**_: Any) -> None:
                 raise RuntimeError("session store unavailable")
 
-            studio._ensure_session = no_session  # type: ignore[method-assign]
-        if failure == "session-exists":
-            response = await client.post(
-                "/api/studio/turn", json=_turn_body("aid to kenya"), headers=AUTH
-            )
-            assert response.status_code == 409
-        else:
-            with pytest.raises(RuntimeError):
-                await client.post("/api/studio/turn", json=_turn_body("aid to kenya"), headers=AUTH)
+            studio._replace_leftover_session = replace_fails  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            await client.post("/api/studio/turn", json=_turn_body("aid to kenya"), headers=AUTH)
 
     # No flush here, since the request's own flush must have exported the outcome.
     assert quiescence.outcomes() == [(paused_trace_id, "abandoned")]
@@ -1041,7 +1103,10 @@ class _SlowDataClient:
 
 
 async def test_an_early_mint_that_ends_during_the_settle_wait_is_not_logged_unsent(
-    quiescence: Quiescence, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    quiescence: Quiescence,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    pg_engine: AsyncEngine,
 ) -> None:
     """An early mint that answers while the response waits for it ends inside
     that wait though exporting its root is slow. It starts the flush and
@@ -1073,6 +1138,7 @@ async def test_an_early_mint_that_ends_during_the_settle_wait_is_not_logged_unse
         tool_surface=ScriptedSurface(),
         settings=Settings(studio_api_token="test"),
         early_mints=early,
+        engine=pg_engine,
     )
     try:
         with caplog.at_level(logging.INFO, logger="harness.early_mint"):
@@ -1089,7 +1155,7 @@ async def test_an_early_mint_that_ends_during_the_settle_wait_is_not_logged_unse
 
 
 async def test_an_early_mint_that_ends_after_its_pause_exports_its_result_on_the_turns_trace(
-    quiescence: Quiescence, monkeypatch: pytest.MonkeyPatch
+    quiescence: Quiescence, monkeypatch: pytest.MonkeyPatch, pg_engine: AsyncEngine
 ) -> None:
     """The card's early `get_data` is still running when the stream that
     offered it pauses and ends its segment. When it ends, its `dfo.tool_result`
@@ -1107,6 +1173,7 @@ async def test_an_early_mint_that_ends_after_its_pause_exports_its_result_on_the
         tool_surface=ScriptedSurface(),
         settings=Settings(studio_api_token="test"),
         early_mints=early,
+        engine=pg_engine,
     )
     try:
         async with _client(app) as client:
@@ -1114,7 +1181,9 @@ async def test_an_early_mint_that_ends_after_its_pause_exports_its_result_on_the
         assert paused[-1]["event"] == "plan.proposed"
         await asyncio.wait_for(data.entered.wait(), timeout=5)
         quiescence.assert_quiescent()
-        trace_id = app.state.studio.store.current(PRINCIPAL, CONVERSATION).trace_id
+        live = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        assert live is not None
+        trace_id = live.trace_id
 
         data.release.set()
         await _until(

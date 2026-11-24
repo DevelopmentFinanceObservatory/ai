@@ -112,10 +112,11 @@ async def composed_app(
     fake_langfuse: FakeLangfuse,
     running_lifespan: Callable[[FastAPI], Any],
     monkeypatch: pytest.MonkeyPatch,
+    pg_database_url: str,
 ) -> AsyncIterator[FastAPI]:
     """The composed harness app with its lifespan running and the harness's
     own clients' transports pointed at it in process."""
-    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token=TOKEN))
 
     def transport(
         url: str,

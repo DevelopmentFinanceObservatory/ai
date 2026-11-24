@@ -59,10 +59,13 @@ class Settings(BaseServiceSettings):
     / `PRESENTATION_MCP_URL` always wins over that default -- that env
     override is what lets a service split back out replace its loopback mount
     (point it at the split-out service's URL instead of the loopback path).
-    `database_url` and the `session_store_*` fields together select ADK's
-    session backend (`harness.session_store.build_session_service`):
-    in-memory when none of them is set, `DatabaseSessionService` over a
-    plain SQLAlchemy URL when `database_url` is set, or
+    `database_url` and the `session_store_*` fields together select the
+    harness's Postgres database (`harness.db.engine.build_database`), which
+    holds the studio's conversations and ADK's session tables, and the ADK
+    session backend on it (`harness.session_store.build_session_service`):
+    no database when none of them is set (`harness.server.create_app`
+    refuses to build the app then), `DatabaseSessionService` over an asyncpg
+    SQLAlchemy URL when `database_url` is set, or
     `DatabaseSessionService` over an async engine built on the Cloud SQL
     Python Connector (PSC, IAM auth) when
     `session_store_instance_connection_name` is set. Setting both
@@ -424,8 +427,8 @@ class Settings(BaseServiceSettings):
             )
         # All three fields select the connector path or none of them do. A
         # partial combination (e.g. the database and user set without the
-        # connection name) boots the in-memory backend silently instead of
-        # the connector the caller meant to configure.
+        # connection name) would leave `build_session_service` with no
+        # database and raise, so it is refused here, naming the missing field.
         connector_fields = (
             (
                 "SESSION_STORE_INSTANCE_CONNECTION_NAME",
