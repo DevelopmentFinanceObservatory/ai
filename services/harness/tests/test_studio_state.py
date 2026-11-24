@@ -55,6 +55,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
 )
 from harness.provenance import CardLineage, ProvenanceInput
+from harness.studio import _answers_refusal, _resume_answer
 from harness.studio_edit import _record_revision, _refresh_block
 from harness.studio_state import (
     CANVAS_LISTING_MAX_BYTES,
@@ -84,7 +85,7 @@ from harness.studio_store import (
 )
 from harness.turn.store import TurnStatus, TurnStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
-from harness.unit_offer import whole_units
+from harness.unit_offer import whole_unit_options, whole_units
 from harness.wire import (
     AddOp,
     ClientFeature,
@@ -97,6 +98,7 @@ from harness.wire import (
     ErrorCode,
     MessageComplete,
     MutationOp,
+    OptionAnswer,
     PlanProposed,
     UnitOffer,
 )
@@ -115,28 +117,31 @@ from .test_turn_store import ADMITTED_RUN
 
 CONVERSATION = "conv_01test0000"
 
-# A unit question as `/interrupt` keeps it: its input and the offer an answer
-# must lie inside.
+_UNIT_OFFER = UnitOffer.model_validate(
+    {
+        "currencies": [
+            {
+                "code": "USD",
+                "name": "US dollars",
+                "prices": ["current", "constant"],
+                "base_year_min": 2000,
+                "base_year_max": 2023,
+            }
+        ],
+        "presets": ["USD"],
+        "start": {"currency": "USD", "prices": "constant", "base_year": 2023},
+    }
+)
+
+# A unit question as `/interrupt` keeps it: its input, the offer an answer must lie
+# inside, and its whole units, which a page sent it as a pick answers with.
 _UNIT_QUESTION = _PendingQuestion(
     id="q2",
     question="In which prices?",
+    options=dict(whole_unit_options(_UNIT_OFFER)),
     skippable=True,
     input=ElicitationInput.UNIT,
-    unit=UnitOffer.model_validate(
-        {
-            "currencies": [
-                {
-                    "code": "USD",
-                    "name": "US dollars",
-                    "prices": ["current", "constant"],
-                    "base_year_min": 2000,
-                    "base_year_max": 2023,
-                }
-            ],
-            "presets": ["USD"],
-            "start": {"currency": "USD", "prices": "constant", "base_year": 2023},
-        }
-    ),
+    unit=_UNIT_OFFER,
 )
 
 
@@ -1924,8 +1929,10 @@ def test_a_stored_unit_question_is_kept_in_its_whole_units_form() -> None:
     )
     asked = ElicitationRequest.model_validate(raw)
     note = MessageComplete(event="message.complete", seq=4, text="One question first.")
+    offer = asked.questions[0].unit
+    assert offer is not None
     question = dataclasses.replace(
-        _UNIT_QUESTION, id="q1", unit=asked.questions[0].unit, skippable=True
+        _UNIT_QUESTION, id="q1", unit=offer, options=dict(whole_unit_options(offer))
     )
     pending = _PendingInterrupt(
         adk_id="adk_1",
@@ -1950,6 +1957,15 @@ def test_a_stored_unit_question_is_kept_in_its_whole_units_form() -> None:
     assert "frames_units" not in entry
     assert restored.frames == (note, asked)
     assert restored.questions == (question,)
+    # A page sent the stored form, as a release with no unit question serves it,
+    # answers with a pick, which reads as that whole unit.
+    pick = OptionAnswer(kind="option", option_id=whole[-1])
+    assert _answers_refusal(restored.questions, {"q1": pick}) is None
+    unit = whole_units(asked.questions[0].unit)[whole[-1]]
+    assert _resume_answer(restored.questions[0], pick) == {
+        "kind": "unit",
+        **unit.model_dump(mode="json", exclude_none=True),
+    }
 
 
 def test_awaiting_answer_excludes_an_entry_marked_resuming() -> None:

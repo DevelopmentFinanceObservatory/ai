@@ -150,7 +150,7 @@ from harness.turn.store import (
     cursor_at,
     finish_on,
 )
-from harness.unit_offer import unit_words, whole_units
+from harness.unit_offer import whole_unit_options
 from harness.wire import (
     STUDIO_FRAME_ADAPTER,
     CompositionManifest,
@@ -449,12 +449,6 @@ def _units_back(frame: dict[str, Any], units: Mapping[str, Any] | None) -> dict[
     }
 
 
-def _whole_unit_options(offer: UnitOffer) -> dict[str, str]:
-    """The options a unit question offering `offer` lists for a client that renders no
-    unit question, by id: its whole units (`whole_units`) in the user's words."""
-    return {option_id: unit_words(unit, offer) for option_id, unit in whole_units(offer).items()}
-
-
 # The key of a stored question that was a unit question (`_stored_question`).
 _OWN_INPUT = "own_input"
 
@@ -481,7 +475,7 @@ def _stored_question(question: _PendingQuestion) -> dict[str, Any]:
     }
     if question.input is ElicitationInput.UNIT and question.unit is not None:
         stored |= {
-            "options": _whole_unit_options(question.unit),
+            "options": whole_unit_options(question.unit),
             "input": ElicitationInput.SINGLE_SELECT.value,
             "native_input": ElicitationInput.UNIT.value,
             _OWN_INPUT: ElicitationInput.UNIT.value,
@@ -490,12 +484,15 @@ def _stored_question(question: _PendingQuestion) -> dict[str, Any]:
 
 
 def _loaded_question(stored: Mapping[str, Any]) -> _PendingQuestion:
-    """The question `_stored_question` kept, a unit question in its own form again."""
+    """The question `_stored_question` kept, a unit question in its own form again,
+    listing its whole units as options, so a page that was sent it as a pick answers
+    it (`harness.studio._answer_kinds`)."""
     own = stored.get(_OWN_INPUT) == ElicitationInput.UNIT.value
     return _PendingQuestion(
         id=stored["id"],
         question=stored["question"],
-        options={} if own else dict(stored["options"]),
+        # A unit question keeps its whole units, which a page sent it as a pick answers.
+        options=dict(stored["options"]),
         skippable=stored["skippable"],
         # A question kept before inputs were stored is single-select.
         input=ElicitationInput.UNIT
@@ -513,7 +510,7 @@ def _loaded_question(stored: Mapping[str, Any]) -> _PendingQuestion:
 def _unit_questions_apart(frame: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """`frame` with each unit question in the form a client that renders no unit
     question is sent it: a `single_select` over the offer's whole units with no free
-    text and no offer (`_whole_unit_options`). The offers are taken out, by question
+    text and no offer (`whole_unit_options`). The offers are taken out, by question
     id, and `_unit_questions_back` puts them back. A loader whose models know no unit
     question, and one that serves the fallback, then serve and answer the question as
     the pending entry keeps it (`_stored_question`). The offers sit under a key of
@@ -532,7 +529,7 @@ def _unit_questions_apart(frame: dict[str, Any]) -> tuple[dict[str, Any], dict[s
             "input": ElicitationInput.SINGLE_SELECT.value,
             "options": [
                 {"id": option_id, "label": label}
-                for option_id, label in _whole_unit_options(
+                for option_id, label in whole_unit_options(
                     UnitOffer.model_validate(offers[question["id"]])
                 ).items()
             ],

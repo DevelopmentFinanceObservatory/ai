@@ -2577,7 +2577,7 @@ def build_orchestrator_tools(
         frames = stored_mapping(call.state, ORCHESTRATOR_FRAMES_KEY)
         on_canvas = _canvas_series(call)
         held_cards = call.state.get(_DRAWN_CARDS_KEY) or {}
-        drawn_cards: dict[str, dict[str, Any]] = (
+        held_drawn: dict[str, dict[str, Any]] = (
             dict(held_cards["drawn"]) if held_cards.get("turn") == call.turn_id else {}
         )
         canvas = {
@@ -2592,10 +2592,10 @@ def build_orchestrator_tools(
 
         def _remember_drawn(identity: str, card: dict[str, Any]) -> None:
             """Record `card` as drawn for `identity` this turn."""
-            drawn_cards[identity] = card
+            held_drawn[identity] = card
             call.state[_DRAWN_CARDS_KEY] = {
                 "turn": call.turn_id,
-                "drawn": drawn_cards,
+                "drawn": held_drawn,
             }
 
         def _unreadable_entry(chart: Chart, *, later: bool) -> dict[str, Any]:
@@ -2650,7 +2650,7 @@ def build_orchestrator_tools(
             if (order := _card_order(chart, cut)) is not None:
                 intent["order"] = order
             identity = _card_identity(intent)
-            held = drawn_cards.get(identity) or canvas.get(identity)
+            held = held_drawn.get(identity) or canvas.get(identity)
             # An earlier write of this card stored one the harness cannot read,
             # and another write would stack a second orphan.
             unreadable = held is not None and bool(held.get("unreadable"))

@@ -120,6 +120,7 @@ from harness.studio_state import (
     _next_manifest,
     _PendingInterrupt,
     _PendingQuestion,
+    _recorded_reply,
     _tool_error_response,
     _wire_id,
     record_unstreamed_span,
@@ -301,10 +302,15 @@ _ANSWER_KINDS: dict[ElicitationInput, frozenset[str]] = {
 def _answer_kinds(question: _PendingQuestion) -> frozenset[str]:
     """The answer kinds `question` takes: those of the input its frame sent
     (`_ANSWER_KINDS`), save free text on a unit question sent as a
-    `single_select`, which offers none."""
+    `single_select`, which offers none. A unit question that lists its whole units
+    as options, as one restored from the conversation row does
+    (`harness.studio_store`), also takes a pick of one, the answer of a page that
+    was sent it as a `single_select`."""
     kinds = _ANSWER_KINDS[question.input]
     if question.native_input is ElicitationInput.UNIT:
         return kinds - {"text"}
+    if question.input is ElicitationInput.UNIT and question.options:
+        return kinds | {"option"}
     return kinds
 
 
@@ -766,13 +772,13 @@ def _given_answers(
 
 
 def _native_answer(question: _PendingQuestion, answer: ElicitationAnswer) -> ElicitationAnswer:
-    """`answer` in the form of `question`'s own input. A pick on a question
-    sent in another form (`_PendingQuestion.native_input`) is, on a unit
-    question, the whole unit the option names (`whole_units`), and on a
+    """`answer` in the form of `question`'s own input. A pick on a unit question,
+    sent as one (`_answer_kinds`) or in another form (`_PendingQuestion.native_input`),
+    is the whole unit the option names (`whole_units`), and on a question sent as a
     `multi_select` one, one tick. Any other answer is itself."""
     if not isinstance(answer, OptionAnswer):
         return answer
-    if question.native_input is ElicitationInput.UNIT and question.unit is not None:
+    if ElicitationInput.UNIT in (question.input, question.native_input) and question.unit:
         unit = whole_units(question.unit)[answer.option_id]
         return UnitAnswer(kind="unit", **unit.model_dump())
     if question.native_input is ElicitationInput.MULTI_SELECT:
@@ -1624,25 +1630,13 @@ def _closed_turn(
     turn_index: int, record: Mapping[str, Any], components: Mapping[str, Mapping[str, Any]]
 ) -> ClosedTurn:
     """Turn `turn_index` as its stored record holds it. The reply is the
-    answer with the notes and the basis line the stream appended to it
-    (`ConversationState.close_turn`), as its `message.complete` sent it,
-    and empty for a record whose stream sent none (`reply_shown: false`).
+    answer the user was shown with the notes and the basis line the stream
+    appended to it (`harness.studio_state._recorded_reply`), as its
+    `message.complete` sent it, and empty for a record whose stream sent none
+    (`reply_shown: false`).
     The user's message is the record's display line where it keeps one
     (`user_display`), else its `user` line."""
-    reply = (
-        ""
-        if record.get("reply_shown") is False
-        else "".join(
-            [
-                record.get("assistant") or "",
-                *(
-                    f"\n\n{block}"
-                    for key in ("match_notes", "basis_line")
-                    if (block := record.get(key))
-                ),
-            ]
-        )
-    )
+    reply = "" if record.get("reply_shown") is False else _recorded_reply(record)
     component_ids = [
         card["component_id"]
         for card in record.get("cards") or []
