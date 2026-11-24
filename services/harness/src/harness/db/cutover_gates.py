@@ -47,7 +47,7 @@ LAPSED_LEDGER_LEASES = "harness.lapsed_ledger_leases"
 # not retry, since no wait changes it: the check cannot tell whether a
 # stream holds it. No stream does once every revision of an image before
 # the release that added the conversation tables is deleted and that
-# release's drain check has passed; the operator then names each such
+# release's drain check has passed. The operator then names each such
 # session in `LAPSED_LEDGER_LEASES`, and both reads pass over it, so a
 # numeric `expires_at` far in the future is cleared the same way.
 LIVE_LEDGER_LEASE_GATE = r"""
@@ -117,8 +117,9 @@ $$;
 # above 0, `turn_recorded` not true) whose ADK turn session
 # `{conversation_id}#t{turn_index}` (app 'dfo_analyst_graph') exists and
 # that `turn_cursors` holds no row for. That covers a start that applies
-# 0003 and 0005 together and one after a stage whose `close-open-turns`
-# never exited 0. A database with no ADK `sessions` table passes, and so
+# 0003 and 0005 together and one after a cutover whose `close-open-turns`
+# never exited 0. A database with no ADK `sessions` table passes, as does
+# one whose `sessions` lacks the six columns 0005 reads as ADK's, and so
 # does one whose `sessions` or `conversations` the current user cannot
 # read, which 0005 then refuses with DFA03, since it renames only tables
 # the current user owns.
@@ -136,7 +137,8 @@ BEGIN
     IF sessions_table IS NULL OR to_regclass('conversations') IS NULL
         OR NOT has_table_privilege(sessions_table, 'SELECT')
         OR NOT has_table_privilege('conversations', 'SELECT') OR EXISTS (
-        SELECT 1 FROM unnest(ARRAY['app_name', 'user_id', 'id']) AS c(col)
+        SELECT 1 FROM unnest(ARRAY[
+            'app_name', 'user_id', 'id', 'state', 'create_time', 'update_time']) AS c(col)
         WHERE NOT EXISTS (
             SELECT 1 FROM pg_attribute a
             WHERE a.attrelid = sessions_table AND a.attname = c.col
@@ -155,8 +157,9 @@ BEGIN
         '  array_agg(o.turn_index ORDER BY o.principal, o.conversation_id), '
         '  array_agg(o.principal || ''/'' || o.conversation_id ORDER BY o.principal, o.conversation_id) '
         'FROM open o WHERE o.turn_index > 0 '
-        'AND EXISTS (SELECT 1 FROM %s s WHERE s.app_name = %L AND s.user_id = o.principal '
-        '  AND s.id = o.conversation_id || ''#t'' || o.turn_index::text)',
+        'AND EXISTS (SELECT 1 FROM %s s WHERE s.app_name::text = %L '
+        '  AND s.user_id::text = o.principal '
+        '  AND s.id::text = o.conversation_id || ''#t'' || o.turn_index::text)',
         sessions_table, 'dfo_analyst_graph')
     INTO ids, turns, keys;
     IF ids IS NULL THEN

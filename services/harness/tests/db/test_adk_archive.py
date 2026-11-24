@@ -648,7 +648,31 @@ async def test_archive_refuses_a_turn_open_on_adk_that_turn_cursors_does_not_hol
             "INSERT INTO turn_cursors (conversation, turn_index, node, status, inputs, state) "
             "SELECT id, 1, 'plan', 'running', '{}', '{}' FROM conversations",
         )
+    if held:
+        assert await apply_pending(pg_empty_engine) == ["0005_rename_adk_tables.sql"]
+    else:
+        with pytest.raises(asyncpg.PostgresError) as refusal:
+            await apply_pending(pg_empty_engine)
+        assert refusal.value.sqlstate == "DFA07"
     capsys.readouterr()
 
     assert await _verb(pg_empty_engine, "archive") == (0 if held else 1)
     assert ("SQLSTATE DFA07" in capsys.readouterr().err) is not held
+
+
+async def test_a_start_archives_beside_a_foreign_sessions_table(
+    pg_empty_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """At 0004, a `sessions` table of another service, with integer
+    `app_name`, `user_id` and `id` and without ADK's other columns, is not
+    ADK's: the DFA07 check passes over it and the start applies 0005."""
+    _, through_0004 = _migration_dirs(tmp_path)
+    await apply_pending(pg_empty_engine, directory=through_0004)
+    await _execute(
+        pg_empty_engine,
+        "CREATE TABLE sessions (app_name integer, user_id integer, id integer)",
+        "INSERT INTO conversations (principal, conversation_id, turn_state) "
+        """VALUES ('p', 'c1', '{"turn_index": 1}')""",
+    )
+
+    assert await apply_pending(pg_empty_engine) == ["0005_rename_adk_tables.sql"]
