@@ -756,7 +756,13 @@ def _given_answers(
     (question,) = pending.questions
     if body.payload in question.options:
         return {question.id: OptionAnswer(kind="option", option_id=body.payload)}
-    return {question.id: TextAnswer(kind="text", text=body.payload)}
+    # `body` held the payload within the cap on new words, or was rebuilt from a stored
+    # answer that stands (`STORED_INTERRUPT`), so the answer takes it whole.
+    return {
+        question.id: TextAnswer.model_validate(
+            {"kind": "text", "text": body.payload}, context={STORED_INTERRUPT: True}
+        )
+    }
 
 
 def _native_answer(question: _PendingQuestion, answer: ElicitationAnswer) -> ElicitationAnswer:
