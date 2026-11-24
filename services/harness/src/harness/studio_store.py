@@ -1122,6 +1122,11 @@ class StopState:
         )
 
 
+# How many times `StudioStore.request_cancel` runs its update for a named turn
+# while each read after it finds a lease on that turn gone live since. Each
+# repeat needs another lease to land between two statements, so a few suffice.
+_STOP_TURN_ATTEMPTS = 3
+
 # The row's turn index, as stored in its turn state.
 _TURN_INDEX_SQL = f"COALESCE((turn_state ->> '{_KEY_TURN_INDEX}')::int, 0)"
 # Turns a set `lease_cancel` into a fresh Stop id naming the row's turn index
@@ -3142,6 +3147,11 @@ class StudioStore:
         database clock. The caller falls back to whatever cancellation means
         with no active segment.
 
+        A lease on `turn_index` that went live after the update read the row
+        is found by the read that follows it, and the update runs again, up
+        to `_STOP_TURN_ATTEMPTS` times, so a Stop is refused only for a turn
+        other than the one it names.
+
         Raises:
             TurnMoved: a live segment holds a turn other than `turn_index`.
         """
@@ -3158,27 +3168,24 @@ class StudioStore:
             assign = "stop_id = :minted, stop_turn = :turn_index"
             guard = f"AND {_TURN_INDEX_SQL} = :turn_index "
             values = {**keys, "minted": _wire_id("stop"), "turn_index": turn_index}
+        update = text(
+            f"UPDATE conversations SET {assign} {live}{guard}"
+            "RETURNING lease_segment_id, lease_owner, lease_expires_at"
+        )
+        held_turn = text(f"SELECT {_TURN_INDEX_SQL} AS turn_index FROM conversations {live}")
         async with entry.write_lock:
             async with self._transaction() as conn:
-                row = (
-                    await conn.execute(
-                        text(
-                            f"UPDATE conversations SET {assign} {live}{guard}"
-                            "RETURNING lease_segment_id, lease_owner, lease_expires_at"
-                        ),
-                        values,
-                    )
-                ).first()
-                if row is None and turn_index is not None:
-                    held = (
-                        await conn.execute(
-                            text(
-                                f"SELECT {_TURN_INDEX_SQL} AS turn_index FROM conversations {live}"
-                            ),
-                            keys,
-                        )
-                    ).first()
-                    if held is not None:
+                for _ in range(_STOP_TURN_ATTEMPTS):
+                    row = (await conn.execute(update, values)).first()
+                    if row is not None or turn_index is None:
+                        break
+                    # Each statement reads the newest committed row, so a
+                    # claim that committed after the update read it shows
+                    # here, and the update runs again on it.
+                    held = (await conn.execute(held_turn, keys)).first()
+                    if held is None:
+                        break
+                    if held.turn_index != turn_index:
                         raise TurnMoved(conversation_id, latest=held.turn_index)
             if row is None:
                 return False

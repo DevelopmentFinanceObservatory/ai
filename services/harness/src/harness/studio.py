@@ -1554,14 +1554,16 @@ def _resume_conflict(detail: str) -> JSONResponse:
 
 
 def _stored_card(
-    component_id: str, entry: Mapping[str, Any], state: ConversationState
+    component_id: str, entry: Mapping[str, Any], state: ConversationState, *, swapped: bool
 ) -> StoredCard | None:
     """The card `entry`, a stored component of `state`
-    (`ConversationState.components`), for the state read, with the unit its
-    stored `UnitCard` can change within (`stored_unit_change`) and the card
-    whose slot it took (`REPLACED_CARD_KEY`). A `fact_summary` that does not
-    validate is left out, and an entry with no type or title gives no
-    card."""
+    (`ConversationState.components`), for the state read. A card on the
+    canvas carries the unit its stored `UnitCard` can change within
+    (`stored_unit_change`), as `apply_unit`, which refuses a card off the
+    canvas, reads it. A card `swapped` in by the turn being read names the
+    card whose slot it took (`REPLACED_CARD_KEY`). A `fact_summary` or a
+    unit offer that cannot be read is left out and logged, and an entry
+    with no type or title gives no card."""
     if not entry.get("type") or not entry.get("title"):
         return None
     try:
@@ -1577,16 +1579,32 @@ def _stored_card(
             exc_info=True,
         )
         summary = None
-    replaces = entry.get(REPLACED_CARD_KEY)
+    unit_change = None
+    if _on_canvas(state, component_id):
+        try:
+            unit_change = stored_unit_change(entry, state.turn_specs, state.turns)
+        except Exception:
+            logger.warning(
+                "studio state: component %s's stored unit offer cannot be read",
+                component_id,
+                exc_info=True,
+            )
+    replaces = entry.get(REPLACED_CARD_KEY) if swapped else None
     return StoredCard(
         component_id=component_id,
         type=str(entry["type"]),
         title=str(entry["title"]),
         revision=int(entry.get("revision") or 1),
         fact_summary=summary,
-        unit_change=stored_unit_change(entry, state.turn_specs, state.turns),
+        unit_change=unit_change,
         replaces=replaces if isinstance(replaces, str) else None,
     )
+
+
+def _on_canvas(state: ConversationState, component_id: str) -> bool:
+    """Whether `state`'s canvas holds card `component_id`."""
+    blocks = state.composition.blocks if state.composition is not None else []
+    return any(block.component_id == component_id for block in blocks)
 
 
 def _open_user_message(state: ConversationState) -> str:
@@ -1622,16 +1640,21 @@ def _closed_turn(turn_index: int, state: ConversationState) -> ClosedTurn:
             ]
         )
     )
-    component_ids = [
-        card["component_id"]
+    listed = [
+        card
         for card in record.get("cards") or []
         if isinstance(card, Mapping) and isinstance(card.get("component_id"), str)
     ]
+    component_ids = [card["component_id"] for card in listed]
+    # The cards this turn swapped into another card's slot
+    # (`harness.studio_edit._swapped`).
+    swapped = {card["component_id"] for card in listed if card.get("action") == "recreated"}
     cards = [
         card
         for component_id in component_ids
         if (entry := state.components.get(component_id)) is not None
-        and (card := _stored_card(component_id, entry, state)) is not None
+        and (card := _stored_card(component_id, entry, state, swapped=component_id in swapped))
+        is not None
     ]
     return ClosedTurn(
         turn_index=turn_index,
@@ -2366,7 +2389,7 @@ async def _stop_under_lock(
     conversation, or once what an open turn left is closed
     (`_stop_open_turn`). It answers that close's 503 when it fails. A Stop
     for turn `turn_index` of a conversation whose latest turn is another
-    stops nothing and is answered `_cancel_skipped`.
+    is answered `_cancel_skipped` and leaves the conversation as it was.
 
     Raises:
         _ClaimLost: this route's claim lost to another request.
@@ -2389,7 +2412,8 @@ async def _stop_under_lock(
 
 def _cancel_skipped(latest: int) -> JSONResponse:
     """`/cancel`'s 200 answer to a Stop for a turn that is not the
-    conversation's latest, `latest`: it stopped nothing."""
+    conversation's latest, `latest`, which leaves the conversation as it
+    was."""
     return JSONResponse(
         content=CancelSkipped(code="turn_moved", turn_index=latest).model_dump(mode="json")
     )
@@ -2785,17 +2809,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         conversation there at all).
 
         A Stop that names its turn (`CancelRequest.turn_index`) stops that
-        turn alone. When the conversation's latest turn is another, it is
-        answered 200 with a `CancelSkipped` (`code` `turn_moved`) and changes
-        nothing, so a Stop from a page that has not seen a later turn begin,
-        on another tab say, leaves that turn running. A Stop on a live lease
-        records its Stop naming the turn at once, only while the row holds
-        that turn (`StudioStore.request_cancel`), so a turn a `/turn` begins
-        under its lease after the Stop runs on. One that names no turn
-        stops whatever turn the conversation runs, as the table below gives
-        it.
+        turn alone. When the conversation's latest turn is another, the
+        route answers 200 with a `CancelSkipped` (`code` `turn_moved`) and
+        the conversation stays as it was, so a later turn, begun on another
+        tab say, runs on. On a live lease the Stop is recorded at once naming
+        its turn, while the row holds that turn (`StudioStore.request_cancel`),
+        so a turn a `/turn` begins under that lease after the Stop runs on. A
+        Stop naming no turn stops whatever turn the conversation runs, as the
+        table below gives it, and so does one naming the latest turn.
 
-        This route answers 204 only after one of three things: it recorded
+        A Stop the route acts on is answered 204 after one of three things: it recorded
         the Stop on a live lease (`StudioStore.request_cancel`), it closed
         the open turn itself under the conversation lock, or under the lock
         it found no open turn and no live lease. A Stop recorded on a lease

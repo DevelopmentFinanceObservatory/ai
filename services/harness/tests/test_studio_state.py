@@ -31,7 +31,7 @@ import json
 import logging
 import ssl
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2551,6 +2551,62 @@ async def test_a_stop_naming_its_turn_is_live_for_that_turn_alone(
     await store.save("principal", CONVERSATION)
     assert (await store.renew("principal", CONVERSATION, segment_id)).stop_id is None
     assert not await stopper.stop_live("principal", CONVERSATION)
+
+
+class _ClaimAfterFirstStatement:
+    """A connection that runs `claim` once its first statement returns, so a
+    claim from another instance commits between that statement and the
+    next."""
+
+    def __init__(self, conn: Any, claim: Callable[[], Awaitable[None]]) -> None:
+        self._conn = conn
+        self._claim: Callable[[], Awaitable[None]] | None = claim
+
+    async def execute(self, *args: Any, **kwargs: Any) -> Any:
+        result = await self._conn.execute(*args, **kwargs)
+        if self._claim is not None:
+            claim, self._claim = self._claim, None
+            await claim()
+        return result
+
+
+async def test_a_stop_racing_a_claim_of_its_own_turn_is_recorded_for_it(
+    new_store, clock, pg_engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turn 1 is open with no lease, as a turn whose client left is, when a
+    Stop names it. Another instance's resume claims turn 1 after the Stop's
+    guarded update found no live lease and before it reads the row again.
+    The Stop finds turn 1 held, so it records itself naming turn 1, and the
+    holder's renewal reports it, with no `TurnMoved` naming the turn the
+    Stop named."""
+    store = new_store(clock=clock)
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
+    await store.save("principal", CONVERSATION)
+    resumer = new_store(clock=clock)
+    held: list[str] = []
+
+    async def claim() -> None:
+        await resumer.load("principal", CONVERSATION)
+        work = resumer.draft("principal", CONVERSATION)
+        held.append(resumer.claim_segment("principal", CONVERSATION, work))
+        await resumer.save("principal", CONVERSATION, work)
+
+    stopper = new_store(clock=clock)
+    transaction = stopper._transaction
+
+    @asynccontextmanager
+    async def claimed_between() -> AsyncIterator[Any]:
+        async with transaction() as conn:
+            yield _ClaimAfterFirstStatement(conn, claim)
+
+    monkeypatch.setattr(stopper, "_transaction", claimed_between)
+
+    assert await stopper.request_cancel("principal", CONVERSATION, turn_index=1) is True
+    (segment_id,) = held
+    flagged, stop_id, stop_turn = await _stop_row(pg_engine)
+    assert (flagged, stop_id is not None, stop_turn) == (False, True, 1)
+    assert (await resumer.renew("principal", CONVERSATION, segment_id)).stop_id == stop_id
 
 
 async def _stop_row(engine: AsyncEngine) -> tuple[bool, str | None, int | None]:

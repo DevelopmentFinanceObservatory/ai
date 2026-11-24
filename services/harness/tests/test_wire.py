@@ -325,6 +325,14 @@ def test_a_malformed_answer_is_refused(answer: dict[str, Any]) -> None:
         STUDIO_REQUEST_ADAPTER.validate_python(raw)
 
 
+@pytest.mark.parametrize("turn_index", [0, 2**31], ids=["zero", "past-postgres-int"])
+def test_a_cancel_naming_a_turn_out_of_range_is_refused(turn_index: int) -> None:
+    raw = {**_load("request-21-cancel-turn.json"), "turn_index": turn_index}
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
 def test_apply_unit_comes_alone() -> None:
     raw = {**_load("request-16-turn-apply-unit.json"), "message": "hello"}
 

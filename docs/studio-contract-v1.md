@@ -119,26 +119,7 @@ union). `GET /api/studio/state` takes query parameters and no body.
   pause and answers no question. When the orchestrator asked, the turn
   closes. When the planner asked, the skip counts as the user declining to
   choose, and the planner plans on without a pick of theirs.
-- **`turn.cancel`** → `POST /api/studio/cancel` (delta 14) aborts the
-  conversation's in-flight segment (the Stop button), whichever instance
-  owns it: the request records a durable Stop request on the
-  conversation's row, and the owning instance's own heartbeat observes it and ends
-  the stream within one heartbeat interval (5 s). Idempotent; returns
-  204\. The aborted stream, if still open, ends with a stream-fatal `error`
-  frame whose code is `cancelled` (a studio-side addition to the error
-  grammar); no `done` follows. A Stop that lands after the turn's pause
-  was stored but before the stream ended ends the stream on `cancelled`
-  alone, with no `plan.proposed` or `elicitation.request` before it. A
-  Stop also ends a calculation the turn is running, so no later turn
-  carries it on. Client disconnect (closing the SSE response) stops the
-  running segment when the server observes it (the response's ASGI call
-  ends and the stream's owner cancels the work) but leaves the turn and
-  its calculations unfinished: the next `turn.request` carries an unfinished
-  calculation on and lists its results, a retried
-  `interrupt.response` with the same answer carries the turn on where it
-  stopped, and `turn.resume` carries the turn on with no answer
-  (delta 26). To end the work, send `cancel`. A `cancel` may name the turn
-  it stops in `turn_index` (delta 32).
+- **`turn.cancel`** → `POST /api/studio/cancel` (delta 14) aborts the conversation's in-flight segment (the Stop button), whichever instance owns it: the request records a durable Stop request on the conversation's row, and the owning instance's own heartbeat observes it and ends the stream within one heartbeat interval (5 s). Idempotent; returns 204, or 200 for a Stop naming another turn than the latest (delta 32). The aborted stream, if still open, ends with a stream-fatal `error` frame whose code is `cancelled` (a studio-side addition to the error grammar); no `done` follows. A Stop that lands after the turn's pause was stored but before the stream ended ends the stream on `cancelled` alone, with no `plan.proposed` or `elicitation.request` before it. A Stop also ends a calculation the turn is running, so no later turn carries it on. Client disconnect (closing the SSE response) stops the running segment when the server observes it (the response's ASGI call ends and the stream's owner cancels the work) but leaves the turn and its calculations unfinished: the next `turn.request` carries an unfinished calculation on and lists its results, a retried `interrupt.response` with the same answer carries the turn on where it stopped, and `turn.resume` carries the turn on with no answer (delta 26). To end the work, send `cancel`. A `cancel` may name the turn it stops in `turn_index` (delta 32).
 - **`turn.resume`** → `POST /api/studio/resume` (delta 26) carries on the
   conversation's open turn `turn_index`, see "Resuming a turn and reading
   the conversation" below.
@@ -840,11 +821,13 @@ After the user answers a unit question, the plan card states the unit in one row
 
 ### A Stop that names its turn
 
-`turn.cancel` gains an optional `turn_index`, the turn the Stop is for: the index the stream's `x-dfo-turn-index` header named. A page that holds no index for its turn, as before the header arrives, leaves it out.
+`turn.cancel` gains an optional `turn_index`, the turn the Stop is for: the index the stream's `x-dfo-turn-index` header named, from 1 to 2147483647. A page leaves it out until a stream's header names its turn, and drops the index it held when it sends a `/turn`, which starts a new turn, so a Stop sent before the new header arrives reaches the new turn.
 
-- When the conversation's latest turn is `turn_index`, the Stop acts as one without it, and the route answers 204. On a live lease, the Stop is recorded at once naming that turn, so a turn begun after it under the same lease runs on.
-- When the latest turn is another, the Stop changes nothing, and the route answers 200 with a `CancelSkipped` JSON body: `{"code": "turn_moved", "turn_index": <the latest turn>}`, `turn_index` being 0 before the first turn. It is no error: the turn the page stopped has ended, and a later turn, begun from another tab say, runs on.
+- When the conversation's latest turn is `turn_index`, the route acts on the Stop and answers 204. On a live lease, the Stop is recorded at once naming that turn, so a turn begun after it under the same lease runs on. A lease on that turn that goes live while the Stop is recorded, from an `/interrupt` or `/resume` of another tab, takes the Stop.
+- When the latest turn is another, the route answers 200 with a `CancelSkipped` JSON body, `{"code": "turn_moved", "turn_index": <the latest turn>}`, `turn_index` being 0 before the first turn, and the conversation stays as it was. The turn the page stopped has already ended, and a later turn, begun from another tab say, runs on. `/turn` answers a stale `after_turn` in another shape, a 409 `edit_conflict` whose `constraint_id` is `turn_moved`.
 - Without `turn_index`, the Stop is for whatever turn the conversation runs, as before.
+
+A release from before this delta refuses `turn_index` with a 422, as it refuses any member it does not name. A page that gets a 422 for a Stop carrying `turn_index` sends the Stop again without it.
 
 ```json
 {"kind": "turn.cancel", "schema_version": 1, "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E", "turn_index": 2}
@@ -854,8 +837,8 @@ After the user answers a unit question, the plan card states the unit in one row
 
 A state read's stored card (`closed_since[].cards[]`, `StoredCard`) gains `unit_change` and `replaces`, with the names and shapes `component.created` gives them, so a page applies one rule to a card from a stream and one from a state read.
 
-- `unit_change`, a `UnitChange`, is set when the card's unit can change, read from what the conversation keeps with the card, as `apply_unit` reads it. Its `offer.start` is the unit the card shows.
-- `replaces` names the card whose canvas slot this card took, recorded when the swap committed, as for a unit change or an Edit Card rebuild. A card an earlier release stored carries none.
+- `unit_change`, a `UnitChange`, is the card's offer now, as `apply_unit` reads it from what the conversation keeps with the card. It is set while the card is on the canvas, and its `offer.start` is the unit the card shows. It can differ from the offer the card's `component.created` sent when a later turn kept a newer Search block for the same spec.
+- `replaces` names the card whose canvas slot this card took, as for a unit change or an Edit Card rebuild. It comes on the closed turn that swapped the card in, recorded when the swap committed. A later turn that revised the card lists it with no `replaces`, and a card an earlier release stored has none.
 
 Each is left out when it has no value. `schema_version` stays 1.
 
@@ -981,4 +964,4 @@ Fixture values that are samples:
    count rows on the plan card").
 1. `elicitation.request` questions gain `input: "unit"` with a `unit` offer, and `multi_select` is emitted; answers gain `{kind: "unit", ...}` and `{kind: "options", option_ids}`. `turn.request` and `interrupt.response` gain `client_features`; a client that declares no `unit_question` or `multi_select` gets those questions as `single_select` (see "Question forms a client declares"). `component.created` gains `unit_change` and `replaces`; `turn.request` gains `apply_unit`, which comes alone (see "A unit question, a card's unit change and several answers").
 1. `plan.proposed.decisions[]` gains `unit` on the row stating a unit question's whole unit, whose `options` are whole units; `interrupt.response` gains `unit` on a `switch` (see "A unit row on the plan card").
-1. `turn.cancel` gains an optional `turn_index`; a Stop naming a turn that is not the latest changes nothing and is answered 200 `{"code": "turn_moved", "turn_index"}`. A state read's stored card gains `unit_change` and `replaces` (see "A Stop that names its turn, and a stored card's unit and slot").
+1. `turn.cancel` gains an optional `turn_index`; a Stop naming another turn than the latest is answered 200 `{"code": "turn_moved", "turn_index"}` and leaves the conversation as it was. A state read's stored card gains `unit_change` and `replaces` (see "A Stop that names its turn, and a stored card's unit and slot").

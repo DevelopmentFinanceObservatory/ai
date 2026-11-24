@@ -42,7 +42,13 @@ from harness.studio_store import (
     turn_standing,
 )
 from harness.turn.store import TurnStatus, TurnStore
-from harness.wire import TURN_INDEX_HEADER, MessageComplete
+from harness.wire import (
+    TURN_INDEX_HEADER,
+    CompositionManifest,
+    MessageComplete,
+    UnitChoice,
+    UnitPrices,
+)
 from planner.workflow import ToolId
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -1217,6 +1223,145 @@ async def test_a_stop_naming_an_earlier_turn_leaves_the_latest_one_open(
     assert (kept["index"], kept["status"]) == (2, "paused")
     assert stopped.status_code == 204
     assert (ended["index"], ended["status"]) == (2, "cancelled")
+
+
+async def test_a_stop_naming_an_earlier_turn_leaves_a_streaming_turn_running(
+    pg_engine: AsyncEngine,
+) -> None:
+    """Another instance streams turn 2 under a live lease. A Stop for turn 1
+    stops nothing and is answered 200 `turn_moved` naming turn 2, and no
+    Stop is live. A Stop for turn 2 is recorded on the lease."""
+    app, _ = orchestrator_app(_text("One."), engine=pg_engine)
+    other = StudioStore(pg_engine)
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("first"))
+        await other.load(PRINCIPAL, CONVERSATION)
+        work = other.draft(PRINCIPAL, CONVERSATION)
+        work.begin_turn()
+        other.claim_segment(PRINCIPAL, CONVERSATION, work)
+        await other.save(PRINCIPAL, CONVERSATION, work)
+        skipped = await client.post(
+            "/api/studio/cancel", json={**_CANCEL, "turn_index": 1}, headers=AUTH
+        )
+        live_after_skip = await other.stop_live(PRINCIPAL, CONVERSATION)
+        stopped = await client.post(
+            "/api/studio/cancel", json={**_CANCEL, "turn_index": 2}, headers=AUTH
+        )
+
+    assert (skipped.status_code, skipped.json()) == (200, {"code": "turn_moved", "turn_index": 2})
+    assert live_after_skip is False
+    assert stopped.status_code == 204
+    assert await other.stop_live(PRINCIPAL, CONVERSATION) is True
+
+
+def _stored_state(
+    cards: list[dict[str, Any]], *, entry: dict[str, Any], on_canvas: bool = True
+) -> ConversationState:
+    """A conversation holding one card, `cmp_new`, stored as `entry`, whose
+    turns' records name it as `cards` gives, one record a turn."""
+    state = ConversationState(conversation_id=CONVERSATION, trace_id="tr_1")
+    state.components = {"cmp_new": {"type": "line_chart", "title": "Aid", "revision": 1, **entry}}
+    state.turns = [{"user": "q", "assistant": "a", "cards": [card]} for card in cards]
+    blocks = (
+        [{"component_id": "cmp_new", "revision": 1, "type": "line_chart", "title": "Aid"}]
+        if on_canvas
+        else []
+    )
+    state.composition = CompositionManifest.model_validate(
+        {
+            "composition_id": "cmp_comp",
+            "revision": 1,
+            "actor": "model",
+            "blocks": blocks,
+            "counts": {
+                "all": len(blocks),
+                "stats": 0,
+                "charts": len(blocks),
+                "tables": 0,
+                "notes": 0,
+            },
+        }
+    )
+    return state
+
+
+def _converted_block() -> dict[str, Any]:
+    """A Search block served in current US dollars that converts into both
+    of their price bases."""
+    years = {"start_year": 2000, "end_year": 2023}
+    usd = {
+        "code": "USD",
+        "noun": "US dollars",
+        "current_years": years,
+        "constant_years": years,
+        "base_year_min": 2000,
+        "base_year_max": 2023,
+    }
+    return {
+        "resolved": {
+            "unit_conversion": {"currencies": [usd]},
+            "facets": {"unit": {"currency": "USD"}},
+        }
+    }
+
+
+def test_a_stored_card_on_the_canvas_offers_its_unit_change() -> None:
+    """The control for the test below: the same card on the canvas, its
+    spec's block readable, offers its units from current US dollars."""
+    state = _stored_state(
+        [{"component_id": "cmp_new", "action": "created"}],
+        entry={"unit_card": {"spec_id": "spec_1", "args": {}}},
+    )
+    state.turn_specs = {"spec_1": _converted_block()}
+
+    (card,) = studio_module._closed_turn(1, state).cards
+
+    assert card.unit_change is not None
+    assert card.unit_change.spec_id == "spec_1"
+    assert card.unit_change.offer.start == UnitChoice(currency="USD", prices=UnitPrices.CURRENT)
+
+
+def test_a_card_names_the_card_it_replaced_only_on_the_turn_that_swapped_it() -> None:
+    """A card a unit change swapped in names the old card on the turn that
+    swapped it. A later turn that revised it lists it at its current
+    revision with no `replaces`, so a page does not swap it in again."""
+    state = _stored_state(
+        [
+            {"component_id": "cmp_new", "action": "recreated"},
+            {"component_id": "cmp_new", "action": "revised"},
+        ],
+        entry={"replaces": "cmp_old"},
+    )
+
+    swapped, revised = (studio_module._closed_turn(index, state) for index in (1, 2))
+
+    assert [card.replaces for card in swapped.cards] == ["cmp_old"]
+    assert [card.replaces for card in revised.cards] == [None]
+
+
+@pytest.mark.parametrize(
+    ("block", "on_canvas"),
+    [
+        pytest.param({"definition": "unreadable"}, True, id="unreadable-block"),
+        pytest.param(None, False, id="off-the-canvas"),
+    ],
+)
+def test_a_stored_card_offers_no_unit_change_it_cannot_make(
+    block: dict[str, Any] | None, on_canvas: bool
+) -> None:
+    """A stored card whose spec's block cannot be read gives the card with
+    no `unit_change`, and so does one off the canvas, which `apply_unit`
+    refuses `scope_choice_stale`."""
+    state = _stored_state(
+        [{"component_id": "cmp_new", "action": "created"}],
+        entry={"unit_card": {"spec_id": "spec_1", "args": {}}},
+        on_canvas=on_canvas,
+    )
+    state.turn_specs = {"spec_1": block if block is not None else _converted_block()}
+
+    (card,) = studio_module._closed_turn(1, state).cards
+
+    assert (card.component_id, card.unit_change) == ("cmp_new", None)
 
 
 async def _cursor_statuses(engine: AsyncEngine) -> list[str]:
