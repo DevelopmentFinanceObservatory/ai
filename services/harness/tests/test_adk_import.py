@@ -519,6 +519,79 @@ async def test_rollback_leaves_a_card_the_previous_release_pauses_on_after_the_m
     assert await _ledger_pending(adk, TEXT_ONLY) == card
 
 
+async def test_rollback_clears_a_pause_whose_resume_this_release_began(adk: AsyncEngine) -> None:
+    """The release recorded an answer to PLAN_PAUSED's card and its resume
+    died: the entry stays, carrying the answer, so the rollback reads the
+    pause as resumed and clears it."""
+    await import_conversations(adk, apply=True)
+    async with adk.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE conversations SET turn_state = jsonb_set(turn_state, "
+                "ARRAY['pending', (SELECT k FROM jsonb_object_keys(turn_state -> 'pending') k), "
+                "'answer'], '\"approve\"') WHERE conversation_id = :id"
+            ),
+            {"id": PLAN_PAUSED},
+        )
+
+    assert (await rollback_turn_sessions(adk, apply=True)).cleared == {_name(PLAN_PAUSED): 1}
+
+
+async def test_rollback_clears_a_resumed_pause_on_a_conversation_once_discarded(
+    pg_empty_engine: AsyncEngine,
+) -> None:
+    """PLAN_PAUSED is refused and given up with `--discard`, then ADK's
+    state is repaired and imported, which resets the mark. The release
+    resumes its card, and the rollback clears the pause."""
+    name = _name(PLAN_PAUSED)
+    await _write_adk(pg_empty_engine, _sessions(**{PLAN_PAUSED: _add(**{"studio:unknown": 1})}))
+    await import_conversations(pg_empty_engine, apply=True, discard=frozenset({name}))
+    async with pg_empty_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE sessions SET state = state - 'studio:unknown', update_time = now() "
+                "WHERE app_name = :app AND id = :id"
+            ),
+            {"app": LEDGER_APP, "id": PLAN_PAUSED},
+        )
+    assert (await import_conversations(pg_empty_engine, apply=True)).imported == [name]
+    async with pg_empty_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE conversations SET turn_state = turn_state || '{\"pending\": {}}'::jsonb "
+                "WHERE conversation_id = :id"
+            ),
+            {"id": PLAN_PAUSED},
+        )
+
+    applied = await rollback_turn_sessions(pg_empty_engine, apply=True)
+
+    assert applied.cleared == {name: 1}
+    assert (await cutover_gate(pg_empty_engine)).discarded == []
+
+
+async def test_rollback_fails_on_a_ledger_session_that_appears_between_its_passes(
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ledger pass reads its keys before the previous release creates
+    TEXT_ONLY's ledger session, and the unledgered read after it: the
+    conversation is in neither pass, so the run lists it and fails."""
+    read = adk_import._ledger_keys
+    calls = 0
+
+    async def first_without_text_only(engine: AsyncEngine) -> list[Any]:
+        nonlocal calls
+        calls += 1
+        keys = await read(engine)
+        return [k for k in keys if k.conversation_id != TEXT_ONLY] if calls == 1 else keys
+
+    monkeypatch.setattr(adk_import, "_ledger_keys", first_without_text_only)
+
+    applied = await rollback_turn_sessions(adk, apply=True)
+
+    assert (applied.moved, applied.exit_status) == ([_name(TEXT_ONLY)], 1)
+
+
 async def test_rollback_reruns_a_conversation_whose_ledger_session_appears_mid_run(
     adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2608,7 +2681,7 @@ async def test_a_refused_conversation_the_tables_lack_is_discarded_only_by_name_
     held = await import_conversations(pg_empty_engine, apply=True, discard=drop)
     assert list(held.refused) == [name]
     restarted = await import_conversations(pg_empty_engine, apply=True, keep_tables=keep)
-    assert (restarted.kept, restarted.refused) == ([name], {})
+    assert (restarted.kept, restarted.discarded, restarted.refused) == ([], [name], {})
     gate = await cutover_gate(pg_empty_engine)
     assert (gate.clean, gate.discarded) == (True, [name])
 
