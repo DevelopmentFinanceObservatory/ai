@@ -43,6 +43,7 @@ from harness.adk_import import (
     TablesMissing,
     UnknownConversation,
     _stored_digest,
+    _stored_runs,
     close_open_turns,
     cutover_gate,
     import_conversations,
@@ -392,30 +393,42 @@ async def test_rollback_turn_sessions_deletes_each_turn_session_above_the_ledger
     """This release served turns 5 and 6 of a conversation whose ledger
     session ADK left at turn 4. Before the previous release serves again,
     the job deletes those turn sessions, and only those: not a turn session
-    at or below the index, another conversation's whose id begins with this
-    one's, another principal's, or one the previous release claimed since
-    (its index is written first)."""
+    at or below the index, one whose number is not a turn number, or one the
+    previous release claimed since (its index is written first). It deletes
+    every turn session of a conversation with no ledger session, as one
+    started on this release, whatever its id begins with or whose it is."""
     await import_conversations(adk, apply=True)
     ahead = [f"{FULL}#t5", f"{FULL}#t6"]
-    await _add_turn_sessions(adk, PRINCIPAL, [*ahead, f"{FULL}#tx", f"{FULL}0#t9"])
+    await _add_turn_sessions(
+        adk,
+        PRINCIPAL,
+        [*ahead, f"{FULL}#tx", f"{FULL}#t12345678901", f"{FULL}0#t10", f"{FULL}0#t9", "c#t#t1"],
+    )
     await _add_turn_sessions(adk, "u_other", [f"{FULL}#t7"])
     before = await _turn_session_ids(adk)
+    started_here = {
+        f"{PRINCIPAL}/c#t": ["c#t#t1"],
+        f"{PRINCIPAL}/{FULL}0": [f"{FULL}0#t9", f"{FULL}0#t10"],
+        f"u_other/{FULL}": [f"{FULL}#t7"],
+    }
 
     dry = await rollback_turn_sessions(adk, apply=False)
 
-    assert (dry.ahead, dry.clean) == ({_name(FULL): ahead}, False)
+    assert (dry.ahead, dry.clean) == ({_name(FULL): ahead, **started_here}, False)
     assert await _turn_session_ids(adk) == before
 
     await _set_adk_state(adk, FULL, {"studio:turn_index": 5})
     applied = await rollback_turn_sessions(adk, apply=True)
 
-    assert (applied.ahead, applied.clean) == ({_name(FULL): [f"{FULL}#t6"]}, False)
+    assert (applied.ahead, applied.clean) == ({_name(FULL): [f"{FULL}#t6"], **started_here}, False)
     assert applied.render().splitlines()[-1].endswith("run again until none is found")
-    assert await _turn_session_ids(adk) == [row for row in before if row[1] != f"{FULL}#t6"]
+    deleted = {f"{FULL}#t6", *(i for ids in started_here.values() for i in ids)}
+    assert await _turn_session_ids(adk) == [row for row in before if row[1] not in deleted]
     assert (await rollback_turn_sessions(adk, apply=True)).clean
 
     await _set_adk_state(adk, PLAN_PAUSED, {"studio:turn_index": "1"})
-    assert (await rollback_turn_sessions(adk, apply=False)).unreadable == [_name(PLAN_PAUSED)]
+    unreadable = await rollback_turn_sessions(adk, apply=True)
+    assert (unreadable.unreadable, unreadable.clean) == ([_name(PLAN_PAUSED)], True)
 
 
 @_LATER_COLUMNS
@@ -976,21 +989,41 @@ def _rows(block: dict[str, Any]) -> list[tuple[str, tuple[str, ...]]]:
     return [(row.text, row.refs) for row in source_from_spec_block(block).bound_refs]
 
 
+# FULL's run item that holds what a run retrieved.
+_RUN_RETRIEVALS = "studio:run_retrievals:run_46328735f3a24a1ba44570e6c79dd119"
+
+
+def _with_run_retrieval(block: dict[str, Any]) -> Any:
+    def change(state: dict[str, Any]) -> dict[str, Any]:
+        state[_RUN_RETRIEVALS] = [*state[_RUN_RETRIEVALS], block]
+        return state
+
+    return change
+
+
+@pytest.mark.parametrize("held_in", ["turn", "run item"])
 async def test_a_mapping_form_block_is_imported_as_rows_and_verifies_equal(
-    pg_empty_engine: AsyncEngine,
+    pg_empty_engine: AsyncEngine, held_in: str
 ) -> None:
     mapping = _mapping_block()
-    await _write_adk(pg_empty_engine, _sessions(**{FULL: _with_turn_specs(mapping)}))
+    change = _with_turn_specs(mapping) if held_in == "turn" else _with_run_retrieval(mapping)
+    await _write_adk(pg_empty_engine, _sessions(**{FULL: change}))
 
     report = await import_conversations(pg_empty_engine, apply=True)
 
     assert (report.clean, report.converted_blocks, report.unconvertible_blocks) == (True, 1, 0)
     assert "1 converted, 0 unconvertible" in report.render()
-    state = await _load(pg_empty_engine, FULL)
-    assert state is not None
-    stored = state.turns[0]["specs"][mapping["spec_id"]]
+    if held_in == "turn":
+        state = await _load(pg_empty_engine, FULL)
+        assert state is not None
+        stored = state.turns[0]["specs"][mapping["spec_id"]]
+    else:
+        stored = (await _stored_runs(pg_empty_engine, PRINCIPAL, FULL)).retrievals[
+            _RUN_RETRIEVALS.removeprefix("studio:run_retrievals:")
+        ][-1]
     assert _rows(stored) == [("g7", ("GroupOfSeven",)), ("africa", ("DACAfrica",))]
-    assert (await verify(pg_empty_engine)).clean
+    verified = await verify(pg_empty_engine)
+    assert (verified.differences, verified.clean) == ({}, True)
 
 
 async def test_a_block_that_does_not_convert_is_reported_and_copied_as_stored(
@@ -1292,6 +1325,10 @@ async def test_an_open_turn_that_cannot_be_read_refuses_the_conversation_with_no
     }
     assert await _load(adk, FULL) is None
     assert sorted(report.imported) == sorted(_name(c) for c in (PLAN_PAUSED, TEXT_ONLY))
+    # The refusal is one `--discard` clears.
+    dropped = await import_conversations(adk, apply=True, discard=frozenset({_name(FULL)}))
+    assert (dropped.discarded, dropped.refused) == ([_name(FULL)], {})
+    assert (await cutover_gate(adk)).clean
 
 
 async def test_a_dry_run_takes_no_row_lock(adk: AsyncEngine) -> None:
@@ -2312,8 +2349,8 @@ async def test_the_cutover_gate_clears_only_current_imported_or_kept_ledger_sess
     release_2_schema: bool,
 ) -> None:
     """`uncleared` None: no ADK `sessions` table resolves, so the gate cannot
-    check anything and refuses, unless told the tables were archived. A
-    discarded conversation clears and is listed apart."""
+    check anything and refuses, unless told the tables were archived and an
+    archive resolves. A discarded conversation clears and is listed apart."""
     if adk_rows:
         await _write_adk(pg_empty_engine, RECORDED["sessions"])
     if release_2_schema:
@@ -2323,6 +2360,10 @@ async def test_the_cutover_gate_clears_only_current_imported_or_kept_ledger_sess
     if uncleared is None:
         with pytest.raises(AdkTablesMissing):
             await cutover_gate(pg_empty_engine)
+        with pytest.raises(AdkTablesMissing, match="--adk-archived needs adk_archive_sessions"):
+            await cutover_gate(pg_empty_engine, adk_archived=True)
+        async with pg_empty_engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE adk_archive_sessions (id text)"))
         archived = await cutover_gate(pg_empty_engine, adk_archived=True)
         assert (archived.clean, archived.archived) == (True, True)
         return
@@ -2376,8 +2417,9 @@ async def test_a_refused_conversation_the_tables_lack_is_discarded_only_by_name_
     pg_empty_engine: AsyncEngine, release_2_schema: bool
 ) -> None:
     """The tables lack the conversation. `--keep-tables` would keep nothing,
-    so it refuses; `--discard` gives it up, adds no row, and the report and
-    the gate count it until ADK's state moves again."""
+    so it refuses; `--discard` gives it up, adds no row, and the report, the
+    gate and verify count it, once its user starts it afresh too, until ADK's
+    state moves again."""
     name = _name(TEXT_ONLY)
     keep, drop = frozenset({name}), frozenset({name})
     await _write_adk(pg_empty_engine, _sessions(**{TEXT_ONLY: _add(**{"studio:unknown": 1})}))
@@ -2405,16 +2447,31 @@ async def test_a_refused_conversation_the_tables_lack_is_discarded_only_by_name_
     assert (applied.discarded, applied.refused, applied.clean) == ([name], {}, True)
     gate = await cutover_gate(pg_empty_engine)
     assert (gate.clean, gate.discarded) == (True, [name])
-    assert gate.render().splitlines()[1].startswith("cutover gate: 1 of them discarded")
+    assert gate.render().splitlines()[1].startswith("cutover gate: 1 cleared ledger sessions")
     assert await _count(pg_empty_engine) == 2
     assert (await import_conversations(pg_empty_engine, apply=True)).discarded == [name]
     assert await _reimporting_store(pg_empty_engine).load(PRINCIPAL, TEXT_ONLY) is None
 
+    # Its user starts it afresh, and another conversation moves on ADK.
+    async with pg_empty_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO conversations (principal, conversation_id) VALUES (:p, :c)"),
+            {"p": PRINCIPAL, "c": TEXT_ONLY},
+        )
+    await _set_adk_state(pg_empty_engine, FULL, {"studio:seq": 7})
+
+    gate = await cutover_gate(pg_empty_engine)
+    assert (gate.first, gate.discarded) == ([_name(FULL)], [name])
+    assert "  " + name in gate.render().splitlines()
+    rerun = await import_conversations(pg_empty_engine, apply=False)
+    assert (rerun.discarded, rerun.kept) == ([name], [])
+    assert (await verify(pg_empty_engine)).discarded == [name]
+
     await _set_adk_state(pg_empty_engine, TEXT_ONLY, {"studio:seq": 5})
 
     gate = await cutover_gate(pg_empty_engine)
-    assert (gate.uncleared, gate.first) == (1, [name])
-    assert list((await import_conversations(pg_empty_engine, apply=True)).refused) == [name]
+    assert (gate.uncleared, gate.first) == (2, sorted([_name(FULL), name]))
+    assert name in (await import_conversations(pg_empty_engine, apply=True)).refused
 
 
 @_RELEASE_2_SCHEMA
@@ -2426,6 +2483,17 @@ async def test_keep_tables_serves_a_diverged_conversation_until_adk_moves_again(
     if release_2_schema:
         await _release_2_schema(pg_empty_engine)
     await _diverge(pg_empty_engine, FULL)
+    # `--discard` refuses a conflict before the conflict is recorded.
+    dropped = await import_conversations(pg_empty_engine, apply=True, discard=frozenset({name}))
+    assert dropped.refused[name][0].endswith("and this one is conflict")
+    async with pg_empty_engine.connect() as conn:
+        marked = (
+            await conn.execute(
+                text("SELECT diverged FROM adk_ledger_imports WHERE conversation_id = :c"),
+                {"c": FULL},
+            )
+        ).scalar_one()
+    assert marked is False
     assert (await import_conversations(pg_empty_engine, apply=True)).conflicts == [name]
     with pytest.raises(ConversationHeld):
         await _reimporting_store(pg_empty_engine).load(PRINCIPAL, FULL)
