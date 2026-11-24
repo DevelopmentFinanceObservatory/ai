@@ -1253,7 +1253,8 @@ MAX_TURN_INDEX = 2**31 - 1
 class CancelRequest(_WireModel):
     """POST /api/studio/cancel -- abort the conversation's in-flight
     segment (the Stop button). Idempotent: cancelling an idle conversation
-    is a no-op 204. The aborted stream, if still open, ends with a
+    answers 204 and leaves it as it was, as does a Stop naming the latest
+    turn once it has closed. The aborted stream, if still open, ends with a
     stream-fatal `error` frame ("cancelled").
 
     `turn_index`, when given, is the turn the Stop is for: the index the

@@ -140,6 +140,7 @@ from harness.studio_store import (
     record_closed_turn,
     retry_delays,
     set_aside_question,
+    stop_names_turn,
     turn_standing,
     write_pause_line,
 )
@@ -2631,6 +2632,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 closed = await studio.turns.turn_at(lease.conversation, work.turn_index)
                 if closed is not None:
                     record_closed_turn(work, closed)
+            # The record of the turn left open, which `begin_turn` below closes
+            # `abandoned`, or `None` when that turn was recorded already.
+            left_record = (
+                work.turn_index - 1 if left_open is not None and not work.turn_recorded else None
+            )
             # An unrecorded previous turn this closes as `abandoned` rides the
             # claim save, which writes its line once it commits
             # (`StudioStore.save`).
@@ -2671,9 +2677,19 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # The turn left open closes `abandoned` and the new turn
                 # opens (the Edit Card route opens none) in the save's
                 # transaction, so a save that fails leaves the turn left
-                # open as it stood, its pause still answerable.
+                # open as it stood, its pause still answerable. A Stop that
+                # names the turn left open, one that landed on this request's
+                # lease after its claim, closes it `cancelled`, cursor and
+                # record, as `_act_on_stop` would have before the claim.
                 if left_open is not None:
-                    await abandon_on(conn, left_open, segment_id=segment_id)
+                    if await stop_names_turn(conn, pk, left_open.turn_index):
+                        await stop_turn_on(
+                            conn, left_open, segment_id=segment_id, now=datetime.now(UTC)
+                        )
+                        if left_record is not None:
+                            work.turns[left_record]["error"] = ErrorCode.CANCELLED.value
+                    else:
+                        await abandon_on(conn, left_open, segment_id=segment_id)
                 if opening is not None:
                     inputs, state, text = opening
                     opened.append(
@@ -2853,6 +2869,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         | Lease live, the segment returned paused, before the closing write | the closing write | `cancelled`, pending cleared | `cancelled` frame in place of the pause frame |
         | Lease live, turn closed, before the closing write | nobody, since the close ended the Stop | unchanged | nothing more |
         | `/turn` claimed, before it abandons the turn left open | the new turn's heartbeat | the old turn `abandoned`, the new `cancelled` | `cancelled` frame |
+        | The same, the Stop naming the turn left open | the save that begins the new turn (`stop_names_turn`) | the old turn `cancelled`, the new running | 204, and the new turn's stream runs on |
         | Lease live, an Edit Card stream | its heartbeat | the turn's record `cancelled` | `cancelled` frame |
         | The same, the client gone before the heartbeat reads it | the closing write | the turn's record `cancelled` | nothing more |
         | The closing write failed or timed out, such as when ending the turn's runs fails | the next claimant, once the lease lapses (up to the lease's 45 s expiry, and a request before then answers a retryable 409) | `cancelled` | `cancelled` frame when the work ended on the Stop, `transient_unavailable` when it had paused, and the next `/turn` streams while an `/interrupt` answers 404 |
@@ -2868,8 +2885,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         | The same, and the request then abandons its claim | the next claimant | `cancelled` | nothing more, and the next `/turn` streams |
 
         A live segment, on any instance, is stopped through its lease.
-        `request_cancel` sets `lease_cancel`, the segment's next renewal
-        records it as the Stop of the lease's turn and reports it, and the
+        `request_cancel` sets `lease_cancel`, or records a Stop naming its
+        turn when given one, the segment's next renewal reports it as the
+        Stop of the lease's turn, and the
         heartbeat stops the turn (`harness.turn.loop.run_segment`). A segment
         streaming on this instance is made to renew at once
         (`renew_lease_now`), so the Stop reaches it without waiting for the

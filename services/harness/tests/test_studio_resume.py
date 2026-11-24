@@ -1254,6 +1254,38 @@ async def test_a_stop_naming_an_earlier_turn_leaves_a_streaming_turn_running(
     assert await other.stop_live(PRINCIPAL, CONVERSATION) is True
 
 
+async def test_a_stop_landing_between_a_claim_and_its_next_turn_cancels_the_turn_it_names(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turn 1 is paused on its plan, with no lease, when a `/turn` claims the
+    lease for turn 2. A Stop naming turn 1 lands on that lease before the
+    claim's save begins turn 2, so it is recorded naming turn 1. The save
+    then closes turn 1 `cancelled`, cursor and record, where it would have
+    closed it `abandoned`, and turn 2 runs to its answer."""
+    app, _ = orchestrator_app(plan_call("q with forks"), _text("Two."), engine=pg_engine)
+    store: StudioStore = app.state.studio.store
+    claim = store.claim_turn_lease
+    stops: list[bool] = []
+
+    async def claim_then_stop(*args: Any, **kwargs: Any) -> Any:
+        lease = await claim(*args, **kwargs)
+        stopper = StudioStore(pg_engine)
+        stops.append(await stopper.request_cancel(PRINCIPAL, CONVERSATION, turn_index=1))
+        return lease
+
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("q with forks"))
+        monkeypatch.setattr(store, "claim_turn_lease", claim_then_stop)
+        second = await stream(client, "/api/studio/turn", turn_body("second"))
+
+    assert stops == [True]
+    assert _events(second)[-1] == "done"
+    stored = await StudioStore(pg_engine).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None
+    assert [turn.get("error") for turn in stored.turns] == ["cancelled", None]
+    assert await _cursor_statuses(pg_engine) == ["cancelled", "done"]
+
+
 def _stored_state(
     cards: list[dict[str, Any]], *, entry: dict[str, Any], on_canvas: bool = True
 ) -> ConversationState:

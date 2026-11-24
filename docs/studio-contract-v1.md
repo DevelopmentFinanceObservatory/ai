@@ -12,7 +12,7 @@ explains the protocol around them, and `services/harness/tests/test_wire.py`
 pins the two together against the fixtures in
 `services/harness/tests/wire_fixtures/studio/`.
 
-v1 records its design decisions as numbered deltas (1–31; 16 is folded
+v1 records its design decisions as numbered deltas (1–32; 16 is folded
 into 11). The deltas are marked where they apply and listed in the delta
 index at the end.
 
@@ -821,10 +821,10 @@ After the user answers a unit question, the plan card states the unit in one row
 
 ### A Stop that names its turn
 
-`turn.cancel` gains an optional `turn_index`, the turn the Stop is for: the index the stream's `x-dfo-turn-index` header named, from 1 to 2147483647. A page leaves it out until a stream's header names its turn, and drops the index it held when it sends a `/turn`, which starts a new turn, so a Stop sent before the new header arrives reaches the new turn.
+`turn.cancel` gains an optional `turn_index`, the turn the Stop is for. It is the index the stream's `x-dfo-turn-index` header named, from 1 to 2147483647. A page leaves it out until a stream's header names its turn, and drops the index it held when it sends a `/turn`, which starts a new turn. A Stop sent before the new header arrives then reaches the new turn once that turn's claim has landed. One that lands earlier, on another server instance, can find no turn running and answer 204 having stopped nothing, so a page that sent a Stop in that window sends it again with the new `turn_index` once the header arrives.
 
-- When the conversation's latest turn is `turn_index`, the route acts on the Stop and answers 204. On a live lease, the Stop is recorded at once naming that turn, so a turn begun after it under the same lease runs on. A lease on that turn that goes live while the Stop is recorded, from an `/interrupt` or `/resume` of another tab, takes the Stop.
-- When the latest turn is another, the route answers 200 with a `CancelSkipped` JSON body, `{"code": "turn_moved", "turn_index": <the latest turn>}`, `turn_index` being 0 before the first turn, and the conversation stays as it was. The turn the page stopped has already ended, and a later turn, begun from another tab say, runs on. `/turn` answers a stale `after_turn` in another shape, a 409 `edit_conflict` whose `constraint_id` is `turn_moved`.
+- When the conversation's latest turn is `turn_index`, the route acts on the Stop and answers 204. On a live lease, the Stop is recorded at once naming that turn, so a turn begun after it under the same lease runs on. When that lease was claimed by a `/turn` for the next turn, the save that begins the next turn closes the named turn `cancelled`, and the next turn runs. A lease on that turn that goes live while the Stop is recorded, from an `/interrupt` or `/resume` of another tab, takes the Stop.
+- When the latest turn is another, the route answers 200 with a `CancelSkipped` JSON body, `{"code": "turn_moved", "turn_index": <the latest turn>}`, `turn_index` being 0 before the first turn, and the conversation stays as it was. The turn the page stopped has already ended, and a later turn, begun from another tab say, runs on. A `turn_index` above the latest turn gets the same answer; a page sends only an index a header named. `/turn` answers a stale `after_turn` in another shape, a 409 `edit_conflict` whose `constraint_id` is `turn_moved`.
 - Without `turn_index`, the Stop is for whatever turn the conversation runs, as before.
 
 A release from before this delta refuses `turn_index` with a 422, as it refuses any member it does not name. A page that gets a 422 for a Stop carrying `turn_index` sends the Stop again without it.
