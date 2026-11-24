@@ -221,6 +221,87 @@ def test_land_component_held_when_auto_add_is_off() -> None:
     assert "cmp_two" in state.components
 
 
+def _titled(component_id: str, title: str | None) -> dict[str, Any]:
+    """`_component` titled `title`, where given, as a chart's payload titles it."""
+    payload = {"payload": {"component": {"title": {"text": title}}}} if title else {}
+    return {**_component(component_id), **payload}
+
+
+@pytest.mark.parametrize(
+    ("titles", "removed", "auto_add", "shown", "named", "unnamed"),
+    [
+        pytest.param(
+            ["Aid to Kenya", "Aid to Ghana"],
+            ["cmp_0"],
+            True,
+            ["cmp_1"],
+            ["Aid to Ghana"],
+            ["Aid to Kenya", "cmp_"],
+            id="a-card-taken-off",
+        ),
+        pytest.param(
+            ["Aid to Kenya", None],
+            [],
+            True,
+            ["cmp_0", "cmp_1"],
+            ["line_chart"],
+            ["cmp_"],
+            id="an-untitled-card",
+        ),
+        pytest.param(
+            ["Aid to Kenya"],
+            [],
+            False,
+            ["cmp_0"],
+            ["Aid to Kenya"],
+            ["cmp_"],
+            id="held-off-the-canvas",
+        ),
+        pytest.param(
+            [f"Aid to country {n}" for n in range(10)],
+            [],
+            True,
+            [f"cmp_{n}" for n in range(10)],
+            ["Aid to country 7", "2 more"],
+            ["Aid to country 8", "cmp_"],
+            id="past-the-card-cap",
+        ),
+        pytest.param(
+            ["Aid " + "x" * 200],
+            [],
+            True,
+            ["cmp_0"],
+            ["Aid xxx"],
+            ["x" * 150],
+            id="a-long-title",
+        ),
+    ],
+)
+def test_a_cards_answer_names_by_title_the_cards_the_user_still_sees(
+    titles: list[str | None],
+    removed: list[str],
+    auto_add: bool,
+    shown: list[str],
+    named: list[str],
+    unnamed: list[str],
+) -> None:
+    """The answer kept for a turn its cards answered names, for a later turn's model,
+    the cards the turn drew that the user still sees, within the digest's bounds on a
+    turn's cards. A card the turn took off again is left out, a card held off the
+    canvas stays, and no component id is named."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.auto_add = auto_add
+    for n, title in enumerate(titles):
+        land_component(state, _titled(f"cmp_{n}", title))
+    remove_cards(state, removed, all_cards=False)
+
+    answer = state.cards_answer()
+
+    assert [card["component_id"] for card in state.turn_cards_shown()] == shown
+    assert all(name in answer for name in named), answer
+    assert not any(name in answer for name in unnamed), answer
+
+
 # --- the canvas digest entry: what each card shows ---------------------------
 
 

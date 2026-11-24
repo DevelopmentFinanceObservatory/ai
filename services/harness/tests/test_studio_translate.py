@@ -3798,9 +3798,15 @@ async def _answered(
         call = types.FunctionCall(id=f"call_{index}", name="make_charts", args={"charts": []})
         translator._agent_response([types.Part(text=narration), types.Part(function_call=call)])
     if cards:
-        translator._conversation.turn_components = [
-            {"component_id": "cmp_1", "type": "line_chart", "title": "Aid to Kenya"}
-        ]
+        land_component(
+            translator._conversation,
+            {
+                "component_id": "cmp_1",
+                "revision": 1,
+                "type": "line_chart",
+                "payload": {"component": {"title": {"text": "Aid to Kenya"}}},
+            },
+        )
     if narrations:
         frames += translator._agent_text(text)
     else:
@@ -3864,7 +3870,7 @@ async def test_a_turn_its_cards_answer_closes_with_the_notes_line_and_chips(
     answered by the card. It closes with the loose-match notes, the basis line and
     the chips a turn answered in words closes with, and the chips apply. The user is
     shown the text streamed beside its calls, a paragraph each, which a reload shows
-    too. A later turn's model reads that the cards answered it, naming them."""
+    too. A later turn's model reads that the cards answered it, naming them by title."""
     note = "The series used for health aid is a close match only."
     monkeypatch.setattr(studio_translate_module, "loose_match_notes", lambda *_, **__: [note])
     readings = [_fetched(_example_part())]
@@ -3880,11 +3886,9 @@ async def test_a_turn_its_cards_answer_closes_with_the_notes_line_and_chips(
     if not text:
         assert deltas == complete.text
     stored = conversation.turns[-1]
-    assert (stored["assistant"], stored.get("match_notes"), stored["basis_line"]) == (
-        "Answered with the cards drawn: Aid to Kenya (cmp_1).",
-        note,
-        _EXAMPLE_LINE,
-    )
+    assert (stored.get("match_notes"), stored["basis_line"]) == (note, _EXAMPLE_LINE)
+    assert "Aid to Kenya" in stored["assistant"]
+    assert "cmp_1" not in stored["assistant"]
     assert _closed_turn(1, stored, {}).reply == complete.text
     digest = conversation.conversation_digest_state()
     assert digest is not None

@@ -114,7 +114,6 @@ from harness.studio_state import (
     _PendingOption,
     _PendingQuestion,
     _wire_id,
-    cards_answer,
 )
 from harness.studio_state import (
     land_component as state_land_component,
@@ -3192,7 +3191,8 @@ class _Translator:
         streamed beside its calls, each response's own paragraph, followed by the
         same notes, line and chips; a turn with none of these sends no
         `message.complete`. Its record keeps the cards as the answer a later turn's
-        model reads (`cards_answer`) and the narration as the reply a reload shows.
+        model reads (`ConversationState.cards_answer`) and the narration as the reply a
+        reload shows.
 
         `new_question` is the user's words a turn ended on when the planner
         read them, typed on the plan card, as a different question
@@ -3236,11 +3236,11 @@ class _Translator:
         # line and chips as one with text. Its record keeps the cards as its answer
         # (`cards_answer`), for a later turn's model, and the narration as what a
         # reload shows (`shown_answer`).
-        shown_cards = bool(self._conversation.turn_components) and not set_aside
+        shown_cards = bool(self._conversation.turn_cards_shown()) and not set_aside
         answer, shown = self._final_text, None
         if not self._final_text and shown_cards:
             shown = self._final_text = "\n\n".join(self._narration)
-            answer = cards_answer(self._conversation.turn_components)
+            answer = self._conversation.cards_answer()
         notes, basis = None, None
         # A set-aside turn's reply is the code's own, with no figures to note.
         answered = (bool(self._final_text) or shown_cards) and not set_aside
