@@ -12,11 +12,12 @@ cell labelled is rendered once.
 
 On a public call (`rebuild_lost_frames`), a call or a replay refused with a code the same
 request can get past (`common.refusal.REPOST_RECOVERS_CODES`, the upstream refreshing under
-the read) is sent once more, and a second such refusal answers the call as the runner wrote
-it (`_sent_again_once`). A frame the runner no longer holds (`ToolRefusal.lost_frames`) is
-rebuilt and the call sent again: a `spec_` frame as the Spec root that fetches it at its
-newest version in its recorded rendering (`runner_tree.spec_root`), an `ops_` frame as the
-pair the runner computes from its stored recipe on current data
+the read) is sent once more when a send as long as the first still ends before the combined
+server's call limit (`common.call_limit`), and a second such refusal, or one with too little
+time left, answers the call as the runner wrote it (`_sent_again_once`). A frame the runner
+no longer holds (`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_`
+frame as the Spec root that fetches it at its newest version in its recorded rendering
+(`runner_tree.spec_root`), an `ops_` frame as the pair the runner computes from its stored recipe on current data
 (`runner_client.replay_derived`). The runner names one lost dataset per refusal, so a
 call over two lost datasets is sent again once per side, at most once per distinct frame
 argument. A `spec_` frame whose rendering
@@ -33,10 +34,12 @@ frame was read as when it moved, since a replay can mint a new `ops_` id.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from common.breakdown_labels import label_cells
+from common.call_limit import EXTERNAL_CALL_LIMIT_S, EXTERNAL_CALL_MARGIN_S
 from common.materialisation import FrameRef
 from common.refusal import REPOST_RECOVERS_CODES
 from fastmcp.tools import ToolResult
@@ -107,23 +110,35 @@ def _transient(refusal: ToolRefusal) -> bool:
     return refusal.code is ToolErrorCode.SERVICE_UNAVAILABLE or refusal.retry_after_s is not None
 
 
-async def _sent_again_once[T](send: Callable[[], Awaitable[T | ToolRefusal]]) -> T | ToolRefusal:
+# The clock a public call's deadline is read on.
+_clock = time.monotonic
+
+
+async def _sent_again_once[T](
+    send: Callable[[], Awaitable[T | ToolRefusal]], *, deadline: float
+) -> T | ToolRefusal:
     """What `send` answers, sent once more at once when it refuses with a code the same
-    request can get past (`common.refusal.REPOST_RECOVERS_CODES`). A second refusal
-    stands."""
+    request can get past (`common.refusal.REPOST_RECOVERS_CODES`) and a send as long as
+    the first still ends by `deadline` on `_clock`. Otherwise, and on a second refusal,
+    the refusal stands."""
+    started = _clock()
     answer = await send()
-    if isinstance(answer, ToolRefusal) and answer.code in REPOST_RECOVERS_CODES:
-        return await send()
-    return answer
+    if not (isinstance(answer, ToolRefusal) and answer.code in REPOST_RECOVERS_CODES):
+        return answer
+    ended = _clock()
+    if deadline - ended < ended - started:
+        return answer
+    return await send()
 
 
 async def _rebuilt(
-    ref: FrameRef, *, lost: ToolRefusal, default_enrichment: bool
+    ref: FrameRef, *, lost: ToolRefusal, default_enrichment: bool, deadline: float
 ) -> _Rebuilt | ToolRefusal:
     """The root that rebuilds `ref`, which the refusal `lost` names, or the refusal the
-    call answers when no root can."""
+    call answers when no root can. A replay is sent once more by `deadline`
+    (`_sent_again_once`)."""
     if ref.spec_id.startswith("ops_"):
-        replayed = await _sent_again_once(lambda: replay_derived(ref))
+        replayed = await _sent_again_once(lambda: replay_derived(ref), deadline=deadline)
         if isinstance(replayed, ToolRefusal):
             if replayed.code in REPOST_RECOVERS_CODES or _transient(replayed):
                 return replayed
@@ -230,8 +245,12 @@ async def run_on_runner(
             follows_tree=follows_tree,
         )
 
+    # A public call comes from an outside client, which the combined server stops at its
+    # call limit.
+    deadline = _clock() + EXTERNAL_CALL_LIMIT_S - EXTERNAL_CALL_MARGIN_S
+
     async def send() -> VerbSummary | ToolRefusal:
-        return await (_sent_again_once(run) if rebuild_lost_frames else run())
+        return await (_sent_again_once(run, deadline=deadline) if rebuild_lost_frames else run())
 
     answer = await send()
     rebuilt: dict[Pair, _Rebuilt] = {}
@@ -247,7 +266,9 @@ async def run_on_runner(
             break
         lost = answer
         for pair, ref in fresh.items():
-            root = await _rebuilt(ref, lost=lost, default_enrichment=follows_tree)
+            root = await _rebuilt(
+                ref, lost=lost, default_enrichment=follows_tree, deadline=deadline
+            )
             if isinstance(root, ToolRefusal):
                 return to_tool_result(root)
             rebuilt[pair] = root

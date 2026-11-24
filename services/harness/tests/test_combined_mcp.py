@@ -1922,7 +1922,7 @@ def _stopped_envelope(tool: str, limit_s: float = LIMIT_S) -> dict[str, Any]:
 
 def test_the_combined_server_stops_calls_at_the_external_call_limit_by_default() -> None:
     """`get_data`'s own deadline is sized to end inside this limit
-    (`data_mcp.deadline.EXTERNAL_CALL_MARGIN_S`)."""
+    (`common.call_limit.EXTERNAL_CALL_MARGIN_S`)."""
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
     [limit] = [m for m in combined.middleware if isinstance(m, combined_mcp._CallLimit)]
 

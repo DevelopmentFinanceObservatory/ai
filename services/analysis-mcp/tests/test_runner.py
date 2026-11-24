@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx2
 import pytest
-from analysis_mcp import digest, verbs
+from analysis_mcp import digest, tool_pipeline, verbs
 from analysis_mcp.digest import render_summary_digest
 from analysis_mcp.runner_client import (
     DEFAULT_RETRY_AFTER_S,
@@ -2076,6 +2076,42 @@ async def test_a_public_call_the_upstream_refreshed_under_is_sent_once_more(
     structured = result.structured_content
     assert structured is not None
     assert structured.get("code") == code
+
+
+@pytest.mark.parametrize(("seconds_per_call", "posts"), [(10.0, 2), (25.0, 1)])
+async def test_a_public_call_is_sent_once_more_only_when_the_call_limit_leaves_time(
+    store: InMemoryMaterialisationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    seconds_per_call: float,
+    posts: int,
+) -> None:
+    """An outside call stops at the combined server's call limit, so a refused call is
+    sent again only when as long a call again still ends inside it. Otherwise the caller
+    gets the retryable refusal, not a cancelled call."""
+    now = [0.0]
+    monkeypatch.setattr(tool_pipeline, "_clock", lambda: now[0], raising=False)
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if "get" in body:
+            return _problem(404, "snapshot_not_found")
+        now[0] += seconds_per_call
+        return _problem(503, "upstream_version_changed", retryable=True)
+
+    runner = _install(answer)
+    result = await verbs.aggregate(
+        frame_ref={"spec_id": _SPEC},
+        aggregation="sum",
+        rebuild_lost_frames=True,
+        rolling_follows_tree=True,
+    )
+
+    assert sum(request.method == "POST" for request in runner.requests) == posts
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured["retry_mode"]) == (
+        "upstream_version_changed",
+        "refresh_then_retry",
+    )
 
 
 def _level_column(node: dict[str, Any]) -> str:

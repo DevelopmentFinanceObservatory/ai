@@ -11,6 +11,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, fields, replace
 from typing import Self
 
+from common.call_limit import EXTERNAL_CALL_LIMIT_S, EXTERNAL_CALL_MARGIN_S
+
 Clock = Callable[[], float]
 
 # apis' default `mint_timeout_seconds` (`datasets_api/config.py`): the longest it runs
@@ -20,15 +22,9 @@ UPSTREAM_SYNC_MINT_TIMEOUT_S = 120.0
 # The wait a caller is told before repeating a `get_data` call its deadline refused.
 DEADLINE_RETRY_AFTER_S = 5.0
 
-# The longest the combined server (`harness.combined_mcp`) lets a call from an outside
-# client run. At this limit it cancels the call and refuses it.
-EXTERNAL_CALL_LIMIT_S = 45.0
-
-# How far before `EXTERNAL_CALL_LIMIT_S` an outside `get_data` call's own deadline ends.
-# At its deadline `get_data` writes its own refusal (`operation_still_processing`,
-# `mint_unanswered`), which takes well under a second; the margin lets that refusal
-# reach the caller before the combined server cancels the call.
-EXTERNAL_CALL_MARGIN_S = 3.0
+# An outside `get_data` call's own deadline ends `EXTERNAL_CALL_MARGIN_S` before the
+# combined server's `EXTERNAL_CALL_LIMIT_S` (`common.call_limit`), so its refusal at that
+# deadline (`operation_still_processing`, `mint_unanswered`) reaches the caller first.
 
 
 @dataclass(frozen=True, kw_only=True)
