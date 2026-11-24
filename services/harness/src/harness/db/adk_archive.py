@@ -1,10 +1,10 @@
 """Archives, restores and drops ADK's session tables.
 
-`python -m harness.db.adk_archive VERB [--apply]` runs one verb in one
-transaction and prints each statement it ran. Without `--apply` it rolls the
-transaction back, so a dry run checks everything the verb would do, the
-database's own refusals included, and changes nothing. With `--apply` it
-commits.
+`python -m harness.db.adk_archive VERB [--apply] [--allow-missing]
+[--backup BACKUP_ID]` runs one verb in one transaction and prints each
+statement it ran. Without `--apply` it rolls the transaction back, so a dry
+run checks everything the verb would do, the database's own refusals
+included, and changes nothing. With `--apply` it commits.
 
 - `archive` runs `0005_rename_adk_tables.sql`, the migration that renames
   ADK's five tables and `adk_ledger_imports` to `adk_archive_<name>`, so its
@@ -46,7 +46,7 @@ statement when anything else, such as a view, depends on one of them. They
 cannot be undone, so with `--apply` each refuses, before it connects,
 unless `--backup BACKUP_ID` gives the numeric id of the on-demand Cloud
 SQL backup taken for it, which it prints with the statements. The job cannot read Cloud SQL's
-backup list, so the name is the operator's record, checked by the runbook
+backup list, so the id is the operator's record, checked by the runbook
 step that takes the backup.
 
 Each verb's transaction takes the advisory lock and the statement and lock
@@ -68,6 +68,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import functools
+import re
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -296,13 +297,12 @@ async def _restore(conn: Any, *, allow_missing: bool = False) -> list[str]:
     tables = [relation for relation in archived if relation.kind == "TABLE"]
     found = {table.name.removeprefix(PREFIX) for table in tables}
     restoring = [name for name in ADK_TABLES if name in found]
-    missing = [name for name in ADK_TABLES if name not in found]
     lacking = [name for name in ARCHIVED if name not in found]
     if not archived:
         return []
     print(
         f"adk_archive restore: ADK's tables in the archive: {', '.join(restoring) or 'none'}; "
-        f"missing: {', '.join(missing) or 'none'}"
+        f"missing from the archive: {', '.join(lacking) or 'none'}"
     )
     for table in tables:
         name = table.name.removeprefix(PREFIX)
@@ -314,10 +314,19 @@ async def _restore(conn: Any, *, allow_missing: bool = False) -> list[str]:
             )
     if lacking and not allow_missing:
         raise ArchiveRefusedError(
-            f"restore renames nothing, because the archive lacks {', '.join(lacking)}. An "
-            "image that reads ADK's tables would create a missing table of ADK's empty, and "
-            "without adk_ledger_imports ADK's history has no import records, so the import "
-            "job cannot clear it. Pass --allow-missing to restore the rest anyway."
+            f"restore renames nothing, because the archive lacks {', '.join(lacking)}."
+            + (
+                " An image that reads ADK's tables would create a missing table of ADK's empty."
+                if set(lacking) & set(ADK_TABLES)
+                else ""
+            )
+            + (
+                " Without adk_ledger_imports ADK's history has no import records, so the "
+                "import job cannot clear it."
+                if "adk_ledger_imports" in lacking
+                else ""
+            )
+            + " Pass --allow-missing to restore the rest anyway."
         )
     taken = await _restore_conflicts(conn, archived)
     if taken:
@@ -438,7 +447,7 @@ async def run(
     `allow_missing` lets `restore` run when the archive lacks some of ADK's
     tables. A drop (`DROPS`) with `apply` returns 2 without connecting unless
     `backup` is the numeric id of the backup taken before it."""
-    if apply and verb in DROPS and not (backup or "").isdigit():
+    if apply and verb in DROPS and not re.fullmatch(r"[0-9]+", backup or ""):
         print(
             f"adk_archive {verb}: --apply drops tables for good, so it needs --backup "
             "BACKUP_ID, the numeric id of the on-demand Cloud SQL backup taken for it "

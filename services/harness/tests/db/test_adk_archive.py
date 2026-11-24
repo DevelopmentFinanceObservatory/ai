@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import contextlib
 import re
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import asyncpg
 import pytest
 from harness import server as server_module
 from harness.db import adk_archive
-from harness.db.migrate import apply_pending
+from harness.db.migrate import MIGRATIONS_DIR, apply_pending
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -254,6 +256,13 @@ def _drop_adk_rows(printed: str) -> int:
     return int(rows)
 
 
+def _restore_lacks(printed: str) -> list[list[str]]:
+    """The tables each of `restore`'s summary lines printed as missing from
+    the archive."""
+    found = re.findall(r"^adk_archive restore: .*; missing from the archive: (.+)$", printed, re.M)
+    return [[] if names == "none" else names.split(", ") for names in found]
+
+
 def _names(tables: tuple[str, ...]) -> set[str]:
     """The unqualified names of the schema-qualified `tables`."""
     return {table.rsplit(".", 1)[1] for table in tables}
@@ -332,19 +341,21 @@ async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until
     assert _names(refusal.tables) == {"sessions"}
     assert refusal.archive_present is True
     assert refusal.ledger_present is False
-    assert ".sessions (beside adk_archive_sessions)" in str(refusal)
+    assert _names(refusal.beside) == {"sessions"}
     capsys.readouterr()
     assert await _verb(pg_empty_engine, "archive") == 1
     assert "SQLSTATE DFA02" in capsys.readouterr().err
     assert await _verb(pg_empty_engine, "drop-adk", apply=False) == 0
     assert _drop_adk_rows(capsys.readouterr().out) == 1
-    assert await adk_archive.run(pg_empty_engine, verb="drop-adk", apply=True) == 2
-    assert "--backup BACKUP_ID" in capsys.readouterr().err
+    for backup in (None, "", "\u00b2", "\u0661\u0662\u0663", "12a"):
+        assert (
+            await adk_archive.run(pg_empty_engine, verb="drop-adk", apply=True, backup=backup) == 2
+        )
     assert "sessions" in await _tables(pg_empty_engine)
     assert await _verb(pg_empty_engine, "drop-adk") == 0
     printed = capsys.readouterr().out
     assert _drop_adk_rows(printed) == 1
-    assert "ran and committed, after backup 1732441200000:" in printed
+    assert "1732441200000" in printed
     await _start(pg_empty_engine)
     tables = await _tables(pg_empty_engine)
     assert archived <= tables
@@ -353,7 +364,7 @@ async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until
     assert await _verb(pg_empty_engine, "drop-archive") == 0
     await _execute(pg_empty_engine, sessions, _session("c4"))
     refusal = await _start_refused(pg_empty_engine)
-    assert ".sessions (without adk_archive_sessions)" in str(refusal)
+    assert (_names(refusal.tables), refusal.beside) == ({"sessions"}, ())
     assert (refusal.archive_present, refusal.ledger_present) == (False, False)
 
 
@@ -395,10 +406,8 @@ async def test_restore_refuses_an_archive_without_all_of_adks_tables_unless_allo
         assert await _verb(pg_empty_engine, "restore", apply=apply) == 1
 
     printed = capsys.readouterr()
-    if "adk_ledger_imports" not in missing:
-        assert f"missing: {', '.join(missing)}" in printed.out
     lacking = [name for name in (*_ADK_TABLES, "adk_ledger_imports") if name in missing]
-    assert f"the archive lacks {', '.join(lacking)}." in printed.err
+    assert _restore_lacks(printed.out) == [lacking, lacking]
     assert await _tables(pg_empty_engine) == archived
     assert adk_archive._arguments(["restore", "--allow-missing"]).allow_missing
     assert (
@@ -568,3 +577,33 @@ def test_drop_adk_checks_the_column_signature_the_migration_checks() -> None:
     assert {name: tuple(re.findall(r"'(\w+)'", columns)) for name, columns in pairs} == (
         adk_archive._ADK_COLUMNS
     )
+
+
+async def test_a_start_that_would_apply_0003_and_0005_together_refuses_beside_adk_history(
+    pg_empty_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """A database at 0002 holding an imported ADK ledger session: a start
+    of this image refuses with DFA07 and applies nothing, since the release
+    that applies 0003 never ran `close-open-turns`. Once that release's
+    files are applied, the same start applies 0005 alone."""
+    before_0003 = tmp_path / "before_0003"
+    through_0004 = tmp_path / "through_0004"
+    for directory, last in ((before_0003, "0002"), (through_0004, "0004")):
+        directory.mkdir()
+        for path in MIGRATIONS_DIR.glob("*.sql"):
+            if path.name[:4] <= last:
+                shutil.copy(path, directory / path.name)
+    await apply_pending(pg_empty_engine, directory=before_0003)
+    await _execute(pg_empty_engine, *_ADK_V1_DDL, _session("c1"), _imported("c1"))
+    async with pg_empty_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO conversations (principal, conversation_id) VALUES ('p', 'c1')")
+        )
+
+    with pytest.raises(asyncpg.PostgresError) as refusal:
+        await apply_pending(pg_empty_engine)
+
+    assert refusal.value.sqlstate == "DFA07"
+    assert "turn_cursors" not in await _tables(pg_empty_engine)
+    await apply_pending(pg_empty_engine, directory=through_0004)
+    assert await apply_pending(pg_empty_engine) == ["0005_rename_adk_tables.sql"]

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -117,9 +118,12 @@ async def apply_pending(
     directory: Path = MIGRATIONS_DIR,
     timeout_s: float = MIGRATION_TIMEOUT_S,
     lock_timeout_s: float = MIGRATION_LOCK_TIMEOUT_S,
+    check_settings: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Apply every file in `directory` not yet recorded, in filename order, in
-    one transaction, and return their names. `timeout_s` bounds each
+    one transaction, and return their names. `check_settings` sets each
+    transaction setting (`harness.db.cutover_gates.CHECK_SETTINGS`) the
+    checks in `BEFORE` read. `timeout_s` bounds each
     statement (`statement_timeout`) and `lock_timeout_s` each wait for a
     lock (`lock_timeout`). The client waits on each call up to
     `MIGRATION_CALL_TIMEOUT_S`, whatever the engine's `command_timeout`.
@@ -151,6 +155,8 @@ async def apply_pending(
                 raise MigrationChecksumError(f"applied but not in {directory}: {refused}")
             if missing:
                 logger.info("schema: applied by a later release, not in this image: %s", missing)
+            for name, value in (check_settings or {}).items():
+                await conn.execute("SELECT set_config($1, $2, true)", name, value, timeout=wait)
             ran: list[str] = []
             for path in files:
                 digest = sha256(path)

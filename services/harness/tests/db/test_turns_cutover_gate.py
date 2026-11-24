@@ -3,11 +3,13 @@ with nothing applied, while an ADK ledger session is not cleared (imported
 or kept as of its last ADK write, 0003, SQLSTATE DFA02) or holds a live
 `studio:segment` lease (`harness.db.cutover_gates.LIVE_LEDGER_LEASE_GATE`,
 run in 0003's transaction just before it, SQLSTATE DFR02, which startup
-retries). The case table is the one the import job's `gate` verb and 0005
+retries) or one it cannot read (DFA06, cleared by `LAPSED_LEDGER_LEASES`).
+The case table is the one the import job's `gate` verb and 0005
 are pinned by."""
 
 from __future__ import annotations
 
+import functools
 import json
 import shutil
 import time
@@ -16,8 +18,9 @@ from pathlib import Path
 
 import asyncpg
 import pytest
+from harness import server
 from harness.db.migrate import MIGRATIONS_DIR, apply_pending
-from harness.server import _apply_migrations_with_retries
+from harness.server import _apply_migrations_with_retries, _MigrationRefusedError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -96,6 +99,31 @@ async def _migrate_before_0003(engine: AsyncEngine, tmp_path: Path) -> None:
     for name in _BEFORE_0003:
         shutil.copy(MIGRATIONS_DIR / name, tmp_path / name)
     await apply_pending(engine, directory=tmp_path)
+
+
+def _through_0004(tmp_path: Path) -> Path:
+    """A directory of the files the release that applies 0003 ships, 0001
+    to 0004. A later file's check refuses a start that applies 0003 beside
+    an ADK ledger session."""
+    shipped = tmp_path / "through_0004"
+    shipped.mkdir(exist_ok=True)
+    for name in (*_BEFORE_0003, _MIGRATION, "0004_card_lineage.sql"):
+        shutil.copy(MIGRATIONS_DIR / name, shipped / name)
+    return shipped
+
+
+def _start_of_0003s_release(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Make `_apply_migrations_with_retries` start as the release that
+    applies 0003 and 0004 does: it applies the files through 0004 and runs
+    no check after them."""
+    monkeypatch.setattr(
+        server, "apply_pending", functools.partial(apply_pending, directory=_through_0004(tmp_path))
+    )
+
+    async def none(engine: AsyncEngine) -> None:
+        return None
+
+    monkeypatch.setattr(server, "_refuse_beside_adk_tables", none, raising=False)
 
 
 async def _execute(engine: AsyncEngine, *statements: str) -> None:
@@ -179,9 +207,9 @@ async def _refused(engine: AsyncEngine, sqlstate: str = "DFA02") -> str:
         ),
         pytest.param(
             (_ADK_SESSIONS,),
-            (_session("c1", state=_leased("soon")), _kept("c1")),
+            (_session("c1", state=json.dumps({"studio:segment": None})), _kept("c1")),
             [],
-            id="kept, a lease expiry that is not a number",
+            id="kept, no lease",
         ),
         pytest.param((), (), [], id="no sessions table"),
         pytest.param(
@@ -209,7 +237,7 @@ async def test_0003_waits_for_every_ledger_session_to_be_imported_or_kept(
     await _execute(pg_empty_engine, *tables, *(row() if callable(row) else row for row in rows))
 
     if not uncleared:
-        assert _MIGRATION in await apply_pending(pg_empty_engine)
+        assert _MIGRATION in await apply_pending(pg_empty_engine, directory=_through_0004(tmp_path))
         return
     message = await _refused(pg_empty_engine)
     assert message.startswith(f"{len(uncleared)} ledger session")
@@ -257,11 +285,13 @@ async def test_the_lease_gate_runs_in_0003s_transaction_before_it(
 
     message = await _refused(pg_empty_engine, "DFR02")
 
-    assert message.startswith("1 ledger session(s) in ADK's `sessions` hold a live")
-    assert "hold a live `studio:segment` lease: p/c1." in message
+    assert "p/c1" in message
     assert await _applied(pg_empty_engine) == sorted(_BEFORE_0003)
     await _execute(pg_empty_engine, f"UPDATE sessions SET state = '{_leased(-60)}'::jsonb")
-    assert (await apply_pending(pg_empty_engine))[:2] == [_MIGRATION, "0004_card_lineage.sql"]
+    assert await apply_pending(pg_empty_engine, directory=_through_0004(tmp_path)) == [
+        _MIGRATION,
+        "0004_card_lineage.sql",
+    ]
 
 
 async def test_the_lease_gate_never_runs_once_0003_is_recorded(
@@ -277,14 +307,63 @@ async def test_the_lease_gate_never_runs_once_0003_is_recorded(
 
 
 async def test_startup_retries_a_live_lease_until_it_lapses(
-    pg_empty_engine: AsyncEngine, tmp_path: Path
+    pg_empty_engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A lease that lapses within the startup budget delays the start that
-    applies 0003, and does not fail it."""
+    applies 0003, and does not fail it. The first attempt meets a live
+    lease; the fake sleep between attempts lapses it."""
     await _migrate_before_0003(pg_empty_engine, tmp_path)
-    leased = _session("c1", state=_leased(2))
+    _start_of_0003s_release(monkeypatch, tmp_path)
+    leased = _session("c1", state=_leased(600))
     await _execute(pg_empty_engine, _ADK_SESSIONS, leased, _imported("c1"), _conversation("c1"))
+    slept: list[float] = []
 
-    await _apply_migrations_with_retries(pg_empty_engine, budget_s=30)
+    async def lapse(seconds: float) -> None:
+        slept.append(seconds)
+        await _execute(pg_empty_engine, f"UPDATE sessions SET state = '{_leased(-60)}'::jsonb")
+
+    await _apply_migrations_with_retries(pg_empty_engine, budget_s=30, sleep=lapse)
+
+    assert len(slept) == 1
+    assert _MIGRATION in await _applied(pg_empty_engine)
+
+
+@pytest.mark.parametrize(
+    "segment",
+    [
+        pytest.param({"id": "seg", "owner": "old", "expires_at": "soon"}, id="a string expiry"),
+        pytest.param({"id": "seg", "owner": "old"}, id="no expiry"),
+        pytest.param("seg", id="not an object"),
+    ],
+)
+async def test_the_lease_gate_refuses_a_lease_it_cannot_read_until_the_operator_lapses_it(
+    pg_empty_engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, segment: object
+) -> None:
+    """A `studio:segment` without a numeric `expires_at` refuses with
+    DFA06, which startup does not retry, until `LAPSED_LEDGER_LEASES` names
+    the session."""
+    await _migrate_before_0003(pg_empty_engine, tmp_path)
+    unreadable = _session("c1", state=json.dumps({"studio:segment": segment}))
+    await _execute(
+        pg_empty_engine,
+        _ADK_SESSIONS,
+        unreadable,
+        _session("c2", state=_leased(-60)),
+        *(_imported(cid) for cid in ("c1", "c2")),
+        *(_conversation(cid) for cid in ("c1", "c2")),
+    )
+
+    assert "p/c1" in await _refused(pg_empty_engine, "DFA06")
+    _start_of_0003s_release(monkeypatch, tmp_path)
+    with pytest.raises(_MigrationRefusedError) as refusal:
+        await _apply_migrations_with_retries(
+            pg_empty_engine, budget_s=30, lapsed_ledger_leases=["p/c2"]
+        )
+    assert refusal.value.sqlstate == "DFA06"
+    assert await _applied(pg_empty_engine) == sorted(_BEFORE_0003)
+
+    await _apply_migrations_with_retries(
+        pg_empty_engine, budget_s=30, lapsed_ledger_leases=["p/c1"]
+    )
 
     assert _MIGRATION in await _applied(pg_empty_engine)

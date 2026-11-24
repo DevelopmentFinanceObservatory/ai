@@ -267,11 +267,9 @@ The first number is the frames whose cards can be refreshed after the bucket's o
 
 ## Conversation import
 
-This image reads saved Studio conversations from the harness's own tables (`harness/db/migrations`) only. A deployment whose serving revision stores conversations in ADK's session tables (app `dfo_analyst_graph.ledger` in the `sessions` table) copies them across with the `python -m harness.adk_import` job on the image of the revision that added the tables, and that image's `deploy/README.md` gives the cutover steps. Its cutover's import is complete in an environment before this image merges there: `import --apply` and `import --verify` exit 0 with no conversation in conflict, `gate` exits 0, the previous revision is deleted, and `gate` exits 0 again. The start that applies `0003_turns.sql` runs the gate in two checks, each naming the count and the first ten. The first refuses with SQLSTATE `DFR02` while any ledger session holds a live `studio:segment` lease, which means a stream of the revision before the import still runs (`harness.db.cutover_gates.LIVE_LEDGER_LEASE_GATE`, run in 0003's transaction just before it). A lease lapses 45 s after its stream's last renewal, so startup retries this check within its 120 s budget; when it still fails, delete that revision, as the cutover step of the release that added the conversation tables does, and restart. The second, in 0003 itself, refuses with SQLSTATE `DFA02` while any ledger session is uncleared, and startup does not retry it. Once 0003 is recorded neither check runs again. That job clears the second on the previous image: `import --apply` copies a session ADK moved since its last copy, `import --apply --prefer-adk PRINCIPAL/CONVERSATION_ID` takes ADK's copy of a diverged one, `import --apply --keep-tables PRINCIPAL/CONVERSATION_ID` keeps the tables' copy of one they hold, `import --apply --discard PRINCIPAL/CONVERSATION_ID` gives up a refused one they do not hold, and `gate` then confirms.
+This image reads saved Studio conversations from the harness's own tables (`harness/db/migrations`) only. A deployment whose serving revision stores conversations in ADK's session tables (app `dfo_analyst_graph.ledger` in the `sessions` table) copies them across with the `python -m harness.adk_import` job on the image of the revision that added the tables, and that image's `deploy/README.md` gives the cutover steps. Its cutover's import is complete in an environment before this image merges there: `import --apply` and `import --verify` exit 0 with no conversation in conflict, `gate` exits 0, the previous revision is deleted, and `gate` exits 0 again. The start that applies `0003_turns.sql` runs the gate in two checks, each naming the count and the first ten. The first refuses with SQLSTATE `DFR02` while any ledger session holds a live `studio:segment` lease, which means a stream of the revision before the import still runs (`harness.db.cutover_gates.LIVE_LEDGER_LEASE_GATE`, run in 0003's transaction just before it). A lease lapses 45 s after its stream's last renewal, so startup retries this check within its 120 s budget. When it still fails, delete that revision, as the cutover step of the release that added the conversation tables does, run that job's `import --apply` and then `gate` until `gate` exits 0, and restart: the stream wrote its ledger session, so without the import the next start refuses with `DFA02`. A ledger session whose `studio:segment` lease has no numeric `expires_at` refuses with SQLSTATE `DFA06`, which startup does not retry, since no check can tell whether a stream holds it. Check each session the message names by hand, and once no stream holds it, deploy a revision with `LAPSED_LEDGER_LEASES` set to the names, comma-separated, which the check then passes over: `gcloud run services update "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --update-env-vars="^@^LAPSED_LEDGER_LEASES=PRINCIPAL/CONVERSATION_ID,..."`. The variable has no effect once 0003 is recorded. The second, in 0003 itself, refuses with SQLSTATE `DFA02` while any ledger session is uncleared, and startup does not retry it. Once 0003 is recorded neither check runs again. That job clears the second on the previous image: `import --apply` copies a session ADK moved since its last copy, `import --apply --prefer-adk PRINCIPAL/CONVERSATION_ID` takes ADK's copy of a diverged one, `import --apply --keep-tables PRINCIPAL/CONVERSATION_ID` keeps the tables' copy of one they hold, `import --apply --discard PRINCIPAL/CONVERSATION_ID` gives up a refused one they do not hold, and `gate` then confirms.
 
-Every pending file applies in one transaction, so at the start that applies `0003_turns.sql` and `0004_card_lineage.sql` together, 0003's `ALTER TABLE conversations` takes ACCESS EXCLUSIVE on `conversations` and holds it through `0004_card_lineage.sql` until the transaction commits. The SHARE ROW EXCLUSIVE lock `0004`'s comment describes applies only where `0004` runs alone. While the `ALTER` waits for a transaction of the serving revision, every later query on `conversations` queues behind it, for at most `MIGRATION_LOCK_TIMEOUT_S` (10 s) before the attempt gives up and is retried within the 120 s startup budget. So the serving revision's lease renewals, sent every 5 s, can each stall up to 10 s per attempt, well inside the 45 s lease, and its stream writes stall the same way. Once the lock is held the migration finishes in milliseconds.
-
-That job's `close-open-turns --apply` must have exited 0 before this image merges, while the release before this one, which applied `0003_turns.sql` and `0004_card_lineage.sql` and runs turns without ADK, held all traffic; that release's `deploy/README.md` gives the step. This image applies `0005_rename_adk_tables.sql`, which archives `adk_ledger_imports` and ADK's tables, and from its first start every verb of the job but `gate --adk-archived` exits 4 (`adk_archive_adk_ledger_imports` resolves), so `close-open-turns` cannot run once it has started. A turn the tables record as open with no turn behind it is a turn the release that ran turns on ADK left paused. This image closes such a turn as `abandoned` on the conversation's next turn, with what the conversation holds, which lacks the source blocks `close-open-turns` keeps from the turn's ADK session. An answer this image receives to such a pause finds no turn to resume.
+That job's `close-open-turns --apply` must have exited 0 before this image merges, while the release before this one, which applied `0003_turns.sql` and `0004_card_lineage.sql` and runs turns without ADK, held all traffic; that release's `deploy/README.md` gives the step. It runs again after the revision deletes below, once their drain checks pass. This image applies `0005_rename_adk_tables.sql`, which archives `adk_ledger_imports` and ADK's tables, and from its first start every verb of the job but `gate --adk-archived` exits 4 (`adk_archive_adk_ledger_imports` resolves), so `close-open-turns` cannot run once it has started. A turn the tables record as open with no turn behind it is a turn the release that ran turns on ADK left paused. This image closes such a turn as `abandoned` on the conversation's next turn, with what the conversation holds, which lacks the source blocks `close-open-turns` keeps from the turn's ADK session. An answer this image receives to such a pause finds no turn to resume.
 
 ## Renaming the ADK tables
 
@@ -285,6 +283,7 @@ Each check below stops startup with its own SQLSTATE, which startup does not ret
 - `DFA02`: a ledger session, a row of ADK's `sessions` of app `dfo_analyst_graph.ledger`, is neither imported nor kept as of its last ADK write. A session is imported when `adk_ledger_imports` holds its row with `source_updated_at` equal to the session's `update_time`, not diverged, with `imported_digest` set, and `conversations` holds the conversation. It is kept when that current row has `kept_tables` set. With no `adk_ledger_imports` or no `conversations` table, no session is cleared. The message gives the count and the first ten keys. A database that applies `0003_turns.sql` and this migration in one start refuses at `0003`'s check of the same predicate first, so at startup this one fires when `0003` was applied earlier and an ADK-reading revision wrote sessions since. After a manual `restore --apply` the migration stays recorded, so startup refuses with `DFA05` instead, and `DFA02` comes from the `archive --apply` that renames the restored tables again. Run the import job of the release that added the conversation tables: `import --apply` copies them, `import --apply --prefer-adk PRINCIPAL/CONVERSATION_ID` takes ADK's copy of a conflict, and `import --apply --keep-tables PRINCIPAL/CONVERSATION_ID` keeps the tables' copy of one they hold, and `import --apply --discard PRINCIPAL/CONVERSATION_ID` gives up a refused one they do not hold. Then run its `gate`, and restart once it exits 0. To discard ADK's conversations instead, take a backup and run `drop-adk --apply`, as the archive job below describes.
 - `DFA03`: a table to rename is not owned by the user the migration runs as, or that user lacks `CREATE` on its schema. Run it as the owner or grant `CREATE`.
 - `DFA04`: for a table, index or sequence to rename, `adk_archive_<name>` would pass PostgreSQL's 63-byte identifier limit, which would truncate it, or a relation or type of that name exists in the schema; or, for a table to rename, a relation named `adk_archive_<table>` resolves through `search_path` in any schema. Rename the object to a shorter name, or rename or drop the one in the way. After the migration each `adk_archive_<table>` therefore resolves to the table it archived, and `restore` gives each object its own name back.
+- `DFA07`: the start would apply `0003_turns.sql` and this migration together while ADK's `sessions` holds a ledger session (`harness.db.cutover_gates.ONE_START_GATE`, run just before this migration). The release before this one, which applies `0003_turns.sql`, then never served, and its cutover's `close-open-turns` never ran, so each turn left open on ADK would lose the source blocks that job keeps. Deploy the release before this one first and follow its steps until `close-open-turns` exits 0. A database with no ADK history applies every file in one start.
 - `DFA05`: after the migrations, every start of this image checks whether any of ADK's five tables resolves through `search_path` under its own name with ADK's columns, and refuses while one does, since an image that reads them may be serving. The message names each such table and whether its own `adk_archive_<name>` resolves beside it, whether the archive resolves, each table of an archive name without the archive's columns, and whether `adk_ledger_imports` resolves under its own name. The check guards startup only and renames nothing. An instance of this image already running keeps serving whatever the tables do later, but no new instance starts, so the service cannot scale out or replace an instance until the step below runs. Tables of those names without ADK's columns are another service's and are left alone. The step depends on what the message names:
   - A live table beside its own `adk_archive_<name>`, or with no archive, no table of an archive name and no `adk_ledger_imports`, as `drop-archive` leaves the database: an image that reads ADK's tables started after the archive and created the table afresh, so it holds what that image wrote since. Find and delete that revision first. Only `drop-adk` or a move out of `search_path` clears these rows, since the import job cannot read them. Once no revision that reads ADK's tables is left, run `drop-adk` as a dry run and read the count of conversations, the ledger sessions of `sessions`, which tells a few stray conversations from the whole history, take a backup, then run `drop-adk --apply --backup BACKUP_ID`, which loses those writes, and restart. To keep the rows for a recovery by hand, move each table out of `search_path` instead with `ALTER TABLE ... SET SCHEMA`, which carries its indexes, owned sequences and the `events` foreign key.
 
@@ -299,11 +298,19 @@ Each check below stops startup with its own SQLSTATE, which startup does not ret
       --command=python --args=-m,harness.adk_import,import
     ```
 
-  - Any other mix, as after an archive table was renamed or dropped by hand, or a restore forced with `--allow-missing`: put each table back under one name, all archived or all restored, and follow the matching case.
+  - Any other mix, as after an archive table was renamed or dropped by hand, or a restore forced with `--allow-missing`: put each table back under one name, all archived or all restored, and follow the matching case. A restore forced with `--allow-missing` from an archive without `adk_ledger_imports` leaves the first case's state, live tables with no archive and no `adk_ledger_imports`, but its rows are ADK's restored history, not a stray revision's writes. With no import records the import job cannot clear them, so either move the tables out of `search_path` to keep them, or take a backup and run `drop-adk --apply --backup BACKUP_ID`, which discards ADK's copy; the harness tables hold every conversation as of the cutover.
 
 ### The archive job
 
 `python -m harness.db.adk_archive` acts on these tables from this image. Each verb runs in one transaction and prints the statements it ran. The transaction takes the migrations' advisory lock and statement and lock timeouts, so a verb never runs beside a starting instance's migrations. Without `--apply` it rolls the transaction back, so a dry run checks everything the verb would do and changes nothing. It connects with the settings the service uses, `DATABASE_URL` or the three `SESSION_STORE_*` variables over IAM auth, and exits 0 when it ran or found nothing to do, 1 when it or the database refused, and 2 on a usage error, a drop with `--apply` and no numeric `--backup`, or with no or an invalid database configuration.
+
+`gcloud run jobs execute --wait` exits 1 for every non-zero status of a job. The job's own status is its task's `status.lastAttemptResult.exitCode`, which this prints for the newest execution of the job named `JOB`, and prints nothing for 0:
+
+```
+gcloud run jobs executions tasks list --region="$REGION" --project="$PROJECT_ID" \
+  --execution="$(gcloud run jobs executions list --job="${JOB:?set it to the job name}" --region="$REGION" --project="$PROJECT_ID" --limit=1 --format='value(metadata.name)')" \
+  --format='value(status.lastAttemptResult.exitCode)'
+```
 
 ```
 uv run --package harness python -m harness.db.adk_archive archive        # dry run, the default
@@ -320,13 +327,16 @@ uv run --package harness python -m harness.db.adk_archive drop-archive [--apply 
 
 Both drops name every table in one `DROP TABLE` statement without `CASCADE`, so the foreign key from `events` to `sessions` resolves within the statement. When anything else depends on one of the tables, such as a view, PostgreSQL refuses the statement, the job drops nothing and exits 1 with PostgreSQL's error, which names the dependent object. Drop or change that object by hand, then run the verb again.
 
-The drops cannot be undone, and Cloud SQL's automated backups keep only their retention window, so take an on-demand backup before each one. With `--apply` each drop exits 2 before it connects unless `--backup BACKUP_ID` gives that backup's numeric id, and prints it with the statements it ran. The job cannot read the backup list, so the command below is the check: it reads the instance from the service's `SESSION_STORE_INSTANCE_CONNECTION_NAME`, creates the backup and waits for it, and prints its id only once Cloud SQL reports it `SUCCESSFUL`. It needs `cloudsql.backupRuns.create` on the instance (`roles/cloudsql.editor`). Set `VERB` to `drop-adk` or `drop-archive`:
+The drops cannot be undone, and Cloud SQL's automated backups keep only their retention window, so take an on-demand backup before each one. With `--apply` each drop exits 2 before it connects unless `--backup BACKUP_ID` gives that backup's numeric id, and prints it with the statements it ran. The job cannot read the backup list, so the command below is the check: it reads the instance from the service's `SESSION_STORE_INSTANCE_CONNECTION_NAME`, points the job at the service's image, since the job keeps the image it was created on and an image older than `--backup` rejects it, creates the backup and waits for it, and prints its id only once Cloud SQL reports it `SUCCESSFUL`. It needs `cloudsql.backupRuns.create` on the instance (`roles/cloudsql.editor`). Set `VERB` to `drop-adk` or `drop-archive`:
 
 ```
 CONNECTION=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
   | jq -er '[(.spec.template.spec.containers[0].env // [])[] | select(.name == "SESSION_STORE_INSTANCE_CONNECTION_NAME") | .value]
     | if length == 1 and (.[0] | split(":") | length) == 3 then .[0] else error("no single instance connection name") end') \
 && SQL_PROJECT=${CONNECTION%%:*} && INSTANCE=${CONNECTION##*:} \
+&& IMAGE=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
+  --format='value(spec.template.spec.containers[0].image)') \
+&& gcloud run jobs update "$SERVICE_AI-adk-archive" --image="$IMAGE" --region="$REGION" --project="$PROJECT_ID" \
 && DESCRIPTION="before ${VERB:?set it to drop-adk or drop-archive} $(date -u +%FT%TZ)" \
 && gcloud sql backups create --instance="$INSTANCE" --project="$SQL_PROJECT" --description="$DESCRIPTION" \
 && BACKUP_ID=$(gcloud sql backups list --instance="$INSTANCE" --project="$SQL_PROJECT" \
@@ -370,51 +380,68 @@ gcloud run revisions delete "${REVISION:?set it to a revision to delete}" \
 && echo "deleted $REVISION at $DELETED_AT"
 ```
 
-Then list them again: the list holds only revisions of the release before this one. Then check that each deleted revision drained. The command below reads three sources. Cloud Run's audit log must record the delete of a revision of exactly that name, so an empty or misspelt `REVISION` fails. The revision's request log is read from 900 seconds before `DELETED_AT`, the longest a request runs, and a request whose end (its `timestamp` plus its `latency`) falls after `DELETED_AT` ran past the delete. Cloud Monitoring's `run.googleapis.com/container/instance_count` must read 0 at the newest point of each series of the revision since the delete; an older point above 0 is a draining instance, and a newest one above 0 means rerun later. `curl -f` fails on an HTTP error, and jq fails when the answer carries `executionErrors` or a `nextPageToken`, since the series read may then be partial. On dev a deleted revision reported no series after the delete, so the request log is the evidence that nothing served. Run it for each revision no sooner than 16 minutes after its `DELETED_AT`, in the same shell or with `REVISION` and `DELETED_AT` set to what that delete printed: a request in flight at the delete logs when it ends, and Cloud Monitoring can show a point up to about 180 s late. It needs `roles/logging.viewer` and `roles/monitoring.viewer`:
+Then list them again: the list holds only revisions of the release before this one. Then check that each deleted revision drained. The command below reads four sources. Cloud Run's audit log must record the delete of a revision of exactly that name, so an empty or misspelt `REVISION` fails. The request log must be visible: it must hold an entry of the deleted revision in the 30 days before `DELETED_AT` and one of the serving revision since `DELETED_AT`, and the check names the read that came back empty. An exclusion filter on Cloud Run's request logs, a sink that routes them elsewhere, or a caller without access to the log bucket empties both, and the late-request read would then pass on an empty answer. At a quiet hour the serving revision may have served nothing since the delete: load the Studio once and rerun. The revision's request log is then read from 900 seconds before `DELETED_AT`, the longest a request runs, and a request whose end (its `timestamp` plus its `latency`) falls after `DELETED_AT` ran past the delete. Cloud Monitoring's `run.googleapis.com/container/instance_count` must not read above 0 at a point of the revision less than 5 minutes old: a running instance reports a point each minute. A deleted revision reports no series at all, so the request log is the evidence that nothing served. A failed `gcloud logging read` stops the check with its own message. `curl -f` fails on an HTTP error, and jq fails when the answer carries `executionErrors` or a `nextPageToken`, since the series read may then be partial. Run it for each revision no sooner than 16 minutes after its `DELETED_AT`, in the same shell or with `REVISION` and `DELETED_AT` set to what that delete printed: a request in flight at the delete logs when it ends, and Cloud Monitoring can show a point up to about 180 s late. It needs `roles/logging.viewer`, `roles/monitoring.viewer` and `roles/run.viewer`:
 
 ```
 (
   set -euo pipefail
   : "${REVISION:?set it to the deleted revision}" "${DELETED_AT:?set it to the time the delete printed}"
   ago() { jq -rn --arg t "$DELETED_AT" --argjson s "$1" '$t | fromdateiso8601 - $s | todateiso8601'; }
-  gcloud logging read "logName=\"projects/$PROJECT_ID/logs/cloudaudit.googleapis.com%2Factivity\" AND protoPayload.methodName:\"DeleteRevision\" AND timestamp>=\"$(ago 86400)\"" \
-    --project="$PROJECT_ID" --format=json \
-  | jq -e --arg r "$REVISION" 'any(.[]; (.protoPayload.resourceName // "") | endswith("/revisions/" + $r))' >/dev/null \
+  logs() {
+    local filter=$1; shift
+    gcloud logging read "$filter" --project="$PROJECT_ID" --format=json "$@" \
+    || { echo "gcloud logging read failed: check roles/logging.viewer and PROJECT_ID" >&2; return 1; }
+  }
+  REQUESTS="logName=\"projects/$PROJECT_ID/logs/run.googleapis.com%2Frequests\""
+  AUDIT=$(logs "logName=\"projects/$PROJECT_ID/logs/cloudaudit.googleapis.com%2Factivity\" AND protoPayload.methodName:\"DeleteRevision\" AND timestamp>=\"$(ago 86400)\"")
+  jq -e --arg r "$REVISION" 'any(.[]; (.protoPayload.resourceName // "") | endswith("/revisions/" + $r))' <<<"$AUDIT" >/dev/null \
   || { echo "no audit log entry deletes revision $REVISION in the day before DELETED_AT or since" >&2; exit 1; }
-  gcloud logging read "logName=\"projects/$PROJECT_ID/logs/run.googleapis.com%2Frequests\" AND resource.labels.revision_name=\"$REVISION\" AND timestamp>=\"$(ago 900)\"" \
-    --project="$PROJECT_ID" --format=json \
-  | jq -er --arg deleted "$DELETED_AT" --arg imported "${IMPORTED_AFTER:-}" '
+  LIVE=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
+    | jq -er '[.status.traffic[] | select((.percent // 0) > 0)] | if length == 1 then .[0].revisionName
+      else error("traffic is not on one revision") end')
+  SEEN=$(logs "$REQUESTS AND resource.labels.revision_name=\"$REVISION\" AND timestamp>=\"$(ago 2592000)\" AND timestamp<\"$DELETED_AT\"" --limit=1)
+  [ "$(jq length <<<"$SEEN")" -gt 0 ] \
+  || { echo "no request entry of $REVISION in the 30 days before the delete: the request log is not visible, so this check cannot pass" >&2; exit 1; }
+  SEEN=$(logs "$REQUESTS AND resource.labels.revision_name=\"$LIVE\" AND timestamp>=\"$DELETED_AT\"" --limit=1)
+  [ "$(jq length <<<"$SEEN")" -gt 0 ] \
+  || { echo "no request entry of the serving revision $LIVE since the delete: load the Studio once and rerun; if that does not help, the request log is not visible" >&2; exit 1; }
+  RECENT=$(logs "$REQUESTS AND resource.labels.revision_name=\"$REVISION\" AND timestamp>=\"$(ago 900)\"")
+  jq -er --arg deleted "$DELETED_AT" --arg repaired "${REPAIRED_AFTER:-}" '
     def secs: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
     [.[] | {at: .timestamp, end: ((.timestamp | secs) + ((.httpRequest.latency // "0s") | rtrimstr("s") | tonumber))}
       | select(.end > ($deleted | fromdateiso8601))] as $late
     | if ($late | length) == 0 then "no request of the revision ran past the delete"
-      elif $imported != "" and ($imported | fromdateiso8601) > ($late | map(.end) | max) then "\($late | length) requests ran past the delete, all ended before IMPORTED_AFTER"
+      elif $repaired != "" and ($repaired | fromdateiso8601) > ($late | map(.end) | max) then "\($late | length) requests ran past the delete, all ended before REPAIRED_AFTER"
       else ("\($late | length) requests ran past the delete, the last ending at \($late | map(.end) | max | todateiso8601):\n"
         + ($late | map("  received \(.at), ended \(.end | todateiso8601)") | join("\n"))
-        + "\nRerun import --apply and gate as the step says, then rerun this check\n" | halt_error(1)) end'
-  curl -fsSG -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+        + "\nRun import --apply, gate and the guarded close-open-turns --apply as the step says, then rerun this check with REPAIRED_AFTER set to the time the repair started\n" | halt_error(1)) end' <<<"$RECENT"
+  METRIC=$(curl -fsSG -H "Authorization: Bearer $(gcloud auth print-access-token)" \
     "https://monitoring.googleapis.com/v3/projects/$PROJECT_ID/timeSeries" \
     --data-urlencode "filter=metric.type=\"run.googleapis.com/container/instance_count\" AND resource.labels.revision_name=\"$REVISION\"" \
     --data-urlencode "interval.startTime=$DELETED_AT" \
-    --data-urlencode "interval.endTime=$(date -u +%FT%TZ)" \
-  | jq -er --arg gone "$REVISION" '
+    --data-urlencode "interval.endTime=$(date -u +%FT%TZ)")
+  jq -er --arg gone "$REVISION" '
     if ((.executionErrors // []) | length) > 0 then ("the answer carries executionErrors\n" | halt_error(1))
     elif (.nextPageToken // "") != "" then ("the answer has a next page\n" | halt_error(1))
-    elif any((.timeSeries // [])[]; (.points[0].value.int64Value | tonumber) > 0) then ("the newest instance count of \($gone) is above 0; rerun later\n" | halt_error(1))
-    else "\($gone): deleted, and no instance counted at its newest point" end'
+    elif any((.timeSeries // [])[]; (.points[0].value.int64Value | tonumber) > 0
+        and (.points[0].interval.endTime | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > now - 300)
+      then ("an instance count of \($gone) above 0 is less than 5 minutes old; rerun later\n" | halt_error(1))
+    else "\($gone): deleted, and no instance counted in the last 5 minutes" end' <<<"$METRIC"
 )
 ```
 
-A request that ran past the delete may have written ADK's ledger sessions or the harness tables after the gate. The check lists each one and the last end time, and exits 1. Then, on the import job of the release that added the conversation tables, record the time, run `import --apply` and `gate`, and rerun the check with `IMPORTED_AFTER` set to the recorded time, which must be later than the last end it printed:
+A request that ran past the delete may have written ADK's ledger sessions, when it ran on the revision before the import, or opened or paused a turn on ADK, when it ran on the release that added the conversation tables. The check lists each one and the last end time, and exits 1. Then record the time, run that release's import job's `import --apply` and `gate`, and run its guarded `close-open-turns --apply` until it exits 0, as that release's `deploy/README.md` gives it, with `NEXT` set to the serving revision of the release before this one. Then rerun the check with `REPAIRED_AFTER` set to the recorded time, which must be later than the last end it printed:
 
 ```
-IMPORTED_AFTER=$(date -u +%FT%TZ) \
+REPAIRED_AFTER=$(date -u +%FT%TZ) \
 && gcloud run jobs execute "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --wait \
   --args=-m,harness.adk_import,import,--apply \
 && gcloud run jobs execute "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --wait \
   --args=-m,harness.adk_import,gate \
-&& echo "IMPORTED_AFTER=$IMPORTED_AFTER"
+&& echo "REPAIRED_AFTER=$REPAIRED_AFTER"
 ```
+
+Once the check passes for every deleted revision, run the guarded `close-open-turns --apply` again until it exits 0. A revision of the release that added the conversation tables can open or pause a turn on ADK after the last run and before its delete, and the check passes on a request that ended before the delete.
 
 Then deploy this image as usual: its startup applies the migration. In each environment, as soon as the release has started and taken traffic, create the job and execute the `restore` dry run. Its exit status 0 and the ADK tables it lists, all five, are the evidence that the archive holds every table a manual restore would need: `restore` refuses when the archive lacks any of them. Keep the job: a manual recovery uses it.
 
@@ -443,7 +470,7 @@ Each later verb is an execution of the same job with its own arguments, for exam
 
 The only supported rollback target is the release before this one. It reads conversations from the harness tables only, and reads neither ADK's tables nor `adk_ledger_imports`, so it serves with the archive in place. Its startup logs `0005_rename_adk_tables.sql` as applied by a later release and carries on. Moving traffic back to it needs no step here.
 
-An image refuses to start (`MigrationChecksumError`) only against a database that recorded a migration file the image lacks whose name sorts at or below the image's own newest file. The image that added the conversation tables holds 0001 and 0002, the release before this one 0001 to 0004, and this image 0001 to 0005, and the lease check that runs before `0003_turns.sql` (`harness.db.cutover_gates`) adds no file. So every rollback starts:
+An image refuses to start with `MigrationChecksumError` when an applied file's bytes changed, which no release does, or when the database recorded a migration file the image lacks whose name sorts at or below the image's own newest file. This image also refuses with `DFA05` beside ADK's live tables (above). The image that added the conversation tables holds 0001 and 0002, the release before this one 0001 to 0004, and this image 0001 to 0005, and the checks that run before `0003_turns.sql` and `0005_rename_adk_tables.sql` (`harness.db.cutover_gates`) add no file. So every rollback starts:
 
 | Rollback to                                    | Database              | Starts                             | Step                                                                                                 |
 | ---------------------------------------------- | --------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------- |

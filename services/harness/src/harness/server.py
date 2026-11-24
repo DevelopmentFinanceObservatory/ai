@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import functools
 import ipaddress
+import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
@@ -45,6 +46,7 @@ from harness import __version__
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
 from harness.db.adk_archive import PREFIX, archive_state, ledger_resolves, live_adk_tables
+from harness.db.cutover_gates import LAPSED_LEDGER_LEASES
 from harness.db.engine import DatabaseHandle, build_database
 from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.early_mint import EarlyMints
@@ -244,18 +246,20 @@ async def _retry_startup_step(
 
 
 class _MigrationRefusedError(RuntimeError):
-    """A migration raised a SQLSTATE beginning `DFA`, its own refusal to run
-    against this database (`0003_turns.sql` and `0005_rename_adk_tables.sql`),
-    or `_refuse_beside_adk_tables` refused with `DFA05`. The database does
-    not change by waiting. The live-lease check before 0003
-    (`harness.db.cutover_gates`) raises `DFR02` instead, which the startup
-    retries within its budget, since a lease lapses on its own. The message leads with the SQLSTATE, which
-    deploy/README.md lists with each refusal's manual step. A `DFA05`
-    refusal also carries the `tables` it names and `archive_present`,
-    whether an `adk_archive_<name>` table resolves, which decides the step, and
-    `foreign_archive_names`, the tables of an archive name that resolve
-    without the archive's columns, and `ledger_present`, whether
-    `adk_ledger_imports` resolves under its own name."""
+    """A refusal to start that waiting does not change: a SQLSTATE beginning
+    `DFA` raised by a migration (`0003_turns.sql`,
+    `0005_rename_adk_tables.sql`) or by a check before one
+    (`harness.db.cutover_gates`: DFA06, DFA07), or `DFA05` from
+    `_refuse_beside_adk_tables`. The live-lease check before 0003 raises
+    `DFR02` instead, which startup retries within its budget, since a lease
+    lapses on its own. `sqlstate` holds the code, which deploy/README.md
+    lists with each refusal's manual step, and the message leads with it. A
+    `DFA05` refusal also carries the `tables` it names; `beside`, those of
+    them whose own `adk_archive_<name>` resolves (the rest are without it);
+    `archive_present`, whether any `adk_archive_<name>` table resolves,
+    which decides the step; `foreign_archive_names`, the tables of an archive
+    name that resolve without the archive's columns; and `ledger_present`,
+    whether `adk_ledger_imports` resolves under its own name."""
 
     def __init__(
         self,
@@ -263,6 +267,7 @@ class _MigrationRefusedError(RuntimeError):
         message: str,
         *,
         tables: tuple[str, ...] = (),
+        beside: tuple[str, ...] = (),
         archive_present: bool = False,
         foreign_archive_names: tuple[str, ...] = (),
         ledger_present: bool = False,
@@ -270,6 +275,7 @@ class _MigrationRefusedError(RuntimeError):
         super().__init__(f"{sqlstate}: {message}")
         self.sqlstate = sqlstate
         self.tables = tables
+        self.beside = beside
         self.archive_present = archive_present
         self.foreign_archive_names = foreign_archive_names
         self.ledger_present = ledger_present
@@ -293,10 +299,11 @@ async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
         return
     archive, foreign = await archive_state(engine)
     archived_names = {qualified.rpartition(".")[2] for qualified in archive}
-    beside = []
-    for table in tables:
-        twin = PREFIX + table.rpartition(".")[2]
-        beside.append(f"{table} ({'beside' if twin in archived_names else 'without'} {twin})")
+    beside = tuple(t for t in tables if PREFIX + t.rpartition(".")[2] in archived_names)
+    named = [
+        f"{t} ({'beside' if t in beside else 'without'} {PREFIX + t.rpartition('.')[2]})"
+        for t in tables
+    ]
     detail = f"The archive resolves: {', '.join(archive)}." if archive else "No archive resolves."
     for qualified in foreign:
         detail += f" {qualified} resolves but is not the archive."
@@ -308,10 +315,11 @@ async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
     )
     raise _MigrationRefusedError(
         "DFA05",
-        f"ADK's tables resolve on search_path under their own names: {', '.join(beside)}. "
+        f"ADK's tables resolve on search_path under their own names: {', '.join(named)}. "
         f"{detail} This image does not start beside them, since an image that reads them "
         "may be serving. deploy/README.md's DFA05 entry gives the step for each case.",
         tables=tuple(tables),
+        beside=beside,
         archive_present=bool(archive),
         foreign_archive_names=tuple(foreign),
         ledger_present=ledger,
@@ -322,10 +330,12 @@ async def _apply_migrations_with_retries(
     engine: AsyncEngine,
     *,
     budget_s: float,
+    lapsed_ledger_leases: Sequence[str] = (),
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], float] = time.monotonic,
 ) -> None:
-    """Retry `apply_pending` under `_retry_startup_step`'s budget. An
+    """Retry `apply_pending` under `_retry_startup_step`'s budget, passing
+    `lapsed_ledger_leases` (`Settings.lapsed_ledger_leases`) to its checks. An
     attempt has no bound of its own. `apply_pending` bounds each statement
     with `statement_timeout`, each lock wait with `lock_timeout` and each
     call it makes with `MIGRATION_CALL_TIMEOUT_S`, this budget, so a
@@ -339,7 +349,10 @@ async def _apply_migrations_with_retries(
 
     async def attempt() -> None:
         try:
-            await apply_pending(engine)
+            await apply_pending(
+                engine,
+                check_settings={LAPSED_LEDGER_LEASES: json.dumps(list(lapsed_ledger_leases))},
+            )
         except asyncpg.PostgresError as exc:
             sqlstate = getattr(exc, "sqlstate", None) or ""
             if sqlstate.startswith("DFA"):
@@ -382,6 +395,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _apply_migrations_with_retries(
         app.state.database_engine,
         budget_s=_STARTUP_DB_RETRY_BUDGET_S,
+        lapsed_ledger_leases=app.state.settings.lapsed_ledger_leases,
     )
     # A 401 from a mounted app reaches an MCP client as a raised `MCPError`,
     # not a tool result: `raise_on_error=False` on `call_tool` doesn't catch
