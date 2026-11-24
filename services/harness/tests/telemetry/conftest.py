@@ -233,10 +233,11 @@ class _OpenSpans(SpanProcessor):
             self.open.pop(span.context.span_id, None)
 
 
-def _metadata(span: Span, key: str) -> str | None:
+def _metadata(span: Span, key: str) -> object:
+    """The metadata value, decoded from the JSON the SDK encodes it as."""
     for attribute in span.attributes:
         if attribute.key == f"langfuse.observation.metadata.{key}":
-            return attribute.value.string_value
+            return json.loads(attribute.value.string_value)
     return None
 
 
@@ -248,7 +249,7 @@ class Quiescence:
     caplog: pytest.LogCaptureFixture
     spans: _OpenSpans
 
-    def outcomes(self, status: str = "closed") -> list[tuple[str | None, str | None]]:
+    def outcomes(self, status: str = "closed") -> list[tuple[object, object]]:
         """`(wire trace id, error)` of every exported `turn` observation of a
         close, or with `status="paused"` of every `turn.pause` observation."""
         name = telemetry.TURN_PAUSE_NAME if status == "paused" else telemetry.TURN_SPAN_NAME
@@ -258,7 +259,7 @@ class Quiescence:
             if span.name == name and (_metadata(span, "dfo.turn_status") or "closed") == status
         ]
 
-    def lines(self, status: str = "closed") -> list[tuple[str | None, str | None]]:
+    def lines(self, status: str = "closed") -> list[tuple[object, object]]:
         """`(trace_id, error)` of every `studio.turn` line logged for a close,
         or with `status="paused"` for a pause."""
         return [
