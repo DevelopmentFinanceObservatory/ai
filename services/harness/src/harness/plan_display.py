@@ -676,7 +676,7 @@ def _entity_whole_concept(
     sector: str | None,
     measure: str,
 ) -> str:
-    """What a declared whole leaving a donor or recipient axis open fetches,
+    """What a declared whole fetches,
     as the plan card names it (`_concept`), by `concept_name`'s order: the concept
     Search states for the whole's `source`, else for its part's `part`, else
     the `sector` option the whole was counted on, else the label Search
@@ -1161,23 +1161,6 @@ def concept_name(
     return concept_label or sector or measure_label or measure
 
 
-# What a declared whole fetches, by the axis it opens (`WholeOf.axis`), with the
-# preposition that sets it after a measure.
-_WHOLE_NAMES = {
-    "sector": ("in", "all sectors"),
-    "donor": ("from", "all donors"),
-    "recipient": ("to", "all recipients"),
-}
-
-
-def whole_name(axis: str, *, measure: str | None = None) -> str:
-    """What a declared whole leaving `axis` open fetches ("all sectors", "all
-    donors"), on `measure` when given ("gross disbursements in all sectors",
-    "gross disbursements from all donors")."""
-    preposition, name = _WHOLE_NAMES[axis]
-    return f"{measure} {preposition} {name}" if measure else name
-
-
 def _concept(
     requirement: DatasetRequirement,
     plan: Plan,
@@ -1187,18 +1170,17 @@ def _concept(
     """What `requirement` fetches, in the reader's words, as `_concepts` names it
     (`concept_name`), read off the scope decisions it cites and its source.
 
-    A declared whole (`DatasetRequirement.whole_of`) is its part with the
-    part's axis opened, and ignores the planner's `measure`. Over every
-    sector it is named by that axis ("all sectors"). Over every donor or
-    recipient it is named off its own source and its part's
+    A declared whole (`DatasetRequirement.whole_of`) is its part with one
+    axis widened, and ignores the planner's `measure`. It is named off its
+    own source, Search's answer for the whole, and its part's
     (`_entity_whole_concept`), on the sector option the whole cites, else
     its part's, else by its part's `measure`; the parties it reads (`_who`,
     `_parties`) name the population its source holds there. A plan not
     compiled reads its source off `sources` (`_source`)."""
     if requirement.whole_of is not None:
         part = plan.requirement(requirement.whole_of.part)
-        if requirement.whole_of.axis == "sector" or not isinstance(part, DatasetRequirement):
-            return whole_name(requirement.whole_of.axis)
+        if not isinstance(part, DatasetRequirement):
+            return requirement.measure
         sector = _governing(requirement, plan).get("sector") or _governing(part, plan).get("sector")
         return _entity_whole_concept(
             source=_source(requirement.id, plan, sources),

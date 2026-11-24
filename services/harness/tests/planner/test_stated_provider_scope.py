@@ -279,7 +279,7 @@ async def _propose(
     decisions: Sequence[dict[str, Any]] = (),
     *,
     words: str | None,
-    surface: _Search | None = None,
+    surface: _Search | _Wholes | None = None,
     reader: _Reader | None = None,
     answer_mode: str = "series",
     amends_version: int | None = None,
@@ -1874,3 +1874,261 @@ async def test_a_planner_draft_on_the_unpublished_caveats_slot_gives_way_to_code
     (written,) = [d for d in plan.decisions if d.slot == slot]
     assert written.caveat == "scope_unpublished"
     assert slot in plan.requirement("aid").decision_ids
+
+
+# --- a declared whole ------------------------------------------------------
+
+# Search's parts and the wholes it derives from them (`fixtures/share_wholes_through_search.json`).
+_WHOLES: dict[str, Any] = json.loads((_FIXTURES / "share_wholes_through_search.json").read_text())
+
+
+class _Wholes:
+    """A tool surface whose `resolve_definition` answers each recorded whole request:
+    the case whose `posted` identity, entries and `whole` the call posts, with its
+    whole, or its refusal as data-mcp relays it, `fix` carrying `cause` and
+    `alternatives` where given. Each call's arguments are recorded in `calls`."""
+
+    def __init__(
+        self,
+        *cases: Mapping[str, Any],
+        cause: str | None = None,
+        alternatives: Sequence[tuple[str, str]] = (),
+    ) -> None:
+        self.cases = cases
+        self.cause = cause
+        self.alternatives = alternatives
+        self.calls: list[Mapping[str, Any]] = []
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        del on_progress
+        assert tool.name == "resolve_definition", tool
+        self.calls.append(arguments)
+        (case,) = [
+            case
+            for case in self.cases
+            if case["posted"]
+            == {key: arguments.get(key) for key in ("identity", "scope_entries", "whole")}
+        ]
+        if "whole" in case:
+            part = {"status": "definite", "spec": copy.deepcopy(case["whole"])}
+            return ToolCallResult(
+                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}}
+            )
+        refused = case["refused"]
+        fix: dict[str, Any] = {"detail": refused["detail"]}
+        if self.cause is not None:
+            fix["cause"] = self.cause
+        if self.alternatives:
+            fix["alternatives"] = [{"ref": r, "label": label} for r, label in self.alternatives]
+        return ToolCallResult(
+            is_error=True,
+            structured_content={
+                "code": "upstream_error",
+                "retry_mode": "do_not_retry",
+                "message": refused["detail"],
+                "fix": fix,
+                "upstream_code": refused["code"],
+            },
+        )
+
+
+def _provider_share(
+    case: str, *, donor: str, period: tuple[int, int], measure: str = "bilateral ODA"
+) -> list[dict[str, Any]]:
+    """The recorded part `case` as a share of its whole over every provider."""
+    part = _WHOLES[case]["part"]
+    return [
+        _dataset("part", part["spec_id"], measure, donor=donor, period=period),
+        {
+            "kind": "dataset",
+            "id": "total",
+            "measure": "total ODA",
+            "period": {"start": period[0], "end": period[1]},
+            "whole_of": {"part": "part", "axis": "provider"},
+        },
+        _share("part", "total"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case", "donor", "period", "words"),
+    [
+        pytest.param("us_bilateral", "United States", (2010, 2023), None, id="us"),
+        pytest.param("g7_bilateral", "Group of Seven", (2015, 2023), _G7_BILATERAL, id="g7"),
+    ],
+)
+async def test_a_provider_whole_is_the_whole_search_derives_from_its_part(
+    case: str, donor: str, period: tuple[int, int], words: str | None
+) -> None:
+    """The bilateral share of US and of G7 ODA, its whole declared over every provider:
+    admission posts the part's base identity and scope entries as its block records
+    them, with `whole: {axis: provider}`, and pins the whole to Search's answer, DAC1
+    total ODA for the same donors. The share's caveat names the option the total counts
+    beside the part's."""
+    ctx = _Context()
+    recorded = _WHOLES[case]
+    _show(ctx, recorded["part"])
+    surface = _Wholes(recorded)
+
+    result = await _propose(
+        ctx,
+        _provider_share(case, donor=donor, period=period),
+        words=words,
+        surface=surface,  # type: ignore[arg-type]
+        answer_mode="computed",
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    (call,) = surface.calls
+    scope = recorded["part"]["resolved"]["scope_choices"]
+    assert call["identity"] == scope["base"]["identity"]
+    assert call["scope_entries"] == scope["entries"]
+    assert call["whole"] == {"axis": "provider"}
+    assert _pins(ctx) == {
+        "part": recorded["part"]["spec_id"],
+        "total": recorded["whole"]["spec_id"],
+    }
+    (held,) = [pin for pin in aligned_pins(ctx.state) if pin.whole_axis == "provider"]
+    assert held.origin == recorded["part"]["spec_id"]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (caveat,) = [d for d in plan.decisions if d.caveat == "derived_whole"]
+    assert caveat.fixes is not None
+    assert caveat.fixes.source_spec_id == recorded["whole"]["spec_id"]
+    assert "The total counts" in caveat.rationale
+
+
+async def test_a_donor_whole_holds_the_parts_provider_option_as_search_derives_it() -> None:
+    """The US share of all aid to Kenya, on DAC2a, divides by its part's whole over every
+    donor: Search's published total for official donors (DAC), on the part's bilateral
+    flows. It is admitted with no sum over the donor side, which Search binds to one
+    total."""
+    ctx = _Context()
+    recorded = _WHOLES["us_to_kenya"]
+    part = recorded["part"]
+    _show(ctx, part)
+    surface = _Wholes(recorded)
+    requirements = [
+        _dataset(
+            "us_oda",
+            part["spec_id"],
+            "ODA to Kenya",
+            donor="United States",
+            recipient="Kenya",
+            period=(2019, 2019),
+        ),
+        {
+            "kind": "dataset",
+            "id": "all_oda",
+            "measure": "ODA to Kenya from all donors",
+            "period": {"start": 2019, "end": 2019},
+            "whole_of": {"part": "us_oda", "axis": "donor"},
+        },
+        _share("us_oda", "all_oda"),
+    ]
+
+    result = await _propose(
+        ctx,
+        requirements,
+        words=None,
+        surface=surface,  # type: ignore[arg-type]
+        answer_mode="computed",
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert surface.calls[0]["whole"] == {"axis": "donor"}
+    assert _pins(ctx)["all_oda"] == recorded["whole"]["spec_id"]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.whole_sums == ()
+
+
+@pytest.mark.parametrize(
+    ("case", "axis", "cause", "alternatives", "expected"),
+    [
+        # US total ODA already counts every provider: Search refuses, stating no cause.
+        pytest.param(
+            "us_total", "provider", None, (), "requested_option_unavailable", id="code-only"
+        ),
+        # Saudi Arabia is no DAC member, so DAC countries' total cannot hold it.
+        pytest.param(
+            "saudi_oda",
+            "donor",
+            "part_outside_whole",
+            (("donor:members", "every donor"),),
+            "part_outside_whole",
+            id="cause-and-alternatives",
+        ),
+    ],
+)
+async def test_a_whole_search_refuses_is_one_underivable_refusal_with_searchs_cause(
+    case: str,
+    axis: str,
+    cause: str | None,
+    alternatives: tuple[tuple[str, str], ...],
+    expected: str,
+) -> None:
+    """A whole Search will not derive is refused under `SHARE_WHOLE_UNDERIVABLE`,
+    carrying Search's cause, else its code, and the options it offers in place of the
+    one refused, and nothing is held."""
+    ctx = _Context()
+    recorded = _WHOLES[case]
+    part = recorded["part"]
+    _show(ctx, part)
+    surface = _Wholes(recorded, cause=cause, alternatives=alternatives)
+    donor = "United States" if case == "us_total" else "Saudi Arabia"
+    requirements = [
+        _dataset("part", part["spec_id"], "ODA", donor=donor, period=(2019, 2022)),
+        {
+            "kind": "dataset",
+            "id": "total",
+            "measure": "total ODA",
+            "period": {"start": 2019, "end": 2022},
+            "whole_of": {"part": "part", "axis": axis},
+        },
+        _share("part", "total"),
+    ]
+
+    result = await _propose(
+        ctx,
+        requirements,
+        words=None,
+        surface=surface,  # type: ignore[arg-type]
+        answer_mode="computed",
+    )
+
+    assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert result["detail"]["whole"] == {
+        "whole_id": "total",
+        "part_spec_id": part["spec_id"],
+        "cause": expected,
+        "alternatives": [{"ref": ref, "label": label} for ref, label in alternatives],
+    }
+    assert not [pin for pin in aligned_pins(ctx.state) if pin.whole_axis == axis]
+    assert load_plan(ctx.state) is None
+
+
+async def test_a_whole_search_answers_with_no_derived_block_is_refused_unheld() -> None:
+    """Search's answer for a whole that states no derived whole, as a release before the
+    `whole` request answers, is no whole: refused under `whole_refused` and not held."""
+    ctx = _Context()
+    recorded = copy.deepcopy(_WHOLES["us_bilateral"])
+    del recorded["whole"]["resolved"]["scope_choices"]["derived"]
+    _show(ctx, recorded["part"])
+
+    result = await _propose(
+        ctx,
+        _provider_share("us_bilateral", donor="United States", period=(2010, 2023)),
+        words=None,
+        surface=_Wholes(recorded),  # type: ignore[arg-type]
+        answer_mode="computed",
+    )
+
+    assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert result["detail"]["whole"]["cause"] == "whole_refused"
+    assert not [pin for pin in aligned_pins(ctx.state) if pin.whole_axis == "provider"]

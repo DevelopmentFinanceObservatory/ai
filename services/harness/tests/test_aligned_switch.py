@@ -828,7 +828,7 @@ def _closed_share(kind: str) -> _ClosedShare:
                 "measure": "US total ODA",
                 "source_spec_id": None,
                 "entities": (),
-                "whole_of": WholeOf(part="health", axis="sector"),
+                "whole_of": WholeOf(part="health", axis="provider"),
             }
         )
         return _ClosedShare(

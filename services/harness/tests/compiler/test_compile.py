@@ -10202,7 +10202,7 @@ _G7_SHARE_RECORDING = json.loads(
     (_EVALS / "recordings" / "share-g7-africa-of-g7-total-aid.json").read_text()
 )
 _G7_WHOLE_ANSWER = json.loads(
-    (_EVALS / "recordings" / "answers" / "d3625d914901027d.json").read_text()
+    (_EVALS / "recordings" / "answers" / "27a1bf31adac9590.json").read_text()
 )
 
 
@@ -10210,9 +10210,8 @@ def test_a_recorded_g7_share_divides_by_the_whole_its_part_compiles_to(
     build: Callable[..., CompileResult],
 ) -> None:
     # G7 aid to Africa as a share of all G7 aid, the eval task's reference plan, on
-    # the blocks Search answered it with. The whole's definition binds the G7 on
-    # `origin` alone and Search reads its open recipient side as the
-    # developing-countries total, which the whole names by its ref.
+    # the blocks Search answered it with. The whole Search derived binds the G7 on
+    # `origin` and the developing-countries total on `destination`.
     payload = _G7_SHARE_TASK["reference_payload"]
     requirements = TypeAdapter(list[EvidenceRequirement]).validate_python(
         payload["evidence_requirements"]
@@ -10229,7 +10228,7 @@ def test_a_recorded_g7_share_divides_by_the_whole_its_part_compiles_to(
     blocks = _spec_blocks(_G7_SHARE_RECORDING["searches"]) | _spec_blocks(_G7_WHOLE_ANSWER)
     pins = {
         "g7_africa_aid": "spec_2a634c06dc3937cc8692b41d25268397",
-        "g7_total_aid": "spec_66627f5871d4ef51038b5ec8c69948a5",
+        "g7_total_aid": "spec_39ed9e4e43cac5bf1fc156ef783093f0",
     }
     sources = {rid: source_from_spec_block(blocks[spec_id]) for rid, spec_id in pins.items()}
 

@@ -8,15 +8,15 @@
       },
       "org.one.dfo/search_envelope": {
         "diagnostics": {
-          "engine_build": "6d0835248dbc7e8c27c69eb3f35a78c232351af4",
+          "engine_build": "unknown",
           "timed_out": false,
           "timing_ms": {
             "by_step": {
               "coverage": 0
             },
-            "total": 26
+            "total": 531
           },
-          "trace_id": "2f8280ecc8d04d26a1a902f280005716",
+          "trace_id": "8aceaea20e224b57b2421b47f75ac5f6",
           "warnings": []
         },
         "kind": "resolution",
@@ -36,6 +36,9 @@
               "definition": {
                 "identity": {
                   "entities": {
+                    "destination": [
+                      "DACDevelopingCountries"
+                    ],
                     "origin": [
                       "GroupOfSeven"
                     ]
@@ -88,7 +91,7 @@
                   ]
                 },
                 "schema_version": 1,
-                "spec_id": "spec_6637eb553704ff42592bfb07e06ba989"
+                "spec_id": "spec_d021de0638ff1f52a9dbde2399b83ce0"
               },
               "resolved": {
                 "alternative_measures": [],
@@ -105,7 +108,7 @@
                     "start_year": 1960
                   }
                 },
-                "coverage_stamp": "860f403d263f3638d66bddbac61c88a64e4547fde8d831505d582ff18781ffad",
+                "coverage_stamp": "2c15d791bbe8e59b84876cc361227cf5b834d4883651f7394abaf1481d43ca63",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
@@ -319,6 +322,9 @@
                   "base": {
                     "identity": {
                       "entities": {
+                        "destination": [
+                          "DACDevelopingCountries"
+                        ],
                         "origin": [
                           "GroupOfSeven"
                         ]
@@ -371,13 +377,56 @@
                       ]
                     },
                     "schema_version": 1,
-                    "spec_id": "spec_6637eb553704ff42592bfb07e06ba989"
+                    "spec_id": "spec_d021de0638ff1f52a9dbde2399b83ce0"
                   },
                   "choices": [
                     {
+                      "active": "region:members_only",
+                      "axis": "region",
+                      "id": "spec_d021de0638ff1f52a9dbde2399b83ce0:region",
+                      "options": [
+                        {
+                          "availability": {
+                            "detail": {},
+                            "status": "available"
+                          },
+                          "binding": {
+                            "add": [
+                              "DACAfricaUnallocated",
+                              "DACEasternAfricaUnallocated",
+                              "DACMiddleAfricaUnallocated",
+                              "DACNorthOfSaharaUnallocated",
+                              "DACSouthOfSaharaUnallocated",
+                              "DACSouthernAfricaUnallocated",
+                              "DACWesternAfricaUnallocated"
+                            ],
+                            "kind": "entities",
+                            "role": "destination"
+                          },
+                          "label": "Africa incl. regional and unspecified amounts",
+                          "option_id": "region:members_and_residuals"
+                        },
+                        {
+                          "availability": {
+                            "detail": {},
+                            "status": "available"
+                          },
+                          "binding": {
+                            "add": [],
+                            "kind": "entities",
+                            "role": "destination"
+                          },
+                          "label": "Africa's countries only",
+                          "option_id": "region:members_only"
+                        }
+                      ],
+                      "provenance": "default",
+                      "rule": "region_residuals"
+                    },
+                    {
                       "active": "measure_basis:net",
                       "axis": "measure_basis",
-                      "id": "spec_6637eb553704ff42592bfb07e06ba989:measure_basis",
+                      "id": "spec_d021de0638ff1f52a9dbde2399b83ce0:measure_basis",
                       "options": [
                         {
                           "availability": {
@@ -438,13 +487,13 @@
                           "option_id": "measure_basis:commitments"
                         }
                       ],
-                      "provenance": "explicit",
+                      "provenance": "default",
                       "rule": "measure_basis_convention"
                     },
                     {
                       "active": "provider:bilateral",
                       "axis": "provider",
-                      "id": "spec_6637eb553704ff42592bfb07e06ba989:provider",
+                      "id": "spec_d021de0638ff1f52a9dbde2399b83ce0:provider",
                       "options": [
                         {
                           "availability": {
@@ -485,8 +534,11 @@
                         },
                         {
                           "availability": {
-                            "detail": {},
-                            "status": "available"
+                            "code": "provider_not_offered",
+                            "detail": {
+                              "why": "destination_bilateral"
+                            },
+                            "status": "unavailable"
                           },
                           "binding": {
                             "kind": "provider",
@@ -496,7 +548,7 @@
                           "option_id": "provider:contributions"
                         }
                       ],
-                      "provenance": "explicit",
+                      "provenance": "default",
                       "rule": "bilateral_destinations"
                     }
                   ],
@@ -566,6 +618,9 @@
                     ],
                     "identity": {
                       "entities": {
+                        "destination": [
+                          "DACDevelopingCountries"
+                        ],
                         "origin": [
                           "GroupOfSeven"
                         ]
@@ -617,32 +672,52 @@
                         }
                       ]
                     },
-                    "spec_id": "spec_6637eb553704ff42592bfb07e06ba989"
+                    "spec_id": "spec_d021de0638ff1f52a9dbde2399b83ce0"
+                  },
+                  "derived": {
+                    "alternatives": [
+                      "recipient:members"
+                    ],
+                    "axis": "recipient",
+                    "kind": "published_total",
+                    "part": {
+                      "option_id": "recipient:named",
+                      "populations": {
+                        "destination": [
+                          "DACAfrica"
+                        ],
+                        "origin": [
+                          "GroupOfSeven"
+                        ]
+                      },
+                      "provider": "provider:bilateral",
+                      "spec_id": "spec_2a634c06dc3937cc8692b41d25268397"
+                    },
+                    "whole": {
+                      "option_id": "recipient:DACDevelopingCountries",
+                      "populations": {
+                        "destination": [
+                          "DACDevelopingCountries"
+                        ],
+                        "origin": [
+                          "GroupOfSeven"
+                        ]
+                      },
+                      "provider": "provider:bilateral",
+                      "spec_id": "spec_d021de0638ff1f52a9dbde2399b83ce0"
+                    },
+                    "years": [
+                      [
+                        1960,
+                        2024
+                      ]
+                    ]
                   },
                   "dropped_entries": [],
-                  "entries": [
-                    {
-                      "axis": "measure_basis",
-                      "option_id": "measure_basis:net",
-                      "origin": {
-                        "choice_id": "spec_2a634c06dc3937cc8692b41d25268397:measure_basis",
-                        "kind": "choice"
-                      },
-                      "provenance": "explicit"
-                    },
-                    {
-                      "axis": "provider",
-                      "option_id": "provider:bilateral",
-                      "origin": {
-                        "choice_id": "spec_2a634c06dc3937cc8692b41d25268397:provider",
-                        "kind": "choice"
-                      },
-                      "provenance": "explicit"
-                    }
-                  ],
-                  "id": "spec_6637eb553704ff42592bfb07e06ba989",
+                  "entries": [],
+                  "id": "spec_d021de0638ff1f52a9dbde2399b83ce0",
                   "ledger": [],
-                  "rule_version": "scope1:8fa547c2d7d0eaa55e822a30541be40b"
+                  "rule_version": "scope1:b4fafdb9789a931fb7c9e6ec1bc48aa1"
                 },
                 "sentence_plan": [
                   {
@@ -1110,7 +1185,7 @@
                   "sums_components": true
                 },
                 "trace": {
-                  "capability_version": "cap_b1f3369f84d185f6",
+                  "capability_version": "cap_890d4521b8bf88ab",
                   "query_qualifiers": [],
                   "resolved_entities": [
                     {
@@ -3208,18 +3283,48 @@
                 },
                 "unresolved_slots": []
               },
-              "spec_id": "spec_6637eb553704ff42592bfb07e06ba989"
+              "spec_id": "spec_d021de0638ff1f52a9dbde2399b83ce0"
             },
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "as_composite": 1,
-                "response_cache_part_memo": 0,
-                "served_entry": 21
+                "answer": 13,
+                "as_composite": 0,
+                "bind": 0,
+                "composite_continuation": 5,
+                "detect_edits": 0,
+                "finalize_preview": 0,
+                "finalize_related": 0,
+                "finalize_relaunch": 1,
+                "finalize_wholes": 0,
+                "ground_convert": 0,
+                "ground_facets": 0,
+                "ground_gates": 2,
+                "ground_related": 0,
+                "ground_units": 0,
+                "materialise": 12,
+                "options": 1,
+                "phase_build_bindings": 1,
+                "phase_build_shape": 0,
+                "phase_detect_edits": 0,
+                "phase_finalize": 0,
+                "phase_ground_build": 365,
+                "phase_materialise": 1,
+                "phase_reread_arcs": 0,
+                "phase_resolve_survivors": 0,
+                "phase_validate": 0,
+                "phase_where_places": 0,
+                "reread_arcs": 0,
+                "resolve_survivors": 0,
+                "served_entry": 109,
+                "shape": 1,
+                "validate": 0,
+                "walk": 1,
+                "where_places": 0
               },
-              "total": 22
+              "total": 512
             },
-            "variable_text": "spec_6637eb553704ff42592bfb07e06ba989",
+            "variable_text": "spec_2a634c06dc3937cc8692b41d25268397",
             "warnings": []
           }
         ],
@@ -3432,10 +3537,10 @@
       }
     },
     "structured_content": {
-      "spec_id": "spec_6637eb553704ff42592bfb07e06ba989",
+      "spec_id": "spec_2a634c06dc3937cc8692b41d25268397",
       "status": "definite"
     },
-    "text": "Search resolved the identity of spec_6637eb553704ff42592bfb07e06ba989: definite."
+    "text": "Search resolved the identity of spec_2a634c06dc3937cc8692b41d25268397: definite."
   },
-  "call": "resolve_definition {\"entity_groups\":{\"origin\":{\"label\":\"Group of Seven\",\"ref\":\"GroupOfSeven\"}},\"identity\":{\"entities\":{\"origin\":[\"GroupOfSeven\"]},\"facets\":{\"provenance\":{\"ref\":\"provenance/ONEDAC2aBilateral\",\"state\":\"value\"}},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialFlow\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"DAC2aAidType206\",\"state\":\"value\"},\"property\":\"dac2aAidType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"dacTypeOfFinance\"},{\"binding\":{\"ref\":\"Disbursement\",\"state\":\"value\"},\"property\":\"financialFlowType\"},{\"binding\":{\"ref\":\"Net\",\"state\":\"value\"},\"property\":\"nettingBasis\"}]},\"scope_entries\":[{\"axis\":\"measure_basis\",\"option_id\":\"measure_basis:net\",\"origin\":{\"choice_id\":\"spec_2a634c06dc3937cc8692b41d25268397:measure_basis\",\"kind\":\"choice\"},\"provenance\":\"explicit\"},{\"axis\":\"provider\",\"option_id\":\"provider:bilateral\",\"origin\":{\"choice_id\":\"spec_2a634c06dc3937cc8692b41d25268397:provider\",\"kind\":\"choice\"},\"provenance\":\"explicit\"}],\"spec_id\":\"spec_6637eb553704ff42592bfb07e06ba989\"}"
+  "call": "resolve_definition {\"entity_groups\":{\"destination\":{\"label\":\"Africa\",\"ref\":\"africa\"},\"origin\":{\"label\":\"Group of Seven\",\"ref\":\"GroupOfSeven\"}},\"identity\":{\"entities\":{\"destination\":[\"DACAfrica\"],\"origin\":[\"GroupOfSeven\"]},\"facets\":{\"provenance\":{\"ref\":\"provenance/ONEDAC2aBilateral\",\"state\":\"value\"}},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialFlow\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"DAC2aAidType206\",\"state\":\"value\"},\"property\":\"dac2aAidType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"dacTypeOfFinance\"},{\"binding\":{\"ref\":\"Disbursement\",\"state\":\"value\"},\"property\":\"financialFlowType\"},{\"binding\":{\"ref\":\"Net\",\"state\":\"value\"},\"property\":\"nettingBasis\"}]},\"scope_entries\":[],\"spec_id\":\"spec_2a634c06dc3937cc8692b41d25268397\",\"whole\":{\"axis\":\"recipient\"}}"
 }

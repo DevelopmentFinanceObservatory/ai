@@ -3908,10 +3908,10 @@ def test_a_recorded_plan_from_before_searchs_labels_reads_the_labels_search_comp
     )
 
 
-def test_a_declared_whole_is_named_by_the_axis_it_opens_and_never_the_planners_measure() -> None:
+def test_a_declared_whole_is_named_off_its_source_and_never_the_planners_measure() -> None:
     """The recorded US health share with its total declared the health part over
-    every sector, under the planner's measure "Total aid to health": the whole's
-    labels name all sectors, the part's sector opened, and never that measure."""
+    every provider, under the planner's measure "Total aid to health": the whole's
+    labels name what Search states its source fetches, and never that measure."""
     plan = _recorded_plan("long")
     plan = Plan.model_validate(
         {
@@ -3920,7 +3920,7 @@ def test_a_declared_whole_is_named_by_the_axis_it_opens_and_never_the_planners_m
                 r.model_copy(
                     update={
                         "measure": "Total aid to health",
-                        "whole_of": WholeOf(part="us_health_aid_raw", axis="sector"),
+                        "whole_of": WholeOf(part="us_health_aid_raw", axis="provider"),
                     }
                 )
                 if r.id == "us_total_aid_raw"
@@ -3932,13 +3932,15 @@ def test_a_declared_whole_is_named_by_the_axis_it_opens_and_never_the_planners_m
 
     labels = [row["label"] for row in card_rows(plan)]
 
+    total = "official development assistance"
     assert labels == [
         f"Fetch {_HEALTH} for United States",
         f"Total {_HEALTH}",
-        "Fetch all sectors for United States",
-        "Total all sectors",
-        f"{_HEALTH[0].upper()}{_HEALTH[1:]} as a share of all sectors",
+        f"Fetch {total} for United States",
+        f"Total {total}",
+        f"{_HEALTH[0].upper()}{_HEALTH[1:]} as a share of {total}",
     ]
+    assert not any("Total aid to health" in label for label in labels)
 
 
 @pytest.mark.parametrize(

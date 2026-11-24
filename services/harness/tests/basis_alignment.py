@@ -365,25 +365,26 @@ def total_without_bilateral() -> dict[str, Any]:
 
 
 class WholeCompiles:
-    """A tool surface whose `resolve_definition` answers the whole of the US health
-    part as Search recorded it, `whole` for a bilateral provider entry and
-    `whole_inclusive` for an inclusive one, or refuses with `refusal` when given,
-    recording each call's arguments in `calls`. With `searched`, its `search`
-    answers that part of `US_2023`, and is recorded in `calls` as well. With
-    `opened`, the whole also carries the part's sector choice, which Search
-    may return on the axis the whole leaves open."""
+    """A tool surface whose `resolve_definition` answers a whole request on the US
+    health part as Search derives it (`whole: {axis: provider}`): the part on
+    bilateral flows has as its whole the same part on the inclusive scope, the CRS's
+    declared provider whole, with `resolved.scope_choices.derived` stating the pair
+    (`derived_answer`); the part on the inclusive scope already is its whole, and is
+    refused `requested_option_unavailable`. With `refusal`, every whole request is
+    refused so. A compile on a provider option, with no `whole`, answers the health
+    part on that option.
+    Each call's arguments are recorded in `calls`. With `searched`, its `search`
+    answers that part of `US_2023`, and is recorded in `calls` as well."""
 
     def __init__(
         self,
         *,
         refusal: Mapping[str, Any] | None = None,
         searched: str | None = None,
-        opened: bool = False,
     ) -> None:
         self.calls: list[Mapping[str, Any]] = []
         self.refusal = refusal
         self.searched = searched
-        self.opened = opened
 
     async def list_tools(self) -> list[Any]:
         return []
@@ -399,23 +400,76 @@ class WholeCompiles:
                 is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}}
             )
         assert tool.name == "resolve_definition", tool
+        if "whole" not in arguments:
+            # A compile of the health part on a provider option, as alignment posts it.
+            (provider,) = [
+                e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "provider"
+            ]
+            name = {"provider:bilateral": "health", "provider:inclusive": "health_inclusive"}
+            part = US_2023[name[provider]]
+            return ToolCallResult(
+                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}}
+            )
+        assert arguments["whole"] == {"axis": "provider"}, arguments
         if self.refusal is not None:
             return ToolCallResult(is_error=True, structured_content=dict(self.refusal))
-        (provider,) = [
-            e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "provider"
-        ]
-        name = {"provider:bilateral": "whole", "provider:inclusive": "whole_inclusive"}[provider]
-        part = US_2023[name]
-        if self.opened:
-            part = json.loads(json.dumps(part))
-            scope = part["spec"]["resolved"]["scope_choices"]
-            (sector,) = [
-                c
-                for c in us_2023_block("health")["resolved"]["scope_choices"]["choices"]
-                if c["axis"] == "sector"
-            ]
-            scope["choices"] = [{**sector, "id": f"{scope['id']}:sector"}, *scope["choices"]]
+        # The health part takes bilateral flows by default, and posts an entry only
+        # where another option settled it.
+        provider = next(
+            (e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "provider"),
+            "provider:bilateral",
+        )
+        if provider != "provider:bilateral":
+            return ToolCallResult(is_error=True, structured_content=dict(PART_IS_WHOLE))
+        whole = derived_answer(us_2023_block("health"), us_2023_block("health_inclusive"))
+        part = {"status": "definite", "spec": whole}
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+
+# A whole request Search refuses because the part already is its whole, as data-mcp
+# relays it.
+PART_IS_WHOLE: Mapping[str, Any] = {
+    "code": "upstream_error",
+    "retry_mode": "do_not_retry",
+    "message": "The whole of this part cannot be derived: part_is_whole.",
+    "fix": {"detail": "The whole of this part cannot be derived: part_is_whole."},
+    "upstream_code": "requested_option_unavailable",
+}
+
+
+def derived_answer(
+    part: Mapping[str, Any],
+    whole: Mapping[str, Any],
+    *,
+    axis: str = "provider",
+    kind: str = "option",
+) -> dict[str, Any]:
+    """A copy of `whole`, the spec block of the whole of the spec block `part` on
+    `axis`, whose scope states the pair as Search derives it
+    (`resolved.scope_choices.derived`, of `kind`): each side's spec_id, its option on
+    the axis and on the provider axis, and its parties. A side with no provider choice
+    states no provider option."""
+
+    def side(block: Mapping[str, Any], option: str) -> dict[str, Any]:
+        scope = (block["resolved"].get("scope_choices") or {}).get("choices") or ()
+        provider = next((c["active"] for c in scope if c["axis"] == "provider"), None)
+        entities = block["definition"]["identity"].get("entities") or {}
+        return {
+            "spec_id": block["spec_id"],
+            "option_id": provider if axis == "provider" else f"{axis}:{option}",
+            **({"provider": provider} if provider is not None else {}),
+            "populations": {role: list(refs) for role, refs in entities.items()},
+        }
+
+    answered = json.loads(json.dumps(whole))
+    answered["resolved"]["scope_choices"]["derived"] = {
+        "axis": axis,
+        "kind": kind,
+        "part": side(part, "named"),
+        "whole": side(whole, "whole"),
+        "alternatives": [],
+    }
+    return answered
 
 
 class Overlapping:

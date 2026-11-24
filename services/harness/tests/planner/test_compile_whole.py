@@ -1,7 +1,8 @@
-"""The resubmits the planner posts to compile a pin on another basis or as a declared
-whole (`planner.source_reads.compile_on_basis`, `planner.source_reads.compile_whole`),
-where what a resubmit posts of the part's named sets cannot be read, or reads though
-the rest of the set does not."""
+"""The resubmits the planner posts to compile a pin on another basis or to ask for a
+declared whole (`planner.source_reads.compile_on_basis`,
+`planner.source_reads.compile_whole`), where what a resubmit posts of the part's named
+sets cannot be read, or reads though the rest of the set does not, or where the part
+has nothing on record to post."""
 
 from __future__ import annotations
 
@@ -38,50 +39,63 @@ def _with_groups(block: dict[str, Any], groups: dict[str, Any]) -> dict[str, Any
 
 
 @pytest.mark.parametrize(
-    ("axis", "role", "group", "posted"),
+    ("group", "posted"),
     [
-        # The set sits on a role the whole keeps, so the whole would lose it.
-        pytest.param("sector", "destination", _UNREADABLE, None, id="kept-role"),
-        # The set sits on the role the whole opens, which posts no set there.
-        pytest.param("donor", "origin", _UNREADABLE, {}, id="opened-role"),
-        # The set states no label, so the whole is posted without it.
-        pytest.param("sector", "destination", _UNLABELLED, {}, id="no-label"),
+        # The set's registry id is not text, so the whole would be posted without it.
+        pytest.param(_UNREADABLE, None, id="group-id-not-text"),
+        # The set states no label, so it names nothing to post.
+        pytest.param(_UNLABELLED, {}, id="no-label"),
         # The set's class is unknown, but the whole posts all it needs of it.
-        pytest.param(
-            "sector", "destination", _UNKNOWN_CLASS, {"destination": _POSTED}, id="unknown-class"
-        ),
+        pytest.param(_UNKNOWN_CLASS, {"destination": _POSTED}, id="unknown-class"),
     ],
 )
-async def test_a_whole_whose_kept_sets_cannot_be_read_is_refused_unposted(
-    axis: str, role: str, group: dict[str, Any], posted: dict[str, Any] | None
+async def test_a_whole_whose_sets_cannot_be_read_is_refused_unposted(
+    group: dict[str, Any], posted: dict[str, Any] | None
 ) -> None:
     """US health aid whose block names a set whose posted identity this release cannot
-    read. A whole keeping the set's role is refused under `groups_unreadable` with no
-    call to Search, since posting the identity without the set lets Search count
-    another population. A whole opening that role posts no set there, so it compiles,
-    as does one keeping a set stating no label, which names nothing to post.
-    A set naming a class of party this release does not know is posted by its label
-    and ref, which is all the resubmit sends."""
+    read. Its whole is refused under `groups_unreadable` with no call to Search, since
+    posting the part without the set lets Search count another population. A set
+    stating no label names nothing to post, and one naming a class of party this
+    release does not know is posted by its label and ref, which is all the resubmit
+    sends, so both are posted with the whole request."""
     surface = WholeCompiles()
     state = cast(SessionState, {})
-    block = _with_groups(us_2023_block("health"), {role: group})
+    block = _with_groups(us_2023_block("health"), {"destination": group})
     save_pin_sources(state, {block["spec_id"]: PinSource(block=block, settled=True)})
 
     read = await planner_source_reads.compile_whole(
         cast(ToolSurface, surface),
-        Realignment(block["spec_id"], (), _WHOLE, _WHOLE, whole_axis=axis),
+        Realignment(block["spec_id"], (), _WHOLE, _WHOLE, whole_axis="provider"),
         state=state,
     )
     refused = read(state)
 
     if posted is not None:
         (call,) = surface.calls
-        assert call.get("entity_groups", {}) == posted
+        assert (call.get("entity_groups", {}), call["whole"]) == (posted, {"axis": "provider"})
         return
     assert surface.calls == []
     assert refused is not None
     assert refused["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value
     assert cast(dict[str, Any], refused["detail"])["whole"]["cause"] == "groups_unreadable"
+
+
+async def test_a_whole_whose_part_has_no_definition_on_record_is_refused_unposted() -> None:
+    """A whole whose part's pin has no block on record has nothing to post: it is
+    refused under `part_unread` with no call to Search."""
+    surface = WholeCompiles()
+    state = cast(SessionState, {})
+
+    read = await planner_source_reads.compile_whole(
+        cast(ToolSurface, surface),
+        Realignment(us_2023_block("health")["spec_id"], (), _WHOLE, _WHOLE, whole_axis="provider"),
+        state=state,
+    )
+    refused = read(state)
+
+    assert surface.calls == []
+    assert refused is not None
+    assert cast(dict[str, Any], refused["detail"])["whole"]["cause"] == "part_unread"
 
 
 @pytest.mark.parametrize(

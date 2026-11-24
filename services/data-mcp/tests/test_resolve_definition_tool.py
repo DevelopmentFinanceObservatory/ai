@@ -189,11 +189,54 @@ async def test_scope_entries_are_posted_with_the_base_identity_and_the_compiled_
     assert json.loads(held.canonical_bytes) == spec["definition"]["identity"]
 
 
-async def test_a_scope_entry_search_refuses_names_search_s_code() -> None:
+async def test_a_whole_request_is_posted_beside_the_scope_entries() -> None:
+    posted: list[dict[str, Any]] = []
+    (entry,) = _SWITCH["request"]["input"]["entries"]
+
+    await _call(
+        _recorded_answer(posted, _SWITCH["response"]),
+        {
+            "spec_id": entry["variable_text"],
+            "identity": entry["identity"],
+            "scope_entries": entry["scope_entries"],
+            "whole": {"axis": "provider"},
+        },
+        InMemoryDefinitionStore(),
+    )
+
+    (sent,) = posted[0]["input"]["entries"]
+    assert (sent["scope_entries"], sent["whole"]) == (
+        entry["scope_entries"],
+        {"axis": "provider"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("extensions", "fix"),
+    [
+        pytest.param({}, {}, id="no-cause"),
+        # A whole request's refusal names its cause and the options that derive.
+        pytest.param(
+            {
+                "pointer": "/input/entries/0/whole",
+                "cause": {"code": "part_outside_whole", "entities": []},
+                "alternatives": [{"ref": "donor:members", "label": "every donor"}],
+            },
+            {
+                "cause": "part_outside_whole",
+                "alternatives": [{"ref": "donor:members", "label": "every donor"}],
+            },
+            id="cause-and-alternatives",
+        ),
+    ],
+)
+async def test_a_scope_entry_search_refuses_names_search_s_code(
+    extensions: dict[str, Any], fix: dict[str, Any]
+) -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(
             422,
-            content=json.dumps(_SWITCH["refusal"]).encode(),
+            content=json.dumps({**_SWITCH["refusal"], **extensions}).encode(),
             headers={"content-type": "application/problem+json"},
         )
 
@@ -211,6 +254,11 @@ async def test_a_scope_entry_search_refuses_names_search_s_code() -> None:
     assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["upstream_code"] == "requested_option_unavailable"
+    assert {
+        key: value
+        for key, value in result.structured_content["fix"].items()
+        if key in ("cause", "alternatives")
+    } == fix
 
 
 async def test_an_invalid_resolve_names_resolve_definition() -> None:
