@@ -48,7 +48,8 @@ later call naming the frame pair reads the same root as the call that named it.
 verb, on each input, so the call computes the tree an explicit `filter` call and
 the verb over its result would, and gets its ids. The step's predicate reads the
 `{role}_type` column of the first typed role (`common.place_type.TYPED_ROLES`)
-the side keys by (`_place_role`), else of `observationAbout`, the one place role
+the side keys by (`_place_role`), a rank's `partition_by` after its `rank_by`
+(`_side_keys`), else of `observationAbout`, the one place role
 whose mixed levels refuse `place_levels_mixed`. A frame without that column
 refuses `role_ambiguous` on `predicates`, a parameter the caller did not send, so
 `verbs` rewrites that refusal for the columns `place_level_columns` names.
@@ -350,9 +351,11 @@ def _place_role(keys: tuple[str, ...]) -> str:
 
 
 def _side_keys(op_spec: OpSpecVariant) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """The columns `op_spec` keys `data` and `other` by."""
+    """The columns `op_spec` keys `data` and `other` by. A rank keys by `rank_by`, then
+    `partition_by`, so a rank of keys with no place keeps the partitions' places."""
     if isinstance(op_spec, RankOpSpec):
-        return op_spec.rank_by, op_spec.rank_by
+        keys = (*op_spec.rank_by, *op_spec.partition_by)
+        return keys, keys
     if isinstance(op_spec, AggregateOpSpec):
         return op_spec.group_by, op_spec.group_by
     numerator_by: tuple[str, ...] = getattr(op_spec, "numerator_by", ())

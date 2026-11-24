@@ -84,7 +84,7 @@ from planner.shapes import summed_sides as _summed_sides
 from planner.workflow import Period, SelectedSource
 
 from compiler.evidence import named_members, named_refs, open_axes_for, opens_place_axis
-from compiler.sources import bound_codes, stat_var_count
+from compiler.sources import bound_codes, cuts_party_totals, stat_var_count
 
 # The code system behind each breakdown dimension: the `get_data` breakdown's
 # `code_system`, the open axis a source's family varies along for it, and the
@@ -234,9 +234,11 @@ def shapes_for(
         own `rejects` check refused its input, when newer data leaves its
         years empty (`planner.shapes.years_run_out`), when newer data takes a
         growth's window year out of its input
-        (`planner.shapes.growth_endpoint_leaves`), or when it pairs an open
+        (`planner.shapes.growth_endpoint_leaves`), when it pairs an open
         side with a side on a newest year not resolved over it
-        (`planner.shapes.anchor_misses`).
+        (`planner.shapes.anchor_misses`), or when it follows the newest year
+        and a step under it reads a retrieval without party totals summed on
+        read (`_rolls_over_a_cut_sum`).
     """
     retrieve_by_requirement = {
         operation.requirement_id: operation.id
@@ -264,6 +266,7 @@ def shapes_for(
     shapes: dict[str, ResolvedShape] = {}
     issues: list[str] = []
     rolled: dict[str, frozenset[str]] = {}
+    summed_cut: dict[str, frozenset[str]] = {}
     for op_id in order:
         operation = operations.get(op_id)
         if operation is None:
@@ -287,15 +290,72 @@ def shapes_for(
             *(rolled[input_id] for input_id in operation_inputs(operation)),
             built.shape.roots if rolls(operation) else (),
         )
+        summed_cut[op_id] = frozenset().union(
+            *(summed_cut[input_id] for input_id in operation_inputs(operation)),
+            _summed_cut_reads(operation, shapes, operations, sources),
+        )
         sides = [shapes[input_id].shape for input_id in operation_inputs(operation)]
-        reason = (anchor_misses(sides, over[op_id]) if len(sides) > 1 else None) or _years_run_out(
-            operation, built.shape, sides, requirements, rolled=rolled[op_id]
+        reason = (
+            (anchor_misses(sides, over[op_id]) if len(sides) > 1 else None)
+            or _years_run_out(operation, built.shape, sides, requirements, rolled=rolled[op_id])
+            or _rolls_over_a_cut_sum(operation, summed_cut[op_id])
         )
         if reason is not None:
             issues.append(f"{op_id}: {reason}")
             continue
         shapes[op_id] = built
     return shapes, issues
+
+
+def _summed_cut_reads(
+    operation: Operation,
+    shapes: Mapping[str, ResolvedShape],
+    operations: Mapping[str, Operation],
+    sources: Mapping[str, SelectedSource],
+) -> frozenset[str]:
+    """The requirements of the retrievals `operation` reads summed on read whose source
+    cuts party totals.
+
+    A verb other than `filter` reading a retrieval the analysis runner sums
+    over its StatVars (`planner.shapes.FrameShape.summed_on_read`) reads the
+    sum, and over a retrieval without party totals (`sources.cuts_party_totals`)
+    the sum and the cut make a dataset version of their own. dfo-apis names no
+    version that one derives from, since the cut can drop periods (dfo-apis
+    conformance C121f).
+    """
+    if isinstance(operation, FilterOperation):
+        return frozenset()
+    found: set[str] = set()
+    for input_id in operation_inputs(operation):
+        read = operations.get(input_id)
+        if (
+            isinstance(read, RetrieveOperation)
+            and shapes[input_id].shape.summed_on_read
+            and cuts_party_totals(sources[input_id])
+        ):
+            found.add(read.requirement_id)
+    return frozenset(found)
+
+
+def _rolls_over_a_cut_sum(operation: Operation, summed_cut: frozenset[str]) -> str | None:
+    """Why a rolling `operation` refuses when a step under it reads the retrievals of the
+    requirements `summed_cut` summed on read, or `None` when it does not.
+
+    A run resolves a rolling step's newest year over its retrievals as fetched,
+    and analysis-mcp checks every root the step's call read against the
+    versions that year was resolved over. The sum of a retrieval without party
+    totals is a version of its own that no resolution names, so the call would
+    refuse `rolling_anchor_unresolved` at run time. Read summed at retrieval
+    (`stat_vars='sum'`), the newest year and the call read one version.
+    """
+    if not summed_cut or not rolls(operation):
+        return None
+    named = ", ".join(repr(requirement_id) for requirement_id in sorted(summed_cut))
+    return (
+        f"this step follows the newest year, found over {named} as retrieved, but a step "
+        "reads that family of StatVars summed, a version the newest year is not found over; "
+        f"read {named} summed (stat_vars='sum')"
+    )
 
 
 def _years_run_out(

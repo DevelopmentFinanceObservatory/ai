@@ -10,16 +10,16 @@ cells read as their labels (`common.breakdown_labels`), read from the graph
 nodes of the cells the digest names (`digest.digest_cells`). A digest with no
 cell labelled is rendered once.
 
-On a public call (`rebuild_lost_frames`), a frame the runner no longer holds
-(`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_` frame
-as the Spec root that fetches it at its newest version in its recorded rendering
-(`runner_tree.spec_root`), an `ops_` frame as the pair the runner computes from its
-stored recipe on current data (`runner_client.replay_derived`). A replay refused with a
-code the same request can get past (`common.refusal.REPOST_RECOVERS_CODES`, the upstream
-refreshing under the read) runs once more, and a second such refusal answers the call as
-the runner wrote it. The runner names one
-lost dataset per refusal, so a call over two lost datasets is sent again once per
-side, at most once per distinct frame argument. A `spec_` frame whose rendering
+On a public call (`rebuild_lost_frames`), a call or a replay refused with a code the same
+request can get past (`common.refusal.REPOST_RECOVERS_CODES`, the upstream refreshing under
+the read) is sent once more, and a second such refusal answers the call as the runner wrote
+it (`_sent_again_once`). A frame the runner no longer holds (`ToolRefusal.lost_frames`) is
+rebuilt and the call sent again: a `spec_` frame as the Spec root that fetches it at its
+newest version in its recorded rendering (`runner_tree.spec_root`), an `ops_` frame as the
+pair the runner computes from its stored recipe on current data
+(`runner_client.replay_derived`). The runner names one lost dataset per refusal, so a
+call over two lost datasets is sent again once per side, at most once per distinct frame
+argument. A `spec_` frame whose rendering
 cannot be established refuses as `spec_root` says. A replay the runner cannot run
 yet refuses with its own delay. When any other replay fails, the call refuses with
 the lost-frame refusal and the sentence that says so (`ToolRefusal.not_rebuilt`). The
@@ -49,7 +49,7 @@ from analysis_mcp.summary import VerbSummary
 from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal, to_tool_result
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Mapping
 
     from common.place_type import PlaceLevel
 
@@ -107,19 +107,27 @@ def _transient(refusal: ToolRefusal) -> bool:
     return refusal.code is ToolErrorCode.SERVICE_UNAVAILABLE or refusal.retry_after_s is not None
 
 
+async def _sent_again_once[T](send: Callable[[], Awaitable[T | ToolRefusal]]) -> T | ToolRefusal:
+    """What `send` answers, sent once more at once when it refuses with a code the same
+    request can get past (`common.refusal.REPOST_RECOVERS_CODES`). A second refusal
+    stands."""
+    answer = await send()
+    if isinstance(answer, ToolRefusal) and answer.code in REPOST_RECOVERS_CODES:
+        return await send()
+    return answer
+
+
 async def _rebuilt(
     ref: FrameRef, *, lost: ToolRefusal, default_enrichment: bool
 ) -> _Rebuilt | ToolRefusal:
     """The root that rebuilds `ref`, which the refusal `lost` names, or the refusal the
     call answers when no root can."""
     if ref.spec_id.startswith("ops_"):
-        replayed = await replay_derived(ref)
-        if isinstance(replayed, ToolRefusal) and replayed.code in REPOST_RECOVERS_CODES:
-            replayed = await replay_derived(ref)
-            if isinstance(replayed, ToolRefusal) and replayed.code in REPOST_RECOVERS_CODES:
-                return replayed
+        replayed = await _sent_again_once(lambda: replay_derived(ref))
         if isinstance(replayed, ToolRefusal):
-            return replayed if _transient(replayed) else lost.not_rebuilt()
+            if replayed.code in REPOST_RECOVERS_CODES or _transient(replayed):
+                return replayed
+            return lost.not_rebuilt()
         return _Rebuilt(ref=ref, node=replayed.model_dump())
     root = await spec_root(ref, default_enrichment=default_enrichment)
     return root if isinstance(root, ToolRefusal) else _Rebuilt(ref=ref, node=root)
@@ -184,8 +192,10 @@ async def run_on_runner(
     first. `follows_tree` lets a derived input's rolling years follow the call's
     tree (`run_tree`). `newest` are the Specs passed as bare `spec_id`s, held in
     `op_spec` under `runner_tree.newest_ref` and read at their newest version. With
-    `rebuild_lost_frames`, a lost frame is rebuilt (see the module docstring).
-    Without it, the runner's refusal is returned. `refine`, when given, rewrites a runner
+    `rebuild_lost_frames`, the public server's, a lost frame is rebuilt and a call the
+    upstream refreshed under is sent once more (see the module docstring). Without it,
+    the runner's refusal is returned, and the harness sends a step again itself
+    (`executor.classify.repost_recovers`). `refine`, when given, rewrites a runner
     refusal before it is returned. `heading`, when given, opens the digest of a
     `sum_of` or `quotient_of` computed under another tool's name.
 
@@ -220,7 +230,10 @@ async def run_on_runner(
             follows_tree=follows_tree,
         )
 
-    answer = await run()
+    async def send() -> VerbSummary | ToolRefusal:
+        return await (_sent_again_once(run) if rebuild_lost_frames else run())
+
+    answer = await send()
     rebuilt: dict[Pair, _Rebuilt] = {}
     lost: ToolRefusal | None = None
     frames = _frame_count(op_spec) if rebuild_lost_frames else 0
@@ -239,7 +252,7 @@ async def run_on_runner(
                 return to_tool_result(root)
             rebuilt[pair] = root
             replaced[pair] = root.node
-        answer = await run()
+        answer = await send()
     if isinstance(answer, ToolRefusal):
         if lost is not None and answer.lost_frames:
             return to_tool_result(answer.not_rebuilt())

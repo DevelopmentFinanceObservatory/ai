@@ -498,8 +498,8 @@ def _record(options: dict[str, Any]) -> MintRecord:
         ),
         (
             # data-mcp's flow enrichment order: the type columns, then party_kind,
-            # party_class and party_whole. The root sends them as the record lists
-            # them, and dfo-apis sorts and dedupes them.
+            # party_class and party_whole. The root sends them sorted and once, as
+            # a stored recipe's root names them.
             _record(
                 {
                     "format": "parquet",
@@ -522,8 +522,8 @@ def _record(options: dict[str, Any]) -> MintRecord:
                     "columns": [
                         "financingProvider_type",
                         "financingRecipient_type",
-                        "party_kind",
                         "party_class",
+                        "party_kind",
                         "party_whole",
                     ],
                 },
@@ -535,7 +535,7 @@ def _record(options: dict[str, Any]) -> MintRecord:
         "mint-record",
         "stat-vars-sum",
         "breakdown-with-columns",
-        "flow-columns-in-order-once",
+        "flow-columns-sorted-once",
     ],
 )
 async def test_a_get_data_frame_is_sent_as_the_dataset_version_its_mint_record_names(
@@ -2023,6 +2023,61 @@ async def test_a_replay_the_upstream_refreshed_under_is_run_once_more(
         assert (structured["code"], structured["retry_mode"]) == (code, retry_mode)
 
 
+@pytest.mark.parametrize(
+    ("public", "answers", "posts", "code"),
+    [
+        (
+            True,
+            [
+                _problem(503, "upstream_version_changed", retryable=True),
+                httpx2.Response(200, json=_recorded_ready("aggregate")),
+            ],
+            2,
+            None,
+        ),
+        (
+            True,
+            [_problem(503, "upstream_version_changed", retryable=True)] * 3,
+            2,
+            "upstream_version_changed",
+        ),
+        (
+            # The harness sends a step again itself (`executor.classify.repost_recovers`).
+            False,
+            [_problem(503, "upstream_version_changed", retryable=True)] * 2,
+            1,
+            "upstream_version_changed",
+        ),
+    ],
+    ids=["settles", "persists", "harness-call"],
+)
+async def test_a_public_call_the_upstream_refreshed_under_is_sent_once_more(
+    store: InMemoryMaterialisationStore,
+    public: bool,
+    answers: list[httpx2.Response],
+    posts: int,
+    code: str | None,
+) -> None:
+    """A bare Spec read while its source refreshed reads the refreshed version when sent
+    again at once, so a public call sends it once more and answers a second refusal as
+    the runner wrote it."""
+    replies = iter(answers)
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        # The answer's manifest, read to record the Spec read, is not held.
+        return _problem(404, "snapshot_not_found") if "get" in body else next(replies)
+
+    runner = _install(answer)
+    flags = {"rebuild_lost_frames": True, "rolling_follows_tree": True} if public else {}
+
+    result = await verbs.aggregate(frame_ref={"spec_id": _SPEC}, aggregation="sum", **flags)
+
+    assert sum(request.method == "POST" for request in runner.requests) == posts
+    structured = result.structured_content
+    assert structured is not None
+    assert structured.get("code") == code
+
+
 def _level_column(node: dict[str, Any]) -> str:
     """The column of the place_level predicate of the filter step `node`."""
     assert node["verb"] == "filter"
@@ -2039,6 +2094,16 @@ def _level_column(node: dict[str, Any]) -> str:
                 frame_ref=_FRAME, rank_by=("observationAbout",), place_level="Country"
             ),
             {"data": "observationAbout_type"},
+        ),
+        (
+            # The ranked purposes have no place: the level is the partitions' places.
+            lambda: verbs.rank(
+                frame_ref=_FRAME,
+                rank_by=("stat_var_crsPurpose",),
+                partition_by=("financingRecipient",),
+                place_level="Country",
+            ),
+            {"data": "financingRecipient_type"},
         ),
         (
             lambda: verbs.aggregate(frame_ref=_FRAME, aggregation="sum", place_level="Country"),
@@ -2075,6 +2140,7 @@ def _level_column(node: dict[str, Any]) -> str:
     ],
     ids=[
         "rank",
+        "rank-within-partitions",
         "aggregate-pooled-place",
         "aggregate-named-side",
         "share_of-each-side",
