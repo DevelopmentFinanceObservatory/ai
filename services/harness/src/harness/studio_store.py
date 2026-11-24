@@ -150,6 +150,7 @@ from harness.turn.store import (
     cursor_at,
     finish_on,
 )
+from harness.unit_offer import unit_words, whole_units
 from harness.wire import (
     STUDIO_FRAME_ADAPTER,
     CompositionManifest,
@@ -356,20 +357,7 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             "kind": p.kind,
             "plan_version": p.plan_version,
             "plan_revision": p.plan_revision,
-            "questions": [
-                {
-                    "id": q.id,
-                    "question": q.question,
-                    "options": dict(q.options),
-                    "skippable": q.skippable,
-                    "input": q.input.value,
-                    **({"unit": q.unit.model_dump(mode="json")} if q.unit is not None else {}),
-                    **(
-                        {"native_input": q.native_input.value} if q.native_input is not None else {}
-                    ),
-                }
-                for q in p.questions
-            ],
+            "questions": [_stored_question(q) for q in p.questions],
             "skippable": p.skippable,
             "legacy": p.legacy,
             "step_order": list(p.step_order),
@@ -461,17 +449,76 @@ def _units_back(frame: dict[str, Any], units: Mapping[str, Any] | None) -> dict[
     }
 
 
-# The `input` a unit question is stored with (`_unit_questions_apart`): one every
-# release's model holds, which with no `unit` passes the unit question's own check.
-_STORED_UNIT_INPUT = ElicitationInput.SINGLE_SELECT.value
+def _whole_unit_options(offer: UnitOffer) -> dict[str, str]:
+    """The options a unit question offering `offer` lists for a client that renders no
+    unit question, by id: its whole units (`whole_units`) in the user's words."""
+    return {option_id: unit_words(unit, offer) for option_id, unit in whole_units(offer).items()}
+
+
+# The key of a stored question that was a unit question (`_stored_question`).
+_OWN_INPUT = "own_input"
+
+
+def _stored_question(question: _PendingQuestion) -> dict[str, Any]:
+    """`question` as the conversation row keeps it. A unit question is kept in the
+    form a client that renders no unit question is asked it: a `single_select` over
+    the offer's whole units, with the offer and `native_input` `unit`, so a loader
+    whose models know no unit question reads an ordinary pick, and one that knows
+    the fallback answers it as a unit (`harness.studio._native_answer`). `own_input`
+    names its own form, which `_loaded_question` restores."""
+    stored: dict[str, Any] = {
+        "id": question.id,
+        "question": question.question,
+        "options": dict(question.options),
+        "skippable": question.skippable,
+        "input": question.input.value,
+        **({"unit": question.unit.model_dump(mode="json")} if question.unit is not None else {}),
+        **(
+            {"native_input": question.native_input.value}
+            if question.native_input is not None
+            else {}
+        ),
+    }
+    if question.input is ElicitationInput.UNIT and question.unit is not None:
+        stored |= {
+            "options": _whole_unit_options(question.unit),
+            "input": ElicitationInput.SINGLE_SELECT.value,
+            "native_input": ElicitationInput.UNIT.value,
+            _OWN_INPUT: ElicitationInput.UNIT.value,
+        }
+    return stored
+
+
+def _loaded_question(stored: Mapping[str, Any]) -> _PendingQuestion:
+    """The question `_stored_question` kept, a unit question in its own form again."""
+    own = stored.get(_OWN_INPUT) == ElicitationInput.UNIT.value
+    return _PendingQuestion(
+        id=stored["id"],
+        question=stored["question"],
+        options={} if own else dict(stored["options"]),
+        skippable=stored["skippable"],
+        # A question kept before inputs were stored is single-select.
+        input=ElicitationInput.UNIT
+        if own
+        else ElicitationInput(stored.get("input", ElicitationInput.SINGLE_SELECT)),
+        unit=UnitOffer.model_validate(stored["unit"]) if stored.get("unit") else None,
+        native_input=(
+            ElicitationInput(stored["native_input"])
+            if stored.get("native_input") and not own
+            else None
+        ),
+    )
 
 
 def _unit_questions_apart(frame: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """`frame` with each unit question stored as a `single_select` one with no offer,
-    and the offers taken out, by question id. An instance rolled back to a release
-    whose models lack the unit question loads the frame. The offers sit under a key of
-    their own, since the previous release's `_units_back` gives every frame with a
-    `frames_units` entry a `decisions` list, which an elicitation frame refuses."""
+    """`frame` with each unit question in the form a client that renders no unit
+    question is sent it: a `single_select` over the offer's whole units with no free
+    text and no offer (`_whole_unit_options`). The offers are taken out, by question
+    id, and `_unit_questions_back` puts them back. A loader whose models know no unit
+    question, and one that serves the fallback, then serve and answer the question as
+    the pending entry keeps it (`_stored_question`). The offers sit under a key of
+    their own, since a loader that gives every frame with a `frames_units` entry a
+    `decisions` list must still load an elicitation frame, which refuses one."""
     offers = {
         question["id"]: question["unit"]
         for question in frame.get("questions") or ()
@@ -480,7 +527,17 @@ def _unit_questions_apart(frame: dict[str, Any]) -> tuple[dict[str, Any], dict[s
     if not offers:
         return frame, {}
     questions = [
-        {k: v for k, v in question.items() if k != "unit"} | {"input": _STORED_UNIT_INPUT}
+        {k: v for k, v in question.items() if k != "unit"}
+        | {
+            "input": ElicitationInput.SINGLE_SELECT.value,
+            "options": [
+                {"id": option_id, "label": label}
+                for option_id, label in _whole_unit_options(
+                    UnitOffer.model_validate(offers[question["id"]])
+                ).items()
+            ],
+            "allow_free_text": False,
+        }
         if question["id"] in offers
         else question
         for question in frame["questions"]
@@ -490,13 +547,14 @@ def _unit_questions_apart(frame: dict[str, Any]) -> tuple[dict[str, Any], dict[s
 
 def _unit_questions_back(frame: dict[str, Any], offers: Mapping[str, Any] | None) -> dict[str, Any]:
     """`frame` with each question `offers` names a unit question again, its offer
-    restored (`_unit_questions_apart`)."""
+    restored and its fallback options dropped (`_unit_questions_apart`)."""
     if not offers:
         return frame
     return {
         **frame,
         "questions": [
-            {**question, "input": ElicitationInput.UNIT.value, "unit": offers[question["id"]]}
+            {k: v for k, v in question.items() if k != "options"}
+            | {"input": ElicitationInput.UNIT.value, "unit": offers[question["id"]]}
             if question.get("id") in offers
             else question
             for question in frame.get("questions") or ()
@@ -546,21 +604,7 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         ),
     )
     if "questions" in entry:
-        pending.questions = tuple(
-            _PendingQuestion(
-                id=q["id"],
-                question=q["question"],
-                options=dict(q["options"]),
-                skippable=q["skippable"],
-                # A question kept before inputs were stored is single-select.
-                input=ElicitationInput(q.get("input", ElicitationInput.SINGLE_SELECT)),
-                unit=UnitOffer.model_validate(q["unit"]) if q.get("unit") else None,
-                native_input=(
-                    ElicitationInput(q["native_input"]) if q.get("native_input") else None
-                ),
-            )
-            for q in entry["questions"]
-        )
+        pending.questions = tuple(_loaded_question(q) for q in entry["questions"])
         pending.skippable = entry["skippable"]
         pending.legacy = entry["legacy"]
     elif pending.kind == "elicitation":

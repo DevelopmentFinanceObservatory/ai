@@ -84,6 +84,7 @@ from harness.studio_store import (
 )
 from harness.turn.store import TurnStatus, TurnStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
+from harness.unit_offer import whole_units
 from harness.wire import (
     AddOp,
     ClientFeature,
@@ -1909,12 +1910,13 @@ def test_a_stored_pending_card_keeps_each_decision_s_unit_beside_the_card_and_fr
     assert (restored.card, restored.frames) == (card, (note, card))
 
 
-def test_a_stored_unit_question_keeps_its_offer_beside_the_frame() -> None:
+def test_a_stored_unit_question_is_kept_in_its_whole_units_form() -> None:
     """A unit question marks the emitted frame with the `unit` input and its offer. An
     instance rolled back to a model without them, or to one that adds `decisions` to
-    each frame holding units, cannot load a stored frame that holds them, so the frame
-    is stored with a single-select question and no offer, the offer under a key of its
-    own, and restored on load."""
+    each frame holding units, must still load the stored frame and answer the question.
+    So the frame and the pending question are kept in the form a client that renders
+    no unit question is asked it, a `single_select` over the offer's whole units, the
+    offer under a key of its own, and both are restored on load."""
     raw = json.loads(
         (
             Path(__file__).parent / "wire_fixtures" / "studio" / "event-18-elicitation-unit.json"
@@ -1922,17 +1924,32 @@ def test_a_stored_unit_question_keeps_its_offer_beside_the_frame() -> None:
     )
     asked = ElicitationRequest.model_validate(raw)
     note = MessageComplete(event="message.complete", seq=4, text="One question first.")
-    pending = _PendingInterrupt(adk_id="adk_1", kind="elicitation", frames=(note, asked))
+    question = dataclasses.replace(
+        _UNIT_QUESTION, id="q1", unit=asked.questions[0].unit, skippable=True
+    )
+    pending = _PendingInterrupt(
+        adk_id="adk_1",
+        kind="elicitation",
+        frames=(note, asked),
+        questions=(question,),
+        skippable=True,
+    )
 
     entry = studio_store._serialize_pending({"int_1": pending})["int_1"]
     restored = studio_store._deserialize_entry(json.loads(json.dumps(entry)))
 
-    (stored,) = [q for frame in entry["frames"] for q in frame.get("questions") or ()]
-    assert "unit" not in stored
-    assert stored["input"] == ElicitationInput.SINGLE_SELECT.value
-    # The previous release's `_units_back` gives a frame with an entry here `decisions`.
+    whole = list(whole_units(asked.questions[0].unit))
+    (framed,) = [q for frame in entry["frames"] for q in frame.get("questions") or ()]
+    assert "unit" not in framed
+    assert framed["input"] == ElicitationInput.SINGLE_SELECT.value
+    assert [option["id"] for option in framed["options"]] == whole
+    assert framed["allow_free_text"] is False
+    (kept,) = entry["questions"]
+    assert (kept["input"], kept["native_input"]) == ("single_select", "unit")
+    assert list(kept["options"]) == whole
     assert "frames_units" not in entry
     assert restored.frames == (note, asked)
+    assert restored.questions == (question,)
 
 
 def test_awaiting_answer_excludes_an_entry_marked_resuming() -> None:
