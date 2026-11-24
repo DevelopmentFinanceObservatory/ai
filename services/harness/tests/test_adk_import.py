@@ -37,16 +37,22 @@ from harness.adk_import import (
     IMPORTED_SEQ_MARGIN,
     LEDGER_APP,
     AdkSchemaError,
+    AdkTablesMissing,
+    GateReport,
     NamedTwice,
+    NextReleaseMissing,
+    TableBusy,
     TablesMissing,
     UnknownConversation,
     _stored_digest,
+    _stored_runs,
     close_open_turns,
     cutover_gate,
     import_conversations,
     main,
     open_turn_specs,
     reimport_on_access,
+    rollback_turn_sessions,
     verify,
 )
 from harness.conversation import current_conversation_key
@@ -196,6 +202,23 @@ async def _count(engine: AsyncEngine) -> int:
         return (await conn.execute(text("SELECT count(*) FROM conversations"))).scalar_one()
 
 
+# The columns of `turn_cursors` that `close-open-turns` reads. The next
+# release's first migration creates the table, and `--apply` refuses until it
+# exists.
+_TURN_CURSORS = (
+    "CREATE TABLE IF NOT EXISTS turn_cursors (id bigint GENERATED ALWAYS AS IDENTITY "
+    "PRIMARY KEY, conversation bigint NOT NULL REFERENCES conversations (id) "
+    "ON DELETE CASCADE, turn_index integer NOT NULL, status text NOT NULL, "
+    "UNIQUE (conversation, turn_index))"
+)
+
+
+async def _next_release_started(engine: AsyncEngine) -> None:
+    """The `turn_cursors` table the next release's first migration creates."""
+    async with engine.begin() as conn:
+        await conn.execute(text(_TURN_CURSORS))
+
+
 @pytest.fixture
 async def adk(pg_empty_engine: AsyncEngine) -> AsyncEngine:
     """A schema holding the recorded ADK rows and no harness tables."""
@@ -321,6 +344,316 @@ async def test_verify_counts_equal_conversations_and_names_each_difference(
         _name(TEXT_ONLY): ["not in the tables"],
     }
     assert report.render().splitlines()[-1] == "1 of 3 equal"
+
+
+async def test_verify_reads_adks_side_as_the_previous_release_did_so_a_mapping_error_differs(
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`read_ledger` maps one key to a wrong value. The import writes it, and
+    verify, whose ADK side loads the ledger session as the previous release
+    did, names the key as a difference."""
+    read = adk_import.read_ledger
+
+    def mismapped(state: dict[str, Any]) -> Any:
+        ledger = read(state)
+        ledger.flat["auto_add"] = not ledger.flat["auto_add"]
+        return ledger
+
+    monkeypatch.setattr(adk_import, "read_ledger", mismapped)
+    await import_conversations(adk, apply=True)
+
+    report = await verify(adk)
+
+    assert report.differences == {_name(c): ["auto_add"] for c in sorted(EXPECTED)}
+    assert not report.clean
+
+
+async def _add_turn_sessions(engine: AsyncEngine, principal: str, ids: list[str]) -> None:
+    """ADK turn sessions, as a release that runs turns on ADK creates them."""
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO sessions (app_name, user_id, id, state, create_time, update_time) "
+                "VALUES (:app, :principal, :id, '{}'::jsonb, now(), now())"
+            ),
+            [{"app": AGENT_NAME, "principal": principal, "id": i} for i in ids],
+        )
+
+
+async def _turn_session_ids(engine: AsyncEngine) -> list[tuple[str, str]]:
+    async with engine.connect() as conn:
+        rows = await conn.execute(
+            text("SELECT user_id, id FROM sessions WHERE app_name = :app ORDER BY user_id, id"),
+            {"app": AGENT_NAME},
+        )
+        return [tuple(row) for row in rows]
+
+
+async def test_rollback_turn_sessions_deletes_each_turn_session_above_the_ledgers_turn_index(
+    adk: AsyncEngine,
+) -> None:
+    """This release served turns 5 and 6 of a conversation whose ledger
+    session ADK left at turn 4. Before the previous release serves again,
+    the job deletes those turn sessions, and only those: not a turn session
+    at or below the index, one whose number is not a turn number, or one the
+    previous release claimed since (its index is written first). It deletes
+    every turn session of a conversation with no ledger session, as one
+    started on this release, whatever its id begins with or whose it is."""
+    await import_conversations(adk, apply=True)
+    ahead = [f"{FULL}#t5", f"{FULL}#t6"]
+    await _add_turn_sessions(
+        adk,
+        PRINCIPAL,
+        [*ahead, f"{FULL}#tx", f"{FULL}#t12345678901", f"{FULL}0#t10", f"{FULL}0#t9", "c#t#t1"],
+    )
+    await _add_turn_sessions(adk, "u_other", [f"{FULL}#t7"])
+    before = await _turn_session_ids(adk)
+    started_here = {
+        f"{PRINCIPAL}/c#t": ["c#t#t1"],
+        f"{PRINCIPAL}/{FULL}0": [f"{FULL}0#t9", f"{FULL}0#t10"],
+        f"u_other/{FULL}": [f"{FULL}#t7"],
+    }
+
+    dry = await rollback_turn_sessions(adk, apply=False)
+
+    assert (dry.ahead, dry.clean) == ({_name(FULL): ahead, **started_here}, False)
+    assert await _turn_session_ids(adk) == before
+
+    # The previous release claimed turn 5, closing the pause it held.
+    await _set_adk_state(adk, FULL, {"studio:turn_index": 5, "studio:pending": {}})
+    applied = await rollback_turn_sessions(adk, apply=True)
+
+    assert (applied.ahead, applied.clean) == ({_name(FULL): [f"{FULL}#t6"], **started_here}, False)
+    assert applied.render().splitlines()[-1].endswith("run again until none is found")
+    deleted = {f"{FULL}#t6", *(i for ids in started_here.values() for i in ids)}
+    assert await _turn_session_ids(adk) == [row for row in before if row[1] not in deleted]
+    assert (await rollback_turn_sessions(adk, apply=True)).clean
+
+    await _set_adk_state(adk, PLAN_PAUSED, {"studio:turn_index": "1"})
+    unreadable = await rollback_turn_sessions(adk, apply=True)
+    assert (unreadable.unreadable, unreadable.clean) == ([_name(PLAN_PAUSED)], True)
+
+    # A stream of this release holds a conversation, with a ledger session or
+    # without: `--apply` leaves both alone until the lease lapses.
+    await _add_turn_sessions(adk, PRINCIPAL, [f"{TEXT_ONLY}#t9", "conv_late#t1"])
+    async with adk.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO conversations (principal, conversation_id) VALUES (:p, 'conv_late')"),
+            {"p": PRINCIPAL},
+        )
+    await _lease(adk, TEXT_ONLY, 600)
+    await _lease(adk, "conv_late", 600)
+    streaming = await rollback_turn_sessions(adk, apply=True)
+    assert (streaming.ahead, streaming.exit_status) == ({}, 5)
+    assert sorted(streaming.live) == sorted([_name(TEXT_ONLY), f"{PRINCIPAL}/conv_late"])
+    assert {(PRINCIPAL, f"{TEXT_ONLY}#t9"), (PRINCIPAL, "conv_late#t1")} <= set(
+        await _turn_session_ids(adk)
+    )
+    await _lease(adk, TEXT_ONLY, -1)
+    await _lease(adk, "conv_late", -1)
+    lapsed = await rollback_turn_sessions(adk, apply=True)
+    assert (lapsed.ahead, lapsed.live, lapsed.exit_status) == (
+        {_name(TEXT_ONLY): [f"{TEXT_ONLY}#t9"], f"{PRINCIPAL}/conv_late": ["conv_late#t1"]},
+        [],
+        1,
+    )
+    assert (await rollback_turn_sessions(adk, apply=True)).exit_status == 0
+
+
+async def _ledger_pending(engine: AsyncEngine, conversation_id: str) -> Any:
+    async with engine.connect() as conn:
+        return (
+            await conn.execute(
+                text(
+                    "SELECT state -> 'studio:pending' FROM sessions WHERE app_name = :app "
+                    "AND id = :id"
+                ),
+                {"app": LEDGER_APP, "id": conversation_id},
+            )
+        ).scalar_one()
+
+
+async def test_rollback_clears_a_pause_this_release_resumed_and_keeps_one_it_did_not(
+    adk: AsyncEngine,
+) -> None:
+    """ADK holds FULL and PLAN_PAUSED paused on a card. This release resumed
+    FULL's pause, so its row no longer holds that interrupt: the rollback
+    clears the interrupt on ADK, so the previous release shows no card and
+    cannot resume the turn a second time. PLAN_PAUSED's pause stands."""
+    await import_conversations(adk, apply=True)
+    paused = await _ledger_pending(adk, PLAN_PAUSED)
+    async with adk.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE conversations SET turn_state = turn_state || '{\"pending\": {}}'::jsonb "
+                "WHERE conversation_id = :id"
+            ),
+            {"id": FULL},
+        )
+
+    dry = await rollback_turn_sessions(adk, apply=False)
+    assert (dry.cleared, dry.exit_status) == ({_name(FULL): 4}, 1)
+    assert await _ledger_pending(adk, FULL)
+
+    applied = await rollback_turn_sessions(adk, apply=True)
+
+    assert applied.cleared == {_name(FULL): 4}
+    assert await _ledger_pending(adk, FULL) == {}
+    assert await _ledger_pending(adk, PLAN_PAUSED) == paused
+    assert (await rollback_turn_sessions(adk, apply=True)).exit_status == 0
+
+
+async def test_rollback_leaves_a_card_the_previous_release_pauses_on_after_the_move(
+    adk: AsyncEngine,
+) -> None:
+    """After traffic moves back, the previous release pauses TEXT_ONLY on a
+    card at turn 3. Its ledger session moved since the import, so the
+    rollback reads the pause as the previous release's own and leaves it."""
+    await import_conversations(adk, apply=True)
+    assert (await rollback_turn_sessions(adk, apply=False)).cleared == {}
+    card = await _ledger_pending(adk, PLAN_PAUSED)
+    await _set_adk_state(adk, TEXT_ONLY, {"studio:turn_index": 3, "studio:pending": card})
+
+    applied = await rollback_turn_sessions(adk, apply=True)
+
+    assert (applied.cleared, applied.exit_status) == ({}, 0)
+    assert await _ledger_pending(adk, TEXT_ONLY) == card
+
+
+async def test_rollback_clears_a_pause_whose_resume_this_release_began(adk: AsyncEngine) -> None:
+    """The release recorded an answer to PLAN_PAUSED's card and its resume
+    died: the entry stays, carrying the answer, so the rollback reads the
+    pause as resumed and clears it."""
+    await import_conversations(adk, apply=True)
+    async with adk.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE conversations SET turn_state = jsonb_set(turn_state, "
+                "ARRAY['pending', (SELECT k FROM jsonb_object_keys(turn_state -> 'pending') k), "
+                "'answer'], '\"approve\"') WHERE conversation_id = :id"
+            ),
+            {"id": PLAN_PAUSED},
+        )
+
+    assert (await rollback_turn_sessions(adk, apply=True)).cleared == {_name(PLAN_PAUSED): 1}
+
+
+async def test_rollback_leaves_a_pause_whose_resume_the_previous_release_began(
+    adk: AsyncEngine,
+) -> None:
+    """On the previous release a resume of PLAN_PAUSED's card recorded its
+    answer and segment and died, and the import copied the entry as it
+    was. The release never touched it, so the rollback leaves the pause for
+    the user's retry."""
+    card = await _ledger_pending(adk, PLAN_PAUSED)
+    key = next(iter(card))
+    await _set_adk_state(
+        adk,
+        PLAN_PAUSED,
+        {"studio:pending": {key: {**card[key], "answer": "approve", "resuming_segment": "seg"}}},
+    )
+    await import_conversations(adk, apply=True)
+
+    applied = await rollback_turn_sessions(adk, apply=True)
+
+    assert (applied.cleared, applied.exit_status) == ({}, 0)
+
+
+async def test_rollback_clears_a_resumed_pause_on_a_conversation_once_discarded(
+    pg_empty_engine: AsyncEngine,
+) -> None:
+    """PLAN_PAUSED is refused and given up with `--discard`, then ADK's
+    state is repaired and imported, which resets the mark. The release
+    resumes its card, and the rollback clears the pause."""
+    name = _name(PLAN_PAUSED)
+    await _write_adk(pg_empty_engine, _sessions(**{PLAN_PAUSED: _add(**{"studio:unknown": 1})}))
+    await import_conversations(pg_empty_engine, apply=True, discard=frozenset({name}))
+    async with pg_empty_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE sessions SET state = state - 'studio:unknown', update_time = now() "
+                "WHERE app_name = :app AND id = :id"
+            ),
+            {"app": LEDGER_APP, "id": PLAN_PAUSED},
+        )
+    assert (await import_conversations(pg_empty_engine, apply=True)).imported == [name]
+    async with pg_empty_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE conversations SET turn_state = turn_state || '{\"pending\": {}}'::jsonb "
+                "WHERE conversation_id = :id"
+            ),
+            {"id": PLAN_PAUSED},
+        )
+
+    applied = await rollback_turn_sessions(pg_empty_engine, apply=True)
+
+    assert applied.cleared == {name: 1}
+    assert (await cutover_gate(pg_empty_engine)).discarded == []
+
+
+def _ledger_keys_without(monkeypatch: pytest.MonkeyPatch, conversation_id: str) -> None:
+    """The run's first read of the ledger keys misses `conversation_id`, as
+    a read before the previous release created its ledger session would."""
+    read = adk_import._ledger_keys
+    calls = 0
+
+    async def first_without(engine: AsyncEngine) -> list[Any]:
+        nonlocal calls
+        calls += 1
+        keys = await read(engine)
+        return [k for k in keys if k.conversation_id != conversation_id] if calls == 1 else keys
+
+    monkeypatch.setattr(adk_import, "_ledger_keys", first_without)
+
+
+@pytest.mark.parametrize("ahead", [False, True], ids=["new conversation", "turn session ahead"])
+async def test_rollback_reads_a_ledger_session_that_appears_between_its_passes(
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch, ahead: bool
+) -> None:
+    """TEXT_ONLY's ledger session appears after the first read of the
+    ledger keys, so the unledgered pass skips it, and the ledger pass reads
+    it in the same run. A new conversation has nothing ahead and passes. A
+    conversation of this release has its turn session ahead deleted."""
+    await import_conversations(adk, apply=False)  # creates the tables only
+    if ahead:
+        await _add_turn_sessions(adk, PRINCIPAL, [f"{TEXT_ONLY}#t3"])
+    _ledger_keys_without(monkeypatch, TEXT_ONLY)
+
+    applied = await rollback_turn_sessions(adk, apply=True)
+
+    expected = {_name(TEXT_ONLY): [f"{TEXT_ONLY}#t3"]} if ahead else {}
+    assert (applied.ahead, applied.exit_status) == (expected, 1 if ahead else 0)
+    assert (PRINCIPAL, f"{TEXT_ONLY}#t3") not in await _turn_session_ids(adk)
+
+
+async def test_rollback_reads_a_conversation_whose_ledger_session_appears_before_its_delete(
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The previous release creates TEXT_ONLY's ledger session between the
+    run's read of the turn sessions with no ledger session and their
+    delete: the delete takes none of them, and the ledger pass that
+    follows deletes only the turn session above the ledger's index."""
+    await import_conversations(adk, apply=False)  # creates the tables only
+    await _add_turn_sessions(adk, PRINCIPAL, [f"{TEXT_ONLY}#t3"])
+    _ledger_keys_without(monkeypatch, TEXT_ONLY)
+    # Read TEXT_ONLY's turn sessions as unledgered, as a read before its
+    # ledger session appeared would.
+    monkeypatch.setattr(
+        adk_import,
+        "_TURN_SESSIONS_UNLEDGERED",
+        text(
+            f"SELECT t.user_id, {adk_import._TURN_CONVERSATION} AS conversation_id, t.id "
+            f"FROM sessions t WHERE t.app_name = :app AND t.id LIKE '{TEXT_ONLY}#t%'"
+        ),
+    )
+
+    applied = await rollback_turn_sessions(adk, apply=True)
+
+    assert applied.ahead == {_name(TEXT_ONLY): [f"{TEXT_ONLY}#t3"]}
+    sessions = await _turn_session_ids(adk)
+    assert (PRINCIPAL, f"{TEXT_ONLY}#t2") in sessions
+    assert (PRINCIPAL, f"{TEXT_ONLY}#t3") not in sessions
 
 
 @_LATER_COLUMNS
@@ -503,6 +836,7 @@ async def test_the_close_open_turns_job_logs_each_close_as_a_json_studio_turn_li
     reads (`jsonPayload.event`), and the job flushes its outcomes, blocking,
     once its event loop has finished."""
     await import_conversations(adk, apply=True)
+    await _next_release_started(adk)
     async with adk.connect() as conn:
         schema = (await conn.execute(text("SELECT current_schema()"))).scalar_one()
     url = adk.url
@@ -553,8 +887,15 @@ async def test_the_close_open_turns_job_logs_each_close_as_a_json_studio_turn_li
 async def test_close_open_turns_closes_each_paused_adk_turn_as_abandoned_with_its_blocks(
     adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each open turn's session row is read once, by the store's load."""
+    """Each open turn's session row is read once, by the store's load.
+    `--apply` refuses until the next release has created `turn_cursors`,
+    since this release can still answer a turn paused on ADK until then."""
     await import_conversations(adk, apply=True)
+    with pytest.raises(NextReleaseMissing, match="turn_cursors"):
+        await close_open_turns(adk, apply=True)
+    before = await _load(adk, PLAN_PAUSED)
+    assert before is not None and not before.turn_recorded and before.pending
+    await _next_release_started(adk)
     open_turns = [f"{_name(FULL)} turn 4", f"{_name(PLAN_PAUSED)} turn 1"]
     reads: list[str] = []
     read_row = adk_import._stored_turn_specs
@@ -615,6 +956,7 @@ async def test_close_open_turns_leaves_a_turn_a_stream_holds_or_that_never_ran_o
     """A stream on an ADK turn fails the run until it ends; a stream on a
     turn with no ADK turn session, or one `turn_cursors` holds, does not."""
     await import_conversations(adk, apply=True)
+    await _next_release_started(adk)
     await _lease(adk, PLAN_PAUSED, 600)
     async with adk.begin() as conn:
         await conn.execute(
@@ -636,9 +978,11 @@ async def test_close_open_turns_leaves_a_turn_a_stream_holds_or_that_never_ran_o
     )
     await _lease(adk, FULL, 600)
     async with adk.begin() as conn:
-        await conn.execute(text("CREATE TABLE turn_cursors (conversation bigint, turn_index int)"))
         await conn.execute(
-            text("INSERT INTO turn_cursors VALUES (:pk, 1)"),
+            text(
+                "INSERT INTO turn_cursors (conversation, turn_index, status) "
+                "VALUES (:pk, 1, 'running')"
+            ),
             {"pk": await _row_id(adk, PLAN_PAUSED)},
         )
 
@@ -681,6 +1025,7 @@ async def test_close_open_turns_leaves_a_conversation_adk_streams_or_wrote_since
     import, is left open and fails the run, dry or applied. A live lease is
     listed as live, whether or not the import is current."""
     await import_conversations(adk, apply=True)
+    await _next_release_started(adk)
     await _set_adk_state(adk, PLAN_PAUSED, adk_write)
 
     for apply in (False, True):
@@ -729,11 +1074,22 @@ async def test_the_command_exits_non_zero_after_importing_the_rest_when_one_is_r
         assert f"refused: {_name(TEXT_ONLY)}\n  studio:unknown: a key this job does not know" in out
         assert (
             out.splitlines()[-1]
-            == "2 imported, 0 re-imported, 0 unchanged, 0 conflicts, 0 kept, 1 refused"
+            == "2 imported, 0 re-imported, 0 unchanged, 0 conflicts, 0 kept, 0 discarded, "
+            "1 refused"
         )
         assert await _count(engine) == 2
         assert await asyncio.to_thread(main, ["import", "--verify"]) == 1
         assert capsys.readouterr().out.splitlines()[-1] == "2 of 3 equal"
+        assert await asyncio.to_thread(main, ["close-open-turns", "--apply"]) == 3
+        assert "no turn_cursors table" in capsys.readouterr().err
+        # The release that archives ADK's tables has started.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("ALTER TABLE adk_ledger_imports RENAME TO adk_archive_adk_ledger_imports")
+            )
+        for verb in (["close-open-turns", "--apply"], ["import", "--verify"]):
+            assert await asyncio.to_thread(main, verb) == 4
+            assert "adk_archive_adk_ledger_imports resolves" in capsys.readouterr().err
     finally:
         await engine.dispose()
 
@@ -788,9 +1144,20 @@ async def _waiting_on_a_lock(engine: AsyncEngine) -> bool:
 async def test_verify_and_close_open_turns_neither_migrate_nor_use_adks_session_service(
     adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for job in (verify(adk), close_open_turns(adk, apply=False)):
+    """Before `import` creates the tables, the verbs that read them refuse,
+    and `rollback-turn-sessions --apply`, which reads leases there, deletes
+    no turn session."""
+    await _add_turn_sessions(adk, PRINCIPAL, [f"{FULL}#t9", "conv_unledgered#t1"])
+    sessions = await _turn_session_ids(adk)
+    jobs = (
+        verify(adk),
+        close_open_turns(adk, apply=False),
+        rollback_turn_sessions(adk, apply=True),
+    )
+    for job in jobs:
         with pytest.raises(TablesMissing):
             await job
+    assert await _turn_session_ids(adk) == sessions
     async with adk.connect() as conn:
         assert (await conn.execute(text("SELECT to_regclass('conversations')"))).scalar() is None
 
@@ -866,21 +1233,41 @@ def _rows(block: dict[str, Any]) -> list[tuple[str, tuple[str, ...]]]:
     return [(row.text, row.refs) for row in source_from_spec_block(block).bound_refs]
 
 
+# FULL's run item that holds what a run retrieved.
+_RUN_RETRIEVALS = "studio:run_retrievals:run_46328735f3a24a1ba44570e6c79dd119"
+
+
+def _with_run_retrieval(block: dict[str, Any]) -> Any:
+    def change(state: dict[str, Any]) -> dict[str, Any]:
+        state[_RUN_RETRIEVALS] = [*state[_RUN_RETRIEVALS], block]
+        return state
+
+    return change
+
+
+@pytest.mark.parametrize("held_in", ["turn", "run item"])
 async def test_a_mapping_form_block_is_imported_as_rows_and_verifies_equal(
-    pg_empty_engine: AsyncEngine,
+    pg_empty_engine: AsyncEngine, held_in: str
 ) -> None:
     mapping = _mapping_block()
-    await _write_adk(pg_empty_engine, _sessions(**{FULL: _with_turn_specs(mapping)}))
+    change = _with_turn_specs(mapping) if held_in == "turn" else _with_run_retrieval(mapping)
+    await _write_adk(pg_empty_engine, _sessions(**{FULL: change}))
 
     report = await import_conversations(pg_empty_engine, apply=True)
 
     assert (report.clean, report.converted_blocks, report.unconvertible_blocks) == (True, 1, 0)
     assert "1 converted, 0 unconvertible" in report.render()
-    state = await _load(pg_empty_engine, FULL)
-    assert state is not None
-    stored = state.turns[0]["specs"][mapping["spec_id"]]
+    if held_in == "turn":
+        state = await _load(pg_empty_engine, FULL)
+        assert state is not None
+        stored = state.turns[0]["specs"][mapping["spec_id"]]
+    else:
+        stored = (await _stored_runs(pg_empty_engine, PRINCIPAL, FULL)).retrievals[
+            _RUN_RETRIEVALS.removeprefix("studio:run_retrievals:")
+        ][-1]
     assert _rows(stored) == [("g7", ("GroupOfSeven",)), ("africa", ("DACAfrica",))]
-    assert (await verify(pg_empty_engine)).clean
+    verified = await verify(pg_empty_engine)
+    assert (verified.differences, verified.clean) == ({}, True)
 
 
 async def test_a_block_that_does_not_convert_is_reported_and_copied_as_stored(
@@ -1045,6 +1432,7 @@ async def test_close_open_turns_keeps_a_mapping_form_turn_block_as_rows(
     adk: AsyncEngine,
 ) -> None:
     await import_conversations(adk, apply=True)
+    await _next_release_started(adk)
     spec_id = next(iter(EXPECTED[FULL]["view"]["turn_specs"]))
     await _put_open_turn_block(adk, {**_mapping_block(), "spec_id": spec_id})
 
@@ -1066,6 +1454,7 @@ async def test_close_open_turns_closes_a_turn_with_a_block_that_does_not_convert
     whose write another instance moved first, under the outcome its turn
     had."""
     await import_conversations(adk, apply=True)
+    await _next_release_started(adk)
     spec_id = next(iter(EXPECTED[FULL]["view"]["turn_specs"]))
     block = {**_mapping_block(), "spec_id": spec_id, "_bound_refs": "g7"}
     async with adk.begin() as conn:
@@ -1180,6 +1569,10 @@ async def test_an_open_turn_that_cannot_be_read_refuses_the_conversation_with_no
     }
     assert await _load(adk, FULL) is None
     assert sorted(report.imported) == sorted(_name(c) for c in (PLAN_PAUSED, TEXT_ONLY))
+    # The refusal is one `--discard` clears.
+    dropped = await import_conversations(adk, apply=True, discard=frozenset({_name(FULL)}))
+    assert (dropped.discarded, dropped.refused) == ([_name(FULL)], {})
+    assert (await cutover_gate(adk)).clean
 
 
 async def test_a_dry_run_takes_no_row_lock(adk: AsyncEngine) -> None:
@@ -1282,7 +1675,7 @@ async def test_verify_fails_when_it_checks_no_conversation(adk: AsyncEngine) -> 
         sorted(_name(c) for c in EXPECTED),
     )
     assert report.render().splitlines()[-2:] == [
-        "none of the 3 ledger sessions compared, written or kept",
+        "none of the 3 ledger sessions compared, written, kept or discarded",
         "0 of 0 equal",
     ]
 
@@ -1387,6 +1780,7 @@ async def test_close_open_turns_leaves_a_diverged_conversation_alone_and_fails(
 ) -> None:
     await _diverge(adk, FULL)
     await import_conversations(adk, apply=True)
+    await _next_release_started(adk)
 
     report = await close_open_turns(adk, apply=True)
 
@@ -1430,6 +1824,7 @@ async def test_close_open_turns_refuses_a_conversation_it_cannot_close_and_close
     adk: AsyncEngine,
 ) -> None:
     await import_conversations(adk, apply=True)
+    await _next_release_started(adk)
     async with adk.begin() as conn:
         await conn.execute(
             text(
@@ -1452,6 +1847,7 @@ async def test_close_open_turns_fences_out_a_stream_whose_lease_lapsed(
     """A stream still running under a lapsed lease cannot write over the turn
     the job closed."""
     await import_conversations(adk, apply=True)
+    await _next_release_started(adk)
     async with adk.begin() as conn:
         await conn.execute(
             text(
@@ -1473,14 +1869,6 @@ async def test_close_open_turns_fences_out_a_stream_whose_lease_lapsed(
     assert closed is not None and closed.turn_recorded and closed.segment is None
 
 
-# The columns of `turn_cursors` that `close-open-turns` reads.
-_TURN_CURSORS = (
-    "CREATE TABLE turn_cursors (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
-    "conversation bigint NOT NULL REFERENCES conversations (id) ON DELETE CASCADE, "
-    "turn_index integer NOT NULL, status text NOT NULL, UNIQUE (conversation, turn_index))"
-)
-
-
 async def test_close_open_turns_leaves_a_turn_cursors_turn_opened_while_its_write_waits(
     adk: AsyncEngine,
 ) -> None:
@@ -1489,8 +1877,7 @@ async def test_close_open_turns_leaves_a_turn_cursors_turn_opened_while_its_writ
     on that row. The write reads the cursor under its own row lock and
     leaves the turn open, its pending interrupts and blocks kept."""
     await import_conversations(adk, apply=True)
-    async with adk.begin() as conn:
-        await conn.execute(text(_TURN_CURSORS))
+    await _next_release_started(adk)
     plan_paused = await _row_id(adk, PLAN_PAUSED)
     # The writer and the poll run beside the job's own pool of two.
     async with adk.connect() as conn:
@@ -1537,6 +1924,7 @@ async def test_close_open_turns_refuses_a_moved_turn_index_and_always_clears_the
     a version change. The first is listed as changed and left open, and the
     second closes with no lease on its row."""
     await import_conversations(adk, apply=True)
+    await _next_release_started(adk)
 
     class Moving(StudioStore):
         async def load(self, principal: str, conversation_id: str) -> Any:
@@ -2122,11 +2510,22 @@ async def _gate_adk_moved(engine: AsyncEngine) -> None:
 
 
 async def _gate_kept(engine: AsyncEngine) -> None:
+    """A refused conversation the tables hold, as imported before ADK's state
+    gained a key the job does not know, kept with `--keep-tables`."""
+    await import_conversations(engine, apply=True)
     await _set_adk_state(engine, TEXT_ONLY, {"studio:unknown": 1})
     report = await import_conversations(
         engine, apply=True, keep_tables=frozenset({_name(TEXT_ONLY)})
     )
     assert report.kept == [_name(TEXT_ONLY)]
+
+
+async def _gate_discarded(engine: AsyncEngine) -> None:
+    """A refused conversation the tables do not hold, given up with
+    `--discard`."""
+    await _set_adk_state(engine, TEXT_ONLY, {"studio:unknown": 1})
+    report = await import_conversations(engine, apply=True, discard=frozenset({_name(TEXT_ONLY)}))
+    assert report.discarded == [_name(TEXT_ONLY)]
 
 
 async def _gate_kept_then_adk_moved(engine: AsyncEngine) -> None:
@@ -2157,18 +2556,19 @@ async def _gate_never_imported(engine: AsyncEngine) -> None:
 
 @_RELEASE_2_SCHEMA
 @pytest.mark.parametrize(
-    ("setup", "adk_rows", "uncleared"),
+    ("setup", "adk_rows", "uncleared", "discarded"),
     [
-        (_gate_complete, True, []),
-        (_gate_one_never_imported, True, [LATE]),
-        (_gate_placeholder_only, True, [FULL]),
-        (_gate_adk_moved, True, [TEXT_ONLY]),
-        (_gate_kept, True, []),
-        (_gate_kept_then_adk_moved, True, [TEXT_ONLY]),
-        (_gate_no_sessions, False, []),
-        (_gate_foreign_sessions, False, []),
-        (_gate_other_apps_only, False, []),
-        (_gate_never_imported, False, sorted(EXPECTED)),
+        (_gate_complete, True, [], []),
+        (_gate_one_never_imported, True, [LATE], []),
+        (_gate_placeholder_only, True, [FULL], []),
+        (_gate_adk_moved, True, [TEXT_ONLY], []),
+        (_gate_kept, True, [], []),
+        (_gate_discarded, True, [], [TEXT_ONLY]),
+        (_gate_kept_then_adk_moved, True, [TEXT_ONLY], []),
+        (_gate_no_sessions, False, None, []),
+        (_gate_foreign_sessions, False, None, []),
+        (_gate_other_apps_only, False, [], []),
+        (_gate_never_imported, False, sorted(EXPECTED), []),
     ],
     ids=[
         "complete",
@@ -2176,6 +2576,7 @@ async def _gate_never_imported(engine: AsyncEngine) -> None:
         "placeholder-only",
         "adk-moved",
         "kept",
+        "discarded",
         "kept-then-adk-moved",
         "no-sessions",
         "foreign-sessions",
@@ -2187,21 +2588,39 @@ async def test_the_cutover_gate_clears_only_current_imported_or_kept_ledger_sess
     pg_empty_engine: AsyncEngine,
     setup: Any,
     adk_rows: bool,
-    uncleared: list[str],
+    uncleared: list[str] | None,
+    discarded: list[str],
     release_2_schema: bool,
 ) -> None:
+    """`uncleared` None: no ADK `sessions` table resolves, so the gate cannot
+    check anything and refuses, unless told the tables were archived and an
+    archive resolves. A discarded conversation clears and is listed apart."""
     if adk_rows:
         await _write_adk(pg_empty_engine, RECORDED["sessions"])
     if release_2_schema:
         await _release_2_schema(pg_empty_engine)
     await setup(pg_empty_engine)
 
+    if uncleared is None:
+        with pytest.raises(AdkTablesMissing):
+            await cutover_gate(pg_empty_engine)
+        with pytest.raises(AdkTablesMissing, match="--adk-archived needs adk_archive_sessions"):
+            await cutover_gate(pg_empty_engine, adk_archived=True)
+        async with pg_empty_engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE adk_archive_sessions (id text)"))
+        archived = await cutover_gate(pg_empty_engine, adk_archived=True)
+        assert (archived.clean, archived.archived) == (True, True)
+        return
     gate = await cutover_gate(pg_empty_engine)
 
-    assert (gate.clean, gate.uncleared, gate.first) == (
+    assert (gate.clean, gate.uncleared, gate.first, gate.discarded) == (
         not uncleared,
         len(uncleared),
         [_name(c) for c in uncleared],
+        [_name(c) for c in discarded],
+    )
+    assert (f"  {_name(TEXT_ONLY)}" in gate.render().splitlines()) == (
+        TEXT_ONLY in uncleared or TEXT_ONLY in discarded
     )
 
 
@@ -2210,8 +2629,16 @@ async def test_the_gate_command_names_what_it_has_not_cleared_and_passes_once_cl
 ) -> None:
     engine = create_async_engine(pg_database_url)
     try:
-        await _write_adk(engine, RECORDED["sessions"])
         monkeypatch.setenv("DATABASE_URL", pg_database_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE sessions RENAME TO adk_archive_sessions"))
+        assert await asyncio.to_thread(main, ["gate"]) == 2
+        assert "no table named sessions carries ADK's columns" in capsys.readouterr().err
+        assert await asyncio.to_thread(main, ["gate", "--adk-archived"]) == 0
+        assert capsys.readouterr().out.startswith("cutover gate: no ADK sessions table")
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE adk_archive_sessions RENAME TO sessions"))
+        await _write_adk(engine, RECORDED["sessions"])
 
         assert await asyncio.to_thread(main, ["gate"]) == 1
         out = capsys.readouterr().out.splitlines()
@@ -2219,7 +2646,7 @@ async def test_the_gate_command_names_what_it_has_not_cleared_and_passes_once_cl
             "cutover gate: 3 ledger sessions not cleared",
             *[f"  {_name(c)}" for c in sorted(EXPECTED)],
         ]
-        assert out[-1].endswith("import --apply --keep-tables PRINCIPAL/CONVERSATION_ID ...")
+        assert out[-1].endswith("import --apply --discard PRINCIPAL/CONVERSATION_ID ...")
 
         assert await asyncio.to_thread(main, ["import", "--apply"]) == 0
         capsys.readouterr()
@@ -2230,37 +2657,85 @@ async def test_the_gate_command_names_what_it_has_not_cleared_and_passes_once_cl
 
 
 @_RELEASE_2_SCHEMA
-async def test_keep_tables_keeps_a_refused_conversation_until_adk_moves_again(
+async def test_a_refused_conversation_the_tables_lack_is_discarded_only_by_name_and_counted(
     pg_empty_engine: AsyncEngine, release_2_schema: bool
 ) -> None:
-    """The tables lack the conversation, and keeping that adds no row."""
+    """The tables lack the conversation. `--keep-tables` would keep nothing,
+    so it refuses; `--discard` gives it up, adds no row, and the report, the
+    gate and verify count it, once its user starts it afresh too, until ADK's
+    state moves again."""
     name = _name(TEXT_ONLY)
-    keep = frozenset({name})
+    keep, drop = frozenset({name}), frozenset({name})
     await _write_adk(pg_empty_engine, _sessions(**{TEXT_ONLY: _add(**{"studio:unknown": 1})}))
     if release_2_schema:
         await _release_2_schema(pg_empty_engine)
     assert list((await import_conversations(pg_empty_engine, apply=True)).refused) == [name]
     assert (await cutover_gate(pg_empty_engine)).first == [name]
 
-    dry = await import_conversations(pg_empty_engine, apply=False, keep_tables=keep)
+    for apply in (False, True):
+        kept = await import_conversations(pg_empty_engine, apply=apply, keep_tables=keep)
 
-    assert (dry.kept, dry.refused, dry.clean) == ([name], {}, True)
-    assert "tables' copy would be kept (--keep-tables): " + name in dry.render()
+        assert (kept.kept, list(kept.refused), kept.clean) == ([], [name], False)
+        # The key's refusal and `--keep-tables`'s own.
+        assert len(kept.refused[name]) == 2
+        assert (await cutover_gate(pg_empty_engine)).first == [name]
+
+    dry = await import_conversations(pg_empty_engine, apply=False, discard=drop)
+
+    assert (dry.discarded, dry.refused, dry.clean) == ([name], {}, True)
+    assert name in dry.render()
     assert not (await cutover_gate(pg_empty_engine)).clean
 
-    applied = await import_conversations(pg_empty_engine, apply=True, keep_tables=keep)
+    applied = await import_conversations(pg_empty_engine, apply=True, discard=drop)
 
-    assert (applied.kept, applied.refused, applied.clean) == ([name], {}, True)
-    assert (await cutover_gate(pg_empty_engine)).clean
+    assert (applied.discarded, applied.refused, applied.clean) == ([name], {}, True)
+    # With the column in place, a repair takes no lock on the table beyond a
+    # row write's, so a reader holding it does not stall the run.
+    async with pg_empty_engine.connect() as reader:
+        await reader.execute(text("LOCK TABLE adk_ledger_imports IN ACCESS SHARE MODE"))
+        again = await asyncio.wait_for(
+            import_conversations(pg_empty_engine, apply=True, discard=drop), timeout=5
+        )
+        await reader.rollback()
+    assert again.discarded == [name]
+    # `--keep-tables` on it stays discarded, and the record keeps nothing
+    # of a conversation the tables lack.
+    kept_absent = await import_conversations(pg_empty_engine, apply=True, keep_tables=keep)
+    assert (kept_absent.discarded, kept_absent.refused) == ([name], {})
+    gate = await cutover_gate(pg_empty_engine)
+    assert (gate.clean, gate.discarded) == (True, [name])
     assert await _count(pg_empty_engine) == 2
-    assert (await import_conversations(pg_empty_engine, apply=True)).kept == [name]
+    assert (await import_conversations(pg_empty_engine, apply=True)).discarded == [name]
     assert await _reimporting_store(pg_empty_engine).load(PRINCIPAL, TEXT_ONLY) is None
+
+    # Its user starts it afresh, and another conversation moves on ADK.
+    async with pg_empty_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO conversations (principal, conversation_id) VALUES (:p, :c)"),
+            {"p": PRINCIPAL, "c": TEXT_ONLY},
+        )
+    await _set_adk_state(pg_empty_engine, FULL, {"studio:seq": 7})
+
+    gate = await cutover_gate(pg_empty_engine)
+    assert (gate.first, gate.discarded) == ([_name(FULL)], [name])
+    assert "  " + name in gate.render().splitlines()
+    rerun = await import_conversations(pg_empty_engine, apply=False)
+    assert (rerun.discarded, rerun.kept) == ([name], [])
+    assert (await verify(pg_empty_engine)).discarded == [name]
 
     await _set_adk_state(pg_empty_engine, TEXT_ONLY, {"studio:seq": 5})
 
     gate = await cutover_gate(pg_empty_engine)
-    assert (gate.uncleared, gate.first) == (1, [name])
-    assert list((await import_conversations(pg_empty_engine, apply=True)).refused) == [name]
+    assert (gate.uncleared, gate.first) == (2, sorted([_name(FULL), name]))
+    assert name in (await import_conversations(pg_empty_engine, apply=True)).refused
+    # The tables hold it now, so `--discard` refuses, and `--keep-tables`
+    # keeps their copy with the mark the first gate listed.
+    held = await import_conversations(pg_empty_engine, apply=True, discard=drop)
+    assert list(held.refused) == [name]
+    restarted = await import_conversations(pg_empty_engine, apply=True, keep_tables=keep)
+    assert (restarted.kept, restarted.discarded, restarted.refused) == ([], [name], {})
+    gate = await cutover_gate(pg_empty_engine)
+    assert (gate.clean, gate.discarded) == (True, [name])
 
 
 @_RELEASE_2_SCHEMA
@@ -2272,6 +2747,17 @@ async def test_keep_tables_serves_a_diverged_conversation_until_adk_moves_again(
     if release_2_schema:
         await _release_2_schema(pg_empty_engine)
     await _diverge(pg_empty_engine, FULL)
+    # `--discard` refuses a conflict before the conflict is recorded.
+    dropped = await import_conversations(pg_empty_engine, apply=True, discard=frozenset({name}))
+    assert list(dropped.refused) == [name]
+    async with pg_empty_engine.connect() as conn:
+        marked = (
+            await conn.execute(
+                text("SELECT diverged FROM adk_ledger_imports WHERE conversation_id = :c"),
+                {"c": FULL},
+            )
+        ).scalar_one()
+    assert marked is False
     assert (await import_conversations(pg_empty_engine, apply=True)).conflicts == [name]
     with pytest.raises(ConversationHeld):
         await _reimporting_store(pg_empty_engine).load(PRINCIPAL, FULL)
@@ -2332,12 +2818,22 @@ async def test_keep_tables_refuses_a_conversation_that_imports_and_a_name_given_
         ]
     }
     assert (await cutover_gate(adk)).clean
-    with pytest.raises(NamedTwice):
-        await import_conversations(
-            adk, apply=True, prefer_adk=frozenset({name}), keep_tables=frozenset({name})
-        )
-    with pytest.raises(UnknownConversation, match="--keep-tables"):
-        await import_conversations(adk, apply=True, keep_tables=frozenset({"u_x/conv_x"}))
+    discarded = await import_conversations(adk, apply=True, discard=frozenset({name}))
+    assert discarded.refused == {
+        name: [
+            "--discard gives up a refused conversation the tables do not hold, "
+            "and this one is unchanged"
+        ]
+    }
+    assert await _count(adk) == 3
+    for one, other in (("prefer_adk", "keep_tables"), ("keep_tables", "discard")):
+        with pytest.raises(NamedTwice):
+            await import_conversations(
+                adk, apply=True, **{one: frozenset({name}), other: frozenset({name})}
+            )
+    for flag in ("keep_tables", "discard"):
+        with pytest.raises(UnknownConversation, match=f"--{flag.replace('_', '-')}"):
+            await import_conversations(adk, apply=True, **{flag: frozenset({"u_x/conv_x"})})
 
 
 @pytest.mark.parametrize(
@@ -2370,3 +2866,33 @@ async def test_verify_reports_and_the_gate_fails_on_a_ledger_session_that_holds_
         # gate then lists as not cleared.
         assert (gate.clean, gate.uncleared) == (not streaming, 0)
     assert ("1 stream holds its lease on ADK" in report.render().splitlines()) == streaming
+
+
+def test_a_failing_gate_prints_its_failure_before_the_discarded_list() -> None:
+    lines = GateReport(uncleared=1, first=["p/a"], discarded=["p/b"]).render().splitlines()
+
+    assert lines[0] == "cutover gate: 1 ledger sessions not cleared"
+    assert lines[-2:] == [
+        "cutover gate: 1 cleared ledger sessions given up with --discard, "
+        "ADK's copy of each not imported:",
+        "  p/b",
+    ]
+
+
+async def test_adding_the_discarded_column_gives_up_on_a_table_another_reader_holds(
+    pg_empty_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The column's `ALTER` waits behind a reader of the table only as long
+    as its lock bound, then stops the run with nothing written."""
+    name = _name(TEXT_ONLY)
+    await _write_adk(pg_empty_engine, _sessions(**{TEXT_ONLY: _add(**{"studio:unknown": 1})}))
+    await import_conversations(pg_empty_engine, apply=True)
+    monkeypatch.setattr(adk_import, "_COLUMN_LOCK_TIMEOUT", "200ms")
+
+    async with pg_empty_engine.connect() as reader:
+        await reader.execute(text("LOCK TABLE adk_ledger_imports IN ACCESS SHARE MODE"))
+        with pytest.raises(TableBusy):
+            await import_conversations(pg_empty_engine, apply=True, discard=frozenset({name}))
+        await reader.rollback()
+
+    assert (await cutover_gate(pg_empty_engine)).first == [name]
