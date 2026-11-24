@@ -134,10 +134,10 @@ async def test_scripted_cases_report_as_marked(
         if r["status"] not in ("PASS", "XFAIL")
     }
     assert passed and failures == {}
-    # The planner's entry read the user's words for its brief, and `propose_plan` the
-    # plan's measure, as Studio's planner does.
+    # The planner's entry read the user's words for its brief, as Studio's planner
+    # does, and no requirement's `measure` was read.
     assert ["How fast did life expectancy grow in Kenya since 2000?"] in stated_scope.calls
-    assert ["life expectancy at birth"] in stated_scope.calls
+    assert ["life expectancy at birth"] not in stated_scope.calls
 
 
 class _SkillReadFailedError(RuntimeError):

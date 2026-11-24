@@ -1236,7 +1236,7 @@ def test_a_pick_rewriting_a_step_beneath_a_share_onto_its_denominator_is_refused
                 group_by=(),
             ),
             _share("first", "second").model_copy(update={"id": "share_two"}),
-            _share("num", "den").model_copy(update={"accept_provider_difference": True}),
+            _share("num", "den"),
         ],
         tool_context=ctx,
     )

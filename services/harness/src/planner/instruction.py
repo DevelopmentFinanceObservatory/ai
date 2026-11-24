@@ -129,10 +129,9 @@ _PLANNING = (
     "'donor', Kenya's share of US aid 'recipient'. Leave it unset "
     "for a whole that binds a sector itself (health aid under malaria aid) "
     "or names a group (DAC donors' aid), a provider share (the multilateral "
-    "share of US aid), or a total from a named source. Set "
-    "`accept_provider_difference` on a share only when the user asked for "
-    'another source\'s total, as "use the DAC1 total" does, with that total '
-    "pinned, and never to get past a refusal.\n\n"
+    "share of US aid), or a total from a named source. For another "
+    'source\'s total the user asks for, as "use the DAC1 total" does, pin '
+    "that total and declare its own option.\n\n"
     "An `axis` or a `denominator_axis` names a role its side's entities "
     "state, or `'country'` for places stating none. A family of StatVars "
     "is read summed or separately (see `stat_vars`).\n\n"
@@ -157,9 +156,9 @@ _PLANNING = (
     "provider` is `provider:inclusive`, or leave it unpinned with a "
     "`measure` naming bilateral plus imputed multilateral aid. Where the "
     'user\'s words say whose spending to count, such as "bilateral" or '
-    '"including imputed multilateral aid", write those words into the '
-    "`measure` of each dataset requirement they apply to, on every side of a "
-    "calculation when they qualify the whole question, and into no other.\n\n"
+    '"including imputed multilateral aid", put that option id in the '
+    "`scope_options` of each requirement they apply to, on every side of a "
+    "calculation when they qualify the whole question, and of no other.\n\n"
     "When the answer is one total of two different sources, such as "
     "bilateral aid from another table plus imputed multilateral aid, "
     "state a `sum_of`, "
