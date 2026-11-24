@@ -42,7 +42,13 @@ from harness.studio_store import (
     turn_standing,
 )
 from harness.turn.store import TurnStatus, TurnStore
-from harness.wire import TURN_INDEX_HEADER, MessageComplete
+from harness.wire import (
+    TURN_INDEX_HEADER,
+    CompositionManifest,
+    MessageComplete,
+    UnitChoice,
+    UnitPrices,
+)
 from planner.workflow import ToolId
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -1191,6 +1197,226 @@ async def test_a_stop_records_its_turn_cancelled_only_with_the_cursor_closed(
 
 
 _CANCEL = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
+
+
+async def test_a_stop_naming_an_earlier_turn_leaves_the_latest_one_open(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A Stop names the turn its page ran (`turn_index`). Sent once turn 2
+    has paused on its plan, a Stop for turn 1 stops nothing: the route
+    answers 200 `turn_moved` naming turn 2, and turn 2 stays paused. A Stop
+    for turn 2 closes it `cancelled`."""
+    app, _ = orchestrator_app(_text("One."), plan_call("q with forks"), engine=pg_engine)
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("first"))
+        await stream(client, "/api/studio/turn", turn_body("q with forks"))
+        skipped = await client.post(
+            "/api/studio/cancel", json={**_CANCEL, "turn_index": 1}, headers=AUTH
+        )
+        kept = (await _state(client)).json()["turn"]
+        stopped = await client.post(
+            "/api/studio/cancel", json={**_CANCEL, "turn_index": 2}, headers=AUTH
+        )
+        ended = (await _state(client)).json()["turn"]
+
+    assert (skipped.status_code, skipped.json()) == (200, {"code": "turn_moved", "turn_index": 2})
+    assert (kept["index"], kept["status"]) == (2, "paused")
+    assert stopped.status_code == 204
+    assert (ended["index"], ended["status"]) == (2, "cancelled")
+
+
+async def test_a_stop_naming_an_earlier_turn_leaves_a_streaming_turn_running(
+    pg_engine: AsyncEngine,
+) -> None:
+    """Another instance streams turn 2 under a live lease. A Stop for turn 1
+    stops nothing and is answered 200 `turn_moved` naming turn 2, and no
+    Stop is live. A Stop for turn 2 is recorded on the lease."""
+    app, _ = orchestrator_app(_text("One."), engine=pg_engine)
+    other = StudioStore(pg_engine)
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("first"))
+        await other.load(PRINCIPAL, CONVERSATION)
+        work = other.draft(PRINCIPAL, CONVERSATION)
+        work.begin_turn()
+        other.claim_segment(PRINCIPAL, CONVERSATION, work)
+        await other.save(PRINCIPAL, CONVERSATION, work)
+        skipped = await client.post(
+            "/api/studio/cancel", json={**_CANCEL, "turn_index": 1}, headers=AUTH
+        )
+        live_after_skip = await other.stop_live(PRINCIPAL, CONVERSATION)
+        stopped = await client.post(
+            "/api/studio/cancel", json={**_CANCEL, "turn_index": 2}, headers=AUTH
+        )
+
+    assert (skipped.status_code, skipped.json()) == (200, {"code": "turn_moved", "turn_index": 2})
+    assert live_after_skip is False
+    assert stopped.status_code == 204
+    assert await other.stop_live(PRINCIPAL, CONVERSATION) is True
+
+
+@pytest.mark.parametrize(
+    ("taken", "closed"),
+    [
+        pytest.param(False, "cancelled", id="stop-names-the-turn"),
+        pytest.param(True, "abandoned", id="stop-its-scope-took"),
+    ],
+)
+async def test_a_stop_landing_between_a_claim_and_its_next_turn_cancels_the_turn_it_names(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, taken: bool, closed: str
+) -> None:
+    """Turn 1 is paused on its plan, with no lease, when a `/turn` claims the
+    lease for turn 2. A Stop naming turn 1 lands on that lease before the
+    claim's save begins turn 2, so it is recorded naming turn 1. The save
+    then closes turn 1 `cancelled`, cursor and record, and turn 2's model
+    reads it so, and turn 2 runs to its answer. A Stop turn 1's `StopScope`
+    already answered (its cursor's `stop_taken_id`), as a re-offered plan
+    records one, is spent, and turn 1 closes `abandoned` as with no Stop."""
+    app, _ = orchestrator_app(plan_call("q with forks"), _text("Two."), engine=pg_engine)
+    store: StudioStore = app.state.studio.store
+    claim = store.claim_turn_lease
+    stops: list[bool] = []
+
+    async def claim_then_stop(*args: Any, **kwargs: Any) -> Any:
+        lease = await claim(*args, **kwargs)
+        stopper = StudioStore(pg_engine)
+        stops.append(await stopper.request_cancel(PRINCIPAL, CONVERSATION, turn_index=1))
+        if taken:
+            async with pg_engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE turn_cursors SET stop_taken_id = "
+                        "(SELECT stop_id FROM conversations) WHERE turn_index = 1"
+                    )
+                )
+        return lease
+
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("q with forks"))
+        monkeypatch.setattr(store, "claim_turn_lease", claim_then_stop)
+        second = await stream(client, "/api/studio/turn", turn_body("second"))
+
+    assert stops == [True]
+    assert _events(second)[-1] == "done"
+    stored = await StudioStore(pg_engine).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None
+    assert [turn.get("error") for turn in stored.turns] == [closed, None]
+    assert await _cursor_statuses(pg_engine) == [closed, "done"]
+    async with pg_engine.connect() as conn:
+        inputs = (
+            await conn.execute(text("SELECT inputs FROM turn_cursors WHERE turn_index = 2"))
+        ).scalar_one()
+    (read,) = json.loads(inputs["conversation_digest"])["turns"][:1]
+    assert read["error"] == closed
+
+
+def _stored_state(
+    cards: list[dict[str, Any]], *, entry: dict[str, Any], on_canvas: bool = True
+) -> ConversationState:
+    """A conversation holding one card, `cmp_new`, stored as `entry`, whose
+    turns' records name it as `cards` gives, one record a turn."""
+    state = ConversationState(conversation_id=CONVERSATION, trace_id="tr_1")
+    state.components = {"cmp_new": {"type": "line_chart", "title": "Aid", "revision": 1, **entry}}
+    state.turns = [{"user": "q", "assistant": "a", "cards": [card]} for card in cards]
+    blocks = (
+        [{"component_id": "cmp_new", "revision": 1, "type": "line_chart", "title": "Aid"}]
+        if on_canvas
+        else []
+    )
+    state.composition = CompositionManifest.model_validate(
+        {
+            "composition_id": "cmp_comp",
+            "revision": 1,
+            "actor": "model",
+            "blocks": blocks,
+            "counts": {
+                "all": len(blocks),
+                "stats": 0,
+                "charts": len(blocks),
+                "tables": 0,
+                "notes": 0,
+            },
+        }
+    )
+    return state
+
+
+def _converted_block() -> dict[str, Any]:
+    """A Search block served in current US dollars that converts into both
+    of their price bases."""
+    years = {"start_year": 2000, "end_year": 2023}
+    usd = {
+        "code": "USD",
+        "noun": "US dollars",
+        "current_years": years,
+        "constant_years": years,
+        "base_year_min": 2000,
+        "base_year_max": 2023,
+    }
+    return {
+        "resolved": {
+            "unit_conversion": {"currencies": [usd]},
+            "facets": {"unit": {"currency": "USD"}},
+        }
+    }
+
+
+def test_a_stored_card_on_the_canvas_offers_its_unit_change() -> None:
+    """The control for the test below: the same card on the canvas, its
+    spec's block readable, offers its units from current US dollars."""
+    state = _stored_state(
+        [{"component_id": "cmp_new", "action": "created"}],
+        entry={"unit_card": {"spec_id": "spec_1", "args": {}}},
+    )
+    state.turn_specs = {"spec_1": _converted_block()}
+
+    (card,) = studio_module._closed_turn(1, state).cards
+
+    assert card.unit_change is not None
+    assert card.unit_change.spec_id == "spec_1"
+    assert card.unit_change.offer.start == UnitChoice(currency="USD", prices=UnitPrices.CURRENT)
+
+
+def test_a_card_names_the_card_it_replaced_only_on_the_turn_that_swapped_it() -> None:
+    """A card a unit change swapped in names the old card on the turn that
+    swapped it. A later turn that revised it lists it at its current
+    revision with no `replaces`, so a page does not swap it in again."""
+    state = _stored_state(
+        [
+            {"component_id": "cmp_new", "action": "recreated"},
+            {"component_id": "cmp_new", "action": "revised"},
+        ],
+        entry={"replaces": "cmp_old"},
+    )
+
+    swapped, revised = (studio_module._closed_turn(index, state) for index in (1, 2))
+
+    assert [card.replaces for card in swapped.cards] == ["cmp_old"]
+    assert [card.replaces for card in revised.cards] == [None]
+
+
+@pytest.mark.parametrize(
+    ("block", "on_canvas"),
+    [
+        pytest.param({"definition": "unreadable"}, True, id="unreadable-block"),
+        pytest.param(None, False, id="off-the-canvas"),
+    ],
+)
+def test_a_stored_card_offers_no_unit_change_it_cannot_make(
+    block: dict[str, Any] | None, on_canvas: bool
+) -> None:
+    """A stored card whose spec's block cannot be read gives the card with
+    no `unit_change`, and so does one off the canvas, which `apply_unit`
+    refuses `scope_choice_stale`."""
+    state = _stored_state(
+        [{"component_id": "cmp_new", "action": "created"}],
+        entry={"unit_card": {"spec_id": "spec_1", "args": {}}},
+        on_canvas=on_canvas,
+    )
+    state.turn_specs = {"spec_1": block if block is not None else _converted_block()}
+
+    (card,) = studio_module._closed_turn(1, state).cards
+
+    assert (card.component_id, card.unit_change) == ("cmp_new", None)
 
 
 async def _cursor_statuses(engine: AsyncEngine) -> list[str]:
