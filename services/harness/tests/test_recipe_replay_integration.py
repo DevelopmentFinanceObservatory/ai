@@ -17,11 +17,11 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
 
 import pytest
+from common.call_limit import CallDeadline
 from common.materialisation import FrameRef, get_store
 from common.row_budget import RowBudget
 from compiler.surface import McpSurface, ToolCallResult
 from data_mcp import client_holder, frame_materialisation
-from data_mcp.deadline import CallDeadline
 from harness.recipe_replay import Pending, Refused, Replayed, replay_recipe
 from harness.server import create_app
 from harness.settings import ANALYSIS_MCP_MOUNT_PATH, DATA_MCP_MOUNT_PATH, Settings

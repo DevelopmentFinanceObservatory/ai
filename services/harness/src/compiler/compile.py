@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from enum import Enum, StrEnum
 from typing import Any, Literal, NamedTuple
 
-from common.place_type import FLOW_ROLE_COLUMNS, type_column
+from common.place_type import type_column
 from common.rolling import PopulationEmptyError, PopulationLevelColumnMissingError
 from common.unit_refs import PERCENT_UNIT
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN, VALUE_COLUMN, normalize_role_keys
@@ -146,6 +146,7 @@ from compiler.shapes import (
     ResolvedShape,
     breakdown_level,
     operation_inputs,
+    retrieved_with_a_fixed_end,
     rolls,
     shapes_for,
     unsummable_axes,
@@ -156,6 +157,7 @@ from compiler.sources import (
     WholeSide,
     bound_codes,
     countries_apart,
+    cuts_party_totals,
     entity_scopes_disjoint,
     family_overlap,
     open_side_column,
@@ -867,12 +869,7 @@ class _Build:
             requirement = self.requirements.get(requirement_id)
             if not isinstance(requirement, DatasetRequirement):
                 continue
-            source = self._source_of(requirement_id)
-            window = ((source.identity if source is not None else None) or {}).get(
-                "requested_window"
-            )
-            closed = isinstance(window, dict) and window.get("end_year") is not None
-            if requirement.period_end_open and not closed:
+            if not retrieved_with_a_fixed_end(requirement, self._source_of(requirement_id)):
                 continue
             self._issue(
                 CompileIssueCode.ROLLING_NEEDS_OPEN_PERIOD,
@@ -2609,16 +2606,9 @@ class _Build:
             }
         if self._read_by_level_filter(operation.id):
             args["place_types"] = True
-        if self._is_flow_source(source):
+        if cuts_party_totals(source):
             args["without_party_totals"] = True
         return args, {}
-
-    @staticmethod
-    def _is_flow_source(source: SelectedSource) -> bool:
-        """Whether `source` has a flow role column among its stated or open entity axes."""
-        axes = {entity.role for entity in source.entities}
-        axes.update(axis.column for axis in source.open_entity_axes or ())
-        return bool(axes & FLOW_ROLE_COLUMNS.keys())
 
     def _read_by_level_filter(self, retrieve_id: str) -> bool:
         """Whether a filter keeping one level of place reads `retrieve_id`, directly or through other filters."""

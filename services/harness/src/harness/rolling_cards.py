@@ -90,6 +90,7 @@ from typing import Any, Final, Protocol
 
 import rfc8785
 from analysis_mcp.runner_client import DerivedUnread
+from common.call_limit import CallDeadline
 from common.caller import STUDIO_SURFACE
 from common.live_apis import LiveApisError, LiveApisNotConfigured
 from common.materialisation import (
@@ -110,7 +111,6 @@ from common.rolling import (
 )
 from common.row_budget import RowBudgetExhausted, row_budget
 from compiler.surface import ToolSurfaceUnavailableError
-from data_mcp.deadline import CallDeadline
 from pydantic import ValidationError
 
 from harness.conversation import shared_work_context

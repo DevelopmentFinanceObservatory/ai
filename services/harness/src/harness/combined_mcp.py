@@ -101,6 +101,7 @@ from analysis_mcp.server import PUBLIC_SHAPES as ANALYSIS_PUBLIC_SHAPES
 from analysis_mcp.server import healthz as analysis_healthz
 from analysis_mcp.server import mcp as analysis_mcp
 from common.auth import BearerTokenVerifier
+from common.call_limit import EXTERNAL_CALL_LIMIT_S
 from common.caller import MCP_CLIENT_NAME_LIMIT, current_caller, current_user_agent
 from common.echoed_text import truncate_value
 from common.logging import JSON_FIELDS
@@ -115,12 +116,7 @@ from common.refusal import (
 )
 from common.telemetry import EventLevel, RequestSpan, current_trace_id, use_request_span
 from common.uri_redaction import loggable_uri
-from data_mcp.deadline import (
-    DEADLINE_RETRY_AFTER_S,
-    EXTERNAL_CALL_BUDGET,
-    EXTERNAL_CALL_LIMIT_S,
-    use_call_budget,
-)
+from data_mcp.deadline import DEADLINE_RETRY_AFTER_S, EXTERNAL_CALL_BUDGET, use_call_budget
 from data_mcp.definition_registration import register_held_definition
 from data_mcp.definition_store import get_store as get_definition_store
 from data_mcp.definition_writes import SPEC_ID_PATTERN

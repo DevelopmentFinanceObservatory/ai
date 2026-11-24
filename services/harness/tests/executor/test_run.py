@@ -22,6 +22,7 @@ import httpx2
 import pyarrow as pa
 import pytest
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
+from common.call_limit import CallDeadline
 from common.materialisation import FrameRef
 from compiler.capabilities import CAPABILITIES, ToolCapability
 from compiler.compile import compile_plan
@@ -35,7 +36,6 @@ from compiler.surface import (
 )
 from data_mcp import stat_var_list
 from data_mcp.client import UpstreamClient
-from data_mcp.deadline import CallDeadline
 from data_mcp.errors import UpstreamError
 from data_mcp.graph_wire import NotHeldEntry, OrganisationNode
 from data_mcp.manifest import strip_manifest
