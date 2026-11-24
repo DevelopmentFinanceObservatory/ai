@@ -1911,9 +1911,10 @@ def test_a_stored_pending_card_keeps_each_decision_s_unit_beside_the_card_and_fr
 
 def test_a_stored_unit_question_keeps_its_offer_beside_the_frame() -> None:
     """A unit question marks the emitted frame with the `unit` input and its offer. An
-    instance rolled back to a model without them cannot load a stored frame that holds
-    them, so the frame is stored with a single-select question and no offer, the offer
-    beside it, and restored on load."""
+    instance rolled back to a model without them, or to one that adds `decisions` to
+    each frame holding units, cannot load a stored frame that holds them, so the frame
+    is stored with a single-select question and no offer, the offer under a key of its
+    own, and restored on load."""
     raw = json.loads(
         (
             Path(__file__).parent / "wire_fixtures" / "studio" / "event-18-elicitation-unit.json"
@@ -1929,6 +1930,8 @@ def test_a_stored_unit_question_keeps_its_offer_beside_the_frame() -> None:
     (stored,) = [q for frame in entry["frames"] for q in frame.get("questions") or ()]
     assert "unit" not in stored
     assert stored["input"] == ElicitationInput.SINGLE_SELECT.value
+    # The previous release's `_units_back` gives a frame with an entry here `decisions`.
+    assert "frames_units" not in entry
     assert restored.frames == (note, asked)
 
 

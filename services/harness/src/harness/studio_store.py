@@ -388,7 +388,8 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             },
             # `new_plan` is stored beside the card, and each decision's `unit`
             # and each unit question's offer beside the card and the frames
-            # (`_units_apart`). An instance rolled back to a model without them
+            # (`_units_apart`, `_unit_questions_apart`). An instance rolled back
+            # to a model without them
             # cannot load a stored card or frame that holds them, and ignores
             # an unknown key of the entry.
             **_units_apart(
@@ -413,78 +414,94 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
     }
 
 
-# The lists of a stored frame whose members can carry a `unit` (`_units_apart`): a
-# plan card's decisions, for a unit row's offer, and an elicitation's questions, for a
-# unit question's offer. A frame holds one of the two, so one map by id serves both.
-_UNIT_LISTS = ("decisions", "questions")
-
-
-def _unit_free(member: dict[str, Any]) -> dict[str, Any]:
-    """`member` with no `unit`. A unit question also takes `single_select` as its
-    `input`, since the earlier release's model has no `unit` input."""
-    free = {k: v for k, v in member.items() if k != "unit"}
-    if free.get("input") == ElicitationInput.UNIT.value:
-        free["input"] = ElicitationInput.SINGLE_SELECT.value
-    return free
-
-
 def _units_apart(key: str, frame: dict[str, Any] | None) -> dict[str, Any]:
-    """`frame` under `key` with no decision's or question's `unit` (`_unit_free`), and
-    each unit taken out, by its member's id, under `<key>_units` when there is one;
-    `_units_back` puts them back. An instance rolled back to a release whose models
-    lack the unit row and the unit question loads the frame without them."""
-    units = {
-        member["id"]: member["unit"]
-        for name in _UNIT_LISTS
-        for member in (frame or {}).get(name) or ()
-        if "unit" in member
-    }
-    if frame is None or not units:
+    """`frame` under `key` with no decision's `unit`, and each unit taken out,
+    by its decision's id, under `<key>_units` when there is one; `_units_back`
+    puts them back."""
+    if frame is None or not any("unit" in d for d in frame.get("decisions") or ()):
         return {key: frame}
+    decisions = frame["decisions"]
     return {
         key: {
             **frame,
-            **{
-                name: [_unit_free(member) for member in frame[name]]
-                for name in _UNIT_LISTS
-                if frame.get(name)
-            },
+            "decisions": [{k: v for k, v in d.items() if k != "unit"} for d in decisions],
         },
-        f"{key}_units": units,
+        f"{key}_units": {d["id"]: d["unit"] for d in decisions if "unit" in d},
     }
 
 
 def _frames_apart(frames: list[dict[str, Any]]) -> dict[str, Any]:
-    """`frames` under `"frames"`, each with no decision's or question's `unit`, and
-    each frame's units taken out, by its index, under `"frames_units"` when there
-    is one (`_units_apart`)."""
-    apart = [_units_apart("frame", frame) for frame in frames]
+    """`frames` under `"frames"`, each with no decision's `unit` and no unit question's
+    offer, each frame's units taken out, by its index, under `"frames_units"`, and its
+    unit questions' offers under `"frames_unit_questions"`, when there is one
+    (`_units_apart`, `_unit_questions_apart`)."""
+    asked = [_unit_questions_apart(frame) for frame in frames]
+    apart = [_units_apart("frame", frame) for frame, _ in asked]
     units = {
         str(index): one["frame_units"] for index, one in enumerate(apart) if "frame_units" in one
     }
-    return {"frames": [one["frame"] for one in apart], **({"frames_units": units} if units else {})}
+    offers = {str(index): one for index, (_, one) in enumerate(asked) if one}
+    return {
+        "frames": [one["frame"] for one in apart],
+        **({"frames_units": units} if units else {}),
+        **({"frames_unit_questions": offers} if offers else {}),
+    }
 
 
 def _units_back(frame: dict[str, Any], units: Mapping[str, Any] | None) -> dict[str, Any]:
-    """`frame` with each decision's and question's `unit` from `units`, by the
-    member's id, a question taking `input` `unit` with it."""
+    """`frame` with each decision's `unit` from `units`, by the decision's id."""
     if not units:
         return frame
-    restored = dict(frame)
-    for name in _UNIT_LISTS:
-        if not frame.get(name):
-            continue
-        restored[name] = [
-            member
-            if member.get("id") not in units
-            else {
-                **member,
-                **({"input": ElicitationInput.UNIT.value} if name == "questions" else {}),
-                "unit": units[member["id"]],
-            }
-            for member in frame[name]
-        ]
-    return restored
+    return {
+        **frame,
+        "decisions": [
+            {**d, "unit": units[d["id"]]} if d.get("id") in units else d
+            for d in frame.get("decisions") or ()
+        ],
+    }
+
+
+# The `input` a unit question is stored with (`_unit_questions_apart`): one every
+# release's model holds, which with no `unit` passes the unit question's own check.
+_STORED_UNIT_INPUT = ElicitationInput.SINGLE_SELECT.value
+
+
+def _unit_questions_apart(frame: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """`frame` with each unit question stored as a `single_select` one with no offer,
+    and the offers taken out, by question id. An instance rolled back to a release
+    whose models lack the unit question loads the frame. The offers sit under a key of
+    their own, since the previous release's `_units_back` gives every frame with a
+    `frames_units` entry a `decisions` list, which an elicitation frame refuses."""
+    offers = {
+        question["id"]: question["unit"]
+        for question in frame.get("questions") or ()
+        if "unit" in question
+    }
+    if not offers:
+        return frame, {}
+    questions = [
+        {k: v for k, v in question.items() if k != "unit"} | {"input": _STORED_UNIT_INPUT}
+        if question["id"] in offers
+        else question
+        for question in frame["questions"]
+    ]
+    return {**frame, "questions": questions}, offers
+
+
+def _unit_questions_back(frame: dict[str, Any], offers: Mapping[str, Any] | None) -> dict[str, Any]:
+    """`frame` with each question `offers` names a unit question again, its offer
+    restored (`_unit_questions_apart`)."""
+    if not offers:
+        return frame
+    return {
+        **frame,
+        "questions": [
+            {**question, "input": ElicitationInput.UNIT.value, "unit": offers[question["id"]]}
+            if question.get("id") in offers
+            else question
+            for question in frame.get("questions") or ()
+        ],
+    }
 
 
 def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
@@ -520,7 +537,10 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         admitted_run=entry.get("admitted_run"),
         frames=tuple(
             STUDIO_FRAME_ADAPTER.validate_python(
-                _units_back(frame, (entry.get("frames_units") or {}).get(str(index)))
+                _unit_questions_back(
+                    _units_back(frame, (entry.get("frames_units") or {}).get(str(index))),
+                    (entry.get("frames_unit_questions") or {}).get(str(index)),
+                )
             )
             for index, frame in enumerate(entry.get("frames") or ())
         ),
