@@ -325,11 +325,25 @@ def _langfuse_exporter() -> Any:
     set), Basic auth from the key pair, the SDK's name, version and public-key
     headers, and `LANGFUSE_TIMEOUT` seconds, 5 by default. It also sends
     `x-langfuse-ingestion-version: 4`, which the SDK asks of a custom exporter
-    so that a Langfuse v4 server processes the spans in real time.
+    so that a Langfuse v4 server processes the spans in real time. The body is
+    compressed as the SDK's default exporter compresses it: gzip, unless
+    `LANGFUSE_OTEL_COMPRESSION` or `OTEL_EXPORTER_OTLP_*_COMPRESSION` say
+    otherwise, and only gzip and none are honoured. `OTLPSpanExporter` drops any
+    batch whose uncompressed request exceeds `max_request_size` (64 MiB by
+    default, set by `LANGFUSE_OTEL_MAX_BATCH_SIZE_BYTES`) and reports FAILURE.
+    It does not split the batch.
     """
     import base64
 
     from langfuse import __version__ as langfuse_version
+
+    # Private SDK helpers, so the exporter follows the SDK's compression and batch-size
+    # settings. `test_the_langfuse_exporter_matches_the_one_the_sdk_builds_by_default`
+    # fails if a release renames them.
+    from langfuse._client.span_processor import (
+        _resolve_compression,
+        _resolve_max_batch_size_bytes,
+    )
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
     from common.uri_redaction import UriRedactingExporter
@@ -349,6 +363,8 @@ def _langfuse_exporter() -> Any:
                 "x-langfuse-ingestion-version": "4",
             },
             timeout=int(os.getenv("LANGFUSE_TIMEOUT", "5")),
+            compression=_resolve_compression(None),
+            max_request_size=_resolve_max_batch_size_bytes(),
         )
     )
 

@@ -222,14 +222,13 @@ def task_run(task_id: str, numbered: Mapping[int, Mapping[str, Any]]) -> dict[st
     return {"task": task_id, "lines": lines, "records": [numbered[line] for line in lines]}
 
 
-def pushed(client: Langfuse, name: str) -> dict[str, Pushed]:
-    """The item runs Langfuse shows under the experiment `name`, by task, each refused
-    unless its records match the digest pushed with them."""
+def _item_runs(client: Langfuse, name: str) -> Iterable[Any]:
+    """Every item run Langfuse shows under the experiment `name`, page by page, or none
+    when `DATASET` does not exist."""
     try:
         dataset = client.api.datasets.get(dataset_name=DATASET)
     except NotFoundError:
-        return {}
-    found: dict[str, Pushed] = {}
+        return
     cursor = None
     while True:
         page = client.api.experiments.list_items(
@@ -240,34 +239,50 @@ def pushed(client: Langfuse, name: str) -> dict[str, Pushed]:
             limit=_PAGE,
             cursor=cursor,
         )
-        for item in page.data:
-            metadata = item.metadata or {}
-            output = item.output
-            if isinstance(output, str):
-                try:
-                    output = json.loads(output)
-                except json.JSONDecodeError:
-                    output = None
-            if not isinstance(output, dict) or digest(output) != metadata.get("task_digest"):
-                raise SystemExit(
-                    f"item run {item.id} of {name} in Langfuse does not hold the records "
-                    "pushed with it"
-                )
-            found[output["task"]] = Pushed(
-                lines=tuple(output["lines"]),
-                records=tuple(output["records"]),
-                digest=digest(output),
-                pushed_with=(
-                    str(metadata["records_digest"]),
-                    int(metadata["tasks"]),
-                    int(metadata["records"]),
-                ),
-                trace_id=item.trace_id,
-                scores=frozenset(score.name for score in item.scores or ()),
-            )
+        yield from page.data
         cursor = page.meta.cursor
         if not page.data or not cursor:
-            return found
+            return
+
+
+def pushed(client: Langfuse, name: str) -> dict[str, Pushed]:
+    """The item runs Langfuse shows under the experiment `name`, by task, each refused
+    unless its output is the task's JSON object and its records match the digest pushed
+    with them.
+
+    A run at level ERROR is a task that raised (`Error: ...` is its output), which
+    `_push_arm` deletes before it sends; it is skipped here, so a good run of the same
+    task beside it is the one read and a task with only a failed run is absent. Any
+    other run that is not the task's object is refused by item run id and trace id."""
+    found: dict[str, Pushed] = {}
+    for item in _item_runs(client, name):
+        if item.level == "ERROR":
+            continue
+        metadata = item.metadata or {}
+        output = item.output
+        if isinstance(output, str):
+            try:
+                output = json.loads(output)
+            except json.JSONDecodeError:
+                output = None
+        if not isinstance(output, dict) or digest(output) != metadata.get("task_digest"):
+            raise SystemExit(
+                f"item run {item.id} (trace {item.trace_id}) of {name} in Langfuse does not "
+                "hold the records pushed with it"
+            )
+        found[output["task"]] = Pushed(
+            lines=tuple(output["lines"]),
+            records=tuple(output["records"]),
+            digest=digest(output),
+            pushed_with=(
+                str(metadata["records_digest"]),
+                int(metadata["tasks"]),
+                int(metadata["records"]),
+            ),
+            trace_id=item.trace_id,
+            scores=frozenset(score.name for score in item.scores or ()),
+        )
+    return found
 
 
 def pull(client: Langfuse, name: str) -> list[dict[str, Any]]:
@@ -328,7 +343,13 @@ def _push_arm(
     wait_s: float,
 ) -> None:
     """Send what Langfuse lacks of one arm's records, `numbered` by line, one item run per
-    task, then wait for it."""
+    task, then wait for it.
+
+    The push starts by deleting the failed runs the experiment holds (`_clear_failed_runs`),
+    so a task that raised in an earlier push, however that push ended, is sent again. A
+    short `run_experiment` result list means a task raised: Langfuse still shows its run,
+    at level ERROR, and the push stops there, leaving that run for the next push to clear.
+    A send that raises nothing but never arrives is caught by `_await_visible`."""
     outputs = {
         task_id: task_run(task_id, numbered)
         for task_id in dict.fromkeys(r["task"] for r in numbered.values())
@@ -341,6 +362,7 @@ def _push_arm(
     expected = {
         task_id: scores(output["records"], tasks[task_id]) for task_id, output in outputs.items()
     }
+    _clear_failed_runs(client, name, wait_s=wait_s)
     held = pushed(client, name)
     if any(digest(outputs.get(task_id)) != task.digest for task_id, task in held.items()):
         raise SystemExit(
@@ -378,9 +400,11 @@ def _push_arm(
             max_concurrency=CONCURRENCY,
         )
         if len(result.item_results) != len(pending):
+            client.flush()
             raise SystemExit(
                 f"{len(pending) - len(result.item_results)} of {len(pending)} item runs of "
-                f"{name} failed to send; push the run directory again"
+                f"{name} failed (their errors are in the langfuse log); push the run "
+                "directory again to clear them and send those tasks"
             )
     for task_id, task in held.items():
         for evaluation in expected[task_id]:
@@ -394,6 +418,25 @@ def _push_arm(
     client.flush()
     print(f"{name}: sent {len(pending)} tasks, {len(held)} already in Langfuse", file=sys.stderr)
     _await_visible(client, name, expected, wait_s=wait_s)
+
+
+def _clear_failed_runs(client: Langfuse, name: str, *, wait_s: float) -> None:
+    """Delete the traces of the experiment's item runs at level ERROR, which the SDK sets
+    when a task raises, and wait for up to `wait_s` until Langfuse no longer lists them,
+    so that the tasks they stood for read as missing."""
+    failed = {item.trace_id for item in _item_runs(client, name) if item.level == "ERROR"}
+    if not failed:
+        return
+    client.api.trace.delete_multiple(trace_ids=sorted(failed))
+    print(f"{name}: deleted {len(failed)} failed item runs", file=sys.stderr)
+    deadline = time.monotonic() + wait_s
+    while remaining := failed & {item.trace_id for item in _item_runs(client, name)}:
+        if time.monotonic() >= deadline:
+            raise SystemExit(
+                f"after {wait_s:.0f} s Langfuse still lists {len(remaining)} failed item runs "
+                f"of {name} that were deleted; push the run directory again once they clear"
+            )
+        time.sleep(min(LOOK_EVERY_S, max(deadline - time.monotonic(), 0.0)))
 
 
 def _await_visible(
