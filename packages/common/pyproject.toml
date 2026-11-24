@@ -20,11 +20,12 @@ dependencies = [
     # from Secret Manager by default, so the import path is the normal one.
     # Capped at the major actually verified here: langfuse has broken its public
     # API at every major so far (v3 renamed the client entry point, v4 replaced
-    # start_span/start_generation with start_observation). Since telemetry only
+    # start_span/start_generation with start_observation, v5 JSON-encodes span
+    # metadata values and reports experiments through OTel). Since telemetry only
     # runs when credentials are present, a silent major bump would surface as
-    # broken tracing in deployment rather than a failing test. 4.9 is the first
-    # release with the `mask_otel_spans` client argument.
-    "langfuse>=4.9,<5.0",
+    # broken tracing in deployment rather than a failing test. 5.2 is the
+    # version verified here.
+    "langfuse>=5.2,<6.0",
     # `common.live_apis`'s client on apis, the same floor data-mcp uses.
     "httpx2>=2.13.0",
     # Canonical JSON for `common.recipe` and `common.materialisation.mint_record`,
