@@ -425,9 +425,11 @@ Concurrency and atomicity:
   `/composition` landed, so a canvas edit and a turn's own card both
   survive when they collide.
 
+A body past 1,048,576 bytes gets a 413 `resource_exhausted` before it is parsed. A `remove` or `pin` operation takes about 60 bytes, so one request holds about 17,000 of them.
+
 ### 4.4 `turn.cancel` → POST `/api/studio/cancel`
 
-Fields: `kind: "turn.cancel"`, `schema_version: 1`, `conversation_id`, `turn_index?`. The server stops the conversation's active stream and returns HTTP 204. The active stream may be running on a different server instance than the one that answers this request; the server finds it there too and stops it within about 5 seconds. The stopped stream ends with an `error` frame whose code is `cancelled`. It is the stream's only ending frame, so a Stop that lands as the turn pauses ends the stream on `cancelled` with no `plan.proposed` or `elicitation.request` before it. A stream running a plan-card `switch` is the exception: `/cancel` stops the switch, and the stream ends on a `plan.proposed` re-offering the unchanged plan with a fresh `interrupt_id` and `switch_failed.code` `switch_cancelled`. Keep reading the stream after the call. A second `/cancel`, or 10 seconds with no re-offered plan, ends it with the `cancelled` error frame. The call is safe when nothing streams. A closed connection stops the stream too and leaves the turn open where it stopped, for `/resume` to carry on (§4.5). Proxies can hide a closed connection. Use `/cancel` for the Stop button.
+Fields: `kind: "turn.cancel"`, `schema_version: 1`, `conversation_id`, `turn_index?`. A body past 4,096 bytes gets a 413 `resource_exhausted` before it is parsed. The server stops the conversation's active stream and returns HTTP 204. The active stream may be running on a different server instance than the one that answers this request; the server finds it there too and stops it within about 5 seconds. The stopped stream ends with an `error` frame whose code is `cancelled`. It is the stream's only ending frame, so a Stop that lands as the turn pauses ends the stream on `cancelled` with no `plan.proposed` or `elicitation.request` before it. A stream running a plan-card `switch` is the exception: `/cancel` stops the switch, and the stream ends on a `plan.proposed` re-offering the unchanged plan with a fresh `interrupt_id` and `switch_failed.code` `switch_cancelled`. Keep reading the stream after the call. A second `/cancel`, or 10 seconds with no re-offered plan, ends it with the `cancelled` error frame. The call is safe when nothing streams. A closed connection stops the stream too and leaves the turn open where it stopped, for `/resume` to carry on (§4.5). Proxies can hide a closed connection. Use `/cancel` for the Stop button.
 
 Set `turn_index` to the turn the page is stopping, the index its stream's `x-dfo-turn-index` header named (§3). A page that sends a `/turn`, which starts a new turn, drops the index it held until the new stream's header names one, and sends its Stops without `turn_index` meanwhile. Such a Stop reaches the new turn once that turn's claim has landed. One that lands earlier, on another server instance, can answer 204 without reaching the new turn, so a page that sent a Stop in that window sends it again with the new `turn_index` once the header arrives.
 
@@ -437,7 +439,7 @@ A server from before `turn_index` answers 422 to a Stop carrying it. On a 422, s
 
 ### 4.5 `turn.resume` → POST `/api/studio/resume`
 
-Fields: `kind: "turn.resume"`, `schema_version: 1`, `conversation_id`, `turn_index` (the `turn.index` a state read returned, §4.6).
+Fields: `kind: "turn.resume"`, `schema_version: 1`, `conversation_id`, `turn_index` (the `turn.index` a state read returned, §4.6). A body past 4,096 bytes gets a 413 `resource_exhausted` before it is parsed.
 
 The server carries on the turn on a new stream, which you read as any other. Send it when the state read shows `status: "running"` and `lease_live: false`. The turn's last stream lost its client, a reload say, and the turn makes no progress until a client resumes it. The turn runs the step it stopped in again from its start, so the new stream carries no `activity.step` lines for earlier steps. A `plan.approved` the turn never sent goes out once. The stream opens with a `plan.approved` for each plan the turn already approved, since the page may have read none of them, so key them by `revision` and ignore one the page holds. The stream ends with `done`, a pause or an `error` frame.
 
@@ -735,7 +737,7 @@ decision, payload or answers than the one that actually resumed answers 409
 ## 7. Errors
 
 The `error` field of an `error` frame, and the body of every non-200
-response FROM THE STUDIO ROUTES' OWN CHECKS (404, 409, and the 422s in
+response FROM THE STUDIO ROUTES' OWN CHECKS (404, 409, 413, and the 422s in
 section 4), is a ToolError: `{error, retry, detail, constraint_id?, pointer?, fix?, retry_after_seconds?}`; the 409 `plan_revision_stale` body adds `current_plan` (section 4.2). Two framework responses have a
 different shape: 401 is `{"detail": "..."}`, and a request body that fails
 schema validation gets a 422 with `{"detail": [...]}` (FastAPI's format).

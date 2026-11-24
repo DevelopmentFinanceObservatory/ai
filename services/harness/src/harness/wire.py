@@ -1279,6 +1279,13 @@ MutationOperation = Annotated[
 ]
 
 
+# The largest `/api/studio/composition` body the route reads (`harness.studio`'s
+# `_BoundedCompositionRoute`): 1 MiB. The largest request a client sends removes or
+# pins blocks of one canvas, an operation per block. A `remove` or `pin` names one
+# component id in about 60 bytes of JSON, so the cap holds about 17,000 of them.
+MAX_COMPOSITION_REQUEST_BYTES = 1_048_576
+
+
 class CompositionMutation(_WireModel):
     """POST /api/studio/composition -- Pin to Canvas, Reorder, Remove.
     Returns the new manifest. Removing a block does not delete the component.
@@ -1300,6 +1307,13 @@ class CompositionMutation(_WireModel):
     operations: list[MutationOperation] = Field(min_length=1)
     expected_revision: int | None = Field(default=None, ge=1)
 
+
+# The largest `/api/studio/cancel` and `/api/studio/resume` bodies the routes read
+# (`harness.studio`'s `_BoundedCancelRoute` and `_BoundedResumeRoute`): 4 KiB. Each
+# request is its kind, its schema version, a conversation id and a turn index,
+# optional on a cancel, about 100 bytes.
+MAX_CANCEL_REQUEST_BYTES = 4_096
+MAX_RESUME_REQUEST_BYTES = 4_096
 
 # The largest turn index a `turn.cancel` may name: Postgres's `int`, which the
 # store compares it with (`harness.studio_store.StudioStore.request_cancel`).
