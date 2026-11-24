@@ -1583,6 +1583,13 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
         pytest.param(
             "CRSPurposeCode11220", ["CRSPurposeCode11220", "donor/DEU"], "Education", id="code-dcid"
         ),
+        # A code dcid the graph does not name keeps no label, so a note counts its series.
+        pytest.param(
+            "CRSPurposeCode99999",
+            ["CRSPurposeCode99999", "donor/DEU"],
+            None,
+            id="code-dcid-unnamed",
+        ),
     ],
 )
 async def test_a_series_breakdown_cell_is_named_by_the_graph_only_when_it_is_a_dcid(
