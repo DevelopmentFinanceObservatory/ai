@@ -40,6 +40,7 @@ from planner.plan import (
     QuotientRequirement,
     RankRequirement,
     RequirementSide,
+    ScopeWords,
     ShareOfRequirement,
     SumOfRequirement,
     plan_revision,
@@ -159,6 +160,8 @@ def test_the_recorded_plans_hold_every_field_added_since_the_base_format() -> No
     walk(SumOfRequirement(id="sum", left=part, right=whole))
     # Nor any scope decision: exercise one.
     walk(DecisionScope(choice_id="spec_choice:sector", axis="sector", options=()))
+    # Nor any plan card's scope words: exercise them.
+    walk(ScopeWords())
     # Nor does any hold a compile warning: exercise an `EvidenceIssue`'s.
     walk(
         EvidenceIssue(

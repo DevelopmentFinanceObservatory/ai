@@ -345,6 +345,17 @@ class DroppedEntry(StrictModel):
         return "stated_choice_not_applied" if explicit else "carried_choice_not_applied"
 
 
+AXIS_ABSENT = "axis_absent"
+
+
+def dropped_changed_nothing(cause: str, option_id: str, active: str | None) -> bool:
+    """Whether a carried entry Search dropped (`DroppedEntry.cause`) changed
+    nothing: the part has no choice on its axis (`axis_absent`), or the option
+    that axis holds (`active`, `None` where it has no choice) is the entry's own
+    (`option_id`)."""
+    return cause == AXIS_ABSENT or active == option_id
+
+
 class ScopeDefinition(StrictModel):
     """The identity a part resolved before its scope compiled, and its spec_id."""
 
