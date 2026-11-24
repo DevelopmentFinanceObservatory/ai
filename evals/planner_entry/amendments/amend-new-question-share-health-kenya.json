@@ -218,8 +218,7 @@
             "entity": "Kenya"
           },
           "axis": null,
-          "denominator_scope": null,
-          "accept_provider_difference": true
+          "denominator_scope": null
         }
       ],
       "declined": [],

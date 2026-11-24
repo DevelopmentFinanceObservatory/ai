@@ -907,6 +907,72 @@ def test_a_retrieve_then_aggregate_plan_produces_two_labelled_steps(
     assert "aggregate" not in labels[1]
 
 
+def test_the_yearly_and_cumulative_shares_of_one_pair_read_as_six_different_sentences(
+    decision: DecisionFactory,
+) -> None:
+    # "What share of total US ODA was US bilateral aid to Kenya", asked per year and
+    # over the window: two datasets, a share per year, a sum of each side, and a share
+    # of the sums. The two sums read alike and are numbered as their labels are; the two
+    # shares differ in their time shape.
+    kenya = DatasetRequirement(
+        id="bilat_kenya",
+        decision_ids=["measure"],
+        measure="official development assistance",
+        entities=[
+            Entity(name="United States", role="donor"),
+            Entity(name="Kenya", role="recipient"),
+        ],
+        period=Period(start=2015, end=2023),
+    )
+    total = DatasetRequirement(
+        id="total_us",
+        decision_ids=["measure"],
+        measure="official development assistance",
+        entities=[Entity(name="United States", role="donor")],
+        period=Period(start=2015, end=2023),
+    )
+    agg_kenya = AggregateRequirement(
+        id="agg_kenya",
+        decision_ids=["measure"],
+        input_id="bilat_kenya",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY,),
+    )
+    agg_us = AggregateRequirement(
+        id="agg_us",
+        decision_ids=["measure"],
+        input_id="total_us",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY,),
+    )
+    yearly = ShareOfRequirement(
+        id="share_yearly",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="bilat_kenya"),
+        denominator=RequirementSide(input_id="total_us"),
+    )
+    cumulative = ShareOfRequirement(
+        id="share_total",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="agg_kenya"),
+        denominator=RequirementSide(input_id="agg_us"),
+    )
+    plan = Plan(
+        question="q",
+        decisions=[decision()],
+        evidence_requirements=[kenya, total, agg_kenya, agg_us, yearly, cumulative],
+    )
+
+    sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
+
+    assert len(set(sentences.values())) == len(plan.evidence_requirements), sentences
+    assert sentences["agg_kenya"].endswith("(1).")
+    assert sentences["agg_us"].endswith("(2).")
+    assert "each year's total of" in sentences["share_yearly"]
+    assert "one total" not in sentences["share_yearly"]
+    assert "as one figure overall" in sentences["share_total"]
+
+
 def test_a_steps_args_are_the_workflow_steps_args_dict_unchanged(
     decision: DecisionFactory,
 ) -> None:
@@ -3281,8 +3347,8 @@ def test_the_approved_plan_names_the_parties_a_shares_denominator_source_holds(
 
     assert rows["all_oda"]["label"] == f"Fetch ODA gross disbursements for {parties}"
     assert rows["share"]["description"].startswith(
-        "Share of ODA gross disbursements as one figure overall, divided by ODA gross "
-        f"disbursements ({parties})."
+        "Share of ODA gross disbursements for each year, divided by each year's total of "
+        f"ODA gross disbursements ({parties})."
     )
 
 
@@ -3445,8 +3511,8 @@ _TOP_TEN = RankRequirement(
 )
 # The share's sentence over a denominator narrowed by the step `label` names.
 _OVER_ROWS = (
-    "Share of ODA gross disbursements as one figure overall, divided by one total of ODA "
-    'gross disbursements over the rows "{label}" keeps.'
+    "Share of ODA gross disbursements for each year, divided by each year's total of "
+    'ODA gross disbursements over the rows "{label}" keeps.'
 )
 
 
@@ -3470,8 +3536,8 @@ _OVER_ROWS = (
         (
             FilterRequirement(id="later", input_id="all_oda", predicates=_LATER),
             {"share": "from every donor"},
-            "Share of ODA gross disbursements as one figure overall, divided by ODA gross "
-            "disbursements (Kenya and all 140 donors).",
+            "Share of ODA gross disbursements for each year, divided by each year's total of "
+            "ODA gross disbursements (Kenya and all 140 donors).",
         ),
     ],
     ids=["value_filter", "top_ten", "period_filter"],

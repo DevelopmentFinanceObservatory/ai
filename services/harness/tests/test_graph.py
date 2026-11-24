@@ -59,6 +59,7 @@ from harness.conversation import current_conversation_id
 from harness.decision_pick import DecisionPick
 from harness.early_mint import EarlyMints
 from harness.graph import answer as answer_module
+from harness.graph import approve as approve_module
 from harness.graph.events import PlannerStarted, StepProgress
 from harness.graph.execute import (
     _failed_step,
@@ -2487,6 +2488,45 @@ async def test_a_transport_stop_closes_the_turn_without_a_replan(
     failed = _output_of(events, "execute")["failed_step"]
     assert failed["step_id"] == "get_data"
     assert failed["wave_remedy"] == wave_remedy
+
+
+async def test_an_approval_stored_over_accept_provider_difference_offers_the_card_again(
+    pg_engine: AsyncEngine, decision: Callable[..., Decision], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user approves the US share of ODA to Kenya, and the approved plan is stored
+    with `accept_provider_difference` on its share, as plans approved before that field
+    left the plan are. `execute` reads it awaiting approval, with no approval recorded:
+    nothing runs, the turn does not raise, and the card is offered again under the
+    revision of the plan as it reads."""
+    plan = us_share_of_kenya_oda(decision, whole=DAC_DONORS, numerator=US_DONOR)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    surface = _CallRecordingSurface(ScriptedSurface())
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=surface)
+    await _start(runner)
+    decide = approve_module.decide
+
+    def stored_with_the_field(ctx: Any, answer: dict[str, Any], *, early_mints: Any) -> Any:
+        routed = decide(ctx, answer, early_mints=early_mints)
+        stored = json.loads(ctx.state["plan"])
+        (share,) = [r for r in stored["evidence_requirements"] if r["kind"] == "share_of"]
+        share["accept_provider_difference"] = True
+        ctx.state["plan"] = json.dumps(stored)
+        return routed
+
+    monkeypatch.setattr(approve_module, "decide", stored_with_the_field)
+
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
+
+    assert _pending_interrupt(events) == APPROVE_PAUSE
+    offered = _output_of(events, "execute")
+    assert offered["revision"] == plan_revision(plan)
+    assert surface.calls == []
+    held = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
+    assert (held.status, held.approved_revision, held.approved_at) == (
+        PlanStatus.PENDING_APPROVAL,
+        None,
+        None,
+    )
 
 
 async def test_a_not_approved_outcome_raises_instead_of_replanning(

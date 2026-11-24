@@ -9,7 +9,8 @@ from typing import Any
 
 import httpx2
 import pytest
-from data_mcp.deadline import DIRECT_CALL_BUDGET, CallDeadline
+from common.call_limit import CallDeadline
+from data_mcp.deadline import DIRECT_CALL_BUDGET
 from data_mcp.operations import (
     PollUpdate,
     QueuedOperation,

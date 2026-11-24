@@ -162,6 +162,8 @@ def _first_results() -> list[dict[str, Any]]:
 
 
 async def test_a_card_drawn_on_a_converted_spec_offers_its_units(pg_engine: AsyncEngine) -> None:
+    """The card's frame offers its units, and a state read gives its stored
+    card the same `unit_change`, with no `replaces`."""
     app = _app(
         *_first_turn(),
         resolver=CannedSearch(_ENVELOPE),
@@ -170,11 +172,18 @@ async def test_a_card_drawn_on_a_converted_spec_offers_its_units(pg_engine: Asyn
     )
     async with _client(app) as client:
         frames = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        read = await client.get(
+            "/api/studio/state", params={"conversation_id": CONVERSATION, "since": 0}, headers=AUTH
+        )
 
     created = _frame(frames, "component.created")
     assert created["unit_change"]["spec_id"] == created["provenance"]["inputs"][0]["spec_id"]
     assert created["unit_change"]["offer"]["start"] == {"currency": "USD", "prices": "current"}
     assert [c["code"] for c in created["unit_change"]["offer"]["currencies"]] == ["USD"]
+    ((card,),) = [closed["cards"] for closed in read.json()["closed_since"]]
+    assert card["component_id"] == created["component_id"]
+    assert card["unit_change"] == created["unit_change"]
+    assert "replaces" not in card
 
 
 async def test_a_unit_change_redraws_the_card_in_its_slot_and_records_the_new_spec(
@@ -249,6 +258,9 @@ async def test_a_unit_change_redraws_the_card_in_its_slot_and_records_the_new_sp
     assert record["assistant"] == "The card now shows constant 2023 US dollars."
     assert [r["spec_id"] for r in record["readings"]] == [new_spec]
     assert new_spec in record["specs"]
+    # The model reads the new card with no word of the swap.
+    recalled = conversation.recall_part(part="canvas", component_id="cmp_01unit0002")
+    assert "replaces" not in recalled
 
     # A state read gives the turn as its stream showed it: no reply, and the
     # change in words with no spec_id.
@@ -256,6 +268,11 @@ async def test_a_unit_change_redraws_the_card_in_its_slot_and_records_the_new_sp
     (closed,) = read.json()["closed_since"]
     assert (closed["user_message"], closed["reply"]) == (shown, "")
     assert read.json()["turn"]["user_message"] == shown
+    # Its stored card names the card it replaced and carries the unit offer
+    # its frame did, so a page that never got the frame draws the same card.
+    (card,) = closed["cards"]
+    assert (card["component_id"], card["replaces"]) == ("cmp_01unit0002", "cmp_01unit0001")
+    assert card["unit_change"] == created["unit_change"]
 
 
 async def test_a_held_card_offers_no_unit_change(pg_engine: AsyncEngine) -> None:
@@ -781,7 +798,9 @@ def test_a_card_replaces_another_only_on_the_edit_routes_which_never_pause() -> 
     Card rebuild, and `_swap_frames`, which writes that swap's frames. That
     module names no frame a turn pauses on. So no card the agent removed
     before a pause is replaced once the turn resumes, and the client holds
-    no removal across a pause."""
+    no removal across a pause. `_swapped` also stores the replaced id with
+    the new card, and the state read's `harness.studio._stored_card` gives
+    that stored id back, setting nothing new."""
     setting = {
         f"{path.relative_to(_SRC)}:{name}"
         for path in sorted(_SRC.rglob("*.py"))
@@ -799,5 +818,9 @@ def test_a_card_replaces_another_only_on_the_edit_routes_which_never_pause() -> 
         for alias in node.names
     }
 
-    assert setting == {"harness/studio_edit.py:_swap_frames", "harness/studio_edit.py:_swapped"}
+    assert setting == {
+        "harness/studio.py:_stored_card",
+        "harness/studio_edit.py:_swap_frames",
+        "harness/studio_edit.py:_swapped",
+    }
     assert not named & _PAUSING_FRAMES

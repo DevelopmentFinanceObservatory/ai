@@ -2854,12 +2854,22 @@ def _reading_clause(source: SelectedSource) -> str | None:
 
 
 def _sentence_aggregate(requirement: AggregateRequirement, plan: Plan) -> str:
-    upstream = plan.requirement(requirement.input_id)
+    sentence = _aggregate_wording(requirement, plan)
+    # Aggregates the card labels alike are numbered in the order of those labels (`_label`).
+    label = _builder_label(requirement, plan)
+    namesakes = [other.id for other in _card_order(plan) if _builder_label(other, plan) == label]
+    if len(namesakes) == 1:
+        return f"{sentence}."
+    return f"{sentence} ({namesakes.index(requirement.id) + 1})."
+
+
+def _aggregate_wording(requirement: AggregateRequirement, plan: Plan) -> str:
+    """`_sentence_aggregate`'s wording before it names its input."""
     word = _REDUCTION_WORDS[requirement.reduction]
     group = _group_by_phrase(
         requirement.group_by, breakdown=_breakdown_of(requirement, plan), grouped=True
     )
-    return f"The {word} of {_measure_of(upstream, plan)}, {group}."
+    return f"The {word} of {_measure_of(plan.requirement(requirement.input_id), plan)}, {group}"
 
 
 def _sentence_growth(requirement: GrowthRequirement, plan: Plan) -> str:
@@ -2951,6 +2961,11 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
         )
         return f"Share of {measure} per {requirement.axis}, {scope_text}."
     divisor = _measure_of(denominator, plan)
+    # An un-keyed share holds no role dimension (`planner.shapes.shared_ratio`), so its
+    # shape is per year or one figure.
+    per_year = "year" in _kept_words(frame_shapes(plan)[requirement.id], plan)
+    shape = "for each year" if per_year else "as one figure overall"
+    total = "each year's total" if per_year else "one total"
     # A denominator narrowed to fewer members than its sources hold names the
     # step that narrows it, whose own line states the filter or limit, in
     # place of the parties its sources hold. A filter keeping a level of place
@@ -2963,7 +2978,7 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
         )
     ):
         return (
-            f"Share of {measure} as one figure overall, divided by one total of {divisor} "
+            f"Share of {measure} {shape}, divided by {total} of {divisor} "
             f'over the rows "{_label(narrowing, plan)}" keeps.'
         )
     # A pooled share over a frame that names no place reads one level of it, which
@@ -2974,7 +2989,8 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
             _parties(dataset, plan, level=level) for dataset in datasets_of(denominator, plan)
         )
     )
-    return f"Share of {measure} as one figure overall, divided by {divisor} ({parties})."
+    whole = f"each year's total of {divisor}" if per_year else divisor
+    return f"Share of {measure} {shape}, divided by {whole} ({parties})."
 
 
 def _sentence_quotient_of(requirement: QuotientRequirement, plan: Plan) -> str:

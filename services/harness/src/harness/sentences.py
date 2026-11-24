@@ -96,6 +96,7 @@ TERMINAL_PROPOSE_CODES = frozenset(
         ProblemCode.NOTHING_TO_PLAN,
         ProblemCode.PRICES_UNSERVED,
         ProblemCode.STATED_SCOPE_UNREADABLE,
+        ProblemCode.STATED_SCOPE_UNAVAILABLE,
         ProblemCode.STATED_COMPILE_UNREACHABLE,
     }
 )
@@ -348,6 +349,10 @@ STOP_SENTENCES: Mapping[StopCode | ProblemCode, str] = {
         "reading it again fails the same way, so nothing was recorded. The fault is in the "
         "system, not the request."
     ),
+    ProblemCode.STATED_SCOPE_UNAVAILABLE: (
+        "The providers' spending the question asks for could not be read from Search, so "
+        "nothing was recorded. The service is unavailable; try again shortly."
+    ),
     ProblemCode.STATED_COMPILE_UNREACHABLE: (
         "The data could not be fetched from Search counted the way the question asks, and "
         "fetching it again fails the same way, so nothing was recorded. The fault is in the "
@@ -380,8 +385,8 @@ STOP_SENTENCES: Mapping[StopCode | ProblemCode, str] = {
         "for, so nothing was recorded."
     ),
     ProblemCode.STATED_SCOPE_UNATTRIBUTED: (
-        "The plan{at} does not say which figures count the providers' spending the question "
-        "asks for, so nothing was recorded."
+        "The plan{at} says whose spending some figures of one calculation count and not "
+        "others, so nothing was recorded."
     ),
     ProblemCode.ASK_NOT_UNDERSTOOD: (
         "Part of the request could not be matched to data{at}, so nothing was recorded."
@@ -425,6 +430,9 @@ STOP_REASONS: Mapping[StopCode | ProblemCode, str] = {
     ProblemCode.STATED_SCOPE_UNREADABLE: (
         "the providers' spending the question asks for could not be read from Search"
     ),
+    ProblemCode.STATED_SCOPE_UNAVAILABLE: (
+        "the providers' spending the question asks for could not be read from Search just now"
+    ),
     ProblemCode.STATED_COMPILE_UNREACHABLE: (
         "the data could not be fetched from Search counted the way the question asks"
     ),
@@ -447,8 +455,7 @@ STOP_REASONS: Mapping[StopCode | ProblemCode, str] = {
         "{lead}the data the plan reads cannot count the providers' spending the question asks for"
     ),
     ProblemCode.STATED_SCOPE_UNATTRIBUTED: (
-        "{lead}the plan does not say which figures count the providers' spending the question "
-        "asks for"
+        "{lead}the plan says whose spending some figures of one calculation count and not others"
     ),
     ProblemCode.ASK_NOT_UNDERSTOOD: "{lead}part of the request could not be matched to data",
     ProblemCode.SEARCH_REFUSED: "Search refused to look up the data{at}",
@@ -773,6 +780,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ExecutorCode.LEDGER_UNAVAILABLE,
             StopCode.DISCOVERY_UNAVAILABLE,
             ProblemCode.SURFACE_UNAVAILABLE,
+            ProblemCode.STATED_SCOPE_UNAVAILABLE,
         }
     ),
     FailureClass.TOO_BIG: frozenset(

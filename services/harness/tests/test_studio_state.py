@@ -31,7 +31,7 @@ import json
 import logging
 import ssl
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,6 +55,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
 )
 from harness.provenance import CardLineage, ProvenanceInput
+from harness.studio import _answers_refusal, _resume_answer
 from harness.studio_edit import _record_revision, _refresh_block
 from harness.studio_state import (
     CANVAS_LISTING_MAX_BYTES,
@@ -81,9 +82,11 @@ from harness.studio_store import (
     SegmentClose,
     StopPending,
     StudioStore,
+    TurnMoved,
 )
 from harness.turn.store import TurnStatus, TurnStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
+from harness.unit_offer import whole_unit_options, whole_units
 from harness.wire import (
     AddOp,
     ClientFeature,
@@ -92,9 +95,11 @@ from harness.wire import (
     CompositionBlock,
     CompositionManifest,
     ElicitationInput,
+    ElicitationRequest,
     ErrorCode,
     MessageComplete,
     MutationOp,
+    OptionAnswer,
     PlanProposed,
     UnitOffer,
 )
@@ -113,28 +118,31 @@ from .test_turn_store import ADMITTED_RUN
 
 CONVERSATION = "conv_01test0000"
 
-# A unit question as `/interrupt` keeps it: its input and the offer an answer
-# must lie inside.
+_UNIT_OFFER = UnitOffer.model_validate(
+    {
+        "currencies": [
+            {
+                "code": "USD",
+                "name": "US dollars",
+                "prices": ["current", "constant"],
+                "base_year_min": 2000,
+                "base_year_max": 2023,
+            }
+        ],
+        "presets": ["USD"],
+        "start": {"currency": "USD", "prices": "constant", "base_year": 2023},
+    }
+)
+
+# A unit question as `/interrupt` keeps it: its input, the offer an answer must lie
+# inside, and its whole units, which a page sent it as a pick answers with.
 _UNIT_QUESTION = _PendingQuestion(
     id="q2",
     question="In which prices?",
+    options=dict(whole_unit_options(_UNIT_OFFER)),
     skippable=True,
     input=ElicitationInput.UNIT,
-    unit=UnitOffer.model_validate(
-        {
-            "currencies": [
-                {
-                    "code": "USD",
-                    "name": "US dollars",
-                    "prices": ["current", "constant"],
-                    "base_year_min": 2000,
-                    "base_year_max": 2023,
-                }
-            ],
-            "presets": ["USD"],
-            "start": {"currency": "USD", "prices": "constant", "base_year": 2023},
-        }
-    ),
+    unit=_UNIT_OFFER,
 )
 
 
@@ -212,6 +220,87 @@ def test_land_component_held_when_auto_add_is_off() -> None:
     assert action == "held"
     assert state.composition is None
     assert "cmp_two" in state.components
+
+
+def _titled(component_id: str, title: str | None) -> dict[str, Any]:
+    """`_component` titled `title`, where given, as a chart's payload titles it."""
+    payload = {"payload": {"component": {"title": {"text": title}}}} if title else {}
+    return {**_component(component_id), **payload}
+
+
+@pytest.mark.parametrize(
+    ("titles", "removed", "auto_add", "shown", "named", "unnamed"),
+    [
+        pytest.param(
+            ["Aid to Kenya", "Aid to Ghana"],
+            ["cmp_0"],
+            True,
+            ["cmp_1"],
+            ["Aid to Ghana"],
+            ["Aid to Kenya", "cmp_"],
+            id="a-card-taken-off",
+        ),
+        pytest.param(
+            ["Aid to Kenya", None],
+            [],
+            True,
+            ["cmp_0", "cmp_1"],
+            ["line_chart"],
+            ["cmp_"],
+            id="an-untitled-card",
+        ),
+        pytest.param(
+            ["Aid to Kenya"],
+            [],
+            False,
+            ["cmp_0"],
+            ["Aid to Kenya"],
+            ["cmp_"],
+            id="held-off-the-canvas",
+        ),
+        pytest.param(
+            [f"Aid to country {n}" for n in range(10)],
+            [],
+            True,
+            [f"cmp_{n}" for n in range(10)],
+            ["Aid to country 7", "2 more"],
+            ["Aid to country 8", "cmp_"],
+            id="past-the-card-cap",
+        ),
+        pytest.param(
+            ["Aid " + "x" * 200],
+            [],
+            True,
+            ["cmp_0"],
+            ["Aid xxx"],
+            ["x" * 150],
+            id="a-long-title",
+        ),
+    ],
+)
+def test_a_cards_answer_names_by_title_the_cards_the_user_still_sees(
+    titles: list[str | None],
+    removed: list[str],
+    auto_add: bool,
+    shown: list[str],
+    named: list[str],
+    unnamed: list[str],
+) -> None:
+    """The answer kept for a turn its cards answered names, for a later turn's model,
+    the cards the turn drew that the user still sees, within the digest's bounds on a
+    turn's cards. A card the turn took off again is left out, a card held off the
+    canvas stays, and no component id is named."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.auto_add = auto_add
+    for n, title in enumerate(titles):
+        land_component(state, _titled(f"cmp_{n}", title))
+    remove_cards(state, removed, all_cards=False)
+
+    answer = state.cards_answer()
+
+    assert [card["component_id"] for card in state.turn_cards_shown()] == shown
+    assert all(name in answer for name in named), answer
+    assert not any(name in answer for name in unnamed), answer
 
 
 # --- the canvas digest entry: what each card shows ---------------------------
@@ -1908,6 +1997,59 @@ def test_a_stored_pending_card_keeps_each_decision_s_unit_beside_the_card_and_fr
     assert (restored.card, restored.frames) == (card, (note, card))
 
 
+def test_a_stored_unit_question_is_kept_in_its_whole_units_form() -> None:
+    """A unit question marks the emitted frame with the `unit` input and its offer. An
+    instance rolled back to a model without them, or to one that adds `decisions` to
+    each frame holding units, must still load the stored frame and answer the question.
+    So the frame and the pending question are kept in the form a client that renders
+    no unit question is asked it, a `single_select` over the offer's whole units, the
+    offer under a key of its own, and both are restored on load."""
+    raw = json.loads(
+        (
+            Path(__file__).parent / "wire_fixtures" / "studio" / "event-18-elicitation-unit.json"
+        ).read_text()
+    )
+    asked = ElicitationRequest.model_validate(raw)
+    note = MessageComplete(event="message.complete", seq=4, text="One question first.")
+    offer = asked.questions[0].unit
+    assert offer is not None
+    question = dataclasses.replace(
+        _UNIT_QUESTION, id="q1", unit=offer, options=dict(whole_unit_options(offer))
+    )
+    pending = _PendingInterrupt(
+        adk_id="adk_1",
+        kind="elicitation",
+        frames=(note, asked),
+        questions=(question,),
+        skippable=True,
+    )
+
+    entry = studio_store._serialize_pending({"int_1": pending})["int_1"]
+    restored = studio_store._deserialize_entry(json.loads(json.dumps(entry)))
+
+    whole = list(whole_units(asked.questions[0].unit))
+    (framed,) = [q for frame in entry["frames"] for q in frame.get("questions") or ()]
+    assert "unit" not in framed
+    assert framed["input"] == ElicitationInput.SINGLE_SELECT.value
+    assert [option["id"] for option in framed["options"]] == whole
+    assert framed["allow_free_text"] is False
+    (kept,) = entry["questions"]
+    assert (kept["input"], kept["native_input"]) == ("single_select", "unit")
+    assert list(kept["options"]) == whole
+    assert "frames_units" not in entry
+    assert restored.frames == (note, asked)
+    assert restored.questions == (question,)
+    # A page sent the stored form, as a release with no unit question serves it,
+    # answers with a pick, which reads as that whole unit.
+    pick = OptionAnswer(kind="option", option_id=whole[-1])
+    assert _answers_refusal(restored.questions, {"q1": pick}) is None
+    unit = whole_units(asked.questions[0].unit)[whole[-1]]
+    assert _resume_answer(restored.questions[0], pick) == {
+        "kind": "unit",
+        **unit.model_dump(mode="json", exclude_none=True),
+    }
+
+
 def test_awaiting_answer_excludes_an_entry_marked_resuming() -> None:
     state = ConversationState(conversation_id=CONVERSATION)
     state.pending["int_1"] = _pending(resuming_segment="seg_1")
@@ -2518,6 +2660,94 @@ async def test_a_stop_request_sets_only_the_flag_and_the_renewal_records_its_id(
     renewed = await store.renew("principal", CONVERSATION, segment_id)
     assert renewed.stop_id is not None
     assert await _stop_columns(pg_engine) == (False, renewed.stop_id)
+
+
+async def test_a_stop_naming_its_turn_is_live_for_that_turn_alone(
+    new_store, clock, pg_engine
+) -> None:
+    """`request_cancel` given the turn a Stop is for records the Stop naming
+    that turn at once, with no flag, while a live lease holds it, and the
+    holder's renewal reports it. For another turn it raises `TurnMoved`
+    naming the row's turn and records nothing. A turn the holder begins
+    after the Stop, under the same lease, runs on: a flag stamped by a
+    later lease write would name the new turn."""
+    store = new_store(clock=clock)
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    stopper = new_store(clock=clock)
+
+    with pytest.raises(TurnMoved) as moved:
+        await stopper.request_cancel("principal", CONVERSATION, turn_index=2)
+    assert moved.value.latest == 1
+    assert await _stop_row(pg_engine) == (False, None, None)
+
+    assert await stopper.request_cancel("principal", CONVERSATION, turn_index=1) is True
+    flagged, stop_id, stop_turn = await _stop_row(pg_engine)
+    assert (flagged, stop_id is not None, stop_turn) == (False, True, 1)
+    assert (await store.renew("principal", CONVERSATION, segment_id)).stop_id == stop_id
+
+    state.begin_turn()
+    await store.save("principal", CONVERSATION)
+    assert (await store.renew("principal", CONVERSATION, segment_id)).stop_id is None
+    assert not await stopper.stop_live("principal", CONVERSATION)
+
+
+class _ClaimAfterFirstStatement:
+    """A connection that runs `claim` once its first statement returns, so a
+    claim from another instance commits between that statement and the
+    next."""
+
+    def __init__(self, conn: Any, claim: Callable[[], Awaitable[None]]) -> None:
+        self._conn = conn
+        self._claim: Callable[[], Awaitable[None]] | None = claim
+
+    async def execute(self, *args: Any, **kwargs: Any) -> Any:
+        result = await self._conn.execute(*args, **kwargs)
+        if self._claim is not None:
+            claim, self._claim = self._claim, None
+            await claim()
+        return result
+
+
+async def test_a_stop_racing_a_claim_of_its_own_turn_is_recorded_for_it(
+    new_store, clock, pg_engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turn 1 is open with no lease, as a turn whose client left is, when a
+    Stop names it. Another instance's resume claims turn 1 after the Stop's
+    guarded update found no live lease and before it reads the row again.
+    The Stop finds turn 1 held, so it records itself naming turn 1, and the
+    holder's renewal reports it, with no `TurnMoved` naming the turn the
+    Stop named."""
+    store = new_store(clock=clock)
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
+    await store.save("principal", CONVERSATION)
+    resumer = new_store(clock=clock)
+    held: list[str] = []
+
+    async def claim() -> None:
+        await resumer.load("principal", CONVERSATION)
+        work = resumer.draft("principal", CONVERSATION)
+        held.append(resumer.claim_segment("principal", CONVERSATION, work))
+        await resumer.save("principal", CONVERSATION, work)
+
+    stopper = new_store(clock=clock)
+    transaction = stopper._transaction
+
+    @asynccontextmanager
+    async def claimed_between() -> AsyncIterator[Any]:
+        async with transaction() as conn:
+            yield _ClaimAfterFirstStatement(conn, claim)
+
+    monkeypatch.setattr(stopper, "_transaction", claimed_between)
+
+    assert await stopper.request_cancel("principal", CONVERSATION, turn_index=1) is True
+    (segment_id,) = held
+    flagged, stop_id, stop_turn = await _stop_row(pg_engine)
+    assert (flagged, stop_id is not None, stop_turn) == (False, True, 1)
+    assert (await resumer.renew("principal", CONVERSATION, segment_id)).stop_id == stop_id
 
 
 async def _stop_row(engine: AsyncEngine) -> tuple[bool, str | None, int | None]:

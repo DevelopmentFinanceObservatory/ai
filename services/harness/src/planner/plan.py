@@ -742,6 +742,13 @@ class _Choice(StrictModel):
 # value such as `sector:120+130`, and a partial option covers one span or a
 # few; each limit sits several times above that.
 MAX_SCOPE_ID_CHARS = 200
+
+# The provider options a dataset requirement may declare
+# (`DatasetRequirement.scope_options`): one per provider scope the harness reads
+# (`harness.scope_choices.ProviderScope`), which is every scope Search publishes.
+ProviderOptionId = Literal[
+    "provider:bilateral", "provider:inclusive", "provider:contributions", "provider:multilateral"
+]
 MAX_SCOPE_YEAR_SPANS = 50
 
 
@@ -763,12 +770,16 @@ class DecisionScope(StrictModel):
     holds one state per `Decision.options` label, in the same order.
     `provenance` is how the choice came to hold its option, `"default"` when
     Search's default settled it, and `None` on a decision recorded without it.
+    `line` says the decision's rationale is the plan card's line where the option
+    a figure is counted on and the user's words part
+    (`submission.service._provider_line`); the card shows it on the row.
     """
 
     choice_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)
     axis: ScopeAxis
     options: tuple[ScopeOptionState, ...] = Field(max_length=MAX_DECISION_OPTIONS)
     provenance: Annotated[ChoiceProvenance | None, HASHED_WHEN_SET] = None
+    line: Annotated[bool, HASHED_WHEN_SET] = Field(default=False, exclude_if=lambda line: not line)
 
 
 # How a calculation qualifies the answer where its inputs differ on one aligned
@@ -776,12 +787,14 @@ class DecisionScope(StrictModel):
 DifferenceCaveat = Literal["providers_differ", "bases_differ"]
 
 # How a decision `propose_plan` writes qualifies the answer (`Decision.caveat`): a
-# calculation's inputs differing on an axis, or a whole compiled from its part.
-DecisionCaveat = Literal[DifferenceCaveat, "derived_whole"]
+# calculation's inputs differing on an axis, a whole compiled from its part, or a
+# figure counted otherwise than the user's words ask because its dataset does not
+# publish it that way (`scope_unpublished`).
+DecisionCaveat = Literal[DifferenceCaveat, "derived_whole", "scope_unpublished"]
 
 # The most decisions qualifying the answer one requirement carries: a calculation
-# states at most one per axis its inputs differ on, and a whole, a dataset
-# requirement, only `derived_whole`.
+# states at most one per axis its inputs differ on, a whole, a dataset requirement,
+# only `derived_whole`, and any other dataset requirement only `scope_unpublished`.
 MAX_REQUIREMENT_CAVEATS = len(get_args(DifferenceCaveat))
 
 
@@ -1003,10 +1016,7 @@ class DatasetRequirement(TaggedModel):
     measure: str = Field(
         min_length=1,
         max_length=MAX_MEASURE_CHARS,
-        description=(
-            "What this requirement retrieves, in the words of the question, naming how a "
-            "flow is counted only when the question does."
-        ),
+        description=("What this requirement retrieves, in the words of the question."),
     )
     entities: tuple[Entity, ...] = Field(
         default=(),
@@ -1117,6 +1127,19 @@ class DatasetRequirement(TaggedModel):
             "Read only as that denominator."
         ),
     )
+    # The provider option the user's words ask this figure to count, which admission
+    # counts its pin on (`submission.service._declared_claims`). No description: the
+    # enum names each option, and one would put the declaration over
+    # `PROPOSE_PLAN_DECLARATION_CEILING`.
+    scope_options: Annotated[tuple[ProviderOptionId, ...], HASHED_WHEN_SET] = Field(
+        default=(), max_length=1, exclude_if=lambda options: not options
+    )
+
+    @property
+    def provider_option(self) -> str | None:
+        """The provider option this requirement declares (`scope_options`), `None`
+        where it declares none."""
+        return self.scope_options[0] if self.scope_options else None
 
     @field_validator("source_code", mode="before")
     @classmethod
@@ -1367,16 +1390,25 @@ class GrowthRequirement(TaggedModel):
         return self
 
 
-# What `accept_provider_difference` means to the planner, on each calculation
-# that subtracts, divides or adds its inputs
-# (`submission.service._PROVIDER_ALIGNED`).
-ACCEPT_PROVIDER_DIFFERENCE = (
-    "Set only when the user asks for inputs counting different providers' spending, as "
-    "'use the DAC1 total' does beside CRS aid: each input keeps its own provider scope."
-)
+class _ProviderAligned(TaggedModel):
+    """A calculation whose inputs alignment counts on one provider scope.
+
+    A stored plan, or a proposal resent from one, can carry
+    `accept_provider_difference`, a field these calculations do not have; it is
+    dropped on read, so such a plan validates and its turn amends it.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_accept_provider_difference(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "accept_provider_difference" in data:
+            return {
+                key: value for key, value in data.items() if key != "accept_provider_difference"
+            }
+        return data
 
 
-class ComparisonRequirement(TaggedModel):
+class ComparisonRequirement(_ProviderAligned):
     """The difference between two requirements' results, at each common period.
 
     A comparison answers the question and feeds nothing further, so no other
@@ -1398,12 +1430,6 @@ class ComparisonRequirement(TaggedModel):
         description="The side the difference starts from: the result is `minuend` minus `subtrahend`."
     )
     subtrahend: RequirementSide = Field(description="The side subtracted from `minuend`.")
-    # Left out of every dump while unset, as `Entity.members` is.
-    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
-        default=False,
-        exclude_if=lambda accepted: not accepted,
-        description=ACCEPT_PROVIDER_DIFFERENCE,
-    )
 
     @model_validator(mode="after")
     def _sides_differ(self) -> ComparisonRequirement:
@@ -1415,7 +1441,7 @@ class ComparisonRequirement(TaggedModel):
         return self
 
 
-class SumOfRequirement(TaggedModel):
+class SumOfRequirement(_ProviderAligned):
     """Two single-series results added together, at each period both report.
 
     Each side reads one series: one entity's, or a result holding one. A
@@ -1436,12 +1462,6 @@ class SumOfRequirement(TaggedModel):
     )
     left: RequirementSide = Field(description="One of the two series added together.")
     right: RequirementSide = Field(description="The series added to `left`.")
-    # Left out of every dump while unset, as `Entity.members` is.
-    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
-        default=False,
-        exclude_if=lambda accepted: not accepted,
-        description=ACCEPT_PROVIDER_DIFFERENCE,
-    )
 
     @model_validator(mode="after")
     def _sides_read_different_requirements(self) -> SumOfRequirement:
@@ -1555,7 +1575,7 @@ class RankRequirement(TaggedModel):
         return self
 
 
-class ShareOfRequirement(TaggedModel):
+class ShareOfRequirement(_ProviderAligned):
     """The share `numerator` holds of `denominator`, at each period.
 
     Both sides cover the same years, because a period only one side covers
@@ -1592,12 +1612,6 @@ class ShareOfRequirement(TaggedModel):
             "total, 'pooled' divides every entity by one total summed across the population."
         ),
     )
-    # Left out of every dump while unset, as `Entity.members` is.
-    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
-        default=False,
-        exclude_if=lambda accepted: not accepted,
-        description=ACCEPT_PROVIDER_DIFFERENCE,
-    )
 
     @property
     def pools_its_own_axis(self) -> bool:
@@ -1626,7 +1640,7 @@ class ShareOfRequirement(TaggedModel):
         return self
 
 
-class QuotientRequirement(TaggedModel):
+class QuotientRequirement(_ProviderAligned):
     """One measure divided by another, at each period both report.
 
     For a per-head, per-capita or "divide one by the other" figure, in the
@@ -1664,12 +1678,6 @@ class QuotientRequirement(TaggedModel):
             "The denominator's name for the same entities, so each divides by its own "
             "counterpart: the role they state there, or 'country' where they state none."
         ),
-    )
-    # Left out of every dump while unset, as `Entity.members` is.
-    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
-        default=False,
-        exclude_if=lambda accepted: not accepted,
-        description=ACCEPT_PROVIDER_DIFFERENCE,
     )
 
     @model_validator(mode="after")
@@ -4850,6 +4858,35 @@ def _serialised_chars(value: Any) -> int:
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
 
 
+# The most provider options one turn's words are read to name. Search names at most
+# one per provider scope, four today; the limit sits several times above that.
+MAX_SCOPE_MENTIONS = 16
+
+
+class ScopeWords(StrictModel):
+    """The provider options the user's words name, as Search read the latest turn whose
+    words name one (`planner.stated_scope.TextReading.mentions`), which the plan card's
+    lines are judged against (`submission.service._provider_records`).
+
+    `summing` is the option Search read where those words sum the bilateral and
+    multilateral lines (`planner.stated_scope.StatedOption.sums_providers`), which a
+    dataset reads as its own option counting core contributions; `None` otherwise.
+
+    `total` is set where those words ask for a total (`TextReading.total`, "total US
+    ODA"), which names a dataset's option counting core contributions as the figure's
+    denominator, though Search reads no option from it.
+    """
+
+    mentions: tuple[Annotated[str, Field(max_length=MAX_SCOPE_ID_CHARS)], ...] = Field(
+        default=(), max_length=MAX_SCOPE_MENTIONS
+    )
+    summing: str | None = Field(default=None, max_length=MAX_SCOPE_ID_CHARS)
+    # Left out of every dump while unset, so a stored plan keeps its revision.
+    total: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False, exclude_if=lambda total: not total
+    )
+
+
 class Plan(StrictModel):
     """The plan object.
 
@@ -4977,6 +5014,11 @@ class Plan(StrictModel):
             "open, each with its whole (`with_whole_sums`)."
         ),
     )
+    # The provider options the user's words name, as the latest turn naming one
+    # stated them (`submission.service.scope_words`); the planner cannot set it.
+    scope_words: Annotated[ScopeWords | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda words: words is None
+    )
     translation: Translation | None = None
     workflow: Workflow | None = None
     version: int = 1
@@ -4984,6 +5026,28 @@ class Plan(StrictModel):
     status: PlanStatus = PlanStatus.DRAFT
     approved_revision: str | None = None
     approved_at: Annotated[datetime | None, HASHED_WHEN_SET] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reopen_approval_over_accept_provider_difference(cls, data: Any) -> Any:
+        """An approved plan stored with `accept_provider_difference` on a requirement
+        reads without it (`_ProviderAligned`), so its content hashes to another revision
+        than the one the user approved. It loads awaiting approval, with no approval
+        recorded, and the `execute` node offers its card again
+        (`harness.graph.execute`)."""
+        if not isinstance(data, dict) or data.get("status") != PlanStatus.APPROVED:
+            return data
+        requirements = data.get("evidence_requirements")
+        if not isinstance(requirements, list | tuple) or not any(
+            isinstance(r, dict) and "accept_provider_difference" in r for r in requirements
+        ):
+            return data
+        return {
+            **data,
+            "status": PlanStatus.PENDING_APPROVAL,
+            "approved_revision": None,
+            "approved_at": None,
+        }
 
     @field_validator("question")
     @classmethod

@@ -124,14 +124,7 @@ from planner.skills import (
 )
 from planner.source_reads import with_source_reads
 from planner.specs import PROPOSE_PLAN, planner_specs
-from planner.stated_scope import (
-    KeepAnswer,
-    StatedScopeReader,
-    proposal_measures,
-    read_stated_scope,
-    record_keep_answer,
-    stated_scope_record,
-)
+from planner.stated_scope import StatedScopeReader, read_stated_scope, stated_scope_record
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import (
@@ -142,8 +135,8 @@ from planner.tools import (
 )
 from planner.workflow import ElectedMeasure, SelectedSource
 from submission.prices_choice import PricesAnswers
+from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from submission.service import (
-    KEEP_PUBLISHED_OPTION,
     Proposal,
     SourceReadings,
     pinned_sources,
@@ -152,7 +145,6 @@ from submission.service import (
     stated_scope_line,
     submit,
 )
-from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import CutCalls, current_cut_calls, resolving_once
 from translator.mechanical import clear_compile_failures
 from translator.referral import ReferralKind
@@ -252,6 +244,12 @@ _SKILLS_BEFORE_ENTRY_STATE_KEY = "planner:skills_before_entry"
 # The last translation's referral the planner's run saw before it ended on an
 # ask, as `propose_plan` answered it, or None.
 _ASKED_REFERRAL_STATE_KEY = "planner:asked_referral"
+# A session slot holding a question whether to keep a dataset counted as published,
+# which a turn may be paused on. No code writes it. A turn paused on it is answered
+# from it once (`_paused_keep`), and the slot is cleared.
+_PAUSED_KEEP_STATE_KEY = "planner:stated_scope_keep_question"
+# The option of that question that kept the datasets as published.
+_KEEP_PUBLISHED_OPTION = "keep as published"
 # The opening of the brief's section for those pages.
 _SKILLS_CONTEXT = """
 Skills you read on an earlier call for this plan, as data-mcp answered. A \
@@ -470,12 +468,9 @@ class PlannerAdapter:
                 asked,
                 answer,
                 ctx.state.get(_ASKED_REFERRAL_STATE_KEY),
-                # `propose_plan` raises the question whether to keep a dataset counted
-                # as published itself (`planner.tools.pause_on_keep_question`). The
-                # user's answer is recorded here, and admission reads it.
-                keep=record_keep_answer(
-                    state, call_id=asked.call_id, keep=_kept_as_published(answer)
-                ),
+                # A turn paused on the keep question (`_PAUSED_KEEP_STATE_KEY`) resumes
+                # on the user's answer to it.
+                keep=_paused_keep(state, call_id=asked.call_id, answer=answer),
             )
             if asked is not None and answer is not None
             else None
@@ -746,13 +741,7 @@ class PlannerAdapter:
             evidence_requirements=list(evidence_requirements), amends_version=prior.version
         )
         if self._stated_scope is not None:
-            unread = await read_stated_scope(
-                state,
-                self._stated_scope,
-                measures=proposal_measures(
-                    state, {"evidence_requirements": list(evidence_requirements)}
-                ),
-            )
+            unread = await read_stated_scope(state, self._stated_scope)
             if unread is not None:
                 return self._revision_refused(unread, words=plan_display.plan_words(prior))
         recorded = await with_source_reads(
@@ -948,6 +937,7 @@ class PlannerAdapter:
             StopCode.PLANNER_TOOL_FAILED,
             ProblemCode.NOTHING_TO_PLAN,
             ProblemCode.STATED_SCOPE_UNREADABLE,
+            ProblemCode.STATED_SCOPE_UNAVAILABLE,
             ProblemCode.STATED_COMPILE_UNREACHABLE,
         }
     )
@@ -1001,17 +991,17 @@ class PlannerAdapter:
         (`submission.service.stated_scope_line`), read at entry through the
         stated-scope reader, each text once a turn (`read_stated_scope`). A read
         Search does not answer, and any fault reading or rendering it, renders
-        nothing. `propose_plan` reads again, and its admission refuses a plan that
-        leaves the option out."""
+        nothing. `propose_plan` reads again, and the plan card names a figure the
+        plan counts otherwise."""
         if self._stated_scope is None:
             return ""
         try:
-            if await read_stated_scope(state, self._stated_scope, measures=()) is not None:
+            if await read_stated_scope(state, self._stated_scope) is not None:
                 return ""
             return stated_scope_line(stated_scope_record(state), shown)
         except Exception:
-            # The line is a hint. `propose_plan` reads the words again and refuses
-            # where it must, so a fault here costs only the line.
+            # The line is a hint. `propose_plan` reads the words again, so a fault
+            # here costs only the line.
             logger.exception("stated scope line not rendered")
             return ""
 
@@ -1220,15 +1210,37 @@ class _Answered(NamedTuple):
     ask: AcceptedAsk
     answer: object
     referral: Mapping[str, Any] | None
-    keep: KeepAnswer | None = None
+    keep: _KeepAnswer | None = None
 
 
-def _kept_as_published(answer: object) -> bool:
-    """Whether `answer`, the resume value of the keep question, picks
-    `KEEP_PUBLISHED_OPTION`. Any other answer, a skip or a dismissal included,
-    does not keep."""
+class _KeepAnswer(NamedTuple):
+    """The user's answer to the keep question a turn paused on
+    (`_paused_keep`): the pins it asked about, whether they were kept as published, and
+    the arguments of the `propose_plan` call it paused."""
+
+    pins: tuple[str, ...]
+    kept: bool
+    proposal: Mapping[str, Any] | None
+
+
+def _paused_keep(state: SessionState, *, call_id: str, answer: object) -> _KeepAnswer | None:
+    """The user's `answer` to the keep question the pause of `propose_plan` call
+    `call_id` asked (`_PAUSED_KEEP_STATE_KEY`), or `None` where that call asked none.
+    The slot is cleared either way. A pick of `_KEEP_PUBLISHED_OPTION` keeps the pins;
+    any other answer, a skip or a dismissal included, does not."""
+    held = state.get(_PAUSED_KEEP_STATE_KEY)
+    if held is None:
+        return None
+    state[_PAUSED_KEEP_STATE_KEY] = None
+    if not isinstance(held, Mapping) or held.get("asked_call_id") != call_id:
+        return None
     reply = (resume_answers(answer) or {}).get("q1") or {}
-    return reply.get("kind") == "option" and reply.get("spec_id") == KEEP_PUBLISHED_OPTION
+    proposal = held.get("proposal")
+    return _KeepAnswer(
+        pins=tuple(dict.fromkeys(str(pair[0]) for pair in held.get("asked") or ())),
+        kept=reply.get("kind") == "option" and reply.get("spec_id") == _KEEP_PUBLISHED_OPTION,
+        proposal=proposal if isinstance(proposal, Mapping) else None,
+    )
 
 
 def _typed_reply(answer: object) -> str | None:
@@ -1294,14 +1306,14 @@ def _answer_text(answered: _Answered) -> str:
     )
 
 
-def _keep_text(keep: KeepAnswer) -> str:
+def _keep_text(keep: _KeepAnswer) -> str:
     """What the user's answer to the keep question settles, for the brief of the
     entry it resumes: a kept pin is admitted as published, so the paused proposal is
     the plan to propose again; a pin not kept, after a skip or a dismissal too,
     cannot be proposed again for the figures it counts, so each is pinned again or
     declined. The resumed run saw none of the asking run's calls, so the paused
     proposal's requirements and decisions render as `propose_plan` was given them."""
-    pins = ", ".join(dict.fromkeys(pin for pin, _ in keep.pairs))
+    pins = ", ".join(keep.pins)
     held = {
         key: keep.proposal[key]
         for key in ("evidence_requirements", "decisions")
@@ -1314,12 +1326,15 @@ def _keep_text(keep: KeepAnswer) -> str:
             if proposal
             else ""
         )
-        return f"They kept {pins} counted as published, so it is admitted as it is.{paused}\n"
+        return (
+            f"They kept {pins} counted as published, so propose it declaring no other "
+            f"option for the figures it counts.{paused}\n"
+        )
     paused = f" The paused proposal held these, to change as above: {proposal}" if proposal else ""
     return (
         f"They did not keep {pins} counted as published, so do not propose it again for the "
         "figures it counts: pin each such figure on a dataset counted the way they asked, "
-        "or remove it and record the part of the question asking for it in `declined` with "
+        "declaring that option in `scope_options`, or remove it and record the part of the question asking for it in `declined` with "
         f"code {UnsupportedOperation.UNSUPPORTED_ASK.value!r}.{paused}\n"
     )
 
@@ -1879,6 +1894,9 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
         # digest leaves them out.
         "rolling_copies",
         "first_years",
+        # Code writes it from the user's words (`Plan.scope_words`), so the digest
+        # leaves it out.
+        "scope_words",
         # The asks section marks each ask the user removed (`_asks_section`).
         "dropped_asks",
     }

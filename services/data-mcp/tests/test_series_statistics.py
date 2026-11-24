@@ -18,6 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from common.apis_auth import TOKEN_HEADER
+from common.call_limit import CallDeadline
 from common.caller import (
     CALLER_HEADER,
     CALLER_PRINCIPAL_HEADER,
@@ -27,7 +28,6 @@ from common.caller import (
     set_supplied_turn,
 )
 from data_mcp import client_holder, series_statistics
-from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import Manifest, strip_manifest
 from data_mcp.series_statistics import (
     SERIES_STATISTICS_ARROW_SCHEMA,
