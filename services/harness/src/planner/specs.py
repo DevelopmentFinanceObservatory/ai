@@ -36,7 +36,6 @@ from planner.tools import (
     REJECT_PLAN,
     EndRun,
     ask_user,
-    pause_on_keep_question,
     propose,
     propose_and_translate,
     propose_reading_sources,
@@ -282,7 +281,7 @@ def planner_tool_specs(
     plan `first_year_unknown`.
 
     `stated_scope` is Search's reader of the provider scope the user's words
-    and each requirement's `measure` state, which `propose_plan` reads before
+    state, which `propose_plan` reads before
     admission (`planner.stated_scope.read_stated_scope`). Given, `propose_plan`'s
     body is a coroutine function. Omitted, admission applies the scope only
     where a reading is already held.
@@ -293,18 +292,17 @@ def planner_tool_specs(
     """
 
     def propose_plan(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
-        return pause_on_keep_question(propose(call, arguments), call, end_run, arguments=arguments)
+        return propose(call, arguments)
 
     async def propose_plan_reading(
         call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]
     ) -> object:
-        answer = await propose_reading_sources(
+        return await propose_reading_sources(
             call,
             arguments,
             surface=surface,
             stated_scope=stated_scope,
         )
-        return pause_on_keep_question(answer, call, end_run, arguments=arguments)
 
     async def propose_plan_translating(
         call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]

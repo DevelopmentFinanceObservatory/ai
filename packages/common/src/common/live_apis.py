@@ -13,8 +13,8 @@ Two credentials, sent in apis' principal header (`PRINCIPAL_HEADER`):
 - `live_refresh_principal` (`LIVE_REFRESH_PRINCIPAL`) on `refresh_frame`,
   `render` and `stream_render_data`.
 
-`read_component`, `list_versions`, `analysis_execution_identity` and
-`read_stated_scopes` need neither.
+`read_component`, `list_versions`, `analysis_execution_identity`,
+`read_stated_scopes` and `read_search_doors` need neither.
 A call whose principal is unset or blank raises `LiveApisNotConfigured` before any
 request is made. Neither value appears in an exception message, an attribute or a
 `repr`.
@@ -69,6 +69,7 @@ _RENDER_PATH = "/api/presentation/components/{component_id}/revisions/{revision}
 _RENDER_DATA_PATH = f"{_RENDER_PATH}/data"
 _CAPABILITIES_PATH = "/api/datasets/capabilities"
 _STATED_SCOPE_PATH = "/api/search/stated-scope"
+_SEARCH_CAPABILITIES_PATH = "/api/search/capabilities"
 
 # The capabilities field naming the engine apis' analysis runner computes with.
 _EXECUTION_IDENTITY_FIELD = "analysis_execution_identity"
@@ -720,6 +721,22 @@ class LiveApisClient:
             self._execution_identity = identity
             self._execution_identity_expires = self._clock() + _max_age(response)
             return identity
+
+    async def read_search_doors(self) -> frozenset[str]:
+        """The names of the doors Search's capabilities document lists as live
+        (`GET /api/search/capabilities`, `doors[]` of `{name, live}`).
+
+        Raises:
+            LiveApisError: apis refused the call, or answered a document whose `doors`
+                is no list of named doors (`response_invalid`).
+        """
+        response = await self._send("GET", _SEARCH_CAPABILITIES_PATH)
+        doors = _json_object(response, "search capabilities document").get("doors")
+        if not isinstance(doors, list) or not all(
+            isinstance(door, dict) and isinstance(door.get("name"), str) for door in doors
+        ):
+            raise _invalid(response, "search capabilities document")
+        return frozenset(door["name"] for door in doors if door.get("live") is True)
 
     async def read_stated_scopes(self, *, texts: Sequence[str]) -> tuple[StatedScopeReading, ...]:
         """The scope each of `texts` states, in order, as Search's reader reads it.

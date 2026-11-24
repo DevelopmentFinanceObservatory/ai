@@ -40,6 +40,7 @@ from harness.scope_choices import (
     EntitiesBinding,
     PartScope,
     ScopeChoice,
+    dropped_changed_nothing,
     mark_planner_axes,
     mark_searched_axes,
     option_axis,
@@ -303,11 +304,11 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     answers with no one dataset, or when what it posts of the part's entity
     groups is not readable, since a resubmit posted without them can bind
     another population. A pin compiled on the provider option its
-    requirement's `measure` states in the user's words, and nothing else
+    requirement declares, and nothing else
     (`Realignment.stated`), answers `submission.service.stated_compile_unanswered`
     where Search can answer later, and otherwise records Search's code
     (`planner.stated_scope.record_stated_uncompiled`), so the next proposal is
-    refused for a pin that cannot count the option, with the ask that keeps it.
+    refused for a pin that cannot count the option.
 
     A compile moving a calculation's axis beside the stated option
     (`Realignment.stated_option`) that Search refuses for good is held for the turn
@@ -831,10 +832,6 @@ def _uncontained(part_pin: str, axis: str, held: Containment) -> tuple[str, str]
     )
 
 
-# Search's cause for an entry dropped because the part has no choice on its axis.
-_AXIS_ABSENT = "axis_absent"
-
-
 def _parties_outside(
     scope: PartScope, spec: Mapping[str, Any], column: str, *, part_block: Mapping[str, Any]
 ) -> Containment:
@@ -926,7 +923,9 @@ def _changed_nothing(
     axis, option_id = entry.get("axis"), entry.get("option_id")
     if (axis, option_id, choice_id) not in carried:
         return False
-    return dropped.get("cause") == _AXIS_ABSENT or answered.get(str(axis)) == option_id
+    return dropped_changed_nothing(
+        str(dropped.get("cause")), str(option_id), answered.get(str(axis))
+    )
 
 
 async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:

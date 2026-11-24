@@ -404,6 +404,12 @@ class ToolSurfaceUnavailableError(RuntimeError):
         return _rebuild, (type(self), *self.args), self.__dict__
 
 
+class TransientFaultError(Exception):
+    """A fault its raise site knows a later attempt may not meet, though it is no
+    transport error, such as a model response that held nothing to go on with
+    (`harness.gemini_agent.EmptyResponseError`). `transient` reads it as transient."""
+
+
 def _rebuild[E: BaseException](cls: type[E], *args: object) -> E:
     """A `cls` holding `args`, made without calling its `__init__`."""
     return cls.__new__(cls, *args)
@@ -539,7 +545,8 @@ def _transient_link(exc: BaseException) -> bool:
     failed verification (`ssl.SSLCertVerificationError`), and a transport
     error that is a permanent fault (`permanent_fault`) is not transient
     either. `transient` refuses these and any wrapper of one before this reads
-    the link. An `OSError` naming an unreachable or downed host or network
+    the link. A `TransientFaultError` is transient, as its raise site states.
+    An `OSError` naming an unreachable or downed host or network
     (`_NETWORK_DOWN_ERRNOS`) is transient. Any other `OSError`, such as
     `FileNotFoundError`, and any other
     aiohttp error, such as `InvalidURL`, is a fault in this code, and any
@@ -579,6 +586,7 @@ def _transient_link(exc: BaseException) -> bool:
             google_auth_errors.TransportError,
             anyio.ClosedResourceError,
             anyio.BrokenResourceError,
+            TransientFaultError,
         ),
     )
 

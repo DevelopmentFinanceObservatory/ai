@@ -55,7 +55,7 @@ from contextlib import (
     suppress,
 )
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from common.caller import ADDRESS_CALLER, set_supplied_caller, set_supplied_turn
 from common.telemetry import flush_telemetry
@@ -74,10 +74,11 @@ from planner.plan import (
 )
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
+from starlette.types import Receive, Scope
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
-from harness.card_unit import UnitMove, unit_move
+from harness.card_unit import UnitMove, stored_unit_change, unit_move
 from harness.conversation import (
     current_conversation_caller,
     current_conversation_id,
@@ -110,6 +111,7 @@ from harness.studio_edit import (
 )
 from harness.studio_state import (
     HEARTBEAT_INTERVAL_S,
+    REPLACED_CARD_KEY,
     ConversationState,
     SegmentBusy,
     SegmentLost,
@@ -119,6 +121,7 @@ from harness.studio_state import (
     _next_manifest,
     _PendingInterrupt,
     _PendingQuestion,
+    _recorded_reply,
     _tool_error_response,
     _wire_id,
     record_unstreamed_span,
@@ -139,6 +142,7 @@ from harness.studio_store import (
     record_closed_turn,
     retry_delays,
     set_aside_question,
+    stop_names_turn,
     turn_standing,
     write_pause_line,
 )
@@ -188,11 +192,14 @@ from harness.unit_offer import (
 )
 from harness.wire import (
     MAX_CLOSED_SINCE,
+    MAX_INTERRUPT_REQUEST_BYTES,
     MAX_TURN_REQUEST_BYTES,
+    STORED_INTERRUPT,
     AddOp,
     ApplyChoice,
     ApplyUnit,
     CancelRequest,
+    CancelSkipped,
     ClosedTurn,
     ComponentRefIntent,
     CompositionActor,
@@ -298,10 +305,15 @@ _ANSWER_KINDS: dict[ElicitationInput, frozenset[str]] = {
 def _answer_kinds(question: _PendingQuestion) -> frozenset[str]:
     """The answer kinds `question` takes: those of the input its frame sent
     (`_ANSWER_KINDS`), save free text on a unit question sent as a
-    `single_select`, which offers none."""
+    `single_select`, which offers none. A unit question that lists its whole units
+    as options, as one restored from the conversation row does
+    (`harness.studio_store`), also takes a pick of one, the answer of a page that
+    was sent it as a `single_select`."""
     kinds = _ANSWER_KINDS[question.input]
     if question.native_input is ElicitationInput.UNIT:
         return kinds - {"text"}
+    if question.input is ElicitationInput.UNIT and question.options:
+        return kinds | {"option"}
     return kinds
 
 
@@ -753,17 +765,23 @@ def _given_answers(
     (question,) = pending.questions
     if body.payload in question.options:
         return {question.id: OptionAnswer(kind="option", option_id=body.payload)}
-    return {question.id: TextAnswer(kind="text", text=body.payload)}
+    # `body` holds the payload within the cap on a request's own words, or is rebuilt
+    # from a stored answer, which is carried whole (`STORED_INTERRUPT`).
+    return {
+        question.id: TextAnswer.model_validate(
+            {"kind": "text", "text": body.payload}, context={STORED_INTERRUPT: True}
+        )
+    }
 
 
 def _native_answer(question: _PendingQuestion, answer: ElicitationAnswer) -> ElicitationAnswer:
-    """`answer` in the form of `question`'s own input. A pick on a question
-    sent in another form (`_PendingQuestion.native_input`) is, on a unit
-    question, the whole unit the option names (`whole_units`), and on a
+    """`answer` in the form of `question`'s own input. A pick on a unit question,
+    sent as one (`_answer_kinds`) or in another form (`_PendingQuestion.native_input`),
+    is the whole unit the option names (`whole_units`), and on a question sent as a
     `multi_select` one, one tick. Any other answer is itself."""
     if not isinstance(answer, OptionAnswer):
         return answer
-    if question.native_input is ElicitationInput.UNIT and question.unit is not None:
+    if ElicitationInput.UNIT in (question.input, question.native_input) and question.unit:
         unit = whole_units(question.unit)[answer.option_id]
         return UnitAnswer(kind="unit", **unit.model_dump())
     if question.native_input is ElicitationInput.MULTI_SELECT:
@@ -1375,54 +1393,58 @@ def _streaming_conflict_response(detail: str, *, retry_after_seconds: int = 5) -
 
 
 class _BodyTooLarge(HTTPException):
-    """A `/turn` body past `MAX_TURN_REQUEST_BYTES`. An `HTTPException`, since
-    FastAPI re-raises those from its body read and turns any other exception
-    there into a 400."""
+    """A body past its route's cap (`_BoundedRoute.max_body_bytes`). An
+    `HTTPException`, since FastAPI re-raises those from its body read and turns
+    any other exception there into a 400."""
 
-    def __init__(self, size: str) -> None:
+    def __init__(self, size: str, cap: int) -> None:
         super().__init__(
             status_code=413,
-            detail=f"the request body is {size} bytes, past the {MAX_TURN_REQUEST_BYTES:,}-byte cap",
+            detail=f"the request body is {size} bytes, past the {cap:,}-byte cap",
         )
 
 
 class _BoundedRequest(Request):
-    """A request whose body read stops at `MAX_TURN_REQUEST_BYTES`.
+    """A request whose body read stops at `cap` bytes.
 
     A declared `Content-Length` past the cap is refused before anything is
     read; a body sent without one is refused as soon as it crosses the cap.
     """
 
+    def __init__(self, scope: Scope, receive: Receive, *, cap: int) -> None:
+        super().__init__(scope, receive)
+        self._cap = cap
+
     async def body(self) -> bytes:
         if not hasattr(self, "_body"):
             declared = self.headers.get("content-length", "")
-            if declared.isdigit() and int(declared) > MAX_TURN_REQUEST_BYTES:
-                raise _BodyTooLarge(f"{int(declared):,}")
+            if declared.isdigit() and int(declared) > self._cap:
+                raise _BodyTooLarge(f"{int(declared):,}", self._cap)
             chunks: list[bytes] = []
             size = 0
             async for chunk in self.stream():
                 size += len(chunk)
-                if size > MAX_TURN_REQUEST_BYTES:
-                    raise _BodyTooLarge(f"more than {MAX_TURN_REQUEST_BYTES:,}")
+                if size > self._cap:
+                    raise _BodyTooLarge(f"more than {self._cap:,}", self._cap)
                 chunks.append(chunk)
             # Starlette's own cache for the body, which `Request.body` reads back.
             self._body = b"".join(chunks)
         return self._body
 
 
-class _BoundedTurnRoute(APIRoute):
-    """The `/turn` route, whose body is read through `_BoundedRequest`, so a
-    request past the size cap is refused before FastAPI parses it. Each seed
-    is checked on its own (`harness.seeds.seeds_slot`) and refused in its own
-    step; this bound is what keeps an oversized request from being parsed at
-    all."""
+class _BoundedRoute(APIRoute):
+    """A route whose body is read through `_BoundedRequest`, so a request past
+    `max_body_bytes` is refused 413 `resource_exhausted` before FastAPI parses it."""
+
+    max_body_bytes: ClassVar[int]
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         handler = super().get_route_handler()
+        cap = self.max_body_bytes
 
         async def bounded(request: Request) -> Response:
             try:
-                return await handler(_BoundedRequest(request.scope, request.receive))
+                return await handler(_BoundedRequest(request.scope, request.receive, cap=cap))
             except _BodyTooLarge as exc:
                 return _tool_error_response(
                     ToolError(
@@ -1434,6 +1456,23 @@ class _BoundedTurnRoute(APIRoute):
                 )
 
         return bounded
+
+
+class _BoundedTurnRoute(_BoundedRoute):
+    """The `/turn` route, bounded at `MAX_TURN_REQUEST_BYTES`. Each seed is
+    checked on its own (`harness.seeds.seeds_slot`) and refused in its own
+    step; this bound is what keeps an oversized request from being parsed at
+    all."""
+
+    max_body_bytes = MAX_TURN_REQUEST_BYTES
+
+
+class _BoundedInterruptRoute(_BoundedRoute):
+    """The `/interrupt` route, bounded at `MAX_INTERRUPT_REQUEST_BYTES`, so the
+    answers, the amendment text and the lists a client posts are bounded before
+    they are parsed."""
+
+    max_body_bytes = MAX_INTERRUPT_REQUEST_BYTES
 
 
 def _resume_refusal(standing: TurnStanding, turn_index: int) -> JSONResponse | None:
@@ -1551,11 +1590,17 @@ def _resume_conflict(detail: str) -> JSONResponse:
     )
 
 
-def _stored_card(component_id: str, entry: Mapping[str, Any]) -> StoredCard | None:
-    """The card `entry`, a conversation's stored component
-    (`ConversationState.components`), for the state read. A `fact_summary`
-    that does not validate is left out, and an entry with no type or title
-    gives no card."""
+def _stored_card(
+    component_id: str, entry: Mapping[str, Any], state: ConversationState, *, swapped: bool
+) -> StoredCard | None:
+    """The card `entry`, a stored component of `state`
+    (`ConversationState.components`), for the state read. A card on the
+    canvas carries the unit its stored `UnitCard` can change within
+    (`stored_unit_change`), as `apply_unit`, which refuses a card off the
+    canvas, reads it. A card `swapped` in by the turn being read names the
+    card whose slot it took (`REPLACED_CARD_KEY`). A `fact_summary` or a
+    unit offer that cannot be read is left out and logged, and an entry
+    with no type or title gives no card."""
     if not entry.get("type") or not entry.get("title"):
         return None
     try:
@@ -1571,13 +1616,32 @@ def _stored_card(component_id: str, entry: Mapping[str, Any]) -> StoredCard | No
             exc_info=True,
         )
         summary = None
+    unit_change = None
+    if _on_canvas(state, component_id):
+        try:
+            unit_change = stored_unit_change(entry, state.turn_specs, state.turns)
+        except Exception:
+            logger.warning(
+                "studio state: component %s's stored unit offer cannot be read",
+                component_id,
+                exc_info=True,
+            )
+    replaces = entry.get(REPLACED_CARD_KEY) if swapped else None
     return StoredCard(
         component_id=component_id,
         type=str(entry["type"]),
         title=str(entry["title"]),
         revision=int(entry.get("revision") or 1),
         fact_summary=summary,
+        unit_change=unit_change,
+        replaces=replaces if isinstance(replaces, str) else None,
     )
+
+
+def _on_canvas(state: ConversationState, component_id: str) -> bool:
+    """Whether `state`'s canvas holds card `component_id`."""
+    blocks = state.composition.blocks if state.composition is not None else []
+    return any(block.component_id == component_id for block in blocks)
 
 
 def _open_user_message(state: ConversationState) -> str:
@@ -1590,39 +1654,32 @@ def _open_user_message(state: ConversationState) -> str:
     return state.turn_user_message
 
 
-def _closed_turn(
-    turn_index: int, record: Mapping[str, Any], components: Mapping[str, Mapping[str, Any]]
-) -> ClosedTurn:
-    """Turn `turn_index` as its stored record holds it. The reply is the
-    answer with the notes and the basis line the stream appended to it
-    (`ConversationState.close_turn`), as its `message.complete` sent it,
-    and empty for a record whose stream sent none (`reply_shown: false`).
+def _closed_turn(turn_index: int, state: ConversationState) -> ClosedTurn:
+    """Turn `turn_index` of `state` as its stored record holds it, with the
+    stored card of each card it made (`_stored_card`). The reply is the
+    answer the user was shown with the notes and the basis line the stream
+    appended to it (`harness.studio_state._recorded_reply`), as its
+    `message.complete` sent it, and empty for a record whose stream sent none
+    (`reply_shown: false`).
     The user's message is the record's display line where it keeps one
     (`user_display`), else its `user` line."""
-    reply = (
-        ""
-        if record.get("reply_shown") is False
-        else "".join(
-            [
-                record.get("assistant") or "",
-                *(
-                    f"\n\n{block}"
-                    for key in ("match_notes", "basis_line")
-                    if (block := record.get(key))
-                ),
-            ]
-        )
-    )
-    component_ids = [
-        card["component_id"]
+    record = state.turns[turn_index - 1]
+    reply = "" if record.get("reply_shown") is False else _recorded_reply(record)
+    listed = [
+        card
         for card in record.get("cards") or []
         if isinstance(card, Mapping) and isinstance(card.get("component_id"), str)
     ]
+    component_ids = [card["component_id"] for card in listed]
+    # The cards this turn swapped into another card's slot
+    # (`harness.studio_edit._swapped`).
+    swapped = {card["component_id"] for card in listed if card.get("action") == "recreated"}
     cards = [
         card
         for component_id in component_ids
-        if (entry := components.get(component_id)) is not None
-        and (card := _stored_card(component_id, entry)) is not None
+        if (entry := state.components.get(component_id)) is not None
+        and (card := _stored_card(component_id, entry, state, swapped=component_id in swapped))
+        is not None
     ]
     return ClosedTurn(
         turn_index=turn_index,
@@ -1658,6 +1715,7 @@ def _answer_again(
     names the revision of the plan it switched on, the entry's own."""
     answer = pending.answer or {}
     switch = answer.get("switch") or {}
+    # A stored answer is carried whole, whatever its length (`STORED_INTERRUPT`).
     return InterruptResponse.model_validate(
         {
             "kind": "interrupt.response",
@@ -1668,7 +1726,8 @@ def _answer_again(
             **({"payload": answer["payload"]} if answer.get("payload") is not None else {}),
             **({"answers": answer["answers"]} if "answers" in answer else {}),
             **({**switch, "plan_revision": pending.plan_revision} if switch else {}),
-        }
+        },
+        context={STORED_INTERRUPT: True},
     )
 
 
@@ -1725,10 +1784,7 @@ def _conversation_read(stored: StoredConversation, *, since: int | None) -> Conv
         else None
     )
     indexes = range(since + 1, len(state.turns) + 1) if since is not None else range(0)
-    closed = [
-        _closed_turn(index, state.turns[index - 1], state.components)
-        for index in indexes[:MAX_CLOSED_SINCE]
-    ]
+    closed = [_closed_turn(index, state) for index in indexes[:MAX_CLOSED_SINCE]]
     pause = None
     if standing is not None and standing.standing is Standing.AWAITING_ANSWER:
         found = pause_entry(state.pending, stored.pause_id)
@@ -2351,24 +2407,43 @@ async def _lock_or_claim(lock: asyncio.Lock, claimed: asyncio.Event, *, timeout:
     return True
 
 
-async def _stop_under_lock(studio: StudioRunner, principal: str, conversation_id: str) -> Response:
+async def _stop_under_lock(
+    studio: StudioRunner, principal: str, conversation_id: str, *, turn_index: int | None
+) -> Response:
     """`/cancel`'s answer once it holds the conversation lock: 204 when a
     lease went live since (another instance claimed while this one waited,
     and the Stop is recorded on it), when the store holds no such
     conversation, or once what an open turn left is closed
-    (`_stop_open_turn`). It answers that close's 503 when it fails.
+    (`_stop_open_turn`). It answers that close's 503 when it fails. A Stop
+    for turn `turn_index` of a conversation whose latest turn is another
+    is answered `_cancel_skipped` and leaves the conversation as it was.
 
     Raises:
         _ClaimLost: this route's claim lost to another request.
     """
-    if await studio.store.request_cancel(principal, conversation_id):
+    try:
+        if await studio.store.request_cancel(principal, conversation_id, turn_index=turn_index):
+            return Response(status_code=204)
+    except TurnMoved as exc:
+        return _cancel_skipped(exc.latest)
+    state = await studio.store.load(principal, conversation_id)
+    if state is None:
         return Response(status_code=204)
-    if await studio.store.load(principal, conversation_id) is None:
-        return Response(status_code=204)
+    if turn_index is not None and state.turn_index != turn_index:
+        return _cancel_skipped(state.turn_index)
     # A turn paused on a question, or one its client left while it ran, is
     # open with no stream to close it.
     refused = await _stop_open_turn(studio, principal, conversation_id)
     return refused or Response(status_code=204)
+
+
+def _cancel_skipped(latest: int) -> JSONResponse:
+    """`/cancel`'s 200 answer to a Stop for a turn that is not the
+    conversation's latest, `latest`, which leaves the conversation as it
+    was."""
+    return JSONResponse(
+        content=CancelSkipped(code="turn_moved", turn_index=latest).model_dump(mode="json")
+    )
 
 
 def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRouter:
@@ -2583,6 +2658,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 closed = await studio.turns.turn_at(lease.conversation, work.turn_index)
                 if closed is not None:
                     record_closed_turn(work, closed)
+            # The record of the turn left open, which `begin_turn` below closes
+            # `abandoned`, or `None` when that turn was recorded already.
+            left_record = (
+                work.turn_index - 1 if left_open is not None and not work.turn_recorded else None
+            )
             # An unrecorded previous turn this closes as `abandoned` rides the
             # claim save, which writes its line once it commits
             # (`StudioStore.save`).
@@ -2616,18 +2696,32 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 body.component_ref is not None
                 and body.component_ref.intent is ComponentRefIntent.EDIT
             )
-            opening = None if editing else _turn_opening(work, body, chip_label)
             opened: list[Cursor] = []
 
             async def begin_turn(conn: AsyncConnection, pk: int) -> None:
                 # The turn left open closes `abandoned` and the new turn
                 # opens (the Edit Card route opens none) in the save's
                 # transaction, so a save that fails leaves the turn left
-                # open as it stood, its pause still answerable.
+                # open as it stood, its pause still answerable. A Stop that
+                # names the turn left open, one that landed on this request's
+                # lease after its claim, closes it `cancelled`, cursor and
+                # record, as `_act_on_stop` would have before the claim. The
+                # new turn's opening is read after that close, so its model
+                # reads the turn left open as it closed.
                 if left_open is not None:
-                    await abandon_on(conn, left_open, segment_id=segment_id)
-                if opening is not None:
-                    inputs, state, text = opening
+                    if await stop_names_turn(conn, pk, left_open.turn_index):
+                        await stop_turn_on(
+                            conn,
+                            left_open,
+                            segment_id=segment_id,
+                            now=datetime.fromtimestamp(studio.store.now(), UTC),
+                        )
+                        if left_record is not None:
+                            work.turns[left_record]["error"] = ErrorCode.CANCELLED.value
+                    else:
+                        await abandon_on(conn, left_open, segment_id=segment_id)
+                if not editing:
+                    inputs, state, text = _turn_opening(work, body, chip_label)
                     opened.append(
                         await open_turn_on(
                             conn,
@@ -2760,7 +2854,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         can reach an instance before the first `/turn` has claimed the
         conversation there at all).
 
-        This route answers 204 only after one of three things: it recorded
+        A Stop that names its turn (`CancelRequest.turn_index`) stops that
+        turn alone. When the conversation's latest turn is another, the
+        route answers 200 with a `CancelSkipped` (`code` `turn_moved`) and
+        the conversation stays as it was, so a later turn, begun on another
+        tab say, runs on. On a live lease the Stop is recorded at once naming
+        its turn, while the row holds that turn (`StudioStore.request_cancel`),
+        so a turn a `/turn` begins under that lease after the Stop runs on. A
+        Stop naming no turn stops whatever turn the conversation runs, as the
+        table below gives it, and so does one naming the latest turn.
+
+        A Stop the route acts on is answered 204 after one of three things: it recorded
         the Stop on a live lease (`StudioStore.request_cancel`), it closed
         the open turn itself under the conversation lock, or under the lock
         it found no open turn and no live lease. A Stop recorded on a lease
@@ -2795,6 +2899,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         | Lease live, the segment returned paused, before the closing write | the closing write | `cancelled`, pending cleared | `cancelled` frame in place of the pause frame |
         | Lease live, turn closed, before the closing write | nobody, since the close ended the Stop | unchanged | nothing more |
         | `/turn` claimed, before it abandons the turn left open | the new turn's heartbeat | the old turn `abandoned`, the new `cancelled` | `cancelled` frame |
+        | The same, the Stop naming the turn left open | the save that begins the new turn (`stop_names_turn`) | the old turn `cancelled`, the new running | 204, and the new turn's stream runs on |
         | Lease live, an Edit Card stream | its heartbeat | the turn's record `cancelled` | `cancelled` frame |
         | The same, the client gone before the heartbeat reads it | the closing write | the turn's record `cancelled` | nothing more |
         | The closing write failed or timed out, such as when ending the turn's runs fails | the next claimant, once the lease lapses (up to the lease's 45 s expiry, and a request before then answers a retryable 409) | `cancelled` | `cancelled` frame when the work ended on the Stop, `transient_unavailable` when it had paused, and the next `/turn` streams while an `/interrupt` answers 404 |
@@ -2810,8 +2915,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         | The same, and the request then abandons its claim | the next claimant | `cancelled` | nothing more, and the next `/turn` streams |
 
         A live segment, on any instance, is stopped through its lease.
-        `request_cancel` sets `lease_cancel`, the segment's next renewal
-        records it as the Stop of the lease's turn and reports it, and the
+        `request_cancel` sets `lease_cancel`, or records a Stop naming its
+        turn when given one, the segment's next renewal reports it as the
+        Stop of the lease's turn, and the
         heartbeat stops the turn (`harness.turn.loop.run_segment`). A segment
         streaming on this instance is made to renew at once
         (`renew_lease_now`), so the Stop reaches it without waiting for the
@@ -2860,7 +2966,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # Taken before the lease is read, so a claim that commits after
             # the read sets this very event.
             claimed = studio.store.claimed_event(principal, body.conversation_id)
-            if await studio.store.request_cancel(principal, body.conversation_id):
+            try:
+                signalled = await studio.store.request_cancel(
+                    principal, body.conversation_id, turn_index=body.turn_index
+                )
+            except TurnMoved as exc:
+                return _cancel_skipped(exc.latest)
+            if signalled:
                 live = studio.store.current(principal, body.conversation_id)
                 if live is not None:
                     renew_lease_now(live)
@@ -2881,7 +2993,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # has passed, a free lock is taken.
             if await _lock_or_claim(lock, claimed, timeout=deadline - loop.time()):
                 try:
-                    return await _stop_under_lock(studio, principal, body.conversation_id)
+                    return await _stop_under_lock(
+                        studio, principal, body.conversation_id, turn_index=body.turn_index
+                    )
                 except _ClaimLost:
                     logger.info(
                         "studio cancel: conversation %s was claimed since its load; deciding again",
@@ -2896,7 +3010,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if loop.time() >= deadline:
                 return busy
 
-    @router.post("/interrupt")
     async def interrupt(  # noqa: PLR0911 -- one distinct refusal per claim guard the route enforces
         body: InterruptResponse,
         authorization: str | None = Header(default=None),
@@ -3403,6 +3516,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 turn=claiming,
             )
             raise
+
+    router.add_api_route(
+        "/interrupt", interrupt, methods=["POST"], route_class_override=_BoundedInterruptRoute
+    )
 
     @router.post("/resume")
     async def resume(  # noqa: PLR0911 -- one distinct refusal per claim guard the route enforces

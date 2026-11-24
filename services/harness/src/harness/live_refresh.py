@@ -75,6 +75,7 @@ from typing import Any, Final
 
 from common import live_apis
 from common.apis_auth import apis_auth_provider
+from common.call_limit import CallDeadline
 from common.caller import WEBSITE_SURFACE, shared_work_context
 from common.live_apis import (
     DatasetVersion,
@@ -89,7 +90,7 @@ from common.recipe import replay_key, root_identity
 from common.row_budget import RowBudget
 from common.telemetry import EventLevel, use_request_span
 from compiler.surface import McpSurface, ToolSurfaceUnavailableError
-from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallDeadline, use_call_budget
+from data_mcp.deadline import EXTERNAL_CALL_BUDGET, use_call_budget
 from data_mcp.frame_materialisation import replayed_mint_options, requests_kinds
 from data_mcp.get_data_tool import recorded_mint_request
 from data_mcp.tool_errors import ToolErrorCode

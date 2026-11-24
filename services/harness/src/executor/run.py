@@ -189,6 +189,7 @@ from functools import partial
 import httpx2
 import pyarrow as pa
 from common.breakdown_labels import Cell, breakdown_axis, code_label
+from common.call_limit import CallDeadline
 from common.materialisation import FrameRef
 from common.refusal import internal_error_message
 from common.telemetry import current_trace_id
@@ -237,7 +238,6 @@ from compiler.surface import (
     transient,
 )
 from data_mcp.artifact_resource import ArtifactRefusalError
-from data_mcp.deadline import CallDeadline
 from data_mcp.graph_wire import NotHeldEntry
 from data_mcp.manifest import Manifest
 from data_mcp.node_lookup import describe_nodes

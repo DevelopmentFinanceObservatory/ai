@@ -57,6 +57,7 @@ from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.provenance import CARD_FRAME_KEY, CardLineage
 from harness.scope_choices import mark_planner_axes
 from harness.studio_state import (
+    REPLACED_CARD_KEY,
     ConversationState,
     _block_index,
     _block_title,
@@ -624,7 +625,9 @@ def _swapped(
     `old_component_id`'s slot, ending the edit on `closed`: the step
     `step_id`, labelled `step_label`, that produced it, its
     `component.created` naming that step, and the write that swaps it in,
-    with its digest entry, turn line and write token. A card whose unit can
+    with its digest entry, turn line and write token. The entry of a card
+    that took the slot names the old card (`REPLACED_CARD_KEY`), as its
+    `component.created` does in `replaces`. A card whose unit can
     change carries its `unit_change` and keeps its `UnitCard` with its entry
     (`harness.card_unit`), its Search block read from `specs` and else from
     the conversation. `also` makes the write's other changes, and `specs`
@@ -672,7 +675,10 @@ def _swapped(
         swapped = _replace_block(
             work, old_component_id=old_component_id, component=component, retitle=retitle
         )
-        return SwapLanded.SWAPPED if swapped else SwapLanded.HELD
+        if not swapped:
+            return SwapLanded.HELD
+        entry[REPLACED_CARD_KEY] = old_component_id
+        return SwapLanded.SWAPPED
 
     return CardSwap(
         step=_step(

@@ -41,6 +41,7 @@ from typing import Annotated, Any, Literal, cast, get_args
 
 from common.place_type import PartyClass
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -52,6 +53,8 @@ from pydantic import (
     WrapValidator,
     model_validator,
 )
+from pydantic.json_schema import WithJsonSchema
+from pydantic_core import PydanticCustomError
 
 logger = logging.getLogger(__name__)
 
@@ -377,6 +380,54 @@ MAX_SEED_SPEC_BYTES = 1_048_576
 # `_BoundedTurnRoute`): six seeds at the cap, and room for the rest of the
 # request.
 MAX_TURN_REQUEST_BYTES = MAX_SEEDS * MAX_SEED_SPEC_BYTES + 65_536
+
+# The most characters of the user's own words an interrupt carries: an amendment
+# (`InterruptResponse.payload`) or a free-text answer (`TextAnswer.text`). The planner
+# reads the last 2,000 characters of a turn's words, so this leaves room for any
+# amendment a person types.
+MAX_INTERRUPT_TEXT_CHARS = 16_000
+
+# The validation context key under which an interrupt `/interrupt` stored is rebuilt
+# (`harness.studio._answer_again`). `MAX_INTERRUPT_TEXT_CHARS` holds for a request's
+# own words, and a stored answer is carried whole, whatever its length.
+STORED_INTERRUPT = "stored_interrupt"
+
+# The most free-text answers one interrupt carries: one per question of an
+# elicitation (`ElicitationRequest.questions`).
+_MAX_TEXT_ANSWERS = 3
+
+# The largest `/api/studio/interrupt` body the route reads (`harness.studio`'s
+# `_BoundedInterruptRoute`): room for a free-text answer to each question at the cap,
+# each character escaped as a JSON surrogate pair at worst (12 bytes), and for the
+# rest of the request.
+MAX_INTERRUPT_REQUEST_BYTES = _MAX_TEXT_ANSWERS * MAX_INTERRUPT_TEXT_CHARS * 12 + 65_536
+
+
+def _within_word_cap(value: str | None, info: ValidationInfo) -> str | None:
+    """`value`, refused `string_too_long` past `MAX_INTERRUPT_TEXT_CHARS` unless it is
+    rebuilt from what `/interrupt` stored (`STORED_INTERRUPT`)."""
+    stored = isinstance(info.context, dict) and info.context.get(STORED_INTERRUPT) is True
+    if value is not None and len(value) > MAX_INTERRUPT_TEXT_CHARS and not stored:
+        raise PydanticCustomError(
+            "string_too_long",
+            "String should have at most {max_length} characters",
+            {"max_length": MAX_INTERRUPT_TEXT_CHARS},
+        )
+    return value
+
+
+# The user's own words in an interrupt: an amendment or a free-text answer. The schema
+# states the cap, which `_within_word_cap` applies.
+UserWords = Annotated[
+    str,
+    AfterValidator(_within_word_cap),
+    WithJsonSchema({"type": "string", "maxLength": MAX_INTERRUPT_TEXT_CHARS}),
+]
+
+# The most `client_features` values a request may declare. A client names the
+# question forms it renders, a handful; one this release does not know is ignored
+# (`declared_features`), so the cap leaves room for later forms.
+MAX_CLIENT_FEATURES = 16
 
 # The bounds on what the harness reads of a seed and of Search's answer for
 # it. A seed comes from a browser, and Search's answer for its identity goes
@@ -980,7 +1031,7 @@ class TurnRequest(_WireModel):
     apply_choice: ApplyChoice | None = None
     apply_unit: ApplyUnit | None = None
     after_turn: int | None = Field(default=None, ge=0)
-    client_features: list[str] | None = None
+    client_features: list[str] | None = Field(default=None, max_length=MAX_CLIENT_FEATURES)
 
     @model_validator(mode="after")
     def _a_chip_comes_alone(self) -> TurnRequest:
@@ -1051,7 +1102,12 @@ class TextAnswer(_WireModel):
     """The user answered in their own words (`allow_free_text`)."""
 
     kind: Literal["text"]
-    text: str = Field(min_length=1)
+    text: Annotated[
+        str,
+        Field(min_length=1),
+        AfterValidator(_within_word_cap),
+        WithJsonSchema({"type": "string", "minLength": 1, "maxLength": MAX_INTERRUPT_TEXT_CHARS}),
+    ]
 
 
 class SkippedAnswer(_WireModel):
@@ -1124,7 +1180,7 @@ class InterruptResponse(_WireModel):
     # The amendment text of a plan's `amend`. An elicitation opened before
     # the frame carried `questions` also takes its one answer here: an
     # offered option id, or free text.
-    payload: str | None = None
+    payload: UserWords | None = None
     # An elicitation's `answer`: each question id of the frame to its answer.
     answers: dict[str, ElicitationAnswer] | None = None
     # A plan's `switch`: the scope choice or planner decision, the option it
@@ -1135,7 +1191,7 @@ class InterruptResponse(_WireModel):
     plan_revision: str | None = Field(default=None, min_length=1)
     # A `switch` of a row offering a unit: the unit the user picked.
     unit: UnitChoice | None = None
-    client_features: list[str] | None = None
+    client_features: list[str] | None = Field(default=None, max_length=MAX_CLIENT_FEATURES)
 
     @model_validator(mode="after")
     def _switch_members_come_with_switch(self) -> InterruptResponse:
@@ -1245,15 +1301,38 @@ class CompositionMutation(_WireModel):
     expected_revision: int | None = Field(default=None, ge=1)
 
 
+# The largest turn index a `turn.cancel` may name: Postgres's `int`, which the
+# store compares it with (`harness.studio_store.StudioStore.request_cancel`).
+MAX_TURN_INDEX = 2**31 - 1
+
+
 class CancelRequest(_WireModel):
     """POST /api/studio/cancel -- abort the conversation's in-flight
     segment (the Stop button). Idempotent: cancelling an idle conversation
-    is a no-op 204. The aborted stream, if still open, ends with a
-    stream-fatal `error` frame ("cancelled")."""
+    answers 204 and leaves it as it was, as does a Stop naming the latest
+    turn once it has closed. The aborted stream, if still open, ends with a
+    stream-fatal `error` frame ("cancelled").
+
+    `turn_index`, when given, is the turn the Stop is for: the index the
+    stream's `x-dfo-turn-index` header named. When the conversation's latest
+    turn is another, the route answers 200 with a `CancelSkipped` and the
+    conversation stays as it was. Without it, the Stop is for whatever turn
+    the conversation runs."""
 
     kind: Literal["turn.cancel"]
     schema_version: Literal[1]
     conversation_id: str
+    turn_index: int | None = Field(default=None, ge=1, le=MAX_TURN_INDEX)
+
+
+class CancelSkipped(_WireModel):
+    """POST /api/studio/cancel's 200 answer to a Stop whose `turn_index` is
+    not the conversation's latest turn, which leaves the conversation as it
+    was. `code` is `turn_moved`, and `turn_index` is the conversation's
+    latest turn, 0 before its first."""
+
+    code: Literal["turn_moved"]
+    turn_index: int = Field(ge=0)
 
 
 class ResumeRequest(_WireModel):
@@ -1965,13 +2044,22 @@ class StoredCard(_WireModel):
     its type, title, revision and the `fact_summary` its
     `component.created` or `component.revised` frame carried. The stored
     card holds no `payload` or `provenance`. The component id reads the
-    resolved revision from the presentation platform."""
+    resolved revision from the presentation platform.
+
+    `unit_change` and `replaces` have `ComponentCreated`'s names and
+    shapes. `unit_change` is the card's offer now, as `apply_unit` reads it
+    from what the conversation keeps with the card, set while the card is on
+    the canvas. `replaces` names the card whose canvas slot this one took,
+    on the closed turn that swapped it in. A card an earlier release stored
+    carries no `replaces`."""
 
     component_id: str
     type: str
     title: str
     revision: int = Field(ge=1)
     fact_summary: FactSummary | None = None
+    unit_change: UnitChange | None = None
+    replaces: str | None = None
 
 
 class ClosedTurn(_WireModel):
