@@ -9,6 +9,7 @@ check said.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Annotated, Any, Literal
@@ -31,6 +32,8 @@ from executor.classify import (
 # The session-state slot holding the latest `RunOutcome`. Separate from the
 # plan's own slot, so the plan stays a control record.
 RUN_STATE_KEY = "executor:run"
+
+logger = logging.getLogger(__name__)
 
 
 class RefusalKind(StrEnum):
@@ -436,16 +439,20 @@ def permanent_transport_stop(outcome: Refused) -> bool:
     return outcome.refusal is RefusalKind.TRANSPORT_FAILED and not outcome.retryable
 
 
-def stop_cause(outcome: Refused) -> StopCause:
+def stop_cause(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> StopCause:
     """Whose `outcome`'s stop is.
 
-    A stop carrying a tool's refusal is transient when the tool says waiting
-    helps (`classify_refusal`), the harness's when the code says the harness
-    wrote the call wrong or a server failed of itself (`is_harness_fault`),
-    and the data's otherwise. A transport stop is transient when a later
-    attempt can get past it (`Refused.retryable`) and the harness's when none
-    can. Any other stop is told by its kind (`STOP_CAUSES`).
+    A method choice and a source to discover again are the data's, which a
+    plan settles with the user. A stop carrying a tool's refusal is transient
+    when the tool says waiting helps (`classify_refusal`), the harness's when
+    the code says the harness wrote the call wrong or a server failed of
+    itself (`is_harness_fault`), and the data's otherwise. A transport stop
+    is transient when a later attempt can get past it (`Refused.retryable`)
+    and the harness's when none can. Any other stop is told by its kind
+    (`STOP_CAUSES`).
     """
+    if not isinstance(outcome, Refused):
+        return StopCause.DATA
     failure = outcome.payload
     if failure is None:
         if permanent_transport_stop(outcome):
@@ -478,14 +485,41 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
     `EvidenceIssueCode` when the evidence check did, `rediscovery_needed` for
     a source to discover again, and the stop's kind otherwise. A `remedy`
     says what the user can do: a tool's own (`_refused_step`), or the one
-    `ISSUE_REMEDIES` gives the evidence check's first error.
+    `ISSUE_REMEDIES` gives the evidence check's first error. A stop on a
+    tool's refusal also carries that refusal's `retry_mode` and `fix`, which
+    word the user's sentence for it (`harness.sentences.failure_sentence`),
+    and the `disposition` `classify_refusal` gave it. Every stop carries its
+    `cause` (`stop_cause`).
+
+    `wave_remedy` is the most severe remedy (`stop_remedy`) of the stop and
+    of each stop in `outcome.also_stopped`, so a new plan gets past the wave
+    only when it gets past every stop in it, and `remedy` reads it. The step
+    named is the stop that decides it, the first of the most severe, so the
+    step, the code, the user's words and the remedy all name one stop, the
+    stop itself whenever it is among them.
     """
+    stops = [stop_step(stop) for stop in (outcome, *outcome.also_stopped)]
+    remedies = [stop_remedy(stop) for stop in stops]
+    severity = list(Remedy)
+    deciding = max(range(len(stops)), key=lambda index: severity.index(remedies[index]))
+    return {**stops[deciding], "wave_remedy": remedies[deciding].value}
+
+
+def stop_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
+    """The step `outcome` itself stopped at, without its wave's siblings or remedy.
+    It is the record each stopped step keeps (`harness.graph.execute`)."""
+    return {**_stopped_at(outcome), "cause": stop_cause(outcome).value}
+
+
+def _stopped_at(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
+    """`failed_step` without its `cause` and its wave's remedy."""
     if isinstance(outcome, MethodChoiceNeeded):
         return {
             "step_id": outcome.step_id,
             "tool": outcome.tool.name,
             "code": outcome.code,
             "message": outcome.refusal.message,
+            **_refusal_terms(outcome.refusal),
         }
     if isinstance(outcome, RediscoveryNeeded):
         return {
@@ -494,6 +528,7 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
             "code": outcome.kind,
             "message": outcome.refusal.message
             or f"the source for requirement {outcome.requirement_id!r} needs discovering again",
+            **_refusal_terms(outcome.refusal),
         }
     # `payload`, set on every `STEP_REFUSED` stop, carries the tool's own
     # `code` and `message` from its `ToolFailure`. `outcome.detail` wraps the
@@ -535,6 +570,16 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
     }
 
 
+def _refusal_terms(failure: ToolFailure) -> dict[str, Any]:
+    """`failure`'s `retry_mode`, its `fix` and its disposition (`classify_refusal`),
+    as `failed_step` carries them."""
+    return {
+        "retry_mode": failure.retry_mode,
+        "fix": dict(failure.fix),
+        "disposition": classify_refusal(failure).value,
+    }
+
+
 def _refused_step(*, step_id: str | None, failure: ToolFailure) -> dict[str, Any]:
     """`failed_step` for a step the tool itself refused.
 
@@ -549,8 +594,186 @@ def _refused_step(*, step_id: str | None, failure: ToolFailure) -> dict[str, Any
         "tool": None,
         "code": failure.code,
         "message": failure.message,
+        **_refusal_terms(failure),
     }
     remedy = failure.fix.get("remedy")
     if isinstance(remedy, str) and remedy:
         failed["remedy"] = remedy
     return failed
+
+
+class Remedy(StrEnum):
+    """What gets past a stopped run's failure (`remedy`). The members run from
+    least to most severe, and a wave's remedy is its most severe stop's
+    (`failed_step`)."""
+
+    # A plan drafted afresh, from another brief or approved again.
+    REPLAN = "replan"
+    # The same plan can run once a service recovers.
+    WAIT = "wait"
+    # The user accepts a fact of the data or changes the question.
+    USER = "user"
+    # The fault is the system's, and nothing the user or a plan does gets past it.
+    SYSTEM = "system"
+
+
+# The stops of the harness's own that are approvals a changed plan or tool
+# surface made stale, or that expired. A plan drafted and approved afresh gets
+# past each, so they are the harness's stops that a new plan remedies.
+LAPSED_APPROVAL_KINDS = frozenset(
+    {
+        RefusalKind.NOT_APPROVED,
+        RefusalKind.STALE_REVISION,
+        RefusalKind.SURFACE_CHANGED,
+        RefusalKind.AUTHORISATION_EXPIRED,
+    }
+)
+
+# What gets past a stop of the data's that no disposition settles, by its
+# `failed_step` code: a tool's code, the executor's own, a stop's kind or an
+# evidence finding. `remedy` reads it after the cause and the disposition, and
+# `tests/executor/test_outcomes.py` keeps its keys equal to the codes that
+# reach it, so a new code is placed on purpose.
+#
+# `REPLAN` is a failure a plan drafted from another brief avoids, reading
+# another source, spec, scope, frame or method. `USER` is a fact of the data
+# the user accepts or changes the question for, a tool no workflow step calls,
+# or a stop no other brief changes this turn.
+_DATA_STOP_REMEDY: dict[str, Remedy] = {
+    # data-mcp: a facet, node, spec or family a different spec avoids.
+    "facet_not_available": Remedy.REPLAN,
+    "default_facet_undefined": Remedy.REPLAN,
+    "node_not_held": Remedy.REPLAN,
+    "spec_not_exportable": Remedy.REPLAN,
+    "member_not_resolvable": Remedy.REPLAN,
+    "rollup_not_summable": Remedy.REPLAN,
+    # A member-cardinality or candidate-window ceiling is fixed by the spec's
+    # own definition, so the user narrows the topic or names a breakdown. A
+    # ceiling a narrower request avoids is a method choice.
+    "over_ceiling": Remedy.USER,
+    "capability_unavailable": Remedy.USER,
+    "entity_not_found": Remedy.USER,
+    # A definition the platform refused to register, or a refusal of the
+    # request under a code the server does not map, which another spec or
+    # request may avoid. A service's own failure is the harness's
+    # (`is_upstream_fault`).
+    "upstream_error": Remedy.REPLAN,
+    # Tools no workflow step calls (`compiler.capabilities.EXCLUDED_TOOLS`).
+    "skill_not_found": Remedy.USER,
+    "skill_resource_not_found": Remedy.USER,
+    "allowance_exhausted": Remedy.USER,
+    "provenance_unavailable": Remedy.USER,
+    "licence_not_redistributable": Remedy.USER,
+    # analysis-mcp: a frame, unit, join or method a different plan avoids.
+    "stat_var_unresolved": Remedy.REPLAN,
+    "frame_too_large": Remedy.REPLAN,
+    # A narrower scope gets past a frame data-mcp minted that failed its
+    # integrity check, since it mints another content version. Any other
+    # stored frame that fails is the store's fault (`is_store_fault`).
+    "frame_integrity_failed": Remedy.REPLAN,
+    "non_finite_result": Remedy.REPLAN,
+    "frame_not_held": Remedy.REPLAN,
+    "frame_expired": Remedy.REPLAN,
+    "mixed_time_grain": Remedy.REPLAN,
+    "filter_unit_conversion_unsupported": Remedy.REPLAN,
+    "join_output_collision": Remedy.REPLAN,
+    "derived_input_unusable": Remedy.REPLAN,
+    "derived_input_unrecoverable": Remedy.REPLAN,
+    "derived_input_ordinal": Remedy.REPLAN,
+    "rolling_reanchor_unavailable": Remedy.REPLAN,
+    "quotient_of_side_unit_unsupported": Remedy.REPLAN,
+    "rendering_not_recorded": Remedy.REPLAN,
+    "rolling_grain_unsupported": Remedy.REPLAN,
+    # No year half of the series hold, or a pairing whose sides share no key.
+    "rolling_anchor_unresolved": Remedy.USER,
+    # The executor's own stops on the data a plan read. Each holds for any plan
+    # over the same data, and its refusal tells the user what to ask instead:
+    # the latest year the series reach, a later start, or the family read apart.
+    "rolling_anchor_behind_plan": Remedy.USER,
+    "rolling_window_outside_dataset": Remedy.USER,
+    "family_not_summed": Remedy.USER,
+    # The run's own stops on what it retrieved.
+    "requirement_unmet": Remedy.REPLAN,
+    "empty_answer": Remedy.REPLAN,
+    # The evidence check's findings on what a retrieval holds, which another
+    # source, scope or reading avoids.
+    "no_data_at_source": Remedy.REPLAN,
+    "data_unverified": Remedy.REPLAN,
+    "identity_unverified": Remedy.REPLAN,
+    "entity_unverified": Remedy.REPLAN,
+    "entity_role_ambiguous": Remedy.REPLAN,
+    "entity_role_mismatch": Remedy.REPLAN,
+    "entity_role_unverified": Remedy.REPLAN,
+    "group_read_as_total": Remedy.REPLAN,
+    "open_axis_unresolved": Remedy.REPLAN,
+    "scope_entities_unbound": Remedy.REPLAN,
+    "scope_entities_wider": Remedy.REPLAN,
+    "unit_mismatch": Remedy.REPLAN,
+    "unit_unverified": Remedy.REPLAN,
+    "unit_price_basis_mismatch": Remedy.REPLAN,
+    "unit_price_basis_unverified": Remedy.REPLAN,
+    "source_mismatch": Remedy.REPLAN,
+    "source_unverified": Remedy.REPLAN,
+    "source_drift": Remedy.REPLAN,
+    "rows_empty": Remedy.REPLAN,
+    "coverage_gaps": Remedy.REPLAN,
+    "grain_ambiguous": Remedy.REPLAN,
+    # The findings no other brief changes this turn: the user's name as the
+    # data lists it, a named party with no series, a period the data does not
+    # reach or confirm, a family the turn approves again as it was, a rebound
+    # binding every search meets, and a manifest that read another pin or
+    # states no statistics.
+    "entity_missing": Remedy.USER,
+    "entity_no_series": Remedy.USER,
+    "window_short": Remedy.USER,
+    "scope_window_short": Remedy.USER,
+    "period_unverified": Remedy.USER,
+    "stat_var_family_moved": Remedy.USER,
+    "stat_var_membership_drift": Remedy.USER,
+    "source_pin_mismatch": Remedy.USER,
+    "statistics_unavailable": Remedy.USER,
+    # No check reports these as a failure.
+    "source_substituted": Remedy.USER,
+    "unit_matches": Remedy.USER,
+}
+
+
+def remedy(failed: Mapping[str, object]) -> Remedy:
+    """What gets past the stopped run `failed`, its `failed_step`, names: the
+    `wave_remedy` it carries. A failed step that carries none is the system's.
+
+    `REPLAN`: a plan drafted afresh, so the turn's plan call is given back once.
+    `WAIT`: a service did not answer, so no plan is given back and the user is
+    told to try again shortly. `USER`: the user accepts a fact of the data or
+    changes the question. `SYSTEM`: the fault is the system's, and the user is
+    not asked to change the question.
+    """
+    stated = failed.get("wave_remedy")
+    return Remedy(stated) if isinstance(stated, str) and stated in set(Remedy) else Remedy.SYSTEM
+
+
+def stop_remedy(failed: Mapping[str, object]) -> Remedy:
+    """What gets past one stop, `failed` as `failed_step` states it alone.
+
+    Read in order: a transient stop waits, and a stop of the harness's own is
+    the system's, except an approval a fresh plan gets past
+    (`LAPSED_APPROVAL_KINDS`). A data stop a method choice or a rediscovery
+    settles (`Disposition`) is re-planned. Any other is decided by its code
+    (`_DATA_STOP_REMEDY`), and an unplaced code is the user's, which asks for
+    no second approval. A stop with no cause is the system's.
+    """
+    cause = failed.get("cause")
+    code = failed.get("code")
+    if cause == StopCause.TRANSIENT:
+        return Remedy.WAIT
+    if cause == StopCause.HARNESS:
+        return Remedy.REPLAN if code in LAPSED_APPROVAL_KINDS else Remedy.SYSTEM
+    if cause != StopCause.DATA:
+        return Remedy.SYSTEM
+    if failed.get("disposition") in (Disposition.METHOD_CHOICE, Disposition.REDISCOVER):
+        return Remedy.REPLAN
+    placed = _DATA_STOP_REMEDY.get(code) if isinstance(code, str) else None
+    if placed is None:
+        logger.warning("no remedy placed for the data stop %r", code)
+        return Remedy.USER
+    return placed

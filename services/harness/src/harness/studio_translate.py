@@ -76,8 +76,10 @@ from planner.tool_results import Outcome, ProblemCode
 from planner.tools import PLAN_WRITES, running_plan_write
 from planner.workflow import ToolId
 from pydantic import ValidationError
+from submission.service import SEARCH_DEFAULT_RATIONALE
 
 from harness import plan_display
+from harness.card_unit import UnitCard, card_unit_change, stored_block, unit_card
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.fatal_codes import stated_refusal, wire_error
 from harness.graph.events import AgentStatus, GraphEvent, PlannerStarted, StepProgress
@@ -87,6 +89,7 @@ from harness.graph.state import (
     APPROVE_PAUSE,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
+    card_unit_offers,
 )
 from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
@@ -103,6 +106,8 @@ from harness.scope_choices import REASON_COPY
 from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
 from harness.sentences import DROPPED_REASON, MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
+    ASK_FOR_QUESTION_REPLY,
+    SET_ASIDE_REPLY,
     ConversationState,
     _PendingChoice,
     _PendingInterrupt,
@@ -117,9 +122,18 @@ from harness.studio_store import StudioStore, keep_turn_records
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
+from harness.unit_offer import (
+    offers_another_unit,
+    row_units,
+    unit_option_id,
+    unit_words,
+    whole_unit_options,
+    whole_units,
+)
 from harness.wire import (
     ActivityStep,
     ApplyChoiceSuggestion,
+    ClientFeature,
     ComponentCreated,
     CompositionUpdated,
     Done,
@@ -150,6 +164,7 @@ from harness.wire import (
     StepStatus,
     Suggestions,
     ToolError,
+    UnitOffer,
     component_created,
     log_unreadable_card,
 )
@@ -307,17 +322,27 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
 
 
 def closed_on_reply(
-    conversation: ConversationState, text: str, *, suggestions: bool
+    conversation: ConversationState,
+    text: str,
+    *,
+    suggestions: bool,
+    say: bool = True,
+    user_display: str | None = None,
 ) -> list[MessageComplete | Suggestions | Done]:
     """Record the turn closed on `text`, its reply, and return the frames
     that close its stream, numbered: `message.complete`, an empty
     `suggestions` when `suggestions`, and `done`. For a turn that runs no
-    agent, such as an Edit Card or a declined plan."""
+    agent, such as an Edit Card or a declined plan. A reply that is not `say`
+    is recorded and sent as no `message.complete`: the stream shows no text,
+    and a state read gives the reply as empty. `user_display` is the line a
+    state read shows as the user's message (`ConversationState.close_turn`)."""
     conversation.turn_final_text = text
-    conversation.close_turn(final_text=text)
-    frames: list[MessageComplete | Suggestions | Done] = [
-        MessageComplete(event="message.complete", seq=conversation.next_seq(), text=text)
-    ]
+    conversation.close_turn(final_text=text, reply_shown=say, user_display=user_display)
+    frames: list[MessageComplete | Suggestions | Done] = []
+    if say:
+        frames.append(
+            MessageComplete(event="message.complete", seq=conversation.next_seq(), text=text)
+        )
     if suggestions:
         frames.append(Suggestions(event="suggestions", seq=conversation.next_seq(), items=[]))
     frames.append(
@@ -1218,10 +1243,17 @@ def _data_phrase(plan: PlannerPlan) -> str | None:
 
 
 def _choice_members(
-    decision: Decision | None, plan: PlannerPlan, named: Callable[[str], str]
+    decision: Decision | None,
+    plan: PlannerPlan,
+    named: Callable[[str], str],
+    unit_offers: Mapping[str, UnitOffer],
 ) -> dict[str, Any]:
     """The `PlanDecision` members a switchable decision of `plan` adds: the id
     of its row, its active option and each option with its label and status.
+
+    A decision whose slot `unit_offers` holds, a unit question's whole unit
+    (`harness.graph.state.unit_row_offers`), takes `plan_display.
+    decision_choice_id` and that offer as `unit` (`_unit_members`).
 
     A scope decision's row takes `plan_display.choice_id`, and each option
     the status Search gave it, its years and why it is limited
@@ -1229,10 +1261,29 @@ def _choice_members(
     (`plan_display.switchable_decision`) takes `plan_display.
     decision_choice_id`, and each option `plan_display.decision_option_id`,
     its label in the card's words (`named`) and status "available", the
-    chosen one active. Empty for any other decision.
+    chosen one active. The row of how pinned sources' flows are counted
+    (`plan_display.count_choice_id`) takes that id, and each count it offers
+    (`plan_display.count_options`) the id `plan_display.decision_option_id`
+    gives its label, with status "available", since Search offered each
+    beside every source of the row. Empty for any other decision.
     """
     if decision is None:
         return {}
+    if (offer := unit_offers.get(decision.slot)) is not None:
+        return _unit_members(decision, offer)
+    if (row := plan_display.count_choice_id(plan, decision)) is not None:
+        return {
+            "choice_id": row,
+            "active_option_id": plan_display.decision_option_id(decision.chosen),
+            "options": [
+                PlanDecisionOption(
+                    option_id=plan_display.decision_option_id(option),
+                    label=named(option),
+                    status="available",
+                )
+                for option in plan_display.count_options(plan, decision)
+            ],
+        }
     if decision.scope is not None:
         return {
             "choice_id": plan_display.choice_id(plan, decision),
@@ -1264,12 +1315,42 @@ def _choice_members(
     }
 
 
+def _unit_members(decision: Decision, offer: UnitOffer) -> dict[str, Any]:
+    """The `PlanDecision` members of the row stating a unit question's whole
+    unit `decision`: its row id, `offer` as `unit`, and as options the whole
+    units a client that renders no unit picker switches between
+    (`row_units`), each labelled in words (`unit_words`), status
+    "available", the offer's start active. Its `chosen` is the start in
+    those words and its `alternatives` every option's label, so the row
+    reads as its options do."""
+    units = row_units(offer)
+    start = unit_option_id(offer.start)
+    return {
+        "chosen": unit_words(offer.start, offer),
+        "alternatives": [unit_words(unit, offer) for unit in units.values()],
+        "choice_id": plan_display.decision_choice_id(decision),
+        "active_option_id": start,
+        "options": [
+            PlanDecisionOption(
+                option_id=option_id, label=unit_words(unit, offer), status="available"
+            )
+            for option_id, unit in units.items()
+        ],
+        "unit": offer,
+    }
+
+
 def _search_default(decision: Decision | None) -> bool:
-    """Whether `decision` states a scope choice Search's default settled."""
+    """Whether `decision` states a scope choice Search's default settled and gives
+    only that as its reason (`submission.service.SEARCH_DEFAULT_RATIONALE`), which the
+    card leaves off. A row reading the card's line where the figure and the user's
+    words part (`DecisionScope.line`) keeps its reason."""
     return (
         decision is not None
         and decision.scope is not None
         and decision.scope.provenance == "default"
+        and not decision.scope.line
+        and decision.rationale == SEARCH_DEFAULT_RATIONALE
     )
 
 
@@ -1278,8 +1359,12 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
     scope choices and switchable planner decisions (`_choice_members`).
 
     A choice is switchable when an option other than its active one is
-    available or partial. The plan card lists `PlanAction.SWITCH` only
-    when one is, and `/interrupt` checks a switch against what is kept.
+    available or partial, or, for a row offering a unit (`PlanDecision.unit`),
+    when its offer holds a unit other than the one it is in
+    (`harness.unit_offer.offers_another_unit`), which a switch names by
+    `unit` though its options list it not. The plan card lists
+    `PlanAction.SWITCH` only when one is, and `/interrupt` checks a switch
+    against what is kept.
     """
     choices: dict[str, _PendingChoice] = {}
     for decision in decisions:
@@ -1289,7 +1374,7 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
         if not any(
             option.status != "unavailable" and option.option_id != decision.active_option_id
             for option in decision.options
-        ):
+        ) and (decision.unit is None or not offers_another_unit(decision.unit)):
             continue
         choices[decision.choice_id] = _PendingChoice(
             active=decision.active_option_id,
@@ -1424,6 +1509,85 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
         )
     }
     return PlannerPlan.model_validate(fields)
+
+
+def _asked_question(
+    question: Mapping[str, Any], *, skippable: bool, features: frozenset[ClientFeature]
+) -> ElicitationQuestion:
+    """One question of the `ask` node's pause as the frame asks it: a unit
+    question, whose entry carries `unit` (`harness.graph.state.ask_questions`),
+    with its offer and no options or free text; any other with its candidates
+    as options, and room for the user's own words; a `multi_select` one lets
+    the user tick several.
+
+    A client that declared no `unit_question` feature gets the unit question
+    as a `single_select` over the offer's whole units (`whole_units`), keeping
+    the offer and no free text; one that declared no `multi_select` gets a
+    `multi_select` question as a `single_select` (`ConversationState.client_features`).
+    """
+    if unit := question.get("unit"):
+        offer = UnitOffer.model_validate(unit["offer"])
+        if ClientFeature.UNIT_QUESTION in features:
+            return ElicitationQuestion(
+                id=str(question["id"]),
+                question=str(question["question"]),
+                input=ElicitationInput.UNIT,
+                allow_free_text=False,
+                skippable=skippable,
+                unit=offer,
+            )
+        return ElicitationQuestion(
+            id=str(question["id"]),
+            question=str(question["question"]),
+            input=ElicitationInput.SINGLE_SELECT,
+            options=[
+                ElicitationOption(id=option_id, label=unit_words(choice, offer))
+                for option_id, choice in whole_units(offer).items()
+            ],
+            allow_free_text=False,
+            skippable=skippable,
+        )
+    multi = bool(question.get("multi_select")) and ClientFeature.MULTI_SELECT in features
+    return ElicitationQuestion(
+        id=str(question["id"]),
+        question=str(question["question"]),
+        input=ElicitationInput.MULTI_SELECT if multi else ElicitationInput.SINGLE_SELECT,
+        options=[
+            ElicitationOption(id=str(candidate["spec_id"]), label=str(candidate["label"]))
+            for candidate in question["candidates"]
+        ],
+        allow_free_text=True,
+        skippable=skippable,
+    )
+
+
+def _kept_question(asked: ElicitationQuestion, entry: Mapping[str, Any] | None) -> _PendingQuestion:
+    """`asked` as `/interrupt` checks its answer, `entry` the `ask` node's
+    question it was built from (`None` for the planner's ask). A unit question
+    keeps its offer, and one sent in another form than its own keeps that form
+    as `native_input`, which turns its `option` answer back into a unit or a
+    one-item `options` answer (`harness.studio._resume_answer`)."""
+    offer = entry.get("unit") if entry is not None else None
+    if offer:
+        native: ElicitationInput | None = ElicitationInput.UNIT
+    elif entry is not None and entry.get("multi_select"):
+        native = ElicitationInput.MULTI_SELECT
+    else:
+        native = None
+    unit = UnitOffer.model_validate(offer["offer"]) if offer else None
+    return _PendingQuestion(
+        id=asked.id,
+        question=asked.question,
+        # A unit question sent as one lists its whole units, which a page that was
+        # sent it as a pick answers with (`harness.studio._answer_kinds`).
+        options=dict[str, str | None](whole_unit_options(unit))
+        if unit is not None and asked.input is ElicitationInput.UNIT
+        else {option.id: option.label for option in asked.options or ()},
+        skippable=asked.skippable,
+        input=asked.input,
+        unit=unit,
+        native_input=None if asked.input is native else native,
+    )
 
 
 def _planner_question(args: dict[str, Any]) -> ElicitationQuestion:
@@ -1574,6 +1738,7 @@ class _Translator:
         recorder: _RecordingExecutor,
         surface_recorder: _RecordingSurface | None = None,
         approving: PlanProposed | None = None,
+        restored: Sequence[PlanApproved] = (),
     ) -> None:
         self._conversation = conversation
         self._recorder = recorder
@@ -1582,10 +1747,17 @@ class _Translator:
         # its interrupt; `plan.approved` states it once the `approve` node
         # takes the approval, and only then.
         self._approving = approving
+        # The `plan.approved` frames of approvals the turn took on an earlier
+        # segment, which this segment sends again, under fresh `seq`s, before
+        # its first frame of its own (`_take_restored`).
+        self._restored = list(restored)
         # The wire `step_id` each step (`_ExecutorRecord.step_id`) was given
         # at its first frame, so its later frames update the same line.
         self._wire_step_ids: dict[str, str] = {}
         self._final_text = ""
+        # The text each response of the agent's run streamed beside its calls,
+        # which stands as the reply of a turn whose cards answer it (`finish`).
+        self._narration: list[str] = []
         self.paused = False
         # Whether the planner's latest entry replans for a pick on the plan
         # card (`PlannerStarted.pick`). Its drafted plan keeps the planner
@@ -1643,7 +1815,15 @@ class _Translator:
         """The frames of `event`, emitted with `marks` (`_EventRecords`):
         those of the calls recorded before it, then its own."""
         records = [] if marks is None else self._take_records(marks)
-        return await self._translate(event, records)
+        return [*self._take_restored(), *await self._translate(event, records)]
+
+    def _take_restored(self) -> list[PlanApproved]:
+        """The restored `plan.approved` frames not yet sent, numbered now,
+        and none after the first call."""
+        restored, self._restored = self._restored, []
+        return [
+            frame.model_copy(update={"seq": self._conversation.next_seq()}) for frame in restored
+        ]
 
     async def _translate(self, event: SegmentEvent, records: list[_ExecutorRecord]) -> list[Any]:
         """The frames of `event`: those of `records`, the calls recorded
@@ -1742,13 +1922,13 @@ class _Translator:
         frames: list[Any] = []
         if node == "approve" and label == "approved":
             if self._approving is not None:
-                frames.append(
-                    plan_approved(
-                        self._approving,
-                        seq=self._conversation.next_seq(),
-                        baseline=self._conversation.turn_choice_baseline,
-                    )
+                approved = plan_approved(
+                    self._approving,
+                    seq=self._conversation.next_seq(),
+                    baseline=self._conversation.turn_choice_baseline,
                 )
+                self._conversation.record_approved(approved)
+                frames.append(approved)
                 self._approving = None
             frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._open_status(_STARTING_PLAN))
@@ -2068,6 +2248,14 @@ class _Translator:
                 )
             )
             if isinstance(component, dict) and created is not None:
+                # Only a card that lands a block can change unit: the route
+                # refuses a card off the canvas (`harness.card_unit.unit_move`).
+                lands = record.land and self._conversation.auto_add
+                card = (
+                    self._unit_card(component, record.card_lineage, created=created)
+                    if lands
+                    else None
+                )
                 frames.extend(
                     await self._component_frames(
                         component,
@@ -2076,9 +2264,31 @@ class _Translator:
                         created=created,
                         write_token=record.write_token,
                         card_lineage=record.card_lineage,
+                        unit_card=card,
                     )
                 )
         return frames
+
+    def _unit_card(
+        self,
+        component: dict[str, Any],
+        lineage: CardLineage | None,
+        *,
+        created: ComponentCreated,
+    ) -> UnitCard | None:
+        """The `UnitCard` of `component` when its unit can change, with its
+        `unit_change` set on `created`: a card drawing one retrieval's own
+        frame of a spec whose Search block, this turn's or one an earlier
+        turn kept, converts it (`harness.card_unit`)."""
+        card = unit_card(component, lineage)
+        if card is None:
+            return None
+        c = self._conversation
+        change = card_unit_change(card, stored_block(c.turn_specs, c.turns, card.spec_id))
+        if change is None:
+            return None
+        created.unit_change = change
+        return card
 
     async def _component_frames(
         self,
@@ -2089,6 +2299,7 @@ class _Translator:
         intent: dict[str, Any] | None = None,
         write_token: str | None = None,
         card_lineage: CardLineage | None = None,
+        unit_card: UnitCard | None = None,
     ) -> list[Any]:
         """Frames for `component`, which passed the `component.created` wire
         contract (`created` is the frame `_record_frames` built from it).
@@ -2104,16 +2315,20 @@ class _Translator:
         resolves to `"held"` inside `harness.studio_state.land_component`
         itself, also only `component.created`, and writes the card's entry
         with no block. The card's `write_token` is kept with it, in its
-        write, and its `card_lineage` commits in that write. A card that does
-        not land keeps its token in the conversation for the closing write,
-        and stores no lineage."""
+        write, and its `card_lineage` commits in that write, as does its
+        `unit_card` with its entry. A card that does not land keeps its token
+        in the conversation for the closing write, and stores no lineage."""
         created.seq = self._conversation.next_seq()
         if not land:
             if write_token:
                 self._conversation.write_tokens[created.component_id] = write_token
             return [created]
         landed = await self._land(
-            component, intent=intent, write_token=write_token, card_lineage=card_lineage
+            component,
+            intent=intent,
+            write_token=write_token,
+            card_lineage=card_lineage,
+            unit_card=unit_card,
         )
         if landed != "created":
             return [created]
@@ -2127,6 +2342,7 @@ class _Translator:
         intent: dict[str, Any] | None,
         write_token: str | None,
         card_lineage: CardLineage | None = None,
+        unit_card: UnitCard | None = None,
     ) -> Literal["created", "held"]:
         """`harness.studio_state.land_component` on the current
         conversation, inside the store's card write
@@ -2144,7 +2360,12 @@ class _Translator:
                     **work.write_tokens,
                     str(component["component_id"]): write_token,
                 }
-            return state_land_component(work, component, intent=intent)
+            return state_land_component(
+                work,
+                component,
+                intent=intent,
+                unit_card=unit_card.as_json() if unit_card is not None else None,
+            )
 
         return await self._recorder.store.change_canvas(
             *key, land, lineage=card_lineage, landed=lambda landed: landed == "created"
@@ -2210,16 +2431,20 @@ class _Translator:
             frames: list[Any] = []
             note = payload.get("refusal_note")
             if isinstance(note, str) and note:
-                # `harness.graph.planning`'s `planner` node sets this in two cases. Its
-                # `"pending_refusal"` route (BUDGET_EXHAUSTED or
-                # QUESTION_FIXED), a refused amendment that still has a
+                # `harness.graph.planning`'s `planner` node sets this in three cases. Its
+                # `"pending_refusal"` route (BUDGET_EXHAUSTED, or
+                # QUESTION_FIXED on an entry with no amendment to hand back
+                # as a new question), a refused amendment that still has a
                 # `PENDING_APPROVAL` plan on record re-offered unmodified,
                 # carries the refusal's sentence: the plan card below says
                 # what is still approvable, and this says why the user is
                 # seeing it again rather than the change they just asked
                 # for. An `"ok"` draft made over a plan the node could not
-                # read says so (`UNREADABLE_PLAN_NOTE`). Any other `"ok"`
-                # draft carries no `refusal_note` and gets no message here.
+                # read says so (`UNREADABLE_PLAN_NOTE`). The first draft
+                # after an approved plan stopped and `plan_done` gave the
+                # plan call back names the step it stopped at and why
+                # (`ORCHESTRATOR_RETRY_NOTE_KEY`). Any other `"ok"` draft
+                # carries no `refusal_note` and gets no message here.
                 frames.append(
                     MessageDelta(event="message.delta", seq=conversation.next_seq(), text=note)
                 )
@@ -2286,6 +2511,7 @@ class _Translator:
                     )
                 conversation.latest_plan_version = version
             plan = _plan_from_payload(payload)
+            unit_offers = card_unit_offers(pause.state, payload.get("revision"))
             questions = plan_display.card_questions(plan)
             by_slot = {decision.slot: decision for decision in plan.decisions}
             named = functools.partial(plan_display.card_decision_text, plan=plan)
@@ -2351,30 +2577,36 @@ class _Translator:
                 for row in plan_display.ask_rows(plan)
             ]
             decisions = [
-                PlanDecision(
-                    id=decision.get("slot", f"d{index + 1}"),
-                    question=questions[decision.get("slot", "")],
-                    chosen=option_named(decision.get("chosen", ""), decision=held, options=offered),
-                    alternatives=(
-                        [
-                            option_named(option, decision=held, options=offered)
-                            for option in decision["options"]
-                        ]
-                        if decision.get("options") is not None
-                        else None
-                    ),
-                    # A reason saying only that Search's default holds says nothing.
-                    reason=""
-                    if _search_default(held)
-                    else named(decision.get("rationale", ""), decision=held),
-                    resolved_by=_RESOLVED_BY_TO_WIRE.get(
-                        decision.get("resolved_by", ""), "default"
-                    ),
-                    **_choice_members(
-                        held,
-                        plan,
-                        functools.partial(option_named, decision=held, options=offered),
-                    ),
+                PlanDecision.model_validate(
+                    {
+                        "id": decision.get("slot", f"d{index + 1}"),
+                        "question": questions[decision.get("slot", "")],
+                        "chosen": option_named(
+                            decision.get("chosen", ""), decision=held, options=offered
+                        ),
+                        "alternatives": (
+                            [
+                                option_named(option, decision=held, options=offered)
+                                for option in decision["options"]
+                            ]
+                            if decision.get("options") is not None
+                            else None
+                        ),
+                        # A reason saying only that Search's default holds says nothing.
+                        "reason": ""
+                        if _search_default(held)
+                        else named(decision.get("rationale", ""), decision=held),
+                        "resolved_by": _RESOLVED_BY_TO_WIRE.get(
+                            decision.get("resolved_by", ""), "default"
+                        ),
+                        # A unit row words its choice and alternatives as its options.
+                        **_choice_members(
+                            held,
+                            plan,
+                            functools.partial(option_named, decision=held, options=offered),
+                            unit_offers,
+                        ),
+                    }
                 )
                 for index, decision in enumerate(payload.get("decisions", []))
                 if decision.get("slot") in questions
@@ -2432,19 +2664,7 @@ class _Translator:
         if asked:
             several = len(asked) > 1
             questions = [
-                ElicitationQuestion(
-                    id=str(question["id"]),
-                    question=str(question["question"]),
-                    input=ElicitationInput.SINGLE_SELECT,
-                    options=[
-                        ElicitationOption(
-                            id=str(candidate["spec_id"]), label=str(candidate["label"])
-                        )
-                        for candidate in question["candidates"]
-                    ],
-                    allow_free_text=True,
-                    skippable=several,
-                )
+                _asked_question(question, skippable=several, features=conversation.client_features)
                 for question in asked
             ]
             skippable = not several
@@ -2462,13 +2682,8 @@ class _Translator:
             adk_id=wire_id,
             kind="elicitation",
             questions=tuple(
-                _PendingQuestion(
-                    id=question.id,
-                    question=question.question,
-                    options={option.id: option.label for option in question.options or ()},
-                    skippable=question.skippable,
-                )
-                for question in questions
+                _kept_question(question, entry)
+                for question, entry in zip(questions, asked or [None], strict=True)
             ),
             skippable=skippable,
             frames=(frame,),
@@ -2558,6 +2773,7 @@ class _Translator:
         the agent wrote before was interim. A plan hand-back with no plan
         shows the failed step first."""
         self._final_text = ""
+        self._narration = []
         self._unanswered = []
         frames: list[ActivityStep] = []
         if event.text == ORCHESTRATOR_PLAN_FAILED_STATUS:
@@ -2579,13 +2795,21 @@ class _Translator:
         """Answer text as the model streams it."""
         if not text:
             return []
-        frames: list[Any] = self._close_status()
+        frames: list[Any] = [*self._close_status(), *self._narration_break()]
         self._streamed_text = True
         self._final_text += text
         frames.append(
             MessageDelta(event="message.delta", seq=self._conversation.next_seq(), text=text)
         )
         return frames
+
+    def _narration_break(self) -> list[MessageDelta]:
+        """The paragraph break a response's first text streams after the text an
+        earlier response streamed beside its calls, so the deltas add up to the
+        narration `finish` joins."""
+        if self._streamed_text or self._final_text or not self._narration:
+            return []
+        return [MessageDelta(event="message.delta", seq=self._conversation.next_seq(), text="\n\n")]
 
     def _agent_response(self, parts: Sequence[types.Part]) -> list[Any]:
         """A finished model response: its text, unless it streamed already,
@@ -2594,6 +2818,7 @@ class _Translator:
         text = "".join(part.text or "" for part in parts if part.text and not part.thought)
         if text and not self._streamed_text:
             frames.extend(self._close_status())
+            frames.extend(self._narration_break())
             self._final_text += text
             frames.append(
                 MessageDelta(event="message.delta", seq=self._conversation.next_seq(), text=text)
@@ -2602,6 +2827,8 @@ class _Translator:
         calls = [part.function_call for part in parts if part.function_call is not None]
         self._unanswered = [(call.id or "", call.name or "") for call in calls]
         if calls:
+            if self._final_text.strip():
+                self._narration.append(self._final_text)
             self._final_text = ""
             # A skill read shows no step, so the line it ran under keeps
             # running and notes the read until its answer comes.
@@ -2953,7 +3180,9 @@ class _Translator:
             },
         )
 
-    async def finish(self) -> list[Any]:
+    async def finish(
+        self, *, new_question: str | None = None, asked_for_question: bool = False
+    ) -> list[Any]:
         """Frames that close a segment that ran to the end of its events. A
         segment that did not pause closes the turn on the agent's answer,
         followed by one sentence for each loose match the turn used
@@ -2963,8 +3192,30 @@ class _Translator:
         `message.complete` text and the stored turn keeps them. The turn
         record keeps the notes and the line apart from the answer
         (`ConversationState.close_turn`), so a later turn's model reads the
-        answer alone, with no text of the code's own to restate."""
-        frames: list[Any] = [*await self._drain_recorder(), *self._close_status()]
+        answer alone, with no text of the code's own to restate.
+
+        A turn whose agent closed with no text, or with whitespace, after the turn
+        drew cards is answered by its cards. Its reply is the text the agent
+        streamed beside its calls, each response's own paragraph, followed by the
+        same notes, line and chips; a turn with none of these sends no
+        `message.complete`. Its record keeps the cards as the answer a later turn's
+        model reads (`ConversationState.cards_answer`) and the narration as the reply a
+        reload shows.
+
+        `new_question` is the user's words a turn ended on when the planner
+        read them, typed on the plan card, as a different question
+        (`harness.graph.state.NEW_QUESTION_KEY`). The turn's record says it
+        ended so (`studio_state.NEW_QUESTION`), and `done` carries the words
+        for the client to send as the next turn. `asked_for_question` marks a
+        turn the planner ended on a new question no message of the user's
+        states (`harness.graph.state.ASK_FOR_QUESTION_KEY`): the reply is
+        `studio_state.ASK_FOR_QUESTION_REPLY`, the record says it ended so
+        (`studio_state.ASKED_FOR_QUESTION`), and `done` carries no words."""
+        frames: list[Any] = [
+            *self._take_restored(),
+            *await self._drain_recorder(),
+            *self._close_status(),
+        ]
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
             self._step(
@@ -2976,10 +3227,36 @@ class _Translator:
         self._held.clear()
         if self.paused:
             return frames
-        answer, notes, basis = self._final_text, None, None
-        if self._final_text:
+        set_aside = bool(new_question) or asked_for_question
+        if new_question:
+            # The planner ended the turn before the agent answered: the reply
+            # says the plan was set aside, for a client that does not read
+            # `done.new_question`.
+            self._final_text = SET_ASIDE_REPLY
+        elif asked_for_question:
+            # The planner ended the turn on a new question no message states:
+            # the reply asks the user to send it.
+            self._final_text = ASK_FOR_QUESTION_REPLY
+        if not self._final_text.strip():
+            self._final_text = ""
+        # A turn whose cards answer it, the agent closing with no text, shows the
+        # user what it streamed beside its calls, and closes with the same notes,
+        # line and chips as one with text. Its record keeps the cards as its answer
+        # (`cards_answer`), for a later turn's model, and the narration as what a
+        # reload shows (`shown_answer`).
+        shown_cards = bool(self._conversation.turn_cards_shown()) and not set_aside
+        answer, shown = self._final_text, None
+        if not self._final_text and shown_cards:
+            shown = self._final_text = "\n\n".join(self._narration)
+            answer = self._conversation.cards_answer()
+        notes, basis = None, None
+        # A set-aside turn's reply is the code's own, with no figures to note.
+        answered = (bool(self._final_text) or shown_cards) and not set_aside
+        if answered or self._final_text:
             notes = (
-                " ".join(
+                None
+                if not answered
+                else " ".join(
                     loose_match_notes(
                         self._conversation.turn_readings,
                         specs=self._conversation.turn_specs,
@@ -2988,12 +3265,21 @@ class _Translator:
                 )
                 or None
             )
-            basis = basis_line(
-                self._conversation.turn_readings,
-                specs=self._conversation.turn_specs,
-                plans=self._conversation.turn_plans,
+            basis = (
+                basis_line(
+                    self._conversation.turn_readings,
+                    specs=self._conversation.turn_specs,
+                    plans=self._conversation.turn_plans,
+                )
+                if answered
+                else None
             )
-            closing = "".join(f"\n\n{block}" for block in (notes, basis) if block)
+            blocks = [block for block in (notes, basis) if block]
+            closing = (
+                "".join(f"\n\n{block}" for block in blocks)
+                if self._final_text
+                else "\n\n".join(blocks)
+            )
             if closing:
                 self._final_text += closing
                 frames.append(
@@ -3001,6 +3287,7 @@ class _Translator:
                         event="message.delta", seq=self._conversation.next_seq(), text=closing
                     )
                 )
+        if self._final_text:
             self._conversation.turn_final_text = self._final_text
             frames.append(
                 MessageComplete(
@@ -3019,11 +3306,18 @@ class _Translator:
                     self._conversation.turn_readings, specs=self._conversation.turn_specs
                 )
             ]
-            if self._final_text
+            if answered
             else []
         )
         self._record_chips(chips)
-        self._conversation.close_turn(final_text=answer, match_notes=notes, basis_line=basis)
+        self._conversation.close_turn(
+            final_text=answer,
+            match_notes=notes,
+            basis_line=basis,
+            new_question=new_question,
+            asked_for_question=asked_for_question,
+            shown_answer=shown,
+        )
         frames.append(
             Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=chips)
         )
@@ -3033,6 +3327,7 @@ class _Translator:
                 seq=self._conversation.next_seq(),
                 trace_id=self._conversation.trace_id,
                 composition=self._conversation.composition,
+                new_question=new_question or None,
             )
         )
         return frames

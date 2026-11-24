@@ -16,13 +16,14 @@ import importlib.util
 import json
 import sys
 from collections import Counter
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import pytest
+from common.live_apis import StatedScopeEntry, StatedScopeReading
 from google.genai import types
 from harness.planner_run import failed_tool_answer
 from harness.reply_figures import card_result
@@ -30,6 +31,7 @@ from harness.studio_state import ConversationState
 from harness.studio_translate import _RecordingExecutor, _Translator
 from orchestrator.run import ModelResponded, ToolsAnswered
 from planner.skills import GET_SKILL
+from planner.stated_scope import TextReading
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .scripted_tools import (
@@ -65,7 +67,59 @@ def _suite() -> dict[str, Any]:
     return json.loads(CASES_PATH.read_text())
 
 
-async def test_scripted_cases_report_as_marked(pg_engine: AsyncEngine) -> None:
+class _CannedStatedScope:
+    """Search's reader of stated scope answering each text as dfo-apis' route did
+    (`fixtures/stated_scope_readings.json`), recording each call's texts in `calls`. A
+    text with no recorded answer fails the test: the eval reads no live route."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        recorded = json.loads((FIXTURES / "stated_scope_readings.json").read_text())
+        self._readings = recorded["readings"]
+
+    async def __call__(self, texts: Sequence[str]) -> list[TextReading]:
+        self.calls.append(list(texts))
+        missing = [text for text in texts if text not in self._readings]
+        assert not missing, f"no recorded stated-scope reading for {missing}"
+        return [TextReading.of(_reading(self._readings[text])) for text in texts]
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _reading(answer: dict[str, Any]) -> StatedScopeReading:
+    """The client's reading of one recorded route answer."""
+    return StatedScopeReading(
+        entries=tuple(
+            StatedScopeEntry(
+                axis=entry["axis"], option_id=entry["option_id"], words=entry["origin"]["text"]
+            )
+            for entry in answer["entries"]
+        ),
+        total=answer["total"],
+        sums_providers=answer["sums_providers"],
+        mentions=tuple(answer["mentions"]),
+    )
+
+
+@pytest.fixture(autouse=True)
+def stated_scope(monkeypatch: pytest.MonkeyPatch) -> _CannedStatedScope:
+    """The reader every studio the eval builds reads the stated scope through, in place
+    of the live route production's planner reads (`build_stated_scope_reader`).
+
+    Patched on the module `run.py` imports, the one `sys.modules` holds: `_load`
+    executes a fresh copy on every call and registers only the first."""
+    canned = _CannedStatedScope()
+    _load("orchestrator_scripted")
+    monkeypatch.setattr(
+        sys.modules["orchestrator_scripted"], "build_stated_scope_reader", lambda settings: canned
+    )
+    return canned
+
+
+async def test_scripted_cases_report_as_marked(
+    pg_engine: AsyncEngine, stated_scope: _CannedStatedScope
+) -> None:
     _load("orchestrator_scripted")
     run = _load("run")
 
@@ -80,6 +134,10 @@ async def test_scripted_cases_report_as_marked(pg_engine: AsyncEngine) -> None:
         if r["status"] not in ("PASS", "XFAIL")
     }
     assert passed and failures == {}
+    # The planner's entry read the user's words for its brief, as Studio's planner
+    # does, and no requirement's `measure` was read.
+    assert ["How fast did life expectancy grow in Kenya since 2000?"] in stated_scope.calls
+    assert ["life expectancy at birth"] not in stated_scope.calls
 
 
 class _SkillReadFailedError(RuntimeError):
@@ -1034,6 +1092,13 @@ async def test_a_question_with_no_options_and_no_answer_text_is_a_miss(
             ["t: elicitation question 1 allow_free_text=False, expected True"],
         ),
         ({"skippable": True}, ["t: elicitation skippable=False, expected True"]),
+        (
+            {"input": "unit"},
+            [
+                "t: elicitation question 1 input=single_select, expected unit",
+                "t: elicitation question 2 input=single_select, expected unit",
+            ],
+        ),
     ],
 )
 def test_an_elicitation_expectation_reads_every_question(
@@ -1046,13 +1111,64 @@ def test_an_elicitation_expectation_reads_every_question(
         "interrupt_id": "int_1",
         "skippable": False,
         "questions": [
-            {"id": "q1", "question": "a", "options": [option] * 3, "allow_free_text": False},
-            {"id": "q2", "question": "b", "options": [option] * 2, "allow_free_text": True},
+            {
+                "id": "q1",
+                "question": "a",
+                "input": "single_select",
+                "options": [option] * 3,
+                "allow_free_text": False,
+            },
+            {
+                "id": "q2",
+                "question": "b",
+                "input": "single_select",
+                "options": [option] * 2,
+                "allow_free_text": True,
+            },
         ],
     }
     turn = {"message": "q", "expect": {"elicitation": rules}}
 
     assert run._check_turn_expectations(turn, [pause], label="t") == violations
+
+
+_UNIT_OFFER = {
+    "currencies": [
+        {
+            "code": "USD",
+            "name": "US dollars",
+            "prices": ["current", "constant"],
+            "base_year_min": 2000,
+            "base_year_max": 2023,
+        }
+    ],
+    "presets": ["USD"],
+    "start": {"currency": "USD", "prices": "current"},
+}
+
+
+@pytest.mark.parametrize(
+    ("scripted", "sent"),
+    [
+        ([], {"kind": "unit", "currency": "USD", "prices": "current"}),
+        (
+            [{"unit": {"prices": "constant"}}],
+            {"kind": "unit", "currency": "USD", "prices": "constant", "base_year": 2023},
+        ),
+    ],
+    ids=["start", "changed"],
+)
+def test_a_unit_question_is_answered_with_its_start_changed_by_the_script(
+    scripted: list[dict[str, Any]], sent: dict[str, Any]
+) -> None:
+    run = _load("run")
+    pause = {
+        "questions": [
+            {"id": "q1", "question": "In which prices?", "input": "unit", "unit": _UNIT_OFFER}
+        ]
+    }
+
+    assert run._elicitation_reply(pause, scripted) == ({"q1": sent}, None)
 
 
 def test_a_figure_in_a_later_question_grounds_the_answer() -> None:

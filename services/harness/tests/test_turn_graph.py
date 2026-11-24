@@ -163,7 +163,9 @@ async def test_an_ask_pauses_and_another_instance_hands_the_answer_back_to_the_w
                         {"label": "Republic of the Congo", "spec_id": None},
                         {"label": "DR Congo", "spec_id": None},
                     ],
-                    "prices_of": None,
+                    "unit_of": None,
+                    "prices": None,
+                    "multi_select": False,
                 }
             ],
         },
@@ -210,6 +212,7 @@ async def test_a_model_response_with_no_answer_fails_the_turn_at_orchestrate(
     else:
         assert isinstance(failed.error, EmptyResponseError)
         assert run.cursor.error["type"] == "EmptyResponseError"
+        assert run.cursor.error["transient"] is True
         assert len(models.orchestrator.requests) == 1
 
 

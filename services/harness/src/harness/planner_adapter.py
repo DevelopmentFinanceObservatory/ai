@@ -79,6 +79,7 @@ from planner.plan import (
     PlanStatus,
     RefusedSpec,
     SessionState,
+    Unit,
     UnsupportedOperation,
     clear_plan,
     clear_unsupported,
@@ -93,6 +94,7 @@ from planner.plan import (
     record_optional_decline,
     record_unsupported,
     save_amendment_entry,
+    save_answered_in_words,
     save_decision_pick,
     save_pin_sources,
     save_plan,
@@ -102,6 +104,8 @@ from planner.plan import (
     truncate,
     warning_codes,
     windowed_origins,
+    without_stated_coverage,
+    without_whole_sums,
 )
 from planner.pydantic_agent import (
     PlannerAnswers,
@@ -120,6 +124,7 @@ from planner.skills import (
 )
 from planner.source_reads import with_source_reads
 from planner.specs import PROPOSE_PLAN, planner_specs
+from planner.stated_scope import StatedScopeReader, read_stated_scope, stated_scope_record
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import (
@@ -129,6 +134,7 @@ from planner.tools import (
     load_pending_ask,
 )
 from planner.workflow import ElectedMeasure, SelectedSource
+from submission.prices_choice import PricesAnswers
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from submission.service import (
     Proposal,
@@ -136,6 +142,7 @@ from submission.service import (
     pinned_sources,
     refused_in_force,
     searched_pins,
+    stated_scope_line,
     submit,
 )
 from translator.discovery import CutCalls, current_cut_calls, resolving_once
@@ -237,6 +244,12 @@ _SKILLS_BEFORE_ENTRY_STATE_KEY = "planner:skills_before_entry"
 # The last translation's referral the planner's run saw before it ended on an
 # ask, as `propose_plan` answered it, or None.
 _ASKED_REFERRAL_STATE_KEY = "planner:asked_referral"
+# A session slot holding a question whether to keep a dataset counted as published,
+# which a turn may be paused on. No code writes it. A turn paused on it is answered
+# from it once (`_paused_keep`), and the slot is cleared.
+_PAUSED_KEEP_STATE_KEY = "planner:stated_scope_keep_question"
+# The option of that question that kept the datasets as published.
+_KEEP_PUBLISHED_OPTION = "keep as published"
 # The opening of the brief's section for those pages.
 _SKILLS_CONTEXT = """
 Skills you read on an earlier call for this plan, as data-mcp answered. A \
@@ -303,20 +316,36 @@ class _RevisionSession(CallSession):
     The user has spoken since the plan it amends was recorded: their switch
     is the revision. A dataset that replaces one the user picked answering
     an ask (`inherits`, the new spec_id to the one it replaces) counts as
-    picked too, so the measure decision a pin of it states stays theirs.
+    picked too, so the measure decision a pin of it states stays theirs, and
+    so does one the switch itself picked (`picked`), another count chosen on
+    the card. A switch of a unit row states the unit it picked by the row's
+    slot (`units`, `switched_units`).
     """
 
     inherits: Mapping[str, str] = field(default_factory=dict)
+    picked: frozenset[str] = frozenset()
+    units: Mapping[str, Unit] = field(default_factory=dict)
+
+    def switched_units(self) -> Mapping[str, Unit]:
+        """The unit each unit row the switch moved is in now, by the row's slot."""
+        return self.units
 
     def user_spoke_since(self, version: int) -> bool:
         """Always: the revision answers the user's own switch."""
         del version
         return True
 
+    def prices_answers(self) -> PricesAnswers:
+        """The prices the user chose, with no part answered and nothing said
+        since the plan the revision amends: the revision reads that plan and
+        its own switch (`units`), so every unit row holds as the plan states it."""
+        return PricesAnswers(super().prices_answers().chosen)
+
     def elected_spec_ids(self) -> frozenset[str]:
-        """The spec_ids the user picked, and each that replaces one of them."""
+        """The spec_ids the user picked, each that replaces one of them, and
+        each the switch picked."""
         elected = super().elected_spec_ids()
-        return elected | {new for new, old in self.inherits.items() if old in elected}
+        return elected | {new for new, old in self.inherits.items() if old in elected} | self.picked
 
 
 class PlannerAdapter:
@@ -334,6 +363,7 @@ class PlannerAdapter:
         specs: Sequence[ToolSpec] | None = None,
         client: Client | None = None,
         on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
+        stated_scope: StatedScopeReader | None = None,
     ) -> None:
         # `translate` replaces the translation `propose_plan` runs, and `specs`
         # the tools (`planner.specs.planner_specs` over the surface and that
@@ -347,7 +377,12 @@ class PlannerAdapter:
         #
         # `on_tool_answered` observes each planner tool's name and the answer
         # the model reads for the call (`PlannerRun.tool_answered`).
+        #
+        # `stated_scope` is Search's reader of the provider scope the user's
+        # words state, which `propose_plan` and `revise` read before admission
+        # (`planner.stated_scope.read_stated_scope`); `None` reads none.
         self._client = client
+        self._stated_scope = stated_scope
         self._on_tool_answered = on_tool_answered
         model_name = (
             agent_settings if agent_settings is not None else AgentSettings()
@@ -373,14 +408,15 @@ class PlannerAdapter:
         # below as `BUDGET_EXHAUSTED` is. The orchestrator reads the user's
         # words and marks its asks (across years). The planner reads them only
         # in an entry the user's amendment opens, which `save_amendment_entry`
-        # records below, and only there may `propose_plan`'s `across_years`
-        # name a step.
+        # records below, and only there does `propose_plan` read its
+        # `across_years`.
         self._specs = tuple(
             specs
             if specs is not None
             else planner_specs(
                 translate=self._translate,
                 surface=self._surface,
+                stated_scope=stated_scope,
             )
         )
         # Built once and shared by every run, each of which names its own
@@ -428,7 +464,14 @@ class PlannerAdapter:
         # user once: every entry starts with none waiting.
         asked = load_pending_ask(state)
         answered = (
-            _Answered(asked, answer, ctx.state.get(_ASKED_REFERRAL_STATE_KEY))
+            _Answered(
+                asked,
+                answer,
+                ctx.state.get(_ASKED_REFERRAL_STATE_KEY),
+                # A turn paused on the keep question (`_PAUSED_KEEP_STATE_KEY`) resumes
+                # on the user's answer to it.
+                keep=_paused_keep(state, call_id=asked.call_id, answer=answer),
+            )
             if asked is not None and answer is not None
             else None
         )
@@ -499,6 +542,10 @@ class PlannerAdapter:
                 record_optional_decline(
                     state, UnsupportedOperation.NO_OPERATION_COVERS, terminal=True
                 )
+        # Whether this run reads the user's own-words answer, which a
+        # `starts_new_plan` call may name as the message asking a new
+        # question (`submission.service._restart_blocked`).
+        save_answered_in_words(state, answered is not None and _typed_reply(answer) is not None)
         ctx.state[_SKILLS_BEFORE_ENTRY_STATE_KEY] = len(skills_read(state))
         # A `resolve_definition` the request's wall-clock bound cuts keeps running here
         # for a later proposal in the same entry to be served, and is
@@ -555,8 +602,10 @@ class PlannerAdapter:
                 )
                 sources = {k: v for k, v in sources.items() if k not in excluded}
                 save_pin_sources(state, sources)
+                stated_line = await self._stated_scope_line(state, sources)
                 message = self._message(
                     question=question,
+                    stated_line=stated_line,
                     prior_plan=_as_authored(changing),
                     refusal=refusal,
                     refused=excluded,
@@ -627,6 +676,8 @@ class PlannerAdapter:
         prior_plan: dict[str, Any],
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],
+        picked: Collection[str] = (),
+        units: Mapping[str, Unit] | None = None,
     ) -> dict[str, Any]:
         """Amend `prior_plan` with `evidence_requirements` and translate it, calling no model.
 
@@ -640,7 +691,9 @@ class PlannerAdapter:
         decisions that pin states and drops those of the one it left, which
         go with it. The proposal opens its own round count, as a planner
         entry does. `inherits` maps each new spec_id to the one it
-        replaces (`_RevisionSession`).
+        replaces, `picked` holds those the user picked by the switch, and
+        `units` the unit a switch of a unit row picked, by the row's slot
+        (`_RevisionSession`).
 
         Returns `{"plan", "summary"}` once the revised plan awaits approval,
         or `{"refused": ...}` as `__call__` refuses, with `reason` beside
@@ -663,6 +716,8 @@ class PlannerAdapter:
                 prior_plan=prior_plan,
                 evidence_requirements=evidence_requirements,
                 inherits=inherits,
+                picked=frozenset(picked),
+                units=dict(units or {}),
             )
 
     async def _revised(
@@ -672,6 +727,8 @@ class PlannerAdapter:
         prior_plan: dict[str, Any],
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],
+        picked: frozenset[str],
+        units: Mapping[str, Unit],
     ) -> dict[str, Any]:
         """`revise`'s answer, inside the turn's answers."""
         state = cast(SessionState, ctx.state)
@@ -679,10 +736,14 @@ class PlannerAdapter:
         save_plan(state, prior)
         save_plan_rounds(state, 0)
         call = SessionCall(ctx.transcript.records, state, None)
-        view = _RevisionSession(call=call, inherits=dict(inherits))
+        view = _RevisionSession(call=call, inherits=dict(inherits), picked=picked, units=units)
         proposal = Proposal(
             evidence_requirements=list(evidence_requirements), amends_version=prior.version
         )
+        if self._stated_scope is not None:
+            unread = await read_stated_scope(state, self._stated_scope)
+            if unread is not None:
+                return self._revision_refused(unread, words=plan_display.plan_words(prior))
         recorded = await with_source_reads(
             lambda: submit(
                 view,
@@ -875,6 +936,9 @@ class PlannerAdapter:
             StopCode.DISCOVERY_UNAVAILABLE,
             StopCode.PLANNER_TOOL_FAILED,
             ProblemCode.NOTHING_TO_PLAN,
+            ProblemCode.STATED_SCOPE_UNREADABLE,
+            ProblemCode.STATED_SCOPE_UNAVAILABLE,
+            ProblemCode.STATED_COMPILE_UNREACHABLE,
         }
     )
 
@@ -883,12 +947,17 @@ class PlannerAdapter:
         """What `__call__` answers for a refusal that ends the entry: its plain
         sentence (`harness.sentences.refusal_sentence`), which the planner and
         the orchestrator read, whether another plan for the same ask could
-        succeed, and its code."""
+        succeed, and its code. A `QUESTION_FIXED` refusal also carries,
+        under `new_question_in`, which of the user's messages the call named
+        as asking the new question, when it named one."""
+        detail = refused.get("detail")
+        source = detail.get("new_question_in") if isinstance(detail, Mapping) else None
         return {
             "refused": {
                 "text": refusal_sentence(refused),
                 "final": refused.get("code") in PlannerAdapter._FINAL_CODES,
                 "code": refused.get("code"),
+                **({"new_question_in": source} if isinstance(source, str) else {}),
             }
         }
 
@@ -917,6 +986,25 @@ class PlannerAdapter:
 
     # -- messages -----------------------------------------------------------
 
+    async def _stated_scope_line(self, state: SessionState, shown: Mapping[str, PinSource]) -> str:
+        """The brief's line on the provider option the turn's words state
+        (`submission.service.stated_scope_line`), read at entry through the
+        stated-scope reader, each text once a turn (`read_stated_scope`). A read
+        Search does not answer, and any fault reading or rendering it, renders
+        nothing. `propose_plan` reads again, and the plan card names a figure the
+        plan counts otherwise."""
+        if self._stated_scope is None:
+            return ""
+        try:
+            if await read_stated_scope(state, self._stated_scope) is not None:
+                return ""
+            return stated_scope_line(stated_scope_record(state), shown)
+        except Exception:
+            # The line is a hint. `propose_plan` reads the words again, so a fault
+            # here costs only the line.
+            logger.exception("stated scope line not rendered")
+            return ""
+
     def _message(
         self,
         *,
@@ -927,6 +1015,7 @@ class PlannerAdapter:
         canvas_digest: dict[str, Any] | None,
         conversation_digest: dict[str, Any] | None,
         ledger: RenderedReadings = _NO_READINGS,
+        stated_line: str = "",
         skills: Sequence[Mapping[str, Any]] = (),
         refused: Sequence[str] = (),
         pick: DecisionPick | None = None,
@@ -942,8 +1031,9 @@ class PlannerAdapter:
         the call asks for (`_ask_text`).
 
         `ledger` is the rendered search readings (`_readings_ledger`), the
-        brief's opening section. `skills` holds the skill pages read on
-        earlier calls (`planner.skills.SKILLS_READ_STATE_KEY`), which follow
+        brief's opening section, closed by `stated_line`, the line on the provider
+        scope the turn's words state (`_stated_scope_line`). `skills` holds the
+        skill pages read on earlier calls (`planner.skills.SKILLS_READ_STATE_KEY`), which follow
         it verbatim (`_skills_section`). A compiled source of the plan being
         changed states no measure choice the ledger already names
         (`_plan_context`). `asks`, the outputs the orchestrator's brief lists
@@ -966,6 +1056,7 @@ class PlannerAdapter:
         return "".join(
             [
                 _READINGS_CONTEXT.format(readings=ledger.text),
+                stated_line,
                 _skills_section(skills),
                 _section("What is already on the user's canvas", canvas_digest),
                 _section("Earlier turns in this conversation", conversation_digest),
@@ -1112,12 +1203,53 @@ _ASKED_REFERRAL_INTRO = (
 
 
 class _Answered(NamedTuple):
-    """The ask the planner's last run ended on, the user's answer to it, and
-    the referral that run saw last, as `propose_plan` answered it, if any."""
+    """The ask the planner's last run ended on, the user's answer to it, the
+    referral that run saw last, as `propose_plan` answered it, if any, and, where
+    `propose_plan` raised the ask itself, the keep question's answer."""
 
     ask: AcceptedAsk
     answer: object
     referral: Mapping[str, Any] | None
+    keep: _KeepAnswer | None = None
+
+
+class _KeepAnswer(NamedTuple):
+    """The user's answer to the keep question a turn paused on
+    (`_paused_keep`): the pins it asked about, whether they were kept as published, and
+    the arguments of the `propose_plan` call it paused."""
+
+    pins: tuple[str, ...]
+    kept: bool
+    proposal: Mapping[str, Any] | None
+
+
+def _paused_keep(state: SessionState, *, call_id: str, answer: object) -> _KeepAnswer | None:
+    """The user's `answer` to the keep question the pause of `propose_plan` call
+    `call_id` asked (`_PAUSED_KEEP_STATE_KEY`), or `None` where that call asked none.
+    The slot is cleared either way. A pick of `_KEEP_PUBLISHED_OPTION` keeps the pins;
+    any other answer, a skip or a dismissal included, does not."""
+    held = state.get(_PAUSED_KEEP_STATE_KEY)
+    if held is None:
+        return None
+    state[_PAUSED_KEEP_STATE_KEY] = None
+    if not isinstance(held, Mapping) or held.get("asked_call_id") != call_id:
+        return None
+    reply = (resume_answers(answer) or {}).get("q1") or {}
+    proposal = held.get("proposal")
+    return _KeepAnswer(
+        pins=tuple(dict.fromkeys(str(pair[0]) for pair in held.get("asked") or ())),
+        kept=reply.get("kind") == "option" and reply.get("spec_id") == _KEEP_PUBLISHED_OPTION,
+        proposal=proposal if isinstance(proposal, Mapping) else None,
+    )
+
+
+def _typed_reply(answer: object) -> str | None:
+    """The text the user typed in `answer`, the resume value of the
+    planner's ask (`resume_answers`), whose one question is `q1`, or `None`
+    when they typed none: a pick of an option, or a skip."""
+    reply = (resume_answers(answer) or {}).get("q1") or {}
+    text = reply.get("text") if reply.get("kind") == "text" else None
+    return text if isinstance(text, str) and text.strip() else None
 
 
 def _answer_text(answered: _Answered) -> str:
@@ -1140,11 +1272,15 @@ def _answer_text(answered: _Answered) -> str:
     }
     reply = (resume_answers(answered.answer) or {}).get("q1") or {}
     picked = str(reply.get("spec_id")) if reply.get("kind") == "option" else None
-    text = reply.get("text") if reply.get("kind") == "text" else None
+    text = _typed_reply(answered.answer)
     if picked is not None:
         said = f"They picked {offered.get(picked, picked)!r}, id `{picked}`."
-    elif isinstance(text, str) and text.strip():
+    elif text is not None:
         said = f"They answered in their own words: {cut_user_text(text, MAX_QUESTION_CHARS)}"
+    elif answered.keep is not None:
+        # Leaving the keep question unanswered settles it: the dataset is not kept,
+        # which `_keep_text` says.
+        said = "They left the question unanswered."
     else:
         said = "They left the question unanswered, so nothing it asked is settled by them."
     question = cut_user_text(str(args.get("message", "")), MAX_QUESTION_CHARS)
@@ -1153,9 +1289,53 @@ def _answer_text(answered: _Answered) -> str:
         if answered.referral is not None
         else ""
     )
+    asker = (
+        f"`{PROPOSE_PLAN}` put to them"
+        if answered.keep is not None
+        else f"you asked through `{PLANNER_ASK}`"
+    )
+    settled = _keep_text(answered.keep) if answered.keep is not None else ""
+    chose = (
+        "What they chose is the user's decision. "
+        if picked is not None or text is not None or answered.keep is None
+        else ""
+    )
     return (
-        f"{referral}\nThe user answered the question you asked through `{PLANNER_ASK}`: "
-        f"{question}\n{said}\nWhat they chose is the user's decision. Carry on from it.\n"
+        f"{referral}\nThe user answered the question {asker}: "
+        f"{question}\n{said}\n{settled}{chose}Carry on from it.\n"
+    )
+
+
+def _keep_text(keep: _KeepAnswer) -> str:
+    """What the user's answer to the keep question settles, for the brief of the
+    entry it resumes: a kept pin is admitted as published, so the paused proposal is
+    the plan to propose again; a pin not kept, after a skip or a dismissal too,
+    cannot be proposed again for the figures it counts, so each is pinned again or
+    declined. The resumed run saw none of the asking run's calls, so the paused
+    proposal's requirements and decisions render as `propose_plan` was given them."""
+    pins = ", ".join(keep.pins)
+    held = {
+        key: keep.proposal[key]
+        for key in ("evidence_requirements", "decisions")
+        if keep.proposal is not None and keep.proposal.get(key)
+    }
+    proposal = json.dumps(held, ensure_ascii=False) if held else None
+    if keep.kept:
+        paused = (
+            f" Propose them again as the question paused the proposal: {proposal}"
+            if proposal
+            else ""
+        )
+        return (
+            f"They kept {pins} counted as published, so propose it declaring no other "
+            f"option for the figures it counts.{paused}\n"
+        )
+    paused = f" The paused proposal held these, to change as above: {proposal}" if proposal else ""
+    return (
+        f"They did not keep {pins} counted as published, so do not propose it again for the "
+        "figures it counts: pin each such figure on a dataset counted the way they asked, "
+        "declaring that option in `scope_options`, or remove it and record the part of the question asking for it in `declined` with "
+        f"code {UnsupportedOperation.UNSUPPORTED_ASK.value!r}.{paused}\n"
     )
 
 
@@ -1582,13 +1762,27 @@ def _as_authored(plan: Plan | None) -> dict[str, Any] | None:
     """`plan` as the model wrote it, for `_plan_context` to render.
 
     A stored plan holds the copies the split of whole-history reads added
-    (`Plan.rolling_copies`), which the model did not write and cannot
+    (`Plan.rolling_copies`) and the sums `propose_plan` added over a whole's
+    open side (`Plan.whole_sums`), which the model did not write and cannot
     patch by name. The render shows the plan without them
-    (`plan_display.shown_plan`), and the stored plan is saved as it is.
+    (`plan_display.shown_plan`, `planner.plan.without_whole_sums`), each
+    reader of a sum reading its whole, and the stored plan is saved as it is.
+    A whole stored with the `entities` and `across` its part settles shows
+    without them (`without_stated_coverage`), since a proposal stating them is
+    refused.
     """
     if plan is None:
         return None
-    return plan_display.shown_plan(plan).model_dump(mode="json")
+    shown = plan_display.shown_plan(plan)
+    return shown.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                without_stated_coverage(requirement)
+                for requirement in without_whole_sums(shown.evidence_requirements, shown.whole_sums)
+            ),
+            "whole_sums": (),
+        }
+    ).model_dump(mode="json")
 
 
 def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] = ()) -> str:
@@ -1700,6 +1894,9 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
         # digest leaves them out.
         "rolling_copies",
         "first_years",
+        # Code writes it from the user's words (`Plan.scope_words`), so the digest
+        # leaves it out.
+        "scope_words",
         # The asks section marks each ask the user removed (`_asks_section`).
         "dropped_asks",
     }

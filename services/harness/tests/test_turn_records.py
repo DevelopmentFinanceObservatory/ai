@@ -31,14 +31,17 @@ from harness.turn_records import (
     PlanRecord,
     ScopeChip,
     SearchReading,
+    SiblingReading,
     WindowReading,
     basis_line,
     chip_kept,
     loose_match_notes,
     open_prices,
     part_name,
+    prices_form,
     render_readings,
     scope_chips,
+    stored_count,
 )
 from planner.plan import (
     CUT_MARKER,
@@ -925,7 +928,32 @@ def test_a_plan_steps_served_record_leaves_the_planners_ledger_text_as_it_was() 
     )
 
 
-def test_the_basis_line_speaks_only_for_parts_with_scope_choices_the_turn_used() -> None:
+@pytest.mark.parametrize(
+    "offers",
+    [
+        pytest.param({}, id="no-offers"),
+        pytest.param(
+            {"alternatives": [{"spec_id": "spec_net", "label": "net disbursements"}]},
+            id="other-counts",
+        ),
+        pytest.param(
+            {"other_prices": [{"spec_id": "spec_constant", "label": "constant prices"}]},
+            id="other-prices-only",
+        ),
+    ],
+)
+def test_the_basis_line_states_the_count_search_elected_once(offers: dict[str, Any]) -> None:
+    """A part whose count search elected states it, whatever else it offers,
+    and a part whose scope holds a count basis states that clause alone."""
+    elected = {"counted_as": "gross disbursements", **offers}
+    unscoped = _fetched({**_example_part(), "scope": None, **elected})
+    scoped = _fetched({**_example_part(), **elected})
+
+    assert basis_line([unscoped], specs={}, plans=[]) == "Counted as: gross disbursements."
+    assert basis_line([scoped], specs={}, plans=[]) == _EXAMPLE_LINE
+
+
+def test_the_basis_line_is_none_for_parts_unused_refused_or_without_a_basis() -> None:
     searched = SearchReading.from_part(_example_part()).model_dump(mode="json")
     refused = SearchReading.from_part(_example_part()).with_fetch({"code": "over_ceiling"})
     unscoped = _fetched({**_example_part(), "scope": None})
@@ -1078,6 +1106,73 @@ def test_the_turn_after_a_chip_reverses_it_only_by_moving_its_choice_back(
     }
 
     assert chip_kept(applied, [SearchReading.from_part(part).model_dump(mode="json")]) is kept
+    assert chip_kept(applied, []) is True
+
+
+_NET = {"spec_id": "spec_net", "label": "net disbursements"}
+
+
+def _counted_part() -> dict[str, Any]:
+    """`_scoped_part` counted as gross disbursements, offering net disbursements as another count."""
+    return {**_scoped_part(), "counted_as": "gross disbursements", "alternatives": [_NET]}
+
+
+def _net_reading(offering: dict[str, Any]) -> dict[str, Any]:
+    """The reading a fetch of `_NET` gains, read as the other count `offering` offers."""
+    reading = SearchReading.from_part(
+        {"variable": "health aid", "status": "chosen", "spec_id": _NET["spec_id"]}
+    ).model_copy(
+        update={
+            "sibling_of": SiblingReading(
+                spec_id=offering["spec_id"], axis="what", label=_NET["label"]
+            ),
+            "counted_as": _NET["label"],
+        }
+    )
+    return reading.with_fetch({"summary": "30 observations"}).model_dump(mode="json")
+
+
+def test_a_part_offering_another_count_offers_its_count_chip_first() -> None:
+    """The count chip runs before every scope chip, and the cut to four keeps
+    it. Once the part reads the other count, its offering reading offers no
+    count chip and the choice is on the other count."""
+    gross = _fetched(_counted_part())
+    choice_id = f"{gross['spec_id']}:count"
+
+    chips = scope_chips([gross], specs={})
+    switched = [gross, _net_reading(gross)]
+
+    assert chips[0] == ScopeChip(
+        label="net disbursements",
+        choice_id=choice_id,
+        option_id="spec_net",
+        spec_id=gross["spec_id"],
+    )
+    assert len(chips) == 4
+    assert [chip.choice_id for chip in scope_chips(switched, specs={})].count(choice_id) == 0
+    assert stored_count(switched, choice_id) == (
+        SearchReading.model_validate(gross),
+        "spec_net",
+    )
+    assert stored_count(switched, f"{gross['spec_id']}:sector") is None
+
+
+@pytest.mark.parametrize(("net", "kept"), [(True, True), (False, False)], ids=["kept", "back"])
+def test_the_turn_after_a_count_chip_reverses_it_only_by_reading_the_count_it_left(
+    net: bool, kept: bool
+) -> None:
+    """A count chip moved health aid from gross to net disbursements. The next
+    turn reverses it when its newest reading of the choice reads gross again,
+    and keeps it when it reads net or names no reading of the choice."""
+    gross = _fetched(_counted_part())
+    applied = {
+        "choice_id": f"{gross['spec_id']}:count",
+        "option_id": "spec_net",
+        "from_option_id": gross["spec_id"],
+    }
+    readings = [gross, _net_reading(gross)] if net else [gross]
+
+    assert chip_kept(applied, readings) is kept
     assert chip_kept(applied, []) is True
 
 
@@ -1493,6 +1588,47 @@ def test_a_partial_option_and_a_dropped_entry_say_why(
         "Africa incl. regional buckets · gross disbursements, current USD (imputed "
         f"multilateral aid covers only some years: 2011-2024) · {why}: Africa's countries only."
     )
+
+
+@pytest.mark.parametrize("from_this_turn", [True, False], ids=["turn-own-search", "user-choice"])
+def test_a_carried_entry_that_changed_nothing_adds_no_clause_unless_the_user_made_it(
+    from_this_turn: bool,
+) -> None:
+    # A second search of a turn carries the first search's choices in. Search drops a
+    # carried entry for an axis the part has no choice on (`axis_absent`) and one whose
+    # option the part already holds (`entry_on_axis`); neither changed the figures, so
+    # the line says nothing of them when the turn's own search carried them. An entry
+    # carried from an earlier turn's choice is the user's, and its clause stays.
+    part = _example_part()
+    own = f"{part['scope']['id']}:region"
+
+    def carried(axis: str, option_id: str, cause: str) -> dict[str, Any]:
+        return {
+            "entry": {
+                "axis": axis,
+                "option_id": option_id,
+                "provenance": "carried",
+                "origin": {
+                    "kind": "choice",
+                    "choice_id": own if from_this_turn else "earlier_turn:region",
+                },
+            },
+            "code": "carried_choice_not_applied",
+            "cause": cause,
+        }
+
+    part["scope"]["dropped_entries"] = [
+        carried("provider", "provider:inclusive", "axis_absent"),
+        carried("region", "region:members_and_residuals", "entry_on_axis"),
+    ]
+
+    line = basis_line([_fetched(part)], specs={}, plans=[])
+
+    clause = REASON_COPY["carried_choice_not_applied"]
+    if from_this_turn:
+        assert line == _EXAMPLE_LINE
+    else:
+        assert clause in line
 
 
 def _filtered_top_donors(role: str, *, names: list[str] | None = None) -> dict[str, Any]:
@@ -1993,6 +2129,23 @@ def test_plan_record_names_the_requirements_the_model_wrote(decision: Any) -> No
 _USD = {"basis": "fallback", "ref": "CurrencyUSD", "label": "US Dollar", "currency": "USD"}
 _CONSTANT_OFFER = {"spec_id": "spec_c", "label": "constant prices"}
 _SEVERAL_YEARS = {"start": 2015, "end": 2023, "source": "requested"}
+_BOTH_BASES = [
+    {"prices": "current", "via": "served"},
+    {"prices": "constant", "via": "unit_request"},
+]
+_CONVERSION = {
+    "currencies": [
+        {
+            "code": "USD",
+            "noun": "US dollars",
+            "current_years": {"start_year": 2000, "end_year": 2023},
+            "constant_years": {"start_year": 2000, "end_year": 2023},
+            "base_year_min": 2000,
+            "base_year_max": 2023,
+        }
+    ],
+    "default_base_year": 2023,
+}
 
 
 @pytest.mark.parametrize(
@@ -2072,7 +2225,52 @@ def test_prices_are_open_over_several_years_of_current_money_the_user_left_unpri
     block = {
         "spec_id": "spec_a",
         "definition": {"identity": identity},
-        "resolved": {"facets": {"unit": unit}},
+        "resolved": {
+            "facets": {"unit": unit},
+            "price_bases": _BOTH_BASES,
+            "unit_conversion": _CONVERSION,
+        },
     }
 
     assert open_prices(block, window=window, other_prices=other_prices) == options
+
+
+def _open_block(**resolved: Any) -> dict[str, Any]:
+    """A part whose prices are open by every check but the price_bases gate."""
+    return {
+        "spec_id": "spec_a",
+        "definition": {"identity": {}},
+        "resolved": {"facets": {"unit": _USD}, **resolved},
+    }
+
+
+@pytest.mark.parametrize(
+    ("resolved", "other_prices", "form"),
+    [
+        ({"price_bases": _BOTH_BASES, "unit_conversion": _CONVERSION}, [], "unit"),
+        ({"price_bases": _BOTH_BASES}, [_CONSTANT_OFFER], "options"),
+        ({"price_bases": _BOTH_BASES}, [{"label": "constant prices"}], "closed"),
+        ({"price_bases": _BOTH_BASES}, [], "closed"),
+        ({"price_bases": [{"prices": "current", "via": "served"}]}, [_CONSTANT_OFFER], "closed"),
+        ({"price_bases": []}, [_CONSTANT_OFFER], "closed"),
+        ({"unit_conversion": _CONVERSION}, [_CONSTANT_OFFER], "closed"),
+    ],
+    ids=[
+        "convertible",
+        "alternative-route-with-spec-id",
+        "alternative-route-without-spec-id",
+        "no-route-to-constant-data",
+        "current-served-alone",
+        "not-money",
+        "price_bases-absent",
+    ],
+)
+def test_prices_form_is_closed_unless_the_harness_can_serve_both_bases(
+    resolved: dict[str, Any], other_prices: list[dict[str, str]], form: str
+) -> None:
+    block = _open_block(**resolved)
+
+    assert prices_form(block, window=_SEVERAL_YEARS, other_prices=other_prices) == form
+    assert bool(open_prices(block, window=_SEVERAL_YEARS, other_prices=other_prices)) == (
+        form != "closed"
+    )

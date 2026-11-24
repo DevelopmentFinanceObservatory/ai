@@ -32,6 +32,7 @@ from harness.settings import (
 )
 from harness.studio_stream import SHUTDOWN_WAIT_S
 from harness.studio_translate import _RecordingSurface
+from harness.wire import TURN_INDEX_HEADER
 from mcp import MCPError
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from presentation_mcp import server as presentation_server
@@ -902,7 +903,11 @@ async def test_a_slow_migration_is_not_cut_short(
         await asyncio.sleep(0.05)
         return []
 
+    async def no_adk_tables(engine: object) -> list[str]:
+        return []
+
     monkeypatch.setattr(server_module, "apply_pending", slow_apply_pending)
+    monkeypatch.setattr(server_module, "live_adk_tables", no_adk_tables)
 
     await server_module._apply_migrations_with_retries(cast(AsyncEngine, object()), budget_s=0.0)
 
@@ -926,12 +931,18 @@ async def _preflight(app: FastAPI, origin: str) -> httpx2.Response:
 async def test_cors_origins_setting_admits_listed_origins_only(pg_database_url: str) -> None:
     """The server answers browser preflights for the origins in
     STUDIO_CORS_ORIGINS and for no other; with the list empty (the deployed
-    posture) it sends no CORS headers at all."""
+    posture) it sends no CORS headers at all. A listed origin may read the
+    turn index header a stream names its turn in."""
     listed = "http://localhost:8091"
     app = create_app(settings=Settings(database_url=pg_database_url, studio_cors_origins=[listed]))
     allowed = await _preflight(app, listed)
     assert allowed.status_code == 200
     assert allowed.headers.get("access-control-allow-origin") == listed
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url="http://cors.test"
+    ) as client:
+        read = await client.get("/healthz", headers={"Origin": listed})
+    assert TURN_INDEX_HEADER in read.headers.get("access-control-expose-headers", "").split(",")
     refused = await _preflight(app, "http://evil.example")
     assert "access-control-allow-origin" not in refused.headers
 

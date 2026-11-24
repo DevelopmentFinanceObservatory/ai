@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import (
     Mapping,
     Sequence,
@@ -22,15 +23,31 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple
 
 from data_mcp.search_tool import MAX_PARTS
-from planner.plan import AskBreakdown, SessionState, scope_unread, stored_plan, with_blocks
+from planner.plan import (
+    AskBreakdown,
+    DatasetRequirement,
+    SessionState,
+    Unit,
+    earlier_block,
+    held_sources,
+    scope_unread,
+    stored_plan,
+    with_blocks,
+)
 from planner.plan import Plan as PlannerPlan
-from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
+from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, ValidationError
+from submission.prices_choice import UNIT_SLOT_PREFIX, measure_key, plan_unit
 
 from harness.tool_contracts import (
     reading_facts,
 )
+from harness.turn.events import APPROVE_UNIT_OFFERS_KEY
 from harness.turn.store import SPECS_KEY, FrameKey, FrameKeys
-from harness.turn_records import Origin, SearchReading, open_prices
+from harness.turn_records import Origin, PricesForm, SearchReading, open_prices, prices_form
+from harness.unit_offer import offered_unit_refusal, unit_offer
+from harness.wire import UnitChoice, UnitOffer
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from harness.turn.node import NodeCtx
@@ -67,6 +84,31 @@ ORCHESTRATOR_ALIGNED_SERVED_KEY = "orchestrator:aligned_served"
 # spec_id -> the warnings of the search part that returned it, as `search`
 # stores its block under `ORCHESTRATOR_SPECS_KEY`.
 ORCHESTRATOR_SPEC_WARNINGS_KEY = "orchestrator:spec_warnings"
+# The spec_ids whose unit the user settled this turn: each part a unit
+# question covered and the count picked beside it, whether Search served,
+# re-read or refused the chosen unit, and each spec_id it re-read them as.
+# Their prices are closed (`unit_settled`, `settle_unit`).
+ORCHESTRATOR_UNIT_SETTLED_KEY = "orchestrator:unit_settled"
+# The spec_ids the `ask` node re-read each part in, by the part a unit question
+# covered (`unit_reads`, `record_unit_read`), so the prices the user chose
+# reach the re-read series (`planner.call.prices_chosen`).
+ORCHESTRATOR_UNIT_READ_KEY = "orchestrator:unit_read"
+# Each part a unit question covered -> the series the agent fetches for it,
+# the unit that series is served in after the answer, the question's lead
+# part and the unit it chose, as `ServedUnit` JSON (`units_served`,
+# `record_unit_served`): the chosen unit when Search serves or re-reads it,
+# the served unit when Search refuses the re-read. Written once, by the `ask`
+# node: admission holds the part to that unit in the plan that first states
+# it (`planner.call.prices_chosen`), and the plan holds it from then on
+# (`submission.service._user_prices`).
+ORCHESTRATOR_UNIT_SERVED_KEY = "orchestrator:unit_served"
+# Each part a unit question put on a unit row that the plan does not read
+# -> the series Search read it as in the unit a switch of the row picked,
+# and that unit, as `ServedUnit` JSON (`units_reread`, `record_units_reread`).
+# Written only by a unit row's switch (`harness.graph.switch`), for those
+# parts alone, and read only for them (`submission.service._user_prices`):
+# a part a later plan adds is pinned in the row's unit to that series.
+ORCHESTRATOR_UNIT_REREAD_KEY = "orchestrator:unit_reread"
 # The search readings of the conversation's earlier turns, with the warnings
 # of the spec_ids they name and the spec_ids whose block an earlier turn
 # stored, seeded by `harness.studio` from `ConversationState.
@@ -89,7 +131,8 @@ ORCHESTRATOR_UNAVAILABLE_KEY = "orchestrator:unavailable"
 APPLY_CHOICE_STATE_KEY = "apply_choice"
 # The chip `seed` applied this turn: `{"choice_id", "option_id",
 # "from_option_id", "spec_id"}`, the option it moved from and the spec_id
-# Search compiled. `harness.studio` keeps it with the turn's record
+# Search compiled. For a count chip, they are the spec_ids of the count it
+# moved from and of the count it moved to. `harness.studio` keeps it with the turn's record
 # (`ConversationState.turn_applied_choice`), where the next turn reads whether
 # the user kept it.
 ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
@@ -97,6 +140,11 @@ ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
 # computed that ask (`_kept_asks`), written by `execute` when a run stops and
 # read by `plan_done`; cleared by `plan_start` and `plan_done`.
 ORCHESTRATOR_KEPT_ASKS_KEY = "orchestrator:kept_asks"
+# The `failed_step` (`executor.outcomes.failed_step`) of the latest run of this
+# plan call that stopped and went back to the planner, written by `execute` on
+# its `"replan"` edge. `plan_done` reads its remedy when the planner then
+# refuses. `plan_start` and `plan_done` clear it.
+ORCHESTRATOR_REPLANNED_STOP_KEY = "orchestrator:replanned_stop"
 # The run the studio's interrupt route admitted with the approval of the
 # plan `approve` last approved (`harness.studio`), or None when it admitted
 # none: written by `approve.decide` on every approval and read by `execute`,
@@ -107,6 +155,30 @@ APPROVED_RUN_KEY = "orchestrator:approved_run"
 # Written by the `planner` node, cleared by `plan_start`, and handed to the
 # agent by `plan_done`, since the amendment reaches the planner alone.
 ORCHESTRATOR_AMENDMENTS_KEY = "orchestrator:amendments"
+# Why the turn's next plan card is a new attempt. It names the step the
+# approved plan stopped at and what happened there, with no advice, since the
+# new plan is the way past it. `plan_done` writes it when it gives the plan call
+# back, and the `planner` node takes it onto the next first draft as its
+# `refusal_note`, which Studio shows before the card.
+ORCHESTRATOR_RETRY_NOTE_KEY = "orchestrator:retry_note"
+# The asks of the plan that stopped when `plan_done` gave the plan call back,
+# as the `PendingPlan` fields `asks`, `ask_breakdowns` and `asks_across_years`.
+# The call given back may change the brief only, so the `plan` tool holds the
+# new plan to these, whatever asks it is sent. The user's answer to a later
+# question this turn (`harness.graph.orchestrate`) clears it, since the user
+# may then ask for other outputs.
+ORCHESTRATOR_GIVEN_BACK_ASKS_KEY = "orchestrator:given_back_asks"
+# The user's words typed on the plan card that the planner read as a new
+# question (`starts_new_plan`), written by the `planner` node as it ends the
+# turn on its `new_question` edge. The stream's `done` frame hands them to
+# the client to send as the next turn (`harness.studio_translate`).
+NEW_QUESTION_KEY = "orchestrator:new_question"
+# Set by the `planner` node as it ends the turn on its `new_question` edge
+# when the planner read the plan card's amendment as a new question that no
+# message of the user's states (`new_question_in` `none`). The turn closes
+# asking the user to send their question, and hands nothing back
+# (`harness.studio_translate`).
+ASK_FOR_QUESTION_KEY = "orchestrator:ask_for_question"
 # The state a planner entry replanning for a pick on the plan card puts back
 # when the replan does not land (`harness.graph.planning`), written when the
 # replan pauses on a planner-side ask and cleared when the entry ends, so it
@@ -136,13 +208,13 @@ class TurnInput(BaseModel):
 
 
 class AskOption(BaseModel):
-    """One answer `ask_user` offers: its wording and, for a count or prices, its spec_id."""
+    """One answer `ask_user` offers: its wording and, for a part's candidate, its spec_id."""
 
     label: str = Field(description="the answer as the user reads it")
     spec_id: str | None = Field(
         default=None,
         description=(
-            "for a count or prices the result names, the spec_id it gives that reading; "
+            "for one of a part's candidates, the spec_id the search result gives it; "
             "leave it out for any other answer"
         ),
     )
@@ -163,12 +235,26 @@ class AskQuestion(BaseModel):
         default_factory=list,
         description=(
             "the likely answers, at least one; the user may also write their own. Leave it "
-            "empty for a prices question, whose options are filled in for you"
+            "empty for a unit question, whose answers are filled in for you"
         ),
     )
-    prices_of: str | None = Field(
+    unit_of: str | None = Field(
         default=None,
-        description="for the prices question of a part that lists `open_prices`, that part's spec_id",
+        description="for the unit question of a part that lists `open_prices`, that part's spec_id",
+    )
+    prices: Literal["current", "constant"] | None = Field(
+        default=None,
+        description=(
+            "for a unit question, the prices a skill prefers the user starts on; leave it out "
+            "otherwise"
+        ),
+    )
+    multi_select: bool = Field(
+        default=False,
+        description=(
+            "true when several answers can hold together and the user may tick more than "
+            "one; the options are then plain labels, with no spec_id, and no `unit_of`"
+        ),
     )
 
 
@@ -213,6 +299,276 @@ def stored_sequence(state: SessionState, key: str) -> tuple[Any, ...]:
     return tuple(state.get(key) or ())
 
 
+def _turn_readings(state: SessionState) -> list[tuple[SearchReading, Mapping[str, Any]]]:
+    """Each reading of the turn with a spec_id, with its stored spec block, oldest first."""
+    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
+    found = []
+    for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY):
+        reading = SearchReading.model_validate(stored)
+        block = specs.get(reading.spec_id) if reading.spec_id is not None else None
+        if block is not None:
+            found.append((reading, block))
+    return found
+
+
+def unit_settled(state: SessionState) -> frozenset[str]:
+    """The spec_ids whose unit the user settled this turn (`ORCHESTRATOR_UNIT_SETTLED_KEY`)."""
+    return frozenset(stored_sequence(state, ORCHESTRATOR_UNIT_SETTLED_KEY))
+
+
+def settle_unit(state: SessionState, *spec_ids: str) -> None:
+    """Record `spec_ids` as settled in the unit the user chose: their prices are closed
+    from here, so no reading lists `open_prices` for them and a second unit question
+    on them is refused."""
+    state[ORCHESTRATOR_UNIT_SETTLED_KEY] = sorted({*unit_settled(state), *spec_ids})
+
+
+def unit_reads(state: SessionState) -> dict[str, list[str]]:
+    """The spec_ids each part a unit question covered was re-read in this turn
+    (`ORCHESTRATOR_UNIT_READ_KEY`), by the part."""
+    return {
+        str(part): [str(spec_id) for spec_id in spec_ids]
+        for part, spec_ids in stored_mapping(state, ORCHESTRATOR_UNIT_READ_KEY).items()
+        if isinstance(spec_ids, list)
+    }
+
+
+def record_unit_read(state: SessionState, part: str, spec_id: str) -> None:
+    """Record that `part`, which a unit question covered, was re-read as `spec_id`."""
+    reads = unit_reads(state)
+    reads[part] = list(dict.fromkeys([*reads.get(part, ()), spec_id]))
+    state[ORCHESTRATOR_UNIT_READ_KEY] = reads
+
+
+class ServedUnit(BaseModel):
+    """What a part a unit question covered is fetched as after the answer:
+    `spec_id`, the series the agent was told to fetch, and `unit`, the unit
+    that series is served in, `None` when its unit cannot be read as one a
+    plan states (`stated_unit`). `group` is the lead part of the unit
+    question that covered the part (`UnitAsk.parts[0]`), which every part
+    that question covered shares, and `chosen` the unit that question's
+    answer asked the part to be read in (`stated_unit`); each is `None` on a
+    record that names none."""
+
+    spec_id: str
+    unit: Unit | None
+    group: str | None = None
+    chosen: Unit | None = None
+
+    @property
+    def row(self) -> str | None:
+        """The lead part of the unit row the part sits on
+        (`submission.prices_choice.unit_slot`): `group`, when the part is
+        served in the unit `chosen` names. `None` for a part Search refused
+        to read in that unit, which keeps a prices row of its own, and for a
+        record naming no group or no chosen unit."""
+        if self.group is None or self.chosen is None or self.unit != self.chosen:
+            return None
+        return self.group
+
+
+def units_served(state: SessionState) -> dict[str, ServedUnit]:
+    """The series and unit each part a unit question covered this turn is
+    fetched as (`ORCHESTRATOR_UNIT_SERVED_KEY`), by the part."""
+    return {
+        str(part): ServedUnit.model_validate(served)
+        for part, served in stored_mapping(state, ORCHESTRATOR_UNIT_SERVED_KEY).items()
+    }
+
+
+def units_reread(state: SessionState) -> dict[str, ServedUnit]:
+    """The series and unit a switch of each part's unit row read each part
+    the plan did not read as (`ORCHESTRATOR_UNIT_REREAD_KEY`), by the part."""
+    return {
+        str(part): ServedUnit.model_validate(read)
+        for part, read in stored_mapping(state, ORCHESTRATOR_UNIT_REREAD_KEY).items()
+    }
+
+
+def record_units_reread(state: SessionState, reads: Mapping[str, tuple[str, Unit]]) -> None:
+    """Record each part of `reads` as read as its series in its unit, by
+    the part, in place of what an earlier switch read it as. Nothing to
+    record writes nothing."""
+    if not reads:
+        return
+    stored = {part: read.model_dump(mode="json") for part, read in units_reread(state).items()}
+    for part, (spec_id, unit) in reads.items():
+        stored[part] = ServedUnit(spec_id=spec_id, unit=unit).model_dump(mode="json")
+    state[ORCHESTRATOR_UNIT_REREAD_KEY] = stored
+
+
+def stated_unit(unit: UnitChoice) -> Unit | None:
+    """`unit` as a plan states it (`planner.plan.Unit`), `None` when no plan can
+    state it, such as a currency code that is not three capital letters."""
+    try:
+        return Unit.model_validate(unit.model_dump(mode="json"))
+    except ValidationError:
+        logger.warning("served unit %r is no unit a plan states", unit)
+        return None
+
+
+def record_unit_served(
+    state: SessionState,
+    part: str,
+    spec_id: str,
+    unit: UnitChoice | None,
+    *,
+    group: str,
+    chosen: UnitChoice,
+) -> None:
+    """Record that `part`, which the unit question led by `group` covered, is
+    fetched as `spec_id`, served in `unit`, the question's answer having
+    chosen `chosen`. A unit no plan can state is recorded as none
+    (`stated_unit`)."""
+    stated = stated_unit(unit) if unit is not None else None
+    served = {name: one.model_dump(mode="json") for name, one in units_served(state).items()}
+    served[part] = ServedUnit(
+        spec_id=spec_id, unit=stated, group=group, chosen=stated_unit(chosen)
+    ).model_dump(mode="json")
+    state[ORCHESTRATOR_UNIT_SERVED_KEY] = served
+
+
+def count_block(block: Mapping[str, Any], count: str) -> dict[str, Any] | None:
+    """`block` with the definition of `count`, another count it offers
+    (`resolved.alternative_measures`), in place of its own; `None` when it offers none."""
+    for alternative in (block.get("resolved") or {}).get("alternative_measures") or ():
+        definition = alternative.get("definition") if isinstance(alternative, Mapping) else None
+        if isinstance(definition, Mapping) and definition.get("spec_id") == count:
+            return {**block, "definition": dict(definition)}
+    return None
+
+
+def _blocks_on_record(state: SessionState) -> dict[str, Mapping[str, Any]]:
+    """Every spec block on record, by spec_id: this turn's searches'
+    (`ORCHESTRATOR_SPECS_KEY`), then the planner's held sources'
+    (`planner.plan.held_sources`)."""
+    blocks: dict[str, Mapping[str, Any]] = dict(stored_mapping(state, ORCHESTRATOR_SPECS_KEY))
+    for spec_id, source in held_sources(state).items():
+        if spec_id not in blocks and (block := source.spec_block(spec_id)) is not None:
+            blocks[spec_id] = block
+    return blocks
+
+
+def counted_from(state: SessionState, pin: str) -> str | None:
+    """The series whose block on record offers `pin` as another count of it
+    (`resolved.alternative_measures`), as a count switch of the plan card
+    pins; `None` when no block on record does."""
+    return next(
+        (
+            spec_id
+            for spec_id, block in _blocks_on_record(state).items()
+            if spec_id != pin and count_block(block, pin) is not None
+        ),
+        None,
+    )
+
+
+def own_block(state: SessionState, pin: str) -> Mapping[str, Any] | None:
+    """The spec block on record for the series `pin` itself
+    (`_blocks_on_record`, else an earlier turn's, `planner.plan.earlier_block`)."""
+    return _blocks_on_record(state).get(pin) or earlier_block(pin)
+
+
+def pin_block(state: SessionState, pin: str) -> Mapping[str, Any] | None:
+    """The spec block of the series `pin`: its own (`own_block`), else, for
+    another count a block on record offers (`counted_from`), which a count
+    switch may pin with no block of its own, that block with the count's
+    definition (`count_block`). `None` when nothing on record states it."""
+    if (block := own_block(state, pin)) is not None:
+        return block
+    source = counted_from(state, pin)
+    return count_block(_blocks_on_record(state)[source], pin) if source is not None else None
+
+
+def unit_rows(plan: PlannerPlan) -> dict[str, list[str]]:
+    """The series each unit row of `plan` covers, by the row's decision slot
+    (`submission.prices_choice.unit_slot`): the distinct pins of the dataset
+    requirements citing it, in plan order. `plan` is read as the planner
+    states it (`submission.service.statement`)."""
+    rows: dict[str, list[str]] = {}
+    for decision in plan.decisions:
+        if not decision.slot.startswith(UNIT_SLOT_PREFIX):
+            continue
+        rows[decision.slot] = list(
+            dict.fromkeys(
+                requirement.source_spec_id
+                for requirement in plan.evidence_requirements
+                if isinstance(requirement, DatasetRequirement)
+                and decision.slot in requirement.decision_ids
+                and requirement.source_spec_id is not None
+            )
+        )
+    return rows
+
+
+def unit_row_offers(state: SessionState, plan: PlannerPlan) -> dict[str, UnitOffer]:
+    """The units the plan card's row for each unit question's whole unit offers,
+    by the row's decision slot (`submission.prices_choice.unit_slot`).
+
+    `plan` is read as the planner states it (`submission.service.statement`).
+    A row's series are the pins of the requirements citing it (`unit_rows`),
+    and its offer is what the block of each converts into (`pin_block`,
+    `unit_offer`). It starts on the unit the plan holds the row to
+    (`submission.prices_choice.plan_unit`). A row with a series whose block
+    is not on record, whose requirements state no one unit, or whose blocks
+    share no unit both bases serve or leave that unit out, offers none.
+    """
+    offers: dict[str, UnitOffer] = {}
+    for slot, pins in unit_rows(plan).items():
+        blocks = [pin_block(state, pin) for pin in pins]
+        unit = plan_unit(plan, slot)
+        if not blocks or unit is None:
+            continue
+        offer = unit_offer([block for block in blocks if block is not None])
+        if offer is None or None in blocks:
+            continue
+        start = UnitChoice.model_validate(unit.model_dump(mode="json"))
+        if (refusal := offered_unit_refusal(offer, start)) is not None:
+            logger.warning("unit row %s offers no switch: %s", slot, refusal)
+            continue
+        offers[slot] = offer.model_copy(update={"start": start})
+    return offers
+
+
+def save_card_unit_offers(
+    state: SessionState, revision: object, offers: Mapping[str, UnitOffer]
+) -> None:
+    """Record `offers` as the units the rows of the plan card of `revision`
+    offer (`harness.turn.events.APPROVE_UNIT_OFFERS_KEY`), or clear the
+    record when none does. They sit beside the pause, since a pause's
+    payload is read back as a plan, and its report carries a copy
+    (`harness.turn.events.Paused.state`)."""
+    if not offers:
+        if state.get(APPROVE_UNIT_OFFERS_KEY) is not None:
+            state[APPROVE_UNIT_OFFERS_KEY] = None
+        return
+    state[APPROVE_UNIT_OFFERS_KEY] = {
+        "revision": revision,
+        "offers": {slot: offer.model_dump(mode="json") for slot, offer in offers.items()},
+    }
+
+
+def card_unit_offers(state: Mapping[str, Any], revision: object) -> dict[str, UnitOffer]:
+    """The units the rows of the plan card of `revision` offer, by the row's
+    slot, as the `approve` node recorded them in `state`; none for a card of
+    another revision or a state that records none."""
+    stored = state.get(APPROVE_UNIT_OFFERS_KEY)
+    if not isinstance(stored, Mapping) or stored.get("revision") != revision:
+        return {}
+    return {
+        str(slot): UnitOffer.model_validate(offer)
+        for slot, offer in (stored.get("offers") or {}).items()
+    }
+
+
+def _reading_prices(reading: SearchReading) -> dict[str, Any]:
+    """The arguments `harness.turn_records.open_prices` and `prices_form` read off `reading`."""
+    return {
+        "window": reading.window.model_dump() if reading.window is not None else None,
+        "other_prices": [offer.model_dump() for offer in reading.other_prices],
+    }
+
+
 def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
     """The `open_prices` entries of each reading of the turn whose prices are open,
     by its spec_id, each with its `prices`: the first the prices search read,
@@ -222,19 +578,13 @@ def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
     `ORCHESTRATOR_SPECS_KEY`. Only code reads `prices`: the readings the model
     reads carry the entries without it (`store_search`).
     """
-    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
     parts: dict[str, list[dict[str, Any]]] = {}
-    for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY):
-        reading = SearchReading.model_validate(stored)
-        block = specs.get(reading.spec_id) if reading.spec_id is not None else None
-        if block is None or reading.spec_id is None:
+    settled = unit_settled(state)
+    for reading, block in _turn_readings(state):
+        assert reading.spec_id is not None
+        if reading.spec_id in settled:
             continue
-        entries = open_prices(
-            block,
-            window=reading.window.model_dump() if reading.window is not None else None,
-            other_prices=[offer.model_dump() for offer in reading.other_prices],
-        )
-        if entries:
+        if entries := open_prices(block, **_reading_prices(reading)):
             parts[reading.spec_id] = [
                 {**entry, "prices": "current" if index == 0 else "constant"}
                 for index, entry in enumerate(entries)
@@ -242,14 +592,35 @@ def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
     return parts
 
 
+def prices_forms(state: SessionState) -> dict[str, PricesForm]:
+    """How the prices question of each reading of the turn whose prices are open is
+    asked, by its spec_id (`harness.turn_records.prices_form`): "unit" or "options"."""
+    forms: dict[str, PricesForm] = {}
+    settled = unit_settled(state)
+    for reading, block in _turn_readings(state):
+        assert reading.spec_id is not None
+        if reading.spec_id in settled:
+            continue
+        if (form := prices_form(block, **_reading_prices(reading))) != "closed":
+            forms[reading.spec_id] = form
+    return forms
+
+
 def prices_question(
-    question: AskQuestion, parts: Mapping[str, list[dict[str, Any]]]
+    question: AskQuestion,
+    parts: Mapping[str, list[dict[str, Any]]],
+    forms: Mapping[str, PricesForm],
 ) -> AskQuestion:
-    """`question` with, when it prices a part of `parts` (`AskQuestion.prices_of`),
-    that part's `open_prices` entries as its options."""
-    entries = parts.get(question.prices_of) if question.prices_of is not None else None
-    if entries is None:
+    """`question` with the answers code gives it when it asks the unit of a part of
+    `parts` (`AskQuestion.unit_of`): none for a part asked in the "unit" form
+    (`forms`), whose answer is a unit, and the part's `open_prices` entries, each
+    naming its spec_id but the reading's own, for one asked in the "options" form."""
+    part = question.unit_of
+    entries = parts.get(part) if part is not None else None
+    if part is None or entries is None:
         return question
+    if forms.get(part) == "unit":
+        return question.model_copy(update={"options": []})
     return question.model_copy(
         update={
             "options": [
@@ -259,18 +630,64 @@ def prices_question(
     )
 
 
+class UnitAsk(NamedTuple):
+    """A unit question's reach: `parts`, the spec_ids of the readings it covers, the
+    one it names first leading, and `offer`, the units every one of them converts into."""
+
+    parts: tuple[str, ...]
+    offer: UnitOffer
+
+
+def unit_asks(questions: Sequence[AskQuestion], state: SessionState) -> list[UnitAsk | None]:
+    """For each of `questions`, the reach of a unit question, `None` for any other
+    question or for one whose parts share no unit both bases serve.
+
+    A unit question is one whose `unit_of` part is asked in the "unit" form
+    (`prices_forms`). It covers that part and every other part asked in that
+    form measuring the same thing (equal `submission.prices_choice.measure_key`),
+    and offers what all of them
+    convert into (`harness.unit_offer.unit_offer`), starting on the prices
+    the question prefers (`AskQuestion.prices`).
+    """
+    forms = prices_forms(state)
+    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
+    measures = {part: measure_key(specs[part]) for part in forms if part in specs}
+    asks: list[UnitAsk | None] = []
+    for question in questions:
+        part = question.unit_of
+        if part is None or forms.get(part) != "unit" or part not in specs:
+            asks.append(None)
+            continue
+        key = measures.get(part)
+        parts = (
+            part,
+            *(
+                other
+                for other, form in forms.items()
+                if other != part
+                and form == "unit"
+                and other in specs
+                and key is not None
+                and measures.get(other) == key
+            ),
+        )
+        offer = unit_offer([specs[p] for p in parts], prefer=question.prices)
+        asks.append(UnitAsk(parts, offer) if offer is not None else None)
+    return asks
+
+
 def priced_options(
     questions: list[AskQuestion], state: SessionState
 ) -> list[dict[int, PricedOption]]:
     """For each of `questions`, the place of each option offering prices, with
     the part it prices and the prices: each option of a question pricing a
-    part (`AskQuestion.prices_of`) that is one of the part's `open_prices`
+    part (`AskQuestion.unit_of`) that is one of the part's `open_prices`
     entries (`open_parts`), matched by spec_id, else by label among the
     entries carrying none. A question pricing no part has none."""
     parts = open_parts(state)
     priced: list[dict[int, PricedOption]] = []
     for question in questions:
-        entries = parts.get(question.prices_of) if question.prices_of is not None else None
+        entries = parts.get(question.unit_of) if question.unit_of is not None else None
         marks: dict[int, PricedOption] = {}
         for index, option in enumerate(question.options):
             entry = next(
@@ -282,8 +699,8 @@ def priced_options(
                 ),
                 None,
             )
-            if entry is not None and question.prices_of is not None:
-                marks[index] = PricedOption(question.prices_of, entry["prices"])
+            if entry is not None and question.unit_of is not None:
+                marks[index] = PricedOption(question.unit_of, entry["prices"])
         priced.append(marks)
     return priced
 
@@ -318,21 +735,34 @@ def ask_candidates(
 
 
 def ask_questions(
-    questions: list[AskQuestion], priced: Sequence[Mapping[int, PricedOption]] = ()
+    questions: list[AskQuestion],
+    priced: Sequence[Mapping[int, PricedOption]] = (),
+    units: Sequence[UnitAsk | None] = (),
 ) -> list[dict[str, Any]]:
     """`PendingAsk.questions` as the clarify interrupt's payload entries: each
     under `q{n}`, its place in the call, with its candidates (`ask_candidates`),
-    each question's priced options read from `priced` by place."""
-    return [
-        {
+    each question's priced options read from `priced` by place, and
+    `multi_select` when the user may tick several. A unit
+    question of `units`, by place, carries `unit`: the spec_ids it covers
+    (`parts`) and its `offer` as `harness.wire.UnitOffer` JSON."""
+    entries = []
+    for index, question in enumerate(questions):
+        entry: dict[str, Any] = {
             "id": f"q{index + 1}",
             "question": question.question,
             "candidates": ask_candidates(
                 question.options, priced[index] if index < len(priced) else None
             ),
         }
-        for index, question in enumerate(questions)
-    ]
+        if question.multi_select:
+            entry["multi_select"] = True
+        if (unit := units[index] if index < len(units) else None) is not None:
+            entry["unit"] = {
+                "parts": list(unit.parts),
+                "offer": unit.offer.model_dump(mode="json", exclude_none=True),
+            }
+        entries.append(entry)
+    return entries
 
 
 def resume_answers(result: Any) -> dict[str, dict[str, Any]] | None:
@@ -341,9 +771,10 @@ def resume_answers(result: Any) -> dict[str, dict[str, Any]] | None:
 
     The value `harness.studio`'s `/interrupt` route resumes a clarify with
     is `{"answers": {question id: answer}}`, each answer
-    `{"kind": "option", "spec_id"}`, `{"kind": "text", "text"}` or
-    `{"kind": "skipped"}`. Any other value, such as the plan card's answer,
-    answers no question.
+    `{"kind": "option", "spec_id"}`, `{"kind": "options", "spec_ids"}`,
+    `{"kind": "unit", "currency", "prices", "base_year"?}`,
+    `{"kind": "text", "text"}` or `{"kind": "skipped"}`. Any other value,
+    such as the plan card's answer, answers no question.
     """
     if not isinstance(result, dict):
         return {}
@@ -541,8 +972,8 @@ def store_search(
     `held_open` those it asked to hold open, and `share_sides` the sides
     its `share_of` operations run over; each is empty when no part's are
     known. A `definite` part whose prices are open over several years reads
-    with `open_prices`, the options of its prices question
-    (`harness.turn_records.open_prices`).
+    with `open_prices` (`harness.turn_records.open_prices`), which tells the
+    model to ask its unit.
 
     A spec_id a part holds as its own keeps that part's block and warnings
     against a later part offering it as a candidate, since a pin of it is
@@ -574,10 +1005,12 @@ def store_search(
             blocks[part["spec_id"]] = part["spec_block"]
             own.add(part["spec_id"])
             facts = reading_facts(part["spec_block"])
-            if prices := open_prices(
-                part["spec_block"],
-                window=part.get("window"),
-                other_prices=part.get("other_prices") or (),
+            if part["spec_id"] not in unit_settled(state) and (
+                prices := open_prices(
+                    part["spec_block"],
+                    window=part.get("window"),
+                    other_prices=part.get("other_prices") or (),
+                )
             ):
                 reading["open_prices"] = prices
         if mentions := reading.get("resolved_sources"):

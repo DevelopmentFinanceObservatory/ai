@@ -132,7 +132,9 @@ def orchestrator_app(
     plans (`ScriptedPlannerModel` by default). `tool_surface` runs an
     approved plan's steps, and with `None` `execute` refuses. `served` are
     the seeds or Spec blocks data-mcp's definition lookup answers with, and
-    `definition_surface` replaces that lookup whole.
+    `definition_surface` replaces that lookup whole and is the one the
+    agent's `fetch` resolves a definition on record through, as the
+    server's is.
     `publisher` publishes a run's derived results, all at once by default,
     and `run_ledger` keeps its runs, an in-memory ledger that keeps each
     conversation's runs apart by default. `early_mints` starts each offered
@@ -162,6 +164,7 @@ def orchestrator_app(
             resolver=resolver,
             executor=recorder,
             surface=surface_recorder,
+            definition_surface=definition_surface,
             recall_part=make_recall_part(store),
         )
         return studio_graph(
@@ -211,13 +214,19 @@ def studio_client(app: FastAPI) -> httpx2.AsyncClient:
     )
 
 
+# The question forms the deployed website declares it renders.
+CLIENT_FEATURES = ["unit_question", "multi_select"]
+
+
 def turn_body(message: str, *, conversation_id: str = CONVERSATION) -> dict[str, Any]:
-    """A `turn.request` body for `/api/studio/turn`."""
+    """A `turn.request` body for `/api/studio/turn`, from a client that
+    renders every question form (`CLIENT_FEATURES`)."""
     return {
         "kind": "turn.request",
         "schema_version": 1,
         "conversation_id": conversation_id,
         "message": message,
+        "client_features": CLIENT_FEATURES,
     }
 
 

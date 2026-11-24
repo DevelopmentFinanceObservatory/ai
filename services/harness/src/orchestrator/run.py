@@ -15,6 +15,19 @@ they happen:
 - `Answered`: the run ended on the reply. Nothing is stored, and the next
   turn opens from the digests.
 
+A response with neither answer text nor a function call
+(`harness.gemini_agent.holds_no_answer`) is not sent back for another try.
+It ends the run `Answered`, with no text, when the run drew a card itself
+(`run_drew_a_card`), on the reply of its `remove_cards` calls when it took a card off
+the canvas instead, and raises `EmptyResponseError` otherwise.
+
+A turn whose first response makes one `remove_cards` call and holds no
+answer text ends after that call: the harness writes the reply from the
+call's answer (`harness.orchestrator_tools.removal_reply`), streams it as a
+`TextDelta` and ends on it, with no second model call. The run leaves
+Pydantic AI's `Agent.iter` loop after the call's tools node, before the next
+model request node, and yields the reply once the agent's run has closed.
+
 The run happens in the caller's task, so cancelling the caller cancels the
 model stream and any tool in flight. A call a bound of the turn's budget
 closes ends the run on the bound's sentence (`orchestrator.model`), as an
@@ -45,6 +58,7 @@ from harness.gemini_agent import (
 )
 from harness.gemini_wire import StreamResumedError, resumed_over_output
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
+from harness.orchestrator_tools import drawn_cards, removal_reply
 from pydantic import BaseModel, SerializerFunctionWrapHandler, field_serializer, field_validator
 from pydantic_ai import (
     Agent,
@@ -57,7 +71,14 @@ from pydantic_ai import (
     TextPart,
     TextPartDelta,
 )
-from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.models import Model
 
 from orchestrator.agent import INSTRUCTION, Orchestrator, OrchestratorDeps
@@ -143,10 +164,13 @@ class Opening:
 @dataclass(frozen=True)
 class HandBack:
     """The result of the run's deferred `answers` call: the planner's result
-    (`plan`) or the user's answer (`ask_user`)."""
+    (`plan`) or the user's answer (`ask_user`). `written` names the turn
+    state keys the node that made the result wrote, which the run's first
+    `ToolsAnswered`, the one answering that call, carries."""
 
     answers: Literal["plan", "ask_user"]
     result: dict[str, Any]
+    written: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -171,7 +195,8 @@ class ToolsAnswered:
     order, and a copy of the turn state's value of every key those calls
     wrote, so a later call's change does not reach an event still queued. A
     call that handed off has no answer here. A run resumed after it opens on
-    one whose answer is the hand-back."""
+    one whose answer is the hand-back, and whose state also holds the keys
+    the hand-back's node wrote (`HandBack.written`)."""
 
     answers: tuple[types.FunctionResponse, ...]
     state: dict[str, Any]
@@ -230,12 +255,13 @@ async def run_orchestrator(
     The first request opens with the date and the digests as one user content,
     then the user's message as its own, then the seed hand-back when there is
     one. A response with neither answer text nor a function call ends the run
-    (`harness.gemini_agent.holds_no_answer`) and is not sent back for another
-    try. Any other exception the model or Pydantic AI raises propagates.
+    `Answered`, with no text, where the run drew a card itself (`run_drew_a_card`), and
+    on the reply of its `remove_cards` calls where it took a card off the canvas
+    instead. Any other exception the model or Pydantic AI raises propagates.
 
     Raises:
         EmptyResponseError: A model response held neither answer text nor a
-            function call.
+            function call, and the run drew and removed no card.
         StreamResumedError: google-genai resumed a stream over output no
             continuation token covers (`harness.gemini_wire.resumed_over_output`),
             a dropped connection a later attempt may not meet.
@@ -255,6 +281,9 @@ async def run_orchestrator(
             conversation = replace(conversation, conversation_id=conversation_id)
             conversation_id = None
         results = DeferredToolResults(calls={_waiting(history, hand_back): hand_back.result})
+        # The hand-back's writes join those of the call it answers, so the
+        # `ToolsAnswered` of that call carries them (`_written_state`).
+        deps.view = RecordingState(state, written=hand_back.written)
     else:
         raise ValueError("give an opening for a turn's first run, or a history and a hand-back")
 
@@ -272,6 +301,20 @@ async def run_orchestrator(
             # The spec blocks before the current response, which its calls
             # may replace (`_written_state`).
             held = dict(deps.state.get(ORCHESTRATOR_SPECS_KEY) or {})
+            # Whether the response at hand is the turn's first and makes
+            # one `remove_cards` call alone (`_lone_removal`).
+            lone_removal = False
+            first = opening is not None and opening.seeded is None
+            # The reply the harness writes for a lone removal, which ends the
+            # run once the agent's run has closed.
+            removal: str | None = None
+            # Whether the run ended on a response with no answer after it drew a
+            # card itself (`run_drew_a_card`), the cards drawn before it, and the
+            # reply of each `remove_cards` call it made that took a card off or
+            # kept a pinned one (`removal_reply`).
+            ended_empty = False
+            drawn_before = drawn_cards(deps.state, turn_id)
+            removals: list[str] = []
             async for node in run:
                 if Agent.is_model_request_node(node):
                     deps.view = RecordingState(deps.state)
@@ -282,10 +325,30 @@ async def run_orchestrator(
                                 yield TextDelta(text)
                         response = stream.response
                     if holds_no_answer(response):
+                        if run_drew_a_card(deps.state, turn_id, drawn_before):
+                            logger.warning(
+                                "orchestrator response held no answer; the run ends on the "
+                                "cards it drew turn_id=%s cards=%d",
+                                turn_id,
+                                len(drawn_cards(deps.state, turn_id) - drawn_before),
+                            )
+                            ended_empty = True
+                            break
+                        if removals:
+                            logger.warning(
+                                "orchestrator response held no answer; the run ends on the "
+                                "cards it removed turn_id=%s removals=%d",
+                                turn_id,
+                                len(removals),
+                            )
+                            removal = " ".join(removals)
+                            break
                         raise EmptyResponseError(
-                            "the model's response held neither answer text nor a function call"
+                            "the model's response held neither answer text nor a "
+                            "function call, and the run drew and removed no card"
                         )
                     yield ModelResponded(parts=response_parts(without_unsigned_thoughts(response)))
+                    lone_removal, first = first and _lone_removal(response), False
                 elif Agent.is_call_tools_node(node):
                     async with node.stream(run.ctx) as stream:
                         answered = [
@@ -298,6 +361,14 @@ async def run_orchestrator(
                             answers=tuple(answered),
                             state=_written_state(deps, held),
                         )
+                    removals.extend(
+                        reply
+                        for answer in answered
+                        if answer.name == "remove_cards"
+                        and (reply := removal_reply(answer.response or {})) is not None
+                    )
+                    if lone_removal and (removal := _removal_reply(answered)) is not None:
+                        break
             result = run.result
     except Exception as exc:
         if not resumed_over_output(exc):
@@ -309,6 +380,13 @@ async def run_orchestrator(
             exc,
         )
         raise StreamResumedError(str(exc)) from exc
+    if removal is not None:
+        yield TextDelta(removal)
+        yield Answered(text=removal)
+        return
+    if ended_empty:
+        yield Answered(text="")
+        return
     assert result is not None
     output = result.output
     if isinstance(output, DeferredToolRequests):
@@ -321,6 +399,24 @@ async def run_orchestrator(
         )
         return
     yield Answered(text=output)
+
+
+def run_drew_a_card(
+    state: Mapping[str, Any], turn_id: str, before: frozenset[tuple[str, int]]
+) -> bool:
+    """Whether a run of turn `turn_id` that began with `before` drawn
+    (`harness.orchestrator_tools.drawn_cards`) drew a card itself.
+
+    A run answers the user it runs for, on the turn's message, an `ask_user` answer
+    or a plan's approval, when its final response holds text, or, where that
+    response holds no answer (`harness.gemini_agent.holds_no_answer`), when the run
+    drew a card, or else took a card off the canvas, which the reply of its
+    `remove_cards` calls then reports (`harness.orchestrator_tools.removal_reply`). A
+    card drawn before a hand-back answered the run that drew it, not the user's reply. Every card a turn shows is drawn by `make_charts`: the execute
+    node of an approved plan publishes frames, which the agent then draws. Text a
+    response streamed beside its calls ("Looking it up.") is narration, which
+    answers nothing."""
+    return bool(drawn_cards(state, turn_id) - before)
 
 
 def _opening(opening: Opening) -> tuple[str, list[ModelMessage]]:
@@ -357,6 +453,22 @@ def _waiting(history: StoredHistory, hand_back: HandBack) -> str:
     if len(calls) != 1:
         raise NoCallWaitsError(f"no one {hand_back.answers} call waits on this hand-back")
     return calls[0].tool_call_id
+
+
+def _lone_removal(response: ModelResponse) -> bool:
+    """Whether `response` makes one call, to `remove_cards`, and holds no
+    answer text."""
+    calls = [part for part in response.parts if isinstance(part, ToolCallPart)]
+    texts = [part for part in response.parts if isinstance(part, TextPart) and part.content]
+    return not texts and len(calls) == 1 and calls[0].tool_name == "remove_cards"
+
+
+def _removal_reply(answered: Sequence[types.FunctionResponse]) -> str | None:
+    """The reply `removal_reply` writes from the lone `remove_cards` call's
+    answer, or None when the model answers instead."""
+    if len(answered) != 1 or answered[0].name != "remove_cards":
+        return None
+    return removal_reply(answered[0].response or {})
 
 
 def _text(event: object) -> str | None:
@@ -417,5 +529,6 @@ __all__ = [
     "StoredHistory",
     "TextDelta",
     "ToolsAnswered",
+    "run_drew_a_card",
     "run_orchestrator",
 ]

@@ -1,0 +1,150 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Show G7 aid to Africa as a share of G7 aid to all developing countries each year from 1970 to 2024, including imputed multilateral aid."
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "G7 aid to Africa (bilateral net disbursements from OECD DAC2a plus OECD imputed multilateral ODA) as a share of G7 total aid to all developing countries each year from 1970 to 2024. For Africa: bilateral net ODA (spec_6192e5d51ea1df89524b0d27fc409350) plus imputed multilateral ODA (spec_26d008bb0f6087a796c698995cbe8bd7, available from 1975). For all developing countries: total bilateral net ODA (spec_4ee950c87d05910e69f21d002f98c349) plus total imputed multilateral ODA (or DAC1 total ODA spec_83b533b617eac833c2baa877335d11d3).",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "g7_africa_aid",
+        "decision_ids": [],
+        "measure": "net ODA including imputed multilateral aid",
+        "entities": [
+          {
+            "name": "Group of Seven",
+            "role": "donor"
+          },
+          {
+            "name": "Africa",
+            "role": "recipient"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 1970,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "dataset",
+        "id": "g7_developing_by_recipient",
+        "decision_ids": [],
+        "measure": "net ODA including imputed multilateral aid",
+        "entities": [
+          {
+            "name": "Group of Seven",
+            "role": "donor"
+          }
+        ],
+        "across": [
+          "recipient"
+        ],
+        "period": {
+          "start": 1970,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "aggregate",
+        "id": "g7_developing_aid",
+        "decision_ids": [],
+        "input_id": "g7_developing_by_recipient",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      },
+      {
+        "kind": "share_of",
+        "id": "g7_africa_share",
+        "decision_ids": [],
+        "numerator": {
+          "input_id": "g7_africa_aid",
+          "entity": null
+        },
+        "denominator": {
+          "input_id": "g7_developing_aid",
+          "entity": null
+        },
+        "axis": null,
+        "denominator_scope": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "G7 aid to Africa (bilateral net ODA plus imputed multilateral ODA) as a share of G7 total aid (bilateral net ODA plus imputed multilateral ODA) each year"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "g7_africa_share"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

@@ -39,12 +39,19 @@ from planner.plan import (
 )
 from planner.records import (
     DenominatorScope,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
     RankAmong,
     RankDirection,
 )
+
+# How a plan card and `harness.turn_records.open_prices` word each prices
+# basis, the labels of a part's prices decision when the user chose no
+# whole unit (`submission.prices_choice.PricesChoice.label`).
+CURRENT_PRICES = "current prices"
+CONSTANT_PRICES = "constant prices"
 
 # Each level of place in words, in the singular: "Keep countries", "Rank the top 5 continents".
 _LEVEL_NOUNS: dict[PlaceType, str] = {
@@ -201,7 +208,10 @@ def narrowing_step(requirement: EvidenceRequirement, plan: Plan) -> EvidenceRequ
             or (isinstance(current, RankRequirement) and current.limit is None)
             or (
                 isinstance(current, FilterRequirement)
-                and all(isinstance(predicate, PeriodThreshold) for predicate in current.predicates)
+                and all(
+                    isinstance(predicate, PeriodThreshold | PeriodIn)
+                    for predicate in current.predicates
+                )
             )
         ):
             current = plan.requirement(current.input_id)

@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -94,6 +95,7 @@ from planner.records import (
     EntityIn,
     GrowthChange,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -430,7 +432,7 @@ def _donor_mint_response(*, spec_id: str, values: dict[str, float]) -> dict[str,
             "identity": {
                 "identity_version": "spec1",
                 "shape": {"id": stat_var, "kind": "stat_var"},
-                "entities": {"donor": [f"country/{code}" for code in ("USA", "GBR", "FRA")]},
+                "entities": {"origin": [f"country/{code}" for code in ("USA", "GBR", "FRA")]},
                 "facets": {"unit": {"ref": "USD", "state": "value"}},
                 "requested_window": {"kind": "all"},
                 "slots": [],
@@ -961,7 +963,7 @@ TOP_DONORS = (
 TOP_DONOR_IDENTITY: dict[str, Any] = {
     "identity_version": "spec1",
     "shape": {"id": "OdaDisbursed", "kind": "stat_var"},
-    "entities": {"donor": [donor.ref for donor in TOP_DONORS]},
+    "entities": {"origin": [donor.ref for donor in TOP_DONORS]},
     "facets": {"unit": {"ref": "USD", "state": "value"}},
     "requested_window": {"kind": "all"},
     "slots": [],
@@ -1150,6 +1152,202 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
     assert rank_step.row_count == 3
     assert "limit 3 (kept 3 of 6 ranked entities)" in rank_step.digest
     assert "beyond_limit (ranked beyond the limit): 3 row(s)" in rank_step.digest
+
+
+APART_SPEC = "spec_" + "8" * 32
+APART_YEARS = range(2019, 2024)
+
+
+def _apart_parquet_bytes() -> bytes:
+    """One row a year from 2019 to 2023 for each donor of `TOP_DONORS`, the first
+    donor's the largest and each year one higher than the last."""
+    rows = [
+        (donor.ref, str(year), 10.0 * (len(TOP_DONORS) - position) + (year - 2019))
+        for position, donor in enumerate(TOP_DONORS)
+        for year in APART_YEARS
+    ]
+    table = pa.table(
+        {
+            "stat_var": pa.array(["dcid:OdaDisbursed"] * len(rows), type=pa.string()),
+            "donor": pa.array([row[0] for row in rows], type=pa.string()),
+            "time_period": pa.array([row[1] for row in rows], type=pa.string()),
+            "value": pa.array([row[2] for row in rows], type=pa.float64()),
+            "unit": pa.array(["USD"] * len(rows), type=pa.string()),
+        }
+    )
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    return buf.getvalue()
+
+
+def _apart_mint_response() -> dict[str, Any]:
+    parquet = _apart_parquet_bytes()
+    first, last = str(APART_YEARS[0]), str(APART_YEARS[-1])
+    return {
+        "schema_version": 1,
+        "definition": {"schema_version": 1, "spec_id": APART_SPEC, "identity": TOP_DONOR_IDENTITY},
+        "content_version": version_of(parquet),
+        "coverage": {
+            "rows": len(TOP_DONORS) * len(APART_YEARS),
+            "dimensions": [{"label": "years", "count": len(APART_YEARS)}],
+        },
+        "citation": {"text": "OECD DAC", "sources": []},
+        "trace": {"graph_revision": "g1", "facets": []},
+        "warnings": [],
+        "artifacts": [
+            {
+                "artifact_digest": f"sha256:{hashlib.sha256(parquet).hexdigest()}",
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
+                "bytes": len(parquet),
+                "media_type": "application/vnd.apache.parquet",
+                "created_at": "2026-08-11T00:00:00+00:00",
+                "tier": "working",
+                "url": "/links/should-not-be-fetched",
+            }
+        ],
+        "statistics": [
+            {
+                "stat_var": "dcid:OdaDisbursed",
+                "entities": [{"role": "donor", "ref": donor.ref}],
+                "facet": {"unit": "USD"},
+                "observations": len(APART_YEARS),
+                "first": {"value": 10.0, "period": first},
+                "latest": {"value": 14.0, "period": last},
+                "minimum": {"value": 10.0, "period": first},
+                "maximum": {"value": 14.0, "period": last},
+            }
+            for donor in TOP_DONORS
+        ],
+    }
+
+
+def _years_apart_approved_plan(decision: Callable[..., Decision], schemas: dict[str, Any]) -> Plan:
+    """The top three donors in 2019 and in 2023, as `planner.plan.FilterRequirement`'s
+    `predicates` describe years asked for apart. The dataset reads 2019 to 2023 and
+    a `period_in` filter keeps the two years. Translated, compiled and approved."""
+    source = SelectedSource(
+        spec_id=APART_SPEC,
+        sentence="ODA disbursed by six DAC donors, 2019 to 2023",
+        has_data=True,
+        served_count=1,
+        shape_member_digest=member_digest(["OdaDisbursed"]),
+        entities=TOP_DONORS,
+        unit_ref="USD",
+        unit_label="US dollars",
+        coverage_window=Period(start=2019, end=2023),
+        identity=TOP_DONOR_IDENTITY,
+    )
+    population = decision(
+        slot="population_scope",
+        description="Whether the rank compares the named donors or every donor the source holds.",
+        options=["the named donors only", "every donor the source holds"],
+        chosen="every donor the source holds",
+        rationale="The question asks for the top three donors overall.",
+        fixes=DecisionFixes(among=RankAmong.POPULATION),
+    )
+    draft = Plan(
+        question="Which three donors disbursed the most ODA in 2019 and in 2023, in one chart?",
+        decisions=[decision(), population],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="oda_disbursed",
+                decision_ids=["measure"],
+                measure="ODA disbursed",
+                entities=[Entity(name=donor.label, role="donor") for donor in TOP_DONORS],
+                period=Period(start=2019, end=2023),
+            ),
+            FilterRequirement(
+                id="two_years",
+                decision_ids=["measure"],
+                input_id="oda_disbursed",
+                predicates=(PeriodIn(years=(2019, 2023)),),
+            ),
+            RankRequirement(
+                id="top_three",
+                decision_ids=["measure", "population_scope"],
+                input_id="two_years",
+                direction=RankDirection.HIGHEST_FIRST,
+                among=RankAmong.POPULATION,
+                axis="donor",
+                per_period=True,
+                limit=3,
+            ),
+        ],
+        status=PlanStatus.DRAFT,
+    )
+    translation = build_translation(draft, {"oda_disbursed": APART_SPEC})
+    compiled = compile_plan(
+        plan=draft,
+        translation=translation,
+        schemas=schemas,
+        discovered={"oda_disbursed": source},
+    )
+    assert compiled.workflow is not None, compiled.issues
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
+
+
+async def test_years_asked_for_apart_run_and_chart_as_the_listed_years_of_a_range(
+    monkeypatch: pytest.MonkeyPatch,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., Any],
+    decision: Callable[..., Decision],
+    _stats_registry: _StatsRegistry,
+    runner: Any,
+    pg_database_url: str,
+) -> None:
+    """2019 and 2023 compile against the mounted services' own tool schemas to a
+    retrieval of 2019 to 2023, a filter keeping 2019 and 2023 by the runner's
+    `category_match` on `time_period`, and a per-year rank. The run keeps the top three donors in each of the two years and
+    no other year, and one chart draws them on the run's own frame."""
+
+    async def fake_fetch(**_kwargs: Any) -> bytes:
+        return _apart_parquet_bytes()
+
+    serve_canonical_frames(monkeypatch, fake_fetch)
+    mint_response = _register_statistics(_stats_registry, _apart_mint_response())
+
+    def mint_handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            return httpx2.Response(200, json=mint_response)
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    planned: list[Plan] = []
+
+    def plan_of(schemas: dict[str, ToolSchema]) -> Plan:
+        planned.append(_years_apart_approved_plan(decision, schemas))
+        return planned[-1]
+
+    top_three = [donor.ref for donor in TOP_DONORS[:3]]
+    async with _studio_session(
+        monkeypatch,
+        running_lifespan,
+        mounted_mcp_transport,
+        runner,
+        pg_database_url,
+        mint_handler=mint_handler,
+        plan_of=plan_of,
+        result_id="top_three",
+        closed_end=[],
+    ) as studio:
+        stored = (await result_table(FrameRef.model_validate(studio.run_frame))).to_pylist()
+        (drawn,) = await studio.charts(
+            studio.chart(top_three, title="The top three donors in 2019 and in 2023")
+        )
+
+    (approved,) = planned
+    assert approved.workflow is not None
+    retrieve, kept, ranked = approved.workflow.steps
+    assert (retrieve.tool.name, kept.tool.name, ranked.tool.name) == ("get_data", "filter", "rank")
+    assert kept.args["predicates"] == [
+        {"kind": "category_match", "column": "time_period", "values": ["2019", "2023"]}
+    ]
+    assert sorted((row["time_period"], row["donor"]) for row in stored) == sorted(
+        (year, donor) for year in ("2019", "2023") for donor in top_three
+    )
+    assert "reply_figures" in drawn, drawn
+    assert [intent["frame_ref"] for intent in studio.platform.created()] == [studio.run_frame]
 
 
 ROLLING_SPEC = "spec_" + "9" * 32
@@ -1592,6 +1790,36 @@ async def studio(
         definition = {**mint_response["definition"], "identity": identity}
         return httpx2.Response(200, json={**mint_response, "definition": definition})
 
+    async with _studio_session(
+        monkeypatch,
+        running_lifespan,
+        mounted_mcp_transport,
+        runner,
+        pg_database_url,
+        mint_handler=mint_handler,
+        plan_of=lambda schemas: _rolling_approved_plan(decision, schemas),
+        result_id="change",
+        closed_end=closed_end,
+    ) as studio:
+        yield studio
+
+
+@asynccontextmanager
+async def _studio_session(
+    monkeypatch: pytest.MonkeyPatch,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., Any],
+    runner: Any,
+    pg_database_url: str,
+    *,
+    mint_handler: Callable[[httpx2.Request], httpx2.Response],
+    plan_of: Callable[[dict[str, ToolSchema]], Plan],
+    result_id: str,
+    closed_end: list[int],
+) -> AsyncIterator[_Studio]:
+    """The orchestrator's tools once `plan_of`'s plan ran on the mounted services,
+    the frame of its step `result_id` registered for charts. `mint_handler`
+    answers data-mcp's mints."""
     client_holder.set_client(data_mcp_client(mint_handler))
     apis = FakeApis(runner)
     assembler = apis.assembler()
@@ -1650,12 +1878,12 @@ async def studio(
         # the provenance a card on it must cite.
         recording = _RecordingSurface(surface, provenance=provenance)
         schemas = {schema.name: schema for schema in await surface.list_tools()}
-        plan = _rolling_approved_plan(decision, schemas)
+        plan = plan_of(schemas)
         _, outcome = await execute_approved_plan(plan, surface=recording)
         assert isinstance(outcome, Accepted), outcome
         assert plan.workflow is not None
         link_evidence_to_terminal_frames(recording, outcome, workflow=plan.workflow)
-        run_frame = outcome.results["change"].model_dump()
+        run_frame = outcome.results[result_id].model_dump()
 
         # `plan_done` lists a plan's final frames to the agent this way.
         described = await executor(tool="describe_frame", args={"frame_ref": run_frame})

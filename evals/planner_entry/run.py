@@ -37,13 +37,14 @@ from entry import (
     PLANNER_RUNNER,
     Task,
     entry_record,
+    load_every_task,
     load_recording,
-    load_tasks,
     quiet_logs,
     run_entry,
 )
 from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
+from harness.wiring import build_stated_scope_reader
 from langfuse import Langfuse
 from planner.settings import AgentSettings
 from summarise import latest, read_records, write_records, write_summary
@@ -115,7 +116,7 @@ async def run_all(args: argparse.Namespace, tasks: list[Task], arms: list[str]) 
     """Run every arm, task and repetition not yet recorded, for up to `--passes` passes,
     each retrying the runs that errored. Returns how many still end in an error."""
     records_path: Path = args.out / "records.jsonl"
-    recordings = {task.id: load_recording(task.id) for task in tasks}
+    recordings = {task.id: load_recording(task.recording_id) for task in tasks}
     by_id = {task.id: task for task in tasks}
     model = AgentSettings().planner_model_name
     at = revision()
@@ -141,6 +142,10 @@ async def run_all(args: argparse.Namespace, tasks: list[Task], arms: list[str]) 
         arm: PrefixCache() if shared is not None and ARMS[arm].edits else shared for arm in arms
     }
     gate = asyncio.Semaphore(args.concurrency)
+    # The reader production's planner reads the user's stated provider scope through
+    # (`harness.wiring.build_planner`); a task reads it only where its words reach
+    # the planner (`user_message_searched`).
+    stated_scope = build_stated_scope_reader(Settings())
 
     async def one(triple: Triple, count: int, total: int) -> None:
         arm, task_id, rep = triple
@@ -151,6 +156,7 @@ async def run_all(args: argparse.Namespace, tasks: list[Task], arms: list[str]) 
                 prefix_cache=prefix_caches[arm],
                 edits=ARMS[arm].edits,
                 timeout_s=args.run_timeout,
+                stated_scope=stated_scope,
             )
         record = entry_record(
             task=by_id[task_id],
@@ -170,16 +176,20 @@ async def run_all(args: argparse.Namespace, tasks: list[Task], arms: list[str]) 
             file=sys.stderr,
         )
 
-    for attempt in range(1, args.passes + 1):
-        existing = read_records([records_path]) if records_path.exists() else []
-        done = {(r["arm"], r["task"], r["rep"]) for r in existing if r["status"] == "ok"}
-        pending = plan_triples(tasks, arms, args.reps, done=done)
-        print(f"pass {attempt} on {model} at {at}: {len(pending)} runs to do", file=sys.stderr)
-        if not pending:
-            break
-        await asyncio.gather(
-            *(one(triple, i, len(pending)) for i, triple in enumerate(pending, start=1))
-        )
+    try:
+        for attempt in range(1, args.passes + 1):
+            existing = read_records([records_path]) if records_path.exists() else []
+            done = {(r["arm"], r["task"], r["rep"]) for r in existing if r["status"] == "ok"}
+            pending = plan_triples(tasks, arms, args.reps, done=done)
+            print(f"pass {attempt} on {model} at {at}: {len(pending)} runs to do", file=sys.stderr)
+            if not pending:
+                break
+            await asyncio.gather(
+                *(one(triple, i, len(pending)) for i, triple in enumerate(pending, start=1))
+            )
+    finally:
+        if stated_scope is not None:
+            await stated_scope.aclose()
     wanted = set(plan_triples(tasks, arms, args.reps, done=set()))
     chosen = latest(read_records([records_path])) if records_path.exists() else {}
     return sum(record["status"] == "error" for key, record in chosen.items() if key in wanted)
@@ -232,7 +242,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     quiet_logs()
-    every_task = load_tasks()
+    every_task = load_every_task()
     tasks = every_task
     if args.only:
         wanted = set(args.only.split(","))

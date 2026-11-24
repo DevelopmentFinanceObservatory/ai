@@ -143,7 +143,9 @@ from harness.graph.interfaces import Executor
 from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
+    ORCHESTRATOR_GIVEN_BACK_ASKS_KEY,
     ORCHESTRATOR_PENDING_KEY,
+    ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
@@ -153,17 +155,20 @@ from harness.graph.state import (
     DescribedFrame,
     PendingAsk,
     PendingPlan,
+    UnitAsk,
     conversation_readings,
     count_call,
     frame_store_ref,
     open_parts,
     pending_action,
+    prices_forms,
     prices_question,
     register_frames,
     store_search,
     stored_mapping,
     stored_sequence,
     turn_budgets,
+    unit_asks,
 )
 from harness.reply_figures import (
     DrawnSeries,
@@ -176,7 +181,7 @@ from harness.reply_figures import (
 )
 from harness.rolling_cards import named_year
 from harness.scope_choices import PartScope, carried_entries
-from harness.studio_state import RecallPart, RecallRefusedError
+from harness.studio_state import CardRemoval, RecallPart, RecallRefusedError
 from harness.tool_contracts import (
     HarnessCode,
     ResolverError,
@@ -203,6 +208,23 @@ _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # could not read back also holds "unreadable": True and is not on the canvas.
 # `remove_cards` drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
+
+
+def drawn_cards(state: Mapping[str, Any], turn_id: str) -> frozenset[tuple[str, int]]:
+    """The cards `make_charts` drew in turn `turn_id` that are on the canvas
+    (`_DRAWN_CARDS_KEY`), less any it could not read back, each as its component id
+    and revision. A chart whose card is drawn already keeps its entry, so a set taken
+    later gains only the cards drawn in between."""
+    held = state.get(_DRAWN_CARDS_KEY) or {}
+    if held.get("turn") != turn_id:
+        return frozenset()
+    return frozenset(
+        (card["component_id"], card["revision"])
+        for card in held["drawn"].values()
+        if not card.get("unreadable") and card.get("component_id")
+    )
+
+
 # The identity member each `get_data` scope member replaces.
 _SCOPE_REPLACES = {"entities": "entities", "window": "requested_window", "facets": "facets"}
 # Skills a search result names, as shown to the model, as data-mcp's search
@@ -1534,16 +1556,22 @@ def _questions_refusal(
     named: set[str],
     parts: Collection[str] = (),
     measures: Mapping[str, str | None] | None = None,
+    units: Sequence[UnitAsk | None] = (),
 ) -> dict[str, Any] | None:
     """The refusal of an `ask_user` call that asks no question or more than
-    `MAX_ASK_QUESTIONS`, asks a question with no option, prices a part that
-    is none of `parts`, the spec_ids of the readings whose prices are open
-    (`harness.graph.state.open_parts`), prices one part, or two parts
-    measuring the same thing over other windows (equal `measures`,
-    `submission.prices_choice.measure_key`), in two questions, offers a spec_id no search result
-    this turn named (`_named_spec_ids`), or offers one spec_id on two options
-    of the call; None when it asks well. `questions` hold the options a
-    prices question is given (`harness.graph.state.prices_question`)."""
+    `MAX_ASK_QUESTIONS`, asks a question with no option, asks the unit of a
+    part that is none of `parts`, the spec_ids of the readings whose prices
+    are open (`harness.graph.state.open_parts`), asks one part's unit, or
+    the units of two parts measuring the same thing over other windows
+    (equal `measures`, `submission.prices_choice.measure_key`), in two
+    questions, asks a unit no currency serves in both prices for the parts
+    it covers (`units`, `harness.graph.state.unit_asks`), offers a spec_id
+    no search result this turn named (`_named_spec_ids`), or offers one
+    spec_id on two options of the call, or lets the user tick several
+    (`AskQuestion.multi_select`) of options that carry a spec_id or of a unit
+    question; None when it asks well. `questions`
+    hold the options a unit question is given
+    (`harness.graph.state.prices_question`)."""
     options = [option for question in questions for option in question.options]
     spec_ids = [option.spec_id for option in options if option.spec_id is not None]
     problems = []
@@ -1552,12 +1580,19 @@ def _questions_refusal(
             f"it asks {len(questions)} questions, and ask_user takes 1 to {MAX_ASK_QUESTIONS}"
         )
     problems += [
-        f"question {question.question!r} prices {question.prices_of}, which lists no "
+        f"question {question.question!r} asks the unit of {question.unit_of}, which lists no "
         "`open_prices` this turn"
         for question in questions
-        if question.prices_of is not None and question.prices_of not in parts
+        if question.unit_of is not None and question.unit_of not in parts
     ]
-    priced = [question.prices_of for question in questions if question.prices_of is not None]
+    problems += [
+        f"question {question.question!r} lets the user tick several, so it offers labels only: "
+        "no spec_id on an option and no `unit_of`"
+        for question in questions
+        if question.multi_select
+        and (question.unit_of is not None or any(o.spec_id for o in question.options))
+    ]
+    priced = [question.unit_of for question in questions if question.unit_of is not None]
     problems += [
         f"{part} is priced by more than one question"
         for part in sorted(set(priced))
@@ -1568,7 +1603,7 @@ def _questions_refusal(
         if (key := (measures or {}).get(part)) is not None:
             by_measure.setdefault(key, set()).add(part)
     problems += [
-        f"{' and '.join(sorted(same))} measure one thing over other years, so one prices "
+        f"{' and '.join(sorted(same))} measure one thing over other years, so one unit "
         "question covers them"
         for same in by_measure.values()
         if len(same) > 1
@@ -1576,7 +1611,15 @@ def _questions_refusal(
     problems += [
         f"question {question.question!r} offers no option"
         for question in questions
-        if not question.options and question.prices_of is None
+        if not question.options and question.unit_of is None
+    ]
+    problems += [
+        f"question {question.question!r} asks the unit of {question.unit_of}, and no currency "
+        "serves both current and constant prices for every part it covers"
+        for index, question in enumerate(questions)
+        if question.unit_of in parts
+        and not question.options
+        and (units[index] if index < len(units) else None) is None
     ]
     problems += [
         f"option {option.label!r} carries {option.spec_id}, which no search result named this turn"
@@ -1713,15 +1756,23 @@ def _attach_fetch(
     (`harness.scope_choices.served_facts`), when it said, and `args`, the
     call's arguments that shape its frame (`FetchReading.args`).
 
-    A spec_id that no reading holds as its own, but one offered as a
-    candidate, as another count (`SearchReading.alternatives`) or as the
-    same count in other prices (`SearchReading.other_prices`), first gains
-    a reading of its own, read from its block (`chosen_part`) with the
+    A spec_id that no reading of this turn holds as its own, but one offered
+    as a candidate, as another count (`SearchReading.alternatives`) or as
+    the same count in other prices (`SearchReading.other_prices`), first
+    gains a reading of its own, read from its block (`chosen_part`) with the
     offering reading's text, skills and departures and asked parties and
-    its own warnings, else the offering reading's. A spec_id no reading
-    offers as a candidate is a sibling (`_offered_sibling`), and its reading
-    names the reading that offered it (`SearchReading.sibling_of`) and the
-    count it reads.
+    its own warnings, else the offering reading's. The offering reading is
+    the newest reading offering the spec_id in any of those ways, this
+    turn's before the earlier turns' (`ORCHESTRATOR_PRIOR_LEDGER_KEY`), so a
+    fetch of what an earlier answer offered, a count chip's included
+    (`harness.graph.switch`), reads as that offer, and this turn's offer
+    wins over an older one (`_offering`). A spec_id offered as another
+    count or in other prices is a sibling, and its reading names the
+    reading it is a sibling of (`SearchReading.sibling_of`) and the count
+    it reads. Another count names the count Search elected for the part
+    (`_elected_count`), and a fetch
+    of a count Search elected, or of one any reading holds as its own
+    count, is no sibling: its reading states its block's own count.
     """
     spec_id = result["spec_id"]
     state = call.state
@@ -1729,13 +1780,21 @@ def _attach_fetch(
         SearchReading.model_validate(stored)
         for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY)
     ]
+    earlier = [
+        SearchReading.model_validate(stored)
+        for stored in stored_mapping(state, ORCHESTRATOR_PRIOR_LEDGER_KEY).get("readings") or ()
+    ]
+    newest_first = [*reversed(searches), *reversed(earlier)]
     block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(spec_id)
-    candidate_of = next(
-        (r for r in searches if any(c.spec_id == spec_id for c in r.candidates)), None
-    )
-    sibling = None if candidate_of else _offered_sibling(searches, spec_id)
-    offered = candidate_of or (sibling[0] if sibling else None)
-    if block and offered is not None and all(r.spec_id != spec_id for r in searches):
+    found = _offering(newest_first, spec_id)
+    if block and found is not None and all(r.spec_id != spec_id for r in searches):
+        offered, link = found
+        if link is not None and link.axis == "what":
+            root = _elected_count(newest_first, offered)
+            elected = root == spec_id or any(
+                r.spec_id == spec_id and r.other_count_of is None for r in newest_first
+            )
+            link = None if elected else link.model_copy(update={"spec_id": root})
         warnings = (state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {}).get(spec_id)
         if warnings is None:
             warnings = [w.model_dump() for w in offered.warnings]
@@ -1751,8 +1810,7 @@ def _attach_fetch(
             "open_roles": offered.open_roles,
             "share_over": offered.share_over,
         }
-        if sibling is not None:
-            link = sibling[1]
+        if link is not None:
             counted_as = link.label if link.axis == "what" else offered.counted_as
             update |= {"sibling_of": link, "counted_as": counted_as}
         searches.append(chosen.model_copy(update=update))
@@ -1791,13 +1849,18 @@ def _share_sides(part: SearchPart) -> list[str]:
     )
 
 
-def _offered_sibling(
-    searches: Sequence[SearchReading], spec_id: str
-) -> tuple[SearchReading, SiblingReading] | None:
-    """The first reading of `searches` offering `spec_id` as another count or
-    in other prices, with the link a reading of `spec_id` keeps to it; `None`
-    when none does."""
-    for reading in searches:
+def _offering(
+    readings: Sequence[SearchReading], spec_id: str
+) -> tuple[SearchReading, SiblingReading | None] | None:
+    """The first of `readings` offering `spec_id`, with the link a reading of
+    `spec_id` keeps to it: `None` for a candidate, a `SiblingReading` for
+    another count (axis `what`) or the same count in other prices (axis
+    `unit`). Each reading's candidates, other counts and other prices are
+    read together, so the newest reading offering `spec_id` wins.
+    `None` when no reading offers `spec_id`."""
+    for reading in readings:
+        if any(candidate.spec_id == spec_id for candidate in reading.candidates):
+            return reading, None
         if reading.spec_id is None:
             continue
         for axis, offers in (("what", reading.alternatives), ("unit", reading.other_prices)):
@@ -1805,6 +1868,29 @@ def _offered_sibling(
             if label is not None:
                 return reading, SiblingReading(spec_id=reading.spec_id, axis=axis, label=label)
     return None
+
+
+def _elected_count(readings: Sequence[SearchReading], offering: SearchReading) -> str:
+    """The spec_id of the count Search elected for the part `offering` reads.
+
+    `offering`'s own, unless it is another count of a part
+    (`SearchReading.other_count_of`): then the count that names, followed
+    back through `readings`, newest first, to a reading that is no other
+    count. A stored reading can name another count in place of the elected
+    one, which this follows past. A link that loops or leaves `readings`
+    ends at the last spec_id it named.
+    """
+    assert offering.spec_id is not None
+    current, seen = offering, {offering.spec_id}
+    while (previous := current.other_count_of) is not None and previous not in seen:
+        seen.add(previous)
+        found = next((r for r in readings if r.spec_id == previous), None)
+        if found is None:
+            return previous
+        current = found
+    # Each reading followed holds the spec_id it was found by.
+    assert current.spec_id is not None
+    return current.spec_id
 
 
 def _asked_roles(part: SearchPart) -> list[str]:
@@ -1889,6 +1975,77 @@ def _search_context(state: SessionState) -> SearchContext:
     )
 
 
+def _nothing_removed_note(
+    component_ids: Sequence[str],
+    *,
+    kept_pinned: Collection[str],
+    already_off: Collection[str],
+    missing: Collection[str],
+    all_cards: bool,
+) -> str:
+    """What a `remove_cards` call that took nothing off met, a sentence per
+    outcome: cards the user pinned, named cards already off the canvas, ids
+    this conversation never held, and, for `all_cards`, a canvas with no
+    card left to take off."""
+    sentences: list[str] = []
+    if kept_pinned:
+        sentences.append(
+            "The user pinned the cards in kept_pinned, so they stay on the canvas. The user "
+            "can unpin one from the card's menu (Unpin from Canvas) and then ask again."
+        )
+    if already_off:
+        sentences.append(
+            "Those cards were already off the canvas."
+            if len(already_off) == len(set(component_ids))
+            else "The cards in already_off were already off the canvas."
+        )
+    if missing:
+        sentences.append("No card of this conversation has the ids in not_in_conversation.")
+    if all_cards and not kept_pinned:
+        sentences.append("The canvas was already empty.")
+    return " ".join(sentences)
+
+
+_REMOVAL_KEYS = frozenset({"removed", "kept_pinned", "titles", "note"})
+
+
+def removal_reply(answer: Mapping[str, Any]) -> str | None:
+    """The reply to a turn whose only call was `remove_cards`, written from
+    the call's `answer`: each card taken off and each pinned card kept, by
+    title, and how the user unpins a kept one. None for an answer that holds
+    anything else (a refusal, `already_off`, `not_in_conversation`) or names
+    no card, which the model answers instead."""
+    if not answer.keys() <= _REMOVAL_KEYS:
+        return None
+    removed = answer.get("removed") or []
+    kept = answer.get("kept_pinned") or []
+    titles = answer.get("titles") or {}
+    if not (removed or kept) or any(cid not in titles for cid in [*removed, *kept]):
+        return None
+    sentences: list[str] = []
+    if removed:
+        sentences.append(f"I took {_quoted_list([titles[cid] for cid in removed])} off the canvas.")
+    if len(kept) == 1:
+        sentences.append(
+            f'"{titles[kept[0]]}" is pinned, so it stays. To remove it, choose Unpin from '
+            "Canvas in its menu, then ask again."
+        )
+    elif kept:
+        sentences.append(
+            f"{_quoted_list([titles[cid] for cid in kept])} are pinned, so they stay. To remove "
+            "one, choose Unpin from Canvas in its menu, then ask again."
+        )
+    return " ".join(sentences)
+
+
+def _quoted_list(titles: Sequence[str]) -> str:
+    """`titles` quoted and joined: "A", "A" and "B", or "A", "B", and "C"."""
+    quoted = [f'"{title}"' for title in titles]
+    if len(quoted) < 3:
+        return " and ".join(quoted)
+    return f"{', '.join(quoted[:-1])}, and {quoted[-1]}"
+
+
 def build_orchestrator_tools(
     *,
     resolver: Resolver,
@@ -1899,7 +2056,7 @@ def build_orchestrator_tools(
     recall_part: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     canvas_series: Callable[[], list[str]] | None = None,
     canvas_cards: Callable[[], list[dict[str, Any]]] | None = None,
-    remove_cards: Callable[..., Awaitable[tuple[list[str], list[str]]]] | None = None,
+    remove_cards: Callable[..., Awaitable[CardRemoval]] | None = None,
 ) -> list[Any]:
     """The orchestrator's tools, bound to this server's resolver, executor and tool surface.
 
@@ -2038,8 +2195,8 @@ def build_orchestrator_tools(
         with other counts under `alternatives` and the same count in other
         prices under `other_prices`, each with its spec_id and label. A
         definite part whose prices the user left open over several years
-        lists `open_prices`, the options of a prices question, the prices
-        search read first. A definite part lists the `source_codes` of the
+        lists `open_prices`, the prices the unit question can ask about, the
+        prices search read first. A definite part lists the `source_codes` of the
         indicators it found, each with the publisher that issues it when
         search names one. And
         `skills`: background a result calls for, each by id and
@@ -2420,7 +2577,7 @@ def build_orchestrator_tools(
         frames = stored_mapping(call.state, ORCHESTRATOR_FRAMES_KEY)
         on_canvas = _canvas_series(call)
         held_cards = call.state.get(_DRAWN_CARDS_KEY) or {}
-        drawn_cards: dict[str, dict[str, Any]] = (
+        held_drawn: dict[str, dict[str, Any]] = (
             dict(held_cards["drawn"]) if held_cards.get("turn") == call.turn_id else {}
         )
         canvas = {
@@ -2435,10 +2592,10 @@ def build_orchestrator_tools(
 
         def _remember_drawn(identity: str, card: dict[str, Any]) -> None:
             """Record `card` as drawn for `identity` this turn."""
-            drawn_cards[identity] = card
+            held_drawn[identity] = card
             call.state[_DRAWN_CARDS_KEY] = {
                 "turn": call.turn_id,
-                "drawn": drawn_cards,
+                "drawn": held_drawn,
             }
 
         def _unreadable_entry(chart: Chart, *, later: bool) -> dict[str, Any]:
@@ -2493,7 +2650,7 @@ def build_orchestrator_tools(
             if (order := _card_order(chart, cut)) is not None:
                 intent["order"] = order
             identity = _card_identity(intent)
-            held = drawn_cards.get(identity) or canvas.get(identity)
+            held = held_drawn.get(identity) or canvas.get(identity)
             # An earlier write of this card stored one the harness cannot read,
             # and another write would stack a second orphan.
             unreadable = held is not None and bool(held.get("unreadable"))
@@ -2789,21 +2946,25 @@ def build_orchestrator_tools(
         you.
 
         Ask only what changes the answer. Each question offers at least one
-        option. An option for a count or prices that a search result names
-        carries the spec_id the result gives it, and the answer names that
-        spec_id when the user picks it. A prices question names its part in
-        `prices_of`, and its options are filled in. Each spec_id goes on one option. End
-        your turn after calling ask_user. Every answer comes back as this
+        option. An option for one of a part's candidates carries the spec_id
+        the search result gives it, and the answer names that spec_id when
+        the user picks it. Each spec_id goes on one option. A unit question
+        names its part in `unit_of`, and its answers are filled in for you.
+        Set `multi_select` when several answers can hold together; its options
+        are labels only, with no spec_id.
+        End your turn after calling ask_user. Every answer comes back as this
         call's result.
         """
         parts = open_parts(call.state)
-        questions = [prices_question(question, parts) for question in questions]
+        forms = prices_forms(call.state)
+        questions = [prices_question(question, parts, forms) for question in questions]
         blocks = stored_mapping(call.state, ORCHESTRATOR_SPECS_KEY)
         refused = _questions_refusal(
             questions,
             _named_spec_ids(call),
             parts,
             {part: measure_key(blocks[part]) for part in parts if part in blocks},
+            unit_asks(questions, call.state),
         )
         if refused:
             return refused
@@ -2835,6 +2996,15 @@ def build_orchestrator_tools(
         End your turn after calling it; the plan's result comes back as this
         call's result.
         """
+        pinned = call.state.get(ORCHESTRATOR_GIVEN_BACK_ASKS_KEY)
+        if pinned and pinned.get("asks"):
+            # The call `plan_done` gave back after a stop may change the brief
+            # only, so the plan keeps the stopped plan's asks in the words the
+            # user asked them in, and the asks sent here are not read.
+            spent = _spend(call, "plan")
+            if spent:
+                return spent
+            return _pend(call, PendingPlan.model_validate({**pinned, "brief": brief}))
         texts = [ask.text for ask in asks]
         refused = _asks_refusal(texts) or _breakdowns_missing(call, asks)
         if refused:
@@ -2956,10 +3126,22 @@ def build_orchestrator_tools(
         user's canvas.
 
         `part`: "plan" for the plan records of a turn, "readings" for the
-        search readings of a turn, "canvas" for every card of the conversation,
-        listed as on_canvas or hidden, each with its id, title, type, facts
-        and pinned state, or, with `component_id`, that one card's stored
-        entry. For a plan or readings, `turn` is the turn's number as the
+        search readings of a turn, "canvas" for the conversation's cards, or,
+        with `component_id`, that one card's stored entry. The canvas listing
+        ranks cards by the turn that drew them and holds no card's place on
+        the canvas. Each card it lists names its `turn`:
+        - `blocks`: cards in full with their facts, while places remain:
+          this turn's cards on the canvas, then the pinned ones, then the
+          other cards on the canvas, newest turn first.
+        - `titles`: the next cards of those three groups, by id, title and
+          type.
+        - `off_canvas`: cards off the canvas by id, title and type, a whole
+          turn at a time, this turn's first, then newest turn first.
+        - `counted`: for each turn with cards no list holds, how many are on
+          the canvas (`on_canvas`) and how many off it (`off_canvas`).
+        - `counted_rest`: the same two counts for older turns' cards and
+          cards of no recorded turn.
+        For a plan or readings, `turn` is the turn's number as the
         conversation digest counts them; leave it out for the newest turn
         that has the part. A target that does not exist is refused with the
         values that do.
@@ -3002,12 +3184,18 @@ def build_orchestrator_tools(
         component_ids: list[str] | None = None,
         all_cards: bool = False,
     ) -> dict[str, Any]:
-        """Take cards off the user's canvas.
+        """Take cards off the user's canvas, when the conversation has moved to
+        another subject or the user asks for cards to go.
 
         `component_ids` names the cards to take off, by the component ids the
-        canvas lists; set `all_cards` to take off every card instead. Returns
-        the ids taken off; a named card already off the canvas needs nothing,
-        and an id this conversation never held is named back.
+        canvas lists; set `all_cards` to take off every card the user has
+        not pinned. A pinned card stays on the canvas, since only the user
+        unpins it. Returns the ids taken off and, as `kept_pinned`, the
+        pinned cards left in place, with each one's title under `titles`; a
+        named card already off the canvas
+        needs nothing and is named back as `already_off`, and an id this
+        conversation never held is named back as `not_in_conversation`. When
+        nothing came off, `note` says what each named id met.
         """
         spent = _spend(call, "remove_cards")
         if spent:
@@ -3023,23 +3211,39 @@ def build_orchestrator_tools(
             )
         _canvas_series(call)
         async with _canvas_lock(call):
-            removed, missing = await remove_cards(
+            removed, missing, kept_pinned, titles = await remove_cards(
                 component_ids=component_ids or [], all_cards=all_cards
             )
             _forget_drawn(call, removed)
-        if not removed and missing and len(missing) == len(component_ids or []):
+        named = component_ids or []
+        if not all_cards and missing and len(missing) == len(dict.fromkeys(named)):
             return _failed(
                 HarnessCode.CARD_NOT_FOUND,
                 "No card of this conversation has those ids. Nothing changed.",
             )
-        if not removed:
-            note = (
-                "The canvas was already empty."
-                if all_cards
-                else "Those cards were already off the canvas."
+        # Each named id once, in the order named.
+        settled = {*removed, *kept_pinned, *missing}
+        already_off = [cid for cid in dict.fromkeys(named) if cid not in settled]
+        answer: dict[str, Any] = {"removed": removed} | {
+            key: ids
+            for key, ids in (
+                ("kept_pinned", kept_pinned),
+                ("already_off", already_off),
+                ("not_in_conversation", missing),
             )
-            return {"removed": [], "note": note}
-        return {"removed": removed} | ({"not_in_conversation": missing} if missing else {})
+            if ids
+        }
+        if removed or kept_pinned:
+            answer["titles"] = {cid: titles[cid] for cid in [*removed, *kept_pinned]}
+        if not removed:
+            answer["note"] = _nothing_removed_note(
+                named,
+                kept_pinned=kept_pinned,
+                already_off=already_off,
+                missing=missing,
+                all_cards=all_cards,
+            )
+        return answer
 
     remove_cards_tool.__name__ = "remove_cards"
 
@@ -3061,4 +3265,11 @@ def build_orchestrator_tools(
     ]
 
 
-__all__ = ["TOOL_NAMES", "Chart", "Resolver", "build_orchestrator_tools", "raised_answer"]
+__all__ = [
+    "TOOL_NAMES",
+    "Chart",
+    "Resolver",
+    "build_orchestrator_tools",
+    "raised_answer",
+    "removal_reply",
+]

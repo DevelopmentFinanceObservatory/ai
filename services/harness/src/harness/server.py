@@ -45,6 +45,7 @@ from starlette.websockets import WebSocketClose
 from harness import __version__
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
+from harness.db.adk_archive import PREFIX, archive_state, ledger_resolves, live_adk_tables
 from harness.db.cutover_gates import LAPSED_LEDGER_LEASES
 from harness.db.engine import DatabaseHandle, build_database
 from harness.db.migrate import MigrationChecksumError, apply_pending
@@ -78,7 +79,8 @@ from harness.studio_store import StudioStore
 from harness.turn.loop import Graph
 from harness.turn.store import FrameLineage, TurnStore
 from harness.turn_budget import current_turn_budget
-from harness.wiring import build_planner, handing_back_planner_failures
+from harness.wire import TURN_INDEX_HEADER
+from harness.wiring import build_planner, build_stated_scope_reader, handing_back_planner_failures
 
 logger = logging.getLogger(__name__)
 
@@ -245,15 +247,83 @@ async def _retry_startup_step(
 
 class _MigrationRefusedError(RuntimeError):
     """A refusal to start that waiting does not change: a SQLSTATE beginning
-    `DFA` raised by a migration (`0003_turns.sql`) or by a check before one
-    (`harness.db.cutover_gates`: DFA06). The live-lease check before 0003
-    raises `DFR02` instead, which startup retries within its budget, since a
-    lease lapses on its own. `sqlstate` holds the code, and the message
-    leads with it."""
+    `DFA` raised by a migration (`0003_turns.sql`,
+    `0005_rename_adk_tables.sql`) or by a check before one
+    (`harness.db.cutover_gates`: DFA06, DFA07), or `DFA05` from
+    `_refuse_beside_adk_tables`. The live-lease check before 0003 raises
+    `DFR02` instead, which startup retries within its budget, since a lease
+    lapses on its own. `sqlstate` holds the code, which deploy/README.md
+    lists with each refusal's manual step, and the message leads with it. A
+    `DFA05` refusal also carries the `tables` it names; `beside`, those of
+    them whose own `adk_archive_<name>` resolves (the rest are without it);
+    `archive_present`, whether any `adk_archive_<name>` table resolves,
+    which decides the step; `foreign_archive_names`, the tables of an archive
+    name that resolve without the archive's columns; and `ledger_present`,
+    whether `adk_ledger_imports` resolves under its own name."""
 
-    def __init__(self, sqlstate: str, message: str) -> None:
+    def __init__(
+        self,
+        sqlstate: str,
+        message: str,
+        *,
+        tables: tuple[str, ...] = (),
+        beside: tuple[str, ...] = (),
+        archive_present: bool = False,
+        foreign_archive_names: tuple[str, ...] = (),
+        ledger_present: bool = False,
+    ) -> None:
         super().__init__(f"{sqlstate}: {message}")
         self.sqlstate = sqlstate
+        self.tables = tables
+        self.beside = beside
+        self.archive_present = archive_present
+        self.foreign_archive_names = foreign_archive_names
+        self.ledger_present = ledger_present
+
+
+async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
+    """Raise `_MigrationRefusedError` with `DFA05` while any of ADK's tables
+    resolves on `search_path` under its own name with ADK's columns
+    (`harness.db.adk_archive.live_adk_tables`). This image does not start
+    beside them, since an image that reads them may be serving, as after a
+    rollback and `restore --apply`, or as a stray revision that created them
+    afresh. The message names, for each such table, whether its own
+    `adk_archive_<name>` resolves (`harness.db.adk_archive.archive_state`):
+    with it, the live table was created after the archive and holds only
+    what that image wrote since; without it, the live table can be restored
+    history. It also names each table of an archive name that resolves
+    without the archive's columns, and deploy/README.md's `DFA05` entry
+    gives the step for each case."""
+    tables = await live_adk_tables(engine)
+    if not tables:
+        return
+    archive, foreign = await archive_state(engine)
+    archived_names = {qualified.rpartition(".")[2] for qualified in archive}
+    beside = tuple(t for t in tables if PREFIX + t.rpartition(".")[2] in archived_names)
+    named = [
+        f"{t} ({'beside' if t in beside else 'without'} {PREFIX + t.rpartition('.')[2]})"
+        for t in tables
+    ]
+    detail = f"The archive resolves: {', '.join(archive)}." if archive else "No archive resolves."
+    for qualified in foreign:
+        detail += f" {qualified} resolves but is not the archive."
+    ledger = await ledger_resolves(engine)
+    detail += (
+        " adk_ledger_imports resolves under its own name."
+        if ledger
+        else " adk_ledger_imports does not resolve under its own name."
+    )
+    raise _MigrationRefusedError(
+        "DFA05",
+        f"ADK's tables resolve on search_path under their own names: {', '.join(named)}. "
+        f"{detail} This image does not start beside them, since an image that reads them "
+        "may be serving. deploy/README.md's DFA05 entry gives the step for each case.",
+        tables=tuple(tables),
+        beside=beside,
+        archive_present=bool(archive),
+        foreign_archive_names=tuple(foreign),
+        ledger_present=ledger,
+    )
 
 
 async def _apply_migrations_with_retries(
@@ -272,9 +342,10 @@ async def _apply_migrations_with_retries(
     migration of several statements runs as long as its statements take
     within it.
     A failed attempt leaves no lock behind, because `apply_pending` holds
-    a transaction-level lock. A `MigrationChecksumError` is a fault in the
-    files, and a migration's own refusal (a SQLSTATE beginning `DFA`) a fact
-    about the database, so each propagates at once."""
+    a transaction-level lock. Each attempt then runs
+    `_refuse_beside_adk_tables`. A `MigrationChecksumError` is a fault in the
+    files, and a refusal (a SQLSTATE beginning `DFA`) a fact about the
+    database, so each propagates at once."""
 
     async def attempt() -> None:
         try:
@@ -287,6 +358,7 @@ async def _apply_migrations_with_retries(
             if sqlstate.startswith("DFA"):
                 raise _MigrationRefusedError(sqlstate, str(exc)) from exc
             raise
+        await _refuse_beside_adk_tables(engine)
 
     await _retry_startup_step(
         "apply_pending",
@@ -379,6 +451,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.live_refresh.aclose()
     except Exception:
         logger.exception("failed to close the live refresh clients during shutdown")
+    try:
+        if app.state.stated_scope is not None:
+            await app.state.stated_scope.aclose()
+    except Exception:
+        logger.exception("failed to close the stated-scope reader during shutdown")
     # Disposes whatever `build_database` opened: the engine for the
     # plain-`DATABASE_URL` backend, and the engine plus the connector for the
     # Cloud SQL Connector path (`harness.db.engine.DatabaseHandle`). Guarded
@@ -501,6 +578,8 @@ def create_app(
             allow_origins=resolved_settings.studio_cors_origins,
             allow_methods=["*"],
             allow_headers=["*"],
+            # A browser reading a stream directly needs the turn's index.
+            expose_headers=[TURN_INDEX_HEADER],
         )
     if resolved_settings.studio_api_token is None:
         # PLACEHOLDER ACCESS CONTROL. Without the shared secret every
@@ -558,6 +637,9 @@ def create_app(
     # One for the process, shared by the planner and the orchestrator
     # across every conversation (`harness.prefix_cache`).
     prefix_cache = PrefixCache() if resolved_settings.studio_prefix_cache else None
+    # One for the process, since it holds a connection pool `_lifespan` closes.
+    stated_scope = build_stated_scope_reader(resolved_settings)
+    app.state.stated_scope = stated_scope
     logger.info("orchestrator thinking level: %s", resolved_settings.orchestrator_thinking_level)
 
     @functools.cache
@@ -598,7 +680,10 @@ def create_app(
             # and the turn goes on.
             planner=handing_back_planner_failures(
                 build_planner(
-                    settings=resolved_settings, surface=tool_surface, prefix_cache=prefix_cache
+                    settings=resolved_settings,
+                    surface=tool_surface,
+                    prefix_cache=prefix_cache,
+                    stated_scope=stated_scope,
                 )
             ),
             # Its spans carry the messages as the planner's do

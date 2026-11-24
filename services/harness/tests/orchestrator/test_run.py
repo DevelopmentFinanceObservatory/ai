@@ -19,9 +19,10 @@ from google.genai import types
 from harness.gemini_agent import EmptyResponseError
 from harness.gemini_wire import StreamResumedError
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
-from harness.orchestrator_tools import build_orchestrator_tools
+from harness.orchestrator_tools import _DRAWN_CARDS_KEY, build_orchestrator_tools
 from harness.prefix_cache import PrefixCache
 from harness.sentences import StopCode, refusal_sentence
+from harness.studio_state import CardRemoval, ConversationState, land_component, remove_cards
 from harness.turn_budget import TurnBudget
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from orchestrator.agent import INSTRUCTION, orchestrator_agent
@@ -548,20 +549,120 @@ async def test_a_resumed_run_names_the_conversation_its_caller_gives(
         [empty_reply()],
         [reply(thought_part("Thinking."))],
         [reply(_SEARCH), empty_reply()],
+        [reply(text_part("Looking it up."), _SEARCH), empty_reply()],
+        [reply(text_part(" \n"))],
     ],
-    ids=["no-parts", "thought-only", "after-a-tool"],
+    ids=["no-parts", "thought-only", "after-a-call", "after-narration", "whitespace-only"],
 )
-async def test_a_response_with_no_answer_ends_the_run_on_a_typed_failure(
+async def test_a_response_with_no_answer_in_a_turn_that_showed_no_card_fails_transiently(
     replies: list[Any],
 ) -> None:
-    """A response with neither answer text nor a function call is not retried:
-    no further request is sent and the run raises `EmptyResponseError`."""
+    """A response with neither answer text nor a function call is not retried: no
+    further request is sent. A turn that showed the user no card, whatever calls it
+    answered and whatever narration it streamed beside them, raises
+    `EmptyResponseError`, a fault a later attempt may not meet."""
     scripted = ScriptedGenai(replies)
 
-    with pytest.raises(EmptyResponseError):
+    with pytest.raises(EmptyResponseError) as raised:
         await _run(scripted, budget=_budget())
 
+    assert transient(raised.value)
     assert len(scripted.requests) == len(replies)
+
+
+class _DrawingSearches(_Searches):
+    """`_Searches` whose every search also records a card drawn this turn in `drawn`,
+    the turn's drawn cards as `make_charts` keeps them."""
+
+    def __init__(self, drawn: dict[str, Any]) -> None:
+        super().__init__()
+        self.drawn = drawn
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.drawn[f"card-{self.calls}"] = {"component_id": f"cmp_{self.calls}", "revision": 1}
+        return await super().__call__(**kwargs)
+
+
+async def test_a_response_with_no_answer_after_a_card_drawn_this_run_ends_it_answered() -> None:
+    """A response with no answer after the run drew a card ends it answered, with no
+    text, and sends no further request: the card is the answer."""
+    scripted = ScriptedGenai([reply(text_part("Looking it up."), _SEARCH), empty_reply()])
+    drawn: dict[str, Any] = {}
+    tools = build_orchestrator_tools(resolver=_DrawingSearches(drawn), executor=_no_executor)
+
+    events, _ = await _run(
+        scripted,
+        budget=_budget(),
+        tools=tools,
+        held={_DRAWN_CARDS_KEY: {"turn": "turn-1", "drawn": drawn}},
+    )
+
+    assert events[-1] == Answered(text="")
+    assert len(scripted.requests) == 2
+
+
+_ASKED = {"questions": [{"question": "Which Congo?", "options": [{"label": "DR Congo"}]}]}
+
+
+@pytest.mark.parametrize(
+    ("replies", "answered"),
+    [
+        pytest.param(
+            [reply(call_part("ask_user", _ASKED)), reply(thought_part("Hmm."))],
+            False,
+            id="nothing-drawn",
+        ),
+        pytest.param(
+            [reply(_SEARCH), reply(call_part("ask_user", _ASKED)), reply(thought_part("Hmm."))],
+            False,
+            id="card-before-the-hand-back",
+        ),
+        pytest.param(
+            [reply(call_part("ask_user", _ASKED)), reply(_SEARCH), reply(thought_part("Hmm."))],
+            True,
+            id="card-after-the-reply",
+        ),
+    ],
+)
+async def test_a_resumed_run_with_no_answer_ends_answered_only_on_a_card_it_drew(
+    replies: list[Any], answered: bool
+) -> None:
+    """A resumed run answers the user's reply. Where its response holds no answer, it
+    ends answered on a card it drew itself; the hand-back that opens it, and a card
+    drawn before the hand-back, answered nothing the user replied, so the run fails
+    transiently and the reply is not met with silence."""
+    scripted = ScriptedGenai(replies)
+    drawn: dict[str, Any] = {}
+    orchestrator = orchestrator_agent(
+        build_orchestrator_tools(resolver=_DrawingSearches(drawn), executor=_no_executor)
+    )
+    state: dict[str, Any] = {
+        "surface": "studio",
+        _DRAWN_CARDS_KEY: {"turn": "turn-1", "drawn": drawn},
+    }
+    model = orchestrator_model("gemini-test", client=scripted.client, budget=None)
+    (handed,) = [
+        e
+        async for e in run_orchestrator(
+            orchestrator, state=state, turn_id="turn-1", model=model, opening=Opening("q", TODAY)
+        )
+        if isinstance(e, HandedOff)
+    ]
+
+    resume = run_orchestrator(
+        orchestrator,
+        state=state,
+        turn_id="turn-1",
+        model=model,
+        history=handed.history,
+        hand_back=HandBack(answers="ask_user", result={"result": "DR Congo"}),
+    )
+    if not answered:
+        with pytest.raises(EmptyResponseError):
+            async for _ in resume:
+                pass
+        return
+    assert [e async for e in resume][-1] == Answered(text="")
 
 
 async def test_a_hand_back_for_a_call_that_does_not_wait_is_refused() -> None:
@@ -672,3 +773,222 @@ async def test_a_stop_mid_answer_cancels_the_model_stream() -> None:
         await task
 
     await asyncio.wait_for(closed.wait(), timeout=1)
+
+
+# --- a turn that only takes cards off ------------------------------------------
+
+
+def _canvas_of_two(*, pinned: str | None = None) -> ConversationState:
+    """A canvas with two charts, "Aid to Kenya" (`cmp_01`) and "Aid to Ghana"
+    (`cmp_02`), with `pinned` pinned."""
+    canvas = ConversationState(conversation_id="c1")
+    for cid, title in (("cmp_01", "Aid to Kenya"), ("cmp_02", "Aid to Ghana")):
+        land_component(
+            canvas,
+            {
+                "component_id": cid,
+                "revision": 1,
+                "type": "line_chart",
+                "payload": {"component": {"title": {"text": title}}},
+            },
+        )
+    assert canvas.composition is not None
+    for block in canvas.composition.blocks:
+        block.pinned = block.component_id == pinned
+    return canvas
+
+
+def _removing_tools(canvas: ConversationState) -> Any:
+    async def remove(*, component_ids: list[str], all_cards: bool) -> CardRemoval:
+        return remove_cards(canvas, component_ids, all_cards=all_cards)
+
+    return build_orchestrator_tools(
+        resolver=_Searches(), executor=_no_executor, remove_cards=remove
+    )
+
+
+_REMOVE_FIRST = call_part("remove_cards", {"component_ids": ["cmp_01"]})
+
+
+@pytest.mark.parametrize(
+    ("pinned", "names", "reply_text"),
+    [
+        (None, ["cmp_01"], 'I took "Aid to Kenya" off the canvas.'),
+        (None, ["cmp_01", "cmp_02"], 'I took "Aid to Kenya" and "Aid to Ghana" off the canvas.'),
+        (
+            "cmp_02",
+            ["cmp_01", "cmp_02"],
+            'I took "Aid to Kenya" off the canvas. "Aid to Ghana" is pinned, so it stays. '
+            "To remove it, choose Unpin from Canvas in its menu, then ask again.",
+        ),
+        (
+            "cmp_01",
+            ["cmp_01"],
+            '"Aid to Kenya" is pinned, so it stays. '
+            "To remove it, choose Unpin from Canvas in its menu, then ask again.",
+        ),
+    ],
+)
+async def test_a_turn_whose_only_call_takes_cards_off_ends_on_the_harness_reply(
+    pinned: str | None, names: list[str], reply_text: str
+) -> None:
+    """The model's one response makes a lone `remove_cards` call and no text.
+    The harness writes the reply from the call's answer, naming each card
+    taken off and each pinned card kept by title, and the run ends without a
+    second model call."""
+    canvas = _canvas_of_two(pinned=pinned)
+    scripted = ScriptedGenai(
+        [
+            reply(thought_part("Remove it."), call_part("remove_cards", {"component_ids": names})),
+            reply(text_part("Removed.")),
+        ]
+    )
+
+    events, _ = await _run(scripted, tools=_removing_tools(canvas))
+
+    assert len(scripted.requests) == 1
+    assert _texts(events) == [reply_text]
+    assert events[-1] == Answered(text=reply_text)
+    assert isinstance(events[-3], ToolsAnswered)
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        pytest.param([text_part("Taking it off."), _REMOVE_FIRST], id="text-beside-the-call"),
+        pytest.param([_SEARCH, _REMOVE_FIRST], id="another-call-beside-it"),
+        pytest.param(
+            [call_part("remove_cards", {"component_ids": ["cmp_01", "cmp_01"]}), _SEARCH],
+            id="removal-first-then-another-call",
+        ),
+    ],
+)
+async def test_a_removal_beside_text_or_another_call_keeps_the_model_reply(
+    first: list[types.Part],
+) -> None:
+    canvas = _canvas_of_two()
+    scripted = ScriptedGenai([reply(*first), reply(text_part("Done."))])
+
+    events, _ = await _run(scripted, tools=_removing_tools(canvas))
+
+    assert len(scripted.requests) == 2
+    assert events[-1] == Answered(text="Done.")
+
+
+async def test_a_removal_after_another_call_keeps_the_model_reply() -> None:
+    canvas = _canvas_of_two()
+    scripted = ScriptedGenai([reply(_SEARCH), reply(_REMOVE_FIRST), reply(text_part("Done."))])
+
+    events, _ = await _run(scripted, tools=_removing_tools(canvas))
+
+    assert len(scripted.requests) == 3
+    assert events[-1] == Answered(text="Done.")
+
+
+_KENYA_OFF = 'I took "Aid to Kenya" off the canvas.'
+
+
+@pytest.mark.parametrize(
+    ("replies", "answer"),
+    [
+        pytest.param(
+            [reply(text_part("Taking it off."), _REMOVE_FIRST), empty_reply()],
+            _KENYA_OFF,
+            id="removal-beside-narration",
+        ),
+        pytest.param(
+            [reply(_SEARCH), reply(_REMOVE_FIRST), empty_reply()],
+            _KENYA_OFF,
+            id="removal-after-another-call",
+        ),
+        pytest.param(
+            [
+                reply(text_part("Taking them off."), _REMOVE_FIRST),
+                reply(call_part("remove_cards", {"component_ids": ["cmp_02"]})),
+                empty_reply(),
+            ],
+            f'{_KENYA_OFF} I took "Aid to Ghana" off the canvas.',
+            id="two-removals",
+        ),
+        pytest.param(
+            [
+                reply(
+                    text_part("Taking it off."),
+                    call_part("remove_cards", {"component_ids": ["cmp_99"]}),
+                ),
+                empty_reply(),
+            ],
+            None,
+            id="refused-removal",
+        ),
+    ],
+)
+async def test_a_response_with_no_answer_after_a_removal_ends_on_the_removal_reply(
+    replies: list[Any], answer: str | None
+) -> None:
+    """A response with no answer after the run took a card off the canvas ends the run
+    answered on the harness's reply for each removal, and sends no further request. A
+    removal the reply cannot name took nothing off, so the turn fails as one that
+    showed the user nothing."""
+    canvas = _canvas_of_two()
+    scripted = ScriptedGenai(replies)
+
+    if answer is None:
+        with pytest.raises(EmptyResponseError):
+            await _run(scripted, tools=_removing_tools(canvas))
+        return
+    events, _ = await _run(scripted, tools=_removing_tools(canvas))
+
+    assert len(scripted.requests) == len(replies)
+    assert events[-1] == Answered(text=answer)
+    assert _texts(events)[-1] == answer
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param({"component_ids": ["cmp_99"]}, id="refused"),
+        pytest.param({"component_ids": ["cmp_01", "cmp_99"]}, id="an-id-never-held"),
+        pytest.param({"component_ids": ["cmp_03"]}, id="already-off"),
+    ],
+)
+async def test_a_removal_the_reply_cannot_name_whole_keeps_the_model_reply(
+    args: dict[str, Any],
+) -> None:
+    """A refused call, or one whose answer holds more than cards taken off and
+    pinned cards kept, goes back to the model."""
+    canvas = _canvas_of_two()
+    land_component(
+        canvas,
+        {"component_id": "cmp_03", "revision": 1, "type": "line_chart"},
+    )
+    remove_cards(canvas, ["cmp_03"], all_cards=False)
+    scripted = ScriptedGenai([reply(call_part("remove_cards", args)), reply(text_part("Done."))])
+
+    events, _ = await _run(scripted, tools=_removing_tools(canvas))
+
+    assert len(scripted.requests) == 2
+    assert events[-1] == Answered(text="Done.")
+
+
+async def test_a_removal_reply_ends_the_agent_run_before_it_is_yielded() -> None:
+    """The graph's `orchestrate` node stops reading at `Answered`, and the
+    generator is closed later from another task. The agent's run has closed
+    by then, so closing the generator resets no context variable of it."""
+    canvas = _canvas_of_two()
+    scripted = ScriptedGenai([reply(_REMOVE_FIRST), reply(text_part("Removed."))])
+    run = run_orchestrator(
+        orchestrator_agent(_removing_tools(canvas)),
+        history=None,
+        state={"surface": "studio"},
+        turn_id="turn-1",
+        model=orchestrator_model("gemini-test", client=scripted.client, budget=_budget()),
+        opening=Opening(question="Remove the first chart.", today=TODAY),
+    )
+    async for event in run:
+        if isinstance(event, Answered):
+            break
+
+    await asyncio.create_task(run.aclose())
+
+    assert event == Answered(text='I took "Aid to Kenya" off the canvas.')

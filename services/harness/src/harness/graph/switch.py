@@ -48,6 +48,25 @@ one's name.
 The card names a choice by its row's id (`harness.plan_display.choice_id`),
 which every switch of the conversation keeps.
 
+A switch of the row stating how pins are counted
+(`harness.plan_display.count_choice_id`) moves every pin the row stands for
+to its other count Search already named beside it, a dataset with a
+definition on record, so it posts nothing to Search: every requirement
+stating one of those pins is re-pinned to that pin's other count in one
+revision, with the user's pick held (`_switched_count`).
+
+A switch of the row stating the whole unit a unit question's answer holds
+its parts to (`submission.prices_choice.unit_slot`) re-reads, in the unit
+picked, each series the requirements citing the row pin
+(`harness.graph.orchestrate.reread_in_unit`), which already carries any count
+or scope switch of the card, and re-pins each of those requirements to its
+own pin's read, stating that unit, in one revision (`_switched_unit`). A pin
+Search cannot read in that unit fails the whole switch. A row stating a
+part's whole unit under the part's own prices slot
+(`submission.prices_choice.prices_slot`) cannot be switched, nor can a unit
+row whose requirements state no one unit or pin a series with no block on
+record (`harness.graph.state.unit_row_offers`).
+
 A switch Search refuses (`requested_option_unavailable`,
 `conflicting_requested_options`), or one that fails anywhere else, offers
 the unchanged plan again with `switch_failed` naming the option, the
@@ -66,7 +85,9 @@ A chip under an answer applies one option the same way, with no plan
 (`apply_stored_choice`): the `seed` node posts the stored reading's base
 identity with the switched entries, stores the reading Search compiles,
 fetches it through the orchestrator's `fetch` tool and hands the result to
-the agent, which answers from it with no search.
+the agent, which answers from it with no search. A chip naming another
+count of a part fetches that count, a dataset Search already named, with
+no resubmit (`_apply_other_count`).
 """
 
 from __future__ import annotations
@@ -78,7 +99,7 @@ from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
-from compiler.sources import readable_wire_groups
+from compiler.sources import readable_wire_groups, source_from_spec_block
 from compiler.surface import ToolSurface
 from data_mcp.scope import ScopeEntry
 from orchestrator.call import OrchestratorCall
@@ -105,6 +126,12 @@ from planner.source_reads import run_together
 from planner.tool_results import ProblemCode
 from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
+from submission.prices_choice import (
+    PRICES_SLOT_PREFIX,
+    UNIT_SLOT_PREFIX,
+    absorbed_rows,
+    unabsorbed_parts,
+)
 from submission.service import part_scope, statement
 from translator.discovery import (
     RESOLVED_AT_STATE_PREFIX,
@@ -118,19 +145,38 @@ from translator.discovery import (
 from harness.decision_pick import picks_the_chosen_option
 from harness.graph.events import GraphEvent
 from harness.graph.interfaces import PlannerModel
-from harness.graph.orchestrate import turn_id
+from harness.graph.orchestrate import reread_in_unit, turn_id
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    ORCHESTRATOR_UNIT_REREAD_KEY,
+    ORCHESTRATOR_UNIT_SETTLED_KEY,
     conversation_readings,
+    counted_from,
+    own_block,
+    pin_block,
     readable_plan,
+    record_units_reread,
+    stated_unit,
     store_search,
     stored_mapping,
+    unit_row_offers,
+    unit_rows,
+    units_served,
+)
+from harness.plan_display import (
+    DECISION_CHOICE_PREFIX,
+    chosen_count_decision,
+    chosen_scope_decision,
+    count_options,
+    decision_option_id,
+    listed_together,
+    pinned_choice_id,
+    switchable_decision,
 )
 from harness.plan_display import choice_id as row_choice_id
-from harness.plan_display import chosen_scope_decision, listed_together, pinned_choice_id
 from harness.scope_choices import (
     PartScope,
     ScopeChoice,
@@ -140,9 +186,24 @@ from harness.scope_choices import (
     switch_entries,
 )
 from harness.sentences import StopCode
-from harness.tool_contracts import resolver_digest
+from harness.tool_contracts import HarnessCode, resolver_digest
 from harness.turn.node import Next, Node, NodeCtx
-from harness.turn_records import CHIP_STALE_NOTE, SearchReading, stored_choice
+from harness.turn_records import (
+    CHIP_STALE_NOTE,
+    SearchReading,
+    is_count_choice,
+    stored_choice,
+    stored_count,
+)
+from harness.unit_offer import (
+    offered_unit_refusal,
+    row_units,
+    served_unit,
+    unit_option_id,
+    unit_phrase,
+)
+from harness.unit_switch import UnitRefused, UnitResubmitted
+from harness.wire import RetryMode, UnitChoice, UnitOffer
 
 logger = logging.getLogger(__name__)
 
@@ -151,14 +212,16 @@ _OPTION_UNAVAILABLE = "requested_option_unavailable"
 _SCOPE_REFUSALS = frozenset({_OPTION_UNAVAILABLE, "conflicting_requested_options"})
 
 # The revision refusals a later switch to the same option can escape: the
-# request ran out of wall-clock time, a search could not reach Search, or a
-# compile could not reach the calculation service. Every other refusal of a
+# request ran out of wall-clock time, a search could not reach Search, a
+# compile could not reach the calculation service, or Search's reader of the
+# provider scope the user stated did not answer. Every other refusal of a
 # revision, which calls no model, repeats.
 _RETRYABLE_REVISION_CODES = frozenset(
     {
         StopCode.TURN_WALL_TIME_SPENT.value,
         StopCode.DISCOVERY_UNAVAILABLE.value,
         ProblemCode.SURFACE_UNAVAILABLE.value,
+        ProblemCode.STATED_SCOPE_UNAVAILABLE.value,
     }
 )
 
@@ -175,12 +238,18 @@ _DRAFTING_PREFIXES = ("planner:", "translator:")
 # maps to the value it is put back as when unset, since the readers take the
 # readings and blocks as a list and a mapping. The blocks are the turn's whole
 # spec mapping, which the turn store writes as given (`harness.turn.store`), so
-# a block the revision added is deleted and one it rewrote is put back.
+# a block the revision added is deleted and one it rewrote is put back. A unit
+# row's switch also settles each series it re-read (`harness.graph.orchestrate.
+# reread_in_unit`), so a switch that fails leaves those unsettled, and records
+# what it read the row's unread parts as (`record_units_reread`), which a
+# stopped switch takes back.
 _RESTORED_KEYS: Mapping[str, Any] = {
     "plan": None,
     ORCHESTRATOR_SEARCHES_KEY: [],
     ORCHESTRATOR_SPECS_KEY: {},
     ORCHESTRATOR_SPEC_WARNINGS_KEY: {},
+    ORCHESTRATOR_UNIT_SETTLED_KEY: [],
+    ORCHESTRATOR_UNIT_REREAD_KEY: {},
 }
 
 
@@ -204,13 +273,23 @@ class SwitchFailedError(Exception):
     """A switch or chip that cannot be applied: `code` is the refusal's code,
     `reason`, the message, the one sentence saying why that the card shows
     under the choice, and `retryable` whether the same switch can succeed if
-    asked again."""
+    asked again. `answer` is a chip's fetch that raised inside DFO, as the
+    `fetch` tool answers a raise (`harness.orchestrator_tools.raised_answer`),
+    handed to the agent as its own fetch would be."""
 
-    def __init__(self, reason: str, *, code: str, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        code: str,
+        retryable: bool = False,
+        answer: Mapping[str, Any] | None = None,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.code = code
         self.retryable = retryable
+        self.answer = answer
 
 
 @dataclass(frozen=True)
@@ -259,7 +338,8 @@ def switch_node(*, planner: PlannerModel, definition_surface: ToolSurface) -> No
     """The `switch` node, revising with `planner` and posting through `definition_surface`."""
 
     async def switch(ctx: NodeCtx[GraphEvent], node_input: Any) -> Next:
-        """Apply the switch `node_input` carries (`{"switch": {"choice_id", "option_id"}}`) and offer the plan again.
+        """Apply the switch `node_input` carries (`{"switch": {"choice_id",
+        "option_id"}}`, with `unit` on a unit row's switch) and offer the plan again.
 
         One route out, `"offer"`, to the `approve` node: the revised plan
         with a new revision and `moved`, or the unchanged plan with a
@@ -285,6 +365,7 @@ def switch_node(*, planner: PlannerModel, definition_surface: ToolSurface) -> No
                         plan,
                         choice_id=choice_id,
                         option_id=option_id,
+                        unit=pick.get("unit"),
                         planner=planner,
                         surface=definition_surface,
                     ),
@@ -400,17 +481,45 @@ async def _switched_plan(
     *,
     choice_id: str,
     option_id: str,
+    unit: object = None,
     planner: PlannerModel,
     surface: ToolSurface,
 ) -> dict[str, Any]:
-    """The `approve` payload of `plan` revised for the switch.
+    """The `approve` payload of `plan` revised for the switch, `unit` the
+    unit a unit row's switch names beside `option_id`, when it names one.
 
     Raises:
         SwitchFailedError: If the switch cannot be applied, with the note to show.
     """
     if picks_the_chosen_option(plan, choice_id=choice_id, option_id=option_id):
-        raise SwitchFailedError(
-            "That choice is already on the plan.", code=SCOPE_CHOICE_NOT_APPLIED
+        raise _already_chosen()
+    slot = choice_id.removeprefix(DECISION_CHOICE_PREFIX)
+    if choice_id.startswith(DECISION_CHOICE_PREFIX) and slot.startswith(UNIT_SLOT_PREFIX):
+        return await _switched_unit(
+            ctx,
+            plan,
+            slot,
+            option_id=option_id,
+            unit=unit,
+            planner=planner,
+            surface=surface,
+        )
+    priced = next((d for d in plan.decisions if d.slot == slot), None)
+    if (
+        choice_id.startswith(DECISION_CHOICE_PREFIX)
+        and slot.startswith(PRICES_SLOT_PREFIX)
+        and priced is not None
+        and not switchable_decision(priced)
+    ):
+        # A part's prices row stating a whole unit, as for a part Search
+        # refused to read in the unit its question chose, offers no switch.
+        # A switchable prices row replans with the pick
+        # (`harness.decision_pick`).
+        raise _unit_not_switchable()
+    counted = chosen_count_decision(plan, choice_id)
+    if counted is not None:
+        return await _switched_count(
+            ctx, plan, counted, choice_id=choice_id, option_id=option_id, planner=planner
         )
     clicked = chosen_scope_decision(plan, choice_id)
     if clicked is None or clicked.scope is None:
@@ -535,6 +644,455 @@ async def _switched_plan(
             stated=_statement_of(revised_plan, state),
         ),
     }
+
+
+async def _switched_count(
+    ctx: NodeCtx[GraphEvent],
+    plan: PlannerPlan,
+    decision: Decision,
+    *,
+    choice_id: str,
+    option_id: str,
+    planner: PlannerModel,
+) -> dict[str, Any]:
+    """The `approve` payload of `plan` revised for a switch of its count row
+    (`harness.plan_display.count_choice_id`) to the count `option_id` names.
+
+    The row states how the pins it stands for are counted
+    (`harness.plan_display.listed_together`), each pin `decision` or one
+    listed with it, a windowed copy read as the pin it copies. The row's
+    counts are those every pin offers (`harness.plan_display.count_options`),
+    and each pin's other count is a dataset Search already named beside it,
+    with a definition on record (`_count_spec_ids`), so nothing is posted to
+    Search: every requirement stating any of the pins
+    (`submission.service.statement`) is re-pinned to its pin's other count
+    (`planner.plan.repinned`) in one revision, and the plan is revised with
+    no model call, the user's pick of each count held
+    (`PlannerModel.revise`'s `picked`), so the measure decision admission
+    writes for each new pin is the user's. Nothing else moves.
+
+    Raises:
+        SwitchFailedError: If the row offers no count under `option_id`, no
+            record names that count's spec_id for one of its pins, no
+            requirement states a pin, or the revision is refused.
+    """
+    state = cast(SessionState, ctx.state)
+    to_origin = {copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()}
+    label = next(
+        (o for o in count_options(plan, decision) if decision_option_id(o) == option_id), None
+    )
+    if label is None:
+        raise SwitchFailedError(
+            f"Search does not offer {option_id} for this source.", code=_OPTION_UNAVAILABLE
+        )
+    moves: dict[str, str] = {}
+    for member in listed_together(plan, decision.slot) or (decision,):
+        assert member.fixes is not None and member.fixes.source_spec_id is not None
+        pinned = member.fixes.source_spec_id
+        pin = to_origin.get(pinned, pinned)
+        new = _count_spec_ids(ctx, pin).get(label)
+        if new is None or new == pin:
+            raise SwitchFailedError(
+                f"Search does not offer {label} for this source.", code=_OPTION_UNAVAILABLE
+            )
+        moves[pin] = new
+    stated = _statement_of(plan, state)
+    blocks = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)
+    requirements: list[dict[str, Any]] = []
+    for requirement in stated.evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement):
+            continue
+        new = moves.get(requirement.source_spec_id or "")
+        if new is None:
+            continue
+        block = blocks.get(new) or earlier_block(new)
+        requirements.append(repinned(requirement, new, exact_codes(block)).model_dump(mode="json"))
+    if {r["source_spec_id"] for r in requirements} != set(moves.values()):
+        raise _choice_gone()
+    revised = await planner.revise(
+        ctx=ctx,
+        prior_plan=plan.model_dump(mode="json"),
+        evidence_requirements=requirements,
+        inherits={new: pin for pin, new in moves.items()},
+        picked=tuple(moves.values()),
+    )
+    if "plan" not in revised:
+        refused = revised.get("refused") or {}
+        logger.warning("plan count switch not revised: %s", refused)
+        code = str(refused.get("code") or SCOPE_CHOICE_NOT_APPLIED)
+        raise SwitchFailedError(
+            str(refused.get("reason") or f"The plan could not be revised to count {label}."),
+            code=code,
+            retryable=code in _RETRYABLE_REVISION_CODES,
+        )
+    revised_plan = PlannerPlan.model_validate(revised["plan"])
+    ctx.state["plan"] = revised_plan.model_dump_json()
+    logger.info(
+        "plan count switched: choice_id=%s moves=%s version=%d",
+        choice_id,
+        moves,
+        revised_plan.version,
+    )
+    return {
+        **revised_plan.model_dump(mode="json"),
+        "summary": revised["summary"],
+        "revision": plan_revision(revised_plan),
+        "moved": [],
+    }
+
+
+async def _switched_unit(
+    ctx: NodeCtx[GraphEvent],
+    plan: PlannerPlan,
+    slot: str,
+    *,
+    option_id: str,
+    unit: object,
+    planner: PlannerModel,
+    surface: ToolSurface,
+) -> dict[str, Any]:
+    """The `approve` payload of `plan` revised for a switch of its unit row,
+    the decision under `slot` (`submission.prices_choice.unit_slot`), to the
+    unit picked (`_picked_unit`).
+
+    The plan holds the row: its unit is the one the requirements citing it
+    state (`submission.prices_choice.plan_unit`), and its series are the
+    distinct pins of those requirements as the planner states them
+    (`submission.service.statement`, `harness.graph.state.unit_rows`), which
+    already carry any count or scope switch of the card. The row's offer is
+    the one the card showed, recomputed from those pins' blocks
+    (`harness.graph.state.unit_row_offers`). Each pin is read in the unit
+    picked at once (`_reread_pin`), with the series the unit question's
+    answer fetched for each part of the row the plan has not absorbed
+    (`submission.prices_choice.unabsorbed_parts`) where Search reads it
+    (`_reread_unread`), each series Search read
+    is held as the source of the series it replaces (`_hold_read_sources`),
+    and each such part's read is recorded for a later plan to pin
+    (`harness.graph.state.record_units_reread`) once the revision lands. Every
+    requirement citing the row is re-pinned to its own pin's read
+    (`planner.plan.repinned`) and states the unit. The plan is revised with
+    no model call, the unit picked held for the row (`PlannerModel.revise`'s
+    `units`), and admission writes the row again in that unit
+    (`submission.prices_choice.prices_decisions`).
+
+    Raises:
+        SwitchFailedError: Non-retryable when the plan holds no such row or
+            no requirement cites it, the row offers no unit, or the unit
+            picked lies outside its offer or is the one it holds; as
+            Search's refusal says (`harness.unit_switch.UnitRefused`) when
+            it cannot read a pin in the unit, or for now a series of a part
+            the plan does not read; and as the revision's refusal when it
+            is refused.
+    """
+    state = cast(SessionState, ctx.state)
+    if not any(d.slot == slot for d in plan.decisions):
+        raise _choice_gone()
+    stated = _statement_of(plan, state)
+    covered = [
+        requirement
+        for requirement in stated.evidence_requirements
+        if isinstance(requirement, DatasetRequirement) and slot in requirement.decision_ids
+    ]
+    if not covered:
+        raise _choice_gone()
+    offer = unit_row_offers(state, stated).get(slot)
+    if offer is None:
+        raise _unit_not_switchable()
+    picked = _picked_unit(offer, option_id=option_id, unit=unit)
+    if picked == offer.start:
+        raise _already_chosen()
+    held = stated_unit(picked)
+    if held is None:
+        raise _unit_unavailable(picked, offer)
+    pins = unit_rows(stated)[slot]
+    lead = slot.removeprefix(UNIT_SLOT_PREFIX)
+    served = units_served(state)
+    outside = {
+        part: served[part].spec_id
+        for part in unabsorbed_parts(
+            stated,
+            slot,
+            [part for part, one in served.items() if one.row == lead],
+            rows=absorbed_rows(state),
+        )
+    }
+    unread = [one for one in dict.fromkeys(outside.values()) if one not in pins]
+    series = [*pins, *unread]
+    readings = _readings(ctx)
+    reads = await run_together(
+        [
+            *(_reread_pin(ctx, pin, picked, surface=surface, readings=readings) for pin in pins),
+            *(
+                _reread_unread(ctx, one, picked, surface=surface, readings=readings)
+                for one in unread
+            ),
+        ]
+    )
+    refused = next((read for read in reads if isinstance(read, UnitRefused)), None)
+    if refused is not None:
+        raise SwitchFailedError(
+            refused.reason,
+            code=refused.code or _OPTION_UNAVAILABLE,
+            retryable=refused.retryable,
+        )
+    read_as = {
+        one: read
+        for one, read in zip(series, reads, strict=True)
+        if isinstance(read, UnitResubmitted)
+    }
+    moves = {pin: read.spec_id for pin, read in read_as.items() if pin in pins}
+    _hold_read_sources(ctx, read_as)
+    blocks = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)
+    requirements: list[dict[str, Any]] = []
+    for requirement in covered:
+        new = moves.get(requirement.source_spec_id or "")
+        moved = (
+            repinned(requirement, new, exact_codes(blocks.get(new) or earlier_block(new)))
+            if new is not None and new != requirement.source_spec_id
+            else requirement
+        )
+        requirements.append(moved.model_copy(update={"unit": held}).model_dump(mode="json"))
+    revised = await planner.revise(
+        ctx=ctx,
+        prior_plan=plan.model_dump(mode="json"),
+        evidence_requirements=requirements,
+        inherits={new: old for old, new in moves.items() if new != old},
+        units={slot: held},
+    )
+    words = unit_phrase(picked, offer)
+    if "plan" not in revised:
+        refused_revision = revised.get("refused") or {}
+        logger.warning("plan unit switch not revised: %s", refused_revision)
+        code = str(refused_revision.get("code") or SCOPE_CHOICE_NOT_APPLIED)
+        raise SwitchFailedError(
+            str(refused_revision.get("reason") or f"The plan could not be revised to {words}."),
+            code=code,
+            retryable=code in _RETRYABLE_REVISION_CODES,
+        )
+    revised_plan = PlannerPlan.model_validate(revised["plan"])
+    ctx.state["plan"] = revised_plan.model_dump_json()
+    record_units_reread(
+        state,
+        {
+            part: (read_as[fetched].spec_id, held)
+            for part, fetched in outside.items()
+            if fetched in read_as
+        },
+    )
+    logger.info(
+        "plan unit switched: slot=%s unit=%s moves=%s version=%d",
+        slot,
+        unit_option_id(picked),
+        moves,
+        revised_plan.version,
+    )
+    return {
+        **revised_plan.model_dump(mode="json"),
+        "summary": revised["summary"],
+        "revision": plan_revision(revised_plan),
+        "moved": [],
+    }
+
+
+async def _reread_pin(
+    ctx: NodeCtx[GraphEvent],
+    pin: str,
+    unit: UnitChoice,
+    *,
+    surface: ToolSurface,
+    readings: Sequence[SearchReading],
+) -> UnitResubmitted | UnitRefused | None:
+    """Search's read of the series `pin` in `unit`
+    (`harness.graph.orchestrate.reread_in_unit`), `None` when its block
+    (`harness.graph.state.pin_block`) is served in `unit` as it stands: for
+    another count with no block of its own, when its definition requests
+    the unit.
+
+    The series is posted from the newest of `readings` of it, so a scope a
+    switch read it with stands (`harness.unit_switch.resubmit_unit`), else
+    from its block. A pin a count switch moved to another count of a series
+    (`harness.graph.state.counted_from`) has no reading of its own: it is
+    posted from that series' newest reading, its scope compiled over the
+    count's identity (`_count_reading`).
+
+    Raises:
+        SwitchFailedError: Non-retryable when no block on record states `pin`.
+    """
+    state = cast(SessionState, ctx.state)
+    block = pin_block(state, pin)
+    if block is None:
+        raise _unit_not_switchable()
+    source = counted_from(state, pin) if own_block(state, pin) is None else None
+    # A count's unit is read off its own definition alone: the block offering
+    # it states the unit of its own count.
+    served = served_unit({"definition": block.get("definition")} if source else block)
+    if served == unit:
+        return None
+    reading = next((r for r in readings if r.spec_id == pin), None)
+    if reading is None and source is not None:
+        reading = _count_reading(next((r for r in readings if r.spec_id == source), None), block)
+    label = (reading.text if reading is not None else None) or pin
+    return await reread_in_unit(
+        state, surface, reading=reading, block=block, unit=unit, label=label
+    )
+
+
+async def _reread_unread(
+    ctx: NodeCtx[GraphEvent],
+    series: str,
+    unit: UnitChoice,
+    *,
+    surface: ToolSurface,
+    readings: Sequence[SearchReading],
+) -> UnitResubmitted | UnitRefused | None:
+    """`_reread_pin` for the series a unit question's answer fetched for a
+    part of the row the plan does not read: `None` when no block on record
+    states it or Search refuses it in `unit` for good. The row offers what
+    its pins convert into (`harness.graph.state.unit_row_offers`), so such a
+    part cannot hold the switch back; with no read in `unit`, it sits on no
+    row (`submission.prices_choice.plan_held_choices`). A refusal the same
+    switch can escape (`UnitRefused.retryable`) is answered as it stands, so
+    the switch fails and can be asked again, and the part is not left off
+    the row by a passing fault."""
+    if pin_block(cast(SessionState, ctx.state), series) is None:
+        return None
+    read = await _reread_pin(ctx, series, unit, surface=surface, readings=readings)
+    if isinstance(read, UnitRefused):
+        return read if read.retryable else None
+    return read
+
+
+def _count_reading(reading: SearchReading | None, block: Mapping[str, Any]) -> SearchReading | None:
+    """`reading`, of the series a count switch moved a pin from, as the read
+    of that pin, the other count whose definition `block` states: its scope,
+    when it holds choices, compiled over the count's identity in place of
+    the series' base, so a scope switch read before the count switch stands
+    and Search answers with the scope's choices again, which a resubmit of
+    the count's identity alone leaves out."""
+    if reading is None or reading.scope is None or not reading.scope.choices:
+        return reading
+    identity = (block.get("definition") or {}).get("identity")
+    if not isinstance(identity, Mapping):
+        return reading.model_copy(update={"scope": None})
+    scope = reading.scope
+    base = scope.base.model_copy(update={"identity": dict(identity)})
+    return reading.model_copy(update={"scope": scope.model_copy(update={"base": base})})
+
+
+def _hold_read_sources(ctx: NodeCtx[GraphEvent], reads: Mapping[str, UnitResubmitted]) -> None:
+    """Hold each series Search read a unit row's pin as (`reads`, by the pin)
+    as a pin source (`planner.plan.pin_sources`), the pin's source replaced
+    by it (`_pin_source`), as a scope switch holds what it compiles.
+    Admission and the revision's discovery read the re-pinned requirement's
+    dataset from that block (`translator.discovery`), so a series Search
+    answered for scope entries, which a search for its identity alone does
+    not find again, is found."""
+    state = cast(SessionState, ctx.state)
+    sources = pin_sources(state)
+    readings = _readings(ctx)
+    held: dict[str, PinSource] = {}
+    for pin, result in reads.items():
+        reading = next((r for r in readings if r.spec_id == result.spec_id), None)
+        if reading is None:
+            continue
+        digest = resolver_digest({"parts": [dict(result.part)]})
+        held[result.spec_id] = _pin_source(sources.get(pin), digest, reading)
+    if held:
+        save_pin_sources(state, {**sources, **held})
+
+
+def _picked_unit(offer: UnitOffer, *, option_id: str, unit: object) -> UnitChoice:
+    """The unit a switch of a unit row offering `offer` picks: `unit` when
+    the answer states one, which `option_id` must name
+    (`harness.unit_offer.unit_option_id`), else the whole unit the row lists
+    under `option_id` (`row_units`).
+
+    Raises:
+        SwitchFailedError: Non-retryable when `unit` is no unit or not the
+            one `option_id` names, `option_id` names no unit the row lists,
+            or the unit lies outside `offer` (`offered_unit_refusal`).
+    """
+    if unit is not None:
+        try:
+            picked = UnitChoice.model_validate(unit)
+        except ValidationError:
+            raise SwitchFailedError(
+                "That unit is not one the plan can be stated in.", code=_OPTION_UNAVAILABLE
+            ) from None
+        if unit_option_id(picked) != option_id:
+            raise SwitchFailedError("That unit is not the option picked.", code=_OPTION_UNAVAILABLE)
+    else:
+        if (found := row_units(offer).get(option_id)) is None:
+            raise SwitchFailedError(
+                "That unit is not offered for these figures.", code=_OPTION_UNAVAILABLE
+            )
+        picked = found
+    if offered_unit_refusal(offer, picked) is not None:
+        raise _unit_unavailable(picked, offer)
+    return picked
+
+
+def _unit_unavailable(unit: UnitChoice, offer: UnitOffer) -> SwitchFailedError:
+    """The refusal of a switch to `unit`, which `offer` does not hold or no plan can state."""
+    return SwitchFailedError(
+        f"Search does not offer {unit_phrase(unit, offer)} for these figures.",
+        code=_OPTION_UNAVAILABLE,
+    )
+
+
+def _unit_not_switchable() -> SwitchFailedError:
+    """The refusal of a switch of a whole unit no re-read can move: a row
+    under a part's prices slot, or a unit row whose requirements state no
+    one unit or pin a series with no block on record
+    (`harness.graph.state.unit_row_offers`)."""
+    return SwitchFailedError(
+        "This plan's unit cannot be changed here. Ask for the unit you want.",
+        code=SCOPE_CHOICE_NOT_APPLIED,
+    )
+
+
+def _already_chosen() -> SwitchFailedError:
+    """The refusal of a switch to the option its row already holds."""
+    return SwitchFailedError("That choice is already on the plan.", code=SCOPE_CHOICE_NOT_APPLIED)
+
+
+def _count_spec_ids(ctx: NodeCtx[GraphEvent], pin: str) -> dict[str, str]:
+    """Each count a pin of `pin` may be counted as, by label, with its spec_id.
+
+    Read from the elected measure (`planner.workflow.ElectedMeasure`) of the
+    block on record for `pin` (`planner.plan.held_sources`, else this turn's
+    or an earlier turn's search): its own label for `pin` and each other
+    count with the spec_id Search gave it. A pin that is itself one of those
+    other counts may hold no block, as when the planner pinned it from the
+    source that offered it; the counts are then read from the block of a
+    source that offers `pin`. Empty when no block on record names `pin`'s
+    counts.
+    """
+    state = cast(SessionState, ctx.state)
+    blocks = {
+        spec_id: block
+        for spec_id, source in held_sources(state).items()
+        if (block := source.spec_block(spec_id)) is not None
+    }
+    for spec_id, block in stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY).items():
+        blocks.setdefault(spec_id, block)
+    if pin not in blocks and (earlier := earlier_block(pin)) is not None:
+        blocks[pin] = earlier
+    offers: list[tuple[str, Mapping[str, Any]]] = [(pin, blocks[pin])] if pin in blocks else []
+    offers += [(spec_id, block) for spec_id, block in blocks.items() if spec_id != pin]
+    for spec_id, block in offers:
+        try:
+            elected = source_from_spec_block(block).elected_measure
+        except ValueError:
+            continue
+        if elected is None:
+            continue
+        counts = {elected.label: spec_id} | {
+            other.label: other.spec_id for other in elected.other_counts()
+        }
+        if pin in counts.values():
+            return counts
+    return {}
 
 
 def _statement_of(plan: PlannerPlan, state: SessionState) -> PlannerPlan:
@@ -1001,9 +1559,9 @@ async def apply_stored_choice(
     fetched the reading, with that fetch's arguments (`FetchReading.args`:
     its places, period and reading of the family), so the chip changes the
     chosen option alone. Its frames, served scope and step reach the turn as
-    any fetch's do. The chip applied is
+    any fetch's do. Once every fetch returned data, the chip applied is
     recorded under `ORCHESTRATOR_APPLIED_KEY`, with the option it moved from
-    and the spec_id Search compiled.
+    and the spec_id Search compiled, and its step succeeds.
 
     A chip that cannot be applied, because no reading holds the choice or
     the newest one is not `spec_id` (`CHIP_STALE_NOTE`, as the studio refuses
@@ -1012,11 +1570,24 @@ async def apply_stored_choice(
     switch shows, and the `APPLY_CHOICE_STEP_TOOL` step fails with it under
     the code the switch reports (`SwitchFailedError.code`), to be retried
     after a delay where the same chip can succeed later
-    (`SwitchFailedError.retryable`) and otherwise not to be retried.
+    (`SwitchFailedError.retryable`) and otherwise not to be retried. A fetch
+    refused fails the chip the same way under the fetch's code (`_fetched`),
+    with nothing recorded as applied.
+
+    A count chip (`is_count_choice`) is applied by `_apply_other_count`.
 
     Returns:
         `{"status", "text"}` for the `orchestrate` node.
     """
+    if is_count_choice(choice_id):
+        return await _apply_other_count(
+            ctx,
+            choice_id=choice_id,
+            option_id=option_id,
+            spec_id=spec_id,
+            fetch=fetch,
+            record_step=record_step,
+        )
     args = _Pick(choice_id=choice_id, option_id=option_id)
     reading, choice = stored_choice(conversation_readings(ctx.state), choice_id) or (None, None)
     option = next((o for o in choice.options if o.option_id == option_id), None) if choice else None
@@ -1050,33 +1621,7 @@ async def apply_stored_choice(
             label=label,
         )
     except SwitchFailedError as exc:
-        note = str(exc)
-        logger.info(
-            "scope choice not applied: choice_id=%s option_id=%s code=%s",
-            choice_id,
-            option_id,
-            exc.code,
-        )
-        _apply_step(
-            record_step,
-            args=args,
-            result={
-                "outcome": "refusal",
-                "refusal": {
-                    "code": exc.code,
-                    "retry_mode": "retry_after_delay" if exc.retryable else "do_not_retry",
-                    "fix": None,
-                    "message": note,
-                },
-            },
-        )
-        return {
-            "status": f"Counting {label}",
-            "text": (
-                f"The user asked to count {label}, and it was not applied: {note} Tell the "
-                "user so in a sentence. The earlier answer stands."
-            ),
-        }
+        return _not_applied(record_step, args=args, label=label, error=exc)
     assert reading.scope is not None
     store_search(
         ctx.state,
@@ -1085,6 +1630,10 @@ async def apply_stored_choice(
         held_open=[reading.open_roles],
         share_sides=[reading.share_over],
     )
+    try:
+        fetched = await _fetched(ctx, fetch, spec_id=switched.spec_id, reading=reading, label=label)
+    except SwitchFailedError as exc:
+        return _not_applied(record_step, args=args, label=label, error=exc)
     ctx.state[ORCHESTRATOR_APPLIED_KEY] = {
         **args,
         "from_option_id": choice.active,
@@ -1101,16 +1650,6 @@ async def apply_stored_choice(
         args=args,
         result={"outcome": "ok", "frame_refs": [], "summary": f"counting {label}"},
     )
-    # One fetch per way the answer fetched the reading, one after another, as
-    # the agent's own calls run.
-    fetched = [
-        await fetch(
-            spec_id=switched.spec_id,
-            call=OrchestratorCall(state=ctx.state, turn_id=turn_id(ctx.key)),
-            **shaped,
-        )
-        for shaped in (reading.fetch.args if reading.fetch is not None else ()) or ({},)
-    ]
     held = choice.active_option
     moved = [
         f"Search also moved {entry['from_label']} to {entry['to_label']}: {entry['reason']}"
@@ -1128,6 +1667,169 @@ async def apply_stored_choice(
         "status": f"Counting {label}",
         "text": "\n".join([lead, *moved, *(json.dumps(result) for result in fetched)]),
     }
+
+
+async def _apply_other_count(
+    ctx: NodeCtx[GraphEvent],
+    *,
+    choice_id: str,
+    option_id: str,
+    spec_id: str,
+    fetch: Callable[..., Awaitable[dict[str, Any]]],
+    record_step: Callable[..., None] | None,
+) -> dict[str, str]:
+    """Apply a count chip: read the part the answer read as spec_id
+    `spec_id` as `option_id`, one of the other counts its reading offers
+    (`harness.turn_records.stored_count`), and return the hand-back the
+    agent answers from.
+
+    The other count is a dataset Search already named, with a definition on
+    record from the turn that offered it
+    (`harness.studio_state.ConversationState.recorded_identity`), so nothing
+    is resubmitted. Its spec_id is fetched with the orchestrator's `fetch`
+    tool once for each way the answer fetched the part
+    (`FetchReading.args`), and the fetch reads it as the offering reading's
+    other count (`SearchReading.sibling_of`). Once every fetch returned
+    data, the chip applied is recorded under `ORCHESTRATOR_APPLIED_KEY`, with
+    the count it moved from and the spec_id it moved to.
+
+    A chip whose part reads a count other than `spec_id` (`CHIP_STALE_NOTE`), or
+    whose option is not one of the other counts offered, fetches nothing and
+    fails its step, as `apply_stored_choice` fails a scope chip. A fetch
+    refused fails it the same way under the fetch's code (`_fetched`).
+    """
+    args = _Pick(choice_id=choice_id, option_id=option_id)
+    counted = stored_count(conversation_readings(ctx.state), choice_id)
+    reading = counted.reading if counted is not None else None
+    other = (
+        next((o for o in reading.alternatives if o.spec_id == option_id), None)
+        if reading is not None
+        else None
+    )
+    label = other.label if other is not None else option_id
+    try:
+        if counted is None or reading is None:
+            raise SwitchFailedError(
+                "That choice is no longer on this answer.", code=SCOPE_CHOICE_NOT_APPLIED
+            )
+        if reading.spec_id != spec_id or counted.current != spec_id:
+            raise SwitchFailedError(CHIP_STALE_NOTE, code=SCOPE_CHOICE_NOT_APPLIED)
+        if other is None:
+            raise SwitchFailedError(
+                f"Search does not offer {label} for this source.", code=_OPTION_UNAVAILABLE
+            )
+        fetched = await _fetched(ctx, fetch, spec_id=option_id, reading=reading, label=label)
+    except SwitchFailedError as exc:
+        return _not_applied(record_step, args=args, label=label, error=exc)
+    ctx.state[ORCHESTRATOR_APPLIED_KEY] = {**args, "from_option_id": spec_id, "spec_id": option_id}
+    logger.info(
+        "count choice applied: choice_id=%s option_id=%s from=%s", choice_id, option_id, spec_id
+    )
+    _apply_step(
+        record_step,
+        args=args,
+        result={"outcome": "ok", "frame_refs": [], "summary": f"counting {label}"},
+    )
+    held = f" in place of {reading.counted_as}" if reading.counted_as else ""
+    lead = (
+        f'The user chose to count "{reading.text or reading.sentence or spec_id}" as {label}'
+        f"{held}. Search names that count as {option_id}, and its data was fetched for you "
+        "below, once for each way the answer fetched it. Answer the user's last question "
+        "again from these figures and say what the change did to them. Search and plan are "
+        "not available this turn."
+    )
+    return {
+        "status": f"Counting {label}",
+        "text": "\n".join([lead, *(json.dumps(result) for result in fetched)]),
+    }
+
+
+# The codes of a fetch refusal that can pass if the same fetch is made later:
+# `fetch` words these "Fetch it again" and states no retry mode of its own.
+_RETRYABLE_FETCH_CODES = frozenset(
+    {HarnessCode.TRANSIENT_UNAVAILABLE.value, HarnessCode.DEADLINE_EXCEEDED.value}
+)
+
+
+async def _fetched(
+    ctx: NodeCtx[GraphEvent],
+    fetch: Callable[..., Awaitable[dict[str, Any]]],
+    *,
+    spec_id: str,
+    reading: SearchReading,
+    label: str,
+) -> list[dict[str, Any]]:
+    """The results of fetching `spec_id` with the orchestrator's `fetch` tool
+    once for each way the answer fetched `reading` (`FetchReading.args`),
+    one after another, as the agent's own calls run.
+
+    Raises:
+        SwitchFailedError: At the first fetch refused (a result stating a
+            `code`), under that code, retryable when the refusal's retry
+            mode or its code says the same fetch can pass later. A fetch
+            that raised (`HarnessCode.RAISED`) carries its answer
+            (`SwitchFailedError.answer`). Later fetches are not made.
+    """
+    fetched: list[dict[str, Any]] = []
+    for shaped in (reading.fetch.args if reading.fetch is not None else ()) or ({},):
+        result = await fetch(
+            spec_id=spec_id,
+            call=OrchestratorCall(state=ctx.state, turn_id=turn_id(ctx.key)),
+            **shaped,
+        )
+        code = result.get("code")
+        if code:
+            retryable = (
+                result.get("retry_mode") == RetryMode.RETRY_AFTER_DELAY
+                or code in _RETRYABLE_FETCH_CODES
+            )
+            raise SwitchFailedError(
+                f"The data counted as {label} could not be fetched"
+                f"{' just now' if retryable else ''}.",
+                code=str(code),
+                retryable=retryable,
+                answer=result if code == HarnessCode.RAISED else None,
+            )
+        fetched.append(result)
+    return fetched
+
+
+def _not_applied(
+    record_step: Callable[..., None] | None,
+    *,
+    args: _Pick,
+    label: str,
+    error: SwitchFailedError,
+) -> dict[str, str]:
+    """Fail the `APPLY_CHOICE_STEP_TOOL` step of a chip that cannot be applied
+    with `error`, and return the hand-back telling the agent so, followed by
+    the answer of a fetch that raised (`SwitchFailedError.answer`)."""
+    note = str(error)
+    logger.info(
+        "scope choice not applied: choice_id=%s option_id=%s code=%s",
+        args["choice_id"],
+        args["option_id"],
+        error.code,
+    )
+    _apply_step(
+        record_step,
+        args=args,
+        result={
+            "outcome": "refusal",
+            "refusal": {
+                "code": error.code,
+                "retry_mode": "retry_after_delay" if error.retryable else "do_not_retry",
+                "fix": None,
+                "message": note,
+            },
+        },
+    )
+    lead = (
+        f"The user asked to count {label}, and it was not applied: {note} Tell the "
+        "user so in a sentence. The earlier answer stands."
+    )
+    raised = [json.dumps(error.answer)] if error.answer is not None else []
+    return {"status": f"Counting {label}", "text": "\n".join([lead, *raised])}
 
 
 def _apply_step(

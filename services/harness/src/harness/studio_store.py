@@ -29,20 +29,27 @@ different groups never conflict:
   transaction, fenced on the segment.
 - `mutate_composition` writes the canvas column alone for each
   `/composition` edit, unfenced, and leaves `version` alone.
-- `renew` and `request_cancel` each update the lease columns in one
+- `renew` and `request_cancel` each update the lease columns with a
   conditional statement and leave `version` alone. `request_cancel` sets
-  the boolean `lease_cancel`, as does any writer that knows only that flag.
+  the boolean `lease_cancel`, as does any writer that knows only that flag,
+  or, given the turn the Stop is for, records the Stop itself, running its
+  update again when a lease on that turn goes live between statements.
 
-A Stop names a turn. The next write of the lease columns after
-`request_cancel` (a renewal, a claim save, a closing write, a dropped lease)
-clears `lease_cancel` and records the Stop as a fresh `stop_id` naming the
-row's turn index as stored before that write (`stop_turn`), in the same
-statement. Whether a Stop is live for the row's turn is one predicate
+A Stop names a turn. The next write of the lease columns after a
+`request_cancel` that set the flag (a renewal, a claim save, a closing
+write, a dropped lease) clears `lease_cancel` and records the Stop as a
+fresh `stop_id` naming the row's turn index as stored before that write
+(`stop_turn`), in the same statement. A `request_cancel` given a turn index
+writes `stop_id` and `stop_turn` at once, and only while the row's turn
+index is that turn. Whether a Stop is live for the row's turn is one predicate
 (`StopState.live`). Every reader locks the row first and reads the turn's
 cursor in a later statement, so it sees every write committed before its
 lock. Closing the turn ends its Stop, whatever the status, and no write marks
 a Stop read. A claim save that starts or resumes work refuses while a Stop is
-live (`StopPending`), so the turn index does not move past a live Stop.
+live (`StopPending`), so the turn index does not move past a live Stop. A
+Stop naming a turn that lands on a lease claimed for the next turn is acted
+on by the save that begins that turn, which closes the named turn
+`cancelled` (`stop_names_turn`).
 
 Every canvas writer holds the row lock, so each applies its change to the
 canvas as stored. Lease expiry is compared against the database's clock in
@@ -115,6 +122,8 @@ from harness.db.commit import (
 from harness.db.jsonb import json_or_none, to_json_param
 from harness.fatal_codes import recorded_code
 from harness.graph.state import (
+    ASK_FOR_QUESTION_KEY,
+    NEW_QUESTION_KEY,
     ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -139,8 +148,25 @@ from harness.studio_state import (
     _wire_id,
 )
 from harness.tool_contracts import HarnessCode
-from harness.turn.store import CLOSED, Cursor, TurnStatus, cursor_at, finish_on
-from harness.wire import STUDIO_FRAME_ADAPTER, CompositionManifest, ErrorCode, PlanProposed
+from harness.turn.store import (
+    CLOSED,
+    Cursor,
+    CursorStale,
+    TurnStatus,
+    close_unleased_on,
+    cursor_at,
+    finish_on,
+)
+from harness.unit_offer import whole_unit_options
+from harness.wire import (
+    STUDIO_FRAME_ADAPTER,
+    CompositionManifest,
+    ElicitationInput,
+    ErrorCode,
+    PlanProposed,
+    UnitOffer,
+    declared_features,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +185,7 @@ _KEY_PENDING = "pending"
 _KEY_PLAN_VERSION_IDS = "plan_version_ids"
 _KEY_LATEST_PLAN_VERSION = "latest_plan_version"
 _KEY_AUTO_ADD = "auto_add"
+_KEY_CLIENT_FEATURES = "client_features"
 _KEY_TIMED_OUT_CALLS = "timed_out_calls"
 _KEY_TURN_USER_MESSAGE = "turn_user_message"
 _KEY_TURN_USER_WORDS = "turn_user_words"
@@ -169,6 +196,7 @@ _KEY_TURN_PLANS = "turn_plans"
 _KEY_TURN_READINGS = "turn_readings"
 _KEY_TURN_APPLIED_CHOICE = "turn_applied_choice"
 _KEY_TURN_CHOICE_BASELINE = "turn_choice_baseline"
+_KEY_TURN_APPROVED = "turn_approved"
 _KEY_TURN_USAGE = "turn_usage"
 _SCALAR_KEYS = frozenset(
     {
@@ -178,6 +206,7 @@ _SCALAR_KEYS = frozenset(
         _KEY_PLAN_VERSION_IDS,
         _KEY_LATEST_PLAN_VERSION,
         _KEY_AUTO_ADD,
+        _KEY_CLIENT_FEATURES,
         _KEY_TIMED_OUT_CALLS,
         _KEY_TURN_USER_MESSAGE,
         _KEY_TURN_USER_WORDS,
@@ -188,6 +217,7 @@ _SCALAR_KEYS = frozenset(
         _KEY_TURN_READINGS,
         _KEY_TURN_APPLIED_CHOICE,
         _KEY_TURN_CHOICE_BASELINE,
+        _KEY_TURN_APPROVED,
         _KEY_TURN_USAGE,
     }
 )
@@ -334,15 +364,7 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             "kind": p.kind,
             "plan_version": p.plan_version,
             "plan_revision": p.plan_revision,
-            "questions": [
-                {
-                    "id": q.id,
-                    "question": q.question,
-                    "options": dict(q.options),
-                    "skippable": q.skippable,
-                }
-                for q in p.questions
-            ],
+            "questions": [_stored_question(q) for q in p.questions],
             "skippable": p.skippable,
             "legacy": p.legacy,
             "step_order": list(p.step_order),
@@ -359,25 +381,188 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 }
                 for choice_id, choice in p.choices.items()
             },
-            # `new_plan` is stored beside the card. An instance rolled back to a
-            # model without it cannot load a stored card that holds it, and
-            # ignores an unknown key of the entry.
-            "card": (
+            # `new_plan` is stored beside the card, and each decision's `unit`
+            # and each unit question's offer beside the card and the frames
+            # (`_units_apart`, `_unit_questions_apart`). An instance rolled back
+            # to a model without them
+            # cannot load a stored card or frame that holds them, and ignores
+            # an unknown key of the entry.
+            **_units_apart(
+                "card",
                 p.card.model_dump(mode="json", exclude_none=True, exclude={"new_plan"})
                 if p.card
-                else None
+                else None,
             ),
             "card_new_plan": bool(p.card and p.card.new_plan),
             # Written only when set: an entry with no admitted run has no key.
             **({"admitted_run": p.admitted_run} if p.admitted_run is not None else {}),
             # Written only when set, as the wire sends each frame.
             **(
-                {"frames": [frame.model_dump(mode="json", exclude_none=True) for frame in p.frames]}
+                _frames_apart(
+                    [frame.model_dump(mode="json", exclude_none=True) for frame in p.frames]
+                )
                 if p.frames
                 else {}
             ),
         }
         for interrupt_id, p in pending.items()
+    }
+
+
+def _units_apart(key: str, frame: dict[str, Any] | None) -> dict[str, Any]:
+    """`frame` under `key` with no decision's `unit`, and each unit taken out,
+    by its decision's id, under `<key>_units` when there is one; `_units_back`
+    puts them back."""
+    if frame is None or not any("unit" in d for d in frame.get("decisions") or ()):
+        return {key: frame}
+    decisions = frame["decisions"]
+    return {
+        key: {
+            **frame,
+            "decisions": [{k: v for k, v in d.items() if k != "unit"} for d in decisions],
+        },
+        f"{key}_units": {d["id"]: d["unit"] for d in decisions if "unit" in d},
+    }
+
+
+def _frames_apart(frames: list[dict[str, Any]]) -> dict[str, Any]:
+    """`frames` under `"frames"`, each with no decision's `unit` and no unit question's
+    offer, each frame's units taken out, by its index, under `"frames_units"`, and its
+    unit questions' offers under `"frames_unit_questions"`, when there is one
+    (`_units_apart`, `_unit_questions_apart`)."""
+    asked = [_unit_questions_apart(frame) for frame in frames]
+    apart = [_units_apart("frame", frame) for frame, _ in asked]
+    units = {
+        str(index): one["frame_units"] for index, one in enumerate(apart) if "frame_units" in one
+    }
+    offers = {str(index): one for index, (_, one) in enumerate(asked) if one}
+    return {
+        "frames": [one["frame"] for one in apart],
+        **({"frames_units": units} if units else {}),
+        **({"frames_unit_questions": offers} if offers else {}),
+    }
+
+
+def _units_back(frame: dict[str, Any], units: Mapping[str, Any] | None) -> dict[str, Any]:
+    """`frame` with each decision's `unit` from `units`, by the decision's id."""
+    if not units:
+        return frame
+    return {
+        **frame,
+        "decisions": [
+            {**d, "unit": units[d["id"]]} if d.get("id") in units else d
+            for d in frame.get("decisions") or ()
+        ],
+    }
+
+
+# The key of a stored question that was a unit question (`_stored_question`).
+_OWN_INPUT = "own_input"
+
+
+def _stored_question(question: _PendingQuestion) -> dict[str, Any]:
+    """`question` as the conversation row keeps it. A unit question is kept in the
+    form a client that renders no unit question is asked it: a `single_select` over
+    the offer's whole units, with the offer and `native_input` `unit`, so a loader
+    whose models know no unit question reads an ordinary pick, and one that knows
+    the fallback answers it as a unit (`harness.studio._native_answer`). `own_input`
+    names its own form, which `_loaded_question` restores."""
+    stored: dict[str, Any] = {
+        "id": question.id,
+        "question": question.question,
+        "options": dict(question.options),
+        "skippable": question.skippable,
+        "input": question.input.value,
+        **({"unit": question.unit.model_dump(mode="json")} if question.unit is not None else {}),
+        **(
+            {"native_input": question.native_input.value}
+            if question.native_input is not None
+            else {}
+        ),
+    }
+    if question.input is ElicitationInput.UNIT and question.unit is not None:
+        stored |= {
+            "options": whole_unit_options(question.unit),
+            "input": ElicitationInput.SINGLE_SELECT.value,
+            "native_input": ElicitationInput.UNIT.value,
+            _OWN_INPUT: ElicitationInput.UNIT.value,
+        }
+    return stored
+
+
+def _loaded_question(stored: Mapping[str, Any]) -> _PendingQuestion:
+    """The question `_stored_question` kept, a unit question in its own form again,
+    listing its whole units as options, so a page that was sent it as a pick answers
+    it (`harness.studio._answer_kinds`)."""
+    own = stored.get(_OWN_INPUT) == ElicitationInput.UNIT.value
+    return _PendingQuestion(
+        id=stored["id"],
+        question=stored["question"],
+        # A unit question keeps its whole units, which a page sent it as a pick answers.
+        options=dict(stored["options"]),
+        skippable=stored["skippable"],
+        # A question kept before inputs were stored is single-select.
+        input=ElicitationInput.UNIT
+        if own
+        else ElicitationInput(stored.get("input", ElicitationInput.SINGLE_SELECT)),
+        unit=UnitOffer.model_validate(stored["unit"]) if stored.get("unit") else None,
+        native_input=(
+            ElicitationInput(stored["native_input"])
+            if stored.get("native_input") and not own
+            else None
+        ),
+    )
+
+
+def _unit_questions_apart(frame: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """`frame` with each unit question in the form a client that renders no unit
+    question is sent it: a `single_select` over the offer's whole units with no free
+    text and no offer (`whole_unit_options`). The offers are taken out, by question
+    id, and `_unit_questions_back` puts them back. A loader whose models know no unit
+    question, and one that serves the fallback, then serve and answer the question as
+    the pending entry keeps it (`_stored_question`). The offers sit under a key of
+    their own, since a loader that gives every frame with a `frames_units` entry a
+    `decisions` list must still load an elicitation frame, which refuses one."""
+    offers = {
+        question["id"]: question["unit"]
+        for question in frame.get("questions") or ()
+        if "unit" in question
+    }
+    if not offers:
+        return frame, {}
+    questions = [
+        {k: v for k, v in question.items() if k != "unit"}
+        | {
+            "input": ElicitationInput.SINGLE_SELECT.value,
+            "options": [
+                {"id": option_id, "label": label}
+                for option_id, label in whole_unit_options(
+                    UnitOffer.model_validate(offers[question["id"]])
+                ).items()
+            ],
+            "allow_free_text": False,
+        }
+        if question["id"] in offers
+        else question
+        for question in frame["questions"]
+    ]
+    return {**frame, "questions": questions}, offers
+
+
+def _unit_questions_back(frame: dict[str, Any], offers: Mapping[str, Any] | None) -> dict[str, Any]:
+    """`frame` with each question `offers` names a unit question again, its offer
+    restored and its fallback options dropped (`_unit_questions_apart`)."""
+    if not offers:
+        return frame
+    return {
+        **frame,
+        "questions": [
+            {k: v for k, v in question.items() if k != "options"}
+            | {"input": ElicitationInput.UNIT.value, "unit": offers[question["id"]]}
+            if question.get("id") in offers
+            else question
+            for question in frame.get("questions") or ()
+        ],
     }
 
 
@@ -403,26 +588,27 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         },
         card=(
             PlanProposed.model_validate(
-                {**entry["card"], "new_plan": True if entry.get("card_new_plan") else None}
+                {
+                    **_units_back(entry["card"], entry.get("card_units")),
+                    "new_plan": True if entry.get("card_new_plan") else None,
+                }
             )
             if entry.get("card")
             else None
         ),
         admitted_run=entry.get("admitted_run"),
         frames=tuple(
-            STUDIO_FRAME_ADAPTER.validate_python(frame) for frame in entry.get("frames") or ()
+            STUDIO_FRAME_ADAPTER.validate_python(
+                _unit_questions_back(
+                    _units_back(frame, (entry.get("frames_units") or {}).get(str(index))),
+                    (entry.get("frames_unit_questions") or {}).get(str(index)),
+                )
+            )
+            for index, frame in enumerate(entry.get("frames") or ())
         ),
     )
     if "questions" in entry:
-        pending.questions = tuple(
-            _PendingQuestion(
-                id=q["id"],
-                question=q["question"],
-                options=dict(q["options"]),
-                skippable=q["skippable"],
-            )
-            for q in entry["questions"]
-        )
+        pending.questions = tuple(_loaded_question(q) for q in entry["questions"])
         pending.skippable = entry["skippable"]
         pending.legacy = entry["legacy"]
     elif pending.kind == "elicitation":
@@ -461,6 +647,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_LATEST_PLAN_VERSION: state.latest_plan_version,
         _KEY_SEGMENT: _serialize_segment(state.segment) if state.segment is not None else None,
         _KEY_AUTO_ADD: state.auto_add,
+        _KEY_CLIENT_FEATURES: sorted(state.client_features),
         _KEY_TIMED_OUT_CALLS: sorted(state.timed_out_calls),
         _KEY_TURN_USER_MESSAGE: state.turn_user_message,
         _KEY_TURN_USER_WORDS: state.turn_user_words,
@@ -471,6 +658,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_TURN_READINGS: state.turn_readings,
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
         _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
+        _KEY_TURN_APPROVED: state.turn_approved,
         _KEY_TURN_USAGE: dataclasses.asdict(state.turn_usage),
     }
     for index, turn in enumerate(state.turns):
@@ -520,6 +708,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.segment = _deserialize_segment(value)
         elif key == _KEY_AUTO_ADD:
             state.auto_add = value
+        elif key == _KEY_CLIENT_FEATURES:
+            state.client_features = declared_features(list(value or ()))
         elif key == _KEY_TIMED_OUT_CALLS:
             state.timed_out_calls = set(value)
         elif key == _KEY_TURN_USER_MESSAGE:
@@ -540,6 +730,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_applied_choice = dict(value) if value else None
         elif key == _KEY_TURN_CHOICE_BASELINE:
             state.turn_choice_baseline = dict(value or {})
+        elif key == _KEY_TURN_APPROVED:
+            state.turn_approved = list(value or ())
         elif key == _KEY_TURN_USAGE:
             pass  # after the loop, once `trace_id` holds its value from this delta
         elif key.startswith(_TURN_ITEM_PREFIX):
@@ -760,6 +952,18 @@ class StopPending(ConversationStale):
     (`save(stopping=True)`)."""
 
 
+class TurnMoved(Exception):  # noqa: N818 -- named for the wire 409
+    """`StudioStore.claim_turn_lease` found the conversation's latest turn
+    is not the one the request names as the turn it follows (`after_turn`),
+    or `StudioStore.request_cancel` found a live segment holding a turn
+    other than the one the Stop names: another request began a turn since.
+    `latest` is the row's turn index."""
+
+    def __init__(self, conversation_id: str, *, latest: int) -> None:
+        super().__init__(f"conversation {conversation_id}'s latest turn is {latest}")
+        self.latest = latest
+
+
 class ConversationExists(Exception):  # noqa: N818 -- named for the race it reports
     """`StudioStore.create` lost the race to create the conversation."""
 
@@ -777,6 +981,158 @@ class Renewal:
 
     held: bool
     stop_id: str | None
+
+
+@dataclass(frozen=True)
+class StoredConversation:
+    """A conversation as its row stands, read with no lock and no lease
+    (`StudioStore.peek`). `state` holds the durable fields, built apart from
+    this instance's live state. `turn_status` is the status of the cursor of
+    the row's turn, `None` when that turn has none (an Edit Card turn, or a
+    turn claimed and not yet opened). `pause_id` is the wire interrupt id of
+    the pause a paused cursor holds, `None` otherwise. `lease_seconds` is how
+    long the lease on the row stays live by the database clock, `None` when
+    none is."""
+
+    state: ConversationState
+    turn_status: TurnStatus | None
+    lease_seconds: float | None
+    pause_id: str | None = None
+
+
+def record_status(record: Mapping[str, Any]) -> TurnStatus:
+    """The status a closed turn's record states: `done` with no error,
+    `cancelled` or `abandoned` for those errors, and `failed` for any other
+    error code. The record is what the client was told the turn ended on,
+    so it outranks the turn's cursor wherever the two differ."""
+    match record.get("error"):
+        case None:
+            return TurnStatus.DONE
+        case TurnStatus.CANCELLED.value:
+            return TurnStatus.CANCELLED
+        case TurnStatus.ABANDONED.value:
+            return TurnStatus.ABANDONED
+        case _:
+            return TurnStatus.FAILED
+
+
+def recorded_close_error(record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The error a cursor closes on when its turn's record closed first
+    (`record_status`): the record's code alone for `failed` or `abandoned`,
+    and `None` for the statuses that take no error. The record holds what
+    the client was told, so the cursor keeps none of the failure's own
+    payload, which may be what JSON could not encode."""
+    error = record.get("error")
+    return {"code": error} if record_status(record) in _ERRORED_STATUSES else None
+
+
+_ERRORED_STATUSES = frozenset({TurnStatus.FAILED, TurnStatus.ABANDONED})
+
+
+class Standing(StrEnum):
+    """Where a conversation's latest turn stands, as `turn_standing` derives
+    it. The state read and `/resume` (`harness.studio`) each map a standing
+    to what they answer, so they agree on every turn the store can hold.
+
+    - `CLOSED`: the turn ended, on the status `TurnStanding.closed` names.
+    - `HELD`: a live lease holds the turn, on some instance.
+    - `RESUMABLE`: the turn is running and no segment holds it.
+    - `AWAITING_ANSWER`: the turn is paused on a question whose stored entry
+      holds the frames the pause was sent as and awaits the user's answer on
+      `/interrupt`.
+    - `CARRY`: the turn is paused on a question whose entry holds an answer
+      a client left before the turn took it; `/resume` carries it on as a
+      retry of that answer.
+    - `REPLAY`: the turn is paused on a question no entry holds, since the
+      write that stores the entry never landed, or whose entry holds no
+      frames to show, since it was stored before entries kept them;
+      `/resume` sends the pause again from the cursor.
+    """
+
+    CLOSED = "closed"
+    HELD = "held"
+    RESUMABLE = "resumable"
+    AWAITING_ANSWER = "awaiting_answer"
+    CARRY = "carry"
+    REPLAY = "replay"
+
+
+@dataclass(frozen=True)
+class TurnStanding:
+    """A turn's `standing`, with the status it `closed` on when `CLOSED`."""
+
+    standing: Standing
+    closed: TurnStatus | None = None
+
+
+def pause_entry(
+    pending: Mapping[str, _PendingInterrupt], pause_id: str | None
+) -> tuple[str, _PendingInterrupt] | None:
+    """The conversation's entry for the pause `pause_id` (a paused cursor's
+    wire interrupt id), with its key, or `None` when no entry holds it.
+    Entries for other pauses, such as an earlier one whose answer the turn
+    took, play no part."""
+    if pause_id is None:
+        return None
+    for interrupt_id, entry in pending.items():
+        if entry.adk_id == pause_id:
+            return interrupt_id, entry
+    return None
+
+
+def turn_standing(
+    *,
+    cursor_status: TurnStatus | None,
+    pause_id: str | None,
+    lease_live: bool,
+    state: ConversationState,
+) -> TurnStanding:
+    """Where `state`'s latest turn stands, from its cursor's status
+    (`None` when the turn has none: an Edit Card turn, or one claimed and
+    not yet opened), the wire interrupt id of the pause a paused cursor
+    holds, and whether a lease on the conversation is live.
+
+    A live lease holds the turn whatever the cursor and the record say, so
+    a reader waits for its holder. Otherwise a recorded turn is closed as
+    its record states (`record_status`), since the record is what the
+    client was told, whatever its cursor says: a write that commits a
+    record closes the cursor with it, and `StudioStore.load` closes a
+    cursor it finds open under a record. An unrecorded turn with no cursor
+    was left by a segment that never opened or recorded it, and reads
+    `abandoned`, as the next turn records it and as `StudioStore.peek`
+    records it on its copy. A cursor closed under an open record is
+    recorded as it closed (`record_closed_turn`) by `load` and on `peek`'s
+    copy, so it reads as the cursor closed. A running cursor is resumable, and a paused one
+    stands as the pause's entry does (`pause_entry`)."""
+    if lease_live:
+        return TurnStanding(Standing.HELD)
+    if state.turn_recorded:
+        return TurnStanding(Standing.CLOSED, record_status(state.turns[-1]))
+    match cursor_status:
+        case None:
+            return TurnStanding(Standing.CLOSED, TurnStatus.ABANDONED)
+        case TurnStatus.RUNNING:
+            return TurnStanding(Standing.RESUMABLE)
+        case TurnStatus.PAUSED:
+            return TurnStanding(_paused_standing(state.pending, pause_id))
+        case _:
+            return TurnStanding(Standing.CLOSED, cursor_status)
+
+
+def _paused_standing(pending: Mapping[str, _PendingInterrupt], pause_id: str | None) -> Standing:
+    """Where a turn paused on `pause_id` stands, by the pause's entry."""
+    found = pause_entry(pending, pause_id)
+    if found is None:
+        return Standing.REPLAY
+    _, entry = found
+    if entry.resuming_segment is not None and entry.answer is not None:
+        return Standing.CARRY
+    if not entry.frames:
+        # An entry stored before entries kept their frames gives the page
+        # no card to draw, so the pause is sent again from the cursor, whose
+        # translation stores the frames.
+        return Standing.REPLAY
+    return Standing.AWAITING_ANSWER
 
 
 @dataclass(frozen=True)
@@ -866,6 +1222,11 @@ class StopState:
         )
 
 
+# How many times `StudioStore.request_cancel` runs its update for a named turn
+# while each read after it finds a lease on that turn gone live since. Each
+# repeat needs another lease to land between two statements, so a few suffice.
+_STOP_TURN_ATTEMPTS = 3
+
 # The row's turn index, as stored in its turn state.
 _TURN_INDEX_SQL = f"COALESCE((turn_state ->> '{_KEY_TURN_INDEX}')::int, 0)"
 # Turns a set `lease_cancel` into a fresh Stop id naming the row's turn index
@@ -875,6 +1236,11 @@ _STAMP_STOP = (
     "stop_id = CASE WHEN lease_cancel THEN :minted ELSE stop_id END, "
     f"stop_turn = CASE WHEN lease_cancel THEN {_TURN_INDEX_SQL} ELSE stop_turn END, "
     "lease_cancel = false"
+)
+# The status of a conversation's turn's cursor, and its pause's interrupt id.
+_TURN_PAUSE = text(
+    "SELECT status, interrupt_id FROM turn_cursors "
+    "WHERE conversation = :pk AND turn_index = :turn_index"
 )
 _TURN_AT = text(
     "SELECT status, stop_taken_id FROM turn_cursors "
@@ -896,6 +1262,22 @@ async def _stop_state(conn: AsyncConnection, row: Any, *, lease_live: bool) -> S
         taken_id=cursor.stop_taken_id if cursor is not None else None,
         lease_live=lease_live,
     )
+
+
+async def stop_names_turn(conn: AsyncConnection, pk: int, turn_index: int) -> bool:
+    """Whether the latest Stop on conversation row `pk`, which the caller
+    locked, names turn `turn_index` (`stop_turn`) and is not the one that
+    turn's `StopScope` answered. A `request_cancel` given the turn records
+    such a Stop, on a lease claimed for the next turn included."""
+    row = (
+        await conn.execute(
+            text("SELECT stop_id, stop_turn FROM conversations WHERE id = :pk"), {"pk": pk}
+        )
+    ).one()
+    if row.stop_id is None or row.stop_turn != turn_index:
+        return False
+    cursor = (await conn.execute(_TURN_AT, {"pk": pk, "turn_index": turn_index})).first()
+    return cursor is None or cursor.stop_taken_id != row.stop_id
 
 
 def _jsonb(value: Any) -> str | None:
@@ -1217,6 +1599,42 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
         conversation.turn_applied_choice = dict(state[ORCHESTRATOR_APPLIED_KEY] or {})
 
 
+def set_aside_question(cursor: Cursor) -> str | None:
+    """The user's words turn `cursor` ended on when it closed `done` with
+    its plan card set aside for them, a different question
+    (`harness.graph.state.NEW_QUESTION_KEY`), else `None`."""
+    typed = cursor.state.get(NEW_QUESTION_KEY)
+    if cursor.status is TurnStatus.DONE and isinstance(typed, str) and typed:
+        return typed
+    return None
+
+
+def asked_for_question(cursor: Cursor) -> bool:
+    """Whether turn `cursor` closed `done` with its plan card set aside for a
+    new question no message of the user's states, asking them to send it
+    (`harness.graph.state.ASK_FOR_QUESTION_KEY`)."""
+    return cursor.status is TurnStatus.DONE and cursor.state.get(ASK_FOR_QUESTION_KEY) is True
+
+
+def record_closed_turn(conversation: ConversationState, cursor: Cursor) -> str:
+    """Record turn `cursor`, closed, on `conversation` as the client was told
+    it ended, for a turn whose closing write never stored its record: keep
+    its records (`keep_turn_records`) and close it with no reply and
+    `closed_turn_error`'s error. A turn that ended on a question set aside
+    for the next turn (`set_aside_question`) keeps that question too, so the
+    state read still hands it back to the page that never got `done`.
+    Returns the error recorded."""
+    keep_turn_records(conversation, cursor.state)
+    error = closed_turn_error(cursor)
+    conversation.close_turn(
+        final_text="",
+        error=error,
+        new_question=set_aside_question(cursor),
+        asked_for_question=asked_for_question(cursor),
+    )
+    return error
+
+
 @dataclass
 class _RuntimeEntry:
     """The process-local anchor for one (principal, conversation_id).
@@ -1462,11 +1880,13 @@ class StudioStore:
 
     async def _read(
         self, principal: str, conversation_id: str
-    ) -> tuple[Any, dict[str, Any], Cursor | None] | None:
+    ) -> tuple[Any, dict[str, Any], Cursor | None, tuple[TurnStatus, str | None] | None] | None:
         """The conversation's row, with the database clock's reading as
-        `db_now`, its flat durable keys, and the cursor of its turn when that
-        turn's record is open and its cursor closed, read in one snapshot.
-        None when no row holds it."""
+        `db_now`, its flat durable keys, the cursor of its turn when that
+        cursor and the turn's record disagree on whether the turn is closed,
+        and the status of the turn's cursor with the interrupt id of the
+        pause it holds, `None` when the turn has no cursor, read in one
+        snapshot. None when no row holds it."""
         async with self._engine.connect() as plain:
             conn = await plain.execution_options(isolation_level="REPEATABLE READ")
             async with conn.begin():
@@ -1482,12 +1902,17 @@ class StudioStore:
                 for prefix, items in _ITEM_TABLES.items():
                     for ident, value in await conn.execute(items.select(), {"pk": row.id}):
                         flat[f"{prefix}{ident}"] = value
-                closed = None
-                if row.turn_index and not flat.get(_KEY_TURN_RECORDED):
-                    cursor = await cursor_at(conn, row.id, row.turn_index)
-                    if cursor is not None and cursor.status in CLOSED:
-                        closed = cursor
-        return row, flat, closed
+                if not row.turn_index:
+                    return row, flat, None, None
+                at = (
+                    await conn.execute(_TURN_PAUSE, {"pk": row.id, "turn_index": row.turn_index})
+                ).first()
+                status = (TurnStatus(at.status), at.interrupt_id) if at is not None else None
+                disagrees = status is not None and (status[0] in CLOSED) != bool(
+                    flat.get(_KEY_TURN_RECORDED)
+                )
+                cursor = await cursor_at(conn, row.id, row.turn_index) if disagrees else None
+        return row, flat, cursor, status
 
     async def load(self, principal: str, conversation_id: str) -> ConversationState | None:
         """Reload `conversation_id`'s durable fields. `None` when the store
@@ -1513,6 +1938,40 @@ class StudioStore:
         async with entry.write_lock:
             return await self._load(entry, principal, conversation_id)
 
+    async def peek(self, principal: str, conversation_id: str) -> StoredConversation | None:
+        """`conversation_id` as its row stands, for a read that changes
+        nothing: no lock, no lease, and this instance's live state left as
+        it is, so a stream running here keeps its own. `None` when the store
+        does not hold the conversation.
+
+        A turn whose cursor closed with its record left open and no lease
+        live is shown recorded as `load` would record it
+        (`_record_closed_turn`), and an unrecorded turn with no cursor and no
+        lease live, an Edit Card turn whose closing write failed or a turn
+        claimed and never opened, is shown recorded `abandoned`, as the next
+        turn records it (`ConversationState.begin_turn`). Both are on the
+        copy alone: nothing is written."""
+        stored = await self._read(principal, conversation_id)
+        if stored is None:
+            return None
+        row, flat, disagreeing, at = stored
+        status, pause_id = at if at is not None else (None, None)
+        state = ConversationState(conversation_id=conversation_id)
+        _apply_delta(state, flat)
+        lease = _row_segment(row)
+        live = lease is not None and lease.expires_at > row.db_now
+        if not live and state.turn_index and not state.turn_recorded:
+            if disagreeing is not None:
+                record_closed_turn(state, disagreeing)
+            elif status is None:
+                state.close_turn(final_text=state.turn_final_text, error="abandoned")
+        return StoredConversation(
+            state=state,
+            turn_status=status,
+            lease_seconds=lease.expires_at - row.db_now if lease is not None and live else None,
+            pause_id=pause_id if status is TurnStatus.PAUSED else None,
+        )
+
     async def _load(
         self, entry: _RuntimeEntry, principal: str, conversation_id: str
     ) -> ConversationState | None:
@@ -1521,15 +1980,18 @@ class StudioStore:
         stored = await self._read(principal, conversation_id)
         if stored is None:
             return None
-        row, flat, closed = stored
+        row, flat, disagreeing, _ = stored
         durable = ConversationState(conversation_id=conversation_id)
         _apply_delta(durable, flat)
         version = row.version
         lease = _row_segment(row)
-        if closed is not None and (lease is None or lease.expires_at <= row.db_now):
-            recorded = await self._record_closed_turn(row.id, row.version, durable, closed)
-            if recorded is not None:
-                durable, version = recorded
+        if disagreeing is not None and (lease is None or lease.expires_at <= row.db_now):
+            if durable.turn_recorded:
+                await self._close_recorded_cursor(row.id, row.version, durable, disagreeing)
+            else:
+                recorded = await self._record_closed_turn(row.id, row.version, durable, disagreeing)
+                if recorded is not None:
+                    durable, version = recorded
         entry.pk, entry.version, entry.read_at = row.id, version, row.db_now
         entry.read_stamp = stamp
         entry.seq_reserved, entry.claimed_reserved = row.seq_reserved, None
@@ -1573,9 +2035,7 @@ class StudioStore:
         Returns the copy and the row's new version, `None` when it recorded
         nothing."""
         recorded = _shallow_copy(durable)
-        keep_turn_records(recorded, cursor.state)
-        error = closed_turn_error(cursor)
-        recorded.close_turn(final_text="", error=error)
+        error = record_closed_turn(recorded, cursor)
         before = _serialize_durable(durable)
         delta = _changed_since(_serialize_durable(recorded), before)
         lines = _committed_lines(delta, stored=before)
@@ -1611,6 +2071,70 @@ class StudioStore:
             error,
         )
         return recorded, stored
+
+    async def _close_recorded_cursor(
+        self, pk: int, version: int, durable: ConversationState, cursor: Cursor
+    ) -> None:
+        """Close the cursor of a turn whose record committed while the
+        cursor stayed open, with the status the record states and the
+        record's code as its error (`record_status`, `recorded_close_error`).
+        Every write that commits a record closes the cursor in the same
+        transaction; this closes any cursor still found open under a record.
+        One transaction under the row lock, refused when the row moved past
+        `version` or a lease on it is live, so a writer since the read wins. A cursor that moved
+        since the read is left as it stands."""
+        record = durable.turns[-1]
+        status = record_status(record)
+
+        async def write(conn: AsyncConnection) -> bool:
+            row = (await conn.execute(self._lock_conversation, {"pk": pk})).first()
+            lease = _row_segment(row) if row is not None else None
+            if (
+                row is None
+                or row.version != version
+                or (lease is not None and lease.expires_at > row.db_now)
+            ):
+                return False
+            try:
+                await close_unleased_on(
+                    conn,
+                    cursor,
+                    status=status,
+                    now=datetime.fromtimestamp(self._clock(), UTC),
+                    error=recorded_close_error(record),
+                )
+            except CursorStale:
+                return False
+            return True
+
+        try:
+            async with self._transaction() as conn:
+                closed = await write(conn)
+        except Exception:
+            logger.warning(
+                "studio store: conversation %s's turn %s is recorded with its cursor open; "
+                "closing the cursor failed",
+                durable.conversation_id,
+                cursor.turn_index,
+                exc_info=True,
+            )
+            return
+        if closed:
+            logger.info(
+                "studio store: conversation %s's turn %s was recorded with its cursor open; "
+                "closed the cursor %s",
+                durable.conversation_id,
+                cursor.turn_index,
+                status.value,
+            )
+
+    def lease_live(self, principal: str, conversation_id: str) -> bool:
+        """Whether the lease on the conversation's loaded state was live at
+        the database clock's reading taken with the load, as
+        `claim_segment` judges it. `load` must have run first."""
+        entry = self._runtime[(principal, conversation_id)]
+        live = entry.state.segment if entry.state is not None else None
+        return live is not None and live.expires_at > entry.read_at
 
     def claim_segment(
         self, principal: str, conversation_id: str, state: ConversationState | None = None
@@ -1652,7 +2176,12 @@ class StudioStore:
         return segment.id
 
     async def claim_turn_lease(
-        self, principal: str, conversation_id: str, *, segment_id: str | None = None
+        self,
+        principal: str,
+        conversation_id: str,
+        *,
+        segment_id: str | None = None,
+        after_turn: int | None = None,
     ) -> TurnLease:
         """Claim the conversation's lease for a new turn and write the lease
         alone, under the row lock, emptying the canvas write ids recorded
@@ -1669,7 +2198,10 @@ class StudioStore:
 
         `segment_id` is the lease's id, minted here when not given, so a
         caller that names it can drop the lease of a claim whose COMMIT may
-        have landed though the call raised. The COMMIT and the bookkeeping
+        have landed though the call raised. `after_turn`, when given, is the
+        turn the new one must follow: the claim is refused when the row's
+        turn index, read under the row lock that orders every claim, is
+        another. The COMMIT and the bookkeeping
         after it run in one task to the end (`harness.db.commit.committing`),
         so a cancel of the caller during the COMMIT lands the claim with the
         live state holding its segment.
@@ -1681,6 +2213,7 @@ class StudioStore:
                 row as locked.
             StopPending: a Stop is live for the conversation's open turn
                 (`StopState.live`).
+            TurnMoved: the row's turn index is not `after_turn`.
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
@@ -1697,6 +2230,8 @@ class StudioStore:
             stored_lease = _row_segment(row)
             if stored_lease is not None and stored_lease.expires_at > row.db_now:
                 raise ConversationStale(conversation_id)
+            if after_turn is not None and row.turn_index != after_turn:
+                raise TurnMoved(conversation_id, latest=row.turn_index)
             if (await _stop_state(conn, row, lease_live=False)).live:
                 raise StopPending(conversation_id)
             claimed = (
@@ -2511,6 +3046,8 @@ class StudioStore:
                     work.close_turn(
                         final_text=work.turn_final_text, error=ErrorCode.CANCELLED.value
                     )
+            elif work.turn_recorded and work.turn_index:
+                await self._close_cursor_with_record(conn, row.id, work, segment_id)
             changed = _changed_since(_serialize_durable(work), entry.baseline)
             lines = _committed_lines(changed, stored=entry.baseline)
             version = (
@@ -2546,6 +3083,32 @@ class StudioStore:
 
         return await self._committing_lines(
             write, what=f"conversation {conversation_id} segment {segment_id}'s closing write"
+        )
+
+    async def _close_cursor_with_record(
+        self, conn: AsyncConnection, pk: int, work: ConversationState, segment_id: str
+    ) -> None:
+        """Close the cursor of `work`'s recorded turn on `conn`, in the
+        closing write's transaction, when it is still open: with the status
+        the record states and the record's code as its error
+        (`record_status`, `recorded_close_error`). A segment whose node
+        failed and whose own close of the cursor failed, a value JSON could
+        not encode say, records the turn failed and leaves the cursor
+        running; this keeps the two together, so a committed record always
+        comes with a closed cursor."""
+        at = (await conn.execute(_TURN_PAUSE, {"pk": pk, "turn_index": work.turn_index})).first()
+        if at is None or TurnStatus(at.status) in CLOSED:
+            return
+        cursor = await cursor_at(conn, pk, work.turn_index)
+        assert cursor is not None
+        record = work.turns[-1]
+        await finish_on(
+            conn,
+            cursor,
+            segment_id=segment_id,
+            status=record_status(record),
+            error=recorded_close_error(record),
+            now=datetime.fromtimestamp(self._clock(), UTC),
         )
 
     async def _committing_lines[T](
@@ -2679,33 +3242,71 @@ class StudioStore:
                 segment_id,
             )
 
-    async def request_cancel(self, principal: str, conversation_id: str) -> bool:
+    async def request_cancel(
+        self, principal: str, conversation_id: str, *, turn_index: int | None = None
+    ) -> bool:
         """Record a Stop request on `conversation_id`'s live segment, whoever
-        owns it, this instance included, by setting `lease_cancel`. The
-        segment's next renewal (`renew`) records it under a fresh id and
-        reports it, and a segment that reads only the flag sees it as well.
-        One conditional update of the lease columns.
+        owns it, this instance included, with a conditional update of the
+        lease columns.
+
+        With no `turn_index`, it sets `lease_cancel`: the segment's next
+        lease write records it under a fresh id naming the row's turn index
+        as it then stands (`_STAMP_STOP`) and reports it, and a segment that
+        reads only the flag sees it as well. With `turn_index`, it records
+        the Stop itself, a fresh `stop_id` naming that turn in `stop_turn`,
+        and only while the row's turn index is `turn_index`. The Stop is then
+        live for that turn alone (`StopState.live`), so a turn begun after it
+        under the same lease runs on.
+
+        A lease on `turn_index` that went live after the update read the row
+        is found by the read that follows it, and the update runs again, up
+        to `_STOP_TURN_ATTEMPTS` times, so a Stop is refused only for a turn
+        other than the one it names.
 
         Returns whether a live segment was found and signalled. `False`
-        means there is none, or the one on record has already expired by the
-        database clock. The caller falls back to whatever cancellation means
-        with no active segment.
+        means the Stop is not recorded: no lease was live, the one on record
+        had expired by the database clock, or, given `turn_index`, each of
+        the `_STOP_TURN_ATTEMPTS` updates missed a lease on that turn that
+        went live or lapsed between statements, so one may be live now. The
+        caller decides again under the conversation lock, as `/cancel` does
+        (`harness.studio._stop_under_lock`), whose claim loses to a live
+        lease.
+
+        Raises:
+            TurnMoved: a live segment holds a turn other than `turn_index`.
         """
         entry = self._entry(principal, conversation_id)
+        live = (
+            "WHERE principal = :principal AND conversation_id = :conversation_id "
+            "AND lease_segment_id IS NOT NULL "
+            f"AND lease_expires_at > {self._time_sql} "
+        )
+        keys = {"principal": principal, "conversation_id": conversation_id}
+        if turn_index is None:
+            assign, guard, values = "lease_cancel = true", "", keys
+        else:
+            assign = "stop_id = :minted, stop_turn = :turn_index"
+            guard = f"AND {_TURN_INDEX_SQL} = :turn_index "
+            values = {**keys, "minted": _wire_id("stop"), "turn_index": turn_index}
+        update = text(
+            f"UPDATE conversations SET {assign} {live}{guard}"
+            "RETURNING lease_segment_id, lease_owner, lease_expires_at"
+        )
+        held_turn = text(f"SELECT {_TURN_INDEX_SQL} AS turn_index FROM conversations {live}")
         async with entry.write_lock:
             async with self._transaction() as conn:
-                row = (
-                    await conn.execute(
-                        text(
-                            "UPDATE conversations SET lease_cancel = true "
-                            "WHERE principal = :principal AND conversation_id = :conversation_id "
-                            "AND lease_segment_id IS NOT NULL "
-                            f"AND lease_expires_at > {self._time_sql} "
-                            "RETURNING lease_segment_id, lease_owner, lease_expires_at"
-                        ),
-                        {"principal": principal, "conversation_id": conversation_id},
-                    )
-                ).first()
+                for _ in range(_STOP_TURN_ATTEMPTS):
+                    row = (await conn.execute(update, values)).first()
+                    if row is not None or turn_index is None:
+                        break
+                    # Each statement reads the newest committed row, so a
+                    # claim that committed after the update read it shows
+                    # here, and the update runs again on it.
+                    held = (await conn.execute(held_turn, keys)).first()
+                    if held is None:
+                        break
+                    if held.turn_index != turn_index:
+                        raise TurnMoved(conversation_id, latest=held.turn_index)
             if row is None:
                 return False
             self._note_segment(

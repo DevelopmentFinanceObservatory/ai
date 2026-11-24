@@ -86,6 +86,10 @@ A `Plan` states the question, its `answer_mode` (`series`, the default, or
 `computed`), every `Decision` the plan makes, the `EvidenceRequirement`s those
 decisions fix, and, once translated, the `Translation` and `Workflow` that
 carry them out (`planner.operations`, `planner.workflow`).
+`propose_plan` gives a first draft stating no `answer_mode` the one its
+requirements define (`planner.plan.answer_mode_of`): `series` where a dataset
+requirement nothing reads is the answer, and `computed` where every dataset
+requirement feeds a calculation.
 
 A `Decision` carries the alternatives considered, the choice, a one-line
 rationale, and whether the user or the planner settled it. Its `slot` names it,
@@ -119,13 +123,17 @@ on the denominator, by the role they state there or `'country'` where they
 state none, so each divides by its own counterpart; `JoinRequirement` joins
 two requirements' results on the keys they share; and `FilterRequirement` keeps
 the rows that satisfy every one of a conjunction of predicates: a value or
-year threshold, an `EntityIn` naming entities, or a `PlaceLevel` keeping one
-level of place, each stated once, since analysis-mcp's filter refuses a predicate
+year threshold, a `PeriodIn` listing the years to keep, an `EntityIn` naming
+entities, or a `PlaceLevel` keeping one level of place, each stated once, since analysis-mcp's filter refuses a predicate
 stated twice, an `EntityIn` naming the same entities in another order
 included. Two `EntityIn`s whose names resolve to one entity, such as one
 naming it under its role and one under none, write one predicate too, and the
 compiler refuses that filter with `bad_args`, by analysis-mcp's own op-spec
-check (`compiler.arguments.op_spec_errors`). An `EntityIn` keeps only names
+check (`compiler.arguments.op_spec_errors`). A `PeriodIn` states years asked
+for apart, as 2000 and 2020, in one predicate over a dataset read from the
+first to the last. Each year it lists has to be one its input holds, it takes
+no `rolling`, and the compiler writes it as analysis-mcp's `category_match` on
+`time_period` (`planner.shapes.year_filter`). An `EntityIn` keeps only names
 the dataset requirements behind its input state, under its `role` when it
 gives one (`planner.plan.unknown_names`, which the compiler reads for
 `unknown_entity`). A breakdown's codes are no entities. The frame holds the
@@ -344,6 +352,7 @@ The anchor a run reads is the newest year the plan states or a later one. Transl
 
 - A step that turns more than one year into one figure per entity, unless every ask its result answers is marked `(across years)`: `period_reduction_unstated`, from `planner.plan.unstated_period_reductions`. Such a step is an `AggregateRequirement` whose `group_by` leaves out `period`, an empty one included, or a `RankRequirement` with a `reduction` and `per_period` unset whose window keeps more than one year. An aggregate that keeps `period` in its `group_by`, a rank stating `per_period`, and a rank whose `window_start` and `window_end` state the same year reduce no years. Every answering result computed from the step, the step included, answers at least one ask, and each ask it answers carries the mark. The orchestrator sets the mark on an ask from the user's words, the plan holds the marked asks' numbers as `asks_across_years`, and the planner reads the mark beside the ask in its message.
 - A rank with no `reduction` whose window does not stay one year, with both ends fixed on it or both following the newest data at one offset: `invalid_plan`, from `planner.plan._rank_reduction_reason`.
+- A rank with no `reduction` over an input of several roles, unless every role but its axis names one entity, not as a set's members: `invalid_plan`, from the same function. Where each does, `propose_plan` reads the pinned source and refuses the rank `invalid_plan` when a name binds several parties, the source binds others beside it on that column, or the source leaves open an axis `across` does not cover (`submission.service._rank_roles_expand`). The compiler refuses the same rank `rank_reduction_required` when its source changes under it.
 - A first year that follows the newest data, in a filter, a rank window or a growth window, below a fixed last year, whichever step states either: a fixed `lte` or `eq` in the same filter, an earlier filter, or the other side of a two-sided verb. Each new year moves the first year toward that last year until no year is left. A rolling bound behind a later fixed first year passes it once the newest year has moved far enough, and is refused the same way: `rolling_years_run_out`, from `planner.shapes.years_run_out`.
 - A growth window year that newer data takes out of its input. A growth reads each entity's values in exactly its window's first and last years, so a window year that follows the newest data needs an input whose last year no fixed bound caps, and a fixed window year needs an input whose first year does not follow the newest data: `rolling_years_run_out`, from `planner.shapes.growth_endpoint_leaves`.
 - A growth window whose first or last year is one an `ne` removed, which leaves no entity both endpoints: `invalid_plan`, from `planner.shapes._rejects_growth_window`.
@@ -357,7 +366,7 @@ The anchor a run reads is the newest year the plan states or a later one. Transl
 - A max or min by entity, matched on each entity's own year against a series that misses a year the max or min can fall in, today or as newer data moves either side, from which a filter removed such a year alone, or whose rows a value filter kept, which can leave out any such year: `invalid_plan`, from `planner.shapes._rejects_paired_picked`. A max or min over a dataset read from its first year can fall in any year back to it, so the series has to be read from its first year too, or the max or min's input bounded from the series' first year, following the newest data where the series' first year does. A series and a max or min read from the same datasets may both stay open to the newest data.
 - A year filter over a max or min by entity whose thresholds keep a year that newer data can move a picked year past. A picked year moves only later, and only while the max or min's input years move. So a fixed first year keeps every entity whose max or min falls at or after it, today and later, and a first year that follows the newest data keeps them only while the input's own first year follows it at the same offset or further ahead. A last year keeps them only while the input's last year sits at or before it today and stays there, unless the input's years do not move at all. The entity whose max or min moves past the year drops out: `invalid_plan`, from `planner.shapes._picked_year_leaves`. Filter the years before the max or min. A filter with no year threshold keeps every entity it keeps today.
 
-Where the planner reads the user's own words, a step is also admitted when the `propose_plan` call names it in `across_years`. The planner reads them only in an entry the user's amendment at the approval card opened (`planner.plan.amendment_entry`). Elsewhere a call naming a step is refused `invalid_plan`, unless the plan it amends already licenses that step as the call states it, which grants nothing new. A call naming a step that keeps its years is refused everywhere. Each named step becomes a `PeriodLicence` in `Plan.period_licences` (step id, kind and `reduction`), which `propose_plan` writes and the model cannot (`planner.plan.period_licences_held`). `Plan.amend` clears the field, and `propose_plan` carries each licence of the plan it amends onto the new one while that step keeps its id and kind and combines its years with the licensed `reduction`, whatever its years: a replan that narrows a licensed total or ranking to one year and a later one that restores its years both keep it. The licence lies unused while a licensed rank states no `reduction`, and admits the rank again once it states the licensed one. An aggregate grouping by `period`, a rank set `per_period`, a step stating another reduction, a step of another kind, or a removed step drops the licence, since each states another figure. A step renamed in an amendment entry holds none of its old id and takes a new one when the call names it. The field is hashed once it holds a licence, so a plan holding none keeps its revision.
+Where the planner reads the user's own words, a step is also admitted when the `propose_plan` call names it in `across_years`. The planner reads them only in an entry the user's amendment at the approval card opened (`planner.plan.amendment_entry`). Elsewhere `propose_plan` ignores the field, so a step it names takes no licence and is refused `period_reduction_unstated` unless a marked ask or a licence the amended plan holds admits it. In an amendment entry, a call naming a step that keeps its years is refused `invalid_plan`. Each named step becomes a `PeriodLicence` in `Plan.period_licences` (step id, kind and `reduction`), which `propose_plan` writes and the model cannot (`planner.plan.period_licences_held`). `Plan.amend` clears the field, and `propose_plan` carries each licence of the plan it amends onto the new one while that step keeps its id and kind and combines its years with the licensed `reduction`, whatever its years: a replan that narrows a licensed total or ranking to one year and a later one that restores its years both keep it. The licence lies unused while a licensed rank states no `reduction`, and admits the rank again once it states the licensed one. An aggregate grouping by `period`, a rank set `per_period`, a step stating another reduction, a step of another kind, or a removed step drops the licence, since each states another figure. A step renamed in an amendment entry holds none of its old id and takes a new one when the call names it. The field is hashed once it holds a licence, so a plan holding none keeps its revision.
 
 The `period_reduction_unstated` refusal's `detail.gaps` holds one entry per refused step, in the order `unstated_period_reductions` finds them. Each entry holds:
 
@@ -447,9 +456,13 @@ reworded question cannot be read as a new plan.
 turn's `question` before the planner ever runs, and a restart would silently
 swap the question out from under the plan the workflow holds. So
 `starts_new_plan` with a plan already recorded is refused with
-`question_fixed`, records nothing, and is how the model tells the harness the
-user's reply asks a different question: the turn ends there for the harness to
-tell the user to send it as its own message. An amendment whose own `question`
+`question_fixed`, whether or not the call also names `amends_version`, records
+nothing, and is how the model tells the harness the user's reply asks a
+different question: the turn ends there, and the harness hands the stored text
+of the user's message the call names in `new_question_in`, the amendment or the
+user's own-words answer to the planner's question about it, to the client to
+send as the next turn (`harness.graph.planning`). On the user's amendment, a
+call naming no such message is refused `invalid_plan`. An amendment whose own `question`
 states something other than the one recorded is refused as `invalid_plan`
 instead, correctable within the same round (`submission.service._resolve_intent`).
 
@@ -503,9 +516,14 @@ state differently, so a value lives once, on the requirement, and nothing is
 refused for it. `Plan` holds every requirement citing a decision to each value
 its `fixes` states, `source_spec_id` aside (`fix_disagreements`). The plan
 record says whether the planner assumed a period, and the answer says a summed
-reading was the user's. A rank's `among='population'` and a `share_of`'s
-`denominator_scope='pooled'` each cite a decision whose `fixes` states the
-claim. Code writes `fixes.source_spec_id`.
+reading was the user's. A `share_of`'s `denominator_scope='pooled'` cites a
+decision whose `fixes` states the claim. A rank's `among` is no decision a draft
+can fix: a rank stating none takes the one value its input admits
+(`ranks_among_settled`), 'named' over an axis a filter narrowed, else
+'population', and its step states the population it ranks. A decision fixing
+one field whose values are an enum (`ENUM_FIXED_FIELDS`: `stat_vars`,
+`reduction`, `direction`, `denominator_scope`, `change`) lists those values as
+its options, as the plan card words each value. Code writes `fixes.source_spec_id`.
 `propose_plan` sets it on the measure decision it writes for a pin of a measure
 a settled source offers (`_measure_decisions`) and moves it with the pin. A
 source a pending referral offers in place of a pin counts as settled, so a
@@ -540,8 +558,12 @@ the part to pin, one the user picked or a later search found. With neither, the
 planner asks the user which prices to go on in (`PRICES_OPTIONS`); a pick of
 the other prices replaces the choice. When the user keeps constant prices, the
 entry ends on `prices_unserved`, naming the series the plan reads, and the
-orchestrator searches for it in constant prices. With
-several parts priced, each card row names the inputs it covers.
+orchestrator searches for it in constant prices. A unit question's answer
+holds the part to the whole unit, currency and base year included, of the
+series the agent fetches for it: the chosen unit, or the unit the part is
+served in when Search refused the chosen one. A requirement pinning a series
+of that measure in another unit is refused, naming the unit and that series.
+With several parts priced, each card row names the inputs it covers.
 
 **A period can follow the newest data.** A growth, a rank and a period threshold state their years as the plan read them, and a `rolling` field beside the years says which of them are relative to the newest year the data holds (`planner.records.RelativePeriod`, an offset of 0 or less from `latest`). Every rule that compares years reads the stated years. A relative period needs `period_end_open` on each dataset requirement it rests on, and `propose_plan` pins such a requirement to its dataset over a range with no end year (`_window_pins`, `planner.plan.period_window`), which apis ends at the current year at every mint. The range starts at the requirement's own first year when only ends roll. When a start rolls, the newest year the data holds can sit behind the one the plan read, so the rolling-start readers read the dataset whole, from the first year the dataset holds (`planner.plan.full_history`, read from a Search answer over no window, kept in `Plan.first_years`), and every other step keeps the range from the requirement's own first year. Search answers a question that names years over those years, so when no answer on record is over no window `propose_plan` reads the pinned identity over no window itself, with one `resolve_definition` call through the planner's tool surface (`read_full_history`), and holds the answer in session state for the turn (`planner.plan.full_histories`). That window is read for its first year and never retrieved. An unpinned requirement whose start is fixed stays unpinned, and the translator searches for it from that year on. `propose_plan` refuses with `detail.issue` `rolling_needs_open_period` when a dataset is closed (`dataset_closed`), has no identity on record where it needs one (`no_source_on_record`), or has no first year because the read did not complete or stated none (`first_year_read_failed`), `rolling_years_disagree` when rolling years that one run counts from one newest year, in one step or in steps one result reads (`planner.plan.rolling_groups`), less their offsets, give different newest years or one after the last year of a dataset they rest on (its `period`, the years Search found it over), `rolling_years_run_out` when a first year that follows the newest data meets a fixed last year (`planner.shapes.years_run_out`), or newer data takes a growth window's first or last year out of its input (`planner.shapes.growth_endpoint_leaves`), `rolling_side_unanchored` when a two-sided step pairs a side whose years follow the newest year with a side open to each series' own newest year that the newest year is not read over (`planner.shapes.anchor_misses`), since the run reads the newest year over the datasets the rolling steps counting from it reach (`planner.plan.anchored_over`, `compiler.rolling.anchor_groups`), so the open side's dataset can lag it, and a rolling bound on a step reading both sides reads it over both, `rolling_exclusion` when a filter's `ne` follows the newest data or reads a dataset stating `period_end_open`, where newer data can make the removed year the one a step reads (the years before the newest are `lte` with `rolling` at offset -1), and `rolling_frame_too_large` when Search counted more rows in the whole history than data-mcp's `max_frame_rows`.
 

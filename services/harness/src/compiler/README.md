@@ -42,7 +42,7 @@ references are `Binding`s. No proposal carries a tool name, a column name, a
 dcid, or a frame reference.
 
 **A retrieval names a source discovery recorded.** A retrieval's `spec_id` has
-to be what discovery recorded for *its own* requirement -- naming a real
+to be what discovery recorded for _its own_ requirement -- naming a real
 `spec_id` discovered for a different requirement is `source_not_discovered_ for_requirement` just the same as naming one nothing discovered. A requirement
 whose `source_spec_id` pins one exact definition refuses any other with
 `source_pin_violated`. The `SelectedSource` the workflow keeps is copied from
@@ -154,7 +154,14 @@ reviewed change here, which is the point.
 
 **The six analysis verbs beyond aggregate, growth and compare.** `rank`
 orders `RankRequirement`'s entities and writes the requirement's own role
-columns as `rank_by`; `sum_of`, `share_of`, `quotient_of` and `join` are two-sided
+columns as `rank_by`. A rank stating no `reduction` is `rank_reduction_required`
+in two cases. One is a retrieval, read directly or through filters, whose source
+leaves open an axis the rank's input keeps no column of, holding several members
+or an uncounted number. Each entity then holds one row per member of that axis in
+each period, which `rank` refuses at run time without an `aggregation`. The other
+is an input of several roles where a role other than the axis holds several
+parties on the source, since only a role whose name binds one party alone
+(`RoleDimension.single`) leaves one row per ranked entity. `sum_of`, `share_of`, `quotient_of` and `join` are two-sided
 like a comparison, writing
 `{role_column: ref}` entity bindings the same way and, for `join`, every key
 explicitly: `join_keys` in the left frame's names and `right_keys` mapping each
@@ -185,8 +192,15 @@ as aggregate, growth and compare already did.
 **`share_of` and `quotient_of` divide differently.** A `share_of` divides a part by
 its whole, so two sides in different units, or one unit against none, are
 `share_units_differ`, which the translator refers back to the planner for repair
-with `quotient_of` among the permitted repairs. A `quotient_of` takes any pair of
-units. It pins each side's own unit (`numerator_unit`, `denominator_unit`) when its
+with `quotient_of` among the permitted repairs. A share's denominator also has to
+hold its numerator: on the donor and recipient sides, a denominator that shows it
+does not hold a party the numerator keeps is `share_part_outside_whole`
+(`compiler.sources.parties_outside`, the check `planner.source_reads.compile_whole`
+makes of a compiled whole). Its permitted repairs are a `whole_of` of the
+numerator's requirement, where the denominator's sources hold another population,
+and a `quotient_of`, where the plan narrowed the denominator to a figure that does
+not hold the numerator, such as each donor's aid over one donor's total. A `quotient_of`
+takes any pair of units. It pins each side's own unit (`numerator_unit`, `denominator_unit`) when its
 source declares a unit ref, and analysis-mcp states the result in the unit the two
 compose. A quotient's numerator is keyed by `axis` and its denominator by
 `denominator_axis`, each resolved on that side's own frame, and `denominator_by`

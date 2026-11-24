@@ -44,14 +44,17 @@ import itertools
 import json
 import logging
 import re
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, MutableMapping, Sequence
 from contextvars import ContextVar
+from dataclasses import replace
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, overload
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
-from compiler.sources import source_from_spec_block, warning_code
+from compiler.sources import open_side_column, source_from_spec_block, warning_code
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from data_mcp.scope import ChoiceProvenance, ScopeAxis
@@ -64,6 +67,7 @@ from planner.parties import (
     Party,
     PartyRole,
     across_party,
+    flow_side,
     party_among,
     role_party,
     same_party,
@@ -83,6 +87,7 @@ from planner.records import (
     OpenPeriodFault,
     OptionStatus,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     Predicate,
@@ -136,7 +141,7 @@ from planner.shapes import (
     years_run_out,
 )
 from planner.shapes import rejects as shape_rejects
-from planner.workflow import ResolvedGroup, Workflow
+from planner.workflow import ResolvedGroup, SelectedSource, Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +168,12 @@ UNSUPPORTED_STATE_KEY = "planner:unsupported"
 # when an entry starts, so an ask-the-user resume inside one entry keeps it.
 # Unset, the entry carries no amendment.
 AMENDMENT_ENTRY_STATE_KEY = "planner:amendment_entry"
+
+# The session-state slot saying whether the run the planner's current call
+# makes reads the user's own-words answer to a question the planner asked
+# (`harness.planner_adapter.PlannerAdapter` writes it on every call). Unset,
+# the run reads none.
+ANSWERED_IN_WORDS_STATE_KEY = "planner:answered_in_words"
 
 # The session-state slot holding the option the user picked for a planner
 # decision on the plan card, as a `DecisionPick` dump, when the planner's
@@ -332,9 +343,11 @@ MAX_PLAN_DECISIONS = 24
 MAX_PLAN_REQUIREMENTS = 24
 
 # The most requirements a plan holds: the model writes at most
-# `MAX_PLAN_REQUIREMENTS` (`Plan._record_fits_the_size_limit`), and
-# `whole_history_split` copies each of them at most once.
-MAX_HELD_REQUIREMENTS = 2 * MAX_PLAN_REQUIREMENTS
+# `MAX_PLAN_REQUIREMENTS` (`Plan._record_fits_the_size_limit`), `propose_plan`
+# adds a sum for at most half of them, since each sums a whole the model wrote
+# with its part and a share reading it (`WholeSum`, `_whole_read_fault`), and
+# `whole_history_split` copies each of these at most once.
+MAX_HELD_REQUIREMENTS = 3 * MAX_PLAN_REQUIREMENTS
 
 # The most asks one brief may list, and the longest each may run. An ask is a
 # short line naming one output the user asked for, such as a chart or a
@@ -461,7 +474,11 @@ class Entity(StrictModel):
         min_length=1,
         max_length=200,
         exclude_if=lambda dcid: dcid is None,
-        description="Graph node from an entity_name_ambiguous referral.",
+        description=(
+            "The graph node this entity is, as a referral or repair names it, such as an "
+            "entity_name_ambiguous candidate's ref or a dcid a repair or kept scope gives; "
+            "Search reads the node, so copy it exactly."
+        ),
     )
 
 
@@ -725,6 +742,13 @@ class _Choice(StrictModel):
 # value such as `sector:120+130`, and a partial option covers one span or a
 # few; each limit sits several times above that.
 MAX_SCOPE_ID_CHARS = 200
+
+# The provider options a dataset requirement may declare
+# (`DatasetRequirement.scope_options`): one per provider scope the harness reads
+# (`harness.scope_choices.ProviderScope`), which is every scope Search publishes.
+ProviderOptionId = Literal[
+    "provider:bilateral", "provider:inclusive", "provider:contributions", "provider:multilateral"
+]
 MAX_SCOPE_YEAR_SPANS = 50
 
 
@@ -746,12 +770,16 @@ class DecisionScope(StrictModel):
     holds one state per `Decision.options` label, in the same order.
     `provenance` is how the choice came to hold its option, `"default"` when
     Search's default settled it, and `None` on a decision recorded without it.
+    `line` says the decision's rationale is the plan card's line where the option
+    a figure is counted on and the user's words part
+    (`submission.service._provider_line`); the card shows it on the row.
     """
 
     choice_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)
     axis: ScopeAxis
     options: tuple[ScopeOptionState, ...] = Field(max_length=MAX_DECISION_OPTIONS)
     provenance: Annotated[ChoiceProvenance | None, HASHED_WHEN_SET] = None
+    line: Annotated[bool, HASHED_WHEN_SET] = Field(default=False, exclude_if=lambda line: not line)
 
 
 # How a calculation qualifies the answer where its inputs differ on one aligned
@@ -759,12 +787,14 @@ class DecisionScope(StrictModel):
 DifferenceCaveat = Literal["providers_differ", "bases_differ"]
 
 # How a decision `propose_plan` writes qualifies the answer (`Decision.caveat`): a
-# calculation's inputs differing on an axis, or a whole compiled from its part.
-DecisionCaveat = Literal[DifferenceCaveat, "derived_whole"]
+# calculation's inputs differing on an axis, a whole compiled from its part, or a
+# figure counted otherwise than the user's words ask because its dataset does not
+# publish it that way (`scope_unpublished`).
+DecisionCaveat = Literal[DifferenceCaveat, "derived_whole", "scope_unpublished"]
 
 # The most decisions qualifying the answer one requirement carries: a calculation
-# states at most one per axis its inputs differ on, and a whole, a dataset
-# requirement, only `derived_whole`.
+# states at most one per axis its inputs differ on, a whole, a dataset requirement,
+# only `derived_whole`, and any other dataset requirement only `scope_unpublished`.
 MAX_REQUIREMENT_CAVEATS = len(get_args(DifferenceCaveat))
 
 
@@ -884,7 +914,6 @@ FixedField = Literal[
     "window_end",
     "direction",
     "predicates",
-    "among",
     "axis",
     "denominator_scope",
     "change",
@@ -895,12 +924,24 @@ FixedField = Literal[
 
 # `settle_decisions` builds the `Decision` from a draft, reading each named
 # field's value off the requirements that cite it.
+# The fields a draft names whose value is one member of an enum. A decision fixing one of
+# them alone chooses between that enum's values, and the plan card words each value
+# (`harness.plan_display.FIXED_VALUE_WORDS`).
+ENUM_FIXED_FIELDS: Mapping[str, type[StrEnum]] = {
+    "stat_vars": StatVarReading,
+    "reduction": Reduction,
+    "direction": RankDirection,
+    "denominator_scope": DenominatorScope,
+    "change": GrowthChange,
+}
+
+
 class DecisionDraft(_Choice):
     """One methodological choice, as a proposal states it: the fields it fixes, by name."""
 
     fixes: tuple[FixedField, ...] | None = Field(
         default=None,
-        max_length=len(DecisionFixes.model_fields.keys() - {"prices"}),
+        max_length=len(get_args(FixedField)),
         description=(
             "The requirement fields this decision settles, by name, whenever it settles "
             "what a requirement carries: the period, the unit, the entities, the measure, "
@@ -908,6 +949,24 @@ class DecisionDraft(_Choice):
             "requirements citing it. Empty when it is a rationale only."
         ),
     )
+
+    @model_validator(mode="after")
+    def _options_are_the_fields_values(self) -> DecisionDraft:
+        """Reject an option that is no value of the one enum field this decision fixes (`ENUM_FIXED_FIELDS`).
+
+        The card shows each value in its own words, which a slug such as
+        "among_population" never matches.
+        """
+        if self.fixes is None or len(self.fixes) != 1 or self.fixes[0] not in ENUM_FIXED_FIELDS:
+            return self
+        (field,) = self.fixes
+        values = [value.value for value in ENUM_FIXED_FIELDS[field]]
+        if unknown := [option for option in self.options if option not in values]:
+            raise ValueError(
+                f"decision {self.slot!r} fixes `{field}` alone, so each option is one of its "
+                f"values {values!r}; replace {unknown!r}"
+            )
+        return self
 
 
 # What a declared whole leaves open: the part's sector, or the party it names on one
@@ -957,10 +1016,7 @@ class DatasetRequirement(TaggedModel):
     measure: str = Field(
         min_length=1,
         max_length=MAX_MEASURE_CHARS,
-        description=(
-            "What this requirement retrieves, in the words of the question, naming how a "
-            "flow is counted only when the question does."
-        ),
+        description=("What this requirement retrieves, in the words of the question."),
     )
     entities: tuple[Entity, ...] = Field(
         default=(),
@@ -1066,10 +1122,24 @@ class DatasetRequirement(TaggedModel):
         description=(
             "Set on the total a share_of or quotient_of divides its part by, the part over "
             "every sector, donor or recipient: all US aid for US health aid, all aid to Kenya "
-            "for US aid to Kenya. Counted from the part's own dataset, with no search. Read "
-            "only as that denominator."
+            "for US aid to Kenya. Counted from the part's own dataset, with no search, for the "
+            "part's parties with that side one total, so it states no `entities` or `across`. "
+            "Read only as that denominator."
         ),
     )
+    # The provider option the user's words ask this figure to count, which admission
+    # counts its pin on (`submission.service._declared_claims`). No description: the
+    # enum names each option, and one would put the declaration over
+    # `PROPOSE_PLAN_DECLARATION_CEILING`.
+    scope_options: Annotated[tuple[ProviderOptionId, ...], HASHED_WHEN_SET] = Field(
+        default=(), max_length=1, exclude_if=lambda options: not options
+    )
+
+    @property
+    def provider_option(self) -> str | None:
+        """The provider option this requirement declares (`scope_options`), `None`
+        where it declares none."""
+        return self.scope_options[0] if self.scope_options else None
 
     @field_validator("source_code", mode="before")
     @classmethod
@@ -1138,10 +1208,11 @@ class DatasetRequirement(TaggedModel):
         `across=('donor',)`, an entity with no role or a place role sits in
         `across=('country',)`, and 'donor' and 'provider' state one party. A
         word outside the party vocabulary is left for
-        `compiler.evidence.open_axes_for` to refuse.
+        `compiler.evidence.open_axes_for` to refuse. A whole (`whole_of`)
+        covers what its part covers (`whole_read`), so it may name nobody.
         """
         if not self.across:
-            if not self.entities:
+            if not self.entities and self.whole_of is None:
                 raise ValueError(
                     "a dataset requirement names at least one entity, or states in `across` "
                     "the parties whose every member it covers"
@@ -1239,7 +1310,8 @@ class AggregateRequirement(TaggedModel):
             "entities named, plus a breakdown's codes when the input has them; an `across` "
             "party is summed), breakdown (its codes alone), or two of them. Without period, "
             "the years reduce to one figure per group. Empty reduces every row to one figure, "
-            "over every year, party and code."
+            "over every year, party and code. Over an input naming no entity, `entity` keeps "
+            "nothing: rank that input, or group by period alone."
         ),
     )
 
@@ -1318,16 +1390,25 @@ class GrowthRequirement(TaggedModel):
         return self
 
 
-# What `accept_provider_difference` means to the planner, on each calculation
-# that subtracts, divides or adds its inputs
-# (`submission.service._PROVIDER_ALIGNED`).
-ACCEPT_PROVIDER_DIFFERENCE = (
-    "Set only when the user asks for inputs counting different providers' spending, as "
-    "'use the DAC1 total' does beside CRS aid: each input keeps its own provider scope."
-)
+class _ProviderAligned(TaggedModel):
+    """A calculation whose inputs alignment counts on one provider scope.
+
+    A stored plan, or a proposal resent from one, can carry
+    `accept_provider_difference`, a field these calculations do not have; it is
+    dropped on read, so such a plan validates and its turn amends it.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_accept_provider_difference(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "accept_provider_difference" in data:
+            return {
+                key: value for key, value in data.items() if key != "accept_provider_difference"
+            }
+        return data
 
 
-class ComparisonRequirement(TaggedModel):
+class ComparisonRequirement(_ProviderAligned):
     """The difference between two requirements' results, at each common period.
 
     A comparison answers the question and feeds nothing further, so no other
@@ -1349,12 +1430,6 @@ class ComparisonRequirement(TaggedModel):
         description="The side the difference starts from: the result is `minuend` minus `subtrahend`."
     )
     subtrahend: RequirementSide = Field(description="The side subtracted from `minuend`.")
-    # Left out of every dump while unset, as `Entity.members` is.
-    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
-        default=False,
-        exclude_if=lambda accepted: not accepted,
-        description=ACCEPT_PROVIDER_DIFFERENCE,
-    )
 
     @model_validator(mode="after")
     def _sides_differ(self) -> ComparisonRequirement:
@@ -1366,7 +1441,7 @@ class ComparisonRequirement(TaggedModel):
         return self
 
 
-class SumOfRequirement(TaggedModel):
+class SumOfRequirement(_ProviderAligned):
     """Two single-series results added together, at each period both report.
 
     Each side reads one series: one entity's, or a result holding one. A
@@ -1387,12 +1462,6 @@ class SumOfRequirement(TaggedModel):
     )
     left: RequirementSide = Field(description="One of the two series added together.")
     right: RequirementSide = Field(description="The series added to `left`.")
-    # Left out of every dump while unset, as `Entity.members` is.
-    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
-        default=False,
-        exclude_if=lambda accepted: not accepted,
-        description=ACCEPT_PROVIDER_DIFFERENCE,
-    )
 
     @model_validator(mode="after")
     def _sides_read_different_requirements(self) -> SumOfRequirement:
@@ -1424,13 +1493,15 @@ class RankRequirement(TaggedModel):
     direction: RankDirection = Field(
         description="Which end of the ranking comes first: the highest value or the lowest."
     )
-    among: RankAmong = Field(
+    among: RankAmong | None = Field(
+        default=None,
         description=(
             "Who this rank compares an entity against: 'named' for exactly the entities a "
             "filter has narrowed to, 'population' for every entity the retrieved definition "
             "holds: every member of the party its `across` states, or, where entities are "
-            "named, those entities as the focus among the rest."
-        )
+            "named, those entities as the focus among the rest. Unset takes the one value "
+            "the input admits: 'named' over an axis a filter narrowed, else 'population'."
+        ),
     )
     axis: str | None = Field(
         default=None,
@@ -1441,8 +1512,8 @@ class RankRequirement(TaggedModel):
     reduction: Reduction | None = Field(
         default=None,
         description=(
-            "How to collapse an entity's rows to one value first. Required when the input "
-            "carries more than one role, to collapse the other role's rows, and required "
+            "How to collapse an entity's rows to one value first. Required when a role "
+            "other than the axis holds several parties, to collapse that role's rows, and "
             "when the window leaves an entity more than one row."
         ),
     )
@@ -1504,7 +1575,7 @@ class RankRequirement(TaggedModel):
         return self
 
 
-class ShareOfRequirement(TaggedModel):
+class ShareOfRequirement(_ProviderAligned):
     """The share `numerator` holds of `denominator`, at each period.
 
     Both sides cover the same years, because a period only one side covers
@@ -1541,12 +1612,6 @@ class ShareOfRequirement(TaggedModel):
             "total, 'pooled' divides every entity by one total summed across the population."
         ),
     )
-    # Left out of every dump while unset, as `Entity.members` is.
-    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
-        default=False,
-        exclude_if=lambda accepted: not accepted,
-        description=ACCEPT_PROVIDER_DIFFERENCE,
-    )
 
     @property
     def pools_its_own_axis(self) -> bool:
@@ -1575,7 +1640,7 @@ class ShareOfRequirement(TaggedModel):
         return self
 
 
-class QuotientRequirement(TaggedModel):
+class QuotientRequirement(_ProviderAligned):
     """One measure divided by another, at each period both report.
 
     For a per-head, per-capita or "divide one by the other" figure, in the
@@ -1613,12 +1678,6 @@ class QuotientRequirement(TaggedModel):
             "The denominator's name for the same entities, so each divides by its own "
             "counterpart: the role they state there, or 'country' where they state none."
         ),
-    )
-    # Left out of every dump while unset, as `Entity.members` is.
-    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
-        default=False,
-        exclude_if=lambda accepted: not accepted,
-        description=ACCEPT_PROVIDER_DIFFERENCE,
     )
 
     @model_validator(mode="after")
@@ -1691,7 +1750,11 @@ class FilterRequirement(TaggedModel):
     predicates: tuple[Predicate, ...] = Field(
         min_length=1,
         max_length=MAX_PREDICATES,
-        description="The conditions a row has to satisfy, all of them, to survive this filter.",
+        description=(
+            "The conditions a row has to satisfy, all of them, to survive this filter. Years "
+            "asked for apart, as 2019 and 2023, are a `period_in` listing them, over a "
+            "dataset whose `period` runs from the first to the last."
+        ),
     )
 
     @model_validator(mode="after")
@@ -1749,6 +1812,18 @@ EvidenceRequirement = Annotated[
 def is_dataset(requirement: EvidenceRequirement) -> bool:
     """Return whether `requirement` is a `DatasetRequirement`."""
     return isinstance(requirement, DatasetRequirement)
+
+
+def answer_mode_of(requirements: Sequence[EvidenceRequirement]) -> AnswerMode:
+    """The one `AnswerMode` `requirements` validate under as its definition reads.
+
+    `series` where a dataset requirement is unread by every other one, which
+    is then the answer and which `computed` refuses; `computed` where every
+    dataset requirement feeds a calculation, whose result is the answer.
+    """
+    read = {input_id for requirement in requirements for input_id in inputs_of(requirement)}
+    unread = any(is_dataset(r) and r.id not in read for r in requirements)
+    return AnswerMode.SERIES if unread else AnswerMode.COMPUTED
 
 
 def inputs_of(requirement: EvidenceRequirement) -> tuple[Identifier, ...]:
@@ -1956,6 +2031,29 @@ class RollingCopy(StrictModel):
 
     copy_id: Identifier = Field(description="The copy's id.")
     origin_id: Identifier = Field(description="The id of the requirement it copies.")
+
+
+class WholeSum(StrictModel):
+    """The aggregate `propose_plan` added to sum the side a whole leaves open.
+
+    A whole (`DatasetRequirement.whole_of`) reads its part with one side of
+    the flow taken over every party there. Search compiles it either binding
+    that side to one total, as DAC2a binds developing countries, or leaving
+    it open with one row per party, as the CRS does over every donor. Where
+    it is left open, `propose_plan` adds an aggregate summing it by period
+    (`whole_sum`), which every reader of the whole reads in its place
+    (`with_whole_sums`). Only `propose_plan` writes it (`Plan.whole_sums`),
+    and the model is shown the plan without it (`authored`).
+
+    The aggregate keeps apart every party the whole leaves open beside that
+    side, the `across` words of its part on its other sides (`whole_read`),
+    one total per party there, as each donor's total over every recipient.
+    They are read off the part as the plan states it (`HistorySplit.kept_open`),
+    so a part the translator rewrites keeps its sum in step.
+    """
+
+    whole_id: Identifier = Field(description="The whole whose open side the aggregate sums.")
+    sum_id: Identifier = Field(description="The aggregate's id.")
 
 
 class FirstYear(StrictModel):
@@ -2495,10 +2593,9 @@ def whole_of_fault(
 
     The whole is compiled from the part's pin with only the part's scope
     widened, so the part is another dataset requirement, itself no whole.
-    A whole over every sector counts the part's parties. A whole over every
-    donor or recipient holds the part only where the part names a party on
-    that side: it states the part's other entities, and `across` the part's
-    words with one word for that side added (`_entity_whole_fault`). It
+    A whole over every donor or recipient opens the side the part names a
+    party on (`_opened_side_fault`). The whole covers the part's parties
+    with that side one total (`whole_read`). It
     follows its part wherever the part is counted, so it is read only as
     the denominator of a share or quotient of its part (`_whole_read_fault`).
     """
@@ -2516,62 +2613,292 @@ def whole_of_fault(
             f"{whole.id!r} states whole_of part {part_id!r}, which is a whole itself; name the "
             "part both are counted from"
         )
-    if whole.whole_of.axis != "sector":
-        if fault := _entity_whole_fault(whole, part, whole.whole_of.axis):
-            return fault
-    elif {*whole.entities, *whole.across} != {*part.entities, *part.across}:
-        return (
-            f"{whole.id!r} is the whole of {part_id!r}, counted from its dataset for the same "
-            "parties, so it states the same entities and `across`"
-        )
+    if fault := _opened_side_fault(whole, part, whole.whole_of.axis):
+        return fault
     return _whole_read_fault(whole, part_id, requirements_by_id)
 
 
-def _entity_whole_fault(
+def _opened_side_fault(
     whole: DatasetRequirement, part: DatasetRequirement, axis: str
 ) -> str | None:
-    """Why `whole`, the whole of `part` over every `axis` (a donor or a recipient),
-    does not hold `part`, `None` when it does.
-
-    The part names a party on the side of the flow `axis` is on. The whole names
-    the part's other entities and states the part's `across` words with one word
-    for that side added, so it is the total over every `axis` for the part's
-    other parties. Where Search answers the whole with that side bound to one
-    group, as DAC1 binds DAC countries' total, the translator names the group on
-    the side in place of the word (`translator.discovery.name_pinned_groups`), so
-    a whole naming one entity on that side, other than the part's, and stating
-    only the part's `across` words holds the part too. Which group Search binds
-    is known only once the whole is compiled, so admission refuses a whole
-    naming any other entity there (`submission.service._misnamed_total`).
-    """
+    """Why `part` names no party on the side of the flow `whole` opens over every
+    `axis`, `None` when it does or `axis` is the sector."""
     side = role_party(axis)
-    named = [e for e in part.entities if e.role is not None and role_party(e.role) == side]
-    if not named and (roleless := [e.name for e in part.entities if e.role is None]):
+    if side is None:
+        return None
+    if _sitting_on(part.entities, side):
+        return None
+    if roleless := [e.name for e in part.entities if e.role is None]:
         return (
             f"{whole.id!r} is the whole of {part.id!r} over every {axis}, and the side of "
             f"{part.id!r}'s entities ({', '.join(sorted(roleless))}) is not stated; state each "
             "entity's role, donor or recipient"
         )
-    if not named:
-        return (
-            f"{whole.id!r} is the whole of {part.id!r} over every {axis}, and {part.id!r} names "
-            f"no {axis} to leave open; state the whole over another axis, or a total of its own "
-            "without `whole_of`"
+    return (
+        f"{whole.id!r} is the whole of {part.id!r} over every {axis}, and {part.id!r} names "
+        f"no {axis} to leave open; state the whole over another axis, or a total of its own "
+        "without `whole_of`"
+    )
+
+
+def _sits_on(entity: Entity, side: Party) -> bool:
+    """Whether `entity`'s role names the party `side`."""
+    return entity.role is not None and role_party(entity.role) == side
+
+
+def _sitting_on(entities: Iterable[Entity], side: Party) -> list[Entity]:
+    """The entities of `entities` whose role names the party `side`."""
+    return [e for e in entities if _sits_on(e, side)]
+
+
+def stated_coverage_fault(whole: DatasetRequirement) -> str | None:
+    """Why `whole` states who it covers though its `whole_of` derives it, `None` when it
+    states nothing or is no whole.
+
+    A whole covers what its part covers with one side left open (`whole_read`),
+    so `entities` or `across` on it could only disagree with that. A proposal
+    stating either is refused (`submission.service._Patch`). A plan stored with
+    them keeps them and reads them as derived (`without_stated_coverage`).
+    """
+    if whole.whole_of is None:
+        return None
+    stated = [field for field in ("entities", "across") if getattr(whole, field)]
+    if not stated:
+        return None
+    return (
+        f"{whole.id!r} states `whole_of`, so it covers what its part "
+        f"{whole.whole_of.part!r} covers with the {whole.whole_of.axis} left open as one "
+        f"total; drop its {' and '.join(f'`{field}`' for field in stated)}"
+    )
+
+
+def without_stated_coverage(requirement: EvidenceRequirement) -> EvidenceRequirement:
+    """`requirement` without the `entities` and `across` it states where it is a whole
+    (`stated_coverage_fault`).
+
+    A proposal stating them is refused (`submission.service._Patch`), and a stored
+    plan can still hold them. The stored plan keeps them, since they feed the
+    revision its user approved (`plan_revision`), and every reader of the whole's
+    coverage derives it from the part (`whole_read`). The planner's view of the
+    plan drops them (`harness.planner_adapter._as_authored`), so an amendment
+    repeating what it was shown is not refused.
+    """
+    if (
+        not isinstance(requirement, DatasetRequirement)
+        or requirement.whole_of is None
+        or not (requirement.entities or requirement.across)
+    ):
+        return requirement
+    return requirement.model_copy(update={"entities": (), "across": ()})
+
+
+def whole_read(whole: DatasetRequirement, part: DatasetRequirement) -> DatasetRequirement:
+    """`whole` covering what its part `part` covers, less the side it opens.
+
+    The whole states no `entities` or `across` of its own. It keeps the part's
+    entities and `across` words on every role but the side of the flow its
+    `WholeOf.axis` opens, which it reads as one total (`opened_role`). A
+    sector whole opens no side and covers the part's parties exactly.
+    """
+    side = role_party(whole.whole_of.axis) if whole.whole_of is not None else None
+    return whole.model_copy(
+        update={
+            "entities": tuple(e for e in part.entities if side is None or not _sits_on(e, side)),
+            "across": tuple(w for w in part.across if side is None or across_party(w) != side),
+        }
+    )
+
+
+def opened_role(whole: DatasetRequirement, part: DatasetRequirement) -> str | None:
+    """The role phrase of the party `part` names on the side `whole` opens, the
+    role the whole reads that side's one total under; `None` for a sector whole."""
+    if whole.whole_of is None or (side := role_party(whole.whole_of.axis)) is None:
+        return None
+    named = _sitting_on(part.entities, side)
+    return named[0].role if named else None
+
+
+def covered(requirement: DatasetRequirement, plan: Plan) -> DatasetRequirement:
+    """Who `requirement` covers, in its own fields. Any requirement but a whole is as stated.
+
+    A whole (`whole_of`) covers what it reads on the source its plan's
+    workflow retrieves it from (`whole_on_source`), as the compiler reads it
+    (`compiler.compile.wholes_on_their_sources`). Before compile, it reads the
+    side it opens open where `plan.whole_sums` sums that side, a copy of the
+    whole included.
+    """
+    if requirement.whole_of is None:
+        return requirement
+    part = next((r for r in plan.evidence_requirements if r.id == requirement.whole_of.part), None)
+    if not isinstance(part, DatasetRequirement):
+        return requirement
+    origin = copy_origins(plan.rolling_copies).get(requirement.id, requirement.id)
+    return whole_on_source(
+        requirement,
+        part,
+        _compiled_source(plan, requirement.id),
+        summed=any(entry.whole_id == origin for entry in plan.whole_sums),
+    )
+
+
+def whole_on_source(
+    whole: DatasetRequirement,
+    part: DatasetRequirement,
+    source: SelectedSource | None,
+    *,
+    summed: bool,
+) -> DatasetRequirement:
+    """`whole`, the whole of `part`, covering what it reads on `source`, the source
+    compile retrieves it from, `None` before compile.
+
+    It covers its part's parties less the side it opens (`whole_read`), and on
+    that side what the source serves there. Where the source leaves the side
+    open (`compiler.sources.open_side_column`), that is the side's word in
+    `across`, one row per party there, which the aggregate `propose_plan`
+    added sums (`WholeSum`). Otherwise it is the parties the source binds
+    there, as entities by their refs, the total Search counts the side as. With no
+    source the side reads open where `summed`, as admission read Search's
+    answer for the whole, and as `whole_read` reads it otherwise. A sector
+    whole opens no side.
+    """
+    read = whole_read(whole, part)
+    role = opened_role(whole, part)
+    if role is None:
+        return read
+    if source is None:
+        open_side = summed
+    else:
+        open_side = open_side_column(source.open_entity_axes, role) is not None
+    if open_side:
+        return read.model_copy(update={"across": (*read.across, role)})
+    side = flow_side(role)
+    held = [
+        Entity(name=entity.label, role=role, dcid=entity.ref)
+        for entity in (source.entities if source is not None else ())
+        if flow_side(entity.role) == side
+    ]
+    return read.model_copy(update={"entities": (*read.entities, *held)})
+
+
+def _compiled_source(plan: Plan, requirement_id: str) -> SelectedSource | None:
+    """The source `plan`'s workflow retrieves `requirement_id` from, `None` before
+    compile or where no step retrieves it."""
+    if plan.workflow is None:
+        return None
+    step_id = next(
+        (
+            binding.step_id
+            for binding in plan.workflow.evidence_bindings
+            if binding.requirement_id == requirement_id
+        ),
+        None,
+    )
+    return None if step_id is None else plan.workflow.source_of(step_id)
+
+
+def wholes_as_read(
+    requirements_by_id: Mapping[str, EvidenceRequirement], *, summed: Collection[str] = ()
+) -> dict[str, EvidenceRequirement]:
+    """`requirements_by_id` with each whole whose part it holds read before compile
+    (`whole_on_source`), the side it opens open, one row per party there, where
+    `summed` names it, one an aggregate sums the open side of (`WholeSum`)."""
+    read: dict[str, EvidenceRequirement] = dict(requirements_by_id)
+    for requirement_id, requirement in requirements_by_id.items():
+        if not isinstance(requirement, DatasetRequirement) or requirement.whole_of is None:
+            continue
+        part = requirements_by_id.get(requirement.whole_of.part)
+        if not isinstance(part, DatasetRequirement) or part.whole_of is not None:
+            continue
+        read[requirement_id] = whole_on_source(
+            requirement, part, None, summed=requirement_id in summed
         )
-    others = {*part.entities} - {*named}
-    spans = any(across_party(word) == side for word in whole.across)
-    kept = {word for word in whole.across if across_party(word) != side}
-    on_side = {e for e in whole.entities if e.role is not None and role_party(e.role) == side}
-    # The side spanned by `across`, or closed to one group other than the part's party.
-    opened = not on_side if spans else len(on_side) == 1 and not on_side & {*named}
-    if {*whole.entities} - on_side != others or not opened or kept != {*part.across}:
-        return (
-            f"{whole.id!r} is the whole of {part.id!r} over every {axis}, so it states "
-            f"{part.id!r}'s entities without its {axis}s "
-            f"({', '.join(sorted(e.name for e in named))}), and `across` "
-            f"{part.id!r}'s words with {axis!r} added"
-        )
-    return None
+    return read
+
+
+def _whole_and_part(
+    requirements_by_id: Mapping[str, EvidenceRequirement], whole_id: str
+) -> tuple[DatasetRequirement, DatasetRequirement] | None:
+    """The whole `whole_id` names and its part, both dataset requirements of
+    `requirements_by_id`; `None` where either is not."""
+    whole = requirements_by_id.get(whole_id)
+    if not isinstance(whole, DatasetRequirement) or whole.whole_of is None:
+        return None
+    part = requirements_by_id.get(whole.whole_of.part)
+    return (whole, part) if isinstance(part, DatasetRequirement) else None
+
+
+def whole_sum(
+    whole: DatasetRequirement, part: DatasetRequirement, entry: WholeSum
+) -> AggregateRequirement:
+    """The aggregate `entry` names, summing the side `whole`, the whole of `part`, opens.
+
+    It sums by period, keeping every party the whole names on its other
+    sides and each party it leaves open there (`whole_read`), and its
+    breakdown's codes, so its result is the whole as the plan reads it,
+    that side one total.
+    """
+    read = whole_read(whole, part)
+    group_by: tuple[GroupBy, ...] = (GroupBy.PERIOD,)
+    if read.entities or read.across:
+        group_by = (GroupBy.PERIOD, GroupBy.ENTITY)
+    elif read.breakdown is not None:
+        group_by = (GroupBy.PERIOD, GroupBy.BREAKDOWN)
+    return AggregateRequirement(
+        id=entry.sum_id, input_id=whole.id, reduction=Reduction.SUM, group_by=group_by
+    )
+
+
+def whole_sums_made(
+    requirements: Sequence[EvidenceRequirement], sums: Iterable[WholeSum]
+) -> tuple[WholeSum, ...]:
+    """The entries of `sums` whose aggregate `with_whole_sums` adds to `requirements`:
+    each naming a whole `requirements` states with its part."""
+    by_id = {requirement.id: requirement for requirement in requirements}
+    return tuple(entry for entry in sums if _whole_and_part(by_id, entry.whole_id) is not None)
+
+
+def with_whole_sums(
+    requirements: Sequence[EvidenceRequirement], sums: Iterable[WholeSum]
+) -> list[EvidenceRequirement]:
+    """`requirements` with the aggregate each of `sums` names (`whole_sum`) placed after
+    its whole, and every other requirement reading the whole reading the aggregate.
+
+    A planner's aggregate over the whole reads the added one too. A sum whose
+    whole `requirements` does not state, or states without its part, is left
+    out.
+    """
+    by_id = {requirement.id: requirement for requirement in requirements}
+    made: dict[str, AggregateRequirement] = {
+        entry.whole_id: whole_sum(*pair, entry)
+        for entry in sums
+        if (pair := _whole_and_part(by_id, entry.whole_id)) is not None
+    }
+    renamed = {whole_id: aggregate.id for whole_id, aggregate in made.items()}
+    summed: list[EvidenceRequirement] = []
+    for requirement in requirements:
+        summed.append(_reading(requirement, renamed))
+        if requirement.id in made:
+            summed.append(made[requirement.id])
+    return summed
+
+
+def without_whole_sums(
+    requirements: Sequence[EvidenceRequirement], sums: Iterable[WholeSum]
+) -> list[EvidenceRequirement]:
+    """`requirements` without the aggregates `sums` names, each reader of one reading its
+    whole again: the inverse of `with_whole_sums`."""
+    wholes = sum_origins(sums)
+    return [
+        _reading(requirement, wholes)
+        for requirement in requirements
+        if requirement.id not in wholes
+    ]
+
+
+def sum_origins(sums: Iterable[WholeSum]) -> dict[str, str]:
+    """Each aggregate's id in `sums` mapped to its whole's, the requirement outward text
+    names in its place (`authored_text`)."""
+    return {entry.sum_id: entry.whole_id for entry in sums}
 
 
 def _dataset_reach(
@@ -2657,6 +2984,8 @@ def _check_requirement_graph(
     answer_mode: AnswerMode,
     whole_history: Mapping[str, int],
     origins: Mapping[str, str],
+    summed: Collection[str] = (),
+    kept_open: Mapping[str, tuple[str, ...]] | None = None,
 ) -> None:
     """Reject requirements that do not agree with each other.
 
@@ -2676,7 +3005,8 @@ def _check_requirement_graph(
     one newest year states that year, one the datasets it rests on hold
     (`_check_rolling_years_agree`). An `ne`
     removes a fixed year from fixed years (`_check_exclusions_fixed`).
-    `whole_history` and `origins` are as `_build_shapes` takes them.
+    `whole_history`, `origins`, `summed` and `kept_open` are as `_build_shapes`
+    takes them.
 
     Under `AnswerMode.SERIES`, a dataset requirement left unread by every
     other requirement is legal: it is the answer. Under `AnswerMode.COMPUTED`,
@@ -2714,7 +3044,13 @@ def _check_requirement_graph(
     _check_exclusions_fixed(requirements_by_id)
     _check_rolling_reads_open_periods(requirements_by_id)
     _check_rolling_years_agree(requirements_by_id)
-    _build_shapes(requirements_by_id, whole_history=whole_history, origins=origins)
+    _build_shapes(
+        requirements_by_id,
+        whole_history=whole_history,
+        origins=origins,
+        summed=summed,
+        kept_open=kept_open,
+    )
 
 
 def rolls(requirement: EvidenceRequirement) -> bool:
@@ -2883,7 +3219,11 @@ class HistorySplit(NamedTuple):
     with that year, the year its shape starts at (`_build_shapes`).
     `first_years_read` names the model's dataset requirements whose first
     year the split reads, and `first_year_unknown` those of them the plan's
-    `first_years` holds no year for (`whole_history_split`).
+    `first_years` holds no year for (`whole_history_split`). `summed` names
+    each whole an aggregate sums the open side of (`Plan.whole_sums`), a copy
+    of one included, `sums` those aggregates, and `kept_open` maps each such
+    aggregate, a copy of one included, to the parties it keeps open, read off
+    its whole's part (`whole_sum`, `split_of`).
     """
 
     requirements: tuple[EvidenceRequirement, ...]
@@ -2891,10 +3231,29 @@ class HistorySplit(NamedTuple):
     whole_history: dict[str, int]
     first_years_read: tuple[str, ...]
     first_year_unknown: tuple[str, ...]
+    summed: frozenset[str] = frozenset()
+    sums: tuple[WholeSum, ...] = ()
+    kept_open: Mapping[str, tuple[str, ...]] = {}
 
     def origins(self) -> dict[str, str]:
         """Each clone's id mapped to its origin's."""
         return copy_origins(self.copies)
+
+    def names(self) -> dict[str, str]:
+        """Each id the model did not write mapped to the requirement outward text names
+        in its place: a clone's to its origin's, an added aggregate's to its whole's,
+        and a clone of an added aggregate to that aggregate's whole."""
+        wholes = sum_origins(self.sums)
+        clones = {copy: wholes.get(origin, origin) for copy, origin in self.origins().items()}
+        return clones | wholes
+
+    def summing(self) -> frozenset[str]:
+        """The ids `names` maps to a whole because they sum it: each added aggregate
+        and each clone of one (`authored_text`'s `sums`)."""
+        wholes = sum_origins(self.sums)
+        return frozenset(wholes) | {
+            copy for copy, origin in self.origins().items() if origin in wholes
+        }
 
 
 def copy_origins(copies: Iterable[RollingCopy]) -> dict[str, str]:
@@ -2903,24 +3262,32 @@ def copy_origins(copies: Iterable[RollingCopy]) -> dict[str, str]:
 
 
 def origin_of(split: HistorySplit, step_id: str) -> str:
-    """The id of the model's requirement `step_id` copies, or `step_id` itself where it copies none.
+    """The id of the model's requirement `step_id` copies, or the whole an added
+    aggregate sums (`WholeSum`), or `step_id` itself where it is neither.
 
     Outward text names a step by it: a refusal's requirement ids and the
     dataset requirement a period-reduction gap reads.
     """
-    return split.origins().get(step_id, step_id)
+    return split.names().get(step_id, step_id)
 
 
-def authored_text(text: str, origins: Mapping[str, str]) -> str:
+def authored_text(
+    text: str, origins: Mapping[str, str], *, sums: Collection[str] = frozenset()
+) -> str:
     """`text` naming, in place of each copy `origins` maps, the requirement it copies.
 
     `origins` maps each copy's id to its origin's (`copy_origins`,
-    `HistorySplit.origins`). Each copy id is matched as a whole identifier in
+    `HistorySplit.names`), and each aggregate `propose_plan` added to sum a
+    whole to the whole (`sum_origins`). Each copy id is matched as a whole identifier in
     prose, so an id the model wrote that only starts with one
     (`aid_history_2` beside `aid_history`) keeps its name, and so does a ref
     holding one: a path or dcid segment (`dc/topic/aid_history`,
     `/aid_history.csv`) or a prefixed name (`dc:aid_history`), where a `/`,
     `.` or `:` joins it to another identifier character or a `/` follows.
+    `sums` are the ids of `origins` that sum their whole (`HistorySplit.summing`).
+    Where `text` names one of them beside its whole, it reads "the sum of" the
+    whole, inside the quotes around the id, so the sentence still tells the
+    two apart.
     Outward text built on the split plan reads through it: the refusals its
     rules raise (`Plan`'s validation), the referrals the translator hands
     back (`translator.tool.authored_answer`), and the prose of what a run
@@ -2929,11 +3296,27 @@ def authored_text(text: str, origins: Mapping[str, str]) -> str:
     if not origins:
         return text
     copy_id = re.compile(
-        r"(?<![A-Za-z0-9_/.:])("
-        + "|".join(map(re.escape, origins))
-        + r")(?![A-Za-z0-9_/]|[.:][A-Za-z0-9_])"
+        "(['\"`]?)" + _identifier_in_prose("|".join(map(re.escape, origins))) + r"\1"
     )
-    return copy_id.sub(lambda match: origins[match[1]], text)
+    beside = {
+        hidden
+        for hidden in sums
+        if hidden in origins
+        and re.search(_identifier_in_prose(re.escape(origins[hidden])), text) is not None
+    }
+
+    def named(match: re.Match[str]) -> str:
+        quote, hidden = match[1], match[2]
+        name = f"{quote}{origins[hidden]}{quote}"
+        return f"the sum of {name}" if hidden in beside else name
+
+    return copy_id.sub(named, text)
+
+
+def _identifier_in_prose(alternatives: str) -> str:
+    """A pattern matching one of `alternatives` as a whole identifier in prose, in a
+    group of its own, as `authored_text` reads ids."""
+    return rf"(?<![A-Za-z0-9_/.:])({alternatives})(?![A-Za-z0-9_/]|[.:][A-Za-z0-9_])"
 
 
 def whole_history_split(
@@ -3292,6 +3675,8 @@ def _split_shapes(split: HistorySplit) -> dict[str, FrameShape]:
         {requirement.id: requirement for requirement in split.requirements},
         whole_history=split.whole_history,
         origins=split.origins(),
+        summed=split.summed,
+        kept_open=split.kept_open,
     )
 
 
@@ -3300,6 +3685,8 @@ def _build_shapes(
     *,
     whole_history: Mapping[str, int],
     origins: Mapping[str, str],
+    summed: Collection[str] = (),
+    kept_open: Mapping[str, tuple[str, ...]] | None = None,
 ) -> dict[str, FrameShape]:
     """Walk every requirement in the order the plan states them, each after its inputs
     (`requirement_step_order`), rejecting an illegal shape as it is found.
@@ -3312,7 +3699,11 @@ def _build_shapes(
     names exactly one, by construction of every transform. `whole_history`
     names each dataset requirement read from the first year its dataset
     holds on record, with that year, where its shape starts
-    (`_dataset_shape`). Every other one starts at its stated period.
+    (`_dataset_shape`). Every other one starts at its stated period. A
+    whole covers what its part covers (`wholes_as_read`), and one `summed`
+    names reads the side it opens open, for the aggregate `propose_plan`
+    added to sum (`WholeSum`), which keeps apart the parties `kept_open`
+    names for it.
     `origins` maps each copy `whole_history_split` added to the requirement
     it copies, which a refusal names in its place: a copy reads other
     years than its origin, and the model wrote only the origin. A copy
@@ -3329,6 +3720,7 @@ def _build_shapes(
             the first growth whose window year newer data takes out of its
             input (`planner.shapes.growth_endpoint_leaves`).
     """
+    requirements_by_id = wholes_as_read(requirements_by_id, summed=summed)
     reads, rolling = _rolling_reads(requirements_by_id)
     over = anchored_over(
         reads,
@@ -3350,6 +3742,8 @@ def _build_shapes(
             shapes_by_id,
             requirements_by_id,
             first_year=whole_history.get(requirement_id),
+            summed=requirement_id in summed,
+            kept_open=(kept_open or {}).get(requirement_id, ()),
         )
         sides = [shapes_by_id[input_id] for input_id in reads[requirement_id]]
         missed = anchor_misses(sides, over[requirement_id]) if len(sides) > 1 else None
@@ -3398,9 +3792,21 @@ def requirement_step_order(requirements_by_id: Mapping[str, EvidenceRequirement]
     return order
 
 
-def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -> FrameShape:
+def _dataset_shape(
+    requirement: DatasetRequirement, *, first_year: int | None, opened: str | None = None
+) -> FrameShape:
     """The shape a fresh retrieval carries: one role dimension per role phrase the entities
     state, then one open dimension per `across` word, then the breakdown's.
+
+    A whole's side it opens is one more role dimension, closed, under the
+    role phrase `opened` (`opened_role`), read as the side's one total.
+
+    A role phrase one entity states alone, not as a set's members, is
+    `single`. The plan cannot tell whether Search binds the name to one party,
+    so `submission.service._rank_roles_expand` and the compiler check it. The
+    opened side is not `single`, since no entity of the whole states it and
+    `_rank_roles_expand` has no name to check, and a rank over another of the
+    whole's roles states a reduction.
 
     Its years run on past `period` with `period_end_open`, and start at
     `first_year` for a read of its dataset's whole history, the first year
@@ -3415,10 +3821,18 @@ def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -
     breakdown, which sums the family within each code.
     """
     role_names = sorted(
-        {entity.role for entity in requirement.entities}, key=lambda role: (role is None, role)
+        {entity.role for entity in requirement.entities} | ({opened} if opened else set()),
+        key=lambda role: (role is None, role),
     )
+    stating = Counter(entity.role for entity in requirement.entities)
     roles = tuple(
-        RoleDimension(role=name, requirement_id=requirement.id, place=place_role(name))
+        RoleDimension(
+            role=name,
+            requirement_id=requirement.id,
+            place=place_role(name),
+            single=stating[name] == 1
+            and not any(entity.members for entity in requirement.entities if entity.role == name),
+        )
         for name in role_names
     )
     roles = (
@@ -3500,7 +3914,9 @@ def retrieved_period(requirement: DatasetRequirement, *, first_year: int | None)
     return Period(start=first_year, end=requirement.period.end)
 
 
-def _aggregate_shape(requirement: AggregateRequirement, input_shape: FrameShape) -> FrameShape:
+def _aggregate_shape(
+    requirement: AggregateRequirement, input_shape: FrameShape, *, kept_open: Collection[str] = ()
+) -> FrameShape:
     by_entity = GroupBy.ENTITY in requirement.group_by
     by_period = GroupBy.PERIOD in requirement.group_by
     by_breakdown = GroupBy.BREAKDOWN in requirement.group_by
@@ -3511,6 +3927,7 @@ def _aggregate_shape(requirement: AggregateRequirement, input_shape: FrameShape)
         by_period=by_period,
         by_breakdown=by_breakdown,
         reduction=requirement.reduction,
+        kept_open=kept_open,
     )
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
@@ -3520,6 +3937,7 @@ def _aggregate_shape(requirement: AggregateRequirement, input_shape: FrameShape)
         by_entity=by_entity,
         by_period=by_period,
         by_breakdown=by_breakdown,
+        kept_open=kept_open,
         step_id=requirement.id,
     )
 
@@ -3580,6 +3998,11 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
     axis_role = _selected_role(input_shape.roles, requirement.axis)
+    if requirement.among is None:
+        raise ValueError(
+            f"{requirement.id!r} states no `among`, and axis {axis_role.role!r} admits only "
+            f"among={_admitted_among(axis_role).value!r}; state it"
+        )
     if requirement.among is RankAmong.NAMED and not axis_role.narrowed:
         raise ValueError(
             f"{requirement.id!r} states among='named', but axis {axis_role.role!r} carries no "
@@ -3600,13 +4023,129 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
     )
 
 
+def _admitted_among(axis_role: RoleDimension) -> RankAmong:
+    """The one `among` a rank over `axis_role` may state.
+
+    A filter that narrowed the axis to named entities leaves only them to
+    rank, so the rank is 'named', and `_rank_shape` refuses 'named' over an
+    axis no filter narrowed. Over any other axis the rank is 'population',
+    which `planner.shapes.rejects` refuses over a narrowed one.
+    """
+    return RankAmong.NAMED if axis_role.narrowed else RankAmong.POPULATION
+
+
+def ranks_among_settled(
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    graph: Sequence[EvidenceRequirement],
+    first_years: Sequence[FirstYear] = (),
+) -> list[EvidenceRequirement]:
+    """`requirements`, each rank stating no `among` given the one its input admits.
+
+    `graph` is every requirement the plan will state, which a rank's input
+    chain is read from. The input's shape is built from the requirements
+    that chain reads alone (`_build_shapes`), each dataset requirement
+    `first_years` names starting at its first year on record, as the split
+    can read it (`whole_history_split`), and gives `_admitted_among` the
+    axis the rank keeps. A rank whose input shape cannot be built, or whose
+    axis names no role of it, keeps `among` unset, and `Plan` validation
+    refuses the fault that stops it.
+    """
+    by_id = {requirement.id: requirement for requirement in graph}
+    whole_history = {first.requirement_id: first.year for first in first_years}
+    settled: list[EvidenceRequirement] = []
+    for requirement in requirements:
+        among = (
+            _among_of_input(requirement, by_id, whole_history)
+            if isinstance(requirement, RankRequirement) and requirement.among is None
+            else None
+        )
+        settled.append(
+            requirement if among is None else requirement.model_copy(update={"among": among})
+        )
+    return settled
+
+
+def _among_of_input(
+    rank: RankRequirement,
+    by_id: Mapping[str, EvidenceRequirement],
+    whole_history: Mapping[str, int],
+) -> RankAmong | None:
+    """The `among` `rank`'s input admits, or `None` when its shape or axis cannot be read."""
+    chain: dict[str, EvidenceRequirement] = {}
+    pending = [rank.input_id]
+    while pending:
+        requirement_id = pending.pop()
+        if requirement_id in chain or requirement_id not in by_id:
+            continue
+        chain[requirement_id] = by_id[requirement_id]
+        pending.extend(inputs_of(by_id[requirement_id]))
+    try:
+        shapes = _build_shapes(
+            chain,
+            whole_history={key: year for key, year in whole_history.items() if key in chain},
+            origins={},
+        )
+    except ValueError:
+        return None
+    shape = shapes.get(rank.input_id)
+    if shape is None:
+        return None
+    if rank.axis is None:
+        axis_role = shape.roles[0] if len(shape.roles) == 1 else None
+    else:
+        axis_role = role_named(shape.roles, rank.axis)
+    return None if axis_role is None else _admitted_among(axis_role)
+
+
+def _other_roles_single(requirement: RankRequirement, input_shape: FrameShape) -> bool:
+    """Whether every role of `input_shape` but the one `requirement` ranks by is `single`."""
+    axis_role = (
+        None if requirement.axis is None else role_named(input_shape.roles, requirement.axis)
+    )
+    return axis_role is not None and all(
+        role.single for role in input_shape.roles if role is not axis_role
+    )
+
+
+def rank_single_roles(plan: Plan) -> list[tuple[RankRequirement, RoleDimension]]:
+    """Each rank of `plan` stating no `reduction` over an input of several roles, with each other role it rests on.
+
+    Plan validation admits such a rank only where every other role is
+    `single` (`_rank_reduction_reason`); whether each name binds one party
+    is a fact of the source (`submission.service._rank_roles_expand`). The
+    shapes are those of the plan as it runs (`split_of`), which validation
+    built, and each rank and role is named by the model's requirement
+    (`origin_of`), once.
+    """
+    split = split_of(plan)
+    shapes = _split_shapes(split)
+    found: dict[tuple[str, str | None, str], tuple[RankRequirement, RoleDimension]] = {}
+    for requirement in split.requirements:
+        if not isinstance(requirement, RankRequirement) or requirement.reduction is not None:
+            continue
+        shape = shapes.get(requirement.input_id)
+        if shape is None or len(shape.roles) < 2 or requirement.axis is None:
+            continue
+        rank = plan.requirement(origin_of(split, requirement.id))
+        assert isinstance(rank, RankRequirement)
+        axis_role = role_named(shape.roles, requirement.axis)
+        for role in shape.roles:
+            if role is axis_role or not role.single:
+                continue
+            origin = replace(role, requirement_id=origin_of(split, role.requirement_id))
+            found.setdefault((rank.id, origin.role, origin.requirement_id), (rank, origin))
+    return list(found.values())
+
+
 def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape) -> str | None:
     """Return why `requirement` needs a reduction it does not state, or `None` when it has enough.
 
     A rank orders entities by one value each. An axis over an input carrying
-    more than one role always needs a reduction, in either mode, to collapse
-    the other role's rows to one value per axis entity per (period, in
-    per-period mode). Short of that, `per_period=True` ranks each period on
+    more than one role needs a reduction, in either mode, to collapse the
+    other roles' rows to one value per axis entity per (period, in
+    per-period mode), unless each other role is `single` and so holds one
+    row per axis entity already. Short of that, `per_period=True` ranks each period on
     its own and never needs a reduction just to collapse years together;
     `per_period=False` needs one unless its input holds one row per entity,
     or the years of its input its window keeps (`_years_read`) are one and
@@ -3619,7 +4158,7 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
     """
     if requirement.reduction is not None:
         return None
-    if len(input_shape.roles) > 1:
+    if len(input_shape.roles) > 1 and not _other_roles_single(requirement, input_shape):
         return (
             f"{requirement.id!r} ranks by axis {requirement.axis!r} over an input carrying more "
             "than one role, which needs a reduction to collapse the other role's rows to one "
@@ -3788,8 +4327,8 @@ def keeps_one_level(predicates: Iterable[Predicate]) -> bool:
 
 
 def states_period_threshold(predicates: Iterable[Predicate]) -> bool:
-    """Whether `predicates` state a `PeriodThreshold`, which compares each row's year."""
-    return any(isinstance(predicate, PeriodThreshold) for predicate in predicates)
+    """Whether `predicates` state a `PeriodThreshold` or a `PeriodIn`, which read each row's year."""
+    return any(isinstance(predicate, PeriodThreshold | PeriodIn) for predicate in predicates)
 
 
 def _check_side_entity_is_named(
@@ -4044,15 +4583,28 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
     requirements_by_id: dict[str, EvidenceRequirement],
     *,
     first_year: int | None,
+    summed: bool = False,
+    kept_open: Collection[str] = (),
 ) -> FrameShape:
     """Return the output shape `requirement` produces, raising on the first illegal input.
 
-    `first_year` starts a dataset requirement's shape (`_dataset_shape`).
+    `first_year` starts a dataset requirement's shape (`_dataset_shape`). A
+    whole reads the side it opens as one closed total, unless it is `summed`
+    (`WholeSum`), when `wholes_as_read` has read that side open. An aggregate
+    summing such a side keeps the open parties `kept_open` names apart.
     """
     if isinstance(requirement, DatasetRequirement):
-        return _dataset_shape(requirement, first_year=first_year)
+        part = (
+            requirements_by_id.get(requirement.whole_of.part)
+            if requirement.whole_of is not None and not summed
+            else None
+        )
+        opened = opened_role(requirement, part) if isinstance(part, DatasetRequirement) else None
+        return _dataset_shape(requirement, first_year=first_year, opened=opened)
     if isinstance(requirement, AggregateRequirement):
-        return _aggregate_shape(requirement, shapes_by_id[requirement.input_id])
+        return _aggregate_shape(
+            requirement, shapes_by_id[requirement.input_id], kept_open=kept_open
+        )
     if isinstance(requirement, GrowthRequirement):
         return _growth_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, RankRequirement):
@@ -4074,32 +4626,31 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
 def _check_population_claims_are_cited(
     requirements: Iterable[EvidenceRequirement], decisions_by_slot: dict[str, Decision]
 ) -> None:
-    """Reject a population-wide claim no cited decision states structurally.
+    """Reject a pooled share no cited decision states structurally.
 
-    A rank stating `among='population'` and a keyed share_of stating
-    `denominator_scope='pooled'` are each a figure computed over entities
-    nobody named, so either needs a cited `Decision` whose own `fixes` states
-    the same claim. Every slot in `decision_ids` is already known to name a
+    A keyed share_of stating `denominator_scope='pooled'` divides by a total
+    over entities nobody named, so it needs a cited `Decision` whose own
+    `fixes` states 'pooled'. A rank's `among` needs none: its input admits
+    one value (`_admitted_among`), and the rank's step states the population
+    it ranks. Every slot in `decision_ids` is already known to name a
     decision the plan makes.
     """
     for requirement in requirements:
-        if isinstance(requirement, RankRequirement) and requirement.among is RankAmong.POPULATION:
-            field, value = "among", RankAmong.POPULATION
-        elif (
+        if not (
             isinstance(requirement, ShareOfRequirement)
             and requirement.denominator_scope is DenominatorScope.POOLED
         ):
-            field, value = "denominator_scope", DenominatorScope.POOLED
-        else:
             continue
         cited = (decisions_by_slot[slot] for slot in requirement.decision_ids)
         if not any(
-            decision.fixes is not None and getattr(decision.fixes, field) == value
+            decision.fixes is not None
+            and decision.fixes.denominator_scope is DenominatorScope.POOLED
             for decision in cited
         ):
             raise ValueError(
-                f"{requirement.id!r} states {field}={value!r}, a claim over entities nobody "
-                f"named, but cites no decision whose `fixes` names `{field}`"
+                f"{requirement.id!r} holds denominator_scope='pooled', a total over entities "
+                "nobody named, but cites no decision whose `fixes` names `denominator_scope`; "
+                "cite one"
             )
 
 
@@ -4307,6 +4858,35 @@ def _serialised_chars(value: Any) -> int:
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
 
 
+# The most provider options one turn's words are read to name. Search names at most
+# one per provider scope, four today; the limit sits several times above that.
+MAX_SCOPE_MENTIONS = 16
+
+
+class ScopeWords(StrictModel):
+    """The provider options the user's words name, as Search read the latest turn whose
+    words name one (`planner.stated_scope.TextReading.mentions`), which the plan card's
+    lines are judged against (`submission.service._provider_records`).
+
+    `summing` is the option Search read where those words sum the bilateral and
+    multilateral lines (`planner.stated_scope.StatedOption.sums_providers`), which a
+    dataset reads as its own option counting core contributions; `None` otherwise.
+
+    `total` is set where those words ask for a total (`TextReading.total`, "total US
+    ODA"), which names a dataset's option counting core contributions as the figure's
+    denominator, though Search reads no option from it.
+    """
+
+    mentions: tuple[Annotated[str, Field(max_length=MAX_SCOPE_ID_CHARS)], ...] = Field(
+        default=(), max_length=MAX_SCOPE_MENTIONS
+    )
+    summing: str | None = Field(default=None, max_length=MAX_SCOPE_ID_CHARS)
+    # Left out of every dump while unset, so a stored plan keeps its revision.
+    total: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False, exclude_if=lambda total: not total
+    )
+
+
 class Plan(StrictModel):
     """The plan object.
 
@@ -4325,10 +4905,10 @@ class Plan(StrictModel):
             "Whether the answer is a computed figure or the series itself. `series` (the "
             "default, and what a plan persisted before this field existed means) leaves an "
             "unread dataset requirement as the answer in its own right; `computed` requires "
-            "every dataset requirement to feed a calculation. The planner's proposal tool requires the "
-            "model to pass this explicitly on a first draft, so the default "
-            "only governs a plan built another way, such as a legacy record deserialising "
-            "without the field."
+            "every dataset requirement to feed a calculation. The planner's proposal tool reads "
+            "a first draft stating none from its requirements (`answer_mode_of`), so the "
+            "default only governs a plan built another way, such as a legacy record "
+            "deserialising without the field."
         ),
     )
     # Past `MAX_PLAN_DECISIONS`, a plan carries the decisions qualifying its answer
@@ -4425,6 +5005,20 @@ class Plan(StrictModel):
             "requirements a step rolling from its start reads."
         ),
     )
+    whole_sums: Annotated[tuple[WholeSum, ...], HASHED_WHEN_SET] = Field(
+        default=(),
+        max_length=MAX_PLAN_REQUIREMENTS,
+        exclude_if=lambda sums: not sums,
+        description=(
+            "The aggregates `propose_plan` added to sum the side a whole's dataset leaves "
+            "open, each with its whole (`with_whole_sums`)."
+        ),
+    )
+    # The provider options the user's words name, as the latest turn naming one
+    # stated them (`submission.service.scope_words`); the planner cannot set it.
+    scope_words: Annotated[ScopeWords | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda words: words is None
+    )
     translation: Translation | None = None
     workflow: Workflow | None = None
     version: int = 1
@@ -4432,6 +5026,28 @@ class Plan(StrictModel):
     status: PlanStatus = PlanStatus.DRAFT
     approved_revision: str | None = None
     approved_at: Annotated[datetime | None, HASHED_WHEN_SET] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reopen_approval_over_accept_provider_difference(cls, data: Any) -> Any:
+        """An approved plan stored with `accept_provider_difference` on a requirement
+        reads without it (`_ProviderAligned`), so its content hashes to another revision
+        than the one the user approved. It loads awaiting approval, with no approval
+        recorded, and the `execute` node offers its card again
+        (`harness.graph.execute`)."""
+        if not isinstance(data, dict) or data.get("status") != PlanStatus.APPROVED:
+            return data
+        requirements = data.get("evidence_requirements")
+        if not isinstance(requirements, list | tuple) or not any(
+            isinstance(r, dict) and "accept_provider_difference" in r for r in requirements
+        ):
+            return data
+        return {
+            **data,
+            "status": PlanStatus.PENDING_APPROVAL,
+            "approved_revision": None,
+            "approved_at": None,
+        }
 
     @field_validator("question")
     @classmethod
@@ -4463,7 +5079,8 @@ class Plan(StrictModel):
         planner's brief can carry. The message names the measured size and the
         parts that take the most of it, so the model can shorten those. Both
         limits measure the plan the model wrote (`authored`), without the
-        copies `whole_history_split` adds. The size leaves out the scope
+        copies `whole_history_split` adds or the sums `propose_plan` adds over a
+        whole's open side (`Plan.whole_sums`). The size leaves out the scope
         decisions and the decisions qualifying the answer that `propose_plan`
         writes (`is_scope_choice`, `Decision.caveat`): the model cannot shorten
         them, and `MAX_PLAN_DECISIONS` and the requirements bound how many a
@@ -4522,8 +5139,8 @@ class Plan(StrictModel):
         every dataset requirement feeds a calculation. Then every requirement
         states each value a decision it cites fixes
         (`_check_requirements_honour_their_decisions`), and a population-wide
-        claim (`among='population'`, `denominator_scope='pooled'`) has to cite
-        a decision whose `fixes` states it. Last, each ask the plan
+        share (`denominator_scope='pooled'`) has to cite a decision whose
+        `fixes` states it. Last, each ask the plan
         carries is answered or declined exactly once, an answer naming any
         requirement the plan states, one another reads included
         (`_check_asks_accounted`), and an answer keeps in one output every
@@ -4562,12 +5179,16 @@ class Plan(StrictModel):
             raise _first_year_unknown(self, split.first_year_unknown[0])
         if self.rolling_copies:
             _check_copies_are_the_split(self)
+        if self.whole_sums:
+            _check_whole_sums(self)
         try:
             _check_requirement_graph(
                 {requirement.id: requirement for requirement in split.requirements},
                 answer_mode=self.answer_mode,
                 whole_history=split.whole_history,
                 origins=split.origins(),
+                summed=split.summed,
+                kept_open=split.kept_open,
             )
         except ValueError as error:
             raise _naming_origins(error, split) from error
@@ -4782,6 +5403,7 @@ class Plan(StrictModel):
                 "decisions": _patched(self.decisions, decisions, removed_decisions, key="slot"),
                 "evidence_requirements": requirements,
                 "rolling_copies": (),
+                "whole_sums": (),
                 "first_years": tuple(first_years),
                 **_patched_accounts(
                     self,
@@ -4931,25 +5553,49 @@ def split_of(plan: Plan) -> HistorySplit:
 
     The split of its requirements under the results answering it and its
     `first_years`, continued from its `rolling_copies` (`whole_history_split`).
-    On a plan already split it is the identity.
+    On a plan already split it is the identity. It names each whole
+    `plan.whole_sums` sums, and each copy of one (`HistorySplit.summed`).
     """
-    return whole_history_split(
+    split = whole_history_split(
         plan.evidence_requirements,
         answering=answering_results(plan),
         first_years=plan.first_years,
         copies=plan.rolling_copies,
     )
+    if not plan.whole_sums:
+        return split
+    wholes = {entry.whole_id for entry in plan.whole_sums}
+    by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    kept = {
+        entry.sum_id: whole_read(*pair).across
+        for entry in plan.whole_sums
+        if (pair := _whole_and_part(by_id, entry.whole_id)) is not None
+    }
+    origins = split.origins()
+    return split._replace(
+        summed=frozenset(
+            requirement.id
+            for requirement in split.requirements
+            if origins.get(requirement.id, requirement.id) in wholes
+        ),
+        sums=plan.whole_sums,
+        kept_open={
+            requirement.id: kept[origin]
+            for requirement in split.requirements
+            if (origin := origins.get(requirement.id, requirement.id)) in kept
+        },
+    )
 
 
-def authored(plan: Plan) -> Plan:
-    """`plan` as the model wrote it, without the copies `rolling_copies` names and with both fields the split writes empty.
+def unsplit(plan: Plan) -> Plan:
+    """`plan` without the copies `rolling_copies` names and with both fields the split writes empty.
 
     Every input naming a copy names its origin again, and `rolling_copies`
-    and `first_years` are empty. The split of the result under `plan`'s
-    `first_years` is `plan` again, and on a plan with no copies this
-    changes only `first_years`. The result is not validated, since a
-    rolling-start read in it needs the first years it no longer carries.
-    `translation` and `workflow` are `plan`'s own.
+    and `first_years` are empty. The aggregates `whole_sums` names stay. The
+    split of the result under `plan`'s `first_years` is `plan` again, and on
+    a plan with no copies this changes only `first_years`. The result is not
+    validated, since a rolling-start read in it needs the first years it no
+    longer carries. `translation` and `workflow` are `plan`'s own.
     """
     origins = copy_origins(plan.rolling_copies)
     return plan.model_copy(
@@ -4965,10 +5611,33 @@ def authored(plan: Plan) -> Plan:
     )
 
 
+def authored(plan: Plan) -> Plan:
+    """`plan` as the model wrote it: `unsplit`, and without the aggregates `whole_sums` names.
+
+    Every input naming such an aggregate names its whole again, and
+    `whole_sums` is empty (`without_whole_sums`). `propose_plan` adds them
+    again from Search's answer for each whole (`submission.service.admit`),
+    and `with_authored_requirements` from the plan's record of them.
+    """
+    written = unsplit(plan)
+    if not plan.whole_sums:
+        return written
+    return written.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                without_whole_sums(written.evidence_requirements, plan.whole_sums)
+            ),
+            "whole_sums": (),
+        }
+    )
+
+
 def with_authored_requirements(plan: Plan, requirements: Sequence[EvidenceRequirement]) -> Plan:
     """`plan` stating `requirements` in place of those the model wrote, split again under its `first_years`.
 
-    `requirements` stand for `authored(plan)`'s. The result carries their
+    `requirements` stand for `authored(plan)`'s. The result carries them with
+    the aggregates `plan.whole_sums` names over wholes they state with their
+    parts (`whole_sums_made`, `with_whole_sums`), and their
     split (`split_of`) in `evidence_requirements` and `rolling_copies`, and a
     copy that copies the same origin in `plan` keeps `plan`'s pin for it,
     its own windowed pin (`submission.service._window_pins`).
@@ -4983,11 +5652,13 @@ def with_authored_requirements(plan: Plan, requirements: Sequence[EvidenceRequir
         for requirement in plan.evidence_requirements
         if requirement.id in origins and isinstance(requirement, DatasetRequirement)
     }
+    sums = whole_sums_made(requirements, plan.whole_sums)
     stated = Plan.model_validate(
         {
             **plan.model_dump(),
-            "evidence_requirements": tuple(requirements),
+            "evidence_requirements": tuple(with_whole_sums(requirements, sums)),
             "rolling_copies": (),
+            "whole_sums": sums,
         }
     )
     split = split_of(stated)
@@ -5208,12 +5879,12 @@ def _first_year_unknown(plan: Plan, requirement_id: str) -> RollingPlanError:
 def _check_copies_are_the_split(plan: Plan) -> None:
     """Reject `rolling_copies` other than the split of the plan the model wrote.
 
-    The split of `authored(plan)` under `plan.first_years` has to give
+    The split of `unsplit(plan)` under `plan.first_years` has to give
     `plan`'s requirements and copies, apart from each copy's
     `source_spec_id`, which `submission.service._window_pins` moves to the
     copy's own windowed pin.
     """
-    written = authored(plan)
+    written = unsplit(plan)
     again = whole_history_split(
         written.evidence_requirements,
         answering=answering_results(written),
@@ -5238,6 +5909,33 @@ def _check_copies_are_the_split(plan: Plan) -> None:
         )
 
 
+def _check_whole_sums(plan: Plan) -> None:
+    """Reject `whole_sums` other than the aggregates `with_whole_sums` adds to the plan the
+    model wrote.
+
+    Each names a whole opening a side of the flow, one sum per whole, under an
+    id of its own, and the plan less its copies (`unsplit`) states exactly the
+    plan the model wrote (`authored`) with those aggregates added.
+    """
+    by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    for entry in plan.whole_sums:
+        pair = _whole_and_part(by_id, entry.whole_id)
+        if pair is None or opened_role(*pair) is None:
+            raise ValueError(
+                f"the plan's sum {entry.sum_id!r} names {entry.whole_id!r}, which is no whole "
+                "opening a donor or recipient side of this plan"
+            )
+    wholes = [entry.whole_id for entry in plan.whole_sums]
+    if len(set(wholes)) != len(wholes):
+        raise ValueError("the plan sums one whole twice")
+    written = unsplit(plan).evidence_requirements
+    if with_whole_sums(authored(plan).evidence_requirements, plan.whole_sums) != list(written):
+        raise ValueError(
+            "the plan's whole sums are not the aggregates its wholes take over the requirements "
+            "the model wrote"
+        )
+
+
 def _naming_origins(error: ValueError, split: HistorySplit) -> ValueError:
     """`error` naming, in its text and its requirements, the requirement each copy among them copies.
 
@@ -5245,7 +5943,7 @@ def _naming_origins(error: ValueError, split: HistorySplit) -> ValueError:
     an `UnsupportedPlanError` or a plain `ValueError`
     (`_check_requirement_graph`). Each comes back as its own kind.
     """
-    message = authored_text(str(error), split.origins())
+    message = authored_text(str(error), split.names(), sums=split.summing())
     if isinstance(error, RollingPlanError):
         named = dict.fromkeys(origin_of(split, step_id) for step_id in error.requirement_ids)
         return RollingPlanError(
@@ -5315,7 +6013,7 @@ def unstated_result_scopes(plan: Plan) -> list[ResultScopeGap]:
     role by name (`_operand_roles`: a rank ordering it, a share or quotient
     keyed on it, or a place-level filter on it, since `_filter_shape`
     refuses an `EntityIn` naming a member of an open role, by
-    `unknown_names`), or, like `among='population'`
+    `unknown_names`), or, like `denominator_scope='pooled'`
     (`_check_population_claims_are_cited`), the dataset requirement that
     opened the role cites a decision whose `fixes` states its `across`, every
     word of it. An ask the result answers states the scope too when it
@@ -5635,8 +6333,8 @@ def period_licences_held(
 
     `named` is the `across_years` of the `propose_plan` call that states
     `plan`, the steps whose years the user's own words, as the planner read
-    them, ask to combine. Only a call made where the planner reads those
-    words names any (`submission.service.admit`). A licence of `previous`,
+    them, ask to combine. `submission.service.admit` empties it for a call
+    made where the planner reads none of those words. A licence of `previous`,
     the plan the call amends, holds while `plan` states a step of its id and
     kind that combines its years with the licensed reduction
     (`_keeps_licence`), whatever years it reads: a replan that narrows the
@@ -5670,25 +6368,6 @@ def period_licences_held(
     }
     held.update((name, licence) for name, licence in granted.items() if licence is not None)
     return tuple(held[step_id] for step_id in steps if step_id in held)
-
-
-def licences_restated(
-    named: Sequence[str],
-    *,
-    requirements: Sequence[EvidenceRequirement],
-    previous: Plan | None,
-) -> frozenset[str]:
-    """The steps of `named` whose licence `previous` already holds, as `requirements` state them.
-
-    Naming such a step grants nothing `period_licences_held` would not
-    carry anyway.
-    """
-    held = set(previous.period_licences) if previous is not None else set()
-    return frozenset(
-        requirement.id
-        for requirement in requirements
-        if requirement.id in named and _licence_for(requirement) in held
-    )
 
 
 def _keeps_licence(step: EvidenceRequirement | None, licence: PeriodLicence) -> bool:
@@ -6472,6 +7151,14 @@ class AlignedPin(StrictModel):
         block = self.digest.get("spec_block")
         return block if isinstance(block, Mapping) else None
 
+    @property
+    def complete(self) -> bool:
+        """Whether the pin holds what its readers read: a whole's compile its spec
+        block, which says how Search serves the side the whole opens
+        (`submission.service._whole_sums`), so one without is compiled again; any
+        other pin as it is."""
+        return self.whole_axis is None or self.block is not None
+
 
 def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
     """The pins `ALIGNED_PINS_STATE_KEY` holds, oldest first; empty when unset."""
@@ -6943,6 +7630,29 @@ def amendment_entry(state: SessionState) -> bool:
 def save_amendment_entry(state: SessionState, amended: bool) -> None:
     """Record whether the planner's current entry opened with the user's amendment of the plan."""
     state[AMENDMENT_ENTRY_STATE_KEY] = amended
+
+
+def answered_in_words(state: SessionState) -> bool:
+    """Whether the planner's current run reads the user's own-words answer to its question (`ANSWERED_IN_WORDS_STATE_KEY`)."""
+    return bool(state.get(ANSWERED_IN_WORDS_STATE_KEY))
+
+
+def save_answered_in_words(state: SessionState, answered: bool) -> None:
+    """Record whether the planner's current run reads the user's own-words answer to its question."""
+    state[ANSWERED_IN_WORDS_STATE_KEY] = answered
+
+
+class NewQuestionSource(TitlelessEnum):
+    """Which of the user's messages a `starts_new_plan` call on the user's
+    amendment says asks the new question: `amendment`, the change they
+    asked for on the plan card, or `answer`, their own-words answer to the
+    question the planner asked about it, which the harness hands on, as
+    stored, as the next turn; or `none`, which ends the turn asking the user
+    to send their question (`harness.graph.planning`)."""
+
+    AMENDMENT = "amendment"
+    ANSWER = "answer"
+    NONE = "none"
 
 
 class DecisionPick(StrictModel):

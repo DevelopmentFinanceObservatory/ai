@@ -30,38 +30,6 @@
     "answer_mode": "computed",
     "decisions": [
       {
-        "slot": "every_african_country",
-        "description": "Which countries the ranking compares.",
-        "options": [
-          "every African country with data",
-          "a named list of African countries"
-        ],
-        "chosen": "every African country with data",
-        "resolved_by": "planner_default",
-        "rationale": "The question asks about African countries without naming any, so every one is ranked.",
-        "fixes": {
-          "period": null,
-          "unit": null,
-          "entities": null,
-          "across": null,
-          "measure": null,
-          "source_spec_id": null,
-          "stat_vars": null,
-          "reduction": null,
-          "group_by": null,
-          "window_start": null,
-          "window_end": null,
-          "direction": null,
-          "predicates": null,
-          "among": "population",
-          "axis": null,
-          "denominator_scope": null,
-          "change": null,
-          "per_period": null,
-          "limit": null
-        }
-      },
-      {
         "slot": "source_spec_55d8689f3c2e76ecf93572f4c30a127b",
         "description": "How the flow is counted.",
         "options": [
@@ -146,9 +114,7 @@
       {
         "kind": "rank",
         "id": "bottom_five",
-        "decision_ids": [
-          "every_african_country"
-        ],
+        "decision_ids": [],
         "input_id": "by_country",
         "direction": "lowest_first",
         "among": "population",

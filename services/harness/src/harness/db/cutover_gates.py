@@ -108,6 +108,87 @@ END
 $$;
 """.replace("@LAPSED@", LAPSED_LEDGER_LEASES)
 
+# The check run before `0005_rename_adk_tables.sql`. The release that added
+# the conversation tables runs turns on ADK turn sessions, and its
+# `python -m harness.adk_import close-open-turns` closes each turn it left
+# open, with the source blocks the turn's ADK session holds; it cannot run
+# once 0005 renames ADK's tables. So the check refuses, with DFA07, while a
+# conversation holds the turns that job closes: an open turn (`turn_index`
+# above 0, `turn_recorded` not true) whose ADK turn session
+# `{conversation_id}#t{turn_index}` (app 'dfo_analyst_graph') exists and
+# that `turn_cursors` holds no row for. That covers a start that applies
+# 0003 and 0005 together and one after a cutover whose `close-open-turns`
+# never exited 0. A database with no ADK `sessions` table passes, as does
+# one whose `sessions` lacks the six columns 0005 reads as ADK's, and so
+# does one whose `sessions` or `conversations` the current user cannot
+# read, which 0005 then refuses with DFA03, since it renames only tables
+# the current user owns.
+# `python -m harness.db.adk_archive archive` runs it too.
+OPEN_TURNS_ON_ADK_GATE = r"""
+DO $$
+DECLARE
+    sessions_table regclass := to_regclass('sessions');
+    ids bigint[];
+    turns numeric[];
+    keys text[];
+    open_turns bigint;
+    open_keys text[];
+BEGIN
+    IF sessions_table IS NULL OR to_regclass('conversations') IS NULL
+        OR NOT has_table_privilege(sessions_table, 'SELECT')
+        OR NOT has_table_privilege('conversations', 'SELECT') OR EXISTS (
+        SELECT 1 FROM unnest(ARRAY[
+            'app_name', 'user_id', 'id', 'state', 'create_time', 'update_time']) AS c(col)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM pg_attribute a
+            WHERE a.attrelid = sessions_table AND a.attname = c.col
+              AND a.attnum > 0 AND NOT a.attisdropped)
+    ) THEN
+        RETURN;
+    END IF;
+    EXECUTE format(
+        'WITH open AS ('
+        '  SELECT c.id, c.principal, c.conversation_id, '
+        '    CASE WHEN jsonb_typeof(c.turn_state -> ''turn_index'') = ''number'' '
+        '    THEN (c.turn_state ->> ''turn_index'')::numeric END AS turn_index '
+        '  FROM conversations c '
+        '  WHERE coalesce(c.turn_state -> ''turn_recorded'', ''false''::jsonb) <> ''true''::jsonb) '
+        'SELECT array_agg(o.id ORDER BY o.principal, o.conversation_id), '
+        '  array_agg(o.turn_index ORDER BY o.principal, o.conversation_id), '
+        '  array_agg(o.principal || ''/'' || o.conversation_id ORDER BY o.principal, o.conversation_id) '
+        'FROM open o WHERE o.turn_index > 0 '
+        'AND EXISTS (SELECT 1 FROM %s s WHERE s.app_name::text = %L '
+        '  AND s.user_id::text = o.principal '
+        '  AND s.id::text = o.conversation_id || ''#t'' || o.turn_index::text)',
+        sessions_table, 'dfo_analyst_graph')
+    INTO ids, turns, keys;
+    IF ids IS NULL THEN
+        RETURN;
+    END IF;
+    IF to_regclass('turn_cursors') IS NULL THEN
+        open_turns := cardinality(ids);
+        open_keys := keys[1:10];
+    ELSE
+        SELECT count(*), (array_agg(u.key ORDER BY u.key))[1:10]
+        INTO open_turns, open_keys
+        FROM unnest(ids, turns, keys) AS u(id, turn_index, key)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM turn_cursors t
+            WHERE t.conversation = u.id AND t.turn_index = u.turn_index);
+    END IF;
+    IF open_turns > 0 THEN
+        RAISE EXCEPTION USING ERRCODE = 'DFA07', MESSAGE = format(
+            '%s conversation(s) hold a turn left open on ADK that `python -m harness.adk_import close-open-turns` closes, and archiving ADK''s tables would lose its source blocks: %s%s. Run that job''s guarded `close-open-turns --apply`, as the deploy/README.md of the release that added the conversation tables gives it, while the release that applied 0003_turns.sql holds all traffic, until it exits 0, then restart.',
+            open_turns, array_to_string(open_keys, ', '),
+            CASE WHEN open_turns > 10 THEN ', ...' ELSE '' END);
+    END IF;
+END
+$$;
+"""
+
 # Each migration file name and the check run in its transaction just before
 # it, while it is pending.
-BEFORE: dict[str, str] = {"0003_turns.sql": LIVE_LEDGER_LEASE_GATE}
+BEFORE: dict[str, str] = {
+    "0003_turns.sql": LIVE_LEDGER_LEASE_GATE,
+    "0005_rename_adk_tables.sql": OPEN_TURNS_ON_ADK_GATE,
+}

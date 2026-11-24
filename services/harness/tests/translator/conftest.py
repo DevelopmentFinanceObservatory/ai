@@ -254,6 +254,9 @@ class FakeCall:
     def response_calls(self) -> Sequence[ResponseCall]:
         return ()
 
+    def records_read(self) -> int:
+        return 0
+
 
 class FakeToolContext:
     """A session state holder: only `.state` is read."""

@@ -27,8 +27,10 @@ from planner.plan import (
     DecisionDraft,
     Decline,
     EvidenceRequirement,
+    NewQuestionSource,
 )
 from planner.skills import DFO_FAQ_SKILL_ID, read_skill_page
+from planner.stated_scope import StatedScopeReader
 from planner.tool_spec import REQUIRED, Parameter, ToolSpec
 from planner.tools import (
     REJECT_PLAN,
@@ -44,7 +46,7 @@ from planner.tools import (
 PROPOSE_PLAN = PROPOSE_PLAN_PROPOSER.call
 
 # What each `propose_plan` argument means, as the model reads it on the
-# argument itself. `question` and `starts_new_plan` describe how
+# argument itself. `question`, `starts_new_plan` and `new_question_in` describe how
 # `submission.service._resolve_intent` holds the turn's question fixed.
 _PROPOSE_PLAN_ARGUMENTS = {
     "question": (
@@ -62,8 +64,7 @@ _PROPOSE_PLAN_ARGUMENTS = {
         "dataset requirement has to feed a calculation, since one left unread "
         "would leave the plan without the figure the question asked for. "
         "Either way, `answered` may name a dataset requirement a calculation "
-        "reads. "
-        "Required on a first draft and with `starts_new_plan`. A patch that "
+        "reads. A patch that "
         "states one switches the plan's mode and re-validates its requirements "
         "under it; one that omits it keeps the recorded mode."
     ),
@@ -127,14 +128,22 @@ _PROPOSE_PLAN_ARGUMENTS = {
     "amends_version": (
         "The `version` this call patches, as the last `propose_plan` call "
         'answered it and as the brief\'s own "version N" line states it. '
-        "Required once a plan is recorded, unless `starts_new_plan` is set: "
-        "a call stating neither is refused, and `question` never stands in "
-        "for the choice."
+        "Required to patch a recorded plan. A call stating neither this nor "
+        "`starts_new_plan` is refused, and `question` never stands in for "
+        "the choice."
     ),
     "starts_new_plan": (
         "True says the user's reply asks a different question from the one "
-        "fixed for this turn. Refused, recording nothing: the harness ends the "
-        "turn and tells the user to send that question as its own message."
+        "fixed for this turn. Refused, recording nothing. On the user's "
+        "amendment of the plan card it holds even beside `amends_version`, and "
+        "the harness ends the turn. Anywhere else a call that also names "
+        "`amends_version` is read as that patch."
+    ),
+    "new_question_in": (
+        "With `starts_new_plan` on the user's amendment, the user's message "
+        "that states the new question, which the harness sends as the next turn: "
+        "the `amendment`, or their own-words `answer` to your question. With "
+        "`none` the harness asks the user for their question."
     ),
 }
 
@@ -216,6 +225,7 @@ _PROPOSE_PARAMETERS = (
     Parameter("across_years", list[str], []),
     Parameter("amends_version", int | None, None),
     Parameter("starts_new_plan", bool, False),
+    Parameter("new_question_in", NewQuestionSource | None, None),
 )
 
 
@@ -253,6 +263,7 @@ def planner_tool_specs(
     *,
     translate: Translate | None = None,
     surface: ToolSurface | None = None,
+    stated_scope: StatedScopeReader | None = None,
 ) -> list[ToolSpec]:
     """The planner's tools: `ask_user_question`, `propose_plan` and `reject_plan`.
 
@@ -269,23 +280,28 @@ def planner_tool_specs(
     body is a coroutine function. Omitted, it reads nothing and refuses such a
     plan `first_year_unknown`.
 
+    `stated_scope` is Search's reader of the provider scope the user's words
+    state, which `propose_plan` reads before
+    admission (`planner.stated_scope.read_stated_scope`). Given, `propose_plan`'s
+    body is a coroutine function. Omitted, admission applies the scope only
+    where a reading is already held.
+
     Raises:
         ValueError: `propose_plan`'s parameters and their descriptions differ
             (`_described`).
     """
 
     def propose_plan(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
-        del end_run
         return propose(call, arguments)
 
     async def propose_plan_reading(
         call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]
     ) -> object:
-        del end_run
         return await propose_reading_sources(
             call,
             arguments,
             surface=surface,
+            stated_scope=stated_scope,
         )
 
     async def propose_plan_translating(
@@ -298,12 +314,13 @@ def planner_tool_specs(
             arguments=arguments,
             translate=translate,
             surface=surface,
+            stated_scope=stated_scope,
         )
 
     body = propose_plan
     if translate is not None:
         body = propose_plan_translating
-    elif surface is not None:
+    elif surface is not None or stated_scope is not None:
         body = propose_plan_reading
     return [
         ToolSpec(
@@ -359,11 +376,16 @@ def skill_tool_spec(surface: ToolSurface) -> ToolSpec:
     )
 
 
-def planner_specs(*, translate: Translate, surface: ToolSurface) -> list[ToolSpec]:
+def planner_specs(
+    *,
+    translate: Translate,
+    surface: ToolSurface,
+    stated_scope: StatedScopeReader | None = None,
+) -> list[ToolSpec]:
     """The planner's tools as sent to a model with `planner.instruction.planner_instruction`,
     in the order the model is shown them: `get_skill` (`skill_tool_spec`), then
     `planner_tool_specs`, each argument as that function documents it."""
     return [
         skill_tool_spec(surface),
-        *planner_tool_specs(translate=translate, surface=surface),
+        *planner_tool_specs(translate=translate, surface=surface, stated_scope=stated_scope),
     ]

@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import base64
 import sys
-from collections.abc import Awaitable, Callable, MutableMapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, MutableMapping, Sequence
 from dataclasses import replace
 from typing import Any, cast
 
+from compiler.surface import TransientFaultError
 from google.genai import types
 from pydantic_ai import Tool
 from pydantic_ai.exceptions import UnexpectedModelBehavior
@@ -90,12 +91,13 @@ class RecordingState:
     records each key written through the view, in first-write order.
 
     The view is a `planner.plan.SessionState`. Writes made to the mapping by
-    anything but the view are unrecorded.
+    anything but the view are unrecorded, save `written`: keys the view counts
+    as written from the start, which another writer wrote before it.
     """
 
-    def __init__(self, state: MutableMapping[str, Any]) -> None:
+    def __init__(self, state: MutableMapping[str, Any], *, written: Iterable[str] = ()) -> None:
         self._state = state
-        self._written: dict[str, None] = {}
+        self._written: dict[str, None] = dict.fromkeys(written)
 
     @property
     def written(self) -> tuple[str, ...]:
@@ -116,24 +118,28 @@ class RecordingState:
         return key in self._state
 
 
-class EmptyResponseError(UnexpectedModelBehavior):
+class EmptyResponseError(UnexpectedModelBehavior, TransientFaultError):
     """The model's response held neither answer text nor a function call
-    (`holds_no_answer`), so the run has nothing to go on with."""
+    (`holds_no_answer`), and the run drew and removed no card
+    (`orchestrator.run.run_drew_a_card`), so it has nothing to go on with. The same
+    request samples again on a later attempt, so the fault is transient
+    (`compiler.surface.TransientFaultError`)."""
 
 
 def holds_no_answer(response: ModelResponse) -> bool:
     """Whether `response` holds neither answer text nor a function call: no
-    parts, thoughts alone, or text that is empty.
+    parts, thoughts alone, or text that is empty or whitespace.
 
     Neither agent sends such a response back for another try. Pydantic AI
     would, with a retry prompt added to the instruction, which breaks the
     one request form (`harness.gemini_wire.in_canonical_form`) and the cached
     prefix, and which no Gemini model of the harness was ever sent. The
-    planner's run ends on it with no output (`planner.pydantic_agent`), and
-    the orchestrator's raises `EmptyResponseError` (`orchestrator.run`).
+    planner's run ends on it with no output (`planner.pydantic_agent`). The
+    orchestrator's ends answered when the run drew a card, and otherwise raises
+    `EmptyResponseError` (`orchestrator.run.run_drew_a_card`).
     """
     return not any(
-        isinstance(part, ToolCallPart) or (isinstance(part, TextPart) and part.content)
+        isinstance(part, ToolCallPart) or (isinstance(part, TextPart) and part.content.strip())
         for part in response.parts
     )
 

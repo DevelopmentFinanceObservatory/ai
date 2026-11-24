@@ -1,0 +1,104 @@
+{
+  "id": "rank-top-ida-recipients-2022",
+  "kind": "rank",
+  "origin": "trace 48def59d",
+  "question": "What were the top ten recipients of IDA disbursements in 2022?",
+  "searches": [
+    {
+      "parts": [
+        {
+          "variable": "gross disbursements",
+          "entities": [
+            {
+              "text": "International Development Association",
+              "role": "from"
+            }
+          ],
+          "time": "2022",
+          "open_roles": [
+            "recipient"
+          ],
+          "operations": [
+            {
+              "verb": "rank",
+              "phrase": "top ten recipients",
+              "over": "destination"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "Rank the top ten recipients of International Development Association (IDA) gross disbursements in 2022, based on OECD DAC2a bilateral ODA gross disbursements data.",
+  "asks": [
+    {
+      "text": "top ten recipients of International Development Association gross disbursements in 2022",
+      "by": [
+        "recipient"
+      ]
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "unit_asked": false,
+  "period_reduction": "none",
+  "reference_payload": {
+    "question": "Rank the top ten recipients of International Development Association (IDA) gross disbursements in 2022, based on OECD DAC2a bilateral ODA gross disbursements data.",
+    "evidence_requirements": [
+      {
+        "frequency": "annual",
+        "measure": "International Development Association gross disbursements",
+        "source_spec_id": "spec_b84704bb0e9a0d4cd673dde2299a0709",
+        "decision_ids": [],
+        "id": "ida_disbursements",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "period": {
+          "end": 2022,
+          "start": 2022
+        },
+        "entities": [
+          {
+            "name": "International Development Association",
+            "role": "donor"
+          }
+        ],
+        "across": [
+          "recipient"
+        ],
+        "kind": "dataset"
+      },
+      {
+        "window_start": 2022,
+        "input_id": "ida_disbursements",
+        "reduction": "sum",
+        "per_period": false,
+        "among": "population",
+        "kind": "rank",
+        "limit": 10,
+        "axis": "recipient",
+        "id": "rank_top10",
+        "window_end": 2022,
+        "decision_ids": [],
+        "direction": "highest_first"
+      }
+    ],
+    "answer_mode": "computed",
+    "answered": [
+      {
+        "outputs": [
+          "rank_top10"
+        ],
+        "ask": 0
+      }
+    ],
+    "decisions": []
+  }
+}

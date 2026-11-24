@@ -1,0 +1,37 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "frontmatter": {
+        "description": "How the OECD DAC measures and reports ODA. Covers the flow types (gross disbursements, net disbursements, grant equivalents, and commitments) and which questions each fits, current and constant prices, DAC deflators and base years, and the 2018 switch to the grant-equivalent headline. Also covers how grants, concessional loans, and private sector instruments (PSI) qualify as ODA and are counted, including grant elements, discount rates, additionality, the institutional and instrument approaches, PSI transition arrangements, and the policy debate on loan and PSI measurement. Relevant to choosing a measure, comparing ODA across donors or years, explaining what an ODA figure represents, and assessing how a financing instrument counts in ODA.",
+        "license": "CC-BY-4.0",
+        "name": "oda-measures"
+      },
+      "resources": [
+        {
+          "digest": "sha256:53a088e2cf561e191f45fbbd5091402b1afa94df6963ea89b3e5a2e6d7b10b5f",
+          "size": 1632,
+          "uri": "skill://oda-measures/SKILL.md"
+        },
+        {
+          "digest": "sha256:24ccfb594fc59bac129f2368c6a32d609436378a1e764aab117130d32fe19989",
+          "size": 4783,
+          "uri": "skill://oda-measures/references/flow-types.md"
+        },
+        {
+          "digest": "sha256:f604da517f7032894dcb0667182f9fd4ee68129402db9278012b6f0b57a3d034",
+          "size": 9733,
+          "uri": "skill://oda-measures/references/grants-loans-psi.md"
+        },
+        {
+          "digest": "sha256:7b5964df78be74bdaf120b550396339c2029d3fb4d065ba52f77e19714d9474e",
+          "size": 3381,
+          "uri": "skill://oda-measures/references/price-basis.md"
+        }
+      ],
+      "uri": "skill://oda-measures/SKILL.md"
+    },
+    "text": "---\nname: oda-measures\ndescription: >-\n  How the OECD DAC measures and reports ODA. Covers the flow types (gross disbursements, net disbursements, grant equivalents, and commitments) and which questions each fits, current and constant prices, DAC deflators and base years, and the 2018 switch to the grant-equivalent headline. Also covers how grants, concessional loans, and private sector instruments (PSI) qualify as ODA and are counted, including grant elements, discount rates, additionality, the institutional and instrument approaches, PSI transition arrangements, and the policy debate on loan and PSI measurement. Relevant to choosing a measure, comparing ODA across donors or years, explaining what an ODA figure represents, and assessing how a financing instrument counts in ODA.\nlicense: CC-BY-4.0\n---\n\nThis skill covers how ODA figures are measured, including the flow type, the price basis, and how each financing instrument is valued in ODA. oda-dataset-selection covers which dataset to use.\n\n## References\n\n- [references/flow-types.md](references/flow-types.md): gross disbursements, net disbursements, grant equivalents and commitments: definitions, which questions each fits, ONE's usual choices, and the 2018 methodology break\n- [references/price-basis.md](references/price-basis.md): current and constant prices, DAC deflators, and base year choice\n- [references/grants-loans-psi.md](references/grants-loans-psi.md): grants, concessional loans, and private sector instruments: ODA eligibility, how each is counted, PSI additionality and transition arrangements, and the policy debate on loan and PSI measurement\n\nFiles in this skill; read one with get_skill(skill_id=\"oda-measures\", path=\u2026):\n- references/flow-types.md (4.7 KB)\n- references/grants-loans-psi.md (9.5 KB)\n- references/price-basis.md (3.3 KB)"
+  },
+  "call": "get_skill {\"skill_id\":\"oda-measures\"}"
+}

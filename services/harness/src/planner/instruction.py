@@ -121,17 +121,17 @@ _PLANNING = (
     'other", and `join` only across different measures.\n\n'
     "For a share of a figure in its own total over every sector, donor or "
     "recipient, state that total as a dataset requirement with `whole_of` "
-    "naming the part and the `axis` it opens, and no `source` or "
-    "`source_spec_id`: only that share reads it. US health aid over all US "
-    "aid opens 'sector' (same entities and `across`); the US share of all "
-    "aid to Kenya opens 'donor', Kenya's share of US aid 'recipient' (the "
-    "part's entities less that party, which joins `across`). Leave it unset "
+    "naming the part and the `axis` it opens. The part names its entities "
+    "as any dataset does; the total states no `entities`, `across`, "
+    "`source` or `source_spec_id`, since it covers the part's parties with "
+    "that side one total, and only that share reads it. US health aid "
+    "over all US aid opens 'sector'; the US share of all aid to Kenya opens "
+    "'donor', Kenya's share of US aid 'recipient'. Leave it unset "
     "for a whole that binds a sector itself (health aid under malaria aid) "
     "or names a group (DAC donors' aid), a provider share (the multilateral "
-    "share of US aid), or a total from a named source. Set "
-    "`accept_provider_difference` on a share only when the user asked for "
-    'another source\'s total, as "use the DAC1 total" does, with that total '
-    "pinned, and never to get past a refusal.\n\n"
+    "share of US aid), or a total from a named source. For another "
+    'source\'s total the user asks for, as "use the DAC1 total" does, pin '
+    "that total and declare its own option.\n\n"
     "An `axis` or a `denominator_axis` names a role its side's entities "
     "state, or `'country'` for places stating none. A family of StatVars "
     "is read summed or separately (see `stat_vars`).\n\n"
@@ -154,7 +154,11 @@ _PLANNING = (
     "Bilateral plus imputed multilateral aid from the CRS or DAC2a is one "
     "dataset requirement with no `sum_of`: pin a reading whose `scope "
     "provider` is `provider:inclusive`, or leave it unpinned with a "
-    "`measure` naming bilateral plus imputed multilateral aid.\n\n"
+    "`measure` naming bilateral plus imputed multilateral aid. Where the "
+    'user\'s words say whose spending to count, such as "bilateral" or '
+    '"including imputed multilateral aid", put that option id in the '
+    "`scope_options` of each requirement they apply to, on every side of a "
+    "calculation when they qualify the whole question, and of no other.\n\n"
     "When the answer is one total of two different sources, such as "
     "bilateral aid from another table plus imputed multilateral aid, "
     "state a `sum_of`, "
@@ -200,9 +204,8 @@ _PLANNING = (
     "when nothing can. Decide the methodology and leave the mechanics "
     "alone. Which data and which operations carry your decisions out is "
     "worked out separately, after you propose, so name no tool.\n\n"
-    "A rank's `among='population'` is a claim over entities nobody named, "
-    "so cite a `Decision` whose `fixes` names `among`, as a `share_of` "
-    "stating `denominator_scope='pooled'` cites one whose `fixes` names "
+    "A `share_of` stating `denominator_scope='pooled'` divides by a total "
+    "over entities nobody named, so cite a `Decision` whose `fixes` names "
     "`denominator_scope`.\n\n"
     "State a rank's `limit` when the question asks for a top or bottom N, "
     'or for the members that hold the most, as "top donors" or "which '
@@ -235,6 +238,7 @@ _VERSIONING = (
     "patching it through `amends_version`, whenever the user asks for a "
     "change. This turn's question is fixed, so when the user's reply asks "
     "a different question, call `propose_plan` with `starts_new_plan=true` "
+    "and, in `new_question_in`, the user's message that states it or `none`, "
     "and stop there.\n\n"
 )
 

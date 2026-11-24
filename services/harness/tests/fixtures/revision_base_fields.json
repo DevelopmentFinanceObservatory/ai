@@ -244,11 +244,19 @@
     "copy_id",
     "origin_id"
   ],
+  "planner.plan.WholeSum": [
+    "whole_id",
+    "sum_id"
+  ],
   "planner.plan.ScopeOptionState": [
     "option_id",
     "status",
     "years",
     "code"
+  ],
+  "planner.plan.ScopeWords": [
+    "mentions",
+    "summing"
   ],
   "planner.plan.ShareOfRequirement": [
     "kind",
@@ -295,6 +303,10 @@
   "planner.records.Period": [
     "start",
     "end"
+  ],
+  "planner.records.PeriodIn": [
+    "kind",
+    "years"
   ],
   "planner.records.PeriodThreshold": [
     "kind",

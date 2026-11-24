@@ -41,6 +41,7 @@ from planner.records import (
     GrowthChange,
     Identifier,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     Predicate,
@@ -146,7 +147,10 @@ class RoleDimension:
     it groups by, and every other verb carries it as it does a named role.
     `place` marks the dimension holding the places the measure is about:
     entities named with no role, or an `across` of the place party
-    (`place_role`). A place word names it (`roles_named`).
+    (`place_role`). A place word names it (`roles_named`). `single` marks a
+    role holding one value, so a rank over another role reads one row per
+    entity. In a plan it is a role one entity is named under, not as a set's
+    members. In a compiled shape it is a column its source binds one party on.
     """
 
     role: str | None
@@ -155,6 +159,7 @@ class RoleDimension:
     breakdown: bool = False
     open: bool = False
     place: bool = False
+    single: bool = False
     mixed_levels: bool = False
     levelled: bool = False
     level_filterable: bool = False
@@ -1161,6 +1166,7 @@ def aggregated(
     by_entity: bool,
     by_period: bool,
     by_breakdown: bool = False,
+    kept_open: Collection[str] = (),
     step_id: Identifier | None,
 ) -> FrameShape:
     """The shape `aggregate` produces, reducing `shape` by `reduction` per entity and/or period.
@@ -1190,6 +1196,10 @@ def aggregated(
     rows hold, which only the data decides, so its `period` is `None`. A
     span the aggregate writes is named for `step_id`, and one it keeps
     keeps its name (`FrameShape.span_of`).
+
+    A group by entity keeps apart the open dimensions `kept_open` names by
+    role, as the aggregate summing a whole's open side keeps each party its
+    part leaves open (`planner.plan.WholeSum`).
     """
     period = shape.period
     if by_period:
@@ -1202,7 +1212,7 @@ def aggregated(
             period = None
     drift = shape.drift if period is not None else FIXED
     if by_entity:
-        roles = tuple(role for role in shape.roles if not role.open)
+        roles = tuple(role for role in shape.roles if not role.open or role.role in kept_open)
     elif by_breakdown:
         roles = tuple(role for role in shape.roles if role.breakdown)
     else:
@@ -1376,6 +1386,17 @@ def _threshold_ends(
     return first, last
 
 
+def _listed_thresholds(listed: PeriodIn) -> list[PeriodThreshold]:
+    """The fixed thresholds that keep `listed`'s years: its first and last year as bounds, and an `ne` on each year between it does not list."""
+    first, last = listed.years[0], listed.years[-1]
+    between = sorted(set(range(first + 1, last)) - set(listed.years))
+    return [
+        PeriodThreshold(op="gte", year=first),
+        PeriodThreshold(op="lte", year=last),
+        *(PeriodThreshold(op="ne", year=year) for year in between),
+    ]
+
+
 @dataclass(frozen=True, slots=True)
 class YearFilter:
     """What a filter's `PeriodThreshold` predicates leave of a frame's years.
@@ -1451,9 +1472,12 @@ def year_filter(
     with no year predicate leaves `period` as it is and leaves no one year,
     whatever `period` spans. An unbounded `period` stays unbounded, and one
     year stands over it only where an `eq` or a pair of meeting bounds names
-    it. Predicates that leave no year of `period` return the refusal reason:
-    bounds that cross, an `eq` year outside `period` or its bounds, two
-    different `eq` years, or `ne` years that remove every year left.
+    it. A `PeriodIn` keeps its years: it bounds the first and the last at its
+    first and last year and removes each year between that it does not list
+    (`_listed_thresholds`). Predicates that leave no year of `period` return
+    the refusal reason: bounds that cross, an `eq` year outside `period` or
+    its bounds, two different `eq` years, `ne` years that remove every year
+    left, or a `PeriodIn` year that `period` does not hold.
 
     A threshold stated with `rolling` follows the newest data. A first year
     such a threshold sets moves with it, a last year it sets follows the
@@ -1465,7 +1489,10 @@ def year_filter(
     the newest data below a fixed last year leaves years today, and newer
     data none (`years_run_out`).
     """
-    thresholds = [p for p in predicates if isinstance(p, PeriodThreshold)]
+    listed = [p for p in predicates if isinstance(p, PeriodIn)]
+    thresholds = [p for p in predicates if isinstance(p, PeriodThreshold)] + [
+        threshold for one in listed for threshold in _listed_thresholds(one)
+    ]
     by_value = any(isinstance(p, ValueThreshold) for p in predicates)
     first_kept, last_kept = _kept_years(thresholds)
     if period is None:
@@ -1481,6 +1508,17 @@ def year_filter(
             by_value=by_value,
         )
     years = _Years.of(period, drift)
+    unheld = sorted(
+        year
+        for one in listed
+        for year in one.years
+        if not period.start <= year <= period.end or year in drift.excluded
+    )
+    if unheld:
+        return (
+            f"the year filter keeps {', '.join(map(str, unheld))}, which "
+            f"{period.start}-{period.end} does not hold"
+        )
     for threshold in thresholds:
         first, last = _threshold_ends(threshold)
         if first is not None:
@@ -1869,7 +1907,9 @@ def _several_measures(verb: str, shape: FrameShape) -> str | None:
     )
 
 
-def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bool) -> str | None:
+def _missing_group_roles(
+    shape: FrameShape, *, by_entity: bool, by_breakdown: bool, kept_open: Collection[str] = ()
+) -> str | None:
     """Why `shape` has no role an aggregate's group by entity or breakdown keeps, or `None`.
 
     A frame with no role dimension that rests on two retrievals, a
@@ -1878,7 +1918,7 @@ def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bo
     yearly sum. Over one retrieval's frame it is refused, and an empty
     group is the one figure it would mean. A group by entity keeps only the
     parties a requirement names, so over a frame whose every party is open
-    it would keep none.
+    it would keep none, unless it keeps open ones apart (`kept_open`).
     """
     if by_entity and not shape.roles and len(shape.roots) < 2:
         return (
@@ -1886,7 +1926,10 @@ def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bo
             f"entity in the step that collapsed the roles, or, {one_figure_remedy()}"
         )
     open_roles = [role.role for role in shape.roles if role.open]
-    if by_entity and open_roles and all(role.open or role.breakdown for role in shape.roles):
+    keeps_none = all(
+        (role.open and role.role not in kept_open) or role.breakdown for role in shape.roles
+    )
+    if by_entity and open_roles and keeps_none:
         return (
             "aggregate grouping by entity keeps the parties the requirement names apart and "
             f"sums its open {open_roles!r} away, and this input names no entity, so the group "
@@ -1931,13 +1974,16 @@ def _rejects_aggregate(
     by_period: bool = False,
     by_breakdown: bool = False,
     reduction: Reduction | None = None,
+    kept_open: Collection[str] = (),
 ) -> str | None:
     several = _several_measures("aggregate", shape) or _rejects_summed_rate(
         "an aggregate", shape, reduction
     )
     if several is not None:
         return several
-    if missing := _missing_group_roles(shape, by_entity=by_entity, by_breakdown=by_breakdown):
+    if missing := _missing_group_roles(
+        shape, by_entity=by_entity, by_breakdown=by_breakdown, kept_open=kept_open
+    ):
         return missing
     sums_open = not by_entity or any(role.open for role in shape.roles)
     if sums_open and (mixed := _mixed_levels("a total or an average across places", shape)):

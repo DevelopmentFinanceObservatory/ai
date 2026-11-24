@@ -70,7 +70,27 @@ from ..session_events import response_event
 from .test_agent import _clarify_answer_event, _clarify_ask_event, _FakeToolContext, _option
 
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "prices_decision_uk_oda.json"
-RECORDED: dict[str, Any] = json.loads(_FIXTURE.read_text())
+AS_SENT: dict[str, Any] = json.loads(_FIXTURE.read_text())
+
+# The recorded `share_denominator` decision names `denominator_scope` in its
+# `fixes`, with options about the share's provider scope. The share is keyed
+# on no axis, so the field settled to nothing; a draft fixing one enum field
+# now lists that field's values as its options, and every call stating the
+# decision is refused as sent. The replay states it as a rationale, which
+# records the same plan.
+_MISNAMED = "share_denominator"
+
+
+def _as_a_rationale(call: Mapping[str, Any]) -> dict[str, Any]:
+    arguments = call["arguments"]
+    decisions = [
+        {**decision, "fixes": None} if decision["slot"] == _MISNAMED else decision
+        for decision in arguments.get("decisions", ())
+    ]
+    return {**call, "arguments": {**arguments, "decisions": decisions}}
+
+
+RECORDED: dict[str, Any] = {**AS_SENT, "calls": [_as_a_rationale(c) for c in AS_SENT["calls"]]}
 
 PART = "spec_20bdd20a52e5f19f51a96c54bb40c2de"
 FOUND = "spec_bf915cf71ebfc1b5772ca64b393e50ec"
@@ -360,6 +380,28 @@ def test_a_restated_prices_decision_leaves_the_users_decision_standing(
     (decided,) = [d for d in first.decisions if d.slot == _PRICES_SLOT]
     assert [d for d in plan.decisions if d.slot == _PRICES_SLOT] == [decided]
     assert _PRICES_SLOT in plan.requirement("uk_total_oda").decision_ids
+
+
+def test_each_recorded_call_stating_the_misnamed_decision_is_refused_as_sent() -> None:
+    """The recorded decision fixes `denominator_scope` with options naming no
+    value of it, so the call is an invalid plan naming the values."""
+    tools = {
+        tool.name: tool for tool in planner_tool_specs(surface=RecordedSearch(RECORDED["resolves"]))
+    }
+    stating = [
+        call
+        for call in AS_SENT["calls"]
+        if any(d["slot"] == _MISNAMED for d in call["arguments"].get("decisions", ()))
+    ]
+    assert len(stating) == 7
+    for call in stating:
+        ctx = _FakeToolContext()
+        _turn_so_far(ctx)
+
+        answer = _propose(tools, ctx, call["arguments"])
+
+        assert (answer["outcome"], answer.get("code")) == ("invalid_input", "invalid_plan")
+        assert "values ['per_axis', 'pooled']" in answer["message"], answer
 
 
 def test_a_candidate_found_with_no_scope_choices_is_held_as_unread() -> None:

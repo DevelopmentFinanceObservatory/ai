@@ -21,7 +21,7 @@ from typing import Any
 from compiler.surface import ToolSurface
 from google.genai import types
 from harness.graph.interfaces import Executor
-from harness.graph.orchestrate import ask, orchestrate_node
+from harness.graph.orchestrate import ask_node, orchestrate_node
 from harness.graph.resume import ResumeRuns
 from harness.graph.seed import Fetch, seed_node
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
@@ -70,16 +70,18 @@ def opening_nodes(
     on the orchestrator's scripted model, `seed` resolving seeds through
     `definition_surface` (a data-mcp over a Search that serves nothing by
     default), recording steps through `executor`, applying a chip with
-    `fetch` and carrying runs on with `resume`."""
+    `fetch` and carrying runs on with `resume`. `ask` re-reads a unit answer's
+    parts through `definition_surface` too."""
+    surface = definition_surface or DataMcpDefinitions()
     return {
         "seed": seed_node(
             executor=executor,
-            definition_surface=definition_surface or DataMcpDefinitions(),
+            definition_surface=surface,
             resume=resume,
             fetch=fetch,
         ),
         "orchestrate": orchestrate_node(orchestrator=orchestrator, model=models.orchestrator_model),
-        "ask": ask,
+        "ask": ask_node(definition_surface=surface),
     }
 
 

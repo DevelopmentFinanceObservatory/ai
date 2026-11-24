@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ import pytest
 from common.hashed_fields import revision_content
 from compiler.sources import source_from_spec_block
 from data_mcp.search_tool import SearchSource
+from harness.planner_adapter import _as_authored
 from planner.operations import (
     AggregateOperation,
     FilterOperation,
@@ -40,6 +42,7 @@ from planner.plan import (
     MAX_OPTION_CHARS,
     MAX_PLAN_DECISIONS,
     MAX_PLAN_RECORD_CHARS,
+    MAX_PLAN_REQUIREMENTS,
     MAX_PREDICATES,
     MAX_QUESTION_CHARS,
     MAX_SOURCE_CHARS,
@@ -65,6 +68,7 @@ from planner.plan import (
     FixedField,
     FullHistory,
     GrowthRequirement,
+    HistorySplit,
     JoinRequirement,
     Period,
     Plan,
@@ -73,6 +77,7 @@ from planner.plan import (
     RankRequirement,
     RequirementSide,
     ResolvedBy,
+    RollingCopy,
     ScopeOptionState,
     ShareOfRequirement,
     SumOfRequirement,
@@ -81,24 +86,31 @@ from planner.plan import (
     UnsupportedPlanError,
     WholeIsItsMemberError,
     WholeOf,
+    WholeSum,
     _build_shapes,
+    authored,
     authored_text,
     cut_user_text,
     frame_shapes,
     full_history,
     is_scope_choice,
     load_plan,
+    origin_of,
     period_window,
     plan_revision,
+    ranks_among_settled,
     restated_to_anchors,
     restated_translation,
     retrieves_period,
     rolls_from_its_start,
+    save_plan,
     scope_choice_slot,
     settle_decisions,
     split_of,
     whole_of_fault,
     windowed_pin,
+    with_authored_requirements,
+    with_whole_sums,
 )
 from planner.proof import mismatches
 from planner.records import (
@@ -111,6 +123,7 @@ from planner.records import (
     GroupBy,
     GrowthChange,
     OpenPeriodFault,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -948,16 +961,6 @@ def test_rank_window_needs_both_years_or_neither() -> None:
         )
 
 
-def test_a_rank_needs_among_stated() -> None:
-    with pytest.raises(ValidationError, match="among"):
-        RankRequirement(
-            id="rank",
-            decision_ids=["measure"],
-            input_id="annual_debt_service",
-            direction=RankDirection.HIGHEST_FIRST,
-        )
-
-
 def test_comparison_sides_must_differ() -> None:
     with pytest.raises(ValidationError, match="minuend and subtrahend must differ"):
         ComparisonRequirement(
@@ -1124,11 +1127,72 @@ def test_a_calculation_the_question_states_outright_cites_no_decision(
 
 def test_a_draft_names_every_field_a_decision_fixes_but_the_pin() -> None:
     # Code alone writes the pin and the user's prices for a part
-    # (`submission.prices_choice`).
+    # (`submission.prices_choice`), and a rank's `among` is the one its input
+    # admits (`ranks_among_settled`).
     assert set(get_args(FixedField)) == set(DecisionFixes.model_fields) - {
         "source_spec_id",
         "prices",
+        "among",
     }
+
+
+def _choice_draft(fixes: tuple[str, ...], options: list[str]) -> DecisionDraft:
+    return DecisionDraft.model_validate(
+        {
+            "slot": "choice",
+            "description": "d",
+            "options": options,
+            "chosen": options[0],
+            "resolved_by": ResolvedBy.PLANNER_DEFAULT,
+            "rationale": "r",
+            "fixes": fixes,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("fixes", "options", "values"),
+    [
+        (("reduction",), ["the yearly sum", "mean"], "['sum', 'mean', 'max', 'min']"),
+        (("direction",), ["highest_first", "lowest"], "['highest_first', 'lowest_first']"),
+        (("denominator_scope",), ["pooled", "of its own total"], "['per_axis', 'pooled']"),
+        (("change",), ["relative_change", "absolute"], "['relative', 'absolute']"),
+        (("stat_vars",), ["sum", "one series each"], "['sum', 'separate']"),
+    ],
+    ids=["reduction", "direction", "denominator_scope", "change", "stat_vars"],
+)
+def test_a_decision_fixing_one_enum_field_lists_its_values_as_options(
+    fixes: tuple[str, ...], options: list[str], values: str
+) -> None:
+    """The card words each value of the field, so an option that is none
+    would print as the planner wrote it; the refusal names the values."""
+    with pytest.raises(ValidationError, match=re.escape(f"values {values}; replace")):
+        _choice_draft(fixes, options)
+
+
+@pytest.mark.parametrize(
+    ("fixes", "options"),
+    [
+        (("reduction",), ["sum", "mean"]),
+        (("reduction", "period"), ["summed over 2015-2024", "averaged over 2015-2024"]),
+        (("period",), ["2015-2024", "2018-2024"]),
+    ],
+    ids=["the-fields-values", "beside-another-field", "a-field-of-no-enum"],
+)
+def test_a_decision_fixing_one_enum_field_with_its_values_or_more_fields_is_admitted(
+    fixes: tuple[str, ...], options: list[str]
+) -> None:
+    assert _choice_draft(fixes, options).options == tuple(options)
+
+
+def test_a_draft_cannot_fix_a_ranks_among() -> None:
+    """The deployed slug options `among_population`/`among_named` printed as
+    'among population' on the card; a draft names no `among` at all."""
+    with pytest.raises(ValidationError) as refused:
+        _choice_draft(("among",), ["among_population", "among_named"])
+
+    (error,) = refused.value.errors()
+    assert (error["type"], error["loc"]) == ("literal_error", ("fixes", 0))
 
 
 @pytest.mark.parametrize(
@@ -2410,22 +2474,99 @@ def test_a_series_of_every_place_needs_no_level(
     assert plan.answer_mode is AnswerMode.SERIES
 
 
-def test_a_rank_over_across_beside_a_named_entity_states_a_reduction(
+_KENYA_2022: dict[str, Any] = {
+    "entities": (Entity(name="Kenya", role="recipient"),),
+    "across": ("donor",),
+    "period": Period(start=2022, end=2022),
+}
+
+
+@pytest.mark.parametrize(
+    ("dataset", "rank", "refusal"),
+    [
+        pytest.param({}, {}, None, id="kenya-alone-in-2022"),
+        pytest.param(
+            {"period": Period(start=2015, end=2022)},
+            {"per_period": True},
+            None,
+            id="kenya-alone-each-year-ranked-apart",
+        ),
+        pytest.param(
+            {
+                "entities": (
+                    Entity(name="Kenya", role="recipient"),
+                    Entity(name="Uganda", role="recipient"),
+                )
+            },
+            {},
+            "more than one role, which needs a reduction",
+            id="two-recipients",
+        ),
+        pytest.param(
+            {"entities": (Entity(name="Africa", role="recipient", members=True),)},
+            {},
+            "more than one role, which needs a reduction",
+            id="a-set-read-as-its-members",
+        ),
+        pytest.param(
+            {"entities": (), "across": ("donor", "recipient")},
+            {},
+            "more than one role, which needs a reduction",
+            id="another-party-left-open",
+        ),
+        pytest.param(
+            {"breakdown": Breakdown(dimension="sector", level=0)},
+            {},
+            "more than one role, which needs a reduction",
+            id="a-breakdown-beside-the-axis",
+        ),
+        pytest.param(
+            {"period": Period(start=2015, end=2022)},
+            {},
+            "ranks entities over 2015-2022 with no reduction",
+            id="kenya-alone-over-several-years",
+        ),
+    ],
+)
+def test_a_rank_with_no_reduction_beside_another_role_needs_one_value_per_ranked_entity(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    dataset: dict[str, Any],
+    rank: dict[str, Any],
+    refusal: str | None,
+) -> None:
+    """ "Top donors to Kenya in 2022": Kenya, one entity, leaves one row per
+    donor, so the rank needs no reduction. Each other axis that can repeat a
+    donor's rows needs one: a second recipient, a set read as its members, a
+    second open party, a breakdown, or several years ranked together. Whether
+    the name binds one party on the source is `submission.service`'s check
+    (`tests/planner/test_rank_roles.py`)."""
+    aid = requirement(**(_KENYA_2022 | dataset))
+    ranked = _rank(aid.id, axis="donor", **rank)
+    if refusal is not None:
+        with pytest.raises(ValidationError, match=refusal):
+            _plan(_population_decision(decision), evidence_requirements=[aid, ranked])
+        return
+
+    plan = _plan(_population_decision(decision), evidence_requirements=[aid, ranked])
+
+    assert plan.requirement("ranked").reduction is None
+
+
+def test_a_rank_over_two_roles_names_its_axis_and_may_state_a_reduction(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
-    # "Top donors to Kenya": Kenya's recipient role and every donor are two
-    # role dimensions, so ranking donors collapses the recipient rows first.
     dataset = requirement(
-        entities=[Entity(name="Kenya", role="recipient")],
-        across=("donor",),
-        period=Period(start=2022, end=2022),
-    )
-
-    with pytest.raises(ValidationError, match="more than one role, which needs a reduction"):
-        _plan(
-            _population_decision(decision),
-            evidence_requirements=[dataset, _rank(dataset.id, axis="donor")],
+        **(
+            _KENYA_2022
+            | {
+                "entities": (
+                    Entity(name="Kenya", role="recipient"),
+                    Entity(name="Uganda", role="recipient"),
+                )
+            }
         )
+    )
     with pytest.raises(ValidationError, match=r"roles are \['donor', 'recipient'\]"):
         _plan(
             _population_decision(decision),
@@ -2642,19 +2783,58 @@ def test_among_named_with_a_narrowing_filter_validates(
     assert plan.requirement("ranked").among == RankAmong.NAMED
 
 
-def test_among_population_with_no_decision_fixing_it_fails(
+@pytest.mark.parametrize(("narrowed", "among"), [(False, "population"), (True, "named")])
+def test_a_rank_stating_no_among_takes_the_one_its_axis_admits(
+    decision: DecisionFactory, requirement: RequirementFactory, narrowed: bool, among: str
+) -> None:
+    # Each value is refused where the other holds, 'named' over an axis no
+    # filter narrowed and 'population' over a narrowed one, so the input decides.
+    dataset = requirement()
+    named = FilterRequirement(
+        id="named_entities",
+        decision_ids=["measure"],
+        input_id=dataset.id,
+        predicates=(EntityIn(names=["Kenya"], role="debtor"),),
+    )
+    ranked = _rank(named.id if narrowed else dataset.id, among=None, reduction=Reduction.MEAN)
+    stated = [dataset, named, ranked] if narrowed else [dataset, ranked]
+
+    settled = ranks_among_settled([ranked], graph=stated)
+
+    assert [one.among for one in settled] == [RankAmong(among)]  # type: ignore[union-attr]
+    plan = _plan(
+        _population_decision(decision) if among == "population" else decision(),
+        evidence_requirements=[*stated[:-1], *settled],
+    )
+    assert plan.requirement("ranked").among == RankAmong(among)
+
+
+def test_a_rank_stating_no_among_over_an_input_it_cannot_shape_is_refused(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
     dataset = requirement()
+    unsettled = _rank(dataset.id, among=None, reduction=Reduction.MEAN)
 
-    with pytest.raises(ValidationError, match="cites no decision whose `fixes` names `among`"):
-        _plan(
-            decision(),  # fixes=None
-            evidence_requirements=[
-                dataset,
-                _rank(dataset.id, among=RankAmong.POPULATION, reduction=Reduction.MEAN),
-            ],
-        )
+    assert ranks_among_settled([unsettled], graph=[unsettled]) == [unsettled]
+    with pytest.raises(ValidationError, match="admits only among='population'"):
+        _plan(decision(), evidence_requirements=[dataset, unsettled])
+
+
+def test_a_population_rank_needs_no_decision_fixing_among(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """The input admits one `among`, so no decision chooses it."""
+    dataset = requirement()
+
+    plan = _plan(
+        decision(),  # fixes=None
+        evidence_requirements=[
+            dataset,
+            _rank(dataset.id, among=RankAmong.POPULATION, reduction=Reduction.MEAN),
+        ],
+    )
+
+    assert plan.requirement("ranked").among is RankAmong.POPULATION  # type: ignore[union-attr]
 
 
 def test_a_keyed_share_of_needs_a_denominator_scope() -> None:
@@ -4641,6 +4821,7 @@ def test_json_without_answer_mode_loads_as_series(
         FilterRequirement,
         ValueThreshold,
         PeriodThreshold,
+        PeriodIn,
         EntityIn,
     ],
     ids=lambda cls: cls.__name__,
@@ -4652,7 +4833,7 @@ def test_the_json_schema_advertises_kind_as_required(tagged: type[TaggedModel]) 
 
 
 def test_the_plan_schema_advertises_kind_as_required_for_every_tagged_part() -> None:
-    # Ten requirements, the four predicates a filter carries, and the ten
+    # Ten requirements, the five predicates a filter carries, and the ten
     # operations a plan's `translation` holds.
     definitions = Plan.model_json_schema()["$defs"]
     tagged = {
@@ -4661,7 +4842,7 @@ def test_the_plan_schema_advertises_kind_as_required_for_every_tagged_part() -> 
         if "kind" in schema.get("properties", {})
     }
 
-    assert len(tagged) == 24
+    assert len(tagged) == 25
     assert all(schema["required"][0] == "kind" for schema in tagged.values())
 
 
@@ -6040,6 +6221,35 @@ def test_authored_text_renames_a_copy_named_in_prose_and_keeps_refs(text: str, n
     assert authored_text(text, {"aid_history": "aid"}) == named
 
 
+@pytest.mark.parametrize(
+    ("text", "named"),
+    [
+        pytest.param("step 'total_sum' failed.", "step 'total' failed.", id="alone"),
+        pytest.param(
+            "aggregate 'total_sum' reads 'total'.",
+            "aggregate the sum of 'total' reads 'total'.",
+            id="beside-its-whole-quoted",
+        ),
+        pytest.param(
+            "total_sum_history reads total.",
+            "the sum of total reads total.",
+            id="a-copy-beside-its-whole",
+        ),
+        pytest.param(
+            "aid_history reads total_sum and aid.",
+            "aid reads total and aid.",
+            id="a-copy-beside-its-origin",
+        ),
+    ],
+)
+def test_authored_text_tells_a_sum_named_beside_its_whole_apart(text: str, named: str) -> None:
+    """A sum `propose_plan` added is named as its whole, and as the sum of its whole
+    where the text names the whole too, so the sentence keeps two parties."""
+    origins = {"total_sum": "total", "total_sum_history": "total", "aid_history": "aid"}
+
+    assert authored_text(text, origins, sums={"total_sum", "total_sum_history"}) == named
+
+
 def test_rolling_years_refused_on_a_copy_name_the_requirement_the_model_wrote(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
@@ -7239,8 +7449,6 @@ def test_a_whole_over_donors_of_a_part_with_a_roleless_entity_asks_for_its_role(
         id="whole",
         decision_ids=["measure"],
         measure="total aid",
-        entities=part_entities,
-        across=("donor",),
         period=period,
         whole_of=WholeOf(part="part", axis="donor"),
     )
@@ -7249,3 +7457,388 @@ def test_a_whole_over_donors_of_a_part_with_a_roleless_entity_asks_for_its_role(
 
     assert reason is not None
     assert ("state each entity's role" in reason) is asks_for_roles
+
+
+def _g7_africa_share(*, whole: DatasetRequirement, pooled: bool = False) -> list[Any]:
+    """G7 aid to Africa as a share of `whole`, the plan the planner first proposed
+    in a recorded Studio turn. With `pooled`, the whole is summed by year first."""
+    part = DatasetRequirement(
+        id="g7_africa_aid",
+        decision_ids=["measure"],
+        measure="official development assistance",
+        entities=[
+            Entity(name="Group of Seven", role="donor"),
+            Entity(name="Africa", role="recipient"),
+        ],
+        period=Period(start=1960, end=2024),
+        source_spec_id=_PIN,
+    )
+    total = AggregateRequirement(
+        id="g7_total_pooled",
+        input_id=whole.id,
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    share = ShareOfRequirement(
+        id="g7_africa_share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id=part.id),
+        denominator=RequirementSide(input_id=total.id if pooled else whole.id),
+    )
+    return [part, whole, *([total] if pooled else []), share]
+
+
+_G7_WHOLE = DatasetRequirement(
+    id="g7_total_aid",
+    decision_ids=["measure"],
+    measure="official development assistance",
+    period=Period(start=1960, end=2024),
+    whole_of=WholeOf(part="g7_africa_aid", axis="recipient"),
+)
+# The same whole as a stored plan may hold it, stating the part's donor and its
+# recipients in `across`, pooled by year.
+_G7_WHOLE_STATED = _G7_WHOLE.model_copy(
+    update={"entities": (Entity(name="Group of Seven", role="donor"),), "across": ("recipient",)}
+)
+
+
+@pytest.mark.parametrize(
+    ("whole", "pooled"),
+    [
+        pytest.param(_G7_WHOLE, False, id="states-nothing"),
+        pytest.param(_G7_WHOLE, True, id="states-nothing-pooled"),
+        pytest.param(_G7_WHOLE_STATED, True, id="stored-with-coverage"),
+    ],
+)
+def test_a_whole_covers_its_parts_parties_with_the_side_it_opens_as_one_total(
+    decision: DecisionFactory, whole: DatasetRequirement, pooled: bool
+) -> None:
+    """G7 aid to Africa over G7 aid to every recipient. The whole states no
+    entities and no `across`, and reads as its part's donor with the recipients
+    one closed total, so the share divides by it directly. A whole a stored
+    session states coverage on keeps it as stored and reads the same way."""
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=_g7_africa_share(whole=whole, pooled=pooled),
+    )
+
+    loaded = plan.requirement(whole.id)
+    assert isinstance(loaded, DatasetRequirement)
+    assert (loaded.entities, loaded.across) == (whole.entities, whole.across)
+    shape = frame_shapes(plan)[whole.id]
+    assert [(role.role, role.open) for role in shape.roles] == [
+        ("donor", False),
+        ("recipient", False),
+    ]
+    assert Plan.model_validate_json(plan.model_dump_json()) == plan
+
+
+def test_an_approved_plan_stored_with_a_whole_stating_coverage_runs_without_reapproval(
+    decision: DecisionFactory,
+) -> None:
+    """An approved plan whose whole states its part's `entities` and `across` runs
+    as approved once stored and reloaded: those fields feed the revision the user
+    approved. The planner is shown the whole without them, so an amendment
+    restating it as shown is admitted."""
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=_g7_africa_share(whole=_G7_WHOLE),
+    )
+    # A whole stating the fields a proposal is refused for: `model_copy` skips
+    # the validation that refuses them.
+    legacy = plan.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                _G7_WHOLE_STATED if requirement.id == _G7_WHOLE.id else requirement
+                for requirement in plan.evidence_requirements
+            )
+        }
+    )
+    state: dict[str, Any] = {}
+    save_plan(state, legacy.approve(at=datetime.now(UTC)))
+    stored_whole = next(
+        requirement
+        for requirement in json.loads(state[PLAN_STATE_KEY])["evidence_requirements"]
+        if requirement["id"] == _G7_WHOLE.id
+    )
+    assert {"entities", "across"} <= stored_whole.keys()
+
+    loaded = load_plan(state)
+
+    assert loaded is not None
+    assert loaded.start_execution().status == PlanStatus.EXECUTING
+    shown = _as_authored(loaded)
+    assert shown is not None
+    (shown_whole,) = (r for r in shown["evidence_requirements"] if r["id"] == _G7_WHOLE.id)
+    assert not shown_whole.get("entities")
+    assert not shown_whole.get("across")
+    _Patch.model_validate(
+        {
+            "decisions": [],
+            "evidence_requirements": shown["evidence_requirements"],
+            "removed_decisions": [],
+            "removed_evidence_requirements": [],
+            "declined": [],
+            "answered": [],
+            "removed_asks": [],
+            "across_years": [],
+        }
+    )
+
+
+def test_a_summed_whole_reads_its_side_open_and_its_sum_closes_it(
+    decision: DecisionFactory,
+) -> None:
+    """G7 aid to Africa over G7 aid to every recipient, on a source leaving the
+    recipients open. The whole reads them open, one row each, and the sum
+    `propose_plan` added keeps the donor and sums them away, so the share divides
+    by one total. The plan the model wrote is the plan without the sum."""
+    sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
+    written = _g7_africa_share(whole=_G7_WHOLE)
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=with_whole_sums(written, sums),
+        whole_sums=sums,
+    )
+
+    shapes = frame_shapes(plan)
+    assert [(role.role, role.open) for role in shapes[_G7_WHOLE.id].roles] == [
+        ("donor", False),
+        ("recipient", True),
+    ]
+    assert [(role.role, role.open) for role in shapes["g7_total_aid_sum"].roles] == [
+        ("donor", False)
+    ]
+    assert authored(plan).evidence_requirements == tuple(written)
+    assert Plan.model_validate_json(plan.model_dump_json()) == plan
+
+
+def test_a_plan_at_the_requirement_limit_holds_the_sum_over_its_whole(
+    decision: DecisionFactory,
+) -> None:
+    """A plan stating `MAX_PLAN_REQUIREMENTS` requirements, one of them a whole
+    `propose_plan` sums. The sum is no requirement the model wrote, so the plan
+    fits."""
+    sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
+    written = _g7_africa_share(whole=_G7_WHOLE)
+    fillers = [
+        DatasetRequirement(
+            id=f"series_{n}",
+            decision_ids=["measure"],
+            measure="official development assistance",
+            entities=[Entity(name="Kenya", role="recipient")],
+            period=Period(start=2020, end=2024),
+        )
+        for n in range(MAX_PLAN_REQUIREMENTS - len(written))
+    ]
+
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid, and aid to Kenya",
+        answer_mode=AnswerMode.SERIES,
+        evidence_requirements=with_whole_sums([*written, *fillers], sums),
+        whole_sums=sums,
+    )
+
+    assert len(plan.evidence_requirements) == MAX_PLAN_REQUIREMENTS + 1
+
+
+@pytest.mark.parametrize(
+    ("sums", "requirements"),
+    [
+        pytest.param(
+            (WholeSum(whole_id="g7_africa_aid", sum_id="g7_total_aid_sum"),),
+            None,
+            id="names-the-part",
+        ),
+        pytest.param(
+            (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),),
+            _g7_africa_share(whole=_G7_WHOLE),
+            id="sum-not-stated",
+        ),
+    ],
+)
+def test_a_plan_whose_whole_sums_are_not_its_wholes_aggregates_is_refused(
+    decision: DecisionFactory,
+    sums: tuple[WholeSum, ...],
+    requirements: list[Any] | None,
+) -> None:
+    written = _g7_africa_share(whole=_G7_WHOLE)
+
+    with pytest.raises(ValidationError) as refused:
+        _plan(
+            decision(),
+            question="G7 aid to Africa as a share of its total aid since the earliest year",
+            answer_mode=AnswerMode.COMPUTED,
+            evidence_requirements=requirements or with_whole_sums(written, sums),
+            whole_sums=sums,
+        )
+    assert [(error["type"], error["loc"]) for error in refused.value.errors()] == [
+        ("value_error", ())
+    ]
+
+
+def test_a_copy_of_a_whole_s_sum_is_named_as_the_whole() -> None:
+    """A rolling copy of the sum `propose_plan` added over a whole is named in
+    outward text as the whole the model wrote, which the planner can patch. The
+    planner is never shown the sum."""
+    split = HistorySplit(
+        requirements=(),
+        copies=(RollingCopy(copy_id="total_sum_history", origin_id="total_sum"),),
+        whole_history={},
+        first_years_read=(),
+        first_year_unknown=(),
+        sums=(WholeSum(whole_id="total", sum_id="total_sum"),),
+    )
+
+    assert origin_of(split, "total_sum_history") == "total"
+    assert origin_of(split, "total_sum") == "total"
+    assert split.summing() == {"total_sum", "total_sum_history"}
+
+
+def test_requirements_dropping_a_whole_drop_its_sum(decision: DecisionFactory) -> None:
+    """G7 aid to Africa over its whole, summed, restated with the whole a total of
+    its own. The plan keeps a sum only over a whole it states."""
+    sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
+    written = _g7_africa_share(whole=_G7_WHOLE, pooled=True)
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=with_whole_sums(written, sums),
+        whole_sums=sums,
+    )
+    total = _G7_WHOLE_STATED.model_copy(update={"whole_of": None})
+    restated = [total if r.id == total.id else r for r in written]
+
+    rebuilt = with_authored_requirements(plan, restated)
+
+    assert rebuilt.whole_sums == ()
+    assert rebuilt.evidence_requirements == tuple(restated)
+
+
+def test_a_part_naming_the_set_it_read_across_keeps_its_whole_s_sum(
+    decision: DecisionFactory,
+) -> None:
+    """Every G7 donor's aid to Africa, totalled, as a share of their aid to every
+    recipient, the recipients summed keeping each donor apart. The part restated
+    naming the G7 in place of its `across` donors, as the translator restates a
+    part whose pin holds that side to one set (`translator.discovery.name_pinned_groups`),
+    keeps the sum, which then keeps the G7 apart in place of each donor."""
+    sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
+    g7 = Entity(name="Group of Seven", role="donor")
+    africa = Entity(name="Africa", role="recipient")
+    part, whole, total, share = _g7_africa_share(whole=_G7_WHOLE, pooled=True)
+    each = part.model_copy(update={"entities": (africa,), "across": ("donor",)})
+    pooled = AggregateRequirement(
+        id="g7_africa_pooled", input_id=each.id, reduction=Reduction.SUM, group_by=(GroupBy.PERIOD,)
+    )
+    over_pool = share.model_copy(update={"numerator": RequirementSide(input_id=pooled.id)})
+    written = [each, pooled, whole, total, over_pool]
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=with_whole_sums(written, sums),
+        whole_sums=sums,
+    )
+    named = each.model_copy(update={"entities": (africa, g7), "across": ()})
+
+    rebuilt = with_authored_requirements(plan, [named, *written[1:]])
+
+    assert rebuilt.whole_sums == sums
+    assert split_of(plan).kept_open == {"g7_total_aid_sum": ("donor",)}
+    assert split_of(rebuilt).kept_open == {"g7_total_aid_sum": ()}
+    assert [(role.role, role.open) for role in frame_shapes(rebuilt)["g7_total_aid_sum"].roles] == [
+        ("donor", False)
+    ]
+
+
+@pytest.mark.parametrize(
+    "stated",
+    [
+        pytest.param({"entities": [{"name": "Group of Seven", "role": "donor"}]}, id="entities"),
+        pytest.param({"across": ["recipient"]}, id="across"),
+    ],
+)
+def test_a_proposal_stating_coverage_on_a_whole_is_refused(stated: dict[str, Any]) -> None:
+    """A whole covers what its part covers with one side left open, so a proposal
+    stating its `entities` or `across` is refused."""
+    whole = {**_G7_WHOLE.model_dump(mode="json"), **stated}
+    part = _g7_africa_share(whole=_G7_WHOLE)[0].model_dump(mode="json")
+
+    with pytest.raises(ValidationError) as raised:
+        _Patch.model_validate(
+            {
+                "decisions": [],
+                "evidence_requirements": [part, whole],
+                "removed_decisions": [],
+                "removed_evidence_requirements": [],
+                "declined": [],
+                "answered": [],
+                "removed_asks": [],
+                "across_years": [],
+            }
+        )
+    assert [(error["type"], error["loc"]) for error in raised.value.errors()] == [
+        ("value_error", ())
+    ]
+
+
+@pytest.mark.parametrize(
+    ("first", "last"),
+    [pytest.param(2019, 2023, id="2019-and-2023"), pytest.param(2000, 2020, id="2000-and-2020")],
+)
+def test_years_asked_for_apart_are_one_listed_filter_over_the_range(
+    decision: DecisionFactory, requirement: RequirementFactory, first: int, last: int
+) -> None:
+    """ "2000 and 2020" read 2000-2020 and keep the two years, whatever lies
+    between: one `period_in` filter, with no predicate per year dropped."""
+    dataset = requirement(id="aid", period=Period(start=first, end=last))
+    kept = FilterRequirement(
+        id="two_years",
+        decision_ids=["measure"],
+        input_id="aid",
+        predicates=(PeriodIn(years=(last, first)),),
+    )
+
+    plan = _plan(decision(), evidence_requirements=[dataset, kept])
+
+    assert plan.requirement("two_years").predicates == (PeriodIn(years=(first, last)),)  # type: ignore[union-attr]
+    shape = frame_shapes(plan)["two_years"]
+    assert shape.period == Period(start=first, end=last)
+    assert shape.drift.excluded == frozenset(range(first + 1, last))
+
+
+def test_a_listed_year_the_input_does_not_hold_is_refused(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    dataset = requirement(id="aid", period=Period(start=2000, end=2020))
+    kept = FilterRequirement(
+        id="two_years",
+        decision_ids=["measure"],
+        input_id="aid",
+        predicates=(PeriodIn(years=(1999, 2020)),),
+    )
+
+    with pytest.raises(ValidationError, match="keeps 1999, which 2000-2020 does not hold"):
+        _plan(decision(), evidence_requirements=[dataset, kept])
+
+
+def test_a_listed_set_of_years_takes_no_rolling() -> None:
+    with pytest.raises(ValidationError, match="rolling"):
+        FilterRequirement.model_validate(
+            {
+                "id": "two_years",
+                "input_id": "aid",
+                "predicates": [
+                    {"kind": "period_in", "years": [2019, 2023], "rolling": {"offset": 0}}
+                ],
+            }
+        )

@@ -38,6 +38,7 @@ from common.materialisation import (
     rendering,
     set_store,
 )
+from common.refusal import SERVICE_FAILURE
 from fastmcp.server.http import set_http_request
 from runner_replay import REPLIES_PATH
 from starlette.requests import Request
@@ -1008,7 +1009,9 @@ async def test_the_caller_is_named_beside_the_principal(
             httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
             "timeout",
             "retry_after_delay",
-            {},
+            # A refusal passed through that the runner answered with a 5xx is
+            # its own failure.
+            {"kind": SERVICE_FAILURE},
         ),
         (
             _problem(
@@ -1028,6 +1031,12 @@ async def test_the_caller_is_named_beside_the_principal(
             {"x": 1},
         ),
         (
+            _problem(500, "a_code_no_registry_holds", fix={"x": 1}),
+            "a_code_no_registry_holds",
+            "do_not_retry",
+            {"x": 1, "kind": SERVICE_FAILURE},
+        ),
+        (
             _problem(422, "unit_heterogeneous", fix={"x": 1}, retry_mode="retry_whenever"),
             "unit_heterogeneous",
             "correct_and_retry",
@@ -1043,13 +1052,22 @@ async def test_the_caller_is_named_beside_the_principal(
             _problem(500, "internal_error"),
             "upstream_error",
             "do_not_retry",
-            {"detail": "internal_error detail"},
+            # A problem the runner answered with a 5xx is its own failure.
+            {"detail": "internal_error detail", "kind": SERVICE_FAILURE},
         ),
         (
             httpx2.Response(502, text="bad gateway"),
             "upstream_error",
             "retry_after_delay",
-            {"detail": "dfo-apis answered 502 with no problem document"},
+            {"detail": "dfo-apis answered 502 with no problem document", "kind": SERVICE_FAILURE},
+        ),
+        # A 4xx with no problem document comes from a proxy or an IAM check in
+        # front of the runner, which failed of itself.
+        (
+            httpx2.Response(403, text="forbidden"),
+            "upstream_error",
+            "do_not_retry",
+            {"detail": "dfo-apis answered 403 with no problem document", "kind": SERVICE_FAILURE},
         ),
         (
             httpx2.Response(200, json={"status": "ready", "summary": {"verb": "aggregate"}}),
@@ -1069,10 +1087,12 @@ async def test_the_caller_is_named_beside_the_principal(
         "retryable-registry-code",
         "code-this-service-defines-no-factory-for",
         "code-no-registry-holds",
+        "code-no-registry-holds-5xx",
         "unheld-retry-mode",
         "malformed-retry-mode",
         "this-services-own-code",
         "no-problem-document",
+        "no-problem-document-4xx",
         "summary-unreadable",
     ],
 )

@@ -1,0 +1,130 @@
+{
+  "answer": {
+    "is_error": false,
+    "meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "data-mcp",
+        "version": "4.1.6"
+      },
+      "org.one.dfo/search_envelope": {
+        "diagnostics": {
+          "engine_build": "1b79c55766eacc280c3d5ad172bed9002cfa0779",
+          "timed_out": false,
+          "timing_ms": {
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 338
+          },
+          "trace_id": "06c7d8e2b4e14020982b29eb0131262b",
+          "warnings": []
+        },
+        "kind": "resolution",
+        "parts": [
+          {
+            "assumptions": [],
+            "departures": [],
+            "entity_refs": [
+              {
+                "refs": [],
+                "text": "Group of Seven"
+              },
+              {
+                "refs": [],
+                "text": "developing countries"
+              }
+            ],
+            "no_data": {
+              "ambiguous_entities": [],
+              "ambiguous_sources": [],
+              "category": "unresolved",
+              "entity_terms": [
+                "developing countries"
+              ],
+              "message": "Could not use \"developing countries\" as a place for this query. Try a different place name.",
+              "options": [],
+              "reason": "entity_not_resolved",
+              "source_terms": [],
+              "unbound_qualifiers": []
+            },
+            "operations": [],
+            "rendered_sentence": "Could not use \"developing countries\" as a place for this query. Try a different place name.",
+            "restatement": {
+              "entities": [
+                {
+                  "role_text": "donor",
+                  "text": "Group of Seven"
+                },
+                {
+                  "role_text": "recipient",
+                  "text": "developing countries"
+                }
+              ],
+              "operations": [],
+              "sources": [],
+              "time_text": "1975 to 2024",
+              "variable_text": "bilateral plus imputed multilateral official development assistance"
+            },
+            "sentence_plan": [
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "heading",
+                "states": [],
+                "text": "Could not use \"developing countries\" as a place for this query. Try a different place name."
+              }
+            ],
+            "status": "no_data",
+            "timing_ms": {
+              "by_step": {
+                "phase_check_entities": 0,
+                "phase_resolve_places": 0,
+                "recall": 333
+              },
+              "total": 333
+            },
+            "variable_text": "bilateral plus imputed multilateral official development assistance",
+            "warnings": [
+              {
+                "code": "skills_not_matchable",
+                "message": "Skills were requested, but this part resolved to no spec, so it binds no graph nodes to match a skill against.",
+                "severity": "warn"
+              }
+            ]
+          }
+        ],
+        "query_echo": {
+          "entry_path": "parsed",
+          "extract_skipped": true
+        },
+        "rendered_sentence": "Could not use \"developing countries\" as a place for this query. Try a different place name.",
+        "schema_version": 1,
+        "sentence_plan": [
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "Could not use \"developing countries\" as a place for this query. Try a different place name."
+          }
+        ],
+        "skills": {},
+        "status": "no_data"
+      }
+    },
+    "structured_content": {
+      "kind": "resolution",
+      "parts": [
+        {
+          "label": "bilateral plus imputed multilateral official development assistance",
+          "specs": [],
+          "status": "no_data"
+        }
+      ],
+      "status": "no_data"
+    },
+    "text": "The ask could not be resolved (reason: entity_not_resolved).\n\nCould not use \"developing countries\" as a place for this query. Try a different place name."
+  },
+  "call": "search {\"parts\":[{\"entities\":[{\"role\":\"donor\",\"text\":\"Group of Seven\"},{\"role\":\"recipient\",\"text\":\"developing countries\"}],\"time\":\"1975 to 2024\",\"variable\":\"bilateral plus imputed multilateral official development assistance\"}]}"
+}

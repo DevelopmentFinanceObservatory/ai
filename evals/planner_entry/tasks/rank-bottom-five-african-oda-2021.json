@@ -42,22 +42,7 @@
   "reference_payload": {
     "question": "Which five African countries received the least ODA in 2021?",
     "answer_mode": "computed",
-    "decisions": [
-      {
-        "slot": "every_african_country",
-        "description": "Which countries the ranking compares.",
-        "options": [
-          "every African country with data",
-          "a named list of African countries"
-        ],
-        "chosen": "every African country with data",
-        "resolved_by": "planner_default",
-        "rationale": "The question asks about African countries without naming any, so every one is ranked.",
-        "fixes": [
-          "among"
-        ]
-      }
-    ],
+    "decisions": [],
     "evidence_requirements": [
       {
         "kind": "dataset",
@@ -89,9 +74,7 @@
         "axis": "recipient",
         "reduction": "sum",
         "limit": 5,
-        "decision_ids": [
-          "every_african_country"
-        ]
+        "decision_ids": []
       }
     ],
     "answered": [
@@ -109,22 +92,7 @@
       "payload": {
         "question": "Which five African countries received the least ODA in 2021?",
         "answer_mode": "computed",
-        "decisions": [
-          {
-            "slot": "every_african_country",
-            "description": "Which countries the ranking compares.",
-            "options": [
-              "every African country with data",
-              "a named list of African countries"
-            ],
-            "chosen": "every African country with data",
-            "resolved_by": "planner_default",
-            "rationale": "The question asks about African countries without naming any, so every one is ranked.",
-            "fixes": [
-              "among"
-            ]
-          }
-        ],
+        "decisions": [],
         "evidence_requirements": [
           {
             "kind": "dataset",
@@ -165,9 +133,7 @@
             "among": "population",
             "axis": "recipient",
             "limit": 5,
-            "decision_ids": [
-              "every_african_country"
-            ],
+            "decision_ids": [],
             "reduction": "sum"
           }
         ],

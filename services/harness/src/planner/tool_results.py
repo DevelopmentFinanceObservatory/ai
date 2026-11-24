@@ -128,6 +128,24 @@ class ProblemCode(StrEnum):
     # provider scope of its other inputs, which the planner repairs
     # (`submission.service._providers_unaligned`).
     PROVIDERS_UNALIGNED = "providers_unaligned"
+    # A dataset requirement declares a provider option its pin cannot count
+    # (`submission.service._declared_claims`).
+    STATED_PROVIDER_DROPPED = "stated_provider_dropped"
+    # Some dataset inputs of a share, quotient or comparison declare a provider option
+    # and some do not (`submission.service._half_declared`).
+    STATED_SCOPE_UNATTRIBUTED = "stated_scope_unattributed"
+    # Search's reader of the provider scope the user's words state refused the read for a
+    # reason no retry changes, so no plan can be admitted on a reading
+    # (`planner.stated_scope.read_stated_scope`).
+    STATED_SCOPE_UNREADABLE = "stated_scope_unreadable"
+    # Search's reader of the provider scope the user's words state did not answer after
+    # the reader's retries, in a way that can pass, so no plan can be admitted on a
+    # reading this entry (`planner.stated_scope.read_stated_scope`).
+    STATED_SCOPE_UNAVAILABLE = "stated_scope_unavailable"
+    # A compile of a pin on the provider scope the user's words state cannot reach
+    # Search, and no retry changes that, so no plan counting it can be admitted
+    # (`planner.source_reads.compile_on_basis`).
+    STATED_COMPILE_UNREACHABLE = "stated_compile_unreachable"
     # A share or quotient whose two sides read one series over the same years and
     # entities, which divides a figure by itself
     # (`submission.service._share_of_itself`).

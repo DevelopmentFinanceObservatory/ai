@@ -5,9 +5,7 @@ the frontend team builds against. Three things are pinned here: every event
 fixture round-trips bit-for-bit through `STUDIO_FRAME_ADAPTER` (parse, then
 `model_dump(mode="json", exclude_unset=True)` reproduces the fixture
 exactly); every request fixture parses through `STUDIO_REQUEST_ADAPTER`
-with the fixtures' `session_id` accepted as the deprecated alias for
-`conversation_id` (contract delta 5) and round-trips up to that one rename;
-and the boundary refuses what the contract says it refuses: unknown
+and round-trips exactly; and the boundary refuses what the contract says it refuses: unknown
 members, unknown discriminators, out-of-vocabulary enum values.
 """
 
@@ -21,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from harness.unit_offer import unit_option_id, unit_words, whole_units
 from harness.wire import (
     MAX_OPERATION_PHRASE_CHARS,
     MAX_SEED_COUNT,
@@ -35,6 +34,7 @@ from harness.wire import (
     STUDIO_REQUEST_ADAPTER,
     ActivityStep,
     CancelRequest,
+    ClientFeature,
     ComponentCreated,
     ComponentRevised,
     CompositionMutation,
@@ -55,6 +55,7 @@ from harness.wire import (
     PlanRequirement,
     PlanStep,
     PlanVersioned,
+    ResumeRequest,
     Seed,
     SkippedAnswer,
     SpecBlock,
@@ -63,8 +64,10 @@ from harness.wire import (
     Surface,
     TextAnswer,
     TurnRequest,
+    UnitOffer,
     check_resolved_bounds,
     component_fault,
+    declared_features,
 )
 from pydantic import ValidationError
 
@@ -88,6 +91,11 @@ EVENT_FIXTURES = {
     "event-15-suggestions-apply-choice.json": Suggestions,
     "event-16-plan-approved.json": PlanApproved,
     "event-17-plan-proposed-switch-failed.json": PlanProposed,
+    "event-18-elicitation-unit.json": ElicitationRequest,
+    "event-19-component-unit-change.json": ComponentCreated,
+    "event-20-elicitation-multi-select.json": ElicitationRequest,
+    "event-21-elicitation-unit-pick.json": ElicitationRequest,
+    "event-22-plan-proposed-unit.json": PlanProposed,
 }
 
 REQUEST_FIXTURES = {
@@ -104,6 +112,14 @@ REQUEST_FIXTURES = {
     "request-11-turn-seeded.json": TurnRequest,
     "request-12-interrupt-answers.json": InterruptResponse,
     "request-13-turn-apply-choice.json": TurnRequest,
+    "request-14-resume.json": ResumeRequest,
+    "request-15-interrupt-unit.json": InterruptResponse,
+    "request-16-turn-apply-unit.json": TurnRequest,
+    "request-17-interrupt-options.json": InterruptResponse,
+    "request-18-interrupt-unit-pick.json": InterruptResponse,
+    "request-19-turn-client-features.json": TurnRequest,
+    "request-20-interrupt-switch-unit.json": InterruptResponse,
+    "request-21-cancel-turn.json": CancelRequest,
 }
 
 
@@ -128,21 +144,13 @@ def test_event_fixture_round_trips_exactly(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", sorted(REQUEST_FIXTURES))
-def test_request_fixture_parses_with_session_id_as_alias(name: str) -> None:
-    """The turn/interrupt fixtures carry `session_id`; v1 parses it as
-    the deprecated alias of `conversation_id` (delta 5) and serialisation
-    writes `conversation_id`, so their round-trip is exact up to that one
-    rename. The composition.mutate fixture is delta-adjusted on disk (delta 5
-    adds a conversation identifier), so it round-trips exactly as stored."""
+def test_request_fixture_round_trips_exactly(name: str) -> None:
     raw = _load(name)
 
     request = STUDIO_REQUEST_ADAPTER.validate_python(raw)
 
     assert type(request) is REQUEST_FIXTURES[name]
-    expected = dict(raw)
-    if "session_id" in expected:
-        expected["conversation_id"] = expected.pop("session_id")
-    assert request.model_dump(mode="json", exclude_unset=True) == expected
+    assert request.model_dump(mode="json", exclude_unset=True) == raw
 
 
 def test_fixtures_that_omit_optional_flags_parse_to_the_contract_defaults() -> None:
@@ -169,14 +177,66 @@ def test_fixtures_that_omit_optional_flags_parse_to_the_contract_defaults() -> N
     assert open_ended.skippable is True
 
 
-def test_turn_request_accepts_conversation_id_directly() -> None:
-    raw = _load("request-01-turn.json")
-    raw["conversation_id"] = raw.pop("session_id")
+@pytest.mark.parametrize("name", ["request-01-turn.json", "request-12-interrupt-answers.json"])
+def test_a_request_without_client_features_states_none(name: str) -> None:
+    """A client that predates `client_features` sends none, which leaves the
+    conversation's set as it was (`harness.studio`)."""
+    request = STUDIO_REQUEST_ADAPTER.validate_python(_load(name))
+
+    assert isinstance(request, TurnRequest | InterruptResponse)
+    assert request.client_features is None
+
+
+def test_a_feature_the_harness_does_not_know_is_ignored() -> None:
+    raw = {**_load("request-19-turn-client-features.json")}
+    raw["client_features"] = [*raw["client_features"], "charts_in_3d"]
 
     request = STUDIO_REQUEST_ADAPTER.validate_python(raw)
 
     assert isinstance(request, TurnRequest)
-    assert request.conversation_id == "sess_01j9zc0000"
+    assert declared_features(request.client_features) == {
+        ClientFeature.UNIT_QUESTION,
+        ClientFeature.MULTI_SELECT,
+    }
+
+
+def test_the_unit_pick_fixture_offers_the_unit_fixture_s_whole_units() -> None:
+    """The unit question a client without `unit_question` gets names the
+    whole units of the typed question's start currency, the start first."""
+    offer = UnitOffer.model_validate(_unit_question()["unit"])
+    (pick,) = _load("event-21-elicitation-unit-pick.json")["questions"]
+
+    assert [(option["id"], option["label"]) for option in pick["options"]] == [
+        (option_id, unit_words(unit, offer)) for option_id, unit in whole_units(offer).items()
+    ]
+
+
+def test_the_unit_row_fixture_offers_its_whole_units_the_start_active() -> None:
+    """The plan card's row for a unit question's whole unit carries the offer,
+    starting on the unit the parts are in, and as options the whole units of
+    that currency, which a client that renders no unit picker switches between.
+    Its `chosen` and `alternatives` are those options' labels, as the
+    harness words them."""
+    card = PlanProposed.model_validate(_load("event-22-plan-proposed-unit.json"))
+    (row,) = card.decisions
+    assert row.unit is not None and row.options is not None
+
+    assert row.active_option_id == unit_option_id(row.unit.start)
+    assert [(option.option_id, option.label) for option in row.options] == [
+        (option_id, unit_words(unit, row.unit)) for option_id, unit in whole_units(row.unit).items()
+    ]
+    assert row.chosen == unit_words(row.unit.start, row.unit)
+    assert row.alternatives == [option.label for option in row.options]
+
+
+def test_the_unit_switch_fixture_names_its_unit_as_the_option() -> None:
+    """A unit switch's `option_id` names the unit it carries, as the row's
+    whole units are named, so an old client's pick and a new client's unit
+    reach the harness alike."""
+    switch = InterruptResponse.model_validate(_load("request-20-interrupt-switch-unit.json"))
+    assert switch.unit is not None
+
+    assert switch.option_id == unit_option_id(switch.unit)
 
 
 def test_turn_request_surface_defaults_to_studio() -> None:
@@ -188,11 +248,103 @@ def test_turn_request_surface_defaults_to_studio() -> None:
     assert request.surface is Surface.STUDIO
 
 
-def test_a_request_carrying_both_id_spellings_is_refused() -> None:
-    """`session_id` is an alias of `conversation_id`: once `conversation_id`
-    claims the alias, a leftover `session_id` is an unknown member."""
-    raw = _load("request-01-turn.json")
-    raw["conversation_id"] = raw["session_id"]
+@pytest.mark.parametrize("name", sorted(REQUEST_FIXTURES))
+def test_a_request_naming_its_conversation_session_id_is_refused(name: str) -> None:
+    """`session_id`, the conversation id's earlier name, is an unknown
+    member of every request that names a conversation."""
+    raw = _load(name)
+    raw["session_id"] = raw.pop("conversation_id")
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
+def _unit_question() -> dict[str, Any]:
+    return _load("event-18-elicitation-unit.json")["questions"][0]
+
+
+def _with(raw: dict[str, Any], path: tuple[str, ...], value: Any) -> dict[str, Any]:
+    raw = copy.deepcopy(raw)
+    node = raw
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    return raw
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        pytest.param(lambda q: {**q, "unit": None}, id="unit-input-without-offer"),
+        pytest.param(lambda q: {**q, "input": "single_select"}, id="offer-on-another-input"),
+        pytest.param(lambda q: {**q, "allow_free_text": True}, id="unit-with-free-text"),
+        pytest.param(
+            lambda q: {**q, "options": [{"id": "o1", "label": "x"}]}, id="unit-with-options"
+        ),
+        pytest.param(
+            lambda q: _with(q, ("unit", "start", "base_year"), None), id="constant-without-year"
+        ),
+        pytest.param(
+            lambda q: _with(q, ("unit", "start", "prices"), "current"), id="current-with-year"
+        ),
+        pytest.param(
+            lambda q: _with(q, ("unit", "currencies", 0, "base_year_max"), None),
+            id="bounds-not-together",
+        ),
+        pytest.param(
+            lambda q: _with(
+                _with(q, ("unit", "currencies", 2, "base_year_min"), 2000),
+                ("unit", "currencies", 2, "base_year_max"),
+                2020,
+            ),
+            id="bounds-on-current-only-currency",
+        ),
+    ],
+)
+def test_a_malformed_unit_question_is_refused(fault: Callable[[dict[str, Any]], Any]) -> None:
+    raw = _load("event-18-elicitation-unit.json")
+    raw["questions"][0] = fault(copy.deepcopy(_unit_question()))
+
+    with pytest.raises(ValidationError):
+        STUDIO_FRAME_ADAPTER.validate_python(raw)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"kind": "options", "option_ids": []},
+        {"kind": "options", "option_ids": ["o1", "o1"]},
+        {"kind": "unit", "currency": "EUR", "prices": "constant"},
+        {"kind": "unit", "currency": "EUR", "prices": "current", "base_year": 2023},
+    ],
+)
+def test_a_malformed_answer_is_refused(answer: dict[str, Any]) -> None:
+    raw = _with(_load("request-15-interrupt-unit.json"), ("answers", "q1"), answer)
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
+@pytest.mark.parametrize("turn_index", [0, 2**31], ids=["zero", "past-postgres-int"])
+def test_a_cancel_naming_a_turn_out_of_range_is_refused(turn_index: int) -> None:
+    raw = {**_load("request-21-cancel-turn.json"), "turn_index": turn_index}
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
+def test_apply_unit_comes_alone() -> None:
+    raw = {**_load("request-16-turn-apply-unit.json"), "message": "hello"}
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
+def test_apply_unit_and_apply_choice_do_not_come_together() -> None:
+    raw = {
+        **_load("request-16-turn-apply-unit.json"),
+        "apply_choice": _load("request-13-turn-apply-choice.json")["apply_choice"],
+    }
 
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python(raw)
@@ -273,7 +425,7 @@ def test_an_unknown_event_discriminator_is_refused() -> None:
 def test_an_unknown_request_kind_is_refused() -> None:
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python(
-            {"kind": "turn.start", "schema_version": 1, "session_id": "s", "message": "m"}
+            {"kind": "turn.start", "schema_version": 1, "conversation_id": "s", "message": "m"}
         )
 
 
@@ -423,6 +575,19 @@ def test_a_scope_decision_missing_or_misstating_a_member_is_refused(
         PlanDecision.model_validate({**_SCOPE_ROW, **change})
 
 
+_ROW_MEMBERS = ("choice_id", "active_option_id", "options")
+
+
+def test_a_decision_offering_a_unit_without_its_row_is_refused() -> None:
+    """Only a row a switch can name carries a unit offer."""
+    (row,) = _load("event-22-plan-proposed-unit.json")["decisions"]
+    plain = {key: value for key, value in row.items() if key not in _ROW_MEMBERS}
+
+    assert PlanDecision.model_validate(row).unit is not None
+    with pytest.raises(ValidationError):
+        PlanDecision.model_validate(plain)
+
+
 def test_studio_frame_adapter_still_discriminates_plan_proposed() -> None:
     frame = STUDIO_FRAME_ADAPTER.validate_python(_load("event-03-plan-proposed.json"))
 
@@ -543,6 +708,9 @@ _SWITCH = {
 }
 
 
+_UNIT = {"currency": "EUR", "prices": "constant", "base_year": 2015}
+
+
 def test_a_switch_names_its_choice_option_and_plan_revision() -> None:
     accepted = STUDIO_REQUEST_ADAPTER.validate_python(_SWITCH)
 
@@ -565,6 +733,32 @@ def test_a_switch_names_its_choice_option_and_plan_revision() -> None:
         pytest.param({"decision": "approve"}, id="approve-with-switch-members"),
         pytest.param(
             {"decision": "amend", "payload": "x", "choice_id": None}, id="amend-with-some"
+        ),
+        pytest.param({"option_id": None, "unit": _UNIT}, id="unit-switch-without-option"),
+        pytest.param(
+            {"decision": "approve", "choice_id": None, "option_id": None, "unit": _UNIT},
+            id="approve-with-unit",
+        ),
+        pytest.param(
+            {
+                "decision": "amend",
+                "payload": "x",
+                "choice_id": None,
+                "option_id": None,
+                "plan_revision": None,
+                "unit": _UNIT,
+            },
+            id="amend-with-unit",
+        ),
+        pytest.param(
+            {
+                "decision": "reject",
+                "choice_id": None,
+                "option_id": None,
+                "plan_revision": None,
+                "unit": _UNIT,
+            },
+            id="reject-with-unit",
         ),
     ],
 )

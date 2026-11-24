@@ -596,8 +596,10 @@ def chosen_part(spec: Mapping[str, Any], *, variable: str | None) -> dict[str, A
     """A candidate's spec block, chosen and fetched, as a `_part_summary` entry with `reading_facts`.
 
     `status` is `chosen`, and `variable` is the text of the part that offered
-    it. Window, `wide` and the resolved sentence are read from the block
-    the way a `definite` part's are.
+    it. Window, `wide`, the resolved sentence and the count Search elected
+    with the other counts and prices the block offers (`measure_choice`) are
+    read from the block the way a `definite` part's are, so a reading of
+    another count offers the way back to the count that offered it.
     """
     spec = dict(spec)
     summary: dict[str, Any] = {
@@ -607,6 +609,7 @@ def chosen_part(spec: Mapping[str, Any], *, variable: str | None) -> dict[str, A
         "resolved": (spec.get("resolved") or {}).get("rendered_sentence"),
         "wide": _wide_facts(spec)["wide"],
         **reading_facts(spec),
+        **measure_choice(spec),
     }
     window = _window(spec)
     if window is not None:

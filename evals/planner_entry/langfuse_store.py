@@ -47,7 +47,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
-from entry import RECORD_SCHEMA, Task, inputs_digest, load_recording, load_tasks
+from entry import RECORD_SCHEMA, Task, inputs_digest, load_every_task, load_recording
 from langfuse import Evaluation, Langfuse
 from langfuse.api import DatasetItem, NotFoundError
 from opentelemetry.sdk.trace import TracerProvider
@@ -177,7 +177,7 @@ def task_item(task: Task) -> dict[str, Any]:
         "metadata": {
             "task": task.id,
             "kind": task.kind,
-            "inputs_digest": inputs_digest(task, load_recording(task.id)),
+            "inputs_digest": inputs_digest(task, load_recording(task.recording_id)),
         },
     }
 
@@ -478,7 +478,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     client = connect()
     if args.command == "push":
-        for name in push(client, args.run, tasks=load_tasks()):
+        for name in push(client, args.run, tasks=load_every_task()):
             print(name)
     else:
         write_records(args.out, pull(client, args.name))

@@ -10,8 +10,9 @@ from typing import Any
 
 import pytest
 from google.genai import types
+from harness import turn_records
 from harness.gemini_wire import model_retry_options
-from harness.orchestrator_tools import build_orchestrator_tools
+from harness.orchestrator_tools import MAX_ASK_QUESTIONS, build_orchestrator_tools
 from harness.prefix_cache import PrefixCache
 from orchestrator.agent import INSTRUCTION, orchestrator_agent
 from orchestrator.model import orchestrator_model
@@ -145,6 +146,26 @@ def test_the_instruction_says_what_the_canvas_digests_focus_card_is():
     assert "focus_component_id" in INSTRUCTION
 
 
+def test_the_instruction_says_when_cards_come_off_and_that_pinned_ones_stay():
+    """Cards accumulate across turns. The model takes them off when the user
+    asks or the conversation changes subject, and pinned cards stay."""
+    text = " ".join(INSTRUCTION.split())
+    assert "each turn's cards join the ones already on the canvas" in text
+    assert "when the conversation turns to another subject" in text
+    assert "remove_cards leaves pinned cards on the canvas and names them as kept_pinned" in text
+    assert "A pinned card comes off once the user unpins it from the card's menu" in text
+    # The ids of the earlier subject's cards come from the canvas listing.
+    assert (
+        "or turns to another subject so the earlier subject's cards come off, call recall "
+        "with part canvas first to see them and their ids" in text
+    )
+
+
+def test_the_instruction_keeps_a_measures_creditor_scope_in_the_reply():
+    text = " ".join(INSTRUCTION.split())
+    assert 'debt service "owed to all creditors" is reported in those words' in text
+
+
 def test_the_instruction_lets_a_reply_about_dfo_state_the_figures_explain_dfo_gives():
     assert "stating only the figures it gives" in INSTRUCTION
     text = " ".join(INSTRUCTION.split())
@@ -172,36 +193,56 @@ def test_the_instruction_tells_the_agent_to_state_the_years_an_event_period_read
     text = " ".join(INSTRUCTION.split())
     assert "names a period by an event or an administration" in text
     assert "say the data ends earlier and answer with what it holds" in text
-    assert "ask a count or prices still open in one more ask_user call" in text
+    assert "ask about candidates or prices search left open in one more ask_user call" in text
     assert "the reading search chose" not in text
 
 
-def test_the_instruction_has_search_elect_the_measure_and_asks_with_its_alternatives():
+_NUMBER_WORDS = {2: "two", 3: "three", 4: "four"}
+
+
+def test_the_instruction_has_search_elect_the_measure_and_asks_only_what_search_left_open():
     text = " ".join(INSTRUCTION.split())
     assert (
         "Put a word for how a flow is counted into `variable` only when the user said it, "
         "and let search elect the rest" in text
     )
-    assert "ask about each with ask_user, one question per choice, all in one call" in text
     assert (
-        "The count search chose is the first option of the count question, and the other counts "
-        "the result names follow" in text
+        "A count search chose (`counted_as`) is settled too, even when it lists other counts "
+        "under `alternatives`: go on with it and do not ask about the count" in text
     )
+    # The harness states the count basis after the reply (`turn_records.basis_line`)
+    # and offers the other options and the other counts as chips
+    # (`turn_records.scope_chips`).
+    assert f'"{turn_records._BASIS_LEAD}...", naming the sector, region, provider' in text
     assert (
-        "A part that lists `open_prices` leaves its prices open, so prices get a question of "
-        "their own, with `prices_of` set to the part's spec_id. Its options are then the "
-        "`open_prices` entries" in text
+        "and the other counts a part lists under `alternatives`, as buttons the user can "
+        "switch with, so leave those out of the reply" in text
     )
+    assert "No button offers" not in text
+    assert "name the source with that count" not in text
+    assert "with the count search chose" not in text
+    assert "switch to another count" not in text
+    assert "Search leaves a count open only when a part lists `candidates`" in text
+    assert (
+        "ask the unit with ask_user in one call: one question per measure, with `unit_of` "
+        "set to a part's spec_id, and `prices` set when a skill prefers current or constant. "
+        "Parts that measure one thing over other years share one unit question, and one call "
+        f"holds at most {_NUMBER_WORDS[MAX_ASK_QUESTIONS]} questions" in text
+    )
+    assert "one question per part" not in text
+    assert "count question" not in text
+    assert "a count or prices still open" not in text
     assert "even when the result lists no `other_prices`" not in text
-    assert (
-        "When they pick prices the result does not name, search again with that unit on the "
-        "part, and put the count they chose, if any, in `variable`" in text
-    )
+    assert "The answer to a unit question names the spec_id to fetch" in text
+    assert "search again with that unit on the part" not in text
     assert (
         "A request that adds or combines measures from different sources, such as aid and debt, "
         "goes to plan straight after search, without ask_user. The planner asks how to combine "
         "them" in text
     )
-    assert "in the user's words, except a count or prices, whose options are set out below" in text
+    assert (
+        "in the user's words, except a part's candidates or open prices, whose options are set "
+        "out in their own paragraphs" in text
+    )
     assert "takes one question a turn" not in text
     assert "gross or net" not in text

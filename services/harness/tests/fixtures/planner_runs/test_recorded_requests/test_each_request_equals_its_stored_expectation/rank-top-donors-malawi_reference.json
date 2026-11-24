@@ -62,38 +62,6 @@
         }
       },
       {
-        "slot": "every_donor",
-        "description": "Which donors the ranking compares.",
-        "options": [
-          "every donor",
-          "a named list of donors"
-        ],
-        "chosen": "every donor",
-        "resolved_by": "planner_default",
-        "rationale": "The question names no list, so every donor is ranked.",
-        "fixes": {
-          "period": null,
-          "unit": null,
-          "entities": null,
-          "across": null,
-          "measure": null,
-          "source_spec_id": null,
-          "stat_vars": null,
-          "reduction": null,
-          "group_by": null,
-          "window_start": null,
-          "window_end": null,
-          "direction": null,
-          "predicates": null,
-          "among": "population",
-          "axis": null,
-          "denominator_scope": null,
-          "change": null,
-          "per_period": null,
-          "limit": null
-        }
-      },
-      {
         "slot": "ranked_year",
         "description": "Which year the ranking reads.",
         "options": [
@@ -198,7 +166,6 @@
         "id": "top_donors",
         "decision_ids": [
           "top_n",
-          "every_donor",
           "ranked_year"
         ],
         "input_id": "oda",

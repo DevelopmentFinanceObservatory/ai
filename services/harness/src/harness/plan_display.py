@@ -23,9 +23,12 @@ sentence what the answer counts, for whom, when and from which source;
 decision's words, and `FIXED_VALUE_WORDS` the words for an option the
 planner wrote as a value a decision fixes, and `place_level_words` the same
 words for the level of place a filter keeps on a role; `choice_id` gives a scope
-choice's row the id every switch keeps; and `switchable_decision`,
-`decision_choice_id` and `decision_option_id` give a planner decision the
-card offers to switch its row's id and its options' ids.
+choice's row the id every switch keeps; `count_choice_id` gives the row of
+how pinned sources' flows are counted its id, `count_options` the counts
+it offers, and `chosen_count_decision` finds that row again; and
+`switchable_decision`, `decision_choice_id` and `decision_option_id` give a
+planner decision the card offers to switch its row's id and its options'
+ids, the last a count row's options' ids too.
 
 In `step_rows`, which the plan record and the planner read, a step's `label`
 names the work a workflow step does and the entity it does
@@ -63,6 +66,8 @@ from compiler.shapes import breakdown_level
 from compiler.sources import stat_var_count
 from planner.parties import across_party, flow_side, party_role, role_party, singular
 from planner.phrasing import (
+    CONSTANT_PRICES,
+    CURRENT_PRICES,
     among_phrase,
     datasets_of,
     denominator_scope_phrase,
@@ -95,9 +100,9 @@ from planner.plan import (
     SumOfRequirement,
     Unit,
     answering_results,
-    authored,
     authored_text,
     copy_origins,
+    covered,
     dataset_of,
     frame_shapes,
     inputs_of,
@@ -105,6 +110,7 @@ from planner.plan import (
     is_scope_choice,
     is_search_pin,
     side_entities,
+    unsplit,
 )
 from planner.records import (
     Breakdown,
@@ -114,6 +120,7 @@ from planner.records import (
     GroupBy,
     GrowthChange,
     Period,
+    PeriodIn,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -154,16 +161,19 @@ def shown_plan(plan: Plan) -> Plan:
     The plan as stored runs a dataset read from its first year beside a copy
     of each step between it and its rolling-start readers
     (`Plan.rolling_copies`). The card, the plan record and the planner's
-    digest name the model's steps only. This is `planner.plan.authored`
+    digest name the model's steps only. This is `planner.plan.unsplit`
     without the copies' operations, workflow steps, evidence bindings and
     the sources compiled for those bindings, and with a warning that names
-    a copy naming its origin, once.
+    a copy naming its origin, once. It keeps the aggregates `propose_plan`
+    added to sum a whole (`Plan.whole_sums`), each a row of its own; the
+    planner's digest leaves them out
+    (`harness.planner_adapter._as_authored`).
 
     The result is a view for reading and is not validated. Shapes, which
     need the first years, are read off `plan` itself (`answer_scopes`).
     """
     origins = copy_origins(plan.rolling_copies)
-    shown = authored(plan)
+    shown = unsplit(plan)
     if not origins:
         return shown
     update: dict[str, object] = {}
@@ -313,7 +323,14 @@ def card_rows(plan: Plan) -> list[dict[str, object]]:
         rows.append(
             {
                 "id": step.id,
-                "label": _card_label(requirement, shown, concepts=concepts, shapes=shapes),
+                # The shape's roles can name a copy the split added, which
+                # `shown` leaves out, so what it keeps apart is read off `plan`.
+                "label": _card_label(
+                    requirement,
+                    shown,
+                    concepts=concepts,
+                    kept=_kept_words(shapes[requirement.id], plan),
+                ),
                 "description": _with_result(description, result),
                 "args": dict(step.args),
                 "gives_answer": step.id == answer,
@@ -617,7 +634,7 @@ def _who(
     region = _governing(requirement, plan).get("region")
     source = _source(requirement.id, plan, sources)
     sides: dict[str | None, list[str]] = {"giving": [], "receiving": [], None: []}
-    for entity in requirement.entities:
+    for entity in covered(requirement, plan).entities:
         side = flow_side(entity.role) if entity.role else None
         name = region.chosen if entity.members and region is not None else entities_phrase([entity])
         sides[side].append(name)
@@ -1438,10 +1455,11 @@ def _card_label(
     plan: Plan,
     *,
     concepts: Mapping[str, str],
-    shapes: Mapping[str, FrameShape],
+    kept: Sequence[str],
 ) -> str:
     """`requirement`'s short card label (`card_rows`). `concepts` names each
-    retrieval (`_concepts`) and `shapes` holds each result's shape."""
+    retrieval (`_concepts`) and `kept` is what its result keeps one figure
+    per (`_kept_words`)."""
 
     def of(requirement_id: str) -> str:
         return _concept_of(plan.requirement(requirement_id), plan, concepts)
@@ -1449,7 +1467,6 @@ def _card_label(
     def side(read: RequirementSide) -> str:
         return _side_named(read, of(read.input_id))
 
-    kept = _kept_words(shapes[requirement.id], plan)
     by = f" by {' and '.join(kept)}" if kept else ""
     match requirement:
         case DatasetRequirement():
@@ -1510,6 +1527,9 @@ def _card_filter_label(requirement: FilterRequirement, concept: str) -> str:
     levels = [p.level for p in requirement.predicates if isinstance(p, PlaceLevel)]
     if levels:
         return f"Keep {pluralize(level_noun(levels[0]))}"
+    listed = [p for p in requirement.predicates if isinstance(p, PeriodIn)]
+    if listed:
+        return f"Keep {_listed_years(listed[0], 'and')}"
     return f"Filter {concept}"
 
 
@@ -1658,10 +1678,29 @@ def switchable_decision(decision: Decision) -> bool:
     writes (`planner.plan.is_code_written`) are not: a search pin's measure
     and a scope choice switch through Search (`choice_id`), and one
     qualifying the answer (`Decision.caveat`) reaches the card only as a
-    caveat.
+    caveat. Nor is the prices of a whole unit a unit answer chose
+    (`_states_whole_unit`): the row of a unit question's whole unit
+    (`submission.prices_choice.unit_slot`) offers the units its parts convert
+    into (`harness.studio_translate`), and a row a part's whole unit states
+    under its own prices slot offers no other option.
     """
-    return decision.fixes is not None and (
-        decision.fixes.prices is not None or not is_code_written(decision)
+    return (
+        decision.fixes is not None
+        and not _states_whole_unit(decision)
+        and (decision.fixes.prices is not None or not is_code_written(decision))
+    )
+
+
+def _states_whole_unit(decision: Decision) -> bool:
+    """Whether `decision` is the prices a unit answer chose for a part as a
+    whole unit: it fixes the part's prices, as only that decision does
+    (`planner.plan.is_code_written`), and its `chosen`
+    (`submission.prices_choice.PricesChoice.words`) names the unit's
+    currency, which the bare prices labels of a choice with no unit never do."""
+    return (
+        decision.fixes is not None
+        and decision.fixes.prices is not None
+        and decision.chosen not in (CURRENT_PRICES, CONSTANT_PRICES)
     )
 
 
@@ -1699,6 +1738,66 @@ def pinned_choice_id(plan: Plan, pinned: Collection[str], axis: str) -> str | No
         None,
     )
     return f"{first.id}:{axis}" if first is not None else None
+
+
+# The axis a count row's id names (`count_choice_id`). No scope axis takes this
+# name, so a count row's id cannot equal a scope choice's.
+COUNT_AXIS = "count"
+
+
+def count_choice_id(plan: Plan, decision: Decision) -> str | None:
+    """The id the plan card gives the row of `decision` when it states how a
+    pinned source's flow is counted (`planner.plan.is_search_pin`) among at
+    least two counts every source of the row offers (`count_options`):
+    `"<requirement id>:count"`, the requirement the first of `plan` citing a
+    decision the row stands for (`_row_slots`). `None` for any other
+    decision, and for one no requirement cites.
+
+    The row stands for every pin counted the same way (`listed_together`),
+    so each of its decisions has the row's id, and a switch of the row
+    re-pins them all. Admission writes the decision on the pin each
+    requirement states (`submission.service._measure_decisions`) and a
+    switch re-pins those requirements and keeps their ids, so the row keeps
+    its id through every switch of its count. Its options take
+    `decision_option_id`.
+    """
+    if not is_search_pin(decision) or len(count_options(plan, decision)) < 2:
+        return None
+    row = _row_slots(plan, decision)
+    first = next(
+        (
+            requirement
+            for requirement in plan.evidence_requirements
+            if isinstance(requirement, DatasetRequirement)
+            and not row.isdisjoint(requirement.decision_ids)
+        ),
+        None,
+    )
+    return f"{first.id}:{COUNT_AXIS}" if first is not None else None
+
+
+def count_options(plan: Plan, decision: Decision) -> tuple[str, ...]:
+    """The counts the card's row for search pin `decision` offers: those of
+    the decision the row lists (`listed_together`) that every decision of
+    the row offers too, in its order. Pins counted alike can offer
+    different other counts, and a count one of them lacks cannot be
+    switched to for all of them."""
+    members = listed_together(plan, decision.slot) or (decision,)
+    listed = _listed_slots(plan).get(decision.slot, decision.slot)
+    shown = next((member for member in members if member.slot == listed), decision)
+    return tuple(
+        option for option in shown.options if all(option in member.options for member in members)
+    )
+
+
+def chosen_count_decision(plan: Plan, choice: str) -> Decision | None:
+    """The decision of `plan` whose count row has id `choice` (`count_choice_id`), if any."""
+    if not choice.endswith(f":{COUNT_AXIS}"):
+        return None
+    return next(
+        (decision for decision in plan.decisions if count_choice_id(plan, decision) == choice),
+        None,
+    )
 
 
 def chosen_scope_decision(plan: Plan, choice: str) -> Decision | None:
@@ -2044,7 +2143,9 @@ def _populations(requirement: EvidenceRequirement, plan: Plan) -> dict[str, _Pop
     if datasets is None:
         return None
     populations: dict[str, _Population] = {}
-    for dataset in datasets:
+    for stated in datasets:
+        # A whole covers its part's parties (`planner.plan.covered`).
+        dataset = covered(stated, plan)
         source = _selected_source(dataset.id, plan)
         if source is None:
             continue
@@ -2112,7 +2213,10 @@ def _reads_whole(
     if isinstance(requirement, DatasetRequirement):
         return (requirement,)
     if isinstance(requirement, FilterRequirement):
-        if not all(isinstance(predicate, PeriodThreshold) for predicate in requirement.predicates):
+        if not all(
+            isinstance(predicate, PeriodThreshold | PeriodIn)
+            for predicate in requirement.predicates
+        ):
             return None
     elif isinstance(requirement, RankRequirement | AggregateRequirement):
         if requirement.reduction not in (None, Reduction.SUM):
@@ -2170,7 +2274,7 @@ def _kept_apart(role: RoleDimension, plan: Plan) -> bool:
         return True
     dataset = plan.requirement(role.requirement_id)
     assert isinstance(dataset, DatasetRequirement)
-    named = [entity for entity in dataset.entities if entity.role == role.role]
+    named = [entity for entity in covered(dataset, plan).entities if entity.role == role.role]
     return len(named) > 1 or any(entity.members for entity in named)
 
 
@@ -2238,6 +2342,12 @@ def _following(rolling: RollingWindow | None) -> str:
     return f", the {end} following the newest year"
 
 
+def _listed_years(listed: PeriodIn, conjunction: str) -> str:
+    """`listed`'s years in words: "2019", "2019 and 2023", "2000, 2010 and 2020"."""
+    *first, last = map(str, listed.years)
+    return f"{', '.join(first)} {conjunction} {last}" if first else last
+
+
 def _predicate_phrase(predicate: Predicate) -> str:
     if isinstance(predicate, EntityIn):
         subject = predicate.role or "the entity"
@@ -2245,6 +2355,8 @@ def _predicate_phrase(predicate: Predicate) -> str:
     if isinstance(predicate, PeriodThreshold):
         following = _FOLLOWING if predicate.rolling is not None else ""
         return f"the year is {_THRESHOLD_WORDS[predicate.op]} {predicate.year}{following}"
+    if isinstance(predicate, PeriodIn):
+        return f"the year is {_listed_years(predicate, 'or')}"
     if isinstance(predicate, ValueThreshold):
         return f"the value is {_THRESHOLD_WORDS[predicate.op]} {predicate.value}"
     if isinstance(predicate, PlaceLevel):
@@ -2377,7 +2489,7 @@ def _axis_role(requirement: RankRequirement, plan: Plan) -> str | None:
     `across` carry when the axis is left to infer from a single-role input."""
     if requirement.axis is not None:
         return requirement.axis
-    datasets = datasets_of(requirement, plan)
+    datasets = [covered(dataset, plan) for dataset in datasets_of(requirement, plan)]
     roles = sorted(
         {entity.role for dataset in datasets for entity in dataset.entities if entity.role}
         | {word for dataset in datasets for word in dataset.across}
@@ -2452,6 +2564,7 @@ def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | 
     keeps. A set on a side no `across` word covers is left unsaid, as the
     requirement leaves it. Before compile the requirement's own words.
     """
+    requirement = covered(requirement, plan)
     sides = {across_party(word) for word in requirement.across}
     source = _selected_source(requirement.id, plan)
     groups = [(side, label) for side, label in _side_groups(source) if side in sides]
@@ -2540,6 +2653,9 @@ def _label_filter(requirement: FilterRequirement, plan: Plan) -> str:
     levels = [p.level for p in requirement.predicates if isinstance(p, PlaceLevel)]
     if levels:
         return f"Keep {pluralize(level_noun(levels[0]))}"
+    listed = [p for p in requirement.predicates if isinstance(p, PeriodIn)]
+    if listed:
+        return f"Keep {_listed_years(listed[0], 'and')}"
     upstream = plan.requirement(requirement.input_id)
     return f"Filter {_measure_of(upstream, plan)}"
 
@@ -2629,7 +2745,8 @@ def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
             return stated
         read = ", ".join(clauses)
         return f"{stated} {read[0].upper()}{read[1:]}."
-    parties = entities_phrase(requirement.entities, across=requirement.across)
+    stated = covered(requirement, plan)
+    parties = entities_phrase(stated.entities, across=stated.across)
     period = f"{requirement.period.start}-{requirement.period.end}" + (
         _FOLLOWING if requirement.period_end_open else ""
     )
@@ -2675,6 +2792,7 @@ def _population_count(requirement: DatasetRequirement, word: str, plan: Plan) ->
     set of open axes.
     """
     source = _selected_source(requirement.id, plan)
+    requirement = covered(requirement, plan)
     if source is None or word not in requirement.across:
         return None
     axes = open_axes_for(requirement.across, source.open_entity_axes)
@@ -2736,12 +2854,22 @@ def _reading_clause(source: SelectedSource) -> str | None:
 
 
 def _sentence_aggregate(requirement: AggregateRequirement, plan: Plan) -> str:
-    upstream = plan.requirement(requirement.input_id)
+    sentence = _aggregate_wording(requirement, plan)
+    # Aggregates the card labels alike are numbered in the order of those labels (`_label`).
+    label = _builder_label(requirement, plan)
+    namesakes = [other.id for other in _card_order(plan) if _builder_label(other, plan) == label]
+    if len(namesakes) == 1:
+        return f"{sentence}."
+    return f"{sentence} ({namesakes.index(requirement.id) + 1})."
+
+
+def _aggregate_wording(requirement: AggregateRequirement, plan: Plan) -> str:
+    """`_sentence_aggregate`'s wording before it names its input."""
     word = _REDUCTION_WORDS[requirement.reduction]
     group = _group_by_phrase(
         requirement.group_by, breakdown=_breakdown_of(requirement, plan), grouped=True
     )
-    return f"The {word} of {_measure_of(upstream, plan)}, {group}."
+    return f"The {word} of {_measure_of(plan.requirement(requirement.input_id), plan)}, {group}"
 
 
 def _sentence_growth(requirement: GrowthRequirement, plan: Plan) -> str:
@@ -2789,6 +2917,8 @@ def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
     # The source counts every place on a place axis, so a level kept from it
     # is named without a count.
     level = _place_level_word(requirement, plan)
+    # `Plan` validation refuses a rank stating no `among` (`planner.plan._rank_shape`).
+    assert requirement.among is not None
     among_text = among_phrase(
         requirement.among,
         across=(level or role) if covering is not None or by_breakdown else None,
@@ -2831,6 +2961,11 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
         )
         return f"Share of {measure} per {requirement.axis}, {scope_text}."
     divisor = _measure_of(denominator, plan)
+    # An un-keyed share holds no role dimension (`planner.shapes.shared_ratio`), so its
+    # shape is per year or one figure.
+    per_year = "year" in _kept_words(frame_shapes(plan)[requirement.id], plan)
+    shape = "for each year" if per_year else "as one figure overall"
+    total = "each year's total" if per_year else "one total"
     # A denominator narrowed to fewer members than its sources hold names the
     # step that narrows it, whose own line states the filter or limit, in
     # place of the parties its sources hold. A filter keeping a level of place
@@ -2838,10 +2973,12 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
     narrowing = narrowing_step(denominator, plan)
     if narrowing is not None and not (
         isinstance(narrowing, FilterRequirement)
-        and all(isinstance(p, PeriodThreshold | PlaceLevel) for p in narrowing.predicates)
+        and all(
+            isinstance(p, PeriodThreshold | PeriodIn | PlaceLevel) for p in narrowing.predicates
+        )
     ):
         return (
-            f"Share of {measure} as one figure overall, divided by one total of {divisor} "
+            f"Share of {measure} {shape}, divided by {total} of {divisor} "
             f'over the rows "{_label(narrowing, plan)}" keeps.'
         )
     # A pooled share over a frame that names no place reads one level of it, which
@@ -2852,7 +2989,8 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
             _parties(dataset, plan, level=level) for dataset in datasets_of(denominator, plan)
         )
     )
-    return f"Share of {measure} as one figure overall, divided by {divisor} ({parties})."
+    whole = f"each year's total of {divisor}" if per_year else divisor
+    return f"Share of {measure} {shape}, divided by {whole} ({parties})."
 
 
 def _sentence_quotient_of(requirement: QuotientRequirement, plan: Plan) -> str:

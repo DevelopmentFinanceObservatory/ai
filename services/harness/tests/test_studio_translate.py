@@ -14,7 +14,8 @@ import json
 import logging
 import ssl
 from collections.abc import Callable, Mapping, Sequence
-from types import SimpleNamespace
+from pathlib import Path
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 
 import aiohttp
@@ -40,7 +41,7 @@ from harness.conversation import current_conversation_id, current_conversation_k
 from harness.decision_pick import DecisionPick, decision_pick
 from harness.graph.events import PlannerStarted, StepProgress
 from harness.graph.planning import planner_ask_pause
-from harness.graph.state import ORCHESTRATOR_PRIOR_LEDGER_KEY
+from harness.graph.state import ORCHESTRATOR_PRIOR_LEDGER_KEY, save_card_unit_offers
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import decision_choice_id, decision_option_id
 from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
@@ -51,7 +52,7 @@ from harness.scripted_plan import scripted_plan
 from harness.seeds import SEED_STEP_TOOL
 from harness.sentences import DECLINE_REASONS, DROPPED_REASON, failure_sentence
 from harness.settings import Settings
-from harness.studio import _close_work
+from harness.studio import _chip_label, _close_work, _closed_turn
 from harness.studio_state import (
     ConversationState,
     _next_manifest,
@@ -77,6 +78,7 @@ from harness.turn.events import NodeDone, Paused, TurnFailed
 from harness.turn.store import AgentRecord
 from harness.turn_events import PLANNER_ASK
 from harness.wire import (
+    ApplyChoice,
     CompositionActor,
     CompositionManifest,
     MessageComplete,
@@ -88,6 +90,11 @@ from harness.wire import (
     PlanProposed,
     PlanStep,
     StepStatus,
+    Suggestions,
+    UnitChoice,
+    UnitCurrency,
+    UnitOffer,
+    UnitPrices,
     component_created,
 )
 from mcp import MCPError
@@ -97,10 +104,12 @@ from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
     Decision,
+    DecisionFixes,
     PinSource,
     Plan,
     ResolvedBy,
     SessionState,
+    Unit,
     UnsupportedOperation,
     plan_revision,
 )
@@ -114,6 +123,7 @@ from pydantic_ai.exceptions import ModelHTTPError
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 from sqlalchemy.ext.asyncio import AsyncEngine
+from submission.prices_choice import prices_slot, unit_slot
 from submission.service import COMBINATION_OPTIONS, scope_choice_decisions
 from translator.discovery import NoTimeLeftError
 from translator.referral import (
@@ -157,16 +167,28 @@ def _translator() -> _Translator:
     )
 
 
-def _pause(kind: str, payload: dict[str, Any], *, message: str = "") -> Paused:
-    """The turn's pause of `kind` on `payload`, under a wire id of its own."""
+def _pause(
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    message: str = "",
+    state: Mapping[str, Any] = MappingProxyType({}),
+) -> Paused:
+    """The turn's pause of `kind` on `payload`, under a wire id of its own,
+    committed with `state`."""
     return Paused(
-        kind=kind, interrupt_id=_wire_id("int"), round=1, payload=payload, message=message
+        kind=kind,
+        interrupt_id=_wire_id("int"),
+        round=1,
+        payload=payload,
+        message=message,
+        state=state,
     )
 
 
-def _card(payload: dict[str, Any]) -> Paused:
-    """The `approve` node's pause offering the plan card `payload`."""
-    return _pause("approve", payload)
+def _card(payload: dict[str, Any], *, state: Mapping[str, Any] = MappingProxyType({})) -> Paused:
+    """The `approve` node's pause offering the plan card `payload`, committed with `state`."""
+    return _pause("approve", payload, state=state)
 
 
 async def _stored_conversation(engine: AsyncEngine) -> tuple[StudioStore, ConversationState]:
@@ -286,19 +308,17 @@ def test_a_planner_ask_marks_the_recommended_option_and_carries_its_rationale() 
     assert (question.allow_free_text, question.skippable) == (True, False)
 
 
-def test_a_combination_ask_offers_its_options_and_takes_no_free_text() -> None:
-    # The planner's ask whether to add two datasets carries the refusal's
-    # `options`; the user's pick of one comes back as its id.
-    args = {
-        "message": "ODA loans count in both aid and debt. Add them?",
-        "options": [dict(option) for option in COMBINATION_OPTIONS],
-    }
+def test_a_fixed_options_ask_offers_its_options_and_takes_no_free_text() -> None:
+    # The planner's ask whether to add two datasets carries the refusal's `options`;
+    # the user's pick of one comes back as its id, and the question takes no free text.
+    fixed = COMBINATION_OPTIONS
+    args = {"message": "Add them?", "options": [dict(option) for option in fixed]}
 
     (frame,) = _translator()._interrupt_frames(_pause("planner_ask", args))
 
     (question,) = frame.questions
     assert [(o.id, o.label) for o in question.options] == [
-        (option["id"], option["label"]) for option in COMBINATION_OPTIONS
+        (option["id"], option["label"]) for option in fixed
     ]
     assert question.allow_free_text is False
     assert frame.skippable is True
@@ -378,10 +398,31 @@ def test_a_plan_proposed_ask_without_asks_leaves_them_unset() -> None:
     assert frame.asks is None
 
 
-def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> None:
+_LINE = "Your words name grant equivalents, and no figure in this plan is counted that way."
+
+
+@pytest.mark.parametrize(
+    ("rationale", "line", "reason"),
+    [
+        pytest.param(None, False, "", id="search-default"),
+        pytest.param(
+            "Counted this way by default.",
+            False,
+            "Counted this way by default.",
+            id="other-default-reason",
+        ),
+        pytest.param(_LINE, True, _LINE, id="scope-line"),
+    ],
+)
+def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option(
+    rationale: str | None, line: bool, reason: str
+) -> None:
     """US health aid to Africa: each scope choice with another option to
     switch to is a card row naming the choice, its active option and every
-    option, with why one out of reach is; a planner decision carries none."""
+    option, with why one out of reach is; a planner decision carries none. A row
+    Search's default settled leaves off a reason saying only that Search's default
+    holds; any other reason, the card's line where the user's words and its option
+    part among them (`DecisionScope.line`), shows."""
     plan = scripted_plan("kenya life expectancy", spec_id=None)
     dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
     pin = "spec_" + "e" * 32
@@ -395,6 +436,18 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
     }
     block = {"spec_id": pin, "resolved": {"scope_choices": scope}}
     scoped = scope_choice_decisions({pin: PinSource(block=block, settled=True)})[pin]
+    if rationale is not None:
+        basis_row = scoped[2]
+        assert basis_row.scope is not None
+        scoped = (
+            *scoped[:2],
+            basis_row.model_copy(
+                update={
+                    "rationale": rationale,
+                    "scope": basis_row.scope.model_copy(update={"line": line}),
+                }
+            ),
+        )
     cited = dataset.model_copy(
         update={
             "decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped)),
@@ -451,7 +504,7 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
         ),
     ]
     # A reason saying only that Search's default holds is left off the card.
-    assert (basis.reason, basis.resolved_by) == ("", "default")
+    assert (basis.reason, basis.resolved_by) == (reason, "default")
     assert frame.actions == ["approve", "amend", "reject", "switch"]
     assert frame.moved is None
     # What a switch on this card may name: every shown choice, with its
@@ -518,6 +571,60 @@ def test_a_planner_decision_settling_fields_is_a_row_the_card_can_switch() -> No
         birth: "life expectancy at birth",
         healthy: "healthy life expectancy",
     }
+
+
+def test_the_row_stating_how_a_pin_is_counted_is_a_row_the_card_can_switch() -> None:
+    """The row admission wrote for total ODA to Kenya in the planner entry
+    eval's recorded run, gross beside net disbursements, on a plan whose
+    dataset pins that source. The card gives it the id
+    `"<requirement id>:count"`, each count as an available option by its
+    label's id, the chosen one active, and a switch may name it."""
+    recorded = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures/planner_runs/test_recorded_requests"
+            / "test_each_request_equals_its_stored_expectation"
+            / "aggregate-total-oda-kenya_reference.json"
+        ).read_text()
+    )
+    (counted,) = [
+        Decision.model_validate(d)
+        for d in recorded["plan"]["decisions"]
+        if d["slot"].startswith("source_")
+    ]
+    assert counted.fixes is not None
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    cited = dataset.model_copy(
+        update={
+            "decision_ids": (*dataset.decision_ids, counted.slot),
+            "source_spec_id": counted.fixes.source_spec_id,
+        }
+    )
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "decisions": [*plan.decisions, counted],
+            "evidence_requirements": [
+                cited if r.id == dataset.id else r for r in plan.evidence_requirements
+            ],
+        }
+    )
+    payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
+    translator = _translator()
+
+    (frame,) = translator._interrupt_frames(_card(payload))
+
+    row = {row.id: row for row in frame.decisions}[counted.slot]
+    gross, net = (decision_option_id(label) for label in counted.options)
+    assert (row.choice_id, row.active_option_id) == (f"{dataset.id}:count", gross)
+    assert row.options == [
+        PlanDecisionOption(option_id=gross, label="gross disbursements", status="available"),
+        PlanDecisionOption(option_id=net, label="net disbursements", status="available"),
+    ]
+    assert PlanAction.SWITCH in frame.actions
+    choices = translator._conversation.pending[frame.interrupt_id].choices
+    assert choices[f"{dataset.id}:count"].active == gross
 
 
 def test_a_planner_decision_option_keeps_its_id_when_a_replan_reorders_the_options() -> None:
@@ -712,6 +819,116 @@ def test_a_caveat_reaches_the_card_only_as_a_caveat() -> None:
     assert differ.slot not in rows
     cited = {slot for requirement in card.requirements or () for slot in requirement.decision_ids}
     assert cited and cited <= rows
+
+
+_EUR = UnitCurrency(
+    code="EUR",
+    name="euros",
+    prices=[UnitPrices.CURRENT, UnitPrices.CONSTANT],
+    base_year_min=2015,
+    base_year_max=2023,
+)
+_USD = _EUR.model_copy(update={"code": "USD", "name": "US dollars"})
+_XOF = UnitCurrency(code="XOF", name="CFA francs", prices=[UnitPrices.CURRENT])
+_KES = UnitCurrency(code="KES", name="Kenyan shillings", prices=[UnitPrices.CURRENT])
+
+
+@pytest.mark.parametrize(
+    ("start", "options", "currencies"),
+    [
+        pytest.param(
+            UnitChoice(currency="EUR", prices=UnitPrices.CONSTANT, base_year=2020),
+            [
+                ("EUR-constant-2020", "Constant 2020 euros"),
+                ("EUR-current", "Current euros"),
+            ],
+            [_USD, _EUR, _XOF],
+            id="both-bases",
+        ),
+        pytest.param(
+            UnitChoice(currency="XOF", prices=UnitPrices.CURRENT),
+            [
+                ("XOF-current", "Current CFA francs"),
+                ("USD-current", "Current US dollars"),
+                ("USD-constant-2023", "Constant 2023 US dollars"),
+            ],
+            [_USD, _EUR, _XOF],
+            id="start-in-one-basis",
+        ),
+        pytest.param(
+            UnitChoice(currency="XOF", prices=UnitPrices.CURRENT),
+            [("XOF-current", "Current CFA francs")],
+            [_XOF, _KES],
+            id="no-currency-in-both-bases",
+        ),
+    ],
+)
+def test_a_unit_question_s_row_offers_its_unit_and_the_whole_units_beside_it(
+    start: UnitChoice, options: list[tuple[str, str]], currencies: list[UnitCurrency]
+) -> None:
+    """The row stating a unit question's whole unit carries the offer the
+    approve pause sets beside the plan, starting on the unit the parts are in,
+    and switches: a client that renders no unit picker gets the whole units of
+    the start's currency, the start active, or the start first and then both
+    bases of a currency serving both. With no currency serving both, the
+    start is the one whole unit, and the row still switches, to any other
+    unit its offer holds. The row's choice and alternatives read as its
+    options. A part's own whole-unit prices row, with no offer, still
+    offers no switch."""
+    plan = _us_health_share()
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    row = Decision(
+        slot=unit_slot(dataset.id),
+        description="Which prices the figures are in.",
+        options=("constant 2020 prices in EUR", "current prices"),
+        chosen="constant 2020 prices in EUR",
+        resolved_by=ResolvedBy.USER,
+        rationale="The user chose constant 2020 prices in EUR.",
+        fixes=DecisionFixes(prices="constant"),
+    )
+    own = row.model_copy(update={"slot": prices_slot(dataset.id)})
+    plan = _us_health_share(
+        decisions=[*plan.decisions, row, own],
+        evidence_requirements=[
+            r.model_copy(
+                update={
+                    "decision_ids": (*r.decision_ids, row.slot, own.slot),
+                    "unit": Unit(currency="EUR", prices="constant", base_year=2020),
+                }
+            )
+            if r.id == dataset.id
+            else r
+            for r in plan.evidence_requirements
+        ],
+    )
+    offer = UnitOffer(currencies=currencies, presets=[c.code for c in currencies[:2]], start=start)
+    translator = _translator()
+
+    state: dict[str, Any] = {}
+    save_card_unit_offers(state, "rev-1", {row.slot: offer})
+
+    (card,) = translator._interrupt_frames(
+        _card({**plan.model_dump(mode="json"), "revision": "rev-1"}, state=state)
+    )
+
+    rows = {decision.id: decision for decision in card.decisions}
+    unit_row = rows[row.slot]
+    assert (unit_row.unit, unit_row.choice_id, unit_row.active_option_id) == (
+        offer,
+        decision_choice_id(row),
+        options[0][0],
+    )
+    assert [(o.option_id, o.label, o.status) for o in unit_row.options or ()] == [
+        (option_id, label, "available") for option_id, label in options
+    ]
+    assert (unit_row.chosen, unit_row.alternatives) == (
+        options[0][1],
+        [label for _, label in options],
+    )
+    assert (rows[own.slot].choice_id, rows[own.slot].unit) == (None, None)
+    assert PlanAction.SWITCH in card.actions
+    (pending,) = translator._conversation.pending.values()
+    assert set(pending.choices[decision_choice_id(row)].options) == {o for o, _ in options}
 
 
 def test_a_planner_decisions_options_one_label_would_read_alike_reach_the_card_apart() -> None:
@@ -3560,14 +3777,41 @@ async def test_a_new_planner_run_after_a_refused_one_starts_its_own_line() -> No
     ]
 
 
-async def _answered(readings: list[dict[str, Any]]) -> tuple[_Translator, list[Any]]:
-    """A translator that closed a turn answering with `readings` and the frames it sent."""
+async def _answered(
+    readings: list[dict[str, Any]],
+    *,
+    text: str = "The US gave $7.9bn.",
+    narrations: Sequence[str] = (),
+    cards: bool = False,
+) -> tuple[_Translator, list[Any]]:
+    """A translator that closed a turn answering with `readings` and the frames it
+    sent. Earlier responses each streamed one of `narrations` beside a call, and with
+    `cards` the turn drew a card. The closing response's `text` is streamed after
+    narrations, and is otherwise held as streamed already."""
     current_conversation_id.set("c1")
     translator = _translator()
     translator._conversation.turn_user_message = "total health aid from the US to Africa"
     translator._conversation.turn_readings = readings
-    translator._final_text = "The US gave $7.9bn."
-    return translator, await translator.finish()
+    frames: list[Any] = []
+    for index, narration in enumerate(narrations):
+        frames += translator._agent_text(narration)
+        call = types.FunctionCall(id=f"call_{index}", name="make_charts", args={"charts": []})
+        translator._agent_response([types.Part(text=narration), types.Part(function_call=call)])
+    if cards:
+        land_component(
+            translator._conversation,
+            {
+                "component_id": "cmp_1",
+                "revision": 1,
+                "type": "line_chart",
+                "payload": {"component": {"title": {"text": "Aid to Kenya"}}},
+            },
+        )
+    if narrations:
+        frames += translator._agent_text(text)
+    else:
+        translator._final_text += text
+    return translator, [*frames, *await translator.finish()]
 
 
 @pytest.mark.parametrize("noted", [False, True], ids=["line-alone", "notes-and-line"])
@@ -3603,6 +3847,60 @@ async def test_the_answer_closes_with_the_code_text_and_the_next_turns_history_l
     assert digest["turns"][-1]["assistant"] == "The US gave $7.9bn."
     assert "Counted as" not in json.dumps(digest)
     assert note not in json.dumps(digest)
+
+
+@pytest.mark.parametrize(
+    ("narrations", "text", "shown"),
+    [
+        pytest.param((), "", "", id="cards-alone"),
+        pytest.param(("Let me chart that.",), "", "Let me chart that.", id="narration"),
+        pytest.param(("Let me chart that.",), " \n", "Let me chart that.", id="whitespace-closing"),
+        pytest.param(
+            ("Let me look.", "Charting now."),
+            "",
+            "Let me look.\n\nCharting now.",
+            id="two-narrations",
+        ),
+    ],
+)
+async def test_a_turn_its_cards_answer_closes_with_the_notes_line_and_chips(
+    monkeypatch: pytest.MonkeyPatch, narrations: tuple[str, ...], text: str, shown: str
+) -> None:
+    """A turn whose agent closed with no text, or whitespace, after drawing a card is
+    answered by the card. It closes with the loose-match notes, the basis line and
+    the chips a turn answered in words closes with, and the chips apply. The user is
+    shown the text streamed beside its calls, a paragraph each, which a reload shows
+    too. A later turn's model reads that the cards answered it, naming them by title."""
+    note = "The series used for health aid is a close match only."
+    monkeypatch.setattr(studio_translate_module, "loose_match_notes", lambda *_, **__: [note])
+    readings = [_fetched(_example_part())]
+    _, worded = await _answered(readings)
+    translator, frames = await _answered(readings, text=text, narrations=narrations, cards=True)
+    conversation = translator._conversation
+
+    complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
+    deltas = "".join(frame.text for frame in frames if isinstance(frame, MessageDelta))
+    chips = next(frame for frame in frames if isinstance(frame, Suggestions))
+    worded_chips = next(frame for frame in worded if isinstance(frame, Suggestions))
+    assert complete.text == "\n\n".join(block for block in (shown, note, _EXAMPLE_LINE) if block)
+    if not text:
+        assert deltas == complete.text
+    stored = conversation.turns[-1]
+    assert (stored.get("match_notes"), stored["basis_line"]) == (note, _EXAMPLE_LINE)
+    assert "Aid to Kenya" in stored["assistant"]
+    assert "cmp_1" not in stored["assistant"]
+    assert _closed_turn(len(conversation.turns), conversation).reply == complete.text
+    digest = conversation.conversation_digest_state()
+    assert digest is not None
+    assert digest["turns"][-1]["assistant"] == stored["assistant"]
+    assert [chip.option_id for chip in chips.items] == [
+        chip.option_id for chip in worded_chips.items
+    ]
+    (chip, *_) = chips.items
+    pick = ApplyChoice(
+        choice_id=chip.choice_id, option_id=chip.option_id, turn=chip.turn, spec_id=chip.spec_id
+    )
+    assert isinstance(_chip_label(conversation, pick), str)
 
 
 async def test_an_answer_using_no_part_with_scope_choices_states_no_basis_line() -> None:

@@ -119,7 +119,7 @@ from collections.abc import Callable, Mapping
 from enum import StrEnum
 from typing import cast
 
-from common.refusal import REPOST_RECOVERS_CODES
+from common.refusal import MINTED_FRAME, REPOST_RECOVERS_CODES, SERVICE_FAILURE
 from planner.records import StrictModel
 from pydantic import Field, JsonValue, ValidationError
 
@@ -394,6 +394,9 @@ HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
     ExecutorCode.INTERNAL_ERROR,
 }
 
+# The code whose `fix.kind` says whose failure it is (`common.refusal`).
+FRAME_INTEGRITY_FAILED = "frame_integrity_failed"
+
 
 def internal_fault(detail: str | None = None) -> dict[str, JsonValue]:
     """The refusal of a fault of the system itself, such as a bug: `internal_error`,
@@ -490,9 +493,43 @@ def is_anchor_fault(failure: ToolFailure) -> bool:
     )
 
 
+def is_upstream_fault(failure: ToolFailure) -> bool:
+    """Whether `failure` says an upstream service failed of itself: a refusal
+    under any code its server marks `SERVICE_FAILURE` that names no recovery
+    of its own (`classify_refusal` calls it `Disposition.STOP`). data-mcp and
+    analysis-mcp mark an `upstream_error` for a 5xx, an answer with no problem
+    document, a call that got no answer, or a response they could not use,
+    and analysis-mcp marks a runner refusal it passes through under the
+    runner's code when the runner answered it with a 5xx. A definition the
+    platform refused and a refusal of the request under a code the server
+    does not map carry no such mark, and another spec or request may avoid
+    them. A marked refusal whose code or retry mode names a recovery keeps it:
+    one that names a wait is transient before it is anyone's fault
+    (`executor.outcomes.stop_cause`), and `upstream_version_changed` is
+    discovered again.
+    """
+    return (
+        failure.fix.get("kind") == SERVICE_FAILURE and classify_refusal(failure) is Disposition.STOP
+    )
+
+
+def is_store_fault(failure: ToolFailure) -> bool:
+    """Whether `failure` is a stored frame that failed its integrity check in
+    the store itself. Only the frame data-mcp minted (`MINTED_FRAME`) is one a
+    narrower scope mints anew. analysis-mcp's and any other read the same
+    corrupted object for every plan."""
+    return failure.code == FRAME_INTEGRITY_FAILED and failure.fix.get("kind") != MINTED_FRAME
+
+
 def is_harness_fault(failure: ToolFailure) -> bool:
-    """Whether `failure` is the harness's own fault (`HARNESS_FAULT_CODES`, `is_anchor_fault`)."""
-    return failure.code in HARNESS_FAULT_CODES or is_anchor_fault(failure)
+    """Whether `failure` is the harness's own fault (`HARNESS_FAULT_CODES`,
+    `is_anchor_fault`, `is_upstream_fault`, `is_store_fault`)."""
+    return (
+        failure.code in HARNESS_FAULT_CODES
+        or is_anchor_fault(failure)
+        or is_upstream_fault(failure)
+        or is_store_fault(failure)
+    )
 
 
 def retry_delay(payload: Mapping[str, object], attempt: int) -> float:

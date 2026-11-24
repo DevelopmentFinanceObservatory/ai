@@ -1425,9 +1425,10 @@ def _kept_scope(
 
     A search sent without them may answer a source that drops them, as
     Japan's aid to every recipient for "Japan's ODA" pinned to every donor's
-    aid to Kenya. A group goes as its label, asking for its members unless
-    `held` binds its published total (`ResolvedGroup.reads_total`); an
-    entity goes as its label and its graph node.
+    aid to Kenya. A group goes as its label and its graph node, where it has
+    one, asking for its members unless `held` binds its published total
+    (`ResolvedGroup.reads_total`); an entity goes as its label and its graph
+    node.
     """
     columns = _kept_columns(plan, requirement, held)
     kept: list[dict[str, object]] = []
@@ -1437,6 +1438,8 @@ def _kept_scope(
             continue
         grouped.add(group.role)
         sent: dict[str, object] = {"text": group.label, "role": role}
+        if group.ref is not None:
+            sent["dcid"] = group.ref
         if not group.reads_total:
             sent["members"] = True
         kept.append(sent)
@@ -2059,7 +2062,8 @@ class DefinitionNotResolvedError(RuntimeError):
     so in words a user reads, naming the refusal's code when it states one.
     `code` is that code, `None` when the refusal states none or nothing was
     refused. `not_issued` is whether the call was never made, the planner
-    entry having no time left for it (`NoTimeLeftError`).
+    entry having no time left for it (`NoTimeLeftError`). `no_part` is whether
+    Search answered with no part.
     """
 
     def __init__(
@@ -2070,12 +2074,14 @@ class DefinitionNotResolvedError(RuntimeError):
         refused: bool = False,
         code: str | None = None,
         not_issued: bool = False,
+        no_part: bool = False,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.refused = refused
         self.code = code
         self.not_issued = not_issued
+        self.no_part = no_part
 
 
 class CutCalls:
@@ -2477,7 +2483,9 @@ async def resolve_definition_at(
         )
     part = _answered_part(answer)
     if part is None:
-        raise DefinitionNotResolvedError("Search returns nothing for it", retryable=False)
+        raise DefinitionNotResolvedError(
+            "Search returns nothing for it", retryable=False, no_part=True
+        )
     return part, at
 
 
@@ -2878,7 +2886,16 @@ async def _source_from_resolve_pin(
     read for that check alone, so a pin of a source the translator found
     itself is set aside too. It never honours the pin: its identity carries
     the window of the search that found it.
+
+    A whole (`DatasetRequirement.whole_of`) is never searched for
+    (`_settled_whole`), and one with no pin, or pinned to a compile of another
+    dataset than its part's, is referred back before any reader runs
+    (`_whole_referral`).
     """
+    if requirement.whole_of is not None and (
+        referred := _whole_referral(state, plan=plan, requirement=requirement)
+    ):
+        return referred
     read = await _pin_source(
         state,
         plan=plan,
@@ -2886,6 +2903,8 @@ async def _source_from_resolve_pin(
         first_year=split_of(plan).whole_history.get(requirement.id),
         surface=surface,
     )
+    if requirement.whole_of is not None:
+        return await _settled_whole(state, plan=plan, requirement=requirement, read=read)
     if read is None or isinstance(read, dict):
         return read
     source, honoured = read
@@ -2921,6 +2940,148 @@ async def _source_from_resolve_pin(
         warnings=[],
         budget_remaining=DISCOVERY_CALL_BUDGET - log.calls(plan_revision(plan)),
     )
+
+
+async def _settled_whole(
+    state: SessionState,
+    *,
+    plan: Plan,
+    requirement: DatasetRequirement,
+    read: tuple[SelectedSource, bool] | dict[str, object] | None,
+) -> dict[str, object]:
+    """The source of the whole `requirement` from its pin, with no search (`_pin_source`'s `read`).
+
+    `propose_plan` pins a whole to the compile of its part with one side
+    left open (`planner.source_reads.compile_whole`), so that pin is its
+    source, whatever it holds on that side: a whole covers what its part
+    covers (`planner.plan.whole_read`), and a search for it could only find
+    another population. The caller has already referred back a whole with no
+    pin or one compiled from another dataset (`_whole_referral`). A problem a
+    reader met is returned as it is. The whole is referred back as unmeetable
+    (`_unsettled_whole`) where no reader holds its pin over its period, a pin
+    read only off the discovery log included, whose identity carries the
+    window of the search that found it. A pin whose spec block is on record
+    and does not read as a source, as one naming a class of party this
+    release does not know, is refused (`SEARCH_REFUSED`), which ends the turn
+    as Search not answering (`translator.mechanical._settle_discovery`): the
+    part's block carries the same field, so settling the part again cannot
+    help.
+    """
+    if isinstance(read, dict):
+        return read
+    assert requirement.whole_of is not None
+    part = requirement.whole_of.part
+    if read is None or not read[1]:
+        if (unread := _unreadable_block(state, plan=plan, requirement=requirement)) is not None:
+            return unread
+        return _unsettled_whole(
+            requirement,
+            f"{requirement.id!r} is the whole of {part!r}, counted from its part's dataset "
+            f"with no search, and its pin {requirement.source_spec_id!r} cannot be read over "
+            f"{requirement.period.start} to {requirement.period.end}: the part's search "
+            "answered a narrower question, or nothing on record describes the pin over "
+            "those years",
+        )
+    source, _ = read
+    log = await _record_honoured_pin(state, plan=plan, requirement=requirement, source=source)
+    return ok(
+        requirement_id=requirement.id,
+        status=DiscoveryStatus.DEFINITE.value,
+        searched_as=requirement.measure,
+        sources=[compact_source(source, selectable=True)],
+        detail=None,
+        warnings=[],
+        budget_remaining=DISCOVERY_CALL_BUDGET - log.calls(plan_revision(plan)),
+    )
+
+
+def _whole_referral(
+    state: SessionState, *, plan: Plan, requirement: DatasetRequirement
+) -> dict[str, object] | None:
+    """The whole `requirement` referred back (`_unsettled_whole`) where it states no
+    pin, or where its pin was compiled from another dataset than the one its part is
+    pinned to; `None` otherwise. Neither needs a reader, so a compile of the
+    part's own dataset is asked for before any reader's answer about this one."""
+    assert requirement.whole_of is not None
+    part = requirement.whole_of.part
+    if requirement.source_spec_id is None:
+        return _unsettled_whole(
+            requirement,
+            f"{requirement.id!r} is the whole of {part!r}, counted from its part's dataset "
+            "with no search, and states no pin to that count",
+        )
+    records = _PinRecords(state)
+    origin = _whole_origin(records, requirement)
+    settled = _settled_part_pins(records, plan, part)
+    if origin is not None and origin not in settled:
+        return _unsettled_whole(
+            requirement,
+            f"{requirement.id!r} is the whole of {part!r}, and its pin "
+            f"{requirement.source_spec_id!r} was counted from {origin!r}, while {part!r} is "
+            f"pinned to {sorted(settled)!r}",
+        )
+    return None
+
+
+def _unreadable_block(
+    state: SessionState, *, plan: Plan, requirement: DatasetRequirement
+) -> dict[str, object] | None:
+    """The refusal for the pin of `requirement` whose spec block on record
+    (`_resolve_pin_block`) does not read as a source; `None` where none is on record
+    or it reads."""
+    block = _resolve_pin_block(_PinRecords(state), plan=plan, requirement=requirement)
+    if block is None:
+        return None
+    try:
+        source_from_spec_block(block)
+    except ValueError as exc:
+        return problem(
+            ProblemCode.SEARCH_REFUSED,
+            f"The spec block on record for {requirement.id!r}'s pin "
+            f"{requirement.source_spec_id!r} could not be read as a source.",
+            outcome=Outcome.REFUSED,
+            detail={
+                "parse_error": str(exc),
+                "budget_remaining": DISCOVERY_CALL_BUDGET
+                - load_log(state).calls(plan_revision(plan)),
+            },
+        )
+    return None
+
+
+def _unsettled_whole(requirement: DatasetRequirement, reason: str) -> dict[str, object]:
+    """The whole `requirement` referred back as unmeetable for `reason`, with the fix
+    to settle its part and propose the plan again, so the whole is compiled from it."""
+    assert requirement.whole_of is not None
+    part = requirement.whole_of.part
+    return _referred_answer(
+        requirement,
+        kind=ReferralKind.REQUIREMENT_UNMEETABLE,
+        code=ProblemCode.SHARE_WHOLE_UNDERIVABLE,
+        message=(
+            f"{reason}. Settle {part!r} on a dataset that answers it, and propose the plan "
+            "again so the whole is compiled from it"
+        ),
+        detail={"requirement_id": requirement.id},
+    )
+
+
+def _whole_origin(records: _PinRecords, whole: DatasetRequirement) -> str | None:
+    """The pin of its part the whole `whole` was compiled from (`AlignedInput.origin`),
+    `None` where nothing records admission compiling it."""
+    entry = records.alignments.get(whole.id)
+    return entry.origin if entry is not None and entry.whole_axis is not None else None
+
+
+def _settled_part_pins(records: _PinRecords, plan: Plan, part_id: str) -> set[str]:
+    """The pins the part `part_id` of `plan` is settled on: the pin it states, and the
+    pin that one copies over its window (`planner.plan.windowed_pins`), the pin a
+    whole of it is compiled from."""
+    part = plan.requirement(part_id)
+    if not isinstance(part, DatasetRequirement) or part.source_spec_id is None:
+        return set()
+    copy = records.copies.get(part.source_spec_id)
+    return {part.source_spec_id, *((copy.windowed_from,) if copy is not None else ())}
 
 
 async def _pin_source(
@@ -3041,6 +3202,9 @@ async def name_pinned_groups(
     on its total would divide G7 by itself, so the pin is set aside and the
     total stays the whole.
 
+    A whole (`DatasetRequirement.whole_of`) is left as it is: it covers what
+    its part covers, and its pin is the compile of it (`_settled_whole`).
+
     The requirements read are those the model wrote (`authored`), so a
     dataset read beside a copy of its whole history
     (`Plan.rolling_copies`) is judged with the readers of both, and the
@@ -3073,7 +3237,11 @@ async def name_pinned_groups(
     named: list[NamedGroup] = []
     honoured: list[tuple[DatasetRequirement, SelectedSource]] = []
     for requirement in written.evidence_requirements:
-        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
+        if (
+            not isinstance(requirement, DatasetRequirement)
+            or requirement.source_spec_id is None
+            or requirement.whole_of is not None
+        ):
             continue
         found = await _groups_named(
             state,
@@ -3270,16 +3438,19 @@ def _group_named(source: SelectedSource, word: str, role: str, *, members: bool)
     label = closing_group(source, word)
     if label is None:
         return None
-    if not members:
-        return Entity(name=label, role=role)
     side = flow_side(word)
+    ref = next(
+        (g.ref for g in source.groups if g.label == label and flow_side(g.role) == side), None
+    )
+    if not members:
+        return Entity(name=label, role=role, dcid=ref)
     if any(
         group.reads_total
         for group in source.groups
         if group.label == label and flow_side(group.role) == side
     ):
         return None
-    return Entity(name=label, role=role, members=True)
+    return Entity(name=label, role=role, members=True, dcid=ref)
 
 
 def _with_groups_named(

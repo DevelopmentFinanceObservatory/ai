@@ -69,11 +69,18 @@ from data_mcp.search_tool import SearchContext
 from data_mcp.skills_client import name_get_skill_in_call_lines
 from google.genai import Client, types
 from google.genai.client import AsyncClient
+from harness.conversation import current_user_message
 from harness.gemini_agent import RecordingState
 from harness.gemini_wire import model_retry_options
 from harness.graph.interfaces import PlannerModel
 from harness.graph.planning import plan_start, planner_node
-from harness.graph.state import ORCHESTRATOR_PENDING_KEY, ORCHESTRATOR_SPECS_KEY, pending_action
+from harness.graph.state import (
+    ASK_FOR_QUESTION_KEY,
+    NEW_QUESTION_KEY,
+    ORCHESTRATOR_PENDING_KEY,
+    ORCHESTRATOR_SPECS_KEY,
+    pending_action,
+)
 from harness.orchestrator_tools import (
     AskedOutput,
     Resolver,
@@ -102,6 +109,7 @@ from planner.plan import (
 )
 from planner.session import function_calls, function_responses
 from planner.source_reads import read_full_history
+from planner.stated_scope import StatedScopeReader
 from planner.tool_results import ProblemCode
 from planner.tools import load_pending_ask
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -111,6 +119,7 @@ from translator.tool import Translate, build_translate
 
 EVAL_DIR = Path(__file__).resolve().parent
 TASKS_DIR = EVAL_DIR / "tasks"
+AMENDMENTS_DIR = EVAL_DIR / "amendments"
 RECORDINGS_DIR = EVAL_DIR / "recordings"
 RECORDING_SCHEMA = 2
 
@@ -187,6 +196,48 @@ class Alternative(_Strict):
     period_reduction: PeriodReduction | None = None
 
 
+class Amendment(_Strict):
+    """What makes a task an amendment of a plan card: the user's `text` typed on the
+    card of `prior_plan`, the plan the planner drafted for task `base` (a `Plan` dump,
+    as a run's record keeps it), and `answer`, the user's own words in reply to a
+    question the planner asks about it, when the task scripts one. A task asking a
+    new question states in `new_question_in` the value, or the list of values, a
+    `starts_new_plan` call may name: `amendment` or `answer`, whose text the turn
+    hands back (`handed_back`), or `none`, which hands back nothing and asks the user
+    for their question. A task that amends the plan states none."""
+
+    base: str
+    prior_plan: dict[str, Any]
+    text: str
+    answer: str | None = None
+    new_question_in: str | list[str] | None = None
+
+    @property
+    def accepted(self) -> frozenset[str]:
+        """The values of `new_question_in` a run may name, empty on a task that
+        amends the plan."""
+        stated = self.new_question_in
+        return frozenset([stated] if isinstance(stated, str) else stated or ())
+
+    def handed_back(self, source: str) -> str | None:
+        """The words a turn hands back when the planner names `source`: the text of
+        the message it names, `None` for `none`."""
+        return {"amendment": self.text, "answer": self.answer}.get(source)
+
+    @model_validator(mode="after")
+    def _each_named_message_exists(self) -> Self:
+        Plan.model_validate(self.prior_plan)
+        if isinstance(self.new_question_in, list) and (
+            not self.new_question_in or len(self.accepted) < len(self.new_question_in)
+        ):
+            raise ValueError("a `new_question_in` list names each value once, and one at least")
+        if unknown := self.accepted - {"amendment", "answer", "none"}:
+            raise ValueError(f"`new_question_in` names {sorted(unknown)}, not a message")
+        if "answer" in self.accepted and self.answer is None:
+            raise ValueError("`new_question_in` names `answer` and the task scripts none")
+        return self
+
+
 class Task(_Strict):
     """One question, as the orchestrator hands it to the planner.
 
@@ -202,7 +253,10 @@ class Task(_Strict):
     several years taken together (`across_years`). A task whose search holds a party
     open names it in one. `period_reduction` is what the reference plan does with the
     years of its data, `none` or `across_years`, and what a run's accepted plan is
-    held to.
+    held to. A task with `user_message_searched` sends its `question` as the user's
+    message on each search, as a served turn does, so Search applies the provider scope
+    the words state. A task with an `amendment` opens the planner on the user's amendment of
+    a plan card instead of a first draft (`load_amendment_tasks`).
     """
 
     id: str
@@ -217,10 +271,18 @@ class Task(_Strict):
     acceptable_kinds: list[str]
     neighbour: Neighbour | None = None
     unit_asked: bool = False
+    user_message_searched: bool = False
     first_proposal_refusal: str | None = None
     period_reduction: PeriodReduction
     reference_payload: dict[str, Any]
     alternative_payloads: list[Alternative] = []
+    amendment: Amendment | None = None
+
+    @property
+    def recording_id(self) -> str:
+        """The task whose recording a run replays: the base task of an amendment
+        task, which shares its searches and skills, else this one."""
+        return self.amendment.base if self.amendment is not None else self.id
 
     @property
     def across_years_numbers(self) -> tuple[int, ...]:
@@ -257,6 +319,30 @@ def load_tasks(directory: Path = TASKS_DIR) -> list[Task]:
     ]
     order = {kind: index for index, kind in enumerate(KINDS)}
     return sorted(tasks, key=lambda task: (order.get(task.kind, len(KINDS)), task.id))
+
+
+def load_amendment_tasks(
+    directory: Path = AMENDMENTS_DIR, tasks: Sequence[Task] | None = None
+) -> list[Task]:
+    """Every amendment task in `directory`, by id. A file holds `id` and the
+    `amendment`; the rest of the task is its base task's (`Amendment.base`), whose
+    searches, brief and asks the turn ran before the user amended the card."""
+    by_id = {task.id: task for task in (tasks if tasks is not None else load_tasks())}
+    loaded = []
+    for path in sorted(directory.glob("*.json")):
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        amendment = Amendment.model_validate(raw["amendment"])
+        base = by_id[amendment.base]
+        loaded.append(
+            base.model_copy(update={"id": raw["id"], "kind": "amendment", "amendment": amendment})
+        )
+    return loaded
+
+
+def load_every_task() -> list[Task]:
+    """Every first-turn task (`load_tasks`), then every amendment task."""
+    first_turns = load_tasks()
+    return [*first_turns, *load_amendment_tasks(tasks=first_turns)]
 
 
 # --- Recordings ----------------------------------------------------------------------
@@ -379,6 +465,34 @@ def stray_recordings(task_ids: Collection[str], directory: Path = RECORDINGS_DIR
 type LiveCall = Callable[[ToolId, Mapping[str, object]], Awaitable[dict[str, Any]]]
 
 
+async def _live_answer(
+    live: LiveCall,
+    tool: ToolId,
+    arguments: Mapping[str, object],
+    *,
+    key: str,
+    failures: list[str],
+) -> dict[str, Any]:
+    """`live`'s answer to one call filed under `key`. A call that raised (the raise
+    propagates) and an answer `_keepable` rejects are listed in `failures`."""
+    try:
+        answer = await live(tool, arguments)
+    except BaseException as exc:
+        failures.append(f"{key}: {type(exc).__name__}: {exc}")
+        raise
+    if not _keepable(answer):
+        failures.append(f"{key}: refused for now: {answer['structured_content']}")
+    return answer
+
+
+def _keepable(answer: Mapping[str, Any]) -> bool:
+    """Whether a recording keeps `answer`: anything but a refusal to retry later."""
+    return not (
+        answer["is_error"]
+        and (answer["structured_content"] or {}).get("retry_mode") == "retry_after_delay"
+    )
+
+
 class TranslationCalls:
     """The `ToolSurface`, resolve door and node door production's translation reads,
     answered from `held`, a recording's `translation`: tool answers under `calls`, by
@@ -431,17 +545,8 @@ class TranslationCalls:
             raise ToolSurfaceUnavailableError(
                 f"the recording holds no answer for {key}", retryable=False
             )
-        try:
-            answer = await self._live(tool, arguments)
-        except BaseException as exc:
-            self.failures.append(f"{key}: {type(exc).__name__}: {exc}")
-            raise
-        if (
-            answer["is_error"]
-            and (answer["structured_content"] or {}).get("retry_mode") == "retry_after_delay"
-        ):
-            self.failures.append(f"{key}: refused for now: {answer['structured_content']}")
-        else:
+        answer = await _live_answer(self._live, tool, arguments, key=key, failures=self.failures)
+        if _keepable(answer):
             self._calls[key] = answer
             self._used.add(key)
         return ToolCallResult.model_validate(answer)
@@ -601,11 +706,21 @@ class RecordedSurface:
     `get_skill_file`, are rewritten to name `get_skill`. A call the recording lacks is answered as an
     unreachable server is (`ToolSurfaceUnavailableError`), which the planner's tool
     turns into a sentence saying the call did not complete, and is listed in `misses`.
+
+    With `live` (`record.py`), a call the recording lacks is made through `live` instead,
+    as the tool and arguments its key names, such as the `resolve_definition` call
+    `propose_plan` makes to admit a `whole_of`, and kept in `added` under its key. A live call that raised, or answered a refusal
+    to retry later, is kept out and listed in `failures`.
     """
 
-    def __init__(self, results: Mapping[str, Mapping[str, Any]]) -> None:
+    def __init__(
+        self, results: Mapping[str, Mapping[str, Any]], *, live: LiveCall | None = None
+    ) -> None:
         self._results = dict(results)
+        self._live = live
         self.misses: list[str] = []
+        self.added: dict[str, dict[str, Any]] = {}
+        self.failures: list[str] = []
 
     async def list_tools(self) -> list[ToolSchema]:
         return []
@@ -623,6 +738,15 @@ class RecordedSurface:
             name = "get_skill_file"
             arguments.setdefault("offset", 0)
         key = surface_key(name, arguments)
+        if key not in self._results and self._live is not None:
+            # The call the key names: a skill file's page is `get_skill_file`'s.
+            called = ToolId(server=tool.server, name=name)
+            answer = await _live_answer(
+                self._live, called, arguments, key=key, failures=self.failures
+            )
+            if not _keepable(answer):
+                return ToolCallResult.model_validate(answer)
+            self._results[key] = self.added[key] = answer
         if key not in self._results:
             self.misses.append(key)
             raise ToolSurfaceUnavailableError(
@@ -656,12 +780,16 @@ async def orchestrator_state(task: Task, resolver: Resolver) -> dict[str, Any]:
     }
     state: dict[str, Any] = {}
     call = OrchestratorCall(state=RecordingState(state), turn_id=task.id)
-    for search in task.searches:
-        found = await tools["search"](call=call, parts=search.parts or None, text=search.text)
-        if "error" in found:
-            raise TaskStateError(
-                f"{task.id}: search {search.parts or search.text!r}: {found['error']}"
-            )
+    token = current_user_message.set(task.question if task.user_message_searched else None)
+    try:
+        for search in task.searches:
+            found = await tools["search"](call=call, parts=search.parts or None, text=search.text)
+            if "error" in found:
+                raise TaskStateError(
+                    f"{task.id}: search {search.parts or search.text!r}: {found['error']}"
+                )
+    finally:
+        current_user_message.reset(token)
     handed = tools["plan"](brief=task.brief, asks=list(task.asks), call=call)
     if handed.get(HANDED_OFF) != "plan":
         raise TaskStateError(f"{task.id}: plan answered {handed}")
@@ -985,10 +1113,16 @@ def live_client() -> Client:
 
 
 def build_adapter(
-    *, probe: Probe, surface: RecordedSurface, prefix_cache: PrefixCache | None, client: Client
+    *,
+    probe: Probe,
+    surface: RecordedSurface,
+    prefix_cache: PrefixCache | None,
+    client: Client,
+    stated_scope: StatedScopeReader | None = None,
 ) -> PlannerAdapter:
     """The adapter `harness.wiring.build_planner` builds, with the probe's translate
-    step and the planner's model calls going through `client`.
+    step, the planner's model calls going through `client`, and `stated_scope` the
+    reader of the provider scope the user's words state.
 
     The planner, its instruction and its tools are production's own.
     """
@@ -998,6 +1132,7 @@ def build_adapter(
         prefix_cache=prefix_cache,
         translate=probe.translate,
         client=client,
+        stated_scope=stated_scope,
     )
 
 
@@ -1029,6 +1164,8 @@ async def run_entry(
     timeout_s: float = 300.0,
     answers: Sequence[Mapping[str, Any]] = (),
     translation: TranslationCalls | None = None,
+    surface: RecordedSurface | None = None,
+    stated_scope: StatedScopeReader | None = None,
 ) -> EntryRun:
     """Run `task`'s planner entry once on a fresh turn.
 
@@ -1043,7 +1180,19 @@ async def run_entry(
     passes none, so an ask ends it. Each answer is the reply the studio's interrupt
     route reads, the user's answer under `result`. With `translation`,
     production's translation runs on the recorded plan over those calls, and
-    `probe.translation` holds its answer.
+    `probe.translation` holds its answer. The planner's tool calls, `propose_plan`'s
+    own included, go to `surface`, by default one over the recording's `tools`.
+    `propose_plan` reads the provider scope the user's words state through
+    `stated_scope`, where given, and in a task with `user_message_searched` each
+    request carries the `question` as the user's words, as a served turn does.
+
+    A task with an `amendment` opens the planner as the `approve` node's `amend` edge
+    does, on the task's prior plan and the user's text, after `plan_start` took the
+    hand-off; its scripted `answer`, when it has one and `answers` is empty, replies to
+    the planner's first question. The entry also ends when the planner reads the text
+    as a new question, the `new_question` edge, which leaves the words it hands back
+    under `NEW_QUESTION_KEY`, or sets `ASK_FOR_QUESTION_KEY` when the planner names
+    no message.
     """
     probe = Probe()
     if translation is not None:
@@ -1053,7 +1202,8 @@ async def run_entry(
             anchor_read=_no_anchor_read,
             describe_nodes=translation.describe_nodes,
         )
-    surface = RecordedSurface(recording.get("tools") or {})
+    if surface is None:
+        surface = RecordedSurface(recording.get("tools") or {})
     resolver = RecordedResolver(recording["searches"])
     state = await orchestrator_state(task, resolver)
     if resolver.left():
@@ -1063,6 +1213,7 @@ async def run_entry(
         surface=surface,
         prefix_cache=prefix_cache,
         client=probe.client(client if client is not None else live_client(), edits=edits),
+        stated_scope=stated_scope,
     )
     # The action `plan` recorded, which `orchestrate` takes from the state as the
     # `plan_start` node's input.
@@ -1087,6 +1238,9 @@ async def run_entry(
     conversation = ConversationState(conversation_id=ctx.key.conversation_id)
     conversation.turn_specs = dict(ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {})
     pending = list(answers)
+    amendment = task.amendment
+    if amendment is not None and amendment.answer is not None and not pending:
+        pending = [{"result": {"answers": {"q1": {"kind": "text", "text": amendment.answer}}}}]
     error: str | None = None
     timed_out = False
     started = time.perf_counter()
@@ -1102,9 +1256,11 @@ async def run_entry(
         probe.next_request()
         token = current_turn_budget.set(budgets[-1])
         identities = current_recorded_identity.set(conversation.recorded_identity)
+        words = current_user_message.set(task.question if task.user_message_searched else None)
         try:
             result = await step
         finally:
+            current_user_message.reset(words)
             current_recorded_identity.reset(identities)
             current_turn_budget.reset(token)
         ctx.state = _stored(ctx.state)
@@ -1117,6 +1273,17 @@ async def run_entry(
         # The planner node runs on its input as the loop stored it with the cursor.
         ctx.state = _stored(ctx.state)
         node_input = _stored(opened.output)
+        if amendment is not None:
+            # The card the user amended holds the prior plan, which the `approve`
+            # node hands the planner with the answer on its `amend` edge.
+            prior = Plan.model_validate(amendment.prior_plan)
+            ctx.state["plan"] = prior.model_dump_json()
+            node_input = _stored(
+                {
+                    "plan": prior.model_dump(mode="json"),
+                    "answer": {"approved": None, "amendment": amendment.text},
+                }
+            )
         result = await segment(drafting.run(ctx, node_input))
         rounds = 0
         while isinstance(result, Pause) and probe.plan is None and pending:
@@ -1189,6 +1356,11 @@ def inputs_digest(task: Task, recording: Mapping[str, Any]) -> str:
         "searches": [search.model_dump(mode="json") for search in task.searches],
         "brief": task.brief,
         "asks": asks,
+        **(
+            {"amendment": task.amendment.model_dump(mode="json")}
+            if task.amendment is not None
+            else {}
+        ),
         "recorded_searches": recording["searches"],
         "recorded_answers": recording["tools"],
     }
@@ -1333,17 +1505,26 @@ def record_period_reduction(record: Mapping[str, Any], task: Task) -> PeriodRedu
 
 def stop_reason(run: EntryRun) -> str:
     """How the entry ended: `error`, `accepted`, `timeout` (the eval's own limit), the
-    adapter's refusal code, or `asked_user` (an ask the tool took, which the entry paused
-    on, awaiting the user's answer). An error wins over a recorded plan: a step
-    that raised, or a state the turn store refused at the node's boundary, fails the
-    served turn, so the plan never reaches the user. A refusal wins over an ask, since
-    the entry it ends pauses on nothing."""
+    adapter's refusal code, `new_question` (the planner read an amendment as a new
+    question, which the turn hands back), or `asked_user` (an ask the tool took, which
+    the entry paused on, awaiting the user's answer). An error wins over a recorded
+    plan: a step that raised, or a state the turn store refused at the node's
+    boundary, fails the served turn, so the plan never reaches the user. A refusal
+    wins over an ask, since the entry it ends pauses on nothing."""
     if run.error is not None:
         return "error"
     if run.probe.plan is not None:
         return "accepted"
     if run.timed_out:
         return "timeout"
+    return _unplanned_ending(run)
+
+
+def _unplanned_ending(run: EntryRun) -> str:
+    """How an entry that recorded no plan, raised nothing and did not time out ended
+    (`stop_reason`)."""
+    if run.state.get(NEW_QUESTION_KEY) or run.state.get(ASK_FOR_QUESTION_KEY):
+        return "new_question"
     if run.probe.refused_code is not None:
         return run.probe.refused_code
     if load_pending_ask(run.state) is not None:
@@ -1401,10 +1582,25 @@ def entry_record(
         "budget_closed": run.budget_closed,
         "surface_misses": run.surface_misses,
         "wall_s": round(run.wall_s, 3),
+        "new_question_in": named_new_question(calls),
+        "new_question": run.state.get(NEW_QUESTION_KEY),
+        "asked_for_question": run.state.get(ASK_FOR_QUESTION_KEY) is True,
     }
 
 
+def named_new_question(calls: Sequence[Mapping[str, Any]]) -> str | None:
+    """The message the run's last `starts_new_plan` call named in `new_question_in`,
+    `None` when none named one."""
+    named = [
+        call["args"].get("new_question_in")
+        for call in calls
+        if call["name"] == "propose_plan" and call["args"].get("starts_new_plan")
+    ]
+    return next((value for value in reversed(named) if value), None)
+
+
 __all__ = [
+    "AMENDMENTS_DIR",
     "KINDS",
     "PERIOD_REFUSAL",
     "EntryRun",
@@ -1423,6 +1619,8 @@ __all__ = [
     "first_year_gaps",
     "inputs_digest",
     "live_client",
+    "load_amendment_tasks",
+    "load_every_task",
     "load_recording",
     "load_tasks",
     "orchestrator_state",

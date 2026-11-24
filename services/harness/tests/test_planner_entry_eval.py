@@ -34,9 +34,11 @@ import pytest
 from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.genai import Client, errors, types
+from harness.graph import planning
 from harness.turn.store import AgentRecord
 from harness.turn_events import PLANNER_ASK
 from langfuse.api import DatasetItem, NotFoundError
+from mcp.types import TextContent
 from planner import session
 from planner.plan import EvidenceRequirement
 from planner.skills import GET_SKILL
@@ -68,11 +70,54 @@ recorder = _load("record")
 
 
 async def test_every_task_validates_and_the_set_covers_every_kind() -> None:
+    # Each recorded plan has to compile, so a task dividing by `share_of` fails
+    # where the share's denominator shows it does not hold a party its numerator
+    # names (`share_part_outside_whole`).
     entry.quiet_logs()
 
     faults = await validate.check_all(entry.load_tasks())
 
     assert faults == {}
+
+
+@pytest.mark.parametrize("moved", [False, True], ids=["as-served", "hand-back-moved"])
+async def test_each_amendment_task_hands_back_the_message_it_names(
+    moved: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scripted planner names each value an amendment task accepts in
+    `new_question_in`, and the turn hands back that message's words, or nothing and
+    asks the user for their question for `none`. A planner node that leaves the hand-back
+    under other keys is reported on every task."""
+    entry.quiet_logs()
+    tasks = entry.load_amendment_tasks()
+    assert any(len(task.amendment.accepted) > 1 for task in tasks)
+    if moved:
+        monkeypatch.setattr(planning, "NEW_QUESTION_KEY", "moved:new_question")
+        monkeypatch.setattr(planning, "ASK_FOR_QUESTION_KEY", "moved:ask_for_question")
+
+    faults = {}
+    for task in tasks:
+        if found := await validate.check_amendment(task):
+            faults[task.id] = found
+
+    assert sorted(faults) == (sorted(task.id for task in tasks) if moved else []), faults
+
+
+@pytest.mark.parametrize(
+    "stated",
+    [
+        pytest.param([], id="an-empty-list"),
+        pytest.param(["amendment", "amendment"], id="a-value-twice"),
+        pytest.param("the brief", id="no-message"),
+        pytest.param(["answer", "none"], id="an-answer-the-task-scripts-not"),
+    ],
+)
+def test_an_amendment_names_only_messages_the_task_holds(stated: Any) -> None:
+    task = next(task for task in entry.load_amendment_tasks() if task.amendment.answer is None)
+    stored = task.amendment.model_dump()
+
+    with pytest.raises(ValidationError):
+        entry.Amendment.model_validate({**stored, "new_question_in": stated})
 
 
 def _search_reworded(task: Any) -> dict[str, Any]:
@@ -208,6 +253,31 @@ async def test_a_pin_over_other_years_is_moved_to_its_copy_over_the_requirements
     assert validate.translation_faults(run, calls) == []
 
 
+async def test_the_g7_share_s_whole_search_binds_compiles_with_no_added_sum() -> None:
+    # Search answers G7 aid over every recipient with the recipients bound to the
+    # developing countries' total, as DAC2a holds it, so `propose_plan` adds no sum
+    # over the whole and the share reads its retrieval.
+    entry.quiet_logs()
+    task = _task("share-g7-africa-of-g7-total-aid")
+    recording = entry.load_recording(task.id)
+    reference = validate.task_payloads(task)[0]
+    calls = entry.TranslationCalls(
+        recording.get("translation") or {}, schemas=await validate.tool_schemas()
+    )
+
+    run = await validate.accepted_run(task, recording, reference, calls)
+
+    assert validate.translation_faults(run, calls) == []
+    plan = run.probe.plan
+    assert plan is not None
+    assert plan.whole_sums == ()
+    assert [r.id for r in plan.evidence_requirements] == [
+        "g7_africa_aid",
+        "g7_total_aid",
+        "g7_africa_share",
+    ]
+
+
 class _LiveClient:
     """A data-mcp client whose every call `answer` answers, keeping what it was asked."""
 
@@ -293,6 +363,46 @@ async def test_a_live_translation_records_each_call_a_replay_reads() -> None:
 
     assert list(kept["calls"]) == client.asked
     assert kept["calls"][client.asked[0]]["meta"][SEARCH_ENVELOPE_META_KEY]["parts"]
+
+
+@pytest.mark.parametrize("refused", [False, True], ids=["answered", "refused-for-now"])
+async def test_a_live_proposal_records_each_call_propose_plan_makes(refused: bool) -> None:
+    # `propose_plan` sends `resolve_definition` to admit the reference plan's `whole_of`.
+    # With that answer left out of the recording, the live client is asked for it.
+    entry.quiet_logs()
+    task = _task("share-g7-africa-of-g7-total-aid")
+    recording = entry.load_recording(task.id)
+    proposed = {
+        key: answer
+        for key, answer in recording["tools"].items()
+        if key.startswith("resolve_definition ")
+    }
+    assert len(proposed) == 1
+    (recorded,) = proposed.values()
+
+    async def answered() -> Any:
+        return SimpleNamespace(
+            is_error=recorded["is_error"],
+            structured_content=recorded["structured_content"],
+            content=[TextContent(type="text", text=recorded["text"])],
+            meta=recorded["meta"],
+        )
+
+    client = _LiveClient(_refused_for_now if refused else answered)
+    held = {
+        **recording,
+        "tools": {key: answer for key, answer in recording["tools"].items() if key not in proposed},
+    }
+
+    if refused:
+        with pytest.raises(recorder.ProposalRecordError, match="refused for now"):
+            await recorder._proposal_calls(client, task, held, wall_s=60.0)
+        assert client.asked == list(proposed)
+        return
+    added = await recorder._proposal_calls(client, task, held, wall_s=60.0)
+
+    assert added == proposed
+    assert client.asked == list(proposed)
 
 
 def test_a_task_states_its_period_reduction_in_the_closed_vocabulary() -> None:
@@ -1610,6 +1720,25 @@ async def test_the_recorded_surface_answers_the_planners_one_skill_tool(
 
     assert result.text.endswith(text)
     assert surface.misses == []
+
+
+async def test_the_recorded_surface_records_a_skill_file_page_by_the_tool_its_key_names() -> None:
+    """A skill file's page the recording lacks is called live as `get_skill_file`, with
+    the arguments its key names, and kept under that key."""
+    called: list[tuple[str, dict[str, Any]]] = []
+
+    async def live(tool: ToolId, arguments: Mapping[str, object]) -> dict[str, Any]:
+        called.append((tool.name, dict(arguments)))
+        return {"is_error": False, "text": "File b.", "structured_content": None}
+
+    surface = entry.RecordedSurface({}, live=live)
+
+    result = await surface.call_tool(tool=GET_SKILL, arguments={"skill_id": "oda", "path": "b.md"})
+
+    arguments = {"skill_id": "oda", "path": "b.md", "offset": 0}
+    assert called == [("get_skill_file", arguments)]
+    assert list(surface.added) == [entry.surface_key("get_skill_file", arguments)]
+    assert result.text == "File b."
 
 
 async def test_the_recorded_surface_passes_other_calls_through_and_misses_what_it_lacks() -> None:

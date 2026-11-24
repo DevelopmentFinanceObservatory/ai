@@ -2475,7 +2475,8 @@
       "call_id": null,
       "args": null,
       "body": {},
-      "name": null
+      "name": null,
+      "record": 0
     },
     {
       "kind": "call",
@@ -2490,7 +2491,8 @@
         ]
       },
       "body": {},
-      "name": null
+      "name": null,
+      "record": 1
     },
     {
       "kind": "answer",
@@ -2514,7 +2516,8 @@
           }
         }
       },
-      "name": null
+      "name": null,
+      "record": 4
     },
     {
       "kind": "response",
@@ -2535,7 +2538,8 @@
           "warnings": []
         }
       },
-      "name": "propose_plan"
+      "name": "propose_plan",
+      "record": 6
     }
   ],
   "state": {
@@ -2550,6 +2554,7 @@
     "planner:terminal_declines": [],
     "planner:reduction_refused_asks": [],
     "translator:compile_failures": [],
+    "planner:answered_in_words": false,
     "planner:skills_before_entry": 0,
     "planner:pin_sources": {
       "spec_cccccccccccccccccccccccccccccccc": {
@@ -3174,6 +3179,7 @@
         ]
       ]
     },
+    "planner:plan_read": 7,
     "planner:alignments": [],
     "planner:pin_verdicts": [
       {
