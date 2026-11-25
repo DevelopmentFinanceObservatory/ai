@@ -64,6 +64,7 @@ from planner.plan import (
     stated_names,
     unknown_names,
     whole_on_source,
+    whole_side,
 )
 from planner.proof import mismatches
 from planner.records import (
@@ -126,11 +127,12 @@ from compiler.evidence import (
     check_evidence,
     errors,
     evidence_from_source,
+    named_members,
+    named_refs,
     read_source_unit,
     read_unit_dcid,
 )
 from compiler.frame_columns import ROLLING_PARAMETER
-from compiler.party_names import named_members, named_refs
 from compiler.rolling import (
     Root,
     anchor_groups,
@@ -159,6 +161,7 @@ from compiler.sources import (
     cuts_party_totals,
     entity_scopes_disjoint,
     family_overlap,
+    named_by_part,
     open_side_column,
     parties_outside,
     party_class,
@@ -346,6 +349,19 @@ class _Parties(NamedTuple):
     kept: Mapping[tuple[str, str], frozenset[str]]
 
 
+def _wholes_and_parts(
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> Iterator[tuple[DatasetRequirement, DatasetRequirement]]:
+    """Each whole of `requirements_by_id` with its part, where it holds the part and
+    the part is no whole itself; the one pairing every whole reader walks."""
+    for whole in requirements_by_id.values():
+        if not isinstance(whole, DatasetRequirement) or whole.whole_of is None:
+            continue
+        part = requirements_by_id.get(whole.whole_of.part)
+        if isinstance(part, DatasetRequirement) and part.whole_of is None:
+            yield whole, part
+
+
 def wholes_on_their_sources(
     requirements_by_id: Mapping[str, EvidenceRequirement],
     discovered: Mapping[str, SelectedSource],
@@ -358,21 +374,34 @@ def wholes_on_their_sources(
     A whole with no source yet reads the side it opens open where `summed`
     names it, as the plan reads it.
     """
-    wholes: dict[str, DatasetRequirement] = {}
-    for requirement_id, whole in requirements_by_id.items():
-        if not isinstance(whole, DatasetRequirement) or whole.whole_of is None:
-            continue
-        part = requirements_by_id.get(whole.whole_of.part)
-        if not isinstance(part, DatasetRequirement) or part.whole_of is not None:
-            continue
-        wholes[requirement_id] = whole_on_source(
+    return {
+        whole.id: whole_on_source(
             whole,
             part,
-            discovered.get(requirement_id),
-            summed=requirement_id in summed,
+            discovered.get(whole.id),
+            summed=whole.id in summed,
             part_source=discovered.get(part.id),
         )
-    return wholes
+        for whole, part in _wholes_and_parts(requirements_by_id)
+    }
+
+
+def sources_named_by_parts(
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+    sources: Mapping[str, SelectedSource],
+) -> dict[str, SelectedSource]:
+    """`sources`, by requirement id, with each whole's source viewed with its part's
+    name facts (`compiler.sources.named_by_part`), so the whole reads the names it
+    keeps from its part as the part's search bound them. A whole or part with no
+    source stays as it is, and its names read on the whole's own source."""
+    named = dict(sources)
+    for whole, part in _wholes_and_parts(requirements_by_id):
+        whole_source, part_source = sources.get(whole.id), sources.get(part.id)
+        if whole_source is not None and part_source is not None and whole.whole_of is not None:
+            named[whole.id] = named_by_part(
+                whole_source, part_source, opened=whole_side(whole.whole_of.axis)
+            )
+    return named
 
 
 class _Ratio(Enum):
@@ -440,6 +469,9 @@ class _Build:
         self.requirements: dict[str, EvidenceRequirement] = stated | wholes_on_their_sources(
             stated, discovered, summed=self.summed
         )
+        # The sources the requirements' names are read on: a whole's viewed with its
+        # part's name facts (`sources_named_by_parts`), stored as discovered (`workflow`).
+        self.named = sources_named_by_parts(stated, discovered)
         self.whole_history = split.whole_history
         self.issues: list[CompileIssue] = []
         self.warnings: list[EvidenceIssue] = []
@@ -483,7 +515,7 @@ class _Build:
         terminal = set(self.translation.terminal)
         return Workflow(
             steps=tuple(self.steps[op_id] for op_id in self.order),
-            sources=tuple(self.sources[op.id] for op in retrieves),
+            sources=tuple(self._stored_source(op) for op in retrieves),
             evidence_bindings=tuple(
                 EvidenceBinding(
                     requirement_id=op.requirement_id,
@@ -494,6 +526,18 @@ class _Build:
             ),
             terminal_steps=tuple(op_id for op_id in self.order if op_id in terminal),
             warnings=warnings,
+        )
+
+    def _stored_source(self, op: RetrieveOperation) -> SelectedSource:
+        """The source the workflow stores for `op`: the one compile read, with a whole's
+        name facts as discovery found them, since the view of its part's
+        (`sources_named_by_parts`) is derived again by every reader."""
+        source = self.sources[op.id]
+        found = self.discovered.get(op.requirement_id)
+        if found is None or self.named.get(op.requirement_id) is found:
+            return source
+        return source.model_copy(
+            update={"bound_refs": found.bound_refs, "entity_refs": found.entity_refs}
         )
 
     # -- checks ------------------------------------------------------------------
@@ -636,7 +680,7 @@ class _Build:
                     requirement_id=operation.requirement_id,
                 )
                 continue
-            source = self.discovered.get(operation.requirement_id)
+            source = self.named.get(operation.requirement_id)
             if source is None or source.spec_id != operation.spec_id:
                 self._issue(
                     CompileIssueCode.SOURCE_NOT_DISCOVERED_FOR_REQUIREMENT,
@@ -3070,7 +3114,7 @@ class _Build:
         """The entities of `source` that the entity `requirement` states as `name` names, for `_frame_entity`.
 
         One entity, or a named set's members on its role column
-        (`compiler.party_names.named_members`). `None` when `requirement`
+        (`compiler.evidence.named_members`). `None` when `requirement`
         states no such entity, under `role` when one is given.
         """
         candidates = entities_named(requirement, name, role)
@@ -3607,7 +3651,7 @@ def _names_on_column(
     entity per role column, a donor and its recipient say, is one series,
     which a whole side reads as it is. Two on one column are two series a
     whole side would pool. A set's name counts once
-    (`compiler.party_names.named_members`); its members still reaching the
+    (`compiler.evidence.named_members`); its members still reaching the
     reader are `_labels_on_column`'s to count.
     """
     return [
@@ -3632,7 +3676,7 @@ def _labels_on_column(source: SelectedSource, column: str, kept: set[str]) -> li
 def _surplus_labels(requirement: DatasetRequirement, source: SelectedSource) -> list[str]:
     """The labels of the entities `source` resolves under `requirement`'s role columns that it does not name.
 
-    Named is by ref (`compiler.party_names.named_refs`), so a set's members are
+    Named is by ref (`compiler.evidence.named_refs`), so a set's members are
     named by the set. Distinct case-folded, in the source's order. Entities
     under the other role columns -- the creditor alongside the debtor -- are
     left out, as `_role_columns` leaves their columns out: pooling a debtor

@@ -66,7 +66,11 @@ def test_entities_phrase_joins_names_in_order_deduplicated() -> None:
     entities = [Entity(name="Kenya"), Entity(name="China"), Entity(name="Kenya")]
     assert phrasing.entities_phrase(entities) == "Kenya and China"
     assert phrasing.entities_phrase([Entity(name="Kenya")]) == "Kenya"
-    # A whole (`whole_of`) states no entity and no `across` word.
+
+
+def test_entities_phrase_is_empty_for_no_entity_and_no_across_word() -> None:
+    """A whole (`whole_of`) states no entity and no `across` word; phrasing it once
+    raised IndexError, which ended a Studio turn as `capability_unavailable`."""
     assert phrasing.entities_phrase([]) == ""
 
 

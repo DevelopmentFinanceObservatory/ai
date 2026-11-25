@@ -61,8 +61,7 @@ import typing
 from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 
-from compiler.evidence import open_axes_for
-from compiler.party_names import resolve_group, resolve_name
+from compiler.evidence import open_axes_for, resolve_group, resolve_name
 from compiler.shapes import breakdown_level
 from compiler.sources import stat_var_count
 from planner.parties import across_party, flow_side, party_role, role_party, singular
@@ -102,6 +101,7 @@ from planner.plan import (
     Unit,
     answering_results,
     authored_text,
+    compiled_source,
     copy_origins,
     covered,
     dataset_of,
@@ -2789,22 +2789,13 @@ def _source(
 
 
 def _selected_source(requirement_id: str, plan: Plan) -> SelectedSource | None:
-    """The source the compiled plan retrieves `requirement_id` from.
+    """The source the compiled plan retrieves `requirement_id` from, a whole's viewed
+    with its part's name facts (`planner.plan.compiled_source`).
 
     `None` before compile (`plan.workflow` unset) or when nothing was bound
     for this requirement.
     """
-    if plan.workflow is None:
-        return None
-    step_id = next(
-        (
-            binding.step_id
-            for binding in plan.workflow.evidence_bindings
-            if binding.requirement_id == requirement_id
-        ),
-        None,
-    )
-    return plan.workflow.source_of(step_id) if step_id is not None else None
+    return compiled_source(plan, requirement_id)
 
 
 def _population_count(requirement: DatasetRequirement, word: str, plan: Plan) -> int | None:

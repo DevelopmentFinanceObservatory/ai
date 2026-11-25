@@ -108,8 +108,13 @@ from weakref import WeakValueDictionary
 
 import rfc8785
 from common.hashed_fields import revision_content
-from compiler.evidence import named_on_open_axes, open_axes_for, source_requirement_matches
-from compiler.party_names import named_members, named_refs
+from compiler.evidence import (
+    named_members,
+    named_on_open_axes,
+    named_refs,
+    open_axes_for,
+    source_requirement_matches,
+)
 from compiler.shapes import BREAKDOWN_CODE_SYSTEMS
 from compiler.sources import (
     EXACT_COVERAGE,
@@ -3218,7 +3223,7 @@ async def name_pinned_groups(
     the side open, dropping the group, or holds it to the same group
     (`translator.referral.dropped_scope`), so no search is spent to learn
     that. A named group is read as the pinned source binds it, as its
-    members or as its published total (`compiler.party_names.named_members`),
+    members or as its published total (`compiler.evidence.named_members`),
     and every reader sums the side away, so either reading gives the
     group's figure. Where every reader ranks over the side instead, the
     group is named for its members, so the rank orders the members the pin
@@ -3348,7 +3353,7 @@ def _divides_its_member_by_itself(
     numerator names (`planner.plan.side_entities`). Both are compared by graph ref:
     the numerator's names are resolved against `pinned` by label, by the refs
     Search bound for them or by the refs the graph resolved them to
-    (`compiler.party_names.named_refs`), and a group the numerator names stands
+    (`compiler.evidence.named_refs`), and a group the numerator names stands
     for every member `pinned` binds on its side. Keeping that scope on the
     denominator, by withholding the sources that drop it
     (`DiscoveryLog.scope_kept`) or by naming its group (`name_pinned_groups`),
@@ -3370,7 +3375,7 @@ def _sides_dividing_by_itself(
     The rule `_divides_its_member_by_itself` states, side by side: a
     share_of or quotient_of of `plan` reading `requirement` as its
     denominator (`_dividers`) whose numerator names, by graph ref
-    (`compiler.party_names.named_refs`), every entity `pinned` binds on the
+    (`compiler.evidence.named_refs`), every entity `pinned` binds on the
     side. Judged on the plan as the model wrote it (`authored`).
     """
     written = authored(plan)
@@ -3458,7 +3463,7 @@ def _group_named(source: SelectedSource, word: str, role: str, *, members: bool)
     """The entity naming the one group `source` holds the `across` word's side to, or `None`.
 
     The group is `translator.referral.closing_group`'s. Named whole, it is
-    met by the source under either reading (`compiler.party_names.named_members`).
+    met by the source under either reading (`compiler.evidence.named_members`).
     Named for its `members`, it is met only where the source binds the
     members, so a group the source binds as a published total
     (`ResolvedGroup.reads_total`) gives `None`.

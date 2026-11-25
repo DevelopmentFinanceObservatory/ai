@@ -55,8 +55,7 @@ from itertools import chain
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, cast, get_args
 
 import rfc8785
-from compiler.evidence import open_axes_for
-from compiler.party_names import named_members, named_refs
+from compiler.evidence import named_members, named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
     WHOLE_COLUMNS,
@@ -2730,7 +2729,7 @@ def _entity_refs(
 
     A name is resolved against the source its dataset requirement pins
     (`_pinned_source`), by label or by the refs Search bound for it
-    (`compiler.party_names.named_refs`), as
+    (`compiler.evidence.named_refs`), as
     `translator.discovery._divides_its_member_by_itself` compares a pin's
     members; a group names every member the source binds on its side. A
     name the pin does not resolve, or on a requirement pinning nothing on
@@ -3179,7 +3178,7 @@ def _rank_roles_expand(plan: Plan, sources: SourceReadings) -> dict[str, object]
     several roles where each other role names one entity
     (`planner.plan.rank_single_roles`). Each such name has to bind one party
     alone on its column of the requirement's pinned source
-    (`compiler.party_names.named_members`), and the source has to leave open no
+    (`compiler.evidence.named_members`), and the source has to leave open no
     axis the requirement's `across` does not cover (`compiler.evidence.open_axes_for`).
     A group read as its members, a source binding other parties beside the
     one named, an open axis left over, or a pin whose source cannot be read
@@ -5124,7 +5123,7 @@ class _Reads(NamedTuple):
 
     `period` is the requirement's period and whether its end is open.
     `entities` holds each entity it names as the refs of the members its pin's
-    source resolves the name to (`compiler.party_names.named_members`), so
+    source resolves the name to (`compiler.evidence.named_members`), so
     "United States" and "United States of America" bound to one ref read
     alike, or as its case-folded name where the source resolves none.
     `across`, `breakdown` and `stat_vars` are what else shapes the frame its

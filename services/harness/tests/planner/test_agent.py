@@ -34,6 +34,7 @@ from analysis_mcp.server import mcp as analysis_mcp
 from compiler.compile import (
     CompileIssueCode,
     compile_plan,
+    sources_named_by_parts,
     wholes_on_their_sources,
 )
 from compiler.evidence import (
@@ -41,10 +42,14 @@ from compiler.evidence import (
     check_evidence,
     errors,
     evidence_from_source,
+    named_members,
+    resolve_group,
+    resolve_name,
 )
 from compiler.sources import (
     PROVIDER_ACCOUNT,
     DiscoveryStatus,
+    named_by_part,
     outcome_from_envelope,
     source_from_spec_block,
 )
@@ -59,6 +64,7 @@ from data_mcp.definition_writes import MAX_IDENTITY_BYTES, windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
+from harness import plan_display
 from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_UNIT_READ_KEY,
@@ -153,6 +159,8 @@ from planner.plan import (
     clear_plan,
     clear_unsupported,
     compile_warnings,
+    compiled_source,
+    covered,
     current_discovery_time_left,
     current_recorded_identity,
     fix_disagreements,
@@ -183,6 +191,7 @@ from planner.plan import (
     split_of,
     stored_plan,
     whole_on_source,
+    whole_side,
     windowed_pins,
 )
 from planner.records import (
@@ -10098,31 +10107,6 @@ async def test_a_donor_whole_searchs_answer_compiles(
     assert compiled.workflow is not None, compiled.issues
 
 
-_G7_MEMBERS = (
-    ("country/CAN", "Canada"),
-    ("country/DEU", "Germany"),
-    ("country/FRA", "France"),
-    ("country/GBR", "United Kingdom"),
-    ("country/ITA", "Italy"),
-    ("country/JPN", "Japan"),
-    ("country/USA", "United States of America"),
-)
-
-
-def _registry_g7(block: dict[str, Any], label: str, group_id: str | None = "groups/G7") -> None:
-    """`block` binding the G7 as a set read as its members, labelled `label`: a
-    membership registry set with the registry id `group_id`, or with none a set
-    known by its label alone, and no graph node or published total either way."""
-    resolved = block["resolved"]
-    resolved["entities"] = [
-        {"ref": ref, "label": name, "entity_type": "Country", "role": "origin"}
-        for ref, name in _G7_MEMBERS
-    ]
-    group = {"label": label, **({"group_id": group_id} if group_id else {})}
-    resolved["entity_groups"] = {"origin": group}
-    block["definition"]["identity"]["entities"]["origin"] = [ref for ref, _ in _G7_MEMBERS]
-
-
 def _part_source(
     block: dict[str, Any], route: str, donor: str, refs: list[str]
 ) -> SelectedSource | None:
@@ -10221,22 +10205,39 @@ async def test_a_provider_whole_reads_its_parts_names_by_the_party_each_resolved
         discovered=discovered,
     )
     assert compiled.workflow is not None, compiled.issues
-    approved = {
+    stored = {
         b.requirement_id: cast(SelectedSource, compiled.workflow.source_of(b.step_id))
         for b in compiled.workflow.evidence_bindings
     }
-    assert approved[_WHOLE].bound_refs == ()
+    # The whole's source is stored as discovery found it, its reading set.
+    assert stored[_WHOLE] == discovered[_WHOLE].model_copy(
+        update={
+            "stat_var_reading": stored[_WHOLE].stat_var_reading,
+            "stat_var_reading_set_by": stored[_WHOLE].stat_var_reading_set_by,
+        }
+    )
+    assert stored[_WHOLE].bound_refs == ()
     requirements = {r.id: r for r in plan.evidence_requirements}
+    approved = sources_named_by_parts(requirements, stored)
     whole = wholes_on_their_sources(requirements, approved, summed=())[_WHOLE]
-    assert [(e.name, e.dcid) for e in whole.entities] == [(donor, refs[0])]
+    assert [(e.name, e.dcid) for e in whole.entities] == [(donor, None)]
     retrieved = RetrievalEvidence(
         origin="manifest",
-        spec_id=approved[_WHOLE].spec_id,
+        spec_id=stored[_WHOLE].spec_id,
         has_data=True,
-        entities=approved[_WHOLE].entities,
+        entities=stored[_WHOLE].entities,
     )
-    findings = check_evidence(whole, retrieved, approved=approved[_WHOLE])
-    assert _entity_codes(findings) == []
+    assert _entity_codes(check_evidence(whole, retrieved, approved=approved[_WHOLE])) == []
+    assert _entity_codes(check_evidence(whole, retrieved, approved=stored[_WHOLE])) == [
+        EvidenceIssueCode.ENTITY_MISSING
+    ]
+    # The card names the whole's donor population as the part's names it.
+    compiled_plan = plan.with_translation(translation=translation, workflow=compiled.workflow)
+    viewed = compiled_source(compiled_plan, _WHOLE)
+    assert viewed == approved[_WHOLE]
+    named = plan_display._named_entities(covered(whole, compiled_plan), viewed)
+    assert [population.named for population in named.values()] == [True]
+    assert plan_display._named_entities(covered(whole, compiled_plan), stored[_WHOLE]) == {}
 
 
 # The codes of findings that say a named entity was not met.
@@ -10248,98 +10249,217 @@ def _entity_codes(findings: list[EvidenceIssue]) -> list[EvidenceIssueCode]:
     return [f.code for f in findings if f.code in _ENTITY_CODES]
 
 
-@pytest.mark.parametrize(
-    "group_id",
-    [pytest.param("groups/G7", id="registry-id"), pytest.param(None, id="label-only")],
-)
-def test_a_provider_whole_reads_a_set_the_part_names_as_the_part_resolves_it(
-    group_id: str | None,
-) -> None:
-    """G7 bilateral ODA over its whole over every provider, both reading the G7 as a
-    set's members, which the part labels "G7" and the whole "Group of Seven": the
-    whole reads the part's "G7" as the whole's set, matched by its registry id, or
-    by its members where it states none, so it is met at compile and by a retrieval
-    holding the members, and as the planner wrote it, it is met by neither."""
-    recorded = _SEARCH_WHOLES["g7_bilateral"]
-    part_block = json.loads(json.dumps(recorded["part"]))
-    whole_block = json.loads(json.dumps(recorded["whole"]))
-    _registry_g7(part_block, "G7", group_id)
-    _registry_g7(whole_block, "Group of Seven", group_id)
-    period = Period(start=2015, end=2023)
-    part = DatasetRequirement(
-        id="part",
-        decision_ids=["measure"],
-        measure="G7 bilateral ODA",
-        entities=[Entity(name="G7", role="donor")],
-        period=period,
-    )
-    stated = DatasetRequirement(
-        id="whole",
-        decision_ids=["measure"],
-        measure="G7 ODA",
-        period=period,
-        whole_of=WholeOf(part="part", axis="provider"),
-    )
-    part_source = source_from_spec_block(part_block)
-    whole_source = source_from_spec_block(whole_block)
-    assert not errors(check_evidence(part, evidence_from_source(part_source)))
-
-    whole = whole_on_source(stated, part, whole_source, summed=False, part_source=part_source)
-
-    assert whole.entities == (Entity(name="Group of Seven", role="donor"),)
-    assert not errors(check_evidence(whole, evidence_from_source(whole_source)))
-    retrieved = RetrievalEvidence(
-        origin="manifest",
-        spec_id=whole_source.spec_id,
-        has_data=True,
-        entities=whole_source.entities,
-    )
-    assert _entity_codes(check_evidence(whole, retrieved, approved=whole_source)) == []
-    unread = whole_on_source(stated, part, whole_source, summed=False)
-    assert errors(check_evidence(unread, evidence_from_source(whole_source)))
-
-
-def _us_provider_pair(
-    part_entity: Entity,
-    part_bound: list[str],
-    edit: Callable[[dict[str, Any]], None],
+def _fixture_sources(
+    name: str,
     *,
-    recipients: Sequence[dict[str, Any]] = (),
-) -> tuple[SelectedSource, DatasetRequirement]:
-    """US bilateral ODA over its whole over every provider, the part naming the
-    United States, bound to `country/USA`, and `part_entity`, which its search answer
-    bound to `part_bound`, its source binding `recipients` too, and the whole's block
-    edited by `edit`: the whole's source and the whole as it reads there."""
-    recorded = _SEARCH_WHOLES["us_bilateral"]
+    part_rows: Sequence[tuple[str, Sequence[str]]] = (),
+    part_edit: Callable[[dict[str, Any]], None] | None = None,
+    whole_edit: Callable[[dict[str, Any]], None] | None = None,
+    whole_from_part: bool = False,
+) -> tuple[SelectedSource, SelectedSource]:
+    """The part's and the whole's sources of the recorded pair `name`
+    (`share_wholes_through_search.json`), the part's search binding each name of
+    `part_rows` to its refs, each block edited where an edit is given. With
+    `whole_from_part`, the whole's block starts from the part's, under the whole's
+    spec_id, for a whole the recording holds no answer for."""
+    recorded = _SEARCH_WHOLES[name]
     part_block = json.loads(json.dumps(recorded["part"]))
+    whole_block = json.loads(json.dumps(recorded["part" if whole_from_part else "whole"]))
+    whole_block["spec_id"] = recorded["whole"]["spec_id"]
     part_block["_bound_refs"] = [
-        {"identity": "United States", "text": "United States", "refs": ["country/USA"]},
-        {"identity": part_entity.name, "text": part_entity.name, "refs": part_bound},
+        {"identity": text, "text": text, "refs": list(refs)} for text, refs in part_rows
     ]
-    if part_entity.role == "recipient" and not recipients:
-        recipients = [{"ref": part_bound[0], "label": part_entity.name, "role": "destination"}]
-    part_block["resolved"]["entities"] += list(recipients)
-    whole_block = json.loads(json.dumps(recorded["whole"]))
-    edit(whole_block)
-    period = Period(start=2010, end=2023)
-    part = DatasetRequirement(
-        id="part",
-        decision_ids=["measure"],
-        measure="US bilateral ODA",
-        entities=[Entity(name="United States", role="donor"), part_entity],
-        period=period,
-    )
+    if part_edit is not None:
+        part_edit(part_block)
+    if whole_edit is not None:
+        whole_edit(whole_block)
+    return source_from_spec_block(part_block), source_from_spec_block(whole_block)
+
+
+def _whole_read(
+    part: DatasetRequirement,
+    axis: str,
+    whole_source: SelectedSource,
+    part_source: SelectedSource,
+) -> DatasetRequirement:
+    """The whole of `part` over every `axis`, as it reads on `whole_source`."""
     stated = DatasetRequirement(
         id="whole",
         decision_ids=["measure"],
-        measure="US ODA",
-        period=period,
-        whole_of=WholeOf(part="part", axis="provider"),
+        measure="total",
+        period=part.period,
+        whole_of=WholeOf(part=part.id, axis=axis),
     )
-    part_source = source_from_spec_block(part_block)
-    whole_source = source_from_spec_block(whole_block)
-    whole = whole_on_source(stated, part, whole_source, summed=False, part_source=part_source)
-    return whole_source, whole
+    return whole_on_source(stated, part, whole_source, summed=False, part_source=part_source)
+
+
+def _dataset_named(*entities: Entity, period: tuple[int, int] = (2010, 2023)) -> DatasetRequirement:
+    return DatasetRequirement(
+        id="part",
+        decision_ids=["measure"],
+        measure="ODA",
+        entities=entities,
+        period=Period(start=period[0], end=period[1]),
+    )
+
+
+@pytest.mark.parametrize(
+    ("rows", "graph"),
+    [
+        pytest.param((("United States", ("country/USA",)),), {}, id="bound-row"),
+        # The graph's resolve door: the part's search bound no row.
+        pytest.param((), {"united states": "country/USA"}, id="graph-door"),
+    ],
+)
+def test_a_whole_reads_its_parts_names_on_the_view_of_its_source(
+    rows: tuple[tuple[str, tuple[str, ...]], ...], graph: dict[str, str]
+) -> None:
+    """US bilateral ODA over its whole over every provider: Search labels the whole's
+    donor "United States of America" and binds no row for it, so the planner's
+    "United States" is met on the whole's source viewed with its part's name facts,
+    and missing on the whole's source alone."""
+    part_source, whole_source = _fixture_sources("us_bilateral", part_rows=rows)
+    part_source = part_source.model_copy(update={"entity_refs": graph})
+    part = _dataset_named(Entity(name="United States", role="donor"))
+    whole = _whole_read(part, "provider", whole_source, part_source)
+    view = named_by_part(whole_source, part_source, opened=None)
+
+    assert not errors(check_evidence(whole, evidence_from_source(view)))
+    assert [f.code for f in errors(check_evidence(whole, evidence_from_source(whole_source)))] == [
+        EvidenceIssueCode.ENTITY_MISSING
+    ]
+
+
+def test_a_whole_reads_the_words_of_the_part_it_is_paired_with() -> None:
+    """One whole source and the same part spec found by two searches: one wrote "US",
+    the other "United States". The whole meets "United States" on the view with the
+    second part's facts, and not with the first's, so a name follows the search the
+    plan reads, which a row written into the whole's source once would not."""
+    part_us, whole_source = _fixture_sources("us_bilateral", part_rows=[("US", ["country/USA"])])
+    part_named, _ = _fixture_sources("us_bilateral", part_rows=[("United States", ["country/USA"])])
+    assert part_us.spec_id == part_named.spec_id
+    part = _dataset_named(Entity(name="United States", role="donor"))
+    whole = _whole_read(part, "provider", whole_source, part_named)
+
+    def missing(part_source: SelectedSource) -> list[EvidenceIssueCode]:
+        view = named_by_part(whole_source, part_source, opened=None)
+        return [f.code for f in errors(check_evidence(whole, evidence_from_source(view)))]
+
+    assert missing(part_named) == []
+    assert missing(part_us) == [EvidenceIssueCode.ENTITY_MISSING]
+
+
+def _g7_recipient_whole(block: dict[str, Any], *, total: bool = False) -> None:
+    """`block`, the part's block of G7 aid to Kenya, as its whole over every
+    recipient: developing countries' total on the recipient side, the G7 labelled
+    "Group of Seven", read as its members, or as its published total where `total`."""
+    resolved = block["resolved"]
+    resolved["entities"] = [
+        *(e for e in resolved["entities"] if e["role"] != "destination"),
+        {
+            "ref": "DACDevelopingCountries",
+            "label": "developing countries (DAC)",
+            "role": "destination",
+        },
+    ]
+    resolved["entity_groups"]["origin"]["label"] = "Group of Seven"
+    if not total:
+        _g7_as_members(block)
+    block["definition"]["identity"]["entities"]["destination"] = ["DACDevelopingCountries"]
+
+
+def _g7_as_members(block: dict[str, Any]) -> None:
+    """`block`, G7 aid to Kenya, reading the Group of Seven as its members."""
+    resolved = block["resolved"]
+    group = resolved["entity_groups"]["origin"]
+    group.pop("total", None)
+    resolved["entities"] = [
+        *(e for e in resolved["entities"] if e["role"] != "origin"),
+        *(
+            {"ref": ref, "label": ref.removeprefix("country/"), "role": "origin"}
+            for ref in group["members"]
+        ),
+    ]
+    block["definition"]["identity"]["entities"]["origin"] = list(group["members"])
+
+
+def test_a_recipient_whole_reads_the_set_its_part_named() -> None:
+    """G7 aid to Kenya over its whole over every recipient, the part's search binding
+    "G7" to the Group of Seven: on the view, "G7" names the whole's "Group of Seven",
+    its members resolve, and the whole still names it "G7"; on the whole's source
+    alone it names nothing."""
+    part_source, whole_source = _fixture_sources(
+        "g7_to_kenya",
+        part_rows=[("G7", ["GroupOfSeven"]), ("Kenya", ["country/KEN"])],
+        part_edit=_g7_as_members,
+        whole_edit=_g7_recipient_whole,
+        whole_from_part=True,
+    )
+    g7 = Entity(name="G7", role="donor")
+    part = _dataset_named(g7, Entity(name="Kenya", role="recipient"), period=(2019, 2019))
+    whole = _whole_read(part, "recipient", whole_source, part_source)
+    view = named_by_part(whole_source, part_source, opened=whole_side("recipient"))
+
+    group = resolve_group(g7, view)
+    assert group is not None and group.label == "Group of Seven"
+    assert g7 in whole.entities
+    assert named_members(g7, view)
+    assert resolve_group(g7, whole_source) is None
+    assert not named_members(g7, whole_source)
+
+
+def test_a_whole_reading_a_set_as_its_total_refuses_a_part_asking_its_members() -> None:
+    """G7 aid to Kenya asked member by member, over a recipient whole binding the
+    Group of Seven's published total: on the view the whole's own set decides, so the
+    check reports `group_read_as_total`; on the whole's source alone the name is
+    missing."""
+    part_source, whole_source = _fixture_sources(
+        "g7_to_kenya",
+        part_rows=[("G7", ["GroupOfSeven"])],
+        whole_edit=lambda block: _g7_recipient_whole(block, total=True),
+        whole_from_part=True,
+    )
+    part = _dataset_named(
+        Entity(name="G7", role="donor", members=True),
+        Entity(name="Kenya", role="recipient"),
+        period=(2019, 2019),
+    )
+    whole = _whole_read(part, "recipient", whole_source, part_source)
+    view = named_by_part(whole_source, part_source, opened=whole_side("recipient"))
+
+    codes = [f.code for f in errors(check_evidence(whole, evidence_from_source(view)))]
+    raw = [f.code for f in errors(check_evidence(whole, evidence_from_source(whole_source)))]
+
+    assert EvidenceIssueCode.GROUP_READ_AS_TOTAL in codes
+    assert EvidenceIssueCode.GROUP_READ_AS_TOTAL not in raw
+    assert EvidenceIssueCode.ENTITY_MISSING in raw
+
+
+def test_a_whole_carries_no_part_name_on_the_side_it_opens() -> None:
+    """G7 aid to Africa over its whole over every recipient, the whole's source edited
+    to state Africa's total among its recipients: the part's "Africa" names nothing
+    on the view, since the whole opens the recipient side, and would with no side
+    opened."""
+
+    def whole_edit(block: dict[str, Any]) -> None:
+        _g7_recipient_whole(block)
+        block["resolved"]["entities"].append(
+            {"ref": "DACAfrica", "label": "Africa (DAC)", "role": "destination"}
+        )
+
+    part_source, whole_source = _fixture_sources(
+        "g7_to_kenya",
+        part_rows=[("G7", ["GroupOfSeven"]), ("Africa", ["DACAfrica"])],
+        whole_edit=whole_edit,
+        whole_from_part=True,
+    )
+    africa = Entity(name="Africa", role="recipient")
+
+    opened = named_by_part(whole_source, part_source, opened=whole_side("recipient"))
+    unopened = named_by_part(whole_source, part_source, opened=None)
+
+    assert resolve_name(africa, opened) is None
+    assert resolve_name(africa, unopened) is not None
 
 
 _CONGOS = [
@@ -10348,115 +10468,32 @@ _CONGOS = [
 ]
 
 
-@pytest.mark.parametrize(
-    ("part_ref", "expected"),
-    [
-        # The whole's own row names the other Congo; the part's decides.
-        pytest.param("country/COD", [], id="part-binds-cod"),
-        # Compiled again after the part's search answer bound "Congo" to the other one.
-        pytest.param("country/COG", [EvidenceIssueCode.ENTITY_NO_SERIES], id="part-binds-cog"),
-    ],
-)
-def test_a_whole_reads_a_name_as_the_party_its_part_resolves_now(
-    part_ref: str, expected: list[EvidenceIssueCode]
-) -> None:
-    """A part naming "Congo" as a recipient, both Congos among its recipients and the
-    whole's, the whole's own search answer binding "Congo" to the Republic of the
-    Congo, and a retrieval holding the Democratic Republic of the Congo alone: the
-    whole reads "Congo" pinned to the party the part's source resolves, so it is met
-    where the part binds the Democratic Republic, whatever the whole's own row says,
-    and missed where the part binds the Republic, as reading the whole again after
-    the part's resolution changes reads it. Neither reading is ambiguous at compile."""
+def test_a_whole_reads_a_name_as_the_part_it_is_paired_with_binds_it_now() -> None:
+    """US aid to "Congo" over its whole over every provider, both Congos among the
+    whole's recipients: paired with a part whose search bound "Congo" to the Republic
+    of the Congo, the whole reads that one; paired again with a part bound to the
+    Democratic Republic, it reads that one and holds no ref of the first."""
 
-    def edit(block: dict[str, Any]) -> None:
+    def recipients(block: dict[str, Any]) -> None:
         block["resolved"]["entities"] += _CONGOS
-        block["_bound_refs"] = [{"identity": "Congo", "text": "Congo", "refs": ["country/COG"]}]
 
     congo = Entity(name="Congo", role="recipient")
-    whole_source, whole = _us_provider_pair(congo, [part_ref], edit, recipients=_CONGOS)
-    assert congo.model_copy(update={"dcid": part_ref}) in whole.entities
-    assert not errors(check_evidence(whole, evidence_from_source(whole_source)))
-    retrieved = RetrievalEvidence(
-        origin="manifest",
-        spec_id=whole_source.spec_id,
-        has_data=True,
-        entities=tuple(e for e in whole_source.entities if e.ref != "country/COG"),
-    )
+    resolved = {}
+    views = {}
+    for ref in ("country/COG", "country/COD"):
+        part_source, whole_source = _fixture_sources(
+            "us_bilateral",
+            part_rows=[("Congo", [ref])],
+            part_edit=recipients,
+            whole_edit=recipients,
+        )
+        views[ref] = named_by_part(whole_source, part_source, opened=None)
+        found = resolve_name(congo, views[ref])
+        resolved[ref] = None if found is None else found.ref
 
-    findings = check_evidence(whole, retrieved, approved=whole_source)
-
-    assert _entity_codes(findings) == expected
-
-
-def test_a_whole_does_not_read_a_name_as_a_party_on_another_side() -> None:
-    """A part naming the United States as a donor and as a recipient over a whole
-    whose source binds the US only as the donor: the donor is pinned to it, and the
-    recipient, which no recipient of the whole answers, is not, so it is missing."""
-    recipient = Entity(name="United States", role="recipient")
-    whole_source, whole = _us_provider_pair(recipient, ["country/USA"], lambda block: None)
-
-    findings = errors(check_evidence(whole, evidence_from_source(whole_source)))
-
-    assert [(e.role, e.dcid) for e in whole.entities] == [
-        ("donor", "country/USA"),
-        ("recipient", None),
-    ]
-    assert [(f.code, f.required) for f in findings] == [
-        (EvidenceIssueCode.ENTITY_MISSING, "United States")
-    ]
-
-
-def test_a_donor_whole_reads_its_own_party_on_the_side_it_opens() -> None:
-    """US bilateral ODA to Kenya over its whole over every donor, the whole's source
-    edited to bind the US among the donors it counts, and a retrieval holding no US
-    series: the whole names the donors its source binds on the side it opens, not
-    the part's donor, so the part's name is never read there, and Kenya, which it
-    keeps, is pinned as the part resolves it."""
-    recorded = _SEARCH_WHOLES["us_bilateral_to_kenya"]
-    part_block = json.loads(json.dumps(recorded["part"]))
-    part_block["_bound_refs"] = [
-        {"identity": "United States", "text": "United States", "refs": ["country/USA"]}
-    ]
-    whole_block = json.loads(json.dumps(recorded["whole"]))
-    whole_block["resolved"]["entities"].append(
-        {"ref": "country/USA", "label": "United States of America", "role": "origin"}
-    )
-    whole_block["definition"]["identity"]["entities"]["origin"].append("country/USA")
-    part = DatasetRequirement(
-        id="part",
-        decision_ids=["measure"],
-        measure="US aid to Kenya",
-        entities=[
-            Entity(name="United States", role="donor"),
-            Entity(name="Kenya", role="recipient"),
-        ],
-        period=Period(start=2019, end=2019),
-    )
-    stated = DatasetRequirement(
-        id="whole",
-        decision_ids=["measure"],
-        measure="aid to Kenya",
-        period=Period(start=2019, end=2019),
-        whole_of=WholeOf(part="part", axis="donor"),
-    )
-    part_source = source_from_spec_block(part_block)
-    whole_source = source_from_spec_block(whole_block)
-    whole = whole_on_source(stated, part, whole_source, summed=False, part_source=part_source)
-    assert Entity(name="United States", role="donor") not in whole.entities
-    assert Entity(name="Kenya", role="recipient", dcid="country/KEN") in whole.entities
-    retrieved = RetrievalEvidence(
-        origin="manifest",
-        spec_id=whole_source.spec_id,
-        has_data=True,
-        entities=tuple(e for e in whole_source.entities if e.ref != "country/USA"),
-    )
-
-    findings = check_evidence(whole, retrieved, approved=whole_source)
-
-    assert not errors(check_evidence(whole, evidence_from_source(whole_source)))
-    assert [(f.code, f.required) for f in findings if f.code in _ENTITY_CODES] == [
-        (EvidenceIssueCode.ENTITY_NO_SERIES, "United States of America")
-    ]
+    assert resolved == {"country/COG": "country/COG", "country/COD": "country/COD"}
+    refs = {r for row in views["country/COD"].bound_refs for r in row.refs}
+    assert "country/COG" not in refs
 
 
 def test_a_part_with_no_scope_record_is_named_by_its_option_on_the_wholes_record() -> None:
