@@ -101,8 +101,10 @@ from analysis_mcp.server import PUBLIC_SHAPES as ANALYSIS_PUBLIC_SHAPES
 from analysis_mcp.server import healthz as analysis_healthz
 from analysis_mcp.server import mcp as analysis_mcp
 from common.auth import BearerTokenVerifier
+from common.call_limit import EXTERNAL_CALL_LIMIT_S
 from common.caller import MCP_CLIENT_NAME_LIMIT, current_caller, current_user_agent
 from common.echoed_text import truncate_value
+from common.logging import JSON_FIELDS
 from common.materialisation import get_store as get_frame_store
 from common.public_shape import PublicShape
 from common.refusal import (
@@ -114,12 +116,7 @@ from common.refusal import (
 )
 from common.telemetry import EventLevel, RequestSpan, current_trace_id, use_request_span
 from common.uri_redaction import loggable_uri
-from data_mcp.deadline import (
-    DEADLINE_RETRY_AFTER_S,
-    EXTERNAL_CALL_BUDGET,
-    EXTERNAL_CALL_LIMIT_S,
-    use_call_budget,
-)
+from data_mcp.deadline import DEADLINE_RETRY_AFTER_S, EXTERNAL_CALL_BUDGET, use_call_budget
 from data_mcp.definition_registration import register_held_definition
 from data_mcp.definition_store import get_store as get_definition_store
 from data_mcp.definition_writes import SPEC_ID_PATTERN
@@ -432,16 +429,17 @@ class _RequestLog(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
+        raw_name = context.message.name[:_CLIENT_TEXT_LIMIT]
         name = _loggable_tool_name(context.message.name)
         subject = f"tool={name}"
         with use_request_span(f"combined mcp tools/call {name}") as span:
             try:
                 result = await call_next(context)
             except Exception as exc:
-                _log_request(context, subject=subject, outcome=type(exc).__name__)
+                _log_request(context, subject=subject, outcome=type(exc).__name__, tool=raw_name)
                 raise
             outcome = _record_refusal(span, result) if result.is_error else "ok"
-            _log_request(context, subject=subject, outcome=outcome)
+            _log_request(context, subject=subject, outcome=outcome, tool=raw_name)
             return result
 
     @override
@@ -544,8 +542,18 @@ _TOOL_NAME = re.compile(rf"[A-Za-z0-9_.\-]{{1,{_CLIENT_TEXT_LIMIT}}}")
 
 
 def _log_request(
-    context: MiddlewareContext[Any], *, subject: str, outcome: str, uri: str | None = None
+    context: MiddlewareContext[Any],
+    *,
+    subject: str,
+    outcome: str,
+    uri: str | None = None,
+    tool: str | None = None,
 ) -> None:
+    """Log one call. The message is the line `parse_mcp_line.sql` reads. The
+    record also carries each key of it as a `JSON_FIELDS` field of the same name,
+    with the value decoded (a string unquoted, an absent value `None`). `tool` is
+    the name cut to `_CLIENT_TEXT_LIMIT` characters. It is `None` outside a tool call,
+    and then the `tool` field is left out."""
     fastmcp_context = context.fastmcp_context
     request_context = fastmcp_context.request_context if fastmcp_context else None
     try:
@@ -559,16 +567,32 @@ def _log_request(
     else:
         client_info = session.client_params.client_info if session.client_params else None
         capabilities = session.client_capabilities
+    revision = request_context.protocol_version if request_context else None
+    caller = current_caller()
+    trace_id = current_trace_id()
+    host = _host_values(client_info=client_info, capabilities=capabilities)
+    user_agent = current_user_agent()
+    fields: dict[str, Any] = {
+        **({"tool": tool} if tool is not None else {}),
+        "outcome": outcome,
+        "revision": revision,
+        "caller": caller,
+        "trace_id": trace_id,
+        **host,
+        **({"uri": uri[:_CLIENT_TEXT_LIMIT]} if uri is not None else {}),
+        "user_agent": user_agent,
+    }
     logger.info(
         "combined mcp call %s outcome=%s revision=%s caller=%s trace_id=%s %s%s user_agent=%s",
         subject,
         outcome,
-        request_context.protocol_version if request_context else None,
-        current_caller(),
-        current_trace_id(),
-        _host_fields(client_info=client_info, capabilities=capabilities),
+        revision,
+        caller,
+        trace_id,
+        _format_host(host),
         f" uri={_client_text(uri)}" if uri is not None else "",
         _user_agent(),
+        extra={JSON_FIELDS: fields},
     )
 
 
@@ -595,7 +619,17 @@ def _host_fields(
     client_info: mt.Implementation | None,
     capabilities: mt.ClientCapabilities | None,
 ) -> str:
-    """The `client`, `client_version`, `views` and `view_mime_types` fields.
+    """The `client`, `client_version`, `views` and `view_mime_types` message keys."""
+    return _format_host(_host_values(client_info=client_info, capabilities=capabilities))
+
+
+def _host_values(
+    *,
+    client_info: mt.Implementation | None,
+    capabilities: mt.ClientCapabilities | None,
+) -> dict[str, Any]:
+    """The `client`, `client_version`, `views` and `view_mime_types` values, cut
+    to their limits and not yet quoted; absent ones are `None`.
 
     `views` is `view_support(capabilities)`.
     `view_mime_types` lists what the client put under the MCP Apps
@@ -604,16 +638,24 @@ def _host_fields(
     settings = (capabilities.extensions or {}).get(UI_EXTENSION_ID) if capabilities else None
     mime_types = settings.get("mimeTypes") if isinstance(settings, dict) else None
     listed = (
-        json.dumps([str(mime)[:_CLIENT_TEXT_LIMIT] for mime in mime_types[:_MIME_TYPES_LIMIT]])
+        [str(mime)[:_CLIENT_TEXT_LIMIT] for mime in mime_types[:_MIME_TYPES_LIMIT]]
         if isinstance(mime_types, list)
         else None
     )
-    name = _client_text(client_info.name) if client_info else None
-    version = _client_text(client_info.version) if client_info else None
-    return (
-        f"client={name} client_version={version} views={view_support(capabilities)} "
-        f"view_mime_types={listed}"
-    )
+    return {
+        "client": client_info.name[:_CLIENT_TEXT_LIMIT] if client_info else None,
+        "client_version": client_info.version[:_CLIENT_TEXT_LIMIT] if client_info else None,
+        "views": view_support(capabilities),
+        "view_mime_types": listed,
+    }
+
+
+def _format_host(host: dict[str, Any]) -> str:
+    """`host` (from `_host_values`) as the message keys, text as JSON strings."""
+    name = None if host["client"] is None else json.dumps(host["client"])
+    version = None if host["client_version"] is None else json.dumps(host["client_version"])
+    listed = None if host["view_mime_types"] is None else json.dumps(host["view_mime_types"])
+    return f"client={name} client_version={version} views={host['views']} view_mime_types={listed}"
 
 
 def _user_agent() -> str | None:

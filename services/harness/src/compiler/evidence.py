@@ -77,6 +77,7 @@ from typing import Literal, NamedTuple, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
+from common.breakdown_labels import Cell
 from common.price_basis import price_basis_reading
 from data_mcp.dcid import bare_dcid, is_dcid
 from data_mcp.manifest import Manifest
@@ -110,7 +111,11 @@ from planner.workflow import (
 from pydantic import ConfigDict, Field, JsonValue, ValidationError, field_validator
 
 from compiler.frame_columns import columns_on_axes
-from compiler.sources import pinned_stat_var, source_constraint_matches
+from compiler.sources import (
+    identity_side,
+    pinned_stat_var,
+    source_constraint_matches,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1437,41 +1442,103 @@ def _scope_issues(
 
     The identity is what `spec_id` hashes, so what it binds is what a
     retrieval against that spec can return. Only what it actually states is
-    compared: a member it omits says nothing.
+    compared: a member it omits, or an axis its `entities` leaves unbound
+    (`_identity_entities`), says nothing. An entity the requirement names is
+    compared with the refs the identity binds on the entity's own axis, the
+    axis its resolved role names (`compiler.sources.identity_side`), and with
+    no other axis's. A named entity on an axis the identity leaves unbound,
+    such as a recipient beside a donor the identity binds, is checked against
+    the source's entities alone (`_entity_findings`). Once a named entity
+    resolves, the refs the identity binds on axes where the requirement names
+    no one, such as the recipients beside a donor it names, are bound wider
+    than the requirement (`SCOPE_ENTITIES_WIDER`). With no name resolved, as
+    at run time when a manifest's entities carry no label, nothing is compared.
     """
     if not evidence.identity:
         return []
     issues: list[EvidenceIssue] = []
-    bound = _identity_refs(evidence.identity.get("entities"))
+    bound = _identity_entities(evidence.identity.get("entities"))
     if bound is not None:
-        named = named_refs(requirement.entities, evidence)
-        issues.extend(_scope_entity_issues(requirement, named, bound))
+        named = _named_axes(requirement, evidence)
+        for axis in sorted(named.keys() & bound.keys()):
+            issues.extend(_scope_entity_issues(requirement, named[axis], bound[axis]))
+        unnamed = sorted(bound.keys() - named.keys())
+        if named and unnamed:
+            issues.append(_unnamed_axes_issue(requirement, {axis: bound[axis] for axis in unnamed}))
     requested = evidence.identity.get("requested_window")
     if isinstance(requested, dict):
         issues.extend(_scope_window_issues(requirement, requested))
     return issues
 
 
-def _identity_refs(entities: JsonValue) -> set[str] | None:
-    """The refs an identity's `entities` binds, across every role; `None` when it states none.
+def _named_axes(
+    requirement: DatasetRequirement, evidence: RetrievalEvidence
+) -> dict[str, set[str]]:
+    """The refs `requirement` names on each identity axis, read off the axis of each
+    member of the source an entity names (`named_members`, `compiler.sources.identity_side`)."""
+    named: dict[str, set[str]] = {}
+    for entity in requirement.entities:
+        for one in named_members(entity, evidence):
+            named.setdefault(identity_side(one.role), set()).add(one.ref)
+    return named
 
-    The identity's keys are graph properties, not the source's role columns,
-    so only the refs are compared and never the roles. An empty map, or one
-    with no list under any key, states none exactly as an absent member
-    does: data-mcp writes `entities: {}` to clear the filter, which is an
-    unfiltered definition wider than the requirement, not one binding nothing.
+
+def _identity_entities(entities: JsonValue) -> dict[str, set[str]] | None:
+    """The refs an identity's `entities` binds, by the axis each key names
+    (`compiler.sources.identity_side`); `None` when it states none.
+
+    Search keys an identity by axis (`observationAbout`, `origin`,
+    `destination`) and the mint by the caller's graph role (`creditor`,
+    `financingRecipient`), so each key is read as the axis it names, and a
+    key outside that set, such as a declared `reporter` role, as an axis of
+    its own. An axis no key binds a ref on is one the definition does not
+    bind, and the source states among its entities what Search reads the
+    side as. A required entity sitting on such an axis is checked against
+    those entities (`_entity_findings`), so the scope check says nothing
+    about it. An empty map, or one with no ref under any key, states none
+    exactly as an absent member does: data-mcp writes `entities: {}` to clear
+    the filter, which is an unfiltered definition wider than the requirement,
+    not one binding nothing. dfo-apis refuses a role with an empty list at
+    Search and at the mint alike, so a key with no ref binds nothing.
     """
     if not isinstance(entities, dict):
         return None
-    lists = [values for values in entities.values() if isinstance(values, list)]
-    if not lists:
-        return None
-    return {value for values in lists for value in values if isinstance(value, str)}
+    bound: dict[str, set[str]] = {}
+    for key, values in entities.items():
+        refs = (
+            {value for value in values if isinstance(value, str)}
+            if isinstance(values, list)
+            else set()
+        )
+        if refs:
+            bound.setdefault(identity_side(key), set()).update(refs)
+    return bound or None
+
+
+def _unnamed_axes_issue(
+    requirement: DatasetRequirement, bound: Mapping[str, set[str]]
+) -> EvidenceIssue:
+    """The finding on the refs `bound` an identity binds on each axis where the
+    requirement names no one. The definition is bound wider than the requirement."""
+    refs = sorted({ref for refs in bound.values() for ref in refs})
+    return EvidenceIssue(
+        code=EvidenceIssueCode.SCOPE_ENTITIES_WIDER,
+        severity=Severity.WARNING,
+        requirement_id=requirement.id,
+        detail=(
+            f"the definition also binds {refs!r} on {sorted(bound)!r}, "
+            "where the requirement names no one"
+        ),
+        found=refs,
+        required=[],
+    )
 
 
 def _scope_entity_issues(
     requirement: DatasetRequirement, wanted: set[str], bound: set[str]
 ) -> list[EvidenceIssue]:
+    """The findings on the refs `wanted` the requirement names on one axis, against
+    the refs `bound` the identity binds there."""
     # A required entity is known by name; the refs it binds to are the ones
     # it names (`named_members`), a set's members included. One naming none
     # is already reported as missing or ambiguous, and has no ref to compare.
@@ -2377,17 +2444,6 @@ def _membership_unverified(
 
 
 # The findings that name one retrieved series (`EvidenceIssue.entities`).
-# A frame's decoded code axis is a `stat_var_<code_system>` column holding the code's label, so
-# an entity under such a role has its label for a ref, not a dcid (dfo-apis
-# `materialise.render._KEPT_AXIS_PREFIX`; `decode_code_systems` in `datasets_api.capabilities`).
-_LABEL_ROLE_PREFIX = "stat_var_"
-
-
-def _names_itself(entity: SeriesEntity) -> bool:
-    """Whether `entity`'s ref is its own label: it sits in a decoded code axis's column."""
-    return entity.role.startswith(_LABEL_ROLE_PREFIX)
-
-
 _SERIES_CODES = frozenset({EvidenceIssueCode.WINDOW_SHORT, EvidenceIssueCode.COVERAGE_GAPS})
 
 
@@ -2405,51 +2461,47 @@ def series_rank(finding: EvidenceIssue) -> tuple[bool, float, str, tuple[str, ..
     return size is None, -(size or 0.0), finding.stat_var or "", refs
 
 
-def unlabelled_series_refs(findings: Iterable[EvidenceIssue], *, limit: int) -> list[str]:
-    """The dcids, at most `limit`, of the entities the series findings among
-    `findings` name with no label, the largest series' first (`series_rank`).
+def unlabelled_series_cells(findings: Iterable[EvidenceIssue], *, limit: int) -> list[Cell]:
+    """The `(role, dcid)` cells, at most `limit`, of the entities the series
+    findings among `findings` name with no label, the largest series' first
+    (`series_rank`).
 
-    An entity under a label column (`_names_itself`, a breakdown's sector) keeps its ref as
-    its label and takes no slot, even where that label equals a held dcid. Any other ref is
-    looked up only if the nodes route accepts it once its `dcid:` marker is stripped.
+    A ref is looked up only if the nodes route accepts it once its `dcid:`
+    marker is stripped. A breakdown cell (`stat_var_crsPurpose`) holds the
+    code's dcid (dfo-apis `datasets_api.decode`), and its role says which
+    axis's code it names (`common.breakdown_labels.code_label`).
 
     An answer names the largest series that fall short
     (`harness.graph.answer`), so a lookup bounded this way still labels the
     series it names.
     """
-    refs: dict[str, None] = {}
+    cells: dict[Cell, None] = {}
     for finding in sorted(
         (one for one in findings if one.code in _SERIES_CODES and one.entities), key=series_rank
     ):
         for entity in finding.entities:
-            if len(refs) == limit:
-                return list(refs)
-            if (
-                entity.label is None
-                and not _names_itself(entity)
-                and is_dcid(dcid := bare_dcid(entity.ref))
-            ):
-                refs.setdefault(dcid)
-    return list(refs)
+            if len(cells) == limit:
+                return list(cells)
+            if entity.label is None and is_dcid(dcid := bare_dcid(entity.ref)):
+                cells.setdefault((entity.role, dcid))
+    return list(cells)
 
 
 def with_series_labels(
-    findings: Iterable[EvidenceIssue], labels: Mapping[str, str]
+    findings: Iterable[EvidenceIssue], labels: Mapping[Cell, str]
 ) -> list[EvidenceIssue]:
-    """`findings` with each series entity that has no label labelled by its dcid in `labels`
-    (the ref without its `dcid:` marker)."""
+    """`findings` with each series entity that has no label labelled by its
+    `(role, dcid)` cell in `labels` (`unlabelled_series_cells`)."""
+
+    def labelled(entity: SeriesEntity) -> SeriesEntity:
+        label = labels.get((entity.role, bare_dcid(entity.ref)))
+        if entity.label is not None or label is None:
+            return entity
+        return entity.model_copy(update={"label": label})
+
     return [
         finding.model_copy(
-            update={
-                "entities": tuple(
-                    entity
-                    if entity.label is not None
-                    or _names_itself(entity)
-                    or bare_dcid(entity.ref) not in labels
-                    else entity.model_copy(update={"label": labels[bare_dcid(entity.ref)]})
-                    for entity in finding.entities
-                )
-            }
+            update={"entities": tuple(labelled(entity) for entity in finding.entities)}
         )
         if finding.code in _SERIES_CODES
         else finding
@@ -2492,7 +2544,7 @@ def _series_issues(
     gives its ref, and its largest absolute value (`EvidenceIssue.magnitude`), so
     an answer can say whose series falls short and name the largest. The
     executor labels the entities `approved` names none for, such as the
-    members of an open population (`unlabelled_series_refs`).
+    members of an open population (`unlabelled_series_cells`).
     """
     if evidence.series is None or not evidence.series.num_rows:
         # `None` (the manifest carries no statistics at all) and a table with
@@ -2819,9 +2871,7 @@ def _series_off_period(
                 SeriesEntity(
                     role=entity["role"],
                     ref=entity["ref"],
-                    label=None
-                    if entity["role"].startswith(_LABEL_ROLE_PREFIX)
-                    else labels.get(bare_dcid(entity["ref"])),
+                    label=labels.get(bare_dcid(entity["ref"])),
                 )
                 for entity in row["entities"]
             ),

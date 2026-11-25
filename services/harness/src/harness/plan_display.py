@@ -66,6 +66,8 @@ from compiler.shapes import breakdown_level
 from compiler.sources import stat_var_count
 from planner.parties import across_party, flow_side, party_role, role_party, singular
 from planner.phrasing import (
+    CONSTANT_PRICES,
+    CURRENT_PRICES,
     among_phrase,
     datasets_of,
     denominator_scope_phrase,
@@ -98,9 +100,9 @@ from planner.plan import (
     SumOfRequirement,
     Unit,
     answering_results,
-    authored,
     authored_text,
     copy_origins,
+    covered,
     dataset_of,
     frame_shapes,
     inputs_of,
@@ -108,6 +110,7 @@ from planner.plan import (
     is_scope_choice,
     is_search_pin,
     side_entities,
+    unsplit,
 )
 from planner.records import (
     Breakdown,
@@ -158,16 +161,19 @@ def shown_plan(plan: Plan) -> Plan:
     The plan as stored runs a dataset read from its first year beside a copy
     of each step between it and its rolling-start readers
     (`Plan.rolling_copies`). The card, the plan record and the planner's
-    digest name the model's steps only. This is `planner.plan.authored`
+    digest name the model's steps only. This is `planner.plan.unsplit`
     without the copies' operations, workflow steps, evidence bindings and
     the sources compiled for those bindings, and with a warning that names
-    a copy naming its origin, once.
+    a copy naming its origin, once. It keeps the aggregates `propose_plan`
+    added to sum a whole (`Plan.whole_sums`), each a row of its own; the
+    planner's digest leaves them out
+    (`harness.planner_adapter._as_authored`).
 
     The result is a view for reading and is not validated. Shapes, which
     need the first years, are read off `plan` itself (`answer_scopes`).
     """
     origins = copy_origins(plan.rolling_copies)
-    shown = authored(plan)
+    shown = unsplit(plan)
     if not origins:
         return shown
     update: dict[str, object] = {}
@@ -628,7 +634,7 @@ def _who(
     region = _governing(requirement, plan).get("region")
     source = _source(requirement.id, plan, sources)
     sides: dict[str | None, list[str]] = {"giving": [], "receiving": [], None: []}
-    for entity in requirement.entities:
+    for entity in covered(requirement, plan).entities:
         side = flow_side(entity.role) if entity.role else None
         name = region.chosen if entity.members and region is not None else entities_phrase([entity])
         sides[side].append(name)
@@ -1672,10 +1678,29 @@ def switchable_decision(decision: Decision) -> bool:
     writes (`planner.plan.is_code_written`) are not: a search pin's measure
     and a scope choice switch through Search (`choice_id`), and one
     qualifying the answer (`Decision.caveat`) reaches the card only as a
-    caveat.
+    caveat. Nor is the prices of a whole unit a unit answer chose
+    (`_states_whole_unit`): the row of a unit question's whole unit
+    (`submission.prices_choice.unit_slot`) offers the units its parts convert
+    into (`harness.studio_translate`), and a row a part's whole unit states
+    under its own prices slot offers no other option.
     """
-    return decision.fixes is not None and (
-        decision.fixes.prices is not None or not is_code_written(decision)
+    return (
+        decision.fixes is not None
+        and not _states_whole_unit(decision)
+        and (decision.fixes.prices is not None or not is_code_written(decision))
+    )
+
+
+def _states_whole_unit(decision: Decision) -> bool:
+    """Whether `decision` is the prices a unit answer chose for a part as a
+    whole unit: it fixes the part's prices, as only that decision does
+    (`planner.plan.is_code_written`), and its `chosen`
+    (`submission.prices_choice.PricesChoice.words`) names the unit's
+    currency, which the bare prices labels of a choice with no unit never do."""
+    return (
+        decision.fixes is not None
+        and decision.fixes.prices is not None
+        and decision.chosen not in (CURRENT_PRICES, CONSTANT_PRICES)
     )
 
 
@@ -2118,7 +2143,9 @@ def _populations(requirement: EvidenceRequirement, plan: Plan) -> dict[str, _Pop
     if datasets is None:
         return None
     populations: dict[str, _Population] = {}
-    for dataset in datasets:
+    for stated in datasets:
+        # A whole covers its part's parties (`planner.plan.covered`).
+        dataset = covered(stated, plan)
         source = _selected_source(dataset.id, plan)
         if source is None:
             continue
@@ -2247,7 +2274,7 @@ def _kept_apart(role: RoleDimension, plan: Plan) -> bool:
         return True
     dataset = plan.requirement(role.requirement_id)
     assert isinstance(dataset, DatasetRequirement)
-    named = [entity for entity in dataset.entities if entity.role == role.role]
+    named = [entity for entity in covered(dataset, plan).entities if entity.role == role.role]
     return len(named) > 1 or any(entity.members for entity in named)
 
 
@@ -2462,7 +2489,7 @@ def _axis_role(requirement: RankRequirement, plan: Plan) -> str | None:
     `across` carry when the axis is left to infer from a single-role input."""
     if requirement.axis is not None:
         return requirement.axis
-    datasets = datasets_of(requirement, plan)
+    datasets = [covered(dataset, plan) for dataset in datasets_of(requirement, plan)]
     roles = sorted(
         {entity.role for dataset in datasets for entity in dataset.entities if entity.role}
         | {word for dataset in datasets for word in dataset.across}
@@ -2537,6 +2564,7 @@ def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | 
     keeps. A set on a side no `across` word covers is left unsaid, as the
     requirement leaves it. Before compile the requirement's own words.
     """
+    requirement = covered(requirement, plan)
     sides = {across_party(word) for word in requirement.across}
     source = _selected_source(requirement.id, plan)
     groups = [(side, label) for side, label in _side_groups(source) if side in sides]
@@ -2717,7 +2745,8 @@ def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
             return stated
         read = ", ".join(clauses)
         return f"{stated} {read[0].upper()}{read[1:]}."
-    parties = entities_phrase(requirement.entities, across=requirement.across)
+    stated = covered(requirement, plan)
+    parties = entities_phrase(stated.entities, across=stated.across)
     period = f"{requirement.period.start}-{requirement.period.end}" + (
         _FOLLOWING if requirement.period_end_open else ""
     )
@@ -2763,6 +2792,7 @@ def _population_count(requirement: DatasetRequirement, word: str, plan: Plan) ->
     set of open axes.
     """
     source = _selected_source(requirement.id, plan)
+    requirement = covered(requirement, plan)
     if source is None or word not in requirement.across:
         return None
     axes = open_axes_for(requirement.across, source.open_entity_axes)
@@ -2824,12 +2854,22 @@ def _reading_clause(source: SelectedSource) -> str | None:
 
 
 def _sentence_aggregate(requirement: AggregateRequirement, plan: Plan) -> str:
-    upstream = plan.requirement(requirement.input_id)
+    sentence = _aggregate_wording(requirement, plan)
+    # Aggregates the card labels alike are numbered in the order of those labels (`_label`).
+    label = _builder_label(requirement, plan)
+    namesakes = [other.id for other in _card_order(plan) if _builder_label(other, plan) == label]
+    if len(namesakes) == 1:
+        return f"{sentence}."
+    return f"{sentence} ({namesakes.index(requirement.id) + 1})."
+
+
+def _aggregate_wording(requirement: AggregateRequirement, plan: Plan) -> str:
+    """`_sentence_aggregate`'s wording before it names its input."""
     word = _REDUCTION_WORDS[requirement.reduction]
     group = _group_by_phrase(
         requirement.group_by, breakdown=_breakdown_of(requirement, plan), grouped=True
     )
-    return f"The {word} of {_measure_of(upstream, plan)}, {group}."
+    return f"The {word} of {_measure_of(plan.requirement(requirement.input_id), plan)}, {group}"
 
 
 def _sentence_growth(requirement: GrowthRequirement, plan: Plan) -> str:
@@ -2921,6 +2961,11 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
         )
         return f"Share of {measure} per {requirement.axis}, {scope_text}."
     divisor = _measure_of(denominator, plan)
+    # An un-keyed share holds no role dimension (`planner.shapes.shared_ratio`), so its
+    # shape is per year or one figure.
+    per_year = "year" in _kept_words(frame_shapes(plan)[requirement.id], plan)
+    shape = "for each year" if per_year else "as one figure overall"
+    total = "each year's total" if per_year else "one total"
     # A denominator narrowed to fewer members than its sources hold names the
     # step that narrows it, whose own line states the filter or limit, in
     # place of the parties its sources hold. A filter keeping a level of place
@@ -2933,7 +2978,7 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
         )
     ):
         return (
-            f"Share of {measure} as one figure overall, divided by one total of {divisor} "
+            f"Share of {measure} {shape}, divided by {total} of {divisor} "
             f'over the rows "{_label(narrowing, plan)}" keeps.'
         )
     # A pooled share over a frame that names no place reads one level of it, which
@@ -2944,7 +2989,8 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
             _parties(dataset, plan, level=level) for dataset in datasets_of(denominator, plan)
         )
     )
-    return f"Share of {measure} as one figure overall, divided by {divisor} ({parties})."
+    whole = f"each year's total of {divisor}" if per_year else divisor
+    return f"Share of {measure} {shape}, divided by {whole} ({parties})."
 
 
 def _sentence_quotient_of(requirement: QuotientRequirement, plan: Plan) -> str:

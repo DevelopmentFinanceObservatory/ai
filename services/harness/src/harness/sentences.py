@@ -95,6 +95,9 @@ TERMINAL_PROPOSE_CODES = frozenset(
         ProblemCode.QUESTION_FIXED,
         ProblemCode.NOTHING_TO_PLAN,
         ProblemCode.PRICES_UNSERVED,
+        ProblemCode.STATED_SCOPE_UNREADABLE,
+        ProblemCode.STATED_SCOPE_UNAVAILABLE,
+        ProblemCode.STATED_COMPILE_UNREACHABLE,
     }
 )
 
@@ -205,6 +208,12 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
     ),
     CompileIssueCode.SUM_UNITS_DIFFER: "the parts of a sum are in different units",
     CompileIssueCode.SHARE_UNITS_DIFFER: "a share sets figures in different units against each other",
+    CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE: (
+        "a share divides by a total that does not include the part it is a share of"
+    ),
+    CompileIssueCode.WHOLE_SUM_UNMATCHED: (
+        "a total was planned for another dataset than the one it is read from"
+    ),
     CompileIssueCode.FRAME_UNITS_DIFFER: "the figures being combined are in different units",
     CompileIssueCode.FRAME_UNIT_UNBOUND: "one of the figures being combined states no unit",
     CompileIssueCode.FRAME_UNIT_FORMS_DIFFER: (
@@ -335,6 +344,20 @@ STOP_SENTENCES: Mapping[StopCode | ProblemCode, str] = {
         "{chosen}, which the user chose, so nothing was recorded. Search once for {reading} in "
         "{chosen}."
     ),
+    ProblemCode.STATED_SCOPE_UNREADABLE: (
+        "The providers' spending the question asks for could not be read from Search, and "
+        "reading it again fails the same way, so nothing was recorded. The fault is in the "
+        "system, not the request."
+    ),
+    ProblemCode.STATED_SCOPE_UNAVAILABLE: (
+        "The providers' spending the question asks for could not be read from Search, so "
+        "nothing was recorded. The service is unavailable; try again shortly."
+    ),
+    ProblemCode.STATED_COMPILE_UNREACHABLE: (
+        "The data could not be fetched from Search counted the way the question asks, and "
+        "fetching it again fails the same way, so nothing was recorded. The fault is in the "
+        "system, not the request."
+    ),
     ProblemCode.OPERATION_UNSUPPORTED: (
         "This cannot be calculated as planned{at}, because {unsupported}, so nothing was recorded."
     ),
@@ -356,6 +379,14 @@ STOP_SENTENCES: Mapping[StopCode | ProblemCode, str] = {
     ),
     ProblemCode.SHARE_OF_ITSELF: (
         "A share{at} would divide a figure by itself, so nothing was recorded."
+    ),
+    ProblemCode.STATED_PROVIDER_DROPPED: (
+        "The data the plan reads{at} cannot count the providers' spending the question asks "
+        "for, so nothing was recorded."
+    ),
+    ProblemCode.STATED_SCOPE_UNATTRIBUTED: (
+        "The plan{at} says whose spending some figures of one calculation count and not "
+        "others, so nothing was recorded."
     ),
     ProblemCode.ASK_NOT_UNDERSTOOD: (
         "Part of the request could not be matched to data{at}, so nothing was recorded."
@@ -396,6 +427,15 @@ STOP_REASONS: Mapping[StopCode | ProblemCode, str] = {
     ProblemCode.BUDGET_EXHAUSTED: "this request has used its budget of {rounds} plan drafts",
     ProblemCode.NOTHING_TO_PLAN: "this system cannot calculate what was asked",
     ProblemCode.PRICES_UNSERVED: "{lead}no series found is in the prices chosen",
+    ProblemCode.STATED_SCOPE_UNREADABLE: (
+        "the providers' spending the question asks for could not be read from Search"
+    ),
+    ProblemCode.STATED_SCOPE_UNAVAILABLE: (
+        "the providers' spending the question asks for could not be read from Search just now"
+    ),
+    ProblemCode.STATED_COMPILE_UNREACHABLE: (
+        "the data could not be fetched from Search counted the way the question asks"
+    ),
     ProblemCode.OPERATION_UNSUPPORTED: "{mixed}",
     ProblemCode.BASES_UNALIGNED: (
         "{lead}the figures the plan combines could not be put on one measure basis and "
@@ -411,6 +451,12 @@ STOP_REASONS: Mapping[StopCode | ProblemCode, str] = {
         "{lead}the figures the plan combines count different providers' spending"
     ),
     ProblemCode.SHARE_OF_ITSELF: "{lead}a share would divide a figure by itself",
+    ProblemCode.STATED_PROVIDER_DROPPED: (
+        "{lead}the data the plan reads cannot count the providers' spending the question asks for"
+    ),
+    ProblemCode.STATED_SCOPE_UNATTRIBUTED: (
+        "{lead}the plan says whose spending some figures of one calculation count and not others"
+    ),
     ProblemCode.ASK_NOT_UNDERSTOOD: "{lead}part of the request could not be matched to data",
     ProblemCode.SEARCH_REFUSED: "Search refused to look up the data{at}",
     ProblemCode.SURFACE_UNAVAILABLE: "a service the plan needs could not be reached",
@@ -734,6 +780,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ExecutorCode.LEDGER_UNAVAILABLE,
             StopCode.DISCOVERY_UNAVAILABLE,
             ProblemCode.SURFACE_UNAVAILABLE,
+            ProblemCode.STATED_SCOPE_UNAVAILABLE,
         }
     ),
     FailureClass.TOO_BIG: frozenset(
@@ -832,6 +879,8 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ProblemCode.WHOLE_IS_ITS_MEMBER,
             ProblemCode.SHARE_WHOLE_UNDERIVABLE,
             ProblemCode.PROVIDERS_UNALIGNED,
+            ProblemCode.STATED_PROVIDER_DROPPED,
+            ProblemCode.STATED_SCOPE_UNATTRIBUTED,
             ProblemCode.SHARE_OF_ITSELF,
         }
     ),
@@ -938,6 +987,8 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ExecutorCode.PUBLICATION_ERROR,
             StopCode.TRANSLATION_INTERNAL_FAILURE,
             StopCode.PLANNER_TOOL_FAILED,
+            ProblemCode.STATED_SCOPE_UNREADABLE,
+            ProblemCode.STATED_COMPILE_UNREACHABLE,
             *_NOT_DRAFTED_CODES,
         }
     ),

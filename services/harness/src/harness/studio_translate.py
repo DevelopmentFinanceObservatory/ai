@@ -76,6 +76,7 @@ from planner.tool_results import Outcome, ProblemCode
 from planner.tools import PLAN_WRITES, running_plan_write
 from planner.workflow import ToolId
 from pydantic import ValidationError
+from submission.service import SEARCH_DEFAULT_RATIONALE
 
 from harness import plan_display
 from harness.card_unit import UnitCard, card_unit_change, stored_block, unit_card
@@ -88,6 +89,7 @@ from harness.graph.state import (
     APPROVE_PAUSE,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
+    card_unit_offers,
 )
 from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
@@ -120,7 +122,14 @@ from harness.studio_store import StudioStore, keep_turn_records
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
-from harness.unit_offer import unit_words, whole_units
+from harness.unit_offer import (
+    offers_another_unit,
+    row_units,
+    unit_option_id,
+    unit_words,
+    whole_unit_options,
+    whole_units,
+)
 from harness.wire import (
     ActivityStep,
     ApplyChoiceSuggestion,
@@ -967,6 +976,7 @@ class _RecordingSurface:
         stat_var_count: int | None,
         carried_frame_refs: Sequence[Mapping[str, str | None]],
         summed_frame_refs: Sequence[Sequence[Mapping[str, str | None]]] = (),
+        summed_reads: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         """Write `frame_ref`'s lineage from the retrieval frames in `evidence_frame_refs`.
 
@@ -984,7 +994,11 @@ class _RecordingSurface:
         StatVars it sums, and each ref a `sum_of`, `quotient_of` or
         `share_of` wrote for its own result that the frame carries as the
         distinct StatVars of its entry in `summed_frame_refs`, the
-        retrievals under that verb's sides. Called once per terminal frame from
+        retrievals under that verb's sides. `summed_reads` names each
+        retrieval in `carried_frame_refs`, by its frame pair, that reaches the
+        frame only through an analysis call that added up its StatVars, with
+        how many it added (`harness.graph.answer._carried_parts`), and counts
+        it as that many. Called once per terminal frame from
         `harness.graph.answer.link_evidence_to_terminal_frames`.
 
         A no-op when `provenance` was never given. All-or-nothing: when any
@@ -1011,6 +1025,9 @@ class _RecordingSurface:
                 [(ref.get("spec_id"), ref.get("content_version")) for ref in under]
                 for under in summed_frame_refs
             ],
+            summed_reads={
+                (read["spec_id"], read["content_version"]): read["count"] for read in summed_reads
+            },
         )
         if not linked:
             logger.warning(
@@ -1226,10 +1243,17 @@ def _data_phrase(plan: PlannerPlan) -> str | None:
 
 
 def _choice_members(
-    decision: Decision | None, plan: PlannerPlan, named: Callable[[str], str]
+    decision: Decision | None,
+    plan: PlannerPlan,
+    named: Callable[[str], str],
+    unit_offers: Mapping[str, UnitOffer],
 ) -> dict[str, Any]:
     """The `PlanDecision` members a switchable decision of `plan` adds: the id
     of its row, its active option and each option with its label and status.
+
+    A decision whose slot `unit_offers` holds, a unit question's whole unit
+    (`harness.graph.state.unit_row_offers`), takes `plan_display.
+    decision_choice_id` and that offer as `unit` (`_unit_members`).
 
     A scope decision's row takes `plan_display.choice_id`, and each option
     the status Search gave it, its years and why it is limited
@@ -1245,6 +1269,8 @@ def _choice_members(
     """
     if decision is None:
         return {}
+    if (offer := unit_offers.get(decision.slot)) is not None:
+        return _unit_members(decision, offer)
     if (row := plan_display.count_choice_id(plan, decision)) is not None:
         return {
             "choice_id": row,
@@ -1289,12 +1315,42 @@ def _choice_members(
     }
 
 
+def _unit_members(decision: Decision, offer: UnitOffer) -> dict[str, Any]:
+    """The `PlanDecision` members of the row stating a unit question's whole
+    unit `decision`: its row id, `offer` as `unit`, and as options the whole
+    units a client that renders no unit picker switches between
+    (`row_units`), each labelled in words (`unit_words`), status
+    "available", the offer's start active. Its `chosen` is the start in
+    those words and its `alternatives` every option's label, so the row
+    reads as its options do."""
+    units = row_units(offer)
+    start = unit_option_id(offer.start)
+    return {
+        "chosen": unit_words(offer.start, offer),
+        "alternatives": [unit_words(unit, offer) for unit in units.values()],
+        "choice_id": plan_display.decision_choice_id(decision),
+        "active_option_id": start,
+        "options": [
+            PlanDecisionOption(
+                option_id=option_id, label=unit_words(unit, offer), status="available"
+            )
+            for option_id, unit in units.items()
+        ],
+        "unit": offer,
+    }
+
+
 def _search_default(decision: Decision | None) -> bool:
-    """Whether `decision` states a scope choice Search's default settled."""
+    """Whether `decision` states a scope choice Search's default settled and gives
+    only that as its reason (`submission.service.SEARCH_DEFAULT_RATIONALE`), which the
+    card leaves off. A row reading the card's line where the figure and the user's
+    words part (`DecisionScope.line`) keeps its reason."""
     return (
         decision is not None
         and decision.scope is not None
         and decision.scope.provenance == "default"
+        and not decision.scope.line
+        and decision.rationale == SEARCH_DEFAULT_RATIONALE
     )
 
 
@@ -1303,8 +1359,12 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
     scope choices and switchable planner decisions (`_choice_members`).
 
     A choice is switchable when an option other than its active one is
-    available or partial. The plan card lists `PlanAction.SWITCH` only
-    when one is, and `/interrupt` checks a switch against what is kept.
+    available or partial, or, for a row offering a unit (`PlanDecision.unit`),
+    when its offer holds a unit other than the one it is in
+    (`harness.unit_offer.offers_another_unit`), which a switch names by
+    `unit` though its options list it not. The plan card lists
+    `PlanAction.SWITCH` only when one is, and `/interrupt` checks a switch
+    against what is kept.
     """
     choices: dict[str, _PendingChoice] = {}
     for decision in decisions:
@@ -1314,7 +1374,7 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
         if not any(
             option.status != "unavailable" and option.option_id != decision.active_option_id
             for option in decision.options
-        ):
+        ) and (decision.unit is None or not offers_another_unit(decision.unit)):
             continue
         choices[decision.choice_id] = _PendingChoice(
             active=decision.active_option_id,
@@ -1514,13 +1574,18 @@ def _kept_question(asked: ElicitationQuestion, entry: Mapping[str, Any] | None) 
         native = ElicitationInput.MULTI_SELECT
     else:
         native = None
+    unit = UnitOffer.model_validate(offer["offer"]) if offer else None
     return _PendingQuestion(
         id=asked.id,
         question=asked.question,
-        options={option.id: option.label for option in asked.options or ()},
+        # A unit question sent as one lists its whole units, which a page that was
+        # sent it as a pick answers with (`harness.studio._answer_kinds`).
+        options=dict[str, str | None](whole_unit_options(unit))
+        if unit is not None and asked.input is ElicitationInput.UNIT
+        else {option.id: option.label for option in asked.options or ()},
         skippable=asked.skippable,
         input=asked.input,
-        unit=UnitOffer.model_validate(offer["offer"]) if offer else None,
+        unit=unit,
         native_input=None if asked.input is native else native,
     )
 
@@ -1690,6 +1755,9 @@ class _Translator:
         # at its first frame, so its later frames update the same line.
         self._wire_step_ids: dict[str, str] = {}
         self._final_text = ""
+        # The text each response of the agent's run streamed beside its calls,
+        # which stands as the reply of a turn whose cards answer it (`finish`).
+        self._narration: list[str] = []
         self.paused = False
         # Whether the planner's latest entry replans for a pick on the plan
         # card (`PlannerStarted.pick`). Its drafted plan keeps the planner
@@ -2443,6 +2511,7 @@ class _Translator:
                     )
                 conversation.latest_plan_version = version
             plan = _plan_from_payload(payload)
+            unit_offers = card_unit_offers(pause.state, payload.get("revision"))
             questions = plan_display.card_questions(plan)
             by_slot = {decision.slot: decision for decision in plan.decisions}
             named = functools.partial(plan_display.card_decision_text, plan=plan)
@@ -2508,30 +2577,36 @@ class _Translator:
                 for row in plan_display.ask_rows(plan)
             ]
             decisions = [
-                PlanDecision(
-                    id=decision.get("slot", f"d{index + 1}"),
-                    question=questions[decision.get("slot", "")],
-                    chosen=option_named(decision.get("chosen", ""), decision=held, options=offered),
-                    alternatives=(
-                        [
-                            option_named(option, decision=held, options=offered)
-                            for option in decision["options"]
-                        ]
-                        if decision.get("options") is not None
-                        else None
-                    ),
-                    # A reason saying only that Search's default holds says nothing.
-                    reason=""
-                    if _search_default(held)
-                    else named(decision.get("rationale", ""), decision=held),
-                    resolved_by=_RESOLVED_BY_TO_WIRE.get(
-                        decision.get("resolved_by", ""), "default"
-                    ),
-                    **_choice_members(
-                        held,
-                        plan,
-                        functools.partial(option_named, decision=held, options=offered),
-                    ),
+                PlanDecision.model_validate(
+                    {
+                        "id": decision.get("slot", f"d{index + 1}"),
+                        "question": questions[decision.get("slot", "")],
+                        "chosen": option_named(
+                            decision.get("chosen", ""), decision=held, options=offered
+                        ),
+                        "alternatives": (
+                            [
+                                option_named(option, decision=held, options=offered)
+                                for option in decision["options"]
+                            ]
+                            if decision.get("options") is not None
+                            else None
+                        ),
+                        # A reason saying only that Search's default holds says nothing.
+                        "reason": ""
+                        if _search_default(held)
+                        else named(decision.get("rationale", ""), decision=held),
+                        "resolved_by": _RESOLVED_BY_TO_WIRE.get(
+                            decision.get("resolved_by", ""), "default"
+                        ),
+                        # A unit row words its choice and alternatives as its options.
+                        **_choice_members(
+                            held,
+                            plan,
+                            functools.partial(option_named, decision=held, options=offered),
+                            unit_offers,
+                        ),
+                    }
                 )
                 for index, decision in enumerate(payload.get("decisions", []))
                 if decision.get("slot") in questions
@@ -2698,6 +2773,7 @@ class _Translator:
         the agent wrote before was interim. A plan hand-back with no plan
         shows the failed step first."""
         self._final_text = ""
+        self._narration = []
         self._unanswered = []
         frames: list[ActivityStep] = []
         if event.text == ORCHESTRATOR_PLAN_FAILED_STATUS:
@@ -2719,13 +2795,21 @@ class _Translator:
         """Answer text as the model streams it."""
         if not text:
             return []
-        frames: list[Any] = self._close_status()
+        frames: list[Any] = [*self._close_status(), *self._narration_break()]
         self._streamed_text = True
         self._final_text += text
         frames.append(
             MessageDelta(event="message.delta", seq=self._conversation.next_seq(), text=text)
         )
         return frames
+
+    def _narration_break(self) -> list[MessageDelta]:
+        """The paragraph break a response's first text streams after the text an
+        earlier response streamed beside its calls, so the deltas add up to the
+        narration `finish` joins."""
+        if self._streamed_text or self._final_text or not self._narration:
+            return []
+        return [MessageDelta(event="message.delta", seq=self._conversation.next_seq(), text="\n\n")]
 
     def _agent_response(self, parts: Sequence[types.Part]) -> list[Any]:
         """A finished model response: its text, unless it streamed already,
@@ -2734,6 +2818,7 @@ class _Translator:
         text = "".join(part.text or "" for part in parts if part.text and not part.thought)
         if text and not self._streamed_text:
             frames.extend(self._close_status())
+            frames.extend(self._narration_break())
             self._final_text += text
             frames.append(
                 MessageDelta(event="message.delta", seq=self._conversation.next_seq(), text=text)
@@ -2742,6 +2827,8 @@ class _Translator:
         calls = [part.function_call for part in parts if part.function_call is not None]
         self._unanswered = [(call.id or "", call.name or "") for call in calls]
         if calls:
+            if self._final_text.strip():
+                self._narration.append(self._final_text)
             self._final_text = ""
             # A skill read shows no step, so the line it ran under keeps
             # running and notes the read until its answer comes.
@@ -3107,6 +3194,14 @@ class _Translator:
         (`ConversationState.close_turn`), so a later turn's model reads the
         answer alone, with no text of the code's own to restate.
 
+        A turn whose agent closed with no text, or with whitespace, after the turn
+        drew cards is answered by its cards. Its reply is the text the agent
+        streamed beside its calls, each response's own paragraph, followed by the
+        same notes, line and chips; a turn with none of these sends no
+        `message.complete`. Its record keeps the cards as the answer a later turn's
+        model reads (`ConversationState.cards_answer`) and the narration as the reply a
+        reload shows.
+
         `new_question` is the user's words a turn ended on when the planner
         read them, typed on the plan card, as a different question
         (`harness.graph.state.NEW_QUESTION_KEY`). The turn's record says it
@@ -3142,10 +3237,22 @@ class _Translator:
             # The planner ended the turn on a new question no message states:
             # the reply asks the user to send it.
             self._final_text = ASK_FOR_QUESTION_REPLY
-        answer, notes, basis = self._final_text, None, None
+        if not self._final_text.strip():
+            self._final_text = ""
+        # A turn whose cards answer it, the agent closing with no text, shows the
+        # user what it streamed beside its calls, and closes with the same notes,
+        # line and chips as one with text. Its record keeps the cards as its answer
+        # (`cards_answer`), for a later turn's model, and the narration as what a
+        # reload shows (`shown_answer`).
+        shown_cards = bool(self._conversation.turn_cards_shown()) and not set_aside
+        answer, shown = self._final_text, None
+        if not self._final_text and shown_cards:
+            shown = self._final_text = "\n\n".join(self._narration)
+            answer = self._conversation.cards_answer()
+        notes, basis = None, None
         # A set-aside turn's reply is the code's own, with no figures to note.
-        answered = bool(self._final_text) and not set_aside
-        if self._final_text:
+        answered = (bool(self._final_text) or shown_cards) and not set_aside
+        if answered or self._final_text:
             notes = (
                 None
                 if not answered
@@ -3167,7 +3274,12 @@ class _Translator:
                 if answered
                 else None
             )
-            closing = "".join(f"\n\n{block}" for block in (notes, basis) if block)
+            blocks = [block for block in (notes, basis) if block]
+            closing = (
+                "".join(f"\n\n{block}" for block in blocks)
+                if self._final_text
+                else "\n\n".join(blocks)
+            )
             if closing:
                 self._final_text += closing
                 frames.append(
@@ -3175,6 +3287,7 @@ class _Translator:
                         event="message.delta", seq=self._conversation.next_seq(), text=closing
                     )
                 )
+        if self._final_text:
             self._conversation.turn_final_text = self._final_text
             frames.append(
                 MessageComplete(
@@ -3203,6 +3316,7 @@ class _Translator:
             basis_line=basis,
             new_question=new_question,
             asked_for_question=asked_for_question,
+            shown_answer=shown,
         )
         frames.append(
             Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=chips)

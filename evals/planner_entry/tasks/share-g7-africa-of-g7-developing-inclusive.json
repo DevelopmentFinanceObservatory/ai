@@ -1,0 +1,375 @@
+{
+  "id": "share-g7-africa-of-g7-developing-inclusive",
+  "kind": "share_of",
+  "origin": "trace 2748e5c6c843ba1ffb05c8328c33ebfb",
+  "question": "Show G7 aid to Africa as a share of G7 aid to all developing countries each year from 1970 to 2024, including imputed multilateral aid.",
+  "searches": [
+    {
+      "parts": [
+        {
+          "time": "1970 to 2024",
+          "operations": [
+            {
+              "verb": "share_of",
+              "phrase": "share of G7 aid to all developing countries"
+            }
+          ],
+          "variable": "aid to Africa as a share of aid to all developing countries including imputed multilateral aid",
+          "entities": [
+            {
+              "text": "G7"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "parts": [
+        {
+          "sources": [
+            {
+              "text": "DAC2a"
+            }
+          ],
+          "entities": [
+            {
+              "role": "from",
+              "text": "G7"
+            },
+            {
+              "role": "to",
+              "text": "Africa"
+            }
+          ],
+          "time": "1970 to 2024",
+          "variable": "net ODA"
+        },
+        {
+          "sources": [
+            {
+              "text": "DAC2a"
+            }
+          ],
+          "variable": "imputed multilateral ODA",
+          "time": "1970 to 2024",
+          "entities": [
+            {
+              "text": "G7",
+              "role": "from"
+            },
+            {
+              "role": "to",
+              "text": "Africa"
+            }
+          ]
+        },
+        {
+          "time": "1970 to 2024",
+          "entities": [
+            {
+              "role": "from",
+              "text": "G7"
+            },
+            {
+              "text": "developing countries",
+              "role": "to"
+            }
+          ],
+          "sources": [
+            {
+              "text": "DAC2a"
+            }
+          ],
+          "variable": "net ODA"
+        },
+        {
+          "sources": [
+            {
+              "text": "DAC2a"
+            }
+          ],
+          "entities": [
+            {
+              "role": "from",
+              "text": "G7"
+            },
+            {
+              "role": "to",
+              "text": "developing countries"
+            }
+          ],
+          "variable": "imputed multilateral ODA",
+          "time": "1970 to 2024"
+        }
+      ]
+    },
+    {
+      "parts": [
+        {
+          "variable": "net ODA",
+          "entities": [
+            {
+              "text": "G7",
+              "role": "from"
+            },
+            {
+              "role": "to",
+              "text": "developing countries, total"
+            }
+          ],
+          "sources": [
+            {
+              "text": "DAC2a"
+            }
+          ],
+          "time": "1970 to 2024"
+        },
+        {
+          "entities": [
+            {
+              "role": "from",
+              "text": "G7"
+            },
+            {
+              "text": "developing countries, total",
+              "role": "to"
+            }
+          ],
+          "variable": "imputed multilateral ODA",
+          "sources": [
+            {
+              "text": "DAC2a"
+            }
+          ],
+          "time": "1970 to 2024"
+        }
+      ]
+    },
+    {
+      "parts": [
+        {
+          "time": "1970 to 2024",
+          "variable": "net ODA",
+          "entities": [
+            {
+              "text": "G7",
+              "role": "from"
+            },
+            {
+              "role": "to",
+              "text": "all developing countries"
+            }
+          ],
+          "sources": [
+            {
+              "text": "DAC2a"
+            }
+          ]
+        }
+      ],
+      "text": "G7 net ODA to all developing countries"
+    },
+    {
+      "parts": [
+        {
+          "entities": [
+            {
+              "text": "G7",
+              "role": "from"
+            },
+            {
+              "text": "Total Recipients",
+              "role": "to"
+            }
+          ],
+          "variable": "net ODA",
+          "time": "1970 to 2024",
+          "sources": [
+            {
+              "text": "DAC2a"
+            }
+          ]
+        },
+        {
+          "variable": "net ODA",
+          "time": "1970 to 2024",
+          "sources": [
+            {
+              "text": "DAC2a"
+            }
+          ],
+          "entities": [
+            {
+              "role": "from",
+              "text": "G7"
+            },
+            {
+              "text": "World",
+              "role": "to"
+            }
+          ]
+        },
+        {
+          "time": "1970 to 2024",
+          "entities": [
+            {
+              "role": "from",
+              "text": "G7"
+            }
+          ],
+          "sources": [
+            {
+              "text": "DAC1"
+            }
+          ],
+          "variable": "official development assistance"
+        }
+      ]
+    },
+    {
+      "parts": [
+        {
+          "entities": [
+            {
+              "text": "G7",
+              "role": "from"
+            }
+          ],
+          "variable": "net ODA",
+          "sources": [
+            {
+              "text": "DAC2a"
+            }
+          ],
+          "time": "1970 to 2024"
+        },
+        {
+          "sources": [
+            {
+              "text": "DAC2a"
+            }
+          ],
+          "time": "1970 to 2024",
+          "variable": "imputed multilateral ODA",
+          "entities": [
+            {
+              "text": "G7",
+              "role": "from"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "parts": [
+        {
+          "time": "1970 to 2024",
+          "sources": [
+            {
+              "text": "DAC1"
+            }
+          ],
+          "entities": [
+            {
+              "role": "from",
+              "text": "G7"
+            }
+          ],
+          "variable": "official development assistance"
+        }
+      ]
+    }
+  ],
+  "brief": "G7 aid to Africa (bilateral net disbursements from OECD DAC2a plus OECD imputed multilateral ODA) as a share of G7 total aid to all developing countries each year from 1970 to 2024. For Africa: bilateral net ODA (spec_6192e5d51ea1df89524b0d27fc409350) plus imputed multilateral ODA (spec_26d008bb0f6087a796c698995cbe8bd7, available from 1975). For all developing countries: total bilateral net ODA (spec_4ee950c87d05910e69f21d002f98c349) plus total imputed multilateral ODA (or DAC1 total ODA spec_83b533b617eac833c2baa877335d11d3).",
+  "asks": [
+    "G7 aid to Africa (bilateral net ODA plus imputed multilateral ODA) as a share of G7 total aid (bilateral net ODA plus imputed multilateral ODA) each year"
+  ],
+  "required_kinds": [
+    "dataset",
+    "share_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "share_of"
+  ],
+  "neighbour": {
+    "kind": "quotient_of",
+    "distinction": "share_of, not quotient_of: G7 aid to Africa is a part of G7 aid to all developing countries, both in one unit"
+  },
+  "unit_asked": false,
+  "period_reduction": "none",
+  "reference_payload": {
+    "question": "G7 aid to Africa (bilateral net disbursements from OECD DAC2a plus OECD imputed multilateral ODA) as a share of G7 total aid to all developing countries each year from 1970 to 2024. For Africa: bilateral net ODA (spec_6192e5d51ea1df89524b0d27fc409350) plus imputed multilateral ODA (spec_26d008bb0f6087a796c698995cbe8bd7, available from 1975). For all developing countries: total bilateral net ODA (spec_4ee950c87d05910e69f21d002f98c349) plus total imputed multilateral ODA (or DAC1 total ODA spec_83b533b617eac833c2baa877335d11d3).",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "g7_africa_aid",
+        "measure": "net ODA including imputed multilateral aid",
+        "entities": [
+          {
+            "name": "Group of Seven",
+            "role": "donor"
+          },
+          {
+            "name": "Africa",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 1970,
+          "end": 2024
+        }
+      },
+      {
+        "kind": "dataset",
+        "id": "g7_developing_by_recipient",
+        "measure": "net ODA including imputed multilateral aid",
+        "entities": [
+          {
+            "name": "Group of Seven",
+            "role": "donor"
+          }
+        ],
+        "period": {
+          "start": 1970,
+          "end": 2024
+        },
+        "across": [
+          "recipient"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "g7_developing_aid",
+        "input_id": "g7_developing_by_recipient",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      },
+      {
+        "kind": "share_of",
+        "id": "g7_africa_share",
+        "numerator": {
+          "input_id": "g7_africa_aid"
+        },
+        "denominator": {
+          "input_id": "g7_developing_aid"
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "g7_africa_share"
+        ]
+      }
+    ]
+  },
+  "alternative_payloads": [],
+  "user_message_searched": true
+}

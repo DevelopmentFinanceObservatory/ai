@@ -75,6 +75,7 @@ from typing import Any, Final
 
 from common import live_apis
 from common.apis_auth import apis_auth_provider
+from common.call_limit import CallDeadline
 from common.caller import WEBSITE_SURFACE, shared_work_context
 from common.live_apis import (
     DatasetVersion,
@@ -89,7 +90,7 @@ from common.recipe import replay_key, root_identity
 from common.row_budget import RowBudget
 from common.telemetry import EventLevel, use_request_span
 from compiler.surface import McpSurface, ToolSurfaceUnavailableError
-from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallDeadline, use_call_budget
+from data_mcp.deadline import EXTERNAL_CALL_BUDGET, use_call_budget
 from data_mcp.frame_materialisation import replayed_mint_options, requests_kinds
 from data_mcp.get_data_tool import recorded_mint_request
 from data_mcp.tool_errors import ToolErrorCode
@@ -797,8 +798,9 @@ class LiveRefresh:
 def build_live_refresh(*, settings: Settings) -> LiveRefresh:
     """The process's `LiveRefresh`, built from settings. Opens no connection.
 
-    apis' origin and the datasets principal are presentation-mcp's
-    (`DFO_APIS_URL`, `DATASETS_FIRST_PARTY_PRINCIPAL`), since the publish goes
+    apis' origin is `settings.dfo_apis_url`, for the refresh's reads, the
+    publish and the ID-token audience alike. The datasets principal is
+    presentation-mcp's (`DATASETS_FIRST_PARTY_PRINCIPAL`), since the publish goes
     through its `PlatformAssembler`, built here so it does not depend on the
     presentation tools having mounted. The verbs run on a tool surface of the
     refresh's own over the loopback mounts.
@@ -808,16 +810,16 @@ def build_live_refresh(*, settings: Settings) -> LiveRefresh:
             `max_frame_rows`, so a replay publishing a full frame, the one claim
             a replay makes, could never run.
     """
-    presentation = PresentationSettings()
+    presentation = PresentationSettings(dfo_apis_url=settings.dfo_apis_url)
     if settings.live_refresh_rows_in_flight_max < presentation.max_frame_rows:
         raise ValueError(
             f"live_refresh_rows_in_flight_max ({settings.live_refresh_rows_in_flight_max}) is "
             f"below max_frame_rows ({presentation.max_frame_rows}), so a replay publishing a "
             "max_frame_rows frame could never run; raise LIVE_REFRESH_ROWS_IN_FLIGHT_MAX"
         )
-    auth = apis_auth_provider(base_url=presentation.dfo_apis_url)
+    auth = apis_auth_provider(base_url=settings.dfo_apis_url)
     apis = LiveApisClient(
-        base_url=presentation.dfo_apis_url,
+        base_url=settings.dfo_apis_url,
         datasets_principal=presentation.datasets_first_party_principal,
         live_refresh_principal=settings.live_refresh_principal,
         auth=auth,

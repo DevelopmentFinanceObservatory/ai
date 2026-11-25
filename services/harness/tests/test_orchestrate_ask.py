@@ -20,6 +20,7 @@ from compiler.surface import ProgressCallback, ToolCallResult, ToolId
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.tool_errors import ToolErrorCode
 from google.genai import types
+from harness.graph.approve import offer
 from harness.graph.orchestrate import answer_replies, ask_node, orchestrate_node
 from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
@@ -27,6 +28,7 @@ from harness.graph.state import (
     AskQuestion,
     ServedUnit,
     ask_questions,
+    card_unit_offers,
     open_parts,
     prices_forms,
     settle_unit,
@@ -38,10 +40,21 @@ from harness.turn.loop import Outcome
 from harness.turn.node import NodeCtx, StopScope, TurnKey
 from harness.turn.transcript import Transcript
 from harness.turn_records import CandidateReading, SearchReading, WindowReading
+from harness.unit_offer import unit_offer
 from orchestrator.run import ToolsAnswered
 from planner.call import _picks
-from planner.plan import Unit
+from planner.plan import (
+    DatasetRequirement,
+    Decision,
+    DecisionFixes,
+    Entity,
+    Period,
+    Plan,
+    ResolvedBy,
+    Unit,
+)
 from sqlalchemy.ext.asyncio import AsyncEngine
+from submission.prices_choice import prices_slot, unit_slot
 
 from .graph_turns import agent_read, given, opening_graph, opening_nodes, visited
 from .scripted_genai import call_part, reply, text_part
@@ -715,6 +728,58 @@ async def test_a_count_read_again_in_a_unit_keeps_the_part_s_roles_and_no_pair_n
     assert "search once for that reading" not in handed.output["text"]
     assert {_FK_GROSS, _FK_NET} <= set(unit_settled(state))
     assert unit_reads(state) == {_FK_GROSS: [posted["spec_id"]]}
+    assert units_served(state)[_FK_GROSS].spec_id == posted["spec_id"]
+
+
+async def test_a_count_refused_a_unit_is_fetched_in_the_unit_the_count_is_served_in() -> None:
+    """The net count picked beside a unit answer is served in current euros,
+    the gross part in current US dollars, and Search refuses the chosen unit
+    for the net count. The agent is told to fetch the net count as served in
+    euros, the unit plan admission holds the part to."""
+    search = _UnitSearch(refusal={"code": "requested_option_unavailable"})
+    block = copy.deepcopy(_FRANCE_KENYA)
+    (net,) = block["resolved"]["alternative_measures"]
+    net["definition"]["identity"]["facets"] = {
+        "unit": {"request": {"currency": "EUR", "prices": "current"}}
+    }
+    state: dict[str, Any] = {
+        ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: block},
+        ORCHESTRATOR_SEARCHES_KEY: [_open_reading(_FK_GROSS, text=_AID)],
+    }
+    ctx = NodeCtx(
+        key=TurnKey("user-1", "conv", 1),
+        inputs={"message": "Aid to Kenya since 2018?"},
+        state=state,
+        transcript=Transcript(),
+        emit=lambda event: None,
+        stop=StopScope(),
+    )
+    questions = [
+        {
+            "question": "How should aid be counted?",
+            "options": [
+                {"label": "gross disbursements", "spec_id": _FK_GROSS},
+                {"label": "net disbursements", "spec_id": _FK_NET},
+            ],
+        },
+        {"question": "In which prices?", "unit_of": _FK_GROSS},
+    ]
+    answer = _answers(
+        q1={"kind": "option", "spec_id": _FK_NET},
+        q2={"kind": "unit", "currency": "USD", "prices": "constant", "base_year": 2023},
+    )
+    node = ask_node(definition_surface=search)
+    assert node.resume is not None
+
+    handed = await node.resume(ctx, {"questions": questions}, answer)
+
+    assert units_served(state)[_FK_GROSS] == ServedUnit(
+        spec_id=_FK_NET,
+        unit=Unit(currency="EUR", prices="current"),
+        group=_FK_GROSS,
+        chosen=Unit(currency="USD", prices="constant", base_year=2023),
+    )
+    assert f"Fetch {_FK_NET} as served, in current EUR, and say so." in handed.output["text"]
 
 
 @pytest.mark.parametrize(
@@ -766,12 +831,94 @@ async def test_a_unit_answer_records_the_series_fetched_and_the_unit_it_is_serve
 
     fetched = search.posted[0]["spec_id"] if search.posted and refusal is None else _FK_GROSS
     assert units_served(state) == {
-        _FK_GROSS: ServedUnit(spec_id=fetched, unit=Unit.model_validate(served))
+        _FK_GROSS: ServedUnit(
+            spec_id=fetched,
+            unit=Unit.model_validate(served),
+            group=_FK_GROSS,
+            chosen=Unit.model_validate(unit),
+        )
     }
     # The series fetched is a reading on record with its block, which the
     # planner's entry shows it (`harness.planner_adapter`'s pin sources).
     assert fetched in state[ORCHESTRATOR_SPECS_KEY]
     assert fetched in [reading["spec_id"] for reading in state[ORCHESTRATOR_SEARCHES_KEY]]
+
+
+async def test_a_unit_answer_records_each_part_under_the_question_s_lead_part() -> None:
+    """A unit question covers its part and the part measuring the same thing
+    over other years. Each part's record names the question's lead part as
+    its group, so the parts' prices are one decision on the plan, and the
+    plan card's row for it offers what both series the plan pins for them
+    convert into, starting on the unit the plan states. A part's own prices
+    row offers no unit."""
+    search = _UnitSearch()
+    state: dict[str, Any] = {
+        ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: _FRANCE_KENYA, _OTHER: _other_window()},
+        ORCHESTRATOR_SEARCHES_KEY: [
+            _open_reading(_FK_GROSS, text=_AID),
+            _open_reading(_OTHER, text=_AID),
+        ],
+    }
+    ctx = NodeCtx(
+        key=TurnKey("user-1", "conv", 1),
+        inputs={"message": "Aid to Kenya to 2014 and since 2018?"},
+        state=state,
+        transcript=Transcript(),
+        emit=lambda event: None,
+        stop=StopScope(),
+    )
+    node = ask_node(definition_surface=search)
+    assert node.resume is not None
+
+    await node.resume(
+        ctx,
+        {"questions": [{"question": "In which prices?", "unit_of": _FK_GROSS}]},
+        _answers(q1={"kind": "unit", "currency": "USD", "prices": "constant", "base_year": 2020}),
+    )
+
+    assert {part: served.group for part, served in units_served(state).items()} == {
+        _FK_GROSS: _FK_GROSS,
+        _OTHER: _FK_GROSS,
+    }
+    row, own = unit_slot(_FK_GROSS), prices_slot(_OTHER)
+    usd_2020 = Unit(currency="USD", prices="constant", base_year=2020)
+    state["plan"] = Plan(
+        question=_AID,
+        decisions=[
+            Decision(
+                slot=row,
+                description="Which prices the figures are in.",
+                options=("current prices", "constant 2020 prices in USD"),
+                chosen="constant 2020 prices in USD",
+                resolved_by=ResolvedBy.USER,
+                rationale="The user chose constant 2020 prices in USD.",
+                fixes=DecisionFixes(prices="constant"),
+            )
+        ],
+        evidence_requirements=[
+            DatasetRequirement(
+                id=f"r{index}",
+                decision_ids=[row],
+                measure=_AID,
+                entities=[Entity(name="Kenya", role="recipient")],
+                period=Period(start=2018, end=2022),
+                source_spec_id=served.spec_id,
+                unit=usd_2020,
+            )
+            for index, served in enumerate(units_served(state).values())
+        ],
+        version=1,
+    ).model_dump_json()
+    card = offer(ctx, {"decisions": [{"slot": row}, {"slot": own}]}, early_mints=None)
+    shared = unit_offer([_FRANCE_KENYA, _other_window()])
+    assert shared is not None
+    offers = card_unit_offers(ctx.state, card.payload.get("revision"))
+    assert {slot: unit.model_dump(mode="json") for slot, unit in offers.items()} == {
+        row: {
+            **shared.model_dump(mode="json"),
+            "start": {"currency": "USD", "prices": "constant", "base_year": 2020},
+        }
+    }
 
 
 def _ask_user_answer(run: SegmentRun) -> dict[str, Any]:

@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_37be17411951f574a7c274c8640a58f0",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_37be17411951f574a7c274c8640a58f0: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"origin\":[\"GroupOfSeven\"]},\"facets\":{\"provenance\":{\"ref\":\"provenance/OECDDAC1\",\"state\":\"value\"}},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialFlow\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"DAC1AidType1010\",\"state\":\"value\"},\"property\":\"dac1AidType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"dacTypeOfFinance\"},{\"binding\":{\"ref\":\"Disbursement\",\"state\":\"value\"},\"property\":\"financialFlowType\"},{\"binding\":{\"ref\":\"Net\",\"state\":\"value\"},\"property\":\"nettingBasis\"}]},\"spec_id\":\"spec_37be17411951f574a7c274c8640a58f0\"}"
+}

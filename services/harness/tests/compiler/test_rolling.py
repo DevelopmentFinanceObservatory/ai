@@ -35,10 +35,11 @@ from compiler.rolling import (
     rolling_bounds,
 )
 from compiler.shapes import shapes_for
-from compiler.sources import source_from_spec_block
+from compiler.sources import member_digest, source_from_spec_block
 from compiler.surface import McpSurface, ToolSchema
 from data_mcp.server import mcp as data_mcp
 from planner.operations import (
+    AggregateOperation,
     CompareOperation,
     FilterOperation,
     GrowthOperation,
@@ -50,6 +51,7 @@ from planner.operations import (
     Translation,
 )
 from planner.plan import (
+    AggregateRequirement,
     AnswerMode,
     AskAnswer,
     ComparisonRequirement,
@@ -71,6 +73,7 @@ from planner.plan import (
 )
 from planner.records import (
     EntityIn,
+    GroupBy,
     Period,
     PeriodThreshold,
     PlaceLevel,
@@ -79,10 +82,19 @@ from planner.records import (
     RankDirection,
     RelativePeriod,
     RollingWindow,
+    StatVarReading,
     ValueThreshold,
 )
 from planner.shapes import FIXED, EndDrift, PeriodDrift, StartDrift
-from planner.workflow import OpenEntityAxis, SelectedSource, ToolId, Workflow, WorkflowStep
+from planner.workflow import (
+    OpenAxis,
+    OpenEntityAxis,
+    ResolvedEntity,
+    SelectedSource,
+    ToolId,
+    Workflow,
+    WorkflowStep,
+)
 from pydantic import JsonValue
 from submission.service import _open_window
 
@@ -323,6 +335,144 @@ def test_a_rolling_rank_keeps_its_planned_years_and_adds_the_overlay(
         ],
     }
     assert ANCHOR_KEY_PARAMETER not in step.args
+
+
+def _yearly_totals(*, rolling: bool) -> tuple[list[EvidenceRequirement], list[Operation]]:
+    """Kenya's debt service summed each year, its growth over the last five years
+    then rolling or fixed."""
+    totals = AggregateRequirement(
+        id="totals",
+        decision_ids=["measure"],
+        input_id="annual_debt_service",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    summed = AggregateOperation(
+        id="totals",
+        requirement_id="totals",
+        input="debt",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    growth_req, change = _growth_pair(
+        input_id="totals", reads="totals", **({} if rolling else {"rolling": None})
+    )
+    return [totals, growth_req], [summed, change]
+
+
+# A family of two StatVars served, summable over its one open axis.
+_FAMILY: dict[str, Any] = {
+    "served_count": 2,
+    "shape_member_count": 2,
+    "shape_member_digest": member_digest(["DebtServicePaid", "DebtServiceDue"]),
+    "open_axes": (OpenAxis(property="debtInstrument", summable=True),),
+}
+_REFUSED = [CompileIssueCode.INPUT_SHAPE_UNSUPPORTED]
+
+
+@pytest.mark.parametrize(
+    ("reading", "steps", "overrides", "issues"),
+    [
+        (StatVarReading.SEPARATE, "growth", {}, _REFUSED),
+        (StatVarReading.SEPARATE, "rank", {}, _REFUSED),
+        (StatVarReading.SEPARATE, "totals-then-growth", {}, _REFUSED),
+        (StatVarReading.SUM, "growth", {}, []),
+        (StatVarReading.SUM, "totals-then-growth", {}, []),
+        (StatVarReading.SEPARATE, "totals-then-fixed-growth", {}, []),
+        # A dataset about places has no party totals to cut.
+        (
+            StatVarReading.SEPARATE,
+            "growth",
+            {
+                "source": {
+                    "entities": (ResolvedEntity(role="place", ref="country/KEN", label="Kenya"),)
+                }
+            },
+            [],
+        ),
+        # A family whose membership is not settled may hold several StatVars, which the
+        # runner would sum on read, and the compiler cannot tell.
+        (
+            StatVarReading.SEPARATE,
+            "growth",
+            {"source": {"served_count": None, "stat_var_member_count": 1}},
+            _REFUSED,
+        ),
+        (
+            StatVarReading.SEPARATE,
+            "growth",
+            {"source": {"served_count": None, "stat_var_member_count": None}},
+            _REFUSED,
+        ),
+        # A source searched with an end year refuses the rolling step on its own
+        # account, and only that.
+        (
+            StatVarReading.SEPARATE,
+            "growth",
+            {
+                "source": {
+                    "identity": {
+                        "stat_var": "DebtServicePaid",
+                        "requested_window": {"kind": "range", "start_year": 2015, "end_year": 2024},
+                    }
+                }
+            },
+            [CompileIssueCode.ROLLING_NEEDS_OPEN_PERIOD],
+        ),
+    ],
+    ids=[
+        "growth-sums-on-read",
+        "rank-sums-on-read",
+        "total-under-the-growth-sums-on-read",
+        "growth-over-the-family-read-summed",
+        "total-of-the-family-read-summed",
+        "fixed-growth-sums-on-read",
+        "no-flow-role",
+        "membership-unsettled",
+        "membership-uncounted",
+        "closed-period",
+    ],
+)
+def test_a_rolling_step_over_a_flow_family_summed_on_read_asks_for_it_read_summed(
+    build: Compile,
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    reading: StatVarReading,
+    steps: str,
+    overrides: dict[str, Any],
+    issues: list[CompileIssueCode],
+) -> None:
+    """A run resolves its newest year over the flow retrieval as fetched, its party
+    totals cut, and checks every root the rolling call read against it. A step reading
+    the family of two StatVars, summable over its one open axis, sums it on read into a
+    version of its own, which dfo-apis names no base for, since the cut can drop
+    periods, so the rolling call would read a root its year was not resolved over. Read
+    summed at retrieval, the newest year and the call read one version."""
+    family = source(**(_FAMILY | overrides.get("source", {})))
+    dataset = requirement(period_end_open=True, stat_vars=reading)
+    decisions = [decision()]
+    if steps == "growth":
+        growth_req, change = _growth_pair()
+        requirements, operations, terminal = [growth_req], [change], "change"
+    elif steps == "rank":
+        ranked_req, ranked = _rank_pair()
+        requirements, operations, terminal = [ranked_req], [ranked], "ranked"
+        decisions.append(_population_decision(decision))
+    else:
+        requirements, operations = _yearly_totals(rolling=steps == "totals-then-growth")
+        terminal = "change"
+
+    result = build(
+        [dataset, *requirements],
+        [_retrieve(), *operations],
+        terminal=[terminal],
+        decisions=decisions,
+        discovered={"annual_debt_service": family},
+    )
+
+    assert [issue.code for issue in result.issues] == issues
+    assert all(issue.operation_id == terminal for issue in result.issues)
 
 
 def test_a_year_filter_rolling_from_its_start_reads_the_copy_of_its_dataset_and_leaves_the_series_alone(

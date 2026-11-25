@@ -15,6 +15,7 @@ records of the user's words, since a pick is none.
 
 from __future__ import annotations
 
+import copy
 import functools
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -27,7 +28,7 @@ from compiler.sources import source_from_spec_block
 from compiler.surface import McpSurface
 from data_mcp.server import mcp as data_mcp
 from harness.decision_pick import decision_pick
-from harness.plan_display import decision_option_id
+from harness.plan_display import decision_option_id, switchable_decision
 from harness.studio_state import _turn_identities
 from harness.turn.store import AgentRecord
 from planner.plan import (
@@ -65,6 +66,7 @@ from .test_agent import (
     _EUR_READ,
     _FRANCE_KENYA,
     _GROSS,
+    _GROSS_2020,
     _US_MULTILATERAL,
     _US_TOTAL,
     _constant_block,
@@ -1234,7 +1236,7 @@ def test_a_pick_rewriting_a_step_beneath_a_share_onto_its_denominator_is_refused
                 group_by=(),
             ),
             _share("first", "second").model_copy(update={"id": "share_two"}),
-            _share("num", "den").model_copy(update={"accept_provider_difference": True}),
+            _share("num", "den"),
         ],
         tool_context=ctx,
     )
@@ -1990,6 +1992,9 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
     assert [d for d in plan.decisions if d.slot == priced] == [decided]
 
 
+_CONSTANT_2020 = "spec_" + "4" * 32
+
+
 def _switch_event(choice_id: str, option_id: str) -> AgentRecord:
     """The approval card's answer switching row `choice_id` to option `option_id`."""
     return user_answer("int_approve", {"switch": {"choice_id": choice_id, "option_id": option_id}})
@@ -2109,6 +2114,118 @@ def test_a_switch_of_the_prices_row_is_the_users_new_prices(
     assert landed is not None
     assert slot in landed.requirement("second").decision_ids
     assert next(d for d in landed.decisions if d.slot == slot).chosen == picked
+
+
+def test_a_switch_of_the_prices_row_holds_every_window_of_the_part_s_measure() -> None:
+    """The user answered current prices for the gross part, and the card reads
+    it over every year and over 2020-2024, two windows of one measure, both
+    citing the one prices row. The user switched that row to constant prices.
+    The switch holds both windows: a replan leaving the later window in
+    current prices is refused, and one stating both in constant prices lands
+    with both citing the row."""
+    measure = Decision(
+        slot="measure",
+        description="What to measure.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+    recent_period = Period(start=2020, end=2024)
+
+    def window(block: dict[str, Any], spec_id: str) -> dict[str, Any]:
+        block["spec_id"] = block["definition"]["spec_id"] = spec_id
+        block["definition"]["identity"]["requested_window"] = {
+            "kind": "range",
+            "start_year": 2020,
+            "end_year": 2024,
+        }
+        return block
+
+    constant_recent = window(_constant_block(), _CONSTANT_2020)
+    recent = window(copy.deepcopy(_FRANCE_KENYA), _GROSS_2020)
+    recent["resolved"]["alternative_measures"].append(
+        {
+            "definition": constant_recent["definition"],
+            "label": "constant prices",
+            "axis": "unit",
+            "measure_axis_values": [],
+        }
+    )
+    current = Unit(currency="USD", prices="current")
+    constant = Unit(currency="USD", prices="constant", base_year=2023)
+
+    def aid(requirement_id: str, pin: str, unit: Unit, **update: Any) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=("measure",),
+            measure="French aid to Kenya",
+            entities=(Entity(name="France", role="donor"), Entity(name="Kenya", role="recipient")),
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+            unit=unit,
+        ).model_copy(update=update)
+
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _offering_constant(), _constant_block(), recent, constant_recent)
+    ctx.records = _prices_ask_events(pick="o1")
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([measure]),
+        evidence_requirements=[
+            aid("all", _GROSS, current),
+            aid("recent", _GROSS_2020, current, period=recent_period),
+        ],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    slot = f"user_prices_{_GROSS}"
+    assert [slot in plan.requirement(rid).decision_ids for rid in ("all", "recent")] == [
+        True,
+        True,
+    ]
+    option = decision_option_id("constant prices")
+    pick = decision_pick(
+        plan, choice_id=f"decision/{slot}", option_id=option, to_origin={}, alignments={}
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+    ctx.records = [
+        *ctx.records,
+        response_event("propose_plan", card),
+        _switch_event(f"decision/{slot}", option),
+    ]
+
+    def replan(recent_pin: str, recent_unit: Unit) -> dict[str, Any]:
+        return propose(
+            amends_version=card["version"],
+            evidence_requirements=[
+                aid("all2", _CONSTANT_GROSS, constant),
+                aid("recent2", recent_pin, recent_unit, period=recent_period),
+            ],
+            removed_evidence_requirements=["all", "recent"],
+            tool_context=ctx,
+        )
+
+    refused = replan(_GROSS_2020, current)
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert refused["detail"]["requirement_id"] == "recent2"
+
+    landed = replan(_CONSTANT_2020, constant)
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    switched = load_plan(ctx.state)
+    assert switched is not None
+    assert [slot in switched.requirement(rid).decision_ids for rid in ("all2", "recent2")] == [
+        True,
+        True,
+    ]
+    assert next(d for d in switched.decisions if d.slot == slot).chosen == "constant prices"
 
 
 def test_no_pick_is_built_for_a_scope_choice_admission_writes() -> None:
@@ -2265,11 +2382,11 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
     assert result["outcome"] == Outcome.OK.value, result
 
 
-def test_a_prices_switch_after_a_whole_unit_keeps_its_currency() -> None:
+def test_a_whole_unit_prices_row_is_one_row_the_card_cannot_switch() -> None:
     """The user chose current euros for the gross part, and the plan on the
-    series Search re-read in them records that choice in words. A switch of
-    the card's prices row to constant prices keeps the euros: a replan in
-    constant US dollars is refused and told the unit in euros."""
+    series Search re-read in them records that choice in words as one
+    decision on the part. The card offers that row no other prices: a switch
+    naming it makes no pick."""
     measure = Decision(
         slot="measure",
         description="What to measure.",
@@ -2278,64 +2395,40 @@ def test_a_prices_switch_after_a_whole_unit_keeps_its_currency() -> None:
         resolved_by=ResolvedBy.PLANNER_DEFAULT,
         rationale="r",
     )
-
-    def aid(requirement_id: str, **update: Any) -> DatasetRequirement:
-        return DatasetRequirement(
-            id=requirement_id,
-            decision_ids=("measure",),
-            measure="French aid to Kenya",
-            entities=(Entity(name="France", role="donor"), Entity(name="Kenya", role="recipient")),
-            period=Period(start=2015, end=2022),
-            source_spec_id=_EUR_READ,
-            unit=Unit(currency="EUR", prices="current"),
-        ).model_copy(update=update)
-
     ctx = _FakeToolContext()
     _show_blocks(ctx, _offering_constant(), _constant_block(), _read_in(_EUR_READ, _EUR))
     _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
-    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
-    card = propose(
+    card = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([measure]),
-        evidence_requirements=[aid("first")],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="first",
+                decision_ids=("measure",),
+                measure="French aid to Kenya",
+                entities=(
+                    Entity(name="France", role="donor"),
+                    Entity(name="Kenya", role="recipient"),
+                ),
+                period=Period(start=2015, end=2022),
+                source_spec_id=_EUR_READ,
+                unit=Unit(currency="EUR", prices="current"),
+            )
+        ],
         tool_context=ctx,
     )
     assert card["outcome"] == Outcome.OK.value, card
     plan = load_plan(ctx.state)
     assert plan is not None
-    slot = f"user_prices_{_EUR_READ}"
-    decided = next(d for d in plan.decisions if d.slot == slot)
-    assert (decided.chosen, decided.options) == (
-        "current prices in EUR",
-        ("current prices in EUR", "constant prices"),
-    )
+    (decided,) = [d for d in plan.decisions if d.fixes is not None and d.fixes.prices is not None]
+    assert (decided.slot, decided.chosen) == (f"user_unit_{_GROSS}", "current prices in EUR")
     assert decided.rationale == "The user chose current prices in EUR."
-    option = decision_option_id("constant prices")
-    pick = decision_pick(
-        plan, choice_id=f"decision/{slot}", option_id=option, to_origin={}, alignments={}
-    )
-    assert pick is not None
-    save_decision_pick(ctx.state, pick)
-    ctx.records = [
-        *ctx.records,
-        response_event("propose_plan", card),
-        _switch_event(f"decision/{slot}", option),
-    ]
+    assert switchable_decision(decided) is False
+    switch = {
+        "choice_id": f"decision/{decided.slot}",
+        "option_id": decision_option_id("constant prices"),
+    }
 
-    result = propose(
-        amends_version=card["version"],
-        evidence_requirements=[
-            aid(
-                "second",
-                source_spec_id=_CONSTANT_GROSS,
-                unit=Unit(currency="USD", prices="constant", base_year=2023),
-            )
-        ],
-        removed_evidence_requirements=["first"],
-        tool_context=ctx,
-    )
-
-    assert result["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, result
-    in_euros = Unit(currency="EUR", prices="constant", base_year=2023)
-    assert result["detail"]["unit"] == in_euros.model_dump(mode="json")
+    assert decision_pick(plan, **switch, to_origin={}, alignments={}) is None

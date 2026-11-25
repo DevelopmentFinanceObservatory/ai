@@ -61,7 +61,7 @@ from compiler.surface import transient
 from harness.conversation import ledger_conversation_id
 from harness.studio_state import HEARTBEAT_INTERVAL_S, SegmentLost, _wire_id
 from harness.turn import transcript as entries
-from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
+from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed, pause_state
 from harness.turn.node import Next, Node, NodeCtx, Pause, StopScope, TurnKey
 from harness.turn.store import (
     CLOSED,
@@ -1068,6 +1068,7 @@ async def drive[E](
                     round=cursor.round + 1,
                     payload=result.payload,
                     message=result.message,
+                    state=pause_state(ctx.state),
                 )
                 if isinstance(result, Pause)
                 else NodeDone(node=node, label=result.label, output=result.output),

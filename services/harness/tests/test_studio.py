@@ -27,7 +27,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, tzinfo
@@ -100,6 +100,7 @@ from harness.settings import Settings
 from harness.studio import (
     _acquire_or_conflict,
     _spec_use_sink,
+    _switch_answer,
     create_studio_router,
 )
 from harness.studio_edit import _canvas_is_behind
@@ -131,6 +132,12 @@ from harness.turn.store import CursorStale, TurnStatus, TurnStore
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wire import (
+    MAX_CANCEL_REQUEST_BYTES,
+    MAX_CLIENT_FEATURES,
+    MAX_COMPOSITION_REQUEST_BYTES,
+    MAX_INTERRUPT_REQUEST_BYTES,
+    MAX_INTERRUPT_TEXT_CHARS,
+    MAX_RESUME_REQUEST_BYTES,
     MAX_SEED_SPEC_BYTES,
     MAX_TURN_REQUEST_BYTES,
     ComponentType,
@@ -172,7 +179,7 @@ from .failure_text import classed_sentence, is_user_sentence
 from .graph_turns import agent_read
 from .resolved_revision import resolved_revision
 from .scope_scenarios import _hashed_scope, _switched_answer
-from .scripted_genai import ScriptedGenai, call_part, reply, text_part
+from .scripted_genai import ScriptedGenai, call_part, empty_reply, reply, text_part
 from .scripted_tools import (
     CannedSearch,
     chart,
@@ -900,6 +907,86 @@ class _HeldSends:
         self.sent.append(args)
         await self.release.wait()
         return "posted"
+
+
+@pytest.mark.parametrize(
+    "shown",
+    ["narration-beside-a-call", "a-card-drawn", "nothing"],
+)
+async def test_a_model_response_with_no_answer_ends_on_whether_the_turn_answered(
+    shown: str,
+) -> None:
+    """A run ending on a response with no answer closes the turn answered when the
+    turn drew a card, the card being the reply. Narration streamed beside a call
+    answers nothing, so such a turn fails, and the user is told to retry."""
+    script = {
+        "narration-beside-a-call": (
+            reply(text_part("Looking it up."), search_call("aid to Kenya")),
+        ),
+        "a-card-drawn": _card()[:3],
+        "nothing": (search_call("aid to Kenya"),),
+    }[shown]
+    app = _app(
+        *script, empty_reply(), resolver=_search(), executor=ScriptedExecutor(_card_results())
+    )
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body())
+
+    events = _events(frames)
+    if shown != "a-card-drawn":
+        error = _frame(frames, "error")["error"]
+        assert (error["error"], error["retry"]) == ("transient_unavailable", "retry_after_delay")
+        assert "message.complete" not in events
+        return
+    assert "error" not in events
+    assert events[-1] == "done"
+    assert "component.created" in events
+
+
+@pytest.mark.parametrize(
+    "drawn",
+    ["after-the-approval", "before-the-plan"],
+)
+async def test_an_approved_plans_empty_closing_response_ends_answered_only_on_its_own_card(
+    drawn: str,
+) -> None:
+    """The run that takes a plan's approval answers it. Where its closing response
+    holds no answer, a card it drew ends the turn answered; a card the turn drew
+    before handing the plan off answered nothing the approval asked, so the turn
+    fails and the user is told to retry."""
+    if drawn == "after-the-approval":
+        script = (
+            plan_call("q with forks"),
+            make_charts_call(chart(PLAN_FRAME, type_="stat_card", title="Aid to Kenya")),
+        )
+        app = _app(
+            *script, empty_reply(), executor=ScriptedExecutor(), tool_surface=ScriptedSurface()
+        )
+    else:
+        app = _app(
+            *_card()[:3],
+            plan_call("q with forks"),
+            empty_reply(),
+            resolver=_search(),
+            executor=ScriptedExecutor(_card_results()),
+            tool_surface=ScriptedSurface(),
+        )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        second = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+
+    events = _events(second)
+    if drawn == "before-the-plan":
+        assert "component.created" in _events(first)
+        error = _frame(second, "error")["error"]
+        assert (error["error"], error["retry"]) == ("transient_unavailable", "retry_after_delay")
+        return
+    assert "component.created" in events
+    assert "error" not in events
+    assert events[-1] == "done"
 
 
 async def test_the_stream_that_offers_a_card_closes_once_its_early_mints_are_posted() -> None:
@@ -8151,6 +8238,131 @@ async def test_a_planner_decision_switch_is_checked_as_a_scope_switch_and_resume
     assert conversation.turn_user_message.endswith("(then: use the top 10 donors)")
 
 
+# The row of a unit question's whole unit a plan card shows
+# (`PlanDecision.unit`), in constant 2020 euros, as the wire fixture states it.
+_UNIT_DECISION = PlanDecision.model_validate(
+    next(
+        decision
+        for decision in json.loads(
+            (
+                Path(__file__).parent
+                / "wire_fixtures"
+                / "studio"
+                / "event-22-plan-proposed-unit.json"
+            ).read_text()
+        )["decisions"]
+        if decision.get("unit")
+    )
+)
+assert _UNIT_DECISION.choice_id is not None and _UNIT_DECISION.options is not None
+_UNIT_ROW = _UNIT_DECISION.choice_id
+_USD_2015 = {"currency": "USD", "prices": "constant", "base_year": 2015}
+
+
+@pytest.mark.parametrize(
+    ("switch", "line"),
+    [
+        ({"option_id": "USD-constant-2015", "unit": _USD_2015}, "use constant 2015 US dollars"),
+        ({"option_id": "EUR-current"}, "use current Euros"),
+        (
+            {"option_id": "EUR-current", "unit": {"currency": "EUR", "prices": "current"}},
+            "use current Euros",
+        ),
+    ],
+    ids=["unlisted-unit", "listed-option", "listed-unit"],
+)
+async def test_a_unit_row_switch_takes_any_unit_its_offer_holds_and_hands_it_on(
+    switch: dict[str, Any], line: str
+) -> None:
+    """A switch of a unit row may carry `unit`, any unit the row's offer
+    holds, named by `option_id`, though the row's whole units do not list it.
+    A unit `option_id` does not name, one outside the offer, the one the row
+    holds and a unit on a row offering none are refused 422. Constant 2015
+    US dollars, or current euros the row lists, by its option or as a unit,
+    resumes the plan, and the turn's record names that unit in one form."""
+    app = _app(*_plan())
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(
+            app,
+            client,
+            choices={
+                _CHOICE_ID: _SHOWN_CHOICE,
+                _UNIT_ROW: _PendingChoice(
+                    active=_UNIT_DECISION.active_option_id or "",
+                    options={
+                        option.option_id: _PendingOption(label=option.label, status=option.status)
+                        for option in _UNIT_DECISION.options
+                    },
+                ),
+            },
+        )
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        pending = conversation.pending[plan["interrupt_id"]]
+        assert pending.card is not None
+        pending.card = pending.card.model_copy(
+            update={"decisions": [*pending.card.decisions, _UNIT_DECISION]}
+        )
+        await app.state.studio.store.save(PRINCIPAL, CONVERSATION)
+        cases = [
+            {"option_id": "USD-constant-2016", "unit": _USD_2015},
+            {"option_id": "USD-constant-1960", "unit": {**_USD_2015, "base_year": 1960}},
+            {
+                "option_id": "EUR-constant-2020",
+                "unit": {"currency": "EUR", "prices": "constant", "base_year": 2020},
+            },
+            {"choice_id": _CHOICE_ID, "option_id": "sector:120+130", "unit": _USD_2015},
+        ]
+        refused = [
+            await client.post(
+                "/api/studio/interrupt",
+                json=_switch_body(plan, **{"choice_id": _UNIT_ROW, **change}),
+                headers=AUTH,
+            )
+            for change in cases
+        ]
+        await _stream(
+            client,
+            "/api/studio/interrupt",
+            _switch_body(plan, choice_id=_UNIT_ROW, **switch),
+        )
+
+    assert [(r.status_code, r.json().get("constraint_id")) for r in refused] == [
+        (422, "switch_option_unavailable")
+    ] * len(cases)
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    assert conversation.approvals == []
+    assert conversation.turn_user_message.endswith(f"(then: {line})")
+
+
+@pytest.mark.parametrize(
+    ("change", "switch"),
+    [
+        ({}, {"choice_id": _CHOICE_ID, "option_id": "sector:120"}),
+        (
+            {"option_id": "USD-constant-2015", "unit": _USD_2015},
+            {"choice_id": _CHOICE_ID, "option_id": "USD-constant-2015", "unit": _USD_2015},
+        ),
+    ],
+    ids=["option", "unit"],
+)
+def test_a_switch_hands_the_approve_node_its_row_option_and_unit(
+    change: dict[str, Any], switch: dict[str, Any]
+) -> None:
+    """The `switch` the paused `approve` node is handed names the row and the
+    option, and the unit when the answer carries one."""
+    body = InterruptResponse.model_validate(
+        {
+            **_interrupt_body("approve", "switch"),
+            "choice_id": _CHOICE_ID,
+            "option_id": "sector:120",
+            "plan_revision": "rev",
+            **change,
+        }
+    )
+
+    assert _switch_answer(body) == switch
+
+
 class _AskingPickPlanner(ScriptedPlannerModel):
     """`ScriptedPlannerModel` whose measure decision fixes the measure, so the
     card offers it to switch, and whose replan for a pick asks the user a
@@ -12139,6 +12351,156 @@ async def test_a_request_past_the_body_cap_is_refused_before_it_is_parsed() -> N
     assert "6,356,992-byte cap" in response.json()["detail"]
     assert executor.calls == []
     assert search.calls == []
+
+
+# Each bounded route's cap, a request to it, valid in shape, and the status the route
+# answers it with for a conversation the store does not hold.
+_BOUNDED_BODIES: dict[str, tuple[int, dict[str, Any], int]] = {
+    "composition": (
+        MAX_COMPOSITION_REQUEST_BYTES,
+        {
+            "kind": "composition.mutate",
+            "schema_version": 1,
+            "conversation_id": CONVERSATION,
+            "operations": [{"op": "remove", "component_id": "cmp_01"}],
+        },
+        404,
+    ),
+    "cancel": (
+        MAX_CANCEL_REQUEST_BYTES,
+        {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
+        204,
+    ),
+    "resume": (
+        MAX_RESUME_REQUEST_BYTES,
+        {
+            "kind": "turn.resume",
+            "schema_version": 1,
+            "conversation_id": CONVERSATION,
+            "turn_index": 1,
+        },
+        404,
+    ),
+}
+
+
+# `AUTH` with the JSON content type a raw body needs.
+_JSON_AUTH = {**AUTH, "Content-Type": "application/json"}
+
+
+async def _chunks(body: bytes) -> AsyncIterator[bytes]:
+    """`body` in 4 KiB chunks, which a client sends with no `Content-Length`."""
+    for start in range(0, len(body), 4_096):
+        yield body[start : start + 4_096]
+
+
+@pytest.mark.parametrize("chunked", [False, True], ids=["content-length", "chunked"])
+@pytest.mark.parametrize("past", [0, 1], ids=["at-the-cap", "a-byte-past"])
+@pytest.mark.parametrize("route", sorted(_BOUNDED_BODIES))
+async def test_a_body_past_its_routes_cap_is_refused_and_one_at_the_cap_is_read(
+    route: str,
+    past: int,
+    chunked: bool,
+) -> None:
+    """`/composition`, `/cancel` and `/resume` each read a body of up to their cap,
+    whether the client declares its length or streams it in chunks, and refuse one a
+    byte longer 413 `resource_exhausted`. The bodies differ only in trailing JSON
+    whitespace, so the route answers the one at the cap as it answers the request
+    unpadded."""
+    cap, request, answered = _BOUNDED_BODIES[route]
+    compact = json.dumps(request, separators=(",", ":")).encode()
+    body = compact + b" " * (cap + past - len(compact))
+    app = _app()
+    async with _client(app) as client:
+        unpadded = await client.post(f"/api/studio/{route}", content=compact, headers=_JSON_AUTH)
+        response = await client.post(
+            f"/api/studio/{route}",
+            content=_chunks(body) if chunked else body,
+            headers=_JSON_AUTH,
+        )
+
+    assert unpadded.status_code == answered
+    if past:
+        assert response.status_code == 413
+        assert response.json()["error"] == "resource_exhausted"
+        return
+    assert response.status_code == unpadded.status_code
+    assert response.content == unpadded.content
+
+
+@pytest.mark.parametrize(
+    ("change", "status", "code"),
+    [
+        pytest.param(
+            {
+                "answers": {
+                    "q1": {
+                        "kind": "options",
+                        "option_ids": [f"o{i}" for i in range(MAX_INTERRUPT_REQUEST_BYTES // 6)],
+                    }
+                }
+            },
+            413,
+            "resource_exhausted",
+            id="option-ids-past-the-body-cap",
+        ),
+        pytest.param(
+            {"answers": {"q1": {"kind": "text", "text": "x" * (MAX_INTERRUPT_TEXT_CHARS + 1)}}},
+            422,
+            "string_too_long",
+            id="text-past-its-cap",
+        ),
+        pytest.param(
+            {"answers": {"q1": {"kind": "text", "text": ""}}},
+            422,
+            "string_too_short",
+            id="empty-text",
+        ),
+        pytest.param(
+            {"client_features": [f"f{i}" for i in range(MAX_CLIENT_FEATURES + 1)]},
+            422,
+            "too_long",
+            id="client-features-past-their-cap",
+        ),
+    ],
+)
+async def test_an_interrupt_past_its_bounds_is_refused_before_it_touches_the_conversation(
+    change: dict[str, Any], status: int, code: str
+) -> None:
+    """`/interrupt` reads at most `MAX_INTERRUPT_REQUEST_BYTES`, so a client cannot post
+    lists of any length, takes at most `MAX_INTERRUPT_TEXT_CHARS` of the user's words,
+    and declares at most `MAX_CLIENT_FEATURES` features."""
+    app = _app(*_ask_questions(("Count?", ("A", "B"))))
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        elicitation = _frame(first, "elicitation.request")
+        picked = {"q1": _pick(elicitation["questions"][0]["options"][0]["id"])}
+        body = {
+            **_interrupt_body(elicitation["interrupt_id"], "answer", answers=picked),
+            **change,
+        }
+        response = await client.post("/api/studio/interrupt", json=body, headers=AUTH)
+
+    assert response.status_code == status, response.text
+    if status == 413:
+        assert response.json()["error"] == code
+    else:
+        assert [error["type"] for error in response.json()["detail"]] == [code]
+    assert (
+        elicitation["interrupt_id"]
+        in app.state.studio.store.current(PRINCIPAL, CONVERSATION).pending
+    )
+
+
+def test_the_interrupt_schema_states_the_cap_on_the_users_words() -> None:
+    """A client built from the schema sees `MAX_INTERRUPT_TEXT_CHARS` on an amendment
+    and on a free-text answer."""
+    schema = InterruptResponse.model_json_schema()
+    (payload,) = [s for s in schema["properties"]["payload"]["anyOf"] if s["type"] == "string"]
+    text = schema["$defs"]["TextAnswer"]["properties"]["text"]
+
+    assert payload["maxLength"] == MAX_INTERRUPT_TEXT_CHARS
+    assert (text["minLength"], text["maxLength"]) == (1, MAX_INTERRUPT_TEXT_CHARS)
 
 
 async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block(

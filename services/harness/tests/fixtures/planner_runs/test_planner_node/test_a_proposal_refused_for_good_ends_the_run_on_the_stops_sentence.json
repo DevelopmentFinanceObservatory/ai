@@ -185,7 +185,8 @@
       "call_id": null,
       "args": null,
       "body": {},
-      "name": null
+      "name": null,
+      "record": 0
     },
     {
       "kind": "response",
@@ -196,7 +197,8 @@
         "code": "budget_exhausted",
         "message": "No more rounds."
       },
-      "name": "propose_plan"
+      "name": "propose_plan",
+      "record": 2
     }
   ],
   "state": {

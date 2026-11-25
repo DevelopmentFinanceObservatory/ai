@@ -15,6 +15,7 @@ import pytest
 from common.hashed_fields import revision_content
 from compiler.sources import source_from_spec_block
 from data_mcp.search_tool import SearchSource
+from harness.planner_adapter import _as_authored
 from planner.operations import (
     AggregateOperation,
     FilterOperation,
@@ -41,6 +42,7 @@ from planner.plan import (
     MAX_OPTION_CHARS,
     MAX_PLAN_DECISIONS,
     MAX_PLAN_RECORD_CHARS,
+    MAX_PLAN_REQUIREMENTS,
     MAX_PREDICATES,
     MAX_QUESTION_CHARS,
     MAX_SOURCE_CHARS,
@@ -66,6 +68,7 @@ from planner.plan import (
     FixedField,
     FullHistory,
     GrowthRequirement,
+    HistorySplit,
     JoinRequirement,
     Period,
     Plan,
@@ -74,6 +77,7 @@ from planner.plan import (
     RankRequirement,
     RequirementSide,
     ResolvedBy,
+    RollingCopy,
     ScopeOptionState,
     ShareOfRequirement,
     SumOfRequirement,
@@ -82,13 +86,16 @@ from planner.plan import (
     UnsupportedPlanError,
     WholeIsItsMemberError,
     WholeOf,
+    WholeSum,
     _build_shapes,
+    authored,
     authored_text,
     cut_user_text,
     frame_shapes,
     full_history,
     is_scope_choice,
     load_plan,
+    origin_of,
     period_window,
     plan_revision,
     ranks_among_settled,
@@ -96,11 +103,14 @@ from planner.plan import (
     restated_translation,
     retrieves_period,
     rolls_from_its_start,
+    save_plan,
     scope_choice_slot,
     settle_decisions,
     split_of,
     whole_of_fault,
     windowed_pin,
+    with_authored_requirements,
+    with_whole_sums,
 )
 from planner.proof import mismatches
 from planner.records import (
@@ -6211,6 +6221,35 @@ def test_authored_text_renames_a_copy_named_in_prose_and_keeps_refs(text: str, n
     assert authored_text(text, {"aid_history": "aid"}) == named
 
 
+@pytest.mark.parametrize(
+    ("text", "named"),
+    [
+        pytest.param("step 'total_sum' failed.", "step 'total' failed.", id="alone"),
+        pytest.param(
+            "aggregate 'total_sum' reads 'total'.",
+            "aggregate the sum of 'total' reads 'total'.",
+            id="beside-its-whole-quoted",
+        ),
+        pytest.param(
+            "total_sum_history reads total.",
+            "the sum of total reads total.",
+            id="a-copy-beside-its-whole",
+        ),
+        pytest.param(
+            "aid_history reads total_sum and aid.",
+            "aid reads total and aid.",
+            id="a-copy-beside-its-origin",
+        ),
+    ],
+)
+def test_authored_text_tells_a_sum_named_beside_its_whole_apart(text: str, named: str) -> None:
+    """A sum `propose_plan` added is named as its whole, and as the sum of its whole
+    where the text names the whole too, so the sentence keeps two parties."""
+    origins = {"total_sum": "total", "total_sum_history": "total", "aid_history": "aid"}
+
+    assert authored_text(text, origins, sums={"total_sum", "total_sum_history"}) == named
+
+
 def test_rolling_years_refused_on_a_copy_name_the_requirement_the_model_wrote(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
@@ -7410,8 +7449,6 @@ def test_a_whole_over_donors_of_a_part_with_a_roleless_entity_asks_for_its_role(
         id="whole",
         decision_ids=["measure"],
         measure="total aid",
-        entities=part_entities,
-        across=("donor",),
         period=period,
         whole_of=WholeOf(part="part", axis="donor"),
     )
@@ -7420,6 +7457,338 @@ def test_a_whole_over_donors_of_a_part_with_a_roleless_entity_asks_for_its_role(
 
     assert reason is not None
     assert ("state each entity's role" in reason) is asks_for_roles
+
+
+def _g7_africa_share(*, whole: DatasetRequirement, pooled: bool = False) -> list[Any]:
+    """G7 aid to Africa as a share of `whole`, the plan the planner first proposed
+    in a recorded Studio turn. With `pooled`, the whole is summed by year first."""
+    part = DatasetRequirement(
+        id="g7_africa_aid",
+        decision_ids=["measure"],
+        measure="official development assistance",
+        entities=[
+            Entity(name="Group of Seven", role="donor"),
+            Entity(name="Africa", role="recipient"),
+        ],
+        period=Period(start=1960, end=2024),
+        source_spec_id=_PIN,
+    )
+    total = AggregateRequirement(
+        id="g7_total_pooled",
+        input_id=whole.id,
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    share = ShareOfRequirement(
+        id="g7_africa_share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id=part.id),
+        denominator=RequirementSide(input_id=total.id if pooled else whole.id),
+    )
+    return [part, whole, *([total] if pooled else []), share]
+
+
+_G7_WHOLE = DatasetRequirement(
+    id="g7_total_aid",
+    decision_ids=["measure"],
+    measure="official development assistance",
+    period=Period(start=1960, end=2024),
+    whole_of=WholeOf(part="g7_africa_aid", axis="recipient"),
+)
+# The same whole as a stored plan may hold it, stating the part's donor and its
+# recipients in `across`, pooled by year.
+_G7_WHOLE_STATED = _G7_WHOLE.model_copy(
+    update={"entities": (Entity(name="Group of Seven", role="donor"),), "across": ("recipient",)}
+)
+
+
+@pytest.mark.parametrize(
+    ("whole", "pooled"),
+    [
+        pytest.param(_G7_WHOLE, False, id="states-nothing"),
+        pytest.param(_G7_WHOLE, True, id="states-nothing-pooled"),
+        pytest.param(_G7_WHOLE_STATED, True, id="stored-with-coverage"),
+    ],
+)
+def test_a_whole_covers_its_parts_parties_with_the_side_it_opens_as_one_total(
+    decision: DecisionFactory, whole: DatasetRequirement, pooled: bool
+) -> None:
+    """G7 aid to Africa over G7 aid to every recipient. The whole states no
+    entities and no `across`, and reads as its part's donor with the recipients
+    one closed total, so the share divides by it directly. A whole a stored
+    session states coverage on keeps it as stored and reads the same way."""
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=_g7_africa_share(whole=whole, pooled=pooled),
+    )
+
+    loaded = plan.requirement(whole.id)
+    assert isinstance(loaded, DatasetRequirement)
+    assert (loaded.entities, loaded.across) == (whole.entities, whole.across)
+    shape = frame_shapes(plan)[whole.id]
+    assert [(role.role, role.open) for role in shape.roles] == [
+        ("donor", False),
+        ("recipient", False),
+    ]
+    assert Plan.model_validate_json(plan.model_dump_json()) == plan
+
+
+def test_an_approved_plan_stored_with_a_whole_stating_coverage_runs_without_reapproval(
+    decision: DecisionFactory,
+) -> None:
+    """An approved plan whose whole states its part's `entities` and `across` runs
+    as approved once stored and reloaded: those fields feed the revision the user
+    approved. The planner is shown the whole without them, so an amendment
+    restating it as shown is admitted."""
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=_g7_africa_share(whole=_G7_WHOLE),
+    )
+    # A whole stating the fields a proposal is refused for: `model_copy` skips
+    # the validation that refuses them.
+    legacy = plan.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                _G7_WHOLE_STATED if requirement.id == _G7_WHOLE.id else requirement
+                for requirement in plan.evidence_requirements
+            )
+        }
+    )
+    state: dict[str, Any] = {}
+    save_plan(state, legacy.approve(at=datetime.now(UTC)))
+    stored_whole = next(
+        requirement
+        for requirement in json.loads(state[PLAN_STATE_KEY])["evidence_requirements"]
+        if requirement["id"] == _G7_WHOLE.id
+    )
+    assert {"entities", "across"} <= stored_whole.keys()
+
+    loaded = load_plan(state)
+
+    assert loaded is not None
+    assert loaded.start_execution().status == PlanStatus.EXECUTING
+    shown = _as_authored(loaded)
+    assert shown is not None
+    (shown_whole,) = (r for r in shown["evidence_requirements"] if r["id"] == _G7_WHOLE.id)
+    assert not shown_whole.get("entities")
+    assert not shown_whole.get("across")
+    _Patch.model_validate(
+        {
+            "decisions": [],
+            "evidence_requirements": shown["evidence_requirements"],
+            "removed_decisions": [],
+            "removed_evidence_requirements": [],
+            "declined": [],
+            "answered": [],
+            "removed_asks": [],
+            "across_years": [],
+        }
+    )
+
+
+def test_a_summed_whole_reads_its_side_open_and_its_sum_closes_it(
+    decision: DecisionFactory,
+) -> None:
+    """G7 aid to Africa over G7 aid to every recipient, on a source leaving the
+    recipients open. The whole reads them open, one row each, and the sum
+    `propose_plan` added keeps the donor and sums them away, so the share divides
+    by one total. The plan the model wrote is the plan without the sum."""
+    sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
+    written = _g7_africa_share(whole=_G7_WHOLE)
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=with_whole_sums(written, sums),
+        whole_sums=sums,
+    )
+
+    shapes = frame_shapes(plan)
+    assert [(role.role, role.open) for role in shapes[_G7_WHOLE.id].roles] == [
+        ("donor", False),
+        ("recipient", True),
+    ]
+    assert [(role.role, role.open) for role in shapes["g7_total_aid_sum"].roles] == [
+        ("donor", False)
+    ]
+    assert authored(plan).evidence_requirements == tuple(written)
+    assert Plan.model_validate_json(plan.model_dump_json()) == plan
+
+
+def test_a_plan_at_the_requirement_limit_holds_the_sum_over_its_whole(
+    decision: DecisionFactory,
+) -> None:
+    """A plan stating `MAX_PLAN_REQUIREMENTS` requirements, one of them a whole
+    `propose_plan` sums. The sum is no requirement the model wrote, so the plan
+    fits."""
+    sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
+    written = _g7_africa_share(whole=_G7_WHOLE)
+    fillers = [
+        DatasetRequirement(
+            id=f"series_{n}",
+            decision_ids=["measure"],
+            measure="official development assistance",
+            entities=[Entity(name="Kenya", role="recipient")],
+            period=Period(start=2020, end=2024),
+        )
+        for n in range(MAX_PLAN_REQUIREMENTS - len(written))
+    ]
+
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid, and aid to Kenya",
+        answer_mode=AnswerMode.SERIES,
+        evidence_requirements=with_whole_sums([*written, *fillers], sums),
+        whole_sums=sums,
+    )
+
+    assert len(plan.evidence_requirements) == MAX_PLAN_REQUIREMENTS + 1
+
+
+@pytest.mark.parametrize(
+    ("sums", "requirements"),
+    [
+        pytest.param(
+            (WholeSum(whole_id="g7_africa_aid", sum_id="g7_total_aid_sum"),),
+            None,
+            id="names-the-part",
+        ),
+        pytest.param(
+            (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),),
+            _g7_africa_share(whole=_G7_WHOLE),
+            id="sum-not-stated",
+        ),
+    ],
+)
+def test_a_plan_whose_whole_sums_are_not_its_wholes_aggregates_is_refused(
+    decision: DecisionFactory,
+    sums: tuple[WholeSum, ...],
+    requirements: list[Any] | None,
+) -> None:
+    written = _g7_africa_share(whole=_G7_WHOLE)
+
+    with pytest.raises(ValidationError) as refused:
+        _plan(
+            decision(),
+            question="G7 aid to Africa as a share of its total aid since the earliest year",
+            answer_mode=AnswerMode.COMPUTED,
+            evidence_requirements=requirements or with_whole_sums(written, sums),
+            whole_sums=sums,
+        )
+    assert [(error["type"], error["loc"]) for error in refused.value.errors()] == [
+        ("value_error", ())
+    ]
+
+
+def test_a_copy_of_a_whole_s_sum_is_named_as_the_whole() -> None:
+    """A rolling copy of the sum `propose_plan` added over a whole is named in
+    outward text as the whole the model wrote, which the planner can patch. The
+    planner is never shown the sum."""
+    split = HistorySplit(
+        requirements=(),
+        copies=(RollingCopy(copy_id="total_sum_history", origin_id="total_sum"),),
+        whole_history={},
+        first_years_read=(),
+        first_year_unknown=(),
+        sums=(WholeSum(whole_id="total", sum_id="total_sum"),),
+    )
+
+    assert origin_of(split, "total_sum_history") == "total"
+    assert origin_of(split, "total_sum") == "total"
+    assert split.summing() == {"total_sum", "total_sum_history"}
+
+
+def test_requirements_dropping_a_whole_drop_its_sum(decision: DecisionFactory) -> None:
+    """G7 aid to Africa over its whole, summed, restated with the whole a total of
+    its own. The plan keeps a sum only over a whole it states."""
+    sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
+    written = _g7_africa_share(whole=_G7_WHOLE, pooled=True)
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=with_whole_sums(written, sums),
+        whole_sums=sums,
+    )
+    total = _G7_WHOLE_STATED.model_copy(update={"whole_of": None})
+    restated = [total if r.id == total.id else r for r in written]
+
+    rebuilt = with_authored_requirements(plan, restated)
+
+    assert rebuilt.whole_sums == ()
+    assert rebuilt.evidence_requirements == tuple(restated)
+
+
+def test_a_part_naming_the_set_it_read_across_keeps_its_whole_s_sum(
+    decision: DecisionFactory,
+) -> None:
+    """Every G7 donor's aid to Africa, totalled, as a share of their aid to every
+    recipient, the recipients summed keeping each donor apart. The part restated
+    naming the G7 in place of its `across` donors, as the translator restates a
+    part whose pin holds that side to one set (`translator.discovery.name_pinned_groups`),
+    keeps the sum, which then keeps the G7 apart in place of each donor."""
+    sums = (WholeSum(whole_id=_G7_WHOLE.id, sum_id="g7_total_aid_sum"),)
+    g7 = Entity(name="Group of Seven", role="donor")
+    africa = Entity(name="Africa", role="recipient")
+    part, whole, total, share = _g7_africa_share(whole=_G7_WHOLE, pooled=True)
+    each = part.model_copy(update={"entities": (africa,), "across": ("donor",)})
+    pooled = AggregateRequirement(
+        id="g7_africa_pooled", input_id=each.id, reduction=Reduction.SUM, group_by=(GroupBy.PERIOD,)
+    )
+    over_pool = share.model_copy(update={"numerator": RequirementSide(input_id=pooled.id)})
+    written = [each, pooled, whole, total, over_pool]
+    plan = _plan(
+        decision(),
+        question="G7 aid to Africa as a share of its total aid since the earliest year",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=with_whole_sums(written, sums),
+        whole_sums=sums,
+    )
+    named = each.model_copy(update={"entities": (africa, g7), "across": ()})
+
+    rebuilt = with_authored_requirements(plan, [named, *written[1:]])
+
+    assert rebuilt.whole_sums == sums
+    assert split_of(plan).kept_open == {"g7_total_aid_sum": ("donor",)}
+    assert split_of(rebuilt).kept_open == {"g7_total_aid_sum": ()}
+    assert [(role.role, role.open) for role in frame_shapes(rebuilt)["g7_total_aid_sum"].roles] == [
+        ("donor", False)
+    ]
+
+
+@pytest.mark.parametrize(
+    "stated",
+    [
+        pytest.param({"entities": [{"name": "Group of Seven", "role": "donor"}]}, id="entities"),
+        pytest.param({"across": ["recipient"]}, id="across"),
+    ],
+)
+def test_a_proposal_stating_coverage_on_a_whole_is_refused(stated: dict[str, Any]) -> None:
+    """A whole covers what its part covers with one side left open, so a proposal
+    stating its `entities` or `across` is refused."""
+    whole = {**_G7_WHOLE.model_dump(mode="json"), **stated}
+    part = _g7_africa_share(whole=_G7_WHOLE)[0].model_dump(mode="json")
+
+    with pytest.raises(ValidationError) as raised:
+        _Patch.model_validate(
+            {
+                "decisions": [],
+                "evidence_requirements": [part, whole],
+                "removed_decisions": [],
+                "removed_evidence_requirements": [],
+                "declined": [],
+                "answered": [],
+                "removed_asks": [],
+                "across_years": [],
+            }
+        )
+    assert [(error["type"], error["loc"]) for error in raised.value.errors()] == [
+        ("value_error", ())
+    ]
 
 
 @pytest.mark.parametrize(

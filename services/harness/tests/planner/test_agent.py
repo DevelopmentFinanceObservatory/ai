@@ -49,12 +49,15 @@ from harness.graph.state import (
     ORCHESTRATOR_UNIT_READ_KEY,
     record_unit_read,
     record_unit_served,
+    record_units_reread,
     store_search,
 )
 from harness.orchestrator_tools import _search_context
-from harness.plan_display import card_questions, plan_words, shown_decisions
+from harness.plan_display import card_questions, plan_words, shown_decisions, switchable_decision
 from harness.planner_adapter import (
+    _as_authored,
     _reading_pin_sources,
+    _RevisionSession,
 )
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.sentences import PlanWords, refusal_reason, refusal_sentence
@@ -78,7 +81,7 @@ from planner.operations import (
     RetrieveOperation,
     Translation,
 )
-from planner.parties import PARTY_ROLES, PartyRole, flow_side, party_role, role_party
+from planner.parties import PARTY_ROLES, PartyRole, flow_side, party_role
 from planner.plan import (
     ALIGNED_PINS_STATE_KEY,
     AMENDMENT_ENTRY_STATE_KEY,
@@ -123,19 +126,24 @@ from planner.plan import (
     RefusedSpec,
     RequirementSide,
     ResolvedBy,
+    SessionState,
     ShareOfRequirement,
     SumOfRequirement,
     Unit,
     UnsupportedOperation,
     WholeOf,
+    WholeSum,
     WindowedPin,
     aligned_pins,
+    authored,
+    clear_plan,
     clear_unsupported,
     compile_warnings,
     current_discovery_time_left,
     current_recorded_identity,
     fix_disagreements,
     held_sources,
+    inputs_of,
     is_dataset,
     is_scope_choice,
     is_search_pin,
@@ -201,7 +209,16 @@ from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, 
 from pydantic import TypeAdapter, ValidationError
 from pydantic_core import to_jsonable_python
 from submission import service as submission_service
-from submission.prices_choice import PRICES_OPTIONS, Parts, PricesChoice, prices_decisions
+from submission.prices_choice import (
+    PRICES_OPTIONS,
+    AnsweredPart,
+    Parts,
+    PricesChoice,
+    plan_held_choices,
+    prices_decisions,
+    row_members_left,
+    whole_unit_slots,
+)
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
@@ -5157,12 +5174,18 @@ async def test_a_share_whose_total_is_not_published_on_the_shared_basis_is_refus
 
 
 def _sum_of_health(
-    propose: Callable[..., Any], ctx: _FakeToolContext, decision: Decision, *, accept: bool = False
+    propose: Callable[..., Any],
+    ctx: _FakeToolContext,
+    decision: Decision,
+    *,
+    declares: tuple[str, str] | None = None,
 ) -> Any:
     """Propose US health aid plus the US total, pinning `HEALTH` and `TOTAL`; with
-    `accept`, the sum accepts a provider difference."""
+    `declares`, each declares the provider option given, in that order."""
 
-    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
+    def dataset(
+        requirement_id: str, measure: str, pin: str, option: str | None = None
+    ) -> DatasetRequirement:
         return DatasetRequirement(
             id=requirement_id,
             decision_ids=["measure"],
@@ -5170,6 +5193,7 @@ def _sum_of_health(
             entities=[Entity(name="United States", role="donor")],
             period=Period(start=2015, end=2024),
             source_spec_id=pin,
+            scope_options=(option,) if option is not None else (),
         )
 
     return propose(
@@ -5177,14 +5201,13 @@ def _sum_of_health(
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision]),
         evidence_requirements=[
-            dataset("health", "US aid to health", HEALTH),
-            dataset("total", "US total ODA", TOTAL),
+            dataset("health", "US aid to health", HEALTH, declares and declares[0]),
+            dataset("total", "US total ODA", TOTAL, declares and declares[1]),
             SumOfRequirement(
                 id="sum",
                 decision_ids=["measure"],
                 left=RequirementSide(input_id="health"),
                 right=RequirementSide(input_id="total"),
-                accept_provider_difference=accept,
             ),
         ],
         tool_context=ctx,
@@ -5369,15 +5392,15 @@ def test_inputs_the_user_stated_on_different_provider_scopes_are_shared_and_neve
         ),
     ],
 )
-def test_a_sum_accepting_a_provider_difference_is_still_refused_where_it_counts_flows_twice(
+def test_a_sum_whose_inputs_declare_their_own_options_is_still_refused_where_it_counts_twice(
     decision: DecisionFactory,
     scopes: tuple[str, str],
     donors: tuple[list[str], list[str]],
     code: str,
 ) -> None:
-    """US health aid plus the US total on other provider scopes, the sum accepting a
-    provider difference. The flag lets each input keep its own scope, so the inputs
-    are not realigned, and the sum still refuses where one donor's money would be
+    """US health aid plus the US total on other provider scopes, each declaring its
+    own. The declarations keep each input on its own scope, so the inputs are not
+    realigned, and the sum still refuses where one donor's money would be
     counted twice: bilateral flows in both, or its aid through multilaterals counted
     as core contributions in both, or as core contributions in one and as an imputed
     share of the multilaterals' spending in the other. Over disjoint donors, or over
@@ -5397,7 +5420,7 @@ def test_a_sum_accepting_a_provider_difference_is_still_refused_where_it_counts_
         functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
         ctx,
         decision(),
-        accept=True,
+        declares=(f"provider:{scopes[0]}", f"provider:{scopes[1]}"),
     )
 
     assert result.get("outcome") == code or result.get("code") == code, result
@@ -5408,7 +5431,7 @@ def test_a_sum_accepting_a_provider_difference_is_still_refused_where_it_counts_
         assert _pins(ctx) == [("health", HEALTH), ("total", TOTAL)]
 
 
-@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "accepted"])
+@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "declared"])
 @pytest.mark.parametrize(
     ("scope", "health_donor", "total_donor", "marked", "code"),
     [
@@ -5471,7 +5494,7 @@ def test_a_sum_on_one_provider_scope_is_refused_where_its_reporters_count_one_mo
     code: str,
 ) -> None:
     """US health aid plus a total, both counted on one provider scope, whether the sum
-    aligns its inputs or accepts a provider difference. Where the scope counts imputed
+    aligns its inputs or each declares that scope. Where the scope counts imputed
     multilateral flows and the total is IDA's, whose own outflows spend the core
     contributions its funders paid it, both inputs count the donors' aid through
     multilaterals, one as an imputed share and one as IDA's spending, so the sum is
@@ -5498,7 +5521,7 @@ def test_a_sum_on_one_provider_scope_is_refused_where_its_reporters_count_one_mo
         functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
         ctx,
         decision(),
-        accept=accept,
+        declares=(f"provider:{scope}", f"provider:{scope}") if accept else None,
     )
 
     assert result.get("outcome") == code or result.get("code") == code, result
@@ -5556,7 +5579,7 @@ def test_a_donor_search_states_no_graph_type_for_reads_as_a_country_by_its_ref(
         functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
         ctx,
         decision(),
-        accept=True,
+        declares=("provider:inclusive", "provider:inclusive"),
     )
 
     assert result.get("outcome") == code or result.get("code") == code, result
@@ -5604,7 +5627,7 @@ def _by_instrument(block: dict[str, Any], codes: list[str], *, added: list[str])
     return block
 
 
-@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "accepted"])
+@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "declared"])
 @pytest.mark.parametrize(
     "donors",
     [
@@ -5665,7 +5688,7 @@ def test_a_sum_on_one_provider_scope_counts_no_flow_twice_over_apart_slots(
         functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
         ctx,
         decision(),
-        accept=accept,
+        declares=("provider:inclusive", "provider:inclusive") if accept else None,
     )
 
     if donors is None or apart:
@@ -5677,7 +5700,7 @@ def test_a_sum_on_one_provider_scope_counts_no_flow_twice_over_apart_slots(
         assert load_plan(ctx.state) is None
 
 
-@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "accepted"])
+@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "declared"])
 @pytest.mark.parametrize(
     ("donors", "dataset", "code"),
     [
@@ -5744,7 +5767,7 @@ def test_a_sum_on_one_provider_scope_counts_one_donor_population_by_the_same_str
         functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
         ctx,
         decision(),
-        accept=accept,
+        declares=("provider:inclusive", "provider:inclusive") if accept else None,
     )
 
     assert result.get("outcome") == code or result.get("code") == code, result
@@ -6851,7 +6874,9 @@ def _search_labelled(name: str) -> dict[str, Any]:
 
 
 def _stated_provider(block: dict[str, Any]) -> dict[str, Any]:
-    """`block` with its provider choice settled by the user's words, as an explicit entry."""
+    """A copy of `block` with its provider choice settled by the user's words, as an
+    explicit entry. `block` is often `US_2023`'s own, which later tests read."""
+    block = json.loads(json.dumps(block))
     scope = block["resolved"]["scope_choices"]
     choice = next(c for c in scope["choices"] if c["axis"] == "provider")
     choice["provenance"] = "explicit"
@@ -6890,7 +6915,8 @@ def _us_2023(
     the whole's source written as `source`; with `quotient`, the part summed by year
     is divided by the whole as a `quotient_of`, as the planner wrote the share in a
     recorded Studio run; with `summed_whole`, the whole too is summed by year and
-    the part summed by year is a `share_of` it, or a `quotient_of` it with `quotient`; with `accept`, the share accepts a provider difference;
+    the part summed by year is a `share_of` it, or a `quotient_of` it with `quotient`; with `accept`, the part and the whole each declare the provider option their
+    pin is counted on, so each keeps its own (`_keeping_its_own`);
     with `denominator`, a decision of the planner's the whole alone cites; `extra`
     is proposed after the rest; `own` are further decisions the part cites."""
 
@@ -6902,15 +6928,17 @@ def _us_2023(
         cited: tuple[str, ...] = (),
         whole_of: WholeOf | None = None,
     ) -> DatasetRequirement:
+        block = None if name is None else _us_block(name)
         return DatasetRequirement(
             id=requirement_id,
             decision_ids=["measure", *cited],
             measure=measure,
-            entities=[Entity(name="United States", role="donor")],
+            entities=[] if whole_of else [Entity(name="United States", role="donor")],
             period=Period(start=2023, end=2023),
             source=named,
-            source_spec_id=None if name is None else _us_block(name)["spec_id"],
+            source_spec_id=None if block is None else block["spec_id"],
             whole_of=whole_of,
+            scope_options=_keeping_its_own(block) if accept and whole_of is None else (),
         )
 
     summed: list[EvidenceRequirement] = []
@@ -6939,7 +6967,6 @@ def _us_2023(
                 id=_SHARE,
                 numerator=RequirementSide(input_id="health_by_year"),
                 denominator=RequirementSide(input_id=denominator_id),
-                accept_provider_difference=accept,
             ),
         ]
     step: EvidenceRequirement = (
@@ -6948,7 +6975,6 @@ def _us_2023(
             decision_ids=["measure"],
             numerator=RequirementSide(input_id=_PART),
             denominator=RequirementSide(input_id=_WHOLE),
-            accept_provider_difference=accept,
         )
         if share
         else ComparisonRequirement(
@@ -6956,7 +6982,6 @@ def _us_2023(
             decision_ids=["measure"],
             minuend=RequirementSide(input_id=_WHOLE),
             subtrahend=RequirementSide(input_id=_PART),
-            accept_provider_difference=accept,
         )
     )
     return propose(
@@ -6978,6 +7003,14 @@ def _us_2023(
         ],
         tool_context=ctx,
     )
+
+
+def _keeping_its_own(block: Mapping[str, Any] | None) -> tuple[Any, ...]:
+    """The provider option `block` is counted on, as a dataset requirement declares it
+    to keep it beside inputs counted otherwise (`DatasetRequirement.scope_options`);
+    none where `block` has no provider choice."""
+    scope = ((block or {}).get("resolved") or {}).get("scope_choices") or {}
+    return tuple(c["active"] for c in scope.get("choices", ()) if c["axis"] == "provider")
 
 
 def _pins(ctx: _FakeToolContext) -> list[tuple[str, str | None]]:
@@ -7150,7 +7183,14 @@ async def test_a_declared_whole_offers_no_row_on_the_axis_it_leaves_open(
         restated = load_plan(ctx.state).requirement(_WHOLE)  # type: ignore[union-attr]
         result = await propose(
             evidence_requirements=[
-                restated.model_copy(update={"whole_of": whole_of if declared else None})
+                restated.model_copy(
+                    update={
+                        "whole_of": whole_of if declared else None,
+                        "entities": ()
+                        if declared
+                        else (Entity(name="United States", role="donor"),),
+                    }
+                )
             ],
             amends_version=result["version"],
             tool_context=ctx,
@@ -7288,7 +7328,6 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
                 id="narrow_whole",
                 decision_ids=["measure"],
                 measure="US total ODA",
-                entities=[united_states],
                 period=Period(start=2023, end=2023),
                 whole_of=WholeOf(part="narrow_part", axis="sector"),
             ),
@@ -7576,7 +7615,6 @@ async def test_wholes_declaring_one_part_and_axis_share_one_compile(
         id="total_reported",
         decision_ids=["measure"],
         measure="US total ODA",
-        entities=[Entity(name="United States", role="donor")],
         period=Period(start=2023, end=2023),
         whole_of=WholeOf(part=_PART, axis="sector"),
     )
@@ -7716,6 +7754,7 @@ async def test_a_declared_whole_replaces_the_planners_decision_on_its_source(
                 pinned.model_copy(
                     update={
                         "source_spec_id": None,
+                        "entities": (),
                         "whole_of": WholeOf(part=_PART, axis="sector"),
                     }
                 )
@@ -8148,8 +8187,8 @@ async def test_a_share_accepting_a_provider_difference_states_one_unless_its_inp
 async def test_a_provider_difference_names_inputs_of_one_concept_as_the_card_does(
     decision: DecisionFactory,
 ) -> None:
-    """The CRS bilateral total compared with the DAC1 total, the comparison accepting
-    the difference. Search names both "official development assistance", so the
+    """The CRS bilateral total compared with the DAC1 total, each declaring its own
+    provider option. Search names both "official development assistance", so the
     card tells the two apart, and the stated difference names each input as the
     card does, so its two sentences read two subjects."""
     ctx = _FakeToolContext()
@@ -8184,7 +8223,8 @@ async def test_a_revisions_provider_difference_names_its_inputs_as_the_revisions
     decision: DecisionFactory,
 ) -> None:
     """US health aid in 2023 from the CRS, whose card names it "health". A revision adds the inclusive CRS health figures, which Search also
-    names "health", and compares them with the first, accepting the difference. The
+    names "health", and compares them with the first, each declaring its own provider
+    option. The
     revision's card names both health inputs afresh, so the stated difference names
     each as that card does, and the first keeps no name the earlier card gave it."""
     ctx = _FakeToolContext()
@@ -8236,15 +8276,19 @@ async def test_a_revisions_provider_difference_names_its_inputs_as_the_revisions
     second = await call_planner_tool(
         tools["propose_plan"],
         evidence_requirements=[
+            health.model_copy(update={"scope_options": _keeping_its_own(us_2023_block("health"))}),
             health.model_copy(
-                update={"id": inclusive, "source_spec_id": us_2023_block(inclusive)["spec_id"]}
+                update={
+                    "id": inclusive,
+                    "source_spec_id": us_2023_block(inclusive)["spec_id"],
+                    "scope_options": _keeping_its_own(us_2023_block(inclusive)),
+                }
             ),
             ComparisonRequirement(
                 id=_COMPARE,
                 decision_ids=["measure"],
                 minuend=RequirementSide(input_id=inclusive),
                 subtrahend=RequirementSide(input_id=_PART),
-                accept_provider_difference=True,
             ),
         ],
         amends_version=first["version"],
@@ -8292,6 +8336,7 @@ async def test_a_provider_difference_names_namesake_inputs_by_the_scope_each_cou
             entities=[Entity(name="United States of America", role="donor")],
             period=Period(start=2023, end=2023),
             source_spec_id=block["spec_id"],
+            scope_options=_keeping_its_own(block),
         )
         for requirement_id, block in blocks.items()
     ]
@@ -8300,7 +8345,6 @@ async def test_a_provider_difference_names_namesake_inputs_by_the_scope_each_cou
         decision_ids=["measure"],
         minuend=RequirementSide(input_id=_WHOLE),
         subtrahend=RequirementSide(input_id=_PART),
-        accept_provider_difference=True,
     )
 
     result = await call_planner_tool(
@@ -8456,8 +8500,8 @@ async def test_a_basis_difference_names_namesake_inputs_by_the_basis_each_is_cou
 async def test_a_carried_share_restates_its_provider_difference_when_an_input_is_repinned(
     decision: DecisionFactory, whole: str, labelled: bool, counted: str
 ) -> None:
-    """CRS bilateral health aid over the DAC1 total, the share accepting the
-    difference. A revision re-pins the part alone to the inclusive CRS form, as a
+    """CRS bilateral health aid over the DAC1 total, each declaring its own provider
+    option. A revision re-pins the part alone to the inclusive CRS form, as a
     plan-card switch does, and carries the share: the share's stated difference now
     names what the re-pinned part counts, one sentence per input naming its concept,
     the provider scope it counts and the tables it is published in, the composite's
@@ -8495,10 +8539,14 @@ async def test_a_carried_share_restates_its_provider_difference_when_an_input_is
     assert plan is not None
     (stated,) = [d for d in plan.decisions if d.caveat == "providers_differ"]
     assert stated.slot in plan.requirement(_SHARE).decision_ids
-    assert stated.rationale == (
-        "The question asks for the inputs as their datasets count them, so they may count "
-        f"different providers' spending. {counted}"
+    lead = (
+        "One input's dataset does not say which providers it counts, so the inputs may "
+        "count different providers' spending."
+        if whole == "dac1_total_gross"
+        else "The inputs are set to different provider scopes, so they count different "
+        "providers' spending."
     )
+    assert stated.rationale == f"{lead} {counted}"
 
 
 @pytest.mark.parametrize(
@@ -8571,21 +8619,19 @@ def test_a_provider_difference_over_four_inputs_is_stated_within_the_rationale_l
 
 
 @pytest.mark.parametrize(
-    ("b_counts", "accept", "differs"),
+    ("b_counts", "differs"),
     [
-        pytest.param("provider:inclusive", False, True, id="set-apart"),
-        pytest.param("provider:inclusive", True, True, id="accepted"),
-        pytest.param("provider:bilateral", False, False, id="one-scope"),
+        pytest.param("provider:inclusive", True, id="set-apart"),
+        pytest.param("provider:bilateral", False, id="one-scope"),
     ],
 )
 def test_a_sum_states_the_provider_difference_of_its_inputs_beside_one_with_no_record(
-    b_counts: str, accept: bool, differs: bool
+    b_counts: str, differs: bool
 ) -> None:
     """US aid a, set to bilateral flows, plus b, set to `b_counts`, plus the DAC1
     total c, whose dataset states no provider scope: (a + b) + c. Where a and b
-    count different providers, the outer sum states so as the inner one does,
-    whether or not it accepts the difference; c's missing record does not hide
-    it. Where a and b match, c alone states nothing on a sum not accepting it."""
+    count different providers, the outer sum states so as the inner one does; c's
+    missing record does not hide it. Where a and b match, c alone states nothing."""
     a = provider_block(
         f"spec_{'a' * 32}", narrow=False, active="provider:bilateral", provenance="explicit"
     )
@@ -8609,7 +8655,6 @@ def test_a_sum_states_the_provider_difference_of_its_inputs_beside_one_with_no_r
             id="abc",
             left=RequirementSide(input_id="ab"),
             right=RequirementSide(input_id="c"),
-            accept_provider_difference=accept,
         ),
     ]
     shown = {block["spec_id"]: PinSource(block=block, settled=True) for block in (a, b, c)}
@@ -8713,18 +8758,12 @@ async def test_a_comparison_with_a_total_stating_no_provider_scope_keeps_both_da
     ]
 
 
-@pytest.mark.parametrize(
-    "flagged_share", [False, True], ids=["sum-alone", "beside-a-flagged-share"]
-)
-async def test_a_provider_difference_accepted_on_one_share_leaves_every_other_calculation_aligned(
-    decision: DecisionFactory, flagged_share: bool
+async def test_a_comparison_and_a_sum_over_a_total_serving_no_bilateral_option_refuse_in_order(
+    decision: DecisionFactory,
 ) -> None:
-    """CRS bilateral health aid plus a total counting core contributions to
-    multilaterals, serving no bilateral option, in a sum mixes providers, so the sum
-    is refused, whether or not a share reading the same total accepts the
-    provider difference: the user's request exempts that one share. Beside a
-    comparison of the same inputs accepting nothing, the comparison, first in plan
-    order, is refused first."""
+    """CRS bilateral health aid compared with, and added to, a total counting core
+    contributions to multilaterals, serving no bilateral option: both mix providers,
+    and the comparison, first in plan order, is refused first."""
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"), total_without_bilateral())
     summed = SumOfRequirement(
@@ -8740,13 +8779,12 @@ async def test_a_provider_difference_accepted_on_one_share_leaves_every_other_ca
         decision(),
         part="health",
         whole="no_bilateral",
-        share=flagged_share,
-        accept=flagged_share,
+        share=False,
         extra=[summed],
     )
 
     assert result["code"] == ProblemCode.PROVIDERS_UNALIGNED.value, result
-    assert result["detail"]["provider"]["step_id"] == (_SUM if flagged_share else _COMPARE)
+    assert result["detail"]["provider"]["step_id"] == _COMPARE
     assert load_plan(ctx.state) is None
 
 
@@ -8913,43 +8951,24 @@ async def test_a_declared_whole_names_why_its_part_could_not_be_read(
     assert surface.calls == []
 
 
-_KENYA_RECIPIENT = Entity(name="Kenya", role="recipient")
-
-
 @pytest.mark.parametrize(
     ("whole_of", "entities", "across"),
     [
-        pytest.param(WholeOf(part=_SHARE, axis="sector"), None, (), id="part-is-a-calculation"),
-        pytest.param(WholeOf(part=_WHOLE, axis="sector"), None, (), id="part-is-itself"),
+        pytest.param(WholeOf(part=_SHARE, axis="sector"), (), (), id="part-is-a-calculation"),
+        pytest.param(WholeOf(part=_WHOLE, axis="sector"), (), (), id="part-is-itself"),
+        # A whole covers its part's parties, so it states none of its own.
         pytest.param(
             WholeOf(part=_PART, axis="sector"),
             [Entity(name="France", role="donor")],
             (),
-            id="other-parties",
+            id="states-entities",
         ),
-        # All aid to Kenya does not hold US aid to every recipient.
-        pytest.param(
-            WholeOf(part=_PART, axis="donor"),
-            [_KENYA_RECIPIENT],
-            ("donor",),
-            id="donor-whole-names-a-party-the-part-does-not",
-        ),
-        # A donor whole names one group in place of 'donor' only where it is not the
-        # part's own donor, which would divide the part by itself.
-        pytest.param(
-            WholeOf(part=_PART, axis="donor"), None, (), id="donor-whole-names-the-parts-donor"
-        ),
-        pytest.param(
-            WholeOf(part=_PART, axis="donor"),
-            [Entity(name="DAC countries", role="donor"), Entity(name="France", role="donor")],
-            (),
-            id="donor-whole-names-two-donors",
-        ),
+        pytest.param(WholeOf(part=_PART, axis="donor"), (), ("donor",), id="states-across"),
         # The part names no recipient, so there is none to leave open.
         pytest.param(
             WholeOf(part=_PART, axis="recipient"),
-            None,
-            ("recipient",),
+            (),
+            (),
             id="recipient-whole-of-a-part-naming-none",
         ),
     ],
@@ -8957,20 +8976,20 @@ _KENYA_RECIPIENT = Entity(name="Kenya", role="recipient")
 def test_a_whole_of_naming_no_part_it_can_be_counted_from_is_an_invalid_plan(
     decision: DecisionFactory,
     whole_of: WholeOf,
-    entities: list[Entity] | None,
+    entities: list[Entity],
     across: tuple[str, ...],
 ) -> None:
-    """A whole declared over a calculation, over itself, for other parties than its
-    part, over every donor while naming a party the part does not, or over every
-    recipient of a part naming none, does not hold its part or cannot be compiled
-    from the part's pin, so the plan is refused for repair."""
+    """A whole declared over a calculation, over itself, or over every recipient of
+    a part naming none cannot be compiled from the part's pin, and one stating
+    parties of its own can only disagree with its part's, so the plan is refused
+    for repair."""
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"))
     whole = DatasetRequirement(
         id=_WHOLE,
         decision_ids=["measure"],
         measure="total ODA",
-        entities=entities if entities is not None else [Entity(name="United States", role="donor")],
+        entities=entities,
         across=across,
         period=Period(start=2023, end=2023),
         whole_of=whole_of,
@@ -9153,15 +9172,14 @@ async def _share_over_every(
     decision: DecisionFactory,
     *,
     year: int = 2023,
-    whole_names: str | None = None,
+    pooled: bool = True,
 ) -> dict[str, object]:
     """Propose the part `block` as a share of its whole over every `axis`, a donor or
-    recipient, summed by year, over `year`, with `surface` answering the whole; `block`
-    is shown.
+    recipient, over `year`, with `surface` answering the whole; `block` is shown. The
+    whole states no entities or `across`, and with `pooled` it is summed by year
+    before the share reads it.
     The part names its donor by Search's label for it, and Africa as its recipient
-    where `block` names Africa's set there, else Search's label for its recipient.
-    With `whole_names`, the whole names that entity on `axis` in place of stating
-    `axis` in `across`, the form `name_pinned_groups` rewrites a whole to."""
+    where `block` names Africa's set there, else Search's label for its recipient."""
     _show_blocks(ctx, block)
     resolved = block["resolved"]
     labels = {e["role"]: e["label"] for e in resolved["entities"]}
@@ -9171,7 +9189,6 @@ async def _share_over_every(
         group = (resolved.get("entity_groups") or {}).get("destination")
         recipient = group["label"] if group else labels["destination"]
         named.append(Entity(name=recipient, role="recipient"))
-    side = "giving" if axis == "donor" else "receiving"
     period = Period(start=year, end=year)
     return await call_planner_tool(
         _tools_reading(cast(ToolSurface, surface))["propose_plan"],
@@ -9191,26 +9208,27 @@ async def _share_over_every(
                 id=_WHOLE,
                 decision_ids=["measure"],
                 measure="total aid",
-                entities=[
-                    *(e for e in named if role_party(cast(str, e.role)) != side),
-                    *([Entity(name=whole_names, role=axis)] if whole_names else []),
-                ],
-                across=() if whole_names else (axis,),
                 period=period,
                 whole_of=WholeOf(part=_PART, axis=axis),
             ),
-            AggregateRequirement(
-                id=_TOTAL,
-                decision_ids=["measure"],
-                input_id=_WHOLE,
-                reduction=Reduction.SUM,
-                group_by=(GroupBy.PERIOD,),
+            *(
+                [
+                    AggregateRequirement(
+                        id=_TOTAL,
+                        decision_ids=["measure"],
+                        input_id=_WHOLE,
+                        reduction=Reduction.SUM,
+                        group_by=(GroupBy.PERIOD,),
+                    )
+                ]
+                if pooled
+                else []
             ),
             ShareOfRequirement(
                 id=_SHARE,
                 decision_ids=["measure"],
                 numerator=RequirementSide(input_id=_PART),
-                denominator=RequirementSide(input_id=_TOTAL),
+                denominator=RequirementSide(input_id=_TOTAL if pooled else _WHOLE),
             ),
         ],
         tool_context=ctx,
@@ -9329,6 +9347,320 @@ async def test_a_declared_whole_over_every_donor_or_recipient_leaves_that_role_o
     assert stated.chosen.endswith(total), stated.chosen
     assert stated.rationale.endswith(f"count the same {alike}."), stated.rationale
     assert stated.slot in plan.requirement(_WHOLE).decision_ids
+
+
+def _summed_whole(plan: Plan) -> tuple[DatasetRequirement, list[EvidenceRequirement]]:
+    """The whole of `plan` (`DatasetRequirement.whole_of`) and every requirement
+    reading it."""
+    (whole,) = [
+        r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement) and r.whole_of
+    ]
+    return whole, [r for r in plan.evidence_requirements if whole.id in inputs_of(r)]
+
+
+# Search's answer for US health aid to Africa over every donor, binding the donors
+# to the published total of official donors as DAC2a does, where the CRS leaves
+# them open.
+_DONORS_BOUND: dict[str, Any] = {
+    "groups": {
+        "origin": {
+            "label": "official donors",
+            "total": "DACOfficialDonors",
+            "members": ["country/USA", "country/FRA"],
+        }
+    },
+    "bound": ["DACOfficialDonors"],
+}
+
+
+@pytest.mark.parametrize(
+    ("answer", "pooled", "summed"),
+    [
+        pytest.param({}, False, True, id="donors-open-read-directly"),
+        pytest.param({}, True, True, id="donors-open-planner-pool"),
+        pytest.param(_DONORS_BOUND, False, False, id="donors-bound"),
+    ],
+)
+async def test_a_whole_search_leaves_open_is_summed_by_one_step_admission_adds(
+    decision: DecisionFactory, answer: dict[str, Any], pooled: bool, summed: bool
+) -> None:
+    """US health aid to Africa as a share of every donor's. Where Search leaves the
+    donors open on the whole, as the CRS does, `propose_plan` adds one aggregate
+    summing them by year, keeping Africa, and every reader of the whole reads it, a
+    pool the planner wrote included. The planner is shown the plan without it.
+    Where Search binds the donors' total the plan is as written."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block, **answer)
+    ctx = _FakeToolContext()
+
+    result = await _share_over_every(surface, ctx, block, "donor", decision, pooled=pooled)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole, readers = _summed_whole(plan)
+    if not summed:
+        assert plan.whole_sums == ()
+        assert [type(reader) for reader in readers] == [
+            AggregateRequirement if pooled else ShareOfRequirement
+        ]
+        return
+    (added,) = readers
+    assert plan.whole_sums == (WholeSum(whole_id=whole.id, sum_id=added.id),)
+    assert isinstance(added, AggregateRequirement)
+    assert (added.reduction, added.group_by) == (Reduction.SUM, (GroupBy.PERIOD, GroupBy.ENTITY))
+    over_sum = [r for r in plan.evidence_requirements if added.id in inputs_of(r)]
+    assert [type(r) for r in over_sum] == [AggregateRequirement if pooled else ShareOfRequirement]
+    shown = _as_authored(plan)
+    assert shown is not None
+    assert added.id not in [r["id"] for r in shown["evidence_requirements"]]
+    assert "whole_sums" not in shown
+
+
+async def test_a_part_moved_between_datasets_takes_or_drops_the_sum_with_its_whole(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid to Africa over every donor, the part moved by amendment from a
+    dataset whose whole Search leaves the donors open, as the CRS does, to one
+    whose whole binds their total, as DAC2a does, and back. The sum goes with the
+    first move and comes back with the second."""
+    crs = _us_health_to_africa()
+    dac2a = json.loads(json.dumps(crs).replace(_AFRICA_PART, f"spec_{'d' * 32}"))
+    surface = _OpenedWholeCompiles(crs)
+    ctx = _FakeToolContext()
+    await _share_over_every(surface, ctx, crs, "donor", decision, pooled=False)
+    _show_blocks(ctx, crs, dac2a)
+    surface.part, surface.groups, surface.bound = (
+        dac2a,
+        _DONORS_BOUND["groups"],
+        _DONORS_BOUND["bound"],
+    )
+    tool = _tools_reading(cast(ToolSurface, surface))["propose_plan"]
+    summed: list[int] = []
+    for block in (dac2a, crs):
+        plan = load_plan(ctx.state)
+        assert plan is not None
+        part = plan.requirement(_PART)
+        assert isinstance(part, DatasetRequirement)
+
+        result = await call_planner_tool(
+            tool,
+            decisions=drafts([decision()]),
+            evidence_requirements=[part.model_copy(update={"source_spec_id": block["spec_id"]})],
+            amends_version=plan.version,
+            tool_context=ctx,
+        )
+
+        assert result["outcome"] == Outcome.OK.value, result
+        amended = load_plan(ctx.state)
+        assert amended is not None
+        summed.append(len(amended.whole_sums))
+    assert summed == [0, 1]
+
+
+async def test_an_added_sum_takes_an_id_no_requirement_of_the_plan_holds(
+    decision: DecisionFactory,
+) -> None:
+    """The sum over a whole is named `{whole}_sum`, or the first free id after it
+    where a requirement the planner wrote already holds that one."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+    await _share_over_every(surface, ctx, block, "donor", decision, pooled=False)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole, _ = _summed_whole(plan)
+    (pin,) = [pin for pin in aligned_pins(ctx.state) if pin.whole_axis is not None]
+    planners = AggregateRequirement(
+        id=f"{whole.id}_sum", input_id=whole.id, reduction=Reduction.SUM, group_by=()
+    )
+
+    sums = submission_service._whole_sums(
+        {whole.id: pin}, [*authored(plan).evidence_requirements, planners]
+    )
+
+    assert sums == (WholeSum(whole_id=whole.id, sum_id=f"{whole.id}_sum_2"),)
+
+
+async def test_a_whole_compiled_with_no_spec_block_on_record_is_compiled_again(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid to Africa as a share of every donor's, the whole's compile on
+    record holding no spec block, so nothing there says whether Search leaves the
+    donors open. Admission compiles the whole again in its place, once, and sums
+    the donors Search's new answer leaves open."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+    blockless = AlignedPin(
+        origin=block["spec_id"],
+        option_ids=(),
+        spec_id=_OPENED_WHOLE["donor"],
+        digest={},
+        whole_axis="donor",
+    )
+    save_aligned_pin(ctx.state, blockless, warnings=())
+
+    result = await _share_over_every(surface, ctx, block, "donor", decision, pooled=False)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert len(surface.calls) == 1
+    (pin,) = [pin for pin in aligned_pins(ctx.state) if pin.whole_axis is not None]
+    assert pin.block is not None
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole, (added,) = _summed_whole(plan)
+    assert plan.whole_sums == (WholeSum(whole_id=whole.id, sum_id=added.id),)
+
+
+async def test_a_whole_search_answers_with_no_spec_block_is_refused_unheld(
+    decision: DecisionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """US health aid to Africa as a share of every donor's, Search's answer for the
+    whole read as stating no spec block. The compile holds no pin, which admission
+    would compile again on every proposal, and the whole is refused after one call."""
+    digest = planner_source_reads.resolver_digest
+
+    def blockless(envelope: dict[str, Any]) -> dict[str, Any]:
+        return {**digest(envelope), "spec_block": None}
+
+    monkeypatch.setattr(planner_source_reads, "resolver_digest", blockless)
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+
+    result = await _share_over_every(surface, ctx, block, "donor", decision, pooled=False)
+
+    assert result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert len(surface.calls) == 1
+    assert [pin for pin in aligned_pins(ctx.state) if pin.whole_axis is not None] == []
+
+
+async def test_a_whole_compiled_again_within_a_call_is_refused(
+    decision: DecisionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """US health aid to Africa as a share of every donor's, where each compile of the
+    whole holds a pin with no spec block. Admission asks for the whole again after
+    the first compile, and the call answers the refusal in place of a second."""
+    block = _us_health_to_africa()
+    compiles: list[Realignment] = []
+
+    async def holding_blockless(
+        surface: ToolSurface, realignment: Realignment, *, state: SessionState
+    ) -> planner_source_reads.SourceRead:
+        del surface, state
+        compiles.append(realignment)
+        if len(compiles) > 1:
+            return lambda _: {"code": "compiled_twice"}
+        pin = AlignedPin(
+            origin=realignment.spec_id,
+            option_ids=(),
+            spec_id=_OPENED_WHOLE["donor"],
+            digest={},
+            whole_axis=realignment.whole_axis,
+        )
+        return lambda into: save_aligned_pin(into, pin, warnings=())
+
+    monkeypatch.setattr(planner_source_reads, "compile_whole", holding_blockless)
+    ctx = _FakeToolContext()
+
+    result = await _share_over_every(
+        _OpenedWholeCompiles(block), ctx, block, "donor", decision, pooled=False
+    )
+
+    assert result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert len(compiles) == 1
+
+
+async def test_a_whole_with_a_second_open_side_is_summed_keeping_that_side_apart(
+    decision: DecisionFactory,
+) -> None:
+    """Every recipient's US health aid as a share of every donor's aid to it. The
+    part keeps the recipients open in `across`, and Search leaves the donors open
+    on the whole, so the sum admission adds totals the donors and keeps each
+    recipient apart, grouped by entity."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, block)
+    labels = {e["role"]: e["label"] for e in block["resolved"]["entities"]}
+    period = Period(start=2023, end=2023)
+
+    result = await call_planner_tool(
+        _tools_reading(cast(ToolSurface, surface))["propose_plan"],
+        question="What share of the aid to each recipient came from the United States?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            DatasetRequirement(
+                id=_PART,
+                decision_ids=["measure"],
+                measure="US aid",
+                entities=[Entity(name=labels["origin"], role="donor")],
+                across=["recipient"],
+                period=period,
+                source_spec_id=block["spec_id"],
+            ),
+            DatasetRequirement(
+                id="every_donor",
+                decision_ids=["measure"],
+                measure="total aid",
+                period=period,
+                whole_of=WholeOf(part=_PART, axis="donor"),
+            ),
+            ShareOfRequirement(
+                id=_SHARE,
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id=_PART),
+                denominator=RequirementSide(input_id="every_donor"),
+                axis="recipient",
+                denominator_scope=DenominatorScope.PER_AXIS,
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole, (added,) = _summed_whole(plan)
+    assert plan.whole_sums == (WholeSum(whole_id=whole.id, sum_id=added.id),)
+    assert split_of(plan).kept_open == {added.id: ("recipient",)}
+    assert isinstance(added, AggregateRequirement)
+    assert added.group_by == (GroupBy.PERIOD, GroupBy.ENTITY)
+
+
+@pytest.mark.parametrize("restated", [False, True], ids=["whole-carried", "whole-restated"])
+async def test_an_amended_plan_keeps_one_sum_over_its_whole(
+    decision: DecisionFactory, restated: bool
+) -> None:
+    """A plan whose whole Search leaves open, amended. The amendment is read without
+    the sum and admission adds it again, so the plan holds one sum under the id it
+    had, whether the patch restates the whole and its share or leaves them."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block)
+    ctx = _FakeToolContext()
+    await _share_over_every(surface, ctx, block, "donor", decision, pooled=False)
+    first = load_plan(ctx.state)
+    assert first is not None
+    whole, (added,) = _summed_whole(first)
+    shown = authored(first)
+    patch = [r for r in shown.evidence_requirements if r.id in {whole.id, _SHARE}]
+
+    amended = await call_planner_tool(
+        _tools_reading(cast(ToolSurface, surface))["propose_plan"],
+        decisions=drafts([decision(rationale="Reconsidered.")]),
+        evidence_requirements=patch if restated else [],
+        amends_version=first.version,
+        tool_context=ctx,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.whole_sums == first.whole_sums == (WholeSum(whole_id=whole.id, sum_id=added.id),)
+    ids = [r.id for r in plan.evidence_requirements]
+    assert len(ids) == len(set(ids)) == len(first.evidence_requirements)
 
 
 def test_a_whole_search_counts_on_another_provider_scope_says_what_each_counts() -> None:
@@ -9878,41 +10210,43 @@ async def test_a_dac_donor_whole_reads_searchs_answer_for_it(
     assert stated.rationale.endswith(f"count {alike}"), stated.rationale
 
 
-@pytest.mark.parametrize(
-    ("name", "whole_names", "refused"),
-    [
-        # DAC1 binds DAC countries' total: the whole may name that total, as
-        # `name_pinned_groups` rewrites it to, and no other donor.
-        pytest.param("dac1", "DAC countries", False, id="dac1-names-its-total"),
-        pytest.param("dac1", "France", True, id="dac1-names-another-donor"),
-        # DAC2a binds no donor, so the whole names none.
-        pytest.param("dac2a", "France", True, id="dac2a-names-a-donor"),
-    ],
-)
-async def test_a_donor_whole_names_on_its_opened_side_only_the_total_search_bound(
-    decision: DecisionFactory, name: str, whole_names: str, refused: bool
+# The total dfo-apis serves DAC2a over every recipient as, which no name resolves to,
+# holding every country that receives aid. Regional aid is the side's residual.
+_DEVELOPING_COUNTRIES = {
+    "label": "developing countries (DAC)",
+    "ref": "DACDevelopingCountries",
+    "total": "DACDevelopingCountries",
+    "whole_of": ["official"],
+    "side_classes": ["official", "residual"],
+}
+
+
+@pytest.mark.parametrize("pooled", [False, True], ids=["read-directly", "summed-by-year"])
+async def test_a_whole_stating_no_entity_compiles_from_its_part(
+    decision: DecisionFactory, pooled: bool
 ) -> None:
-    """US ODA as a share of its whole over every donor, the whole naming one donor
-    in place of `across` donor: admitted where Search's answer for the whole binds
-    the donor side to that total, and refused under `whole_names_another_total`
-    where it names any other party, as [France (donor), Kenya] over US ODA to Kenya,
-    which would read as France's total while dividing by every donor's."""
-    surface = _RecordedWhole(name)
-    ctx = _FakeToolContext()
-    block = json.loads(json.dumps(surface.recorded["part"]))
-
-    result = await _share_over_every(
-        cast(Any, surface), ctx, block, "donor", decision, whole_names=whole_names
+    """The planner's first plan in a recorded Studio turn on "G7 aid to Africa as a
+    share of its total aid": the whole declares itself the part over every recipient
+    and states no entity and no `across`. It is admitted and compiled from the part,
+    Search binding the recipients to the developing countries' total, whether the
+    share reads it directly or summed by year, and it keeps stating nothing."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(
+        block,
+        groups={"destination": _DEVELOPING_COUNTRIES},
+        bound=[_DEVELOPING_COUNTRIES["ref"]],
     )
+    ctx = _FakeToolContext()
 
-    if not refused:
-        assert result["outcome"] == Outcome.OK.value, result
-        year = Period(start=2023, end=2023)
-        assert dict(_pins(ctx))[_WHOLE] == _over_period(surface.recorded["whole"], year)
-        return
-    assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
-    assert result["detail"]["whole"]["cause"] == "whole_names_another_total"
-    assert load_plan(ctx.state) is None
+    result = await _share_over_every(surface, ctx, block, "recipient", decision, pooled=pooled)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, _OPENED_WHOLE["recipient"])]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole = plan.requirement(_WHOLE)
+    assert isinstance(whole, DatasetRequirement)
+    assert (whole.entities, whole.across) == ((), ())
 
 
 def test_a_dac1_donor_whole_with_no_choices_says_nothing_both_sides_count_alike() -> None:
@@ -9957,30 +10291,34 @@ class _SearchRefused:
 
 
 @pytest.mark.parametrize(
-    ("name", "group"),
+    ("name", "pooled"),
     [
-        pytest.param("dac1", "DAC countries", id="dac1"),
-        pytest.param("dac1_bilateral_uncovered", "DAC countries", id="dac1-bilateral-uncovered"),
-        pytest.param("dac2a", None, id="dac2a"),
+        pytest.param("dac1", True, id="dac1"),
+        pytest.param("dac1", False, id="dac1-read-directly"),
+        pytest.param("dac1_bilateral_uncovered", True, id="dac1-bilateral-uncovered"),
+        pytest.param("dac2a", True, id="dac2a"),
+        pytest.param("dac2a", False, id="dac2a-read-directly"),
     ],
 )
 async def test_a_dac_donor_whole_searchs_answer_compiles(
-    decision: DecisionFactory, name: str, group: str | None
+    decision: DecisionFactory, name: str, pooled: bool
 ) -> None:
     """US ODA as a share of its whole over every donor, the whole pinned to Search's
     answer to the resubmit `compile_whole` posts: the translator takes the pin with no
-    fresh search and the plan compiles, whether Search binds the donor side to one
-    published total (DAC1's DAC countries' total) or leaves it open (DAC2a)."""
+    fresh search and no rewrite, and the plan compiles, whether Search binds the donor
+    side to one published total (DAC1's DAC countries' total), which the share may
+    read directly, or leaves it open (DAC2a), which the compiler sums by year after
+    the retrieval, so the share reads it directly or summed by year either way."""
     surface = _RecordedWhole(name)
     ctx = _FakeToolContext()
     block = json.loads(json.dumps(surface.recorded["part"]))
-    proposed = await _share_over_every(cast(Any, surface), ctx, block, "donor", decision, year=2019)
+    proposed = await _share_over_every(
+        cast(Any, surface), ctx, block, "donor", decision, year=2019, pooled=pooled
+    )
     assert proposed["outcome"] == Outcome.OK.value, proposed
 
     refused = _SearchRefused()
-    named = await name_pinned_groups(ctx.state, surface=cast(ToolSurface, refused))
-    named_in_place = [(g.requirement_id, g.entity.name, g.across) for g in named]
-    assert named_in_place == ([(_WHOLE, group, "donor")] if group else [])
+    assert await name_pinned_groups(ctx.state, surface=cast(ToolSurface, refused)) == ()
     discover_source = build_discover_source(surface=cast(ToolSurface, refused))
     for requirement_id in (_PART, _WHOLE):
         found = await discover_source(requirement_id=requirement_id, state=ctx.state)
@@ -10294,7 +10632,7 @@ async def test_a_sum_with_a_multilaterals_outflows_is_refused_where_the_other_co
     unmarked: str | None,
     refused: str | None,
 ) -> None:
-    """Two figures added, the sum accepting a provider difference. IDA's health aid to
+    """Two figures added, each declaring its own provider option. IDA's health aid to
     Kenya, which Search marks a multilateral's outflows, spends the core contributions
     its funders paid it, so it counts multilateral money: the sum is refused beside a
     figure counting the DAC countries' core contributions, on multilateral ODA or total
@@ -10328,6 +10666,7 @@ async def test_a_sum_with_a_multilaterals_outflows_is_refused_where_the_other_co
                     entities=_named(block),
                     period=period,
                     source_spec_id=block["spec_id"],
+                    scope_options=_keeping_its_own(block),
                 )
                 for requirement_id, block in blocks.items()
             ),
@@ -10336,7 +10675,6 @@ async def test_a_sum_with_a_multilaterals_outflows_is_refused_where_the_other_co
                 decision_ids=["measure"],
                 left=RequirementSide(input_id=_TOTAL),
                 right=RequirementSide(input_id=_PART),
-                accept_provider_difference=True,
             ),
         ],
         tool_context=ctx,
@@ -13014,6 +13352,10 @@ _EUR = {"currency": "EUR", "prices": "current"}
 _USD_2020 = {"currency": "USD", "prices": "constant", "base_year": 2020}
 _USD_2023 = {"currency": "USD", "prices": "constant", "base_year": 2023}
 _USD = {"currency": "USD", "prices": "current"}
+_EUR_2020 = {"currency": "EUR", "prices": "constant", "base_year": 2020}
+# A series of the gross part's measure in constant 2020 euros that a search
+# found apart from the part, not one the part's block offers.
+_EUR_2020_FOUND = "spec_" + "3a" * 16
 
 
 def _read_in(spec_id: str, unit: dict[str, Any]) -> dict[str, Any]:
@@ -13026,6 +13368,46 @@ def _read_in(spec_id: str, unit: dict[str, Any]) -> dict[str, Any]:
     return block
 
 
+# The gross part as Search re-reads it in current US dollars.
+_USD_READ = "spec_" + "9e" * 16
+
+
+def _switch_unit_row(
+    ctx: _FakeToolContext,
+    plan: Plan,
+    requirements: Sequence[DatasetRequirement],
+    units: Mapping[str, Unit],
+) -> dict[str, object]:
+    """Admission of the revision a switch of `plan`'s unit rows to `units`,
+    by slot, proposes: `requirements`, each restated in its row's unit, as
+    `harness.graph.switch` re-pins them, with no model call
+    (`harness.planner_adapter.PlannerAdapter.revise`)."""
+    unit_of = {
+        requirement.id: next(
+            (unit for slot, unit in units.items() if slot in requirement.decision_ids),
+            requirement.unit,
+        )
+        for requirement in requirements
+    }
+    return submission_service.submit(
+        _RevisionSession(call=session_call(ctx), units=dict(units)),
+        submission_service.Proposal(
+            evidence_requirements=[
+                r.model_copy(update={"unit": unit_of[r.id]}).model_dump(mode="json")
+                for r in requirements
+            ],
+            amends_version=plan.version,
+        ),
+        proposer=submission_service.PROPOSE_PLAN,
+    )
+
+
+def _landed(ctx: _FakeToolContext, answer: Mapping[str, Any]) -> None:
+    """Record `propose_plan`'s `answer`, a plan landing, in `ctx`'s
+    transcript, as the planner host records each tool's answer."""
+    ctx.records = [*ctx.records, tool_answers(("landed", "propose_plan", answer))]
+
+
 def _unit_answered(
     ctx: _FakeToolContext, chose: dict[str, Any], fetched: str, served: dict[str, Any]
 ) -> None:
@@ -13034,7 +13416,14 @@ def _unit_answered(
     question = {**_UNIT_QUESTION, "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS]}}
     if fetched != _GROSS:
         record_unit_read(ctx.state, _GROSS, fetched)
-    record_unit_served(ctx.state, _GROSS, fetched, UnitChoice.model_validate(served))
+    record_unit_served(
+        ctx.state,
+        _GROSS,
+        fetched,
+        UnitChoice.model_validate(served),
+        group=_GROSS,
+        chosen=UnitChoice.model_validate(chose),
+    )
     ctx.records = [
         turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
         user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **chose}}}),
@@ -13052,8 +13441,19 @@ def _unit_answered(
             _CONSTANT_GROSS,
             _USD_2023,
         ),
+        (
+            _EUR,
+            _EUR_READ,
+            lambda: [
+                _FRANCE_KENYA,
+                _read_in(_EUR_READ, _EUR),
+                _read_in(_EUR_2020_FOUND, _EUR_2020),
+            ],
+            _EUR_2020_FOUND,
+            _EUR_2020,
+        ),
     ],
-    ids=["currency", "base-year"],
+    ids=["currency", "base-year", "chosen-currency-found-apart"],
 )
 def test_a_plan_in_another_unit_than_the_user_chose_is_refused_and_told_the_series(
     decision: DecisionFactory,
@@ -13065,10 +13465,13 @@ def test_a_plan_in_another_unit_than_the_user_chose_is_refused_and_told_the_seri
     stated: dict[str, Any],
 ) -> None:
     """The user chose current euros, or constant 2020 US dollars, for the gross
-    part, and Search re-read it in that unit. A plan pinning a series of the
-    part in the same prices but another currency or base year is refused,
-    told the unit and the re-read series to pin; one pinning that series in
-    that unit lands."""
+    part, whose reading is in current US dollars, and Search re-read it in
+    that unit. A plan pinning a series of the part in the same prices but
+    another currency or base year is refused, as is one pinning a series of
+    the part's measure in the chosen currency but other prices that a search
+    found apart from the part; each refusal tells the unit and the re-read
+    series to pin. One pinning that series in that unit lands, stating the
+    user's choice as one decision on the part."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_blocks(ctx, *shown())
@@ -13094,6 +13497,11 @@ def test_a_plan_in_another_unit_than_the_user_chose_is_refused_and_told_the_seri
     )
 
     assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    prices = [d.slot for d in plan.decisions if d.fixes is not None and d.fixes.prices is not None]
+    assert prices == [f"user_unit_{_GROSS}"]
+    assert plan.requirement(dataset.id).decision_ids.count(prices[0]) == 1
 
 
 def test_a_plan_on_the_part_in_another_unit_is_refused_with_no_block_for_the_re_read(
@@ -13121,6 +13529,1604 @@ def test_a_plan_on_the_part_in_another_unit_is_refused_with_no_block_for_the_re_
     assert load_plan(ctx.state) is None
 
 
+_GROSS_2020 = "spec_" + "6" * 32
+_EUR_READ_2020 = "spec_" + "5" * 32
+
+
+@pytest.mark.parametrize("wrong", ["all", "recent"], ids=["first-window", "later-window"])
+def test_a_unit_answer_holds_every_window_of_the_measure_its_question_covers(
+    decision: DecisionFactory, requirements: RequirementPair, wrong: str
+) -> None:
+    """The unit question covers the gross part over every year and over
+    2020-2024, two windows of one measure. The user chose current euros, and
+    Search re-read each window in them. Each window holds that choice, so a
+    plan pinning both windows with one of them in current US dollars is
+    refused under the question's one decision and told the series the agent
+    fetches for that window. A plan pinning each window's re-read series in
+    euros lands with one decision for the question's unit, under the lead
+    part, cited by both requirements."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    later = copy.deepcopy(_FRANCE_KENYA)
+    later["spec_id"] = later["definition"]["spec_id"] = _GROSS_2020
+    later["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    _show_blocks(ctx, _FRANCE_KENYA, later)
+    for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
+        record_unit_read(ctx.state, part, read)
+        record_unit_served(
+            ctx.state,
+            part,
+            read,
+            UnitChoice.model_validate(_EUR),
+            group=_GROSS,
+            chosen=UnitChoice.model_validate(_EUR),
+        )
+    question = {
+        **_UNIT_QUESTION,
+        "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
+    }
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+        user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+
+    assert prices_chosen(session_call(ctx)) == {
+        _GROSS: PricesChoice("current", _EUR_READ, unit=Unit(**_EUR), group=_GROSS),
+        _GROSS_2020: PricesChoice("current", _EUR_READ_2020, unit=Unit(**_EUR), group=_GROSS),
+    }
+
+    dataset, _ = requirements
+    in_eur = {"unit": Unit(**_EUR)}
+    windows = {
+        "all": (_GROSS, _EUR_READ, None),
+        "recent": (_GROSS_2020, _EUR_READ_2020, Period(start=2020, end=2024)),
+    }
+    refused = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [
+            dataset.model_copy(
+                update={
+                    "id": rid,
+                    **({"period": period} if period is not None else {}),
+                    **(
+                        {"source_spec_id": part, "unit": Unit(**_USD)}
+                        if rid == wrong
+                        else {"source_spec_id": read, **in_eur}
+                    ),
+                }
+            )
+            for rid, (part, read, period) in windows.items()
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert (refused["detail"]["unit"], refused["detail"]["pin"]) == (_EUR, windows[wrong][1])
+    assert refused["detail"]["requirement_id"] == wrong
+    assert refused["detail"]["slot"] == f"user_unit_{_GROSS}"
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [
+            dataset.model_copy(update={"id": "all", "source_spec_id": _EUR_READ, **in_eur}),
+            dataset.model_copy(
+                update={
+                    "id": "recent",
+                    "source_spec_id": _EUR_READ_2020,
+                    "period": Period(start=2020, end=2024),
+                    **in_eur,
+                }
+            ),
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    priced = [d for d in plan.decisions if d.fixes is not None and d.fixes.prices is not None]
+    assert [(d.slot, d.chosen) for d in priced] == [
+        (f"user_unit_{_GROSS}", "current prices in EUR")
+    ]
+    assert [
+        plan.requirement(rid).decision_ids.count(priced[0].slot) for rid in ("all", "recent")
+    ] == [1, 1]
+
+
+_CONSTANT_2015 = "spec_" + "c1" * 16
+_CONSTANT_2015_EUR = "spec_" + "c2" * 16
+_EUR_WINDOW = "spec_" + "c3" * 16
+
+
+def test_a_planner_window_in_the_currency_a_constant_part_is_held_to_cites_the_unit_row(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The unit question covers the gross part, a search's reading in
+    constant 2015 US dollars. The user chose current euros, and Search
+    re-read the part in them. The planner pins a window of the same measure
+    in current euros a search found apart. That window is the part's, so
+    its requirement cites the unit row, beside the part's re-read series."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    part = _constant_block()
+    part["spec_id"] = part["definition"]["spec_id"] = _CONSTANT_2015
+    part["resolved"]["facets"]["unit"] = {
+        **part["resolved"]["facets"]["unit"],
+        "ref": "ConstantUSD_2015",
+        "label": "Constant 2015 US Dollar",
+    }
+    window = _read_in(_EUR_WINDOW, _EUR)
+    window["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    _show_blocks(ctx, part, _read_in(_CONSTANT_2015_EUR, _EUR), window)
+    eur = UnitChoice.model_validate(_EUR)
+    record_unit_read(ctx.state, _CONSTANT_2015, _CONSTANT_2015_EUR)
+    record_unit_served(
+        ctx.state, _CONSTANT_2015, _CONSTANT_2015_EUR, eur, group=_CONSTANT_2015, chosen=eur
+    )
+    question = {**_UNIT_QUESTION, "unit": {**_UNIT_QUESTION["unit"], "parts": [_CONSTANT_2015]}}
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+        user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+    dataset, _ = requirements
+    in_eur = {"unit": Unit(**_EUR)}
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [
+            dataset.model_copy(
+                update={"id": "all", "source_spec_id": _CONSTANT_2015_EUR, **in_eur}
+            ),
+            dataset.model_copy(
+                update={
+                    "id": "recent",
+                    "source_spec_id": _EUR_WINDOW,
+                    "period": Period(start=2020, end=2024),
+                    **in_eur,
+                }
+            ),
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    row = f"user_unit_{_CONSTANT_2015}"
+    assert [row in plan.requirement(rid).decision_ids for rid in ("all", "recent")] == [
+        True,
+        True,
+    ]
+
+
+_EUR_WHOLE = "spec_" + "4" * 32
+
+
+@pytest.mark.parametrize("reads_shown", [True, False], ids=["reads-shown", "reads-unshown"])
+def test_a_window_the_planner_pins_in_the_unit_the_user_answered_falls_under_that_answer(
+    decision: DecisionFactory, requirements: RequirementPair, reads_shown: bool
+) -> None:
+    """The unit question covers two windows of the gross part, served in US
+    dollars, and the user chose current euros, which Search read each in.
+    The planner then pins a third window, 2010-2024, that a search of its
+    own found in euros. That window measures what the question's parts
+    measure, in the unit the user chose, so it is held to that answer: it
+    cites the question's one unit decision beside the two windows."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    later = copy.deepcopy(_FRANCE_KENYA)
+    later["spec_id"] = later["definition"]["spec_id"] = _GROSS_2020
+    later["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    whole = _read_in(_EUR_WHOLE, _EUR)
+    whole["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2010,
+        "end_year": 2024,
+    }
+    reads = (_read_in(_EUR_READ, _EUR), _read_in(_EUR_READ_2020, _EUR)) if reads_shown else ()
+    _show_blocks(ctx, _FRANCE_KENYA, later, *reads, whole)
+    for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
+        record_unit_read(ctx.state, part, read)
+        record_unit_served(
+            ctx.state,
+            part,
+            read,
+            UnitChoice.model_validate(_EUR),
+            group=_GROSS,
+            chosen=UnitChoice.model_validate(_EUR),
+        )
+    question = {
+        **_UNIT_QUESTION,
+        "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
+    }
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+        user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+    dataset, _ = requirements
+    in_eur = {"unit": Unit(**_EUR)}
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [
+            dataset.model_copy(update={"id": "all", "source_spec_id": _EUR_READ, **in_eur}),
+            dataset.model_copy(
+                update={
+                    "id": "recent",
+                    "source_spec_id": _EUR_READ_2020,
+                    "period": Period(start=2020, end=2024),
+                    **in_eur,
+                }
+            ),
+            dataset.model_copy(
+                update={
+                    "id": "series",
+                    "source_spec_id": _EUR_WHOLE,
+                    "period": Period(start=2010, end=2024),
+                    **in_eur,
+                }
+            ),
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    slot = f"user_unit_{_GROSS}"
+    assert [slot in plan.requirement(rid).decision_ids for rid in ("all", "recent", "series")] == [
+        True,
+        True,
+        True,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("answer", "fixing_unit", "cited"),
+    [
+        ("unit", ["user_unit"], ["user_unit"]),
+        ("none", ["currency_unit"], ["currency_unit"]),
+        ("bare-prices", ["currency_unit"], ["currency_unit"]),
+    ],
+    ids=["unit-answered", "no-answer", "bare-prices-answered"],
+)
+def test_a_planner_decision_stating_the_unit_the_user_answered_goes_from_the_plan(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    answer: str,
+    fixing_unit: list[str],
+    cited: list[str],
+) -> None:
+    """The user chose current euros for both windows of the gross part. The
+    planner states that unit a second time, in a decision of its own cited
+    by both windows, fixing `unit` alone. The plan lands
+    with the user's answer as the one decision on the unit, and neither
+    window cites the planner's, which goes with no citation left. With no
+    unit answer, or a bare current prices answer, which holds no
+    currency, the planner's decision stating the unit stands, cited by the
+    requirements it fixes."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    later = copy.deepcopy(_FRANCE_KENYA)
+    later["spec_id"] = later["definition"]["spec_id"] = _GROSS_2020
+    later["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    _show_blocks(ctx, _FRANCE_KENYA, later)
+    answered = answer == "unit"
+    unit = _EUR if answered else _USD
+    if answered:
+        for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
+            record_unit_read(ctx.state, part, read)
+            record_unit_served(
+                ctx.state,
+                part,
+                read,
+                UnitChoice.model_validate(_EUR),
+                group=_GROSS,
+                chosen=UnitChoice.model_validate(_EUR),
+            )
+        question = {
+            **_UNIT_QUESTION,
+            "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
+        }
+        ctx.records = [
+            turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+            user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+        ]
+    elif answer == "bare-prices":
+        ctx.records = _prices_ask_events(pick="o1")
+    dataset, _ = requirements
+    currency = decision(
+        slot="currency_unit",
+        description="Currency and price basis for the flows.",
+        options=["current euros", "current USD"],
+        chosen="current euros" if answered else "current USD",
+        resolved_by=ResolvedBy.USER if answered else ResolvedBy.PLANNER_DEFAULT,
+        rationale="The figures are stated in one currency.",
+        fixes=DecisionFixes(unit=Unit(**unit)),
+    )
+    stated = {"unit": Unit(**unit), "decision_ids": ["currency_unit"]}
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        currency,
+        [
+            dataset.model_copy(
+                update={
+                    "id": "all",
+                    "source_spec_id": _EUR_READ if answered else _GROSS,
+                    **stated,
+                }
+            ),
+            dataset.model_copy(
+                update={
+                    "id": "recent",
+                    "source_spec_id": _EUR_READ_2020 if answered else _GROSS_2020,
+                    "period": Period(start=2020, end=2024),
+                    **stated,
+                }
+            ),
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    named = {"user_unit": f"user_unit_{_GROSS}", "currency_unit": "currency_unit"}
+    assert [
+        d.slot
+        for d in plan.decisions
+        if d.fixes is not None and (d.fixes.unit is not None or d.slot == named["user_unit"])
+    ] == [named[slot] for slot in fixing_unit]
+    assert [
+        [slot for slot in plan.requirement(rid).decision_ids if slot in named.values()]
+        for rid in ("all", "recent")
+    ] == [[named[slot] for slot in cited]] * 2
+
+
+def test_a_planner_decision_fixing_the_unit_and_the_years_is_restated_without_the_unit(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose current euros for the gross part. The planner pins
+    its read in euros over 2015 to 2020, citing a decision of its own fixing
+    both the unit and those years, and is refused: the user's row states the
+    unit. Restated fixing the years alone, the plan lands with the planner's
+    decision on the card, switchable and cited, and a switch of the user's
+    row to current US dollars lands with that decision as it was."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_USD_READ, _USD))
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, _ = requirements
+    years = Period(start=2015, end=2020)
+    window = {
+        "slot": "window",
+        "description": "Which years the figures cover.",
+        "options": ["2015-2020", "every year"],
+        "chosen": "2015-2020",
+        "resolved_by": ResolvedBy.PLANNER_DEFAULT,
+        "rationale": "The question asks about 2015 to 2020.",
+    }
+    pinned = dataset.model_copy(
+        update={
+            "source_spec_id": _EUR_READ,
+            "unit": Unit(**_EUR),
+            "period": years,
+            "decision_ids": ["window"],
+        }
+    )
+
+    refused = _propose_one(
+        tools,
+        ctx,
+        decision(**window, fixes=DecisionFixes(unit=Unit(**_EUR), period=years)),
+        [pinned],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert refused["detail"] == {
+        "slot": "window",
+        "requirement_id": dataset.id,
+        "fields": ["period"],
+    }
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(**window, fixes=DecisionFixes(period=years)),
+        [pinned],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (kept,) = (d for d in plan.decisions if d.slot == "window")
+    assert switchable_decision(kept)
+    assert "window" in plan.requirement(dataset.id).decision_ids
+
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement(dataset.id).model_copy(update={"source_spec_id": _USD_READ})],
+        {f"user_unit_{_GROSS}": Unit(**_USD)},
+    )
+
+    assert switched["outcome"] == Outcome.OK.value, switched
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    assert [d for d in revised.decisions if d.slot == "window"] == [kept]
+    assert "window" in revised.requirement(dataset.id).decision_ids
+
+
+_DE_KENYA_EUR = "spec_" + "d1" * 16
+
+
+def test_a_planner_unit_decision_stays_whole_on_a_requirement_the_user_s_unit_does_not_hold(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose current euros for the gross part, which Search re-read
+    in them. The planner pins it in euros beside aid from Germany to Kenya
+    in euros, which no unit question covered, both citing a decision of its
+    own fixing the unit and the measure, and is refused: the user's row
+    states the gross part's unit. Restated with the gross part's requirement
+    citing it no longer, the plan lands: that requirement cites the user's
+    unit row, and the other cites the planner's decision whole. A switch of
+    the user's row to current US dollars, which
+    re-pins the gross part to Search's read of it in them, then lands, and
+    the planner's decision still fixes euros, the unit of the one
+    requirement citing it."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    german = _read_in(_DE_KENYA_EUR, _EUR)
+    german["definition"]["identity"]["entities"] = {
+        "destination": ["country/KEN"],
+        "origin": ["country/DEU"],
+    }
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_USD_READ, _USD), german)
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, _ = requirements
+    currency = decision(
+        slot="currency_unit",
+        description="Currency and price basis for the flows.",
+        options=["current euros", "current USD"],
+        chosen="current euros",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="The figures are stated in one currency.",
+        fixes=DecisionFixes(unit=Unit(**_EUR), measure=dataset.measure),
+    )
+    stated = {"unit": Unit(**_EUR), "decision_ids": ["currency_unit"]}
+    germany = dataset.model_copy(
+        update={"id": "germany", "source_spec_id": _DE_KENYA_EUR, **stated}
+    )
+    france = dataset.model_copy(update={"id": "france", "source_spec_id": _EUR_READ, **stated})
+
+    refused = _propose_one(tools, ctx, currency, [france, germany], answer_mode=AnswerMode.SERIES)
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert refused["detail"] == {
+        "slot": "currency_unit",
+        "requirement_id": "france",
+        "fields": ["measure"],
+    }
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        currency,
+        [france.model_copy(update={"decision_ids": ()}), germany],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    row = f"user_unit_{_GROSS}"
+    cites = {
+        rid: [s for s in plan.requirement(rid).decision_ids if s in {row, "currency_unit"}]
+        for rid in ("france", "germany")
+    }
+    assert cites == {"france": [row], "germany": ["currency_unit"]}
+
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement("france").model_copy(update={"source_spec_id": _USD_READ})],
+        {row: Unit(**_USD)},
+    )
+
+    assert switched["outcome"] == Outcome.OK.value, switched
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    kept = next(d for d in revised.decisions if d.slot == "currency_unit")
+    assert kept.fixes is not None and kept.fixes.unit == Unit(**_EUR)
+    assert [
+        "currency_unit" in revised.requirement(rid).decision_ids for rid in ("france", "germany")
+    ] == [False, True]
+    assert revised.requirement("germany").unit == Unit(**_EUR)
+
+
+# The gross part's net count as Search names it beside the part's read in
+# current euros, and the gross part as Search reads it in current pounds.
+_EUR_NET = "spec_" + "e7" * 16
+_GBP_READ = "spec_" + "e8" * 16
+_GBP = {"currency": "GBP", "prices": "current"}
+
+
+def _read_in_euros_offering_net() -> dict[str, Any]:
+    """The gross part's read in current euros under `_EUR_READ`, naming its
+    net count in current euros beside it under `_EUR_NET`."""
+    block = _read_in(_EUR_READ, _EUR)
+    (net,) = copy.deepcopy(_FRANCE_KENYA["resolved"]["alternative_measures"])
+    net["definition"] = {
+        **net["definition"],
+        "spec_id": _EUR_NET,
+        "identity": {**net["definition"]["identity"], "facets": {"unit": {"request": _EUR}}},
+    }
+    block["resolved"]["alternative_measures"] = [net]
+    return block
+
+
+_DE_KENYA_USD = "spec_" + "d2" * 16
+_TO_POUNDS = {"inherits": {_GBP_READ: _EUR_READ}, "units": {f"user_unit_{_GROSS}": Unit(**_GBP)}}
+
+
+def _germany_in_dollars() -> dict[str, Any]:
+    """Aid from Germany to Kenya in current US dollars under `_DE_KENYA_USD`,
+    another measure than the gross part's."""
+    block = _read_in(_DE_KENYA_USD, _USD)
+    block["definition"]["identity"]["entities"] = {
+        "destination": ["country/KEN"],
+        "origin": ["country/DEU"],
+    }
+    return block
+
+
+@pytest.mark.parametrize(
+    ("switch", "pin", "proposed", "cites_row", "told"),
+    [
+        (
+            {"inherits": {_EUR_NET: _EUR_READ}, "picked": frozenset({_EUR_NET})},
+            _EUR_NET,
+            _NET,
+            True,
+            (_EUR, _EUR_NET),
+        ),
+        (_TO_POUNDS, _GBP_READ, _GROSS, False, (_GBP, _GBP_READ)),
+        (_TO_POUNDS, _GBP_READ, _DE_KENYA_USD, True, (_GBP, None)),
+    ],
+    ids=["count-the-part-s-own", "unit-the-part-citing-nothing", "unit-another-measure-citing-it"],
+)
+def test_a_re_proposal_after_a_switch_is_told_the_series_and_unit_the_plan_holds(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    switch: dict[str, Any],
+    pin: str,
+    proposed: str,
+    cites_row: bool,
+    told: tuple[dict[str, Any], str | None],
+) -> None:
+    """The user chose current euros for the gross part, which Search re-read
+    in them, and a switch of the card moved the plan to the net count Search
+    named beside that read, or its unit row to current pounds, which Search
+    read the part in. The unit answer's record still names the euro read.
+    A proposal in US dollars is refused and told what the plan holds: one
+    pinning the part's own net count, to pin the net count in euros; one
+    pinning the part itself, citing no decision, to pin its read in pounds;
+    one pinning another measure while citing the unit row, to state pounds."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        _FRANCE_KENYA,
+        _read_in_euros_offering_net(),
+        _read_in(_GBP_READ, _GBP),
+        _germany_in_dollars(),
+    )
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, derived = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)}), derived],
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    # The unit switch restates the requirement in the unit it picked.
+    restated = {"unit": Unit(**_GBP)} if "units" in switch else {}
+    switched = submission_service.submit(
+        _RevisionSession(call=session_call(ctx), **switch),
+        submission_service.Proposal(
+            evidence_requirements=[
+                plan.requirement(dataset.id)
+                .model_copy(update={"source_spec_id": pin, **restated})
+                .model_dump(mode="json")
+            ],
+            amends_version=plan.version,
+        ),
+        proposer=submission_service.PROPOSE_PLAN,
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+    moved = load_plan(ctx.state)
+    assert moved is not None
+    held = moved.requirement(dataset.id)
+    cited = held.decision_ids if cites_row else ()
+
+    refused = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        amends_version=moved.version,
+        decisions=[],
+        evidence_requirements=[
+            held.model_copy(
+                update={"source_spec_id": proposed, "unit": Unit(**_USD), "decision_ids": cited}
+            )
+        ],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert (refused["detail"]["unit"], refused["detail"].get("pin")) == told
+
+
+def _two_windows_answered(ctx: _FakeToolContext) -> None:
+    """The user answered one unit question covering the gross part over every
+    year and over 2020-2024 with current euros, and Search re-read each
+    window in them (`_EUR_READ`, `_EUR_READ_2020`), every block on record."""
+    later = copy.deepcopy(_FRANCE_KENYA)
+    later["spec_id"] = later["definition"]["spec_id"] = _GROSS_2020
+    later["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    later_read = _read_in(_EUR_READ_2020, _EUR)
+    later_read["definition"]["identity"]["requested_window"] = later["definition"]["identity"][
+        "requested_window"
+    ]
+    _show_blocks(ctx, _FRANCE_KENYA, later, _read_in(_EUR_READ, _EUR), later_read)
+    for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
+        record_unit_read(ctx.state, part, read)
+        record_unit_served(
+            ctx.state,
+            part,
+            read,
+            UnitChoice.model_validate(_EUR),
+            group=_GROSS,
+            chosen=UnitChoice.model_validate(_EUR),
+        )
+    question = {
+        **_UNIT_QUESTION,
+        "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
+    }
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+        user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+
+
+def test_a_window_the_first_plan_left_out_keeps_the_unit_its_answer_chose(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The unit question covers two windows of the gross part, and the user
+    chose current euros. The first plan reads the whole history alone, so
+    its unit row absorbs that window only. A later proposal adding the
+    2020-2024 window as the part itself in US dollars is refused and told
+    to pin that window's own read in euros, not the whole history's."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _two_windows_answered(ctx)
+    dataset, _ = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [
+            dataset.model_copy(
+                update={"id": "all", "source_spec_id": _EUR_READ, "unit": Unit(**_EUR)}
+            )
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+
+    refused = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=plan.version,
+        decisions=[],
+        evidence_requirements=[
+            dataset.model_copy(
+                update={
+                    "id": "recent",
+                    "period": Period(start=2020, end=2024),
+                    "source_spec_id": _GROSS_2020,
+                    "unit": Unit(**_USD),
+                }
+            )
+        ],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert (refused["detail"]["unit"], refused["detail"]["pin"]) == (_EUR, _EUR_READ_2020)
+
+
+def test_a_unit_answer_given_after_the_plan_landed_holds_the_row_over_the_plan(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose current euros for the gross part, and the plan landed
+    with its unit row in them. The user then wrote again, was asked the unit
+    question once more and chose current pounds, which Search read the part
+    in. A proposal pinning that read in pounds lands, the row stating
+    pounds: the newer answer holds the row, not the plan's euros."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_GBP_READ, _GBP))
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, _ = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    record_unit_served(
+        ctx.state,
+        _GROSS,
+        _GBP_READ,
+        UnitChoice.model_validate(_GBP),
+        group=_GROSS,
+        chosen=UnitChoice.model_validate(_GBP),
+    )
+    question = {**_UNIT_QUESTION, "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS]}}
+    ctx.records = [
+        *ctx.records,
+        transcript.user_message("In pounds, please."),
+        turn_pause("ask", "int_ask_again", {"questions": [question]}),
+        user_answer("int_ask_again", {"answers": {"q1": {"kind": "unit", **_GBP}}}),
+    ]
+
+    again = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=plan.version,
+        decisions=[],
+        evidence_requirements=[
+            plan.requirement(dataset.id).model_copy(
+                update={"source_spec_id": _GBP_READ, "unit": Unit(**_GBP)}
+            )
+        ],
+        tool_context=ctx,
+    )
+
+    assert again["outcome"] == Outcome.OK.value, again
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    assert [d.chosen for d in revised.decisions if d.slot == f"user_unit_{_GROSS}"] == [
+        "current prices in GBP"
+    ]
+
+
+def test_a_bare_prices_answer_on_a_row_s_series_keeps_the_series_off_the_row() -> None:
+    """The plan's unit row pins the gross part's read in euros, and the user
+    then answered the planner's prices question on that read with constant
+    prices alone, as a refusal of the row sends the planner to ask. The read
+    keeps that answer: the row does not take it back."""
+    row = f"user_unit_{_GROSS}"
+    plan = Plan(
+        question="q",
+        decisions=[
+            Decision(
+                slot=row,
+                description="Which prices the figures are in.",
+                options=("current prices in EUR", "constant prices"),
+                chosen="current prices in EUR",
+                resolved_by=ResolvedBy.USER,
+                rationale="The user chose current prices in EUR.",
+                fixes=DecisionFixes(prices="current"),
+            )
+        ],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="aid",
+                decision_ids=[row],
+                measure="aid",
+                entities=[Entity(name="Kenya", role="recipient")],
+                period=Period(start=2018, end=2022),
+                source_spec_id=_EUR_READ,
+                unit=Unit(**_EUR),
+            )
+        ],
+        version=1,
+    )
+    bare = PricesChoice("constant", asked=True)
+    choices = {
+        _GROSS: PricesChoice("current", _EUR_READ, unit=Unit(**_EUR), group=_GROSS),
+        _EUR_READ: bare,
+    }
+
+    assert plan_held_choices(choices, plan, units={})[_EUR_READ] == bare
+
+
+def test_a_part_refused_the_unit_chosen_states_no_whole_unit_row() -> None:
+    """A part Search refused to read in the unit chosen keeps its served
+    unit on a prices row of its own, which records no whole unit the user
+    chose, so the planner's own unit decisions on it stand."""
+    refused = PricesChoice("current", _GROSS, unit=Unit(**_USD))
+
+    assert whole_unit_slots({_GROSS: refused}) == frozenset()
+
+
+def test_a_unit_switch_after_a_typed_message_moves_the_row_s_decision(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose current euros for the gross part, the plan landed with
+    its unit row in them, and the user then typed a message, which releases
+    the turn's choices and the plan's unit rows. A switch of the row to
+    current US dollars is a revision stating the row's new unit, so it lands
+    with the row stating dollars."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_USD_READ, _USD))
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, _ = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    ctx.records = [*ctx.records, transcript.user_message("Show it as a chart.")]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    row = f"user_unit_{_GROSS}"
+
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement(dataset.id).model_copy(update={"source_spec_id": _USD_READ})],
+        {row: Unit(**_USD)},
+    )
+
+    assert switched["outcome"] == Outcome.OK.value, switched
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    assert [d.chosen for d in revised.decisions if d.slot == row] == ["current prices in USD"]
+
+
+# The gross part's 2020-2024 window as Search reads it in current US dollars.
+_USD_READ_2020 = "spec_" + "4c" * 16
+
+
+def _window_reread(ctx: _FakeToolContext) -> None:
+    """Record that a switch of the gross part's unit row to current US
+    dollars read the 2020-2024 window, which the plan left out, as
+    `_USD_READ_2020`, its block on record."""
+    block = _read_in(_USD_READ_2020, _USD)
+    block["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    save_pin_sources(
+        ctx.state,
+        {**pin_sources(ctx.state), _USD_READ_2020: PinSource(block=block, settled=True)},
+    )
+    record_units_reread(ctx.state, {_GROSS_2020: (_USD_READ_2020, Unit(**_USD))})
+
+
+def _window_left_out_then_switched(
+    tools: dict[str, ToolSpec],
+    ctx: _FakeToolContext,
+    dataset: DatasetRequirement,
+    decision: Decision,
+) -> Plan:
+    """The unit question covers two windows of the gross part, answered in
+    current euros; the plan reads the whole history alone, and a switch of
+    its unit row to current US dollars lands. The plan the switch revised."""
+    _two_windows_answered(ctx)
+    save_pin_sources(
+        ctx.state,
+        {
+            **pin_sources(ctx.state),
+            _USD_READ: PinSource(block=_read_in(_USD_READ, _USD), settled=True),
+        },
+    )
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision,
+        [
+            dataset.model_copy(
+                update={"id": "all", "source_spec_id": _EUR_READ, "unit": Unit(**_EUR)}
+            )
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement("all").model_copy(update={"source_spec_id": _USD_READ})],
+        {f"user_unit_{_GROSS}": Unit(**_USD)},
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    return revised
+
+
+@pytest.mark.parametrize(
+    ("reread", "told"),
+    [(True, _USD_READ_2020), (False, _USD_READ)],
+    ids=["window-read-by-the-switch", "window-never-read"],
+)
+def test_a_window_the_plan_left_out_is_told_a_series_in_the_unit_a_switch_picked(
+    decision: DecisionFactory, requirements: RequirementPair, reread: bool, told: str
+) -> None:
+    """The unit question covers two windows of the gross part, and the user
+    chose current euros. The plan reads the whole history alone, and a
+    switch of its unit row to current US dollars lands, reading the
+    2020-2024 window in them too. A later proposal adding that window on
+    its euros read is refused and told dollars and the window's read in
+    them, and a proposal on that read lands. With no read of the window
+    in dollars on record, the window is on no row: the proposal is told
+    the series the row reads in dollars, and following it lands."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    dataset, _ = requirements
+    revised = _window_left_out_then_switched(tools, ctx, dataset, decision())
+    if reread:
+        _window_reread(ctx)
+    recent = dataset.model_copy(update={"id": "recent", "period": Period(start=2020, end=2024)})
+
+    refused = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=revised.version,
+        decisions=[],
+        evidence_requirements=[
+            recent.model_copy(update={"source_spec_id": _EUR_READ_2020, "unit": Unit(**_EUR)})
+        ],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert (refused["detail"]["unit"], refused["detail"].get("pin")) == (_USD, told), refused
+
+    landed = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=revised.version,
+        decisions=[],
+        evidence_requirements=[
+            recent.model_copy(update={"source_spec_id": told, "unit": Unit(**_USD)})
+        ],
+        tool_context=ctx,
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.requirement("recent").unit == Unit(**_USD)
+
+
+def test_a_fresh_plan_s_base_year_refusal_reads_the_answer_not_the_plan_on_record(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose constant 2020 US dollars for the gross part, the plan
+    landed in them, and a switch of its unit row to constant 2023 dollars
+    landed. A new plan pinning the 2020 read in constant dollars with no base
+    year amends nothing, so its refusal reads the user's answer and tells
+    the 2020 base year."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _offering_constant(), _constant_block(), _read_in(_READ_2020, _USD_2020))
+    _unit_answered(ctx, _USD_2020, _READ_2020, _USD_2020)
+    dataset, _ = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _READ_2020, "unit": Unit(**_USD_2020)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement(dataset.id).model_copy(update={"source_spec_id": _CONSTANT_GROSS})],
+        {f"user_unit_{_GROSS}": Unit(**_USD_2023)},
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+
+    refused = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        starts_new_plan=True,
+        decisions=[],
+        evidence_requirements=[
+            dataset.model_dump(mode="json")
+            | {
+                "source_spec_id": _READ_2020,
+                "unit": {"currency": "USD", "prices": "constant"},
+            }
+        ],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.INVALID_PLAN.value, refused
+    assert refused["detail"]["unit"] == _USD_2020, refused
+
+
+def test_a_typed_message_after_the_plan_landed_releases_its_unit_row(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose current euros for the gross part, and the plan landed
+    with its unit row in them. The user then typed "use US dollars
+    instead", which releases the row as it releases every choice: the
+    planner's proposal pinning the part's read in dollars lands in them."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_USD_READ, _USD))
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, _ = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    ctx.records = [*ctx.records, transcript.user_message("Use US dollars instead.")]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+
+    again = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=plan.version,
+        decisions=[],
+        evidence_requirements=[
+            plan.requirement(dataset.id).model_copy(
+                update={"source_spec_id": _USD_READ, "unit": Unit(**_USD)}
+            )
+        ],
+        tool_context=ctx,
+    )
+
+    assert again["outcome"] == Outcome.OK.value, again
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    assert revised.requirement(dataset.id).unit == Unit(**_USD)
+
+
+def _constant_row_switched(
+    tools: dict[str, ToolSpec], ctx: _FakeToolContext, decision: Decision, dataset: Any
+) -> Plan:
+    """The user chose constant 2020 US dollars for the gross part, the plan
+    landed with its unit row in them, and a switch of the row to constant
+    2023 dollars landed. The plan the switch revised."""
+    _show_blocks(ctx, _offering_constant(), _constant_block(), _read_in(_READ_2020, _USD_2020))
+    _unit_answered(ctx, _USD_2020, _READ_2020, _USD_2020)
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision,
+        [dataset.model_copy(update={"source_spec_id": _READ_2020, "unit": Unit(**_USD_2020)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement(dataset.id).model_copy(update={"source_spec_id": _CONSTANT_GROSS})],
+        {f"user_unit_{_GROSS}": Unit(**_USD_2023)},
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    return revised
+
+
+def test_a_skip_of_the_prices_ask_after_a_unit_switch_keeps_the_switched_unit(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose constant 2020 US dollars for the gross part, and a
+    switch of the plan's unit row moved it to constant 2023 dollars. The
+    planner then asked which prices to go on in, and the user skipped,
+    which only marks the constant choice asked. A proposal keeping the
+    switched plan lands in 2023 dollars: the skip sets nothing newer than
+    the switch."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    dataset, _ = requirements
+    revised = _constant_row_switched(tools, ctx, decision(), dataset)
+    ctx.records = [
+        *ctx.records,
+        _prices_refused_event(_GROSS, asks_user=True),
+        _prices_options_ask(),
+        _ask_response("ask-prices", {"result": {"skip": True}}),
+    ]
+
+    again = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=revised.version,
+        decisions=[],
+        evidence_requirements=[revised.requirement(dataset.id)],
+        tool_context=ctx,
+    )
+
+    assert again["outcome"] == Outcome.OK.value, again
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.requirement(dataset.id).unit == Unit(**_USD_2023)
+
+
+# A part on the gross part's unit row with a measure of its own, as Search
+# reads it in current pounds.
+_OTHER_GBP = "spec_" + "0d" * 16
+
+
+@pytest.mark.parametrize(
+    ("answer", "left"),
+    [
+        (PricesChoice("current", asked=True), True),
+        (
+            PricesChoice("current", _EUR_READ, unit=Unit(**_EUR), group=_GROSS),
+            False,
+        ),
+    ],
+    ids=["prices-answer", "unit-answer"],
+)
+def test_a_member_answered_after_a_unit_switch_leaves_the_row_and_the_rest_hold_it(
+    answer: PricesChoice, left: bool
+) -> None:
+    """A unit answer in current euros put the gross part and another part
+    on one unit row, the plan read each under a requirement of its own, and
+    a switch moved the row to current pounds. The user then answered
+    current prices for the other part alone. That part holds its answer and
+    its requirement stops citing the row, while the gross part holds
+    pounds, so the row states one unit and stays switchable. A new unit
+    answer on the row holds the whole row as answered."""
+    row = f"user_unit_{_GROSS}"
+    gbp, eur = Unit(**_GBP), Unit(**_EUR)
+    plan = Plan(
+        question="q",
+        decisions=[
+            Decision(
+                slot=row,
+                description="Which prices the figures are in.",
+                options=("current prices in GBP", "constant prices"),
+                chosen="current prices in GBP",
+                resolved_by=ResolvedBy.USER,
+                rationale="The user chose current prices in GBP.",
+                fixes=DecisionFixes(prices="current"),
+            )
+        ],
+        evidence_requirements=[
+            DatasetRequirement(
+                id=rid,
+                decision_ids=[row],
+                measure=rid,
+                entities=[Entity(name="Kenya", role="recipient")],
+                period=Period(start=2018, end=2022),
+                source_spec_id=pin,
+                unit=gbp,
+            )
+            for rid, pin in (("gross", _GBP_READ), ("other", _OTHER_GBP))
+        ],
+        version=2,
+    )
+    answered = {
+        _GROSS: AnsweredPart(_GROSS, _EUR_READ, eur),
+        _UNIT_OTHER: AnsweredPart(_GROSS, _UNIT_OTHER, eur),
+    }
+    rows = {row: {_GROSS: ("gross",), _UNIT_OTHER: ("other",)}}
+    first = PricesChoice("current", _EUR_READ, unit=eur, group=_GROSS)
+    choices = {_GROSS: first, _UNIT_OTHER: answer}
+    fresh = {_UNIT_OTHER}
+
+    held = plan_held_choices(choices, plan, units={}, answered=answered, rows=rows, fresh=fresh)
+    moved = row_members_left(choices, plan, answered=answered, rows=rows, fresh=fresh)
+
+    if left:
+        assert held == {
+            _UNIT_OTHER: answer,
+            _GBP_READ: PricesChoice("current", _GBP_READ, unit=gbp, group=_GROSS),
+        }
+        assert moved == {"other": frozenset({row})}
+    else:
+        assert held == choices
+        assert moved == {}
+
+
+def test_a_count_switch_after_a_refused_amendment_keeps_the_switched_unit(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose current euros for the gross part, and the plan landed
+    with its unit row in them. The user amended the card, the amendment's
+    entry was refused and the card offered again, and the user switched the
+    row to current US dollars. A count or scope switch's revision, which
+    moves no unit row, still holds the row to dollars: one re-pinning the
+    part on its euro read is refused and told dollars and their read. The
+    amendment came before the unit switch's plan, so it releases nothing."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_USD_READ, _USD))
+    _unit_answered(ctx, _EUR, _EUR_READ, _EUR)
+    dataset, _ = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    ctx.records = [
+        *ctx.records,
+        turn_pause("approve", "int_card", {}),
+        user_answer("int_card", {"amendment": "Add 2023 too."}),
+    ]
+    row = f"user_unit_{_GROSS}"
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement(dataset.id).model_copy(update={"source_spec_id": _USD_READ})],
+        {row: Unit(**_USD)},
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+    revised = load_plan(ctx.state)
+    assert revised is not None
+
+    counted = _switch_unit_row(
+        ctx,
+        revised,
+        [
+            revised.requirement(dataset.id).model_copy(
+                update={"source_spec_id": _EUR_READ, "unit": Unit(**_EUR)}
+            )
+        ],
+        {},
+    )
+
+    assert counted["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, counted
+    assert (counted["detail"]["unit"], counted["detail"].get("pin")) == (_USD, _USD_READ)
+
+
+def test_a_unit_switch_discards_a_unit_answer_whose_entry_was_refused(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The plan landed with the gross part's unit row in current US
+    dollars. The user amended the card and answered the unit question again
+    with current euros, the amendment's entry was refused and the card
+    offered again, and the user switched the row to current pounds. The
+    switch lands, and so does the replan of a pick holding the pounds the
+    card shows: the euro answer came before the switch's plan."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, _read_in(_EUR_READ, _EUR), _read_in(_GBP_READ, _GBP))
+    _unit_answered(ctx, _USD, _GROSS, _USD)
+    dataset, _ = requirements
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"source_spec_id": _GROSS, "unit": Unit(**_USD)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+    _landed(ctx, landed)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    record_unit_served(
+        ctx.state,
+        _GROSS,
+        _EUR_READ,
+        UnitChoice.model_validate(_EUR),
+        group=_GROSS,
+        chosen=UnitChoice.model_validate(_EUR),
+    )
+    question = {**_UNIT_QUESTION, "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS]}}
+    ctx.records = [
+        *ctx.records,
+        turn_pause("approve", "int_card", {}),
+        user_answer("int_card", {"amendment": "In euros, please."}),
+        turn_pause("ask", "int_ask_again", {"questions": [question]}),
+        user_answer("int_ask_again", {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+    row = f"user_unit_{_GROSS}"
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement(dataset.id).model_copy(update={"source_spec_id": _GBP_READ})],
+        {row: Unit(**_GBP)},
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+    revised = load_plan(ctx.state)
+    assert revised is not None
+
+    replanned = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=revised.version,
+        decisions=[],
+        evidence_requirements=[revised.requirement(dataset.id)],
+        tool_context=ctx,
+    )
+
+    assert replanned["outcome"] == Outcome.OK.value, replanned
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [d.chosen for d in plan.decisions if d.slot == row] == ["current prices in GBP"]
+
+
+@pytest.mark.parametrize("first_reads_gross", [True, False], ids=["at-once", "on-amendment"])
+def test_a_fresh_plan_does_not_read_what_an_earlier_plan_s_unit_row_absorbed(
+    decision: DecisionFactory, requirements: RequirementPair, first_reads_gross: bool
+) -> None:
+    """The unit question covers two windows of the gross part, and the user
+    chose current euros. A first plan reads the 2020-2024 window alone under
+    the id "r1". A later first-draft entry clears it, as the planner adapter
+    does, and its fresh plan reads the whole history alone under "r1", at
+    once or on an amendment of a draft reading aid from Germany alone; a
+    switch of that plan's unit row to current US dollars lands, reading the
+    2020-2024 window in them. That plan's row never absorbed the window, so
+    a later proposal adding it in euros is refused and told the window's
+    read in dollars, as for any window the plan left out."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _two_windows_answered(ctx)
+    germany = _read_in(_DE_KENYA_EUR, _EUR)
+    germany["definition"]["identity"]["entities"] = {
+        "destination": ["country/KEN"],
+        "origin": ["country/DEU"],
+    }
+    save_pin_sources(
+        ctx.state,
+        {
+            **pin_sources(ctx.state),
+            _USD_READ: PinSource(block=_read_in(_USD_READ, _USD), settled=True),
+            _DE_KENYA_EUR: PinSource(block=germany, settled=True),
+        },
+    )
+    dataset, _ = requirements
+    recent = {"period": Period(start=2020, end=2024), "source_spec_id": _EUR_READ_2020}
+    first = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [dataset.model_copy(update={"id": "r1", **recent, "unit": Unit(**_EUR)})],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    _landed(ctx, first)
+    clear_plan(ctx.state)
+
+    whole = dataset.model_copy(
+        update={"id": "r1", "source_spec_id": _EUR_READ, "unit": Unit(**_EUR)}
+    )
+    german = dataset.model_copy(
+        update={"id": "de", "source_spec_id": _DE_KENYA_EUR, "unit": Unit(**_EUR)}
+    )
+    fresh = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [whole if first_reads_gross else german],
+        answer_mode=AnswerMode.SERIES,
+    )
+    assert fresh["outcome"] == Outcome.OK.value, fresh
+    if not first_reads_gross:
+        _landed(ctx, fresh)
+        drafted = load_plan(ctx.state)
+        assert drafted is not None
+        fresh = call_planner_tool(
+            tools["propose_plan"],
+            question="q",
+            answer_mode=AnswerMode.SERIES,
+            amends_version=drafted.version,
+            decisions=[],
+            evidence_requirements=[whole],
+            tool_context=ctx,
+        )
+        assert fresh["outcome"] == Outcome.OK.value, fresh
+    _landed(ctx, fresh)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    switched = _switch_unit_row(
+        ctx,
+        plan,
+        [plan.requirement("r1").model_copy(update={"source_spec_id": _USD_READ})],
+        {f"user_unit_{_GROSS}": Unit(**_USD)},
+    )
+    assert switched["outcome"] == Outcome.OK.value, switched
+    _window_reread(ctx)
+    revised = load_plan(ctx.state)
+    assert revised is not None
+
+    refused = call_planner_tool(
+        tools["propose_plan"],
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        amends_version=revised.version,
+        decisions=[],
+        evidence_requirements=[
+            dataset.model_copy(update={"id": "r2", **recent, "unit": Unit(**_EUR)})
+        ],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert (refused["detail"]["unit"], refused["detail"].get("pin")) == (
+        _USD,
+        _USD_READ_2020,
+    ), refused
+
+
+def test_a_carried_planner_decision_stating_the_unit_the_user_answered_goes_on_amendment(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """A plan recorded before the rule above holds the planner's decision
+    stating the unit the user answered beside the user's own, both windows
+    citing both. The next amendment carries it no further: the plan holds
+    the user's answer alone, and neither window cites the planner's."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    later = copy.deepcopy(_FRANCE_KENYA)
+    later["spec_id"] = later["definition"]["spec_id"] = _GROSS_2020
+    later["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    _show_blocks(ctx, _FRANCE_KENYA, later)
+    for part, read in ((_GROSS, _EUR_READ), (_GROSS_2020, _EUR_READ_2020)):
+        record_unit_read(ctx.state, part, read)
+        record_unit_served(
+            ctx.state,
+            part,
+            read,
+            UnitChoice.model_validate(_EUR),
+            group=_GROSS,
+            chosen=UnitChoice.model_validate(_EUR),
+        )
+    question = {
+        **_UNIT_QUESTION,
+        "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
+    }
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+        user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+    dataset, _ = requirements
+    in_eur = {"unit": Unit(**_EUR)}
+    windows = [
+        dataset.model_copy(update={"id": "all", "source_spec_id": _EUR_READ, **in_eur}),
+        dataset.model_copy(
+            update={
+                "id": "recent",
+                "source_spec_id": _EUR_READ_2020,
+                "period": Period(start=2020, end=2024),
+                **in_eur,
+            }
+        ),
+    ]
+    landed = _propose_one(tools, ctx, decision(), windows, answer_mode=AnswerMode.SERIES)
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    currency = decision(
+        slot="currency_unit",
+        description="Currency and price basis for the flows.",
+        options=["current euros", "current USD"],
+        chosen="current euros",
+        resolved_by=ResolvedBy.USER,
+        rationale="The figures are stated in one currency.",
+        fixes=DecisionFixes(unit=Unit(**_EUR)),
+    )
+    save_plan(
+        ctx.state,
+        Plan.model_validate(
+            {
+                **plan.model_dump(),
+                "decisions": [*plan.decisions, currency],
+                "evidence_requirements": [
+                    r.model_copy(update={"decision_ids": (*r.decision_ids, "currency_unit")})
+                    if r.id in {"all", "recent"}
+                    else r
+                    for r in plan.evidence_requirements
+                ],
+            }
+        ),
+    )
+
+    amended = _propose(
+        tools,
+        ctx,
+        decision(),
+        [windows[0].model_copy(update={"measure": "aid from France to Kenya"})],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    revised = load_plan(ctx.state)
+    assert revised is not None
+    assert "currency_unit" not in {d.slot for d in revised.decisions}
+    assert [
+        "currency_unit" in revised.requirement(rid).decision_ids for rid in ("all", "recent")
+    ] == [False, False]
+    assert f"user_unit_{_GROSS}" in revised.requirement("recent").decision_ids
+
+
 def test_a_unit_search_refused_holds_the_plan_to_the_unit_the_series_is_served_in(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
@@ -13142,6 +15148,82 @@ def test_a_unit_search_refused_holds_the_plan_to_the_unit_the_series_is_served_i
     )
 
     assert landed["outcome"] == Outcome.OK.value, landed
+
+
+@pytest.mark.parametrize("lead_refused", [False, True], ids=["window-refused", "lead-refused"])
+def test_a_window_search_refused_the_unit_keeps_a_prices_decision_of_its_own(
+    decision: DecisionFactory, requirements: RequirementPair, lead_refused: bool
+) -> None:
+    """The unit question covers two windows of the gross part. The user chose
+    current euros; Search re-read one window in them and refused the other,
+    which the agent fetches as served, in current US dollars: the later
+    window, or the question's lead part. The plan states the unit the user
+    chose as the question's one decision on the window read in it, and the
+    refused window's own unit as a decision of its own."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    later = copy.deepcopy(_FRANCE_KENYA)
+    later["spec_id"] = later["definition"]["spec_id"] = _GROSS_2020
+    later["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    _show_blocks(ctx, _FRANCE_KENYA, later)
+    eur, usd = UnitChoice.model_validate(_EUR), UnitChoice.model_validate(_USD)
+    read, refused = (_GROSS_2020, _GROSS) if lead_refused else (_GROSS, _GROSS_2020)
+    read_as = _EUR_READ_2020 if lead_refused else _EUR_READ
+    record_unit_read(ctx.state, read, read_as)
+    record_unit_served(ctx.state, read, read_as, eur, group=_GROSS, chosen=eur)
+    record_unit_served(ctx.state, refused, refused, usd, group=_GROSS, chosen=eur)
+    question = {
+        **_UNIT_QUESTION,
+        "unit": {**_UNIT_QUESTION["unit"], "parts": [_GROSS, _GROSS_2020]},
+    }
+    ctx.records = [
+        turn_pause("ask", _ASK_PAUSE_ID, {"questions": [question]}),
+        user_answer(_ASK_PAUSE_ID, {"answers": {"q1": {"kind": "unit", **_EUR}}}),
+    ]
+    dataset, _ = requirements
+    pins = {read: (read_as, _EUR), refused: (refused, _USD)}
+
+    landed = _propose_one(
+        tools,
+        ctx,
+        decision(),
+        [
+            dataset.model_copy(
+                update={
+                    "id": "all",
+                    "source_spec_id": pins[_GROSS][0],
+                    "unit": Unit(**pins[_GROSS][1]),
+                }
+            ),
+            dataset.model_copy(
+                update={
+                    "id": "recent",
+                    "source_spec_id": pins[_GROSS_2020][0],
+                    "period": Period(start=2020, end=2024),
+                    "unit": Unit(**pins[_GROSS_2020][1]),
+                }
+            ),
+        ],
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    assert landed["outcome"] == Outcome.OK.value, landed
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    cited = {
+        rid: [slot for slot in plan.requirement(rid).decision_ids if slot.startswith("user_")]
+        for rid in ("all", "recent")
+    }
+    row, own = f"user_unit_{_GROSS}", f"user_prices_{refused}"
+    on_row = "recent" if lead_refused else "all"
+    off_row = "all" if lead_refused else "recent"
+    assert cited == {on_row: [row], off_row: [own]}
+    chosen = {d.slot: d.chosen for d in plan.decisions if d.slot.startswith("user_")}
+    assert chosen == {row: "current prices in EUR", own: "current prices in USD"}
 
 
 _DAC2A = "provenance/OECDDAC2A"
@@ -14187,7 +16269,9 @@ def test_propose_plans_declaration_describes_every_field() -> None:
     # field means without it having to live in `_PLANNING` prose.
     # `_undescribed_properties` walks `$defs`, the shape the model
     # is actually sent. The fields every requirement kind shares are described once,
-    # on the `evidence_requirements` argument.
+    # on the `evidence_requirements` argument. `scope_options` carries none: its enum
+    # names each option, and a description puts the declaration over its ceiling
+    # (`test_context_budget.PROPOSE_PLAN_DECLARATION_CEILING`).
     tools = _tools_by_name()
 
     declaration = planner_tool_declaration(tools["propose_plan"])
@@ -14199,7 +16283,7 @@ def test_propose_plans_declaration_describes_every_field() -> None:
         name for name, field in schema["properties"].items() if not field.get("description")
     ] == []
     assert sorted({entry.rsplit(".", 1)[1] for entry in _undescribed_properties(schema)}) == sorted(
-        SHARED_FIELDS
+        {*SHARED_FIELDS, "scope_options"}
     )
     described = schema["properties"]["evidence_requirements"]["description"]
     assert all(f"`{field}`" in described for field in SHARED_FIELDS)
@@ -18938,7 +21022,7 @@ async def test_a_double_count_refusal_names_the_wider_figure_by_its_label(
     decision: DecisionFactory,
 ) -> None:
     """Bilateral CRS health aid plus the DAC1 total counting core contributions to
-    multilaterals, the sum accepting a provider difference: the refusal names the
+    multilaterals, each declaring its own provider option: the refusal names the
     total by the count it carries, whose cause is not imputed multilateral flows."""
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"), dac1_with_contributions())
@@ -18947,7 +21031,6 @@ async def test_a_double_count_refusal_names_the_wider_figure_by_its_label(
         decision_ids=["measure"],
         left=RequirementSide(input_id=_PART),
         right=RequirementSide(input_id=_WHOLE),
-        accept_provider_difference=True,
     )
 
     refused = await _us_2023(
@@ -19007,86 +21090,68 @@ _EDUCATION, _EDUCATION_INCLUSIVE = (f"spec_{'8' * 32}", f"spec_{'9' * 32}")
 def _us_dataset(
     requirement_id: str, measure: str, pin: str | None, whole_of: WholeOf | None = None
 ) -> DatasetRequirement:
-    """US aid of `measure` in 2023, pinned to `pin`, declaring `whole_of` when given."""
+    """US aid of `measure` in 2023, pinned to `pin`, declaring `whole_of` when given,
+    which names no entity."""
     return DatasetRequirement(
         id=requirement_id,
         decision_ids=["measure"],
         measure=measure,
-        entities=[Entity(name="United States", role="donor")],
+        entities=[] if whole_of else [Entity(name="United States", role="donor")],
         period=Period(start=2023, end=2023),
         source_spec_id=pin,
         whole_of=whole_of,
     )
 
 
-_FLAGGED_LEAD = "The question asks for the inputs as their datasets count them"
-
-
 @pytest.mark.parametrize(
-    ("wholes", "accepts", "pinned", "compiled", "compare_lead"),
+    ("wholes", "declares", "pinned", "compiled"),
     [
         pytest.param(
             ("dac1_contributions", "dac1_contributions"),
             (True, True),
             ("dac1_contributions", "dac1_contributions"),
             False,
-            None,
-            id="both-accepting-over-dac1",
+            id="both-declaring-over-dac1",
         ),
         pytest.param(
             (None, "dac1_contributions"),
             (False, False),
             ("whole", "whole"),
             True,
-            None,
             id="declared-whole-beside-dac1",
-        ),
-        pytest.param(
-            (None, "dac1_contributions"),
-            (False, True),
-            ("whole", "dac1_contributions"),
-            True,
-            _FLAGGED_LEAD,
-            id="declared-whole-beside-accepted-dac1",
         ),
         pytest.param(
             ("dac1_contributions", "whole"),
             (True, False),
-            ("dac1_contributions", "whole"),
+            None,
             False,
-            _FLAGGED_LEAD,
-            id="one-accepting-over-dac1",
+            id="one-declaring-over-dac1",
         ),
     ],
 )
-async def test_comparing_two_shares_keeps_each_shares_own_provider_contract(
+async def test_comparing_two_shares_keeps_each_shares_declared_options(
     decision: DecisionFactory,
     wholes: tuple[str | None, str],
-    accepts: tuple[bool, bool],
-    pinned: tuple[str, str],
+    declares: tuple[bool, bool],
+    pinned: tuple[str, str] | None,
     compiled: bool,
-    compare_lead: str | None,
 ) -> None:
     """US health and education aid each as a share of a total, the two shares
     compared. The comparison counts numerators with numerators and denominators
-    with denominators, and a share's own contract stands.
+    with denominators.
 
     Both shares over the DAC1 total, which counts core contributions to
-    multilaterals, each accepting the provider difference: the positions already
-    match, so the DAC1 total keeps its pin though Search offers DAC1 bilateral ODA
-    beside it, nothing is compiled, and the comparison states no provider
-    difference beside each share's own. The health share over a whole declared
-    from its part, beside the education share over the DAC1 total: the declared
+    multilaterals, every input declaring the option its pin is counted on: the
+    positions already match, so the DAC1 total keeps its pin though Search offers
+    DAC1 bilateral ODA beside it, nothing is compiled, and the comparison states no
+    provider difference. The health share over a whole declared from its part,
+    beside the education share over the DAC1 total, declaring nothing: the declared
     whole stands in for its bilateral part, so the DAC1 denominator is compiled
-    bilateral, unless the education share accepts the difference, when its DAC1
-    denominator stays and the comparison states the denominators' difference as
-    the user's request. The health share over the DAC1 total accepting the difference,
-    beside the education share over the CRS bilateral total: the accepted
-    contract stands, nothing moves, and the comparison states the denominators'
-    difference as the user's request."""
+    bilateral. Only the health share's inputs declaring their options: the
+    comparison reads inputs that declare and inputs that do not, and is refused."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
-    blocks = {name: _us_block(name) for name in {*wholes, *pinned} - {None}}
+    blocks = {name: _us_block(name) for name in {*wholes, "whole"} - {None}}
     _show_blocks(
         ctx,
         us_2023_block("health"),
@@ -19094,20 +21159,24 @@ async def test_comparing_two_shares_keeps_each_shares_own_provider_contract(
         *blocks.values(),
     )
 
-    def total(requirement_id: str, whole: str | None) -> DatasetRequirement:
+    def dataset(requirement_id: str, measure: str, block: Mapping[str, Any], keep: bool):
+        return _us_dataset(requirement_id, measure, block["spec_id"]).model_copy(
+            update={"scope_options": _keeping_its_own(block) if keep else ()}
+        )
+
+    def total(requirement_id: str, whole: str | None, keep: bool) -> DatasetRequirement:
         if whole is None:
             return _us_dataset(
                 requirement_id, "US total ODA", None, WholeOf(part=_PART, axis="sector")
             )
-        return _us_dataset(requirement_id, "US total ODA", blocks[whole]["spec_id"])
+        return dataset(requirement_id, "US total ODA", blocks[whole], keep)
 
-    def share(requirement_id: str, part: str, whole: str, accept: bool) -> ShareOfRequirement:
+    def share(requirement_id: str, part: str, whole: str) -> ShareOfRequirement:
         return ShareOfRequirement(
             id=requirement_id,
             decision_ids=["measure"],
             numerator=RequirementSide(input_id=part),
             denominator=RequirementSide(input_id=whole),
-            accept_provider_difference=accept,
         )
 
     result = await call_planner_tool(
@@ -19116,12 +21185,17 @@ async def test_comparing_two_shares_keeps_each_shares_own_provider_contract(
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
         evidence_requirements=[
-            _us_dataset(_PART, "US aid to health", us_2023_block("health")["spec_id"]),
-            _us_dataset("education_crs", "US aid to education", _EDUCATION),
-            total(_WHOLE, wholes[0]),
-            total("total_education", wholes[1]),
-            share(_SHARE, _PART, _WHOLE, accepts[0]),
-            share("share_education", "education_crs", "total_education", accepts[1]),
+            dataset(_PART, "US aid to health", us_2023_block("health"), declares[0]),
+            dataset(
+                "education_crs",
+                "US aid to education",
+                _education_block("health", spec_id=_EDUCATION),
+                declares[1],
+            ),
+            total(_WHOLE, wholes[0], declares[0]),
+            total("total_education", wholes[1], declares[1]),
+            share(_SHARE, _PART, _WHOLE),
+            share("share_education", "education_crs", "total_education"),
             ComparisonRequirement(
                 id=_COMPARE,
                 decision_ids=["measure"],
@@ -19132,6 +21206,10 @@ async def test_comparing_two_shares_keeps_each_shares_own_provider_contract(
         tool_context=ctx,
     )
 
+    if pinned is None:
+        assert result["code"] == ProblemCode.STATED_SCOPE_UNATTRIBUTED.value, result
+        assert result["detail"]["requirement_id"] == _COMPARE
+        return
     assert result["outcome"] == Outcome.OK.value, result
     assert bool(surface.calls) is compiled
     assert _pins(ctx) == [
@@ -19142,14 +21220,11 @@ async def test_comparing_two_shares_keeps_each_shares_own_provider_contract(
     ]
     plan = load_plan(ctx.state)
     assert plan is not None
-    stated = [
+    assert not [
         d
         for d in plan.decisions
         if d.caveat == "providers_differ" and d.slot in plan.requirement(_COMPARE).decision_ids
     ]
-    assert [d.rationale.startswith(compare_lead) for d in stated] == (
-        [] if compare_lead is None else [True]
-    )
 
 
 def test_comparing_two_quotients_counts_their_numerators_on_one_basis(
@@ -19280,8 +21355,8 @@ def test_a_sum_accepting_a_provider_difference_counts_flows_twice_only_where_the
     inclusive: Callable[[], dict[str, Any]],
     code: str,
 ) -> None:
-    """US bilateral health aid plus US aid with imputed multilateral flows, the sum
-    accepting the provider difference. The inclusive figure holds the bilateral
+    """US bilateral health aid plus US aid with imputed multilateral flows, each
+    declaring its own provider option. The inclusive figure holds the bilateral
     flows only where the two meet on every axis: one donor, a sector, a recipient
     and a year in common. US bilateral health aid plus US inclusive education aid
     counts no flow twice and is served; so is a sum over years or recipient
@@ -19298,14 +21373,17 @@ def test_a_sum_accepting_a_provider_difference_counts_flows_twice_only_where_the
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
         evidence_requirements=[
-            _us_dataset(_PART, "US bilateral aid to health", left["spec_id"]),
-            _us_dataset("other_aid", "US aid with imputed multilateral", right["spec_id"]),
+            _us_dataset(_PART, "US bilateral aid to health", left["spec_id"]).model_copy(
+                update={"scope_options": _keeping_its_own(left)}
+            ),
+            _us_dataset(
+                "other_aid", "US aid with imputed multilateral", right["spec_id"]
+            ).model_copy(update={"scope_options": _keeping_its_own(right)}),
             SumOfRequirement(
                 id=_SUM,
                 decision_ids=["measure"],
                 left=RequirementSide(input_id=_PART),
                 right=RequirementSide(input_id="other_aid"),
-                accept_provider_difference=True,
             ),
         ],
         tool_context=ctx,

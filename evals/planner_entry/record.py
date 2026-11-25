@@ -6,14 +6,17 @@ orchestrator's own `search` tool, as `entry.orchestrator_state` replays them, so
 recording holds exactly the calls a replay makes. Then every skill a search names, and
 `dfo-faq`, is read with each file it lists, page by page, and each first-year read
 `propose_plan` can make for a dataset the planner is shown (`submission.service.first_year_reads`).
+Then every call `propose_plan` makes while it admits each of the task's payloads, such
+as the `resolve_definition` call that checks a `whole_of` total can be counted.
 Last, every call production's translation makes for each of the task's payloads: the
 search `discover_source` sends for each dataset requirement, with its warnings, each
 definition it resolves or describes, each entity name it resolves, and each code node
 it reads to climb a breakdown's named codes up their hierarchy.
 
     just eval-planner-entry-record                   # tasks with no recording, a stale one,
-                                                     # or one lacking a first-year read or
-                                                     # a call its translation makes
+                                                     # or one lacking a first-year read, a
+                                                     # call a proposal makes, or a call its
+                                                     # translation makes
     just eval-planner-entry-record --all             # every task again
     just eval-planner-entry-record --only share-health-oda-kenya
 
@@ -39,6 +42,7 @@ from data_mcp.settings import Settings as DataSettings
 from entry import (
     RECORDING_SCHEMA,
     RecordedResolver,
+    RecordedSurface,
     RecordingMismatchError,
     Task,
     TaskStateError,
@@ -122,6 +126,12 @@ def _result(result: Any) -> dict[str, Any]:
     }
 
 
+def _call_result(result: Any) -> dict[str, Any]:
+    """A tool result as `compiler.surface.McpSurface` hands it on, `_meta` included,
+    where `search` puts the envelope `discover_source` reads."""
+    return {**_result(result), "meta": dict(result.meta) if result.meta else None}
+
+
 async def _skill_results(client: Any, skill_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
     """Each skill, and every page of `SKILL.md` and of each file it lists, by the key
     `entry.RecordedSurface` looks it up under: `get_skill` for a skill's first page,
@@ -200,10 +210,52 @@ async def _first_year_results(
     return surface.results
 
 
-def _call_result(result: Any) -> dict[str, Any]:
-    """A tool result as `compiler.surface.McpSurface` hands it on, `_meta` included,
-    where `search` puts the envelope `discover_source` reads."""
-    return {**_result(result), "meta": dict(result.meta) if result.meta else None}
+class ProposalRecordError(RuntimeError):
+    """A live proposal that would leave its recording short. The task is not saved."""
+
+
+async def _proposal_calls(
+    client: Any, task: Task, recording: Mapping[str, Any], *, wall_s: float
+) -> dict[str, dict[str, Any]]:
+    """The answers to each call `propose_plan` makes while it admits each of `task`'s
+    payloads that the recording's `tools` do not hold, made live, by the key
+    `entry.RecordedSurface` looks each up under, such as the `resolve_definition` call
+    `compile_whole` sends for a `whole_of`. Each entry may take `wall_s`.
+
+    Raises:
+        ProposalRecordError: If an entry errored, ran out of time or accepted no
+            proposal, a live call raised or was refused for now, or a replay over the
+            recording with these answers still misses a call. The message names the
+            payload and the call.
+    """
+
+    async def live(tool: ToolId, arguments: Mapping[str, object]) -> dict[str, Any]:
+        # `_meta` included: `resolve_definition` answers its envelope there.
+        return _call_result(
+            await client.call_tool(tool.name, dict(arguments), raise_on_error=False)
+        )
+
+    surface = RecordedSurface(recording["tools"], live=live)
+    payloads = task_payloads(task)
+    for payload in payloads:
+        run = await accepted_run(task, recording, payload, timeout_s=wall_s, surface=surface)
+        if run.timed_out:
+            raise ProposalRecordError(f"{payload.label}: ran past {wall_s:g} s")
+        if surface.failures:
+            raise ProposalRecordError(f"{payload.label}: {surface.failures[0]}")
+        if run.error is not None:
+            raise ProposalRecordError(f"{payload.label}: {run.error.splitlines()[0]}")
+        if run.probe.plan is None:
+            raise ProposalRecordError(f"{payload.label}: no proposal was accepted")
+    replayed = {**recording, "tools": {**recording["tools"], **surface.added}}
+    for payload in payloads:
+        run = await accepted_run(task, replayed, payload)
+        if run.surface_misses:
+            raise ProposalRecordError(
+                f"{payload.label}: a replay misses {run.surface_misses[0]}, which the live "
+                "proposal never asked"
+            )
+    return surface.added
 
 
 class TranslationRecordError(RuntimeError):
@@ -254,8 +306,9 @@ async def _translation_calls(
 
 
 async def record_task(client: Any, task: Task) -> dict[str, Any]:
-    """`task`'s recording: its searches' envelopes, every skill they name, and each
-    first-year read the planner can make."""
+    """`task`'s recording: its searches' envelopes, every skill they name, each
+    first-year read the planner can make, every call its payloads' proposals make, and
+    every call their translations make."""
     resolver = RecordingResolver(client)
     await orchestrator_state(task, resolver)
     recording = {
@@ -267,10 +320,10 @@ async def record_task(client: Any, task: Task) -> dict[str, Any]:
         # The planner's `get_skill` declaration names `dfo-faq` whatever the readings say.
         "tools": await _skill_results(client, [*resolver.skills, DFO_FAQ_SKILL_ID]),
     }
+    wall_s = Settings().turn_wall_s
     recording["tools"] |= await _first_year_results(client, task, recording)
-    recording["translation"] = await _translation_calls(
-        client, task, recording, wall_s=Settings().turn_wall_s
-    )
+    recording["tools"] |= await _proposal_calls(client, task, recording, wall_s=wall_s)
+    recording["translation"] = await _translation_calls(client, task, recording, wall_s=wall_s)
     return recording
 
 
@@ -302,16 +355,17 @@ async def main_async(args: argparse.Namespace) -> int:
             held = None if args.all else await _replaying(task)
             try:
                 if held is not None:
+                    wall_s = Settings().turn_wall_s
                     added = await _first_year_results(client, task, held)
                     held = {**held, "tools": held["tools"] | added}
-                    translation = await _translation_calls(
-                        client, task, held, wall_s=Settings().turn_wall_s
-                    )
-                    if added or translation != held.get("translation"):
+                    proposed = await _proposal_calls(client, task, held, wall_s=wall_s)
+                    held = {**held, "tools": held["tools"] | proposed}
+                    translation = await _translation_calls(client, task, held, wall_s=wall_s)
+                    if added or proposed or translation != held.get("translation"):
                         save_recording(task.id, {**held, "translation": translation})
                         print(
-                            f"ok   {task.id}: first-year reads {len(added)}, translation "
-                            f"calls {len(translation['calls'])}",
+                            f"ok   {task.id}: first-year reads {len(added)}, proposal calls "
+                            f"{len(proposed)}, translation calls {len(translation['calls'])}",
                             file=sys.stderr,
                         )
                     return

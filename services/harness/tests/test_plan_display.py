@@ -22,6 +22,7 @@ import pytest
 from compiler.sources import source_from_spec_block
 from harness import plan_display
 from harness.decision_pick import DecisionPick, decision_pick
+from harness.graph.plan_done import _stop_causes
 from harness.plan_display import (
     _card_label,
     _concepts,
@@ -67,6 +68,7 @@ from planner.operations import (
     SumOfOperation,
     Translation,
 )
+from planner.phrasing import CONSTANT_PRICES, CURRENT_PRICES
 from planner.plan import (
     AggregateRequirement,
     ComparisonRequirement,
@@ -89,7 +91,9 @@ from planner.plan import (
     ScopeOptionState,
     ShareOfRequirement,
     SumOfRequirement,
+    Unit,
     WholeOf,
+    covered,
     frame_shapes,
     scope_choice_slot,
     search_pin_slot,
@@ -131,6 +135,7 @@ from planner.workflow import (
     WorkflowStep,
 )
 from pydantic import BaseModel
+from submission.prices_choice import PricesChoice, prices_slot, unit_slot
 from submission.service import SourceReadings, _card_names
 from translator.mechanical import build_translation
 
@@ -900,6 +905,72 @@ def test_a_retrieve_then_aggregate_plan_produces_two_labelled_steps(
     # Never a bare tool name.
     assert "get_data" not in labels[0]
     assert "aggregate" not in labels[1]
+
+
+def test_the_yearly_and_cumulative_shares_of_one_pair_read_as_six_different_sentences(
+    decision: DecisionFactory,
+) -> None:
+    # "What share of total US ODA was US bilateral aid to Kenya", asked per year and
+    # over the window: two datasets, a share per year, a sum of each side, and a share
+    # of the sums. The two sums read alike and are numbered as their labels are; the two
+    # shares differ in their time shape.
+    kenya = DatasetRequirement(
+        id="bilat_kenya",
+        decision_ids=["measure"],
+        measure="official development assistance",
+        entities=[
+            Entity(name="United States", role="donor"),
+            Entity(name="Kenya", role="recipient"),
+        ],
+        period=Period(start=2015, end=2023),
+    )
+    total = DatasetRequirement(
+        id="total_us",
+        decision_ids=["measure"],
+        measure="official development assistance",
+        entities=[Entity(name="United States", role="donor")],
+        period=Period(start=2015, end=2023),
+    )
+    agg_kenya = AggregateRequirement(
+        id="agg_kenya",
+        decision_ids=["measure"],
+        input_id="bilat_kenya",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY,),
+    )
+    agg_us = AggregateRequirement(
+        id="agg_us",
+        decision_ids=["measure"],
+        input_id="total_us",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY,),
+    )
+    yearly = ShareOfRequirement(
+        id="share_yearly",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="bilat_kenya"),
+        denominator=RequirementSide(input_id="total_us"),
+    )
+    cumulative = ShareOfRequirement(
+        id="share_total",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="agg_kenya"),
+        denominator=RequirementSide(input_id="agg_us"),
+    )
+    plan = Plan(
+        question="q",
+        decisions=[decision()],
+        evidence_requirements=[kenya, total, agg_kenya, agg_us, yearly, cumulative],
+    )
+
+    sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
+
+    assert len(set(sentences.values())) == len(plan.evidence_requirements), sentences
+    assert sentences["agg_kenya"].endswith("(1).")
+    assert sentences["agg_us"].endswith("(2).")
+    assert "each year's total of" in sentences["share_yearly"]
+    assert "one total" not in sentences["share_yearly"]
+    assert "as one figure overall" in sentences["share_total"]
 
 
 def test_a_steps_args_are_the_workflow_steps_args_dict_unchanged(
@@ -3276,8 +3347,8 @@ def test_the_approved_plan_names_the_parties_a_shares_denominator_source_holds(
 
     assert rows["all_oda"]["label"] == f"Fetch ODA gross disbursements for {parties}"
     assert rows["share"]["description"].startswith(
-        "Share of ODA gross disbursements as one figure overall, divided by ODA gross "
-        f"disbursements ({parties})."
+        "Share of ODA gross disbursements for each year, divided by each year's total of "
+        f"ODA gross disbursements ({parties})."
     )
 
 
@@ -3440,8 +3511,8 @@ _TOP_TEN = RankRequirement(
 )
 # The share's sentence over a denominator narrowed by the step `label` names.
 _OVER_ROWS = (
-    "Share of ODA gross disbursements as one figure overall, divided by one total of ODA "
-    'gross disbursements over the rows "{label}" keeps.'
+    "Share of ODA gross disbursements for each year, divided by each year's total of "
+    'ODA gross disbursements over the rows "{label}" keeps.'
 )
 
 
@@ -3465,8 +3536,8 @@ _OVER_ROWS = (
         (
             FilterRequirement(id="later", input_id="all_oda", predicates=_LATER),
             {"share": "from every donor"},
-            "Share of ODA gross disbursements as one figure overall, divided by ODA gross "
-            "disbursements (Kenya and all 140 donors).",
+            "Share of ODA gross disbursements for each year, divided by each year's total of "
+            "ODA gross disbursements (Kenya and all 140 donors).",
         ),
     ],
     ids=["value_filter", "top_ten", "period_filter"],
@@ -3937,18 +4008,29 @@ def test_a_declared_whole_is_named_by_the_axis_it_opens_and_never_the_planners_m
 
 
 @pytest.mark.parametrize(
-    ("whole", "population"),
-    [(DAC_DONORS, "official donors (DAC)"), (ALL_DONORS, "140 donors")],
+    ("whole", "population", "divided_by"),
+    [
+        (DAC_DONORS, "official donors (DAC)", "from official donors (DAC)"),
+        (ALL_DONORS, "140 donors", "from every donor"),
+    ],
     ids=["dac_donors", "all_donors"],
 )
+@pytest.mark.parametrize("states_coverage", [True, False], ids=["stored", "as-written"])
 def test_a_declared_donor_whole_is_named_by_its_parts_concept_and_the_donors_its_source_holds(
-    decision: DecisionFactory, whole: dict[str, Any], population: str
+    decision: DecisionFactory,
+    whole: dict[str, Any],
+    population: str,
+    divided_by: str,
+    states_coverage: bool,
 ) -> None:
     """The United States' share of ODA to Kenya with the total declared the US part
     over every donor, under the planner's measure "Total aid to Kenya": the whole
     counts the part's concept, so the card names it so, with the donors its source
-    holds, the total of official donors (DAC) or the 140 left open."""
+    holds, the total of official donors (DAC) or the 140 left open. A whole stating
+    no entities or `across`, as the planner writes one, covers its part's parties,
+    so its card reads the same as one a stored plan states them on."""
     plan = us_share_of_kenya_oda(decision, whole=whole, numerator=US_DONOR)
+    coverage = {} if states_coverage else {"entities": (), "across": ()}
     plan = Plan.model_validate(
         {
             **plan.model_dump(),
@@ -3957,6 +4039,7 @@ def test_a_declared_donor_whole_is_named_by_its_parts_concept_and_the_donors_its
                     update={
                         "measure": "Total aid to Kenya",
                         "whole_of": WholeOf(part="us", axis="donor"),
+                        **coverage,
                     }
                 )
                 if r.id == "all_oda"
@@ -3975,6 +4058,126 @@ def test_a_declared_donor_whole_is_named_by_its_parts_concept_and_the_donors_its
         f"Total {whole_name} by year",
         f"ODA gross disbursements from United States to Kenya as a share of {whole_name}",
     ]
+    assert share_wholes(plan) == {"share": divided_by}
+
+
+@pytest.mark.parametrize(
+    ("whole", "population", "summed"),
+    [(DAC_DONORS, "official donors (DAC)", False), (ALL_DONORS, "140 donors", True)],
+    ids=["donors-bound", "donors-open"],
+)
+def test_the_sum_over_a_whole_s_open_side_is_a_card_row_of_its_own(
+    decision: DecisionFactory, whole: dict[str, Any], population: str, summed: bool
+) -> None:
+    """The United States' share of ODA to Kenya over every donor, the share reading
+    the whole. Where the whole's source leaves the donors open, the sum
+    `propose_plan` adds over them is a step with a row of its own, worded as a
+    total by year, which a stop names as itself, and the share divides by the
+    whole of every donor. Where the source binds the donors' total there is no
+    such row."""
+    plan = us_share_of_kenya_oda(
+        decision, whole=whole, numerator=US_DONOR, whole_of=True, group_by=None
+    )
+
+    labels = [row["label"] for row in card_rows(plan)]
+
+    whole_name = f"ODA gross disbursements from {population} to Kenya"
+    assert labels == [
+        "Fetch ODA gross disbursements from United States to Kenya",
+        f"Fetch {whole_name}",
+        *([f"Total {whole_name} by year"] if summed else []),
+        f"ODA gross disbursements from United States to Kenya as a share of {whole_name}",
+    ]
+    assert [row["id"] for row in step_rows(plan)] == [
+        "us",
+        "all_oda",
+        *(["all_oda_sum"] if summed else []),
+        "share",
+    ]
+    assert share_wholes(plan) == {
+        "share": "from every donor" if summed else "from official donors (DAC)"
+    }
+    if summed:
+        # A stop in the sum is reported as the sum's own, and stops the share.
+        assert _stop_causes(plan, "all_oda_sum") == {
+            "all_oda_sum": "all_oda_sum",
+            "share": "all_oda_sum",
+        }
+
+
+@pytest.mark.parametrize(
+    ("whole", "donors", "across"),
+    [
+        (DAC_DONORS, [("official donors (DAC)", "DACOfficialDonors")], ()),
+        (ALL_DONORS, [], ("donor",)),
+        # The donors bound with no entity stated for them. The whole names no donor
+        # and leaves no side open, so compile reads no open axis it cannot resolve.
+        ({"entities": DAC_DONORS["entities"][:1]}, [], ()),
+    ],
+    ids=["donors-bound", "donors-open", "donors-bound-unstated"],
+)
+def test_a_whole_covers_the_side_it_opens_as_its_compiled_source_serves_it(
+    decision: DecisionFactory,
+    whole: dict[str, Any],
+    donors: list[tuple[str, str]],
+    across: tuple[str, ...],
+) -> None:
+    """The United States' share of ODA to Kenya over every donor, compiled. Where
+    the whole's source binds the donors' total, the whole covers that total by its
+    ref. Where it leaves the donors open, which the plan sums, it covers every
+    donor."""
+    plan = us_share_of_kenya_oda(
+        decision, whole=whole, numerator=US_DONOR, whole_of=True, group_by=None
+    )
+    stated = plan.requirement("all_oda")
+    assert isinstance(stated, DatasetRequirement)
+
+    read = covered(stated, plan)
+
+    assert [(e.name, e.dcid) for e in read.entities if e.role == "donor"] == donors
+    assert read.across == across
+
+
+def test_a_whole_keeps_apart_the_parties_its_part_names_several_of(
+    decision: DecisionFactory,
+) -> None:
+    """US ODA to Kenya and Uganda over every donor, each recipient's share of its own
+    total: the whole states no entity, as the planner writes one, and covers its
+    part's two recipients, so its result reads one figure per recipient."""
+    period = Period(start=2015, end=2020)
+    part = DatasetRequirement(
+        id="us",
+        decision_ids=["measure"],
+        measure="ODA",
+        entities=[
+            Entity(name="United States", role="donor"),
+            Entity(name="Kenya", role="recipient"),
+            Entity(name="Uganda", role="recipient"),
+        ],
+        period=period,
+    )
+    whole = DatasetRequirement(
+        id="all_oda",
+        decision_ids=["measure"],
+        measure="ODA",
+        whole_of=WholeOf(part="us", axis="donor"),
+        period=period,
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="us"),
+        denominator=RequirementSide(input_id="all_oda"),
+        axis="recipient",
+        denominator_scope=DenominatorScope.PER_AXIS,
+    )
+    plan = Plan(
+        question="What share of ODA to Kenya and Uganda does the United States give?",
+        decisions=[decision()],
+        evidence_requirements=[part, whole, share],
+    )
+
+    assert _kept_words(frame_shapes(plan)["all_oda"], plan) == ["recipient", "year"]
 
 
 _ODA = "official development assistance"
@@ -5072,6 +5275,24 @@ def _planner_decision(**update: Any) -> Decision:
     )
 
 
+def _prices_decision(choice: PricesChoice, *, slot: str | None = None) -> Decision:
+    """The decision `propose_plan` writes for `choice`, the prices the user
+    chose for a part, under `slot`, the part's prices slot unless given, as
+    `submission.prices_choice.prices_decisions` words it."""
+    return Decision(
+        slot=slot or prices_slot(_SPEC_A),
+        description="Which prices the figures are in.",
+        options=tuple(
+            choice.words if label == choice.label else label
+            for label in (CURRENT_PRICES, CONSTANT_PRICES)
+        ),
+        chosen=choice.words,
+        resolved_by=ResolvedBy.USER,
+        rationale=f"The user chose {choice.words}.",
+        fixes=DecisionFixes(prices=choice.prices),
+    )
+
+
 @pytest.mark.parametrize(
     ("decision", "switchable"),
     [
@@ -5083,14 +5304,46 @@ def _planner_decision(**update: Any) -> Decision:
         ),
         (_scope_decision(_SPEC_A, "sector"), False),
         (_planner_decision(caveat="providers_differ"), False),
+        (_prices_decision(PricesChoice("current")), True),
+        (
+            _prices_decision(PricesChoice("current", unit=Unit(currency="EUR", prices="current"))),
+            False,
+        ),
+        (
+            _prices_decision(
+                PricesChoice(
+                    "constant", unit=Unit(currency="USD", prices="constant", base_year=2023)
+                )
+            ),
+            False,
+        ),
+        (
+            _prices_decision(
+                PricesChoice("current", unit=Unit(currency="EUR", prices="current")),
+                slot=unit_slot(_SPEC_A),
+            ),
+            False,
+        ),
     ],
-    ids=["fixes_fields", "rationale_only", "search_pin", "scope_choice", "caveat"],
+    ids=[
+        "fixes_fields",
+        "rationale_only",
+        "search_pin",
+        "scope_choice",
+        "caveat",
+        "prices",
+        "whole_unit",
+        "whole_unit_in_usd",
+        "unit_question",
+    ],
 )
 def test_only_a_planner_decision_settling_fields_switches_on_the_card(
     decision: Decision, switchable: bool
 ) -> None:
     """The decisions `propose_plan` writes switch through Search or qualify
-    the answer, and a rationale settles nothing a switch could change."""
+    the answer, and a rationale settles nothing a switch could change. The
+    prices the user chose for a part switch to the other prices, unless a
+    unit answer chose them as a whole unit, which the card shows read-only."""
     assert switchable_decision(decision) is switchable
 
 

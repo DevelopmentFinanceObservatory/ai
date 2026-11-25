@@ -12972,7 +12972,10 @@
               "currency": "USD",
               "prices": "constant",
               "base_year": 2024
-            }
+            },
+            "scope_options": [
+              "provider:contributions"
+            ]
           },
           {
             "unit": {
@@ -13022,6 +13025,9 @@
                 "name": "Africa",
                 "role": "recipient"
               }
+            ],
+            "scope_options": [
+              "provider:bilateral"
             ]
           },
           {
@@ -13035,7 +13041,6 @@
             },
             "kind": "share_of",
             "id": "share_africa",
-            "accept_provider_difference": true,
             "decision_ids": [
               "share_denominator"
             ]
@@ -13110,7 +13115,10 @@
             },
             "measure": "ODA",
             "source_spec_id": "spec_8877bd41b91e6a87835be50f04331cf6",
-            "id": "uk_total_oda"
+            "id": "uk_total_oda",
+            "scope_options": [
+              "provider:contributions"
+            ]
           },
           {
             "decision_ids": [],
@@ -13160,6 +13168,9 @@
                 "name": "Africa",
                 "role": "recipient"
               }
+            ],
+            "scope_options": [
+              "provider:bilateral"
             ]
           },
           {
@@ -13175,8 +13186,7 @@
             "numerator": {
               "entity": "United Kingdom",
               "input_id": "uk_oda_africa"
-            },
-            "accept_provider_difference": true
+            }
           }
         ],
         "answer_mode": "series"
@@ -13227,7 +13237,10 @@
             "period": {
               "end": 2025,
               "start": 1960
-            }
+            },
+            "scope_options": [
+              "provider:contributions"
+            ]
           }
         ],
         "amends_version": 1
@@ -13264,7 +13277,10 @@
             },
             "source_spec_id": "spec_bf915cf71ebfc1b5772ca64b393e50ec",
             "id": "uk_total_oda",
-            "kind": "dataset"
+            "kind": "dataset",
+            "scope_options": [
+              "provider:contributions"
+            ]
           }
         ],
         "amends_version": 1,
@@ -13332,7 +13348,10 @@
               "prices": "constant"
             },
             "source_spec_id": "spec_bf915cf71ebfc1b5772ca64b393e50ec",
-            "frequency": "annual"
+            "frequency": "annual",
+            "scope_options": [
+              "provider:contributions"
+            ]
           }
         ],
         "decisions": [
@@ -13391,7 +13410,10 @@
               "end": 2025,
               "start": 1960
             },
-            "measure": "ODA"
+            "measure": "ODA",
+            "scope_options": [
+              "provider:contributions"
+            ]
           }
         ],
         "amends_version": 1,
@@ -13488,6 +13510,9 @@
             "measure": "ODA",
             "decision_ids": [
               "user_prices_spec_20bdd20a52e5f19f51a96c54bb40c2de"
+            ],
+            "scope_options": [
+              "provider:contributions"
             ]
           }
         ]
@@ -13540,7 +13565,10 @@
               }
             ],
             "frequency": "annual",
-            "kind": "dataset"
+            "kind": "dataset",
+            "scope_options": [
+              "provider:contributions"
+            ]
           }
         ],
         "amends_version": 1

@@ -45,6 +45,7 @@ import httpx2
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from common.call_limit import CallDeadline
 from common.materialisation import (
     DEFAULT_MINT_OPTIONS,
     KIND_COLUMNS,
@@ -100,7 +101,7 @@ from fastmcp.exceptions import ResourceError
 from pydantic import ValidationError
 
 from data_mcp.client_holder import get_client
-from data_mcp.deadline import DEADLINE_RETRY_AFTER_S, CallDeadline
+from data_mcp.deadline import DEADLINE_RETRY_AFTER_S
 from data_mcp.manifest import ArtifactEntry, Manifest
 from data_mcp.settings import Settings
 from data_mcp.tool_errors import ToolRefusal

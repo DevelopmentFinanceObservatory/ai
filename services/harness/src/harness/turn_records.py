@@ -30,10 +30,11 @@ from typing import Any, Literal, NamedTuple, cast
 from common.place_type import FLOW_ROLE_COLUMNS
 from compiler.evidence import read_unit_currency, read_unit_dcid
 from compiler.sources import PROVIDER_ACCOUNT, block_concept_label, stat_var_count, warning_code
-from data_mcp.scope import ScopeAxis, ScopeEntry, TextOrigin
+from data_mcp.scope import ChoiceOrigin, ScopeAxis, ScopeEntry, TextOrigin
 from executor.classify import RECOVERABLE_SPEC_CODES
 from executor.ledger import RunStatus
 from planner.parties import PARTY_ROLES, column_party_roles, party_role
+from planner.phrasing import CONSTANT_PRICES, CURRENT_PRICES
 from planner.plan import (
     DatasetRequirement,
     Decline,
@@ -71,6 +72,7 @@ from harness.scope_choices import (
     ServedScope,
     ShapeBinding,
     block_dataset,
+    dropped_changed_nothing,
 )
 from harness.tool_contracts import reading_facts, requested_range, series_description
 
@@ -1020,12 +1022,6 @@ def settled_by_readings(
             yield reading.spec_id, reading.observed_at
 
 
-# How `open_prices` words the prices search read, and the prices it offers
-# when search lists no other prices of its own.
-CURRENT_PRICES = "current prices"
-CONSTANT_PRICES = "constant prices"
-
-
 type PricesForm = Literal["unit", "options", "closed"]
 
 
@@ -1427,11 +1423,21 @@ def basis_line(
         ]
     )
     narrowed = _newest_narrowings(plans)
+    own_choices = {
+        choice["id"]
+        for reading in readings
+        for choice in (reading.get("scope") or {}).get("choices") or ()
+    }
     parts: dict[tuple[str, ...], list[str]] = {}
     for reading in used:
         served = reading.fetch.served if reading.fetch is not None else None
         clauses = (
-            _scope_clauses(reading.scope, served, narrowed=narrowed.get(reading.spec_id or "", ()))
+            _scope_clauses(
+                reading.scope,
+                served,
+                narrowed=narrowed.get(reading.spec_id or "", ()),
+                own_choices=own_choices,
+            )
             if reading.scope is not None
             else ()
         )
@@ -1446,7 +1452,7 @@ def basis_line(
             )
     scoped = {reading.spec_id for reading in used if reading.scope is not None}
     for basis in _aligned_bases(plans, read=scoped):
-        clauses = _scope_clauses(basis.scope, basis.served)
+        clauses = _scope_clauses(basis.scope, basis.served, own_choices=own_choices)
         if clauses:
             parts.setdefault(clauses, []).append(basis.name)
     if not parts:
@@ -1777,7 +1783,11 @@ def _newest_narrowings(
 
 
 def _scope_clauses(
-    scope: PartScope, served: ServedScope | None, *, narrowed: Sequence[RoleNarrowing] = ()
+    scope: PartScope,
+    served: ServedScope | None,
+    *,
+    narrowed: Sequence[RoleNarrowing] = (),
+    own_choices: Collection[str] = (),
 ) -> tuple[str, ...]:
     """The basis line's clauses for one used part's `scope`: one per scope
     choice that names its active option, then one per entry Search dropped.
@@ -1787,7 +1797,11 @@ def _scope_clauses(
     axis, or after the choices when the part has none on it. An entry the
     user stated reads as what a filter keeps (`narrowed`) on the role its
     axis names (`planner.parties.party_role`), where one does; otherwise as
-    why it was dropped (`REASON_COPY`)."""
+    why it was dropped (`REASON_COPY`). A carried entry that changed nothing
+    (`dropped_changed_nothing`) reads as none when it was carried from a choice
+    of one of the turn's own searches (`own_choices`, the choice ids of the turn's
+    readings): the harness's search context, not a choice the user made.
+    """
     composite = served.composite_clause() if served is not None else None
     clauses = [
         composite[1]
@@ -1798,7 +1812,17 @@ def _scope_clauses(
     clauses = [clause for clause in clauses if clause is not None]
     if composite is not None and all(choice.axis != composite[0] for choice in scope.choices):
         clauses.append(composite[1])
+    active = {choice.axis: choice.active for choice in scope.choices}
     for dropped in scope.dropped_entries:
+        if (
+            dropped.code == "carried_choice_not_applied"
+            and isinstance(dropped.entry.origin, ChoiceOrigin)
+            and dropped.entry.origin.choice_id in own_choices
+            and dropped_changed_nothing(
+                dropped.cause, dropped.entry.option_id, active.get(dropped.entry.axis)
+            )
+        ):
+            continue
         stood_in = (
             _stood_in(dropped.entry, narrowed)
             if dropped.code == "stated_choice_not_applied"

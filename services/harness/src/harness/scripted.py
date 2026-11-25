@@ -33,7 +33,7 @@ from compiler.surface import (
 from executor.completion import FramePublished
 from google.genai import Client, types
 from planner.call import PlannerCall
-from planner.plan import load_plan, plan_revision
+from planner.plan import Unit, load_plan, plan_revision
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import ok
 from planner.tool_spec import ToolSpec
@@ -410,9 +410,10 @@ class ScriptedPlannerModel:
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],
         picked: Collection[str] = (),
+        units: Mapping[str, Unit] | None = None,
     ) -> dict[str, Any]:
         """Refuse: the canned plan pins no source, so no switch reaches it."""
-        del ctx, prior_plan, evidence_requirements, inherits, picked
+        del ctx, prior_plan, evidence_requirements, inherits, picked, units
         return {"refused": {"text": "The scripted planner revises no plan.", "code": None}}
 
 

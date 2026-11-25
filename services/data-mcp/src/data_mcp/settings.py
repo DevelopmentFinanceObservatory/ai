@@ -148,7 +148,7 @@ class Settings(FrameServiceSettings):
     own mount are not counted.
 
     `search_sends_conversation_context` gates the parsed input's `user_message`
-    and `carried_entries` (its own description says why it defaults off).
+    and `carried_entries`, and is on by default.
 
     `dfo_caller_principal` (`DFO_CALLER_PRINCIPAL`) is the secret dfo-apis shares
     with the website. Every dfo-apis call carries it beside an `ip:<digest>` or
@@ -180,15 +180,14 @@ class Settings(FrameServiceSettings):
     operation_poll_interval_s: float = Field(default=2.0, ge=0.5, allow_inf_nan=False)
     external_mint_concurrency: int = Field(default=1, ge=1)
     search_sends_conversation_context: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Whether `search` posts the conversation context its caller sends "
             "(`search_tool.SearchContext`: the user's message and the carried scope "
             "entries) to the Search API as the parsed input's `user_message` and "
-            "`carried_entries`. Leave it off until the dfo-apis deployment behind "
-            "`dfo_apis_url` declares both members: the API refuses a request with an "
-            "unknown field with 422, so every parsed search would fail. Off, the "
-            "context is read and dropped."
+            "`carried_entries`, so a later search keeps the scope choices the "
+            "conversation settled. Off, the context is read and dropped, and each "
+            "search reads its parts alone. The raw-text door takes no context either way."
         ),
     )
 

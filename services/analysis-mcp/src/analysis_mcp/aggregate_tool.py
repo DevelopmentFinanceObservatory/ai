@@ -97,7 +97,7 @@ async def aggregate(
         aggregation: The reduction function. See the closed vocabulary above.
         group_by: Column names to group by. Empty reduces the whole frame to one row.
         unit: Pins the unit, to answer a prior unit_heterogeneous refusal.
-        allow_sparse_breakdowns: Count an empty breakdown cell as no flow.
+        allow_sparse_breakdowns: Let empty breakdown cells pass the coverage check.
 
     Returns:
         A digest: the computed numbers per group, the resolved unit, coverage,

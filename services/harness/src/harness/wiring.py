@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from compiler.surface import ToolSurface
+from planner.stated_scope import ApisStatedScopeReader, StatedScopeReader, apis_stated_scope_reader
 
 from harness.graph.interfaces import PlannerModel
 from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
@@ -25,6 +26,7 @@ def build_planner(
     settings: Settings,
     surface: ToolSurface,
     prefix_cache: PrefixCache | None = None,
+    stated_scope: StatedScopeReader | None = None,
 ) -> PlannerAdapter:
     """The planner adapter: the planner with the translation from
     `translator.tool.build_translate` attached to `propose_plan`, adapted by
@@ -34,8 +36,22 @@ def build_planner(
     `harness.server.create_app` already built for the `execute` node, so the
     two compile against one set of schemas, read once. `prefix_cache` is the
     process's shared prompt-prefix cache, passed on to the planner's model.
+    `stated_scope` is the reader `propose_plan` reads the provider scope the
+    user's words state through (`build_stated_scope_reader`); `None` reads none.
     """
-    return PlannerAdapter(settings=settings, surface=surface, prefix_cache=prefix_cache)
+    return PlannerAdapter(
+        settings=settings, surface=surface, prefix_cache=prefix_cache, stated_scope=stated_scope
+    )
+
+
+def build_stated_scope_reader(settings: Settings) -> ApisStatedScopeReader | None:
+    """The reader of dfo-apis' stated-scope route at `settings.dfo_apis_url`
+    (`DFO_APIS_URL`), or `None` where `planner_stated_scope` is off. Build it once for the
+    process and close it at shutdown (`ApisStatedScopeReader.aclose`), since it holds a
+    connection pool."""
+    if not settings.planner_stated_scope:
+        return None
+    return apis_stated_scope_reader(base_url=settings.dfo_apis_url)
 
 
 def handing_back_planner_failures(planner: PlannerModel) -> PlannerModel:
@@ -73,4 +89,4 @@ def _handed_back(exc: PlannerAdapterError) -> dict[str, Any]:
     return {"refused": {"text": str(exc), "code": exc.refusal.get("code")}}
 
 
-__all__ = ["build_planner", "handing_back_planner_failures"]
+__all__ = ["build_planner", "build_stated_scope_reader", "handing_back_planner_failures"]

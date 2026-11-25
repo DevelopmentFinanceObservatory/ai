@@ -333,6 +333,8 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             | CompileIssueCode.FAMILY_UNSUMMABLE
             | CompileIssueCode.SUM_UNITS_DIFFER
             | CompileIssueCode.SHARE_UNITS_DIFFER
+            | CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE
+            | CompileIssueCode.WHOLE_SUM_UNMATCHED
             | CompileIssueCode.FRAME_UNITS_DIFFER
             | CompileIssueCode.FRAME_UNIT_FORMS_DIFFER
             | CompileIssueCode.FRAME_PRICE_BASES_DIFFER
@@ -454,6 +456,18 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "for one measure per unit of another, replace the share with a `quotient_of`, which "
         "divides the two and states the result in a composed unit; for a part of its whole, "
         "state the same unit on both sides' requirements"
+    ),
+    CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE: (
+        "where the share is a part of its whole, make the denominator a dataset requirement "
+        "stating `whole_of` with the numerator's requirement as its `part` and the side it "
+        "leaves open as its `axis`, which is counted from the part's own dataset; where it "
+        "is one measure set against another that does not hold it, replace the share with a "
+        "`quotient_of`; otherwise give the denominator entities that hold every party the "
+        "numerator names"
+    ),
+    CompileIssueCode.WHOLE_SUM_UNMATCHED: (
+        "propose the plan again with the whole as it stands, so `propose_plan` reads the "
+        "side it opens as its dataset serves it"
     ),
     CompileIssueCode.FRAME_UNITS_DIFFER: (
         "state the same unit on both sides' requirements, so each source is retrieved in it"
@@ -1337,12 +1351,12 @@ def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str,
     listed once, and the first `repair` stated kept. A named group
     repeating one before it is dropped.
     """
-    if not split.copies:
+    if not split.names():
         return answer
 
     def prose(entry: dict[str, object]) -> dict[str, object]:
         return entry | {
-            field: authored_text(text, split.origins())
+            field: authored_text(text, split.names(), sums=split.summing())
             for field in ("reason", "repair")
             if isinstance(text := entry.get(field), str)
         }

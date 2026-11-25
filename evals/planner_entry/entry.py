@@ -69,6 +69,7 @@ from data_mcp.search_tool import SearchContext
 from data_mcp.skills_client import name_get_skill_in_call_lines
 from google.genai import Client, types
 from google.genai.client import AsyncClient
+from harness.conversation import current_user_message
 from harness.gemini_agent import RecordingState
 from harness.gemini_wire import model_retry_options
 from harness.graph.interfaces import PlannerModel
@@ -108,6 +109,7 @@ from planner.plan import (
 )
 from planner.session import function_calls, function_responses
 from planner.source_reads import read_full_history
+from planner.stated_scope import StatedScopeReader
 from planner.tool_results import ProblemCode
 from planner.tools import load_pending_ask
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -251,7 +253,9 @@ class Task(_Strict):
     several years taken together (`across_years`). A task whose search holds a party
     open names it in one. `period_reduction` is what the reference plan does with the
     years of its data, `none` or `across_years`, and what a run's accepted plan is
-    held to. A task with an `amendment` opens the planner on the user's amendment of
+    held to. A task with `user_message_searched` sends its `question` as the user's
+    message on each search, as a served turn does, so Search applies the provider scope
+    the words state. A task with an `amendment` opens the planner on the user's amendment of
     a plan card instead of a first draft (`load_amendment_tasks`).
     """
 
@@ -267,6 +271,7 @@ class Task(_Strict):
     acceptable_kinds: list[str]
     neighbour: Neighbour | None = None
     unit_asked: bool = False
+    user_message_searched: bool = False
     first_proposal_refusal: str | None = None
     period_reduction: PeriodReduction
     reference_payload: dict[str, Any]
@@ -460,6 +465,34 @@ def stray_recordings(task_ids: Collection[str], directory: Path = RECORDINGS_DIR
 type LiveCall = Callable[[ToolId, Mapping[str, object]], Awaitable[dict[str, Any]]]
 
 
+async def _live_answer(
+    live: LiveCall,
+    tool: ToolId,
+    arguments: Mapping[str, object],
+    *,
+    key: str,
+    failures: list[str],
+) -> dict[str, Any]:
+    """`live`'s answer to one call filed under `key`. A call that raised (the raise
+    propagates) and an answer `_keepable` rejects are listed in `failures`."""
+    try:
+        answer = await live(tool, arguments)
+    except BaseException as exc:
+        failures.append(f"{key}: {type(exc).__name__}: {exc}")
+        raise
+    if not _keepable(answer):
+        failures.append(f"{key}: refused for now: {answer['structured_content']}")
+    return answer
+
+
+def _keepable(answer: Mapping[str, Any]) -> bool:
+    """Whether a recording keeps `answer`: anything but a refusal to retry later."""
+    return not (
+        answer["is_error"]
+        and (answer["structured_content"] or {}).get("retry_mode") == "retry_after_delay"
+    )
+
+
 class TranslationCalls:
     """The `ToolSurface`, resolve door and node door production's translation reads,
     answered from `held`, a recording's `translation`: tool answers under `calls`, by
@@ -512,17 +545,8 @@ class TranslationCalls:
             raise ToolSurfaceUnavailableError(
                 f"the recording holds no answer for {key}", retryable=False
             )
-        try:
-            answer = await self._live(tool, arguments)
-        except BaseException as exc:
-            self.failures.append(f"{key}: {type(exc).__name__}: {exc}")
-            raise
-        if (
-            answer["is_error"]
-            and (answer["structured_content"] or {}).get("retry_mode") == "retry_after_delay"
-        ):
-            self.failures.append(f"{key}: refused for now: {answer['structured_content']}")
-        else:
+        answer = await _live_answer(self._live, tool, arguments, key=key, failures=self.failures)
+        if _keepable(answer):
             self._calls[key] = answer
             self._used.add(key)
         return ToolCallResult.model_validate(answer)
@@ -682,11 +706,21 @@ class RecordedSurface:
     `get_skill_file`, are rewritten to name `get_skill`. A call the recording lacks is answered as an
     unreachable server is (`ToolSurfaceUnavailableError`), which the planner's tool
     turns into a sentence saying the call did not complete, and is listed in `misses`.
+
+    With `live` (`record.py`), a call the recording lacks is made through `live` instead,
+    as the tool and arguments its key names, such as the `resolve_definition` call
+    `propose_plan` makes to admit a `whole_of`, and kept in `added` under its key. A live call that raised, or answered a refusal
+    to retry later, is kept out and listed in `failures`.
     """
 
-    def __init__(self, results: Mapping[str, Mapping[str, Any]]) -> None:
+    def __init__(
+        self, results: Mapping[str, Mapping[str, Any]], *, live: LiveCall | None = None
+    ) -> None:
         self._results = dict(results)
+        self._live = live
         self.misses: list[str] = []
+        self.added: dict[str, dict[str, Any]] = {}
+        self.failures: list[str] = []
 
     async def list_tools(self) -> list[ToolSchema]:
         return []
@@ -704,6 +738,15 @@ class RecordedSurface:
             name = "get_skill_file"
             arguments.setdefault("offset", 0)
         key = surface_key(name, arguments)
+        if key not in self._results and self._live is not None:
+            # The call the key names: a skill file's page is `get_skill_file`'s.
+            called = ToolId(server=tool.server, name=name)
+            answer = await _live_answer(
+                self._live, called, arguments, key=key, failures=self.failures
+            )
+            if not _keepable(answer):
+                return ToolCallResult.model_validate(answer)
+            self._results[key] = self.added[key] = answer
         if key not in self._results:
             self.misses.append(key)
             raise ToolSurfaceUnavailableError(
@@ -737,12 +780,16 @@ async def orchestrator_state(task: Task, resolver: Resolver) -> dict[str, Any]:
     }
     state: dict[str, Any] = {}
     call = OrchestratorCall(state=RecordingState(state), turn_id=task.id)
-    for search in task.searches:
-        found = await tools["search"](call=call, parts=search.parts or None, text=search.text)
-        if "error" in found:
-            raise TaskStateError(
-                f"{task.id}: search {search.parts or search.text!r}: {found['error']}"
-            )
+    token = current_user_message.set(task.question if task.user_message_searched else None)
+    try:
+        for search in task.searches:
+            found = await tools["search"](call=call, parts=search.parts or None, text=search.text)
+            if "error" in found:
+                raise TaskStateError(
+                    f"{task.id}: search {search.parts or search.text!r}: {found['error']}"
+                )
+    finally:
+        current_user_message.reset(token)
     handed = tools["plan"](brief=task.brief, asks=list(task.asks), call=call)
     if handed.get(HANDED_OFF) != "plan":
         raise TaskStateError(f"{task.id}: plan answered {handed}")
@@ -1066,10 +1113,16 @@ def live_client() -> Client:
 
 
 def build_adapter(
-    *, probe: Probe, surface: RecordedSurface, prefix_cache: PrefixCache | None, client: Client
+    *,
+    probe: Probe,
+    surface: RecordedSurface,
+    prefix_cache: PrefixCache | None,
+    client: Client,
+    stated_scope: StatedScopeReader | None = None,
 ) -> PlannerAdapter:
     """The adapter `harness.wiring.build_planner` builds, with the probe's translate
-    step and the planner's model calls going through `client`.
+    step, the planner's model calls going through `client`, and `stated_scope` the
+    reader of the provider scope the user's words state.
 
     The planner, its instruction and its tools are production's own.
     """
@@ -1079,6 +1132,7 @@ def build_adapter(
         prefix_cache=prefix_cache,
         translate=probe.translate,
         client=client,
+        stated_scope=stated_scope,
     )
 
 
@@ -1110,6 +1164,8 @@ async def run_entry(
     timeout_s: float = 300.0,
     answers: Sequence[Mapping[str, Any]] = (),
     translation: TranslationCalls | None = None,
+    surface: RecordedSurface | None = None,
+    stated_scope: StatedScopeReader | None = None,
 ) -> EntryRun:
     """Run `task`'s planner entry once on a fresh turn.
 
@@ -1124,7 +1180,11 @@ async def run_entry(
     passes none, so an ask ends it. Each answer is the reply the studio's interrupt
     route reads, the user's answer under `result`. With `translation`,
     production's translation runs on the recorded plan over those calls, and
-    `probe.translation` holds its answer.
+    `probe.translation` holds its answer. The planner's tool calls, `propose_plan`'s
+    own included, go to `surface`, by default one over the recording's `tools`.
+    `propose_plan` reads the provider scope the user's words state through
+    `stated_scope`, where given, and in a task with `user_message_searched` each
+    request carries the `question` as the user's words, as a served turn does.
 
     A task with an `amendment` opens the planner as the `approve` node's `amend` edge
     does, on the task's prior plan and the user's text, after `plan_start` took the
@@ -1142,7 +1202,8 @@ async def run_entry(
             anchor_read=_no_anchor_read,
             describe_nodes=translation.describe_nodes,
         )
-    surface = RecordedSurface(recording.get("tools") or {})
+    if surface is None:
+        surface = RecordedSurface(recording.get("tools") or {})
     resolver = RecordedResolver(recording["searches"])
     state = await orchestrator_state(task, resolver)
     if resolver.left():
@@ -1152,6 +1213,7 @@ async def run_entry(
         surface=surface,
         prefix_cache=prefix_cache,
         client=probe.client(client if client is not None else live_client(), edits=edits),
+        stated_scope=stated_scope,
     )
     # The action `plan` recorded, which `orchestrate` takes from the state as the
     # `plan_start` node's input.
@@ -1194,9 +1256,11 @@ async def run_entry(
         probe.next_request()
         token = current_turn_budget.set(budgets[-1])
         identities = current_recorded_identity.set(conversation.recorded_identity)
+        words = current_user_message.set(task.question if task.user_message_searched else None)
         try:
             result = await step
         finally:
+            current_user_message.reset(words)
             current_recorded_identity.reset(identities)
             current_turn_budget.reset(token)
         ctx.state = _stored(ctx.state)

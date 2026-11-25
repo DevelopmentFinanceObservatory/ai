@@ -29,20 +29,27 @@ different groups never conflict:
   transaction, fenced on the segment.
 - `mutate_composition` writes the canvas column alone for each
   `/composition` edit, unfenced, and leaves `version` alone.
-- `renew` and `request_cancel` each update the lease columns in one
+- `renew` and `request_cancel` each update the lease columns with a
   conditional statement and leave `version` alone. `request_cancel` sets
-  the boolean `lease_cancel`, as does any writer that knows only that flag.
+  the boolean `lease_cancel`, as does any writer that knows only that flag,
+  or, given the turn the Stop is for, records the Stop itself, running its
+  update again when a lease on that turn goes live between statements.
 
-A Stop names a turn. The next write of the lease columns after
-`request_cancel` (a renewal, a claim save, a closing write, a dropped lease)
-clears `lease_cancel` and records the Stop as a fresh `stop_id` naming the
-row's turn index as stored before that write (`stop_turn`), in the same
-statement. Whether a Stop is live for the row's turn is one predicate
+A Stop names a turn. The next write of the lease columns after a
+`request_cancel` that set the flag (a renewal, a claim save, a closing
+write, a dropped lease) clears `lease_cancel` and records the Stop as a
+fresh `stop_id` naming the row's turn index as stored before that write
+(`stop_turn`), in the same statement. A `request_cancel` given a turn index
+writes `stop_id` and `stop_turn` at once, and only while the row's turn
+index is that turn. Whether a Stop is live for the row's turn is one predicate
 (`StopState.live`). Every reader locks the row first and reads the turn's
 cursor in a later statement, so it sees every write committed before its
 lock. Closing the turn ends its Stop, whatever the status, and no write marks
 a Stop read. A claim save that starts or resumes work refuses while a Stop is
-live (`StopPending`), so the turn index does not move past a live Stop.
+live (`StopPending`), so the turn index does not move past a live Stop. A
+Stop naming a turn that lands on a lease claimed for the next turn is acted
+on by the save that begins that turn, which closes the named turn
+`cancelled` (`stop_names_turn`).
 
 Every canvas writer holds the row lock, so each applies its change to the
 canvas as stored. Lease expiry is compared against the database's clock in
@@ -150,6 +157,7 @@ from harness.turn.store import (
     cursor_at,
     finish_on,
 )
+from harness.unit_offer import whole_unit_options
 from harness.wire import (
     STUDIO_FRAME_ADAPTER,
     CompositionManifest,
@@ -356,20 +364,7 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             "kind": p.kind,
             "plan_version": p.plan_version,
             "plan_revision": p.plan_revision,
-            "questions": [
-                {
-                    "id": q.id,
-                    "question": q.question,
-                    "options": dict(q.options),
-                    "skippable": q.skippable,
-                    "input": q.input.value,
-                    **({"unit": q.unit.model_dump(mode="json")} if q.unit is not None else {}),
-                    **(
-                        {"native_input": q.native_input.value} if q.native_input is not None else {}
-                    ),
-                }
-                for q in p.questions
-            ],
+            "questions": [_stored_question(q) for q in p.questions],
             "skippable": p.skippable,
             "legacy": p.legacy,
             "step_order": list(p.step_order),
@@ -386,25 +381,188 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 }
                 for choice_id, choice in p.choices.items()
             },
-            # `new_plan` is stored beside the card. An instance rolled back to a
-            # model without it cannot load a stored card that holds it, and
-            # ignores an unknown key of the entry.
-            "card": (
+            # `new_plan` is stored beside the card, and each decision's `unit`
+            # and each unit question's offer beside the card and the frames
+            # (`_units_apart`, `_unit_questions_apart`). An instance rolled back
+            # to a model without them
+            # cannot load a stored card or frame that holds them, and ignores
+            # an unknown key of the entry.
+            **_units_apart(
+                "card",
                 p.card.model_dump(mode="json", exclude_none=True, exclude={"new_plan"})
                 if p.card
-                else None
+                else None,
             ),
             "card_new_plan": bool(p.card and p.card.new_plan),
             # Written only when set: an entry with no admitted run has no key.
             **({"admitted_run": p.admitted_run} if p.admitted_run is not None else {}),
             # Written only when set, as the wire sends each frame.
             **(
-                {"frames": [frame.model_dump(mode="json", exclude_none=True) for frame in p.frames]}
+                _frames_apart(
+                    [frame.model_dump(mode="json", exclude_none=True) for frame in p.frames]
+                )
                 if p.frames
                 else {}
             ),
         }
         for interrupt_id, p in pending.items()
+    }
+
+
+def _units_apart(key: str, frame: dict[str, Any] | None) -> dict[str, Any]:
+    """`frame` under `key` with no decision's `unit`, and each unit taken out,
+    by its decision's id, under `<key>_units` when there is one; `_units_back`
+    puts them back."""
+    if frame is None or not any("unit" in d for d in frame.get("decisions") or ()):
+        return {key: frame}
+    decisions = frame["decisions"]
+    return {
+        key: {
+            **frame,
+            "decisions": [{k: v for k, v in d.items() if k != "unit"} for d in decisions],
+        },
+        f"{key}_units": {d["id"]: d["unit"] for d in decisions if "unit" in d},
+    }
+
+
+def _frames_apart(frames: list[dict[str, Any]]) -> dict[str, Any]:
+    """`frames` under `"frames"`, each with no decision's `unit` and no unit question's
+    offer, each frame's units taken out, by its index, under `"frames_units"`, and its
+    unit questions' offers under `"frames_unit_questions"`, when there is one
+    (`_units_apart`, `_unit_questions_apart`)."""
+    asked = [_unit_questions_apart(frame) for frame in frames]
+    apart = [_units_apart("frame", frame) for frame, _ in asked]
+    units = {
+        str(index): one["frame_units"] for index, one in enumerate(apart) if "frame_units" in one
+    }
+    offers = {str(index): one for index, (_, one) in enumerate(asked) if one}
+    return {
+        "frames": [one["frame"] for one in apart],
+        **({"frames_units": units} if units else {}),
+        **({"frames_unit_questions": offers} if offers else {}),
+    }
+
+
+def _units_back(frame: dict[str, Any], units: Mapping[str, Any] | None) -> dict[str, Any]:
+    """`frame` with each decision's `unit` from `units`, by the decision's id."""
+    if not units:
+        return frame
+    return {
+        **frame,
+        "decisions": [
+            {**d, "unit": units[d["id"]]} if d.get("id") in units else d
+            for d in frame.get("decisions") or ()
+        ],
+    }
+
+
+# The key of a stored question that was a unit question (`_stored_question`).
+_OWN_INPUT = "own_input"
+
+
+def _stored_question(question: _PendingQuestion) -> dict[str, Any]:
+    """`question` as the conversation row keeps it. A unit question is kept in the
+    form a client that renders no unit question is asked it: a `single_select` over
+    the offer's whole units, with the offer and `native_input` `unit`, so a loader
+    whose models know no unit question reads an ordinary pick, and one that knows
+    the fallback answers it as a unit (`harness.studio._native_answer`). `own_input`
+    names its own form, which `_loaded_question` restores."""
+    stored: dict[str, Any] = {
+        "id": question.id,
+        "question": question.question,
+        "options": dict(question.options),
+        "skippable": question.skippable,
+        "input": question.input.value,
+        **({"unit": question.unit.model_dump(mode="json")} if question.unit is not None else {}),
+        **(
+            {"native_input": question.native_input.value}
+            if question.native_input is not None
+            else {}
+        ),
+    }
+    if question.input is ElicitationInput.UNIT and question.unit is not None:
+        stored |= {
+            "options": whole_unit_options(question.unit),
+            "input": ElicitationInput.SINGLE_SELECT.value,
+            "native_input": ElicitationInput.UNIT.value,
+            _OWN_INPUT: ElicitationInput.UNIT.value,
+        }
+    return stored
+
+
+def _loaded_question(stored: Mapping[str, Any]) -> _PendingQuestion:
+    """The question `_stored_question` kept, a unit question in its own form again,
+    listing its whole units as options, so a page that was sent it as a pick answers
+    it (`harness.studio._answer_kinds`)."""
+    own = stored.get(_OWN_INPUT) == ElicitationInput.UNIT.value
+    return _PendingQuestion(
+        id=stored["id"],
+        question=stored["question"],
+        # A unit question keeps its whole units, which a page sent it as a pick answers.
+        options=dict(stored["options"]),
+        skippable=stored["skippable"],
+        # A question kept before inputs were stored is single-select.
+        input=ElicitationInput.UNIT
+        if own
+        else ElicitationInput(stored.get("input", ElicitationInput.SINGLE_SELECT)),
+        unit=UnitOffer.model_validate(stored["unit"]) if stored.get("unit") else None,
+        native_input=(
+            ElicitationInput(stored["native_input"])
+            if stored.get("native_input") and not own
+            else None
+        ),
+    )
+
+
+def _unit_questions_apart(frame: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """`frame` with each unit question in the form a client that renders no unit
+    question is sent it: a `single_select` over the offer's whole units with no free
+    text and no offer (`whole_unit_options`). The offers are taken out, by question
+    id, and `_unit_questions_back` puts them back. A loader whose models know no unit
+    question, and one that serves the fallback, then serve and answer the question as
+    the pending entry keeps it (`_stored_question`). The offers sit under a key of
+    their own, since a loader that gives every frame with a `frames_units` entry a
+    `decisions` list must still load an elicitation frame, which refuses one."""
+    offers = {
+        question["id"]: question["unit"]
+        for question in frame.get("questions") or ()
+        if "unit" in question
+    }
+    if not offers:
+        return frame, {}
+    questions = [
+        {k: v for k, v in question.items() if k != "unit"}
+        | {
+            "input": ElicitationInput.SINGLE_SELECT.value,
+            "options": [
+                {"id": option_id, "label": label}
+                for option_id, label in whole_unit_options(
+                    UnitOffer.model_validate(offers[question["id"]])
+                ).items()
+            ],
+            "allow_free_text": False,
+        }
+        if question["id"] in offers
+        else question
+        for question in frame["questions"]
+    ]
+    return {**frame, "questions": questions}, offers
+
+
+def _unit_questions_back(frame: dict[str, Any], offers: Mapping[str, Any] | None) -> dict[str, Any]:
+    """`frame` with each question `offers` names a unit question again, its offer
+    restored and its fallback options dropped (`_unit_questions_apart`)."""
+    if not offers:
+        return frame
+    return {
+        **frame,
+        "questions": [
+            {k: v for k, v in question.items() if k != "options"}
+            | {"input": ElicitationInput.UNIT.value, "unit": offers[question["id"]]}
+            if question.get("id") in offers
+            else question
+            for question in frame.get("questions") or ()
+        ],
     }
 
 
@@ -430,32 +588,27 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         },
         card=(
             PlanProposed.model_validate(
-                {**entry["card"], "new_plan": True if entry.get("card_new_plan") else None}
+                {
+                    **_units_back(entry["card"], entry.get("card_units")),
+                    "new_plan": True if entry.get("card_new_plan") else None,
+                }
             )
             if entry.get("card")
             else None
         ),
         admitted_run=entry.get("admitted_run"),
         frames=tuple(
-            STUDIO_FRAME_ADAPTER.validate_python(frame) for frame in entry.get("frames") or ()
+            STUDIO_FRAME_ADAPTER.validate_python(
+                _unit_questions_back(
+                    _units_back(frame, (entry.get("frames_units") or {}).get(str(index))),
+                    (entry.get("frames_unit_questions") or {}).get(str(index)),
+                )
+            )
+            for index, frame in enumerate(entry.get("frames") or ())
         ),
     )
     if "questions" in entry:
-        pending.questions = tuple(
-            _PendingQuestion(
-                id=q["id"],
-                question=q["question"],
-                options=dict(q["options"]),
-                skippable=q["skippable"],
-                # A question kept before inputs were stored is single-select.
-                input=ElicitationInput(q.get("input", ElicitationInput.SINGLE_SELECT)),
-                unit=UnitOffer.model_validate(q["unit"]) if q.get("unit") else None,
-                native_input=(
-                    ElicitationInput(q["native_input"]) if q.get("native_input") else None
-                ),
-            )
-            for q in entry["questions"]
-        )
+        pending.questions = tuple(_loaded_question(q) for q in entry["questions"])
         pending.skippable = entry["skippable"]
         pending.legacy = entry["legacy"]
     elif pending.kind == "elicitation":
@@ -801,8 +954,10 @@ class StopPending(ConversationStale):
 
 class TurnMoved(Exception):  # noqa: N818 -- named for the wire 409
     """`StudioStore.claim_turn_lease` found the conversation's latest turn
-    is not the one the request names as the turn it follows (`after_turn`):
-    another request began a turn since. `latest` is the row's turn index."""
+    is not the one the request names as the turn it follows (`after_turn`),
+    or `StudioStore.request_cancel` found a live segment holding a turn
+    other than the one the Stop names: another request began a turn since.
+    `latest` is the row's turn index."""
 
     def __init__(self, conversation_id: str, *, latest: int) -> None:
         super().__init__(f"conversation {conversation_id}'s latest turn is {latest}")
@@ -1067,6 +1222,11 @@ class StopState:
         )
 
 
+# How many times `StudioStore.request_cancel` runs its update for a named turn
+# while each read after it finds a lease on that turn gone live since. Each
+# repeat needs another lease to land between two statements, so a few suffice.
+_STOP_TURN_ATTEMPTS = 3
+
 # The row's turn index, as stored in its turn state.
 _TURN_INDEX_SQL = f"COALESCE((turn_state ->> '{_KEY_TURN_INDEX}')::int, 0)"
 # Turns a set `lease_cancel` into a fresh Stop id naming the row's turn index
@@ -1102,6 +1262,22 @@ async def _stop_state(conn: AsyncConnection, row: Any, *, lease_live: bool) -> S
         taken_id=cursor.stop_taken_id if cursor is not None else None,
         lease_live=lease_live,
     )
+
+
+async def stop_names_turn(conn: AsyncConnection, pk: int, turn_index: int) -> bool:
+    """Whether the latest Stop on conversation row `pk`, which the caller
+    locked, names turn `turn_index` (`stop_turn`) and is not the one that
+    turn's `StopScope` answered. A `request_cancel` given the turn records
+    such a Stop, on a lease claimed for the next turn included."""
+    row = (
+        await conn.execute(
+            text("SELECT stop_id, stop_turn FROM conversations WHERE id = :pk"), {"pk": pk}
+        )
+    ).one()
+    if row.stop_id is None or row.stop_turn != turn_index:
+        return False
+    cursor = (await conn.execute(_TURN_AT, {"pk": pk, "turn_index": turn_index})).first()
+    return cursor is None or cursor.stop_taken_id != row.stop_id
 
 
 def _jsonb(value: Any) -> str | None:
@@ -3066,33 +3242,71 @@ class StudioStore:
                 segment_id,
             )
 
-    async def request_cancel(self, principal: str, conversation_id: str) -> bool:
+    async def request_cancel(
+        self, principal: str, conversation_id: str, *, turn_index: int | None = None
+    ) -> bool:
         """Record a Stop request on `conversation_id`'s live segment, whoever
-        owns it, this instance included, by setting `lease_cancel`. The
-        segment's next renewal (`renew`) records it under a fresh id and
-        reports it, and a segment that reads only the flag sees it as well.
-        One conditional update of the lease columns.
+        owns it, this instance included, with a conditional update of the
+        lease columns.
+
+        With no `turn_index`, it sets `lease_cancel`: the segment's next
+        lease write records it under a fresh id naming the row's turn index
+        as it then stands (`_STAMP_STOP`) and reports it, and a segment that
+        reads only the flag sees it as well. With `turn_index`, it records
+        the Stop itself, a fresh `stop_id` naming that turn in `stop_turn`,
+        and only while the row's turn index is `turn_index`. The Stop is then
+        live for that turn alone (`StopState.live`), so a turn begun after it
+        under the same lease runs on.
+
+        A lease on `turn_index` that went live after the update read the row
+        is found by the read that follows it, and the update runs again, up
+        to `_STOP_TURN_ATTEMPTS` times, so a Stop is refused only for a turn
+        other than the one it names.
 
         Returns whether a live segment was found and signalled. `False`
-        means there is none, or the one on record has already expired by the
-        database clock. The caller falls back to whatever cancellation means
-        with no active segment.
+        means the Stop is not recorded: no lease was live, the one on record
+        had expired by the database clock, or, given `turn_index`, each of
+        the `_STOP_TURN_ATTEMPTS` updates missed a lease on that turn that
+        went live or lapsed between statements, so one may be live now. The
+        caller decides again under the conversation lock, as `/cancel` does
+        (`harness.studio._stop_under_lock`), whose claim loses to a live
+        lease.
+
+        Raises:
+            TurnMoved: a live segment holds a turn other than `turn_index`.
         """
         entry = self._entry(principal, conversation_id)
+        live = (
+            "WHERE principal = :principal AND conversation_id = :conversation_id "
+            "AND lease_segment_id IS NOT NULL "
+            f"AND lease_expires_at > {self._time_sql} "
+        )
+        keys = {"principal": principal, "conversation_id": conversation_id}
+        if turn_index is None:
+            assign, guard, values = "lease_cancel = true", "", keys
+        else:
+            assign = "stop_id = :minted, stop_turn = :turn_index"
+            guard = f"AND {_TURN_INDEX_SQL} = :turn_index "
+            values = {**keys, "minted": _wire_id("stop"), "turn_index": turn_index}
+        update = text(
+            f"UPDATE conversations SET {assign} {live}{guard}"
+            "RETURNING lease_segment_id, lease_owner, lease_expires_at"
+        )
+        held_turn = text(f"SELECT {_TURN_INDEX_SQL} AS turn_index FROM conversations {live}")
         async with entry.write_lock:
             async with self._transaction() as conn:
-                row = (
-                    await conn.execute(
-                        text(
-                            "UPDATE conversations SET lease_cancel = true "
-                            "WHERE principal = :principal AND conversation_id = :conversation_id "
-                            "AND lease_segment_id IS NOT NULL "
-                            f"AND lease_expires_at > {self._time_sql} "
-                            "RETURNING lease_segment_id, lease_owner, lease_expires_at"
-                        ),
-                        {"principal": principal, "conversation_id": conversation_id},
-                    )
-                ).first()
+                for _ in range(_STOP_TURN_ATTEMPTS):
+                    row = (await conn.execute(update, values)).first()
+                    if row is not None or turn_index is None:
+                        break
+                    # Each statement reads the newest committed row, so a
+                    # claim that committed after the update read it shows
+                    # here, and the update runs again on it.
+                    held = (await conn.execute(held_turn, keys)).first()
+                    if held is None:
+                        break
+                    if held.turn_index != turn_index:
+                        raise TurnMoved(conversation_id, latest=held.turn_index)
             if row is None:
                 return False
             self._note_segment(

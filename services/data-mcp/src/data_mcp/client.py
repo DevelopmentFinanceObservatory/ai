@@ -21,10 +21,10 @@ from typing import Any, Self
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
+from common.call_limit import CallDeadline
 from common.caller import vouched_caller_headers
 from opentelemetry import trace
 
-from data_mcp.deadline import CallDeadline
 from data_mcp.errors import (
     UpstreamAuthUnavailable,
     UpstreamError,

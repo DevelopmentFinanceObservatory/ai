@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -21,7 +22,13 @@ from harness.graph.state import ORCHESTRATOR_FRAMES_KEY, frame_store_keys
 from harness.provenance import ProvenanceStore
 from harness.studio_store import StudioStore
 from harness.turn import transcript as entries
-from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
+from harness.turn.events import (
+    APPROVE_UNIT_OFFERS_KEY,
+    NodeDone,
+    Paused,
+    TurnEvent,
+    TurnFailed,
+)
 from harness.turn.loop import (
     END,
     Answer,
@@ -314,6 +321,35 @@ async def test_a_paused_turn_resumes_at_its_node_in_another_instance(
         entries.PAUSE,
         entries.ANSWER,
     ]
+
+
+async def test_a_pause_reports_a_copy_of_the_offers_its_node_recorded_beside_it(
+    pg_engine: AsyncEngine, clock: StoreClock
+) -> None:
+    """The `approve` node records the plan card's unit offers in the turn's
+    state beside its pause. The pause's report carries a copy of that entry
+    alone, as the pause committed it, so a later write to the turn's state
+    does not reach it."""
+    store, lease = TurnStore(pg_engine), await _instance(pg_engine, clock)
+    offers = {"revision": "r1", "offers": {"user_unit_a": {"start": {"currency": "USD"}}}}
+    held: list[dict[str, Any]] = []
+
+    async def card(ctx: NodeCtx, node_input: Any) -> Pause:
+        ctx.state[APPROVE_UNIT_OFFERS_KEY] = copy.deepcopy(offers)
+        ctx.state["drafting"] = "kept out"
+        held.append(ctx.state)
+        return Pause(kind="approve", payload={"plan": "p"})
+
+    graph = Graph(start="approve", nodes={"approve": Node(run=card)}, edges={})
+    segment_id = await _claim(lease)
+    events: list[TurnEvent] = []
+    await _segment(store, lease, await _open(store, segment_id, graph), segment_id, graph, events)
+    [event] = events
+    assert isinstance(event, Paused)
+    (state,) = held
+    state[APPROVE_UNIT_OFFERS_KEY]["revision"] = "r2"
+
+    assert event.state == {APPROVE_UNIT_OFFERS_KEY: offers}
 
 
 async def test_one_of_two_answers_racing_on_one_read_resumes_the_pause(

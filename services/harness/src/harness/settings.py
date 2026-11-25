@@ -59,6 +59,9 @@ class Settings(BaseServiceSettings):
     / `PRESENTATION_MCP_URL` always wins over that default -- that env
     override is what lets a service split back out replace its loopback mount
     (point it at the split-out service's URL instead of the loopback path).
+    `dfo_apis_url` (`DFO_APIS_URL`) is the origin of dfo-apis, which the planner's
+    stated-scope reader (`harness.wiring.build_stated_scope_reader`) and the live
+    refresh (`harness.live_refresh.build_live_refresh`) call.
     `database_url` and the `session_store_*` fields together select the
     harness's Postgres database (`harness.db.engine.build_database`), which
     holds the studio's conversations: no database when none of them is set
@@ -136,7 +139,7 @@ class Settings(BaseServiceSettings):
     `combined_mcp_max_in_flight` caps the tool calls and resource reads the
     combined server runs at once, per instance. The token bucket limits how
     often calls start, and each call can run for up to 45 s
-    (`data_mcp.deadline.EXTERNAL_CALL_LIMIT_S`), so without this cap a burst
+    (`common.call_limit.EXTERNAL_CALL_LIMIT_S`), so without this cap a burst
     of slow calls piles up on one instance, each holding an upstream
     connection and memory. A call over the cap refuses `rate_limited` at
     once rather than queueing, since a queued call would spend its own 45 s
@@ -252,6 +255,11 @@ class Settings(BaseServiceSettings):
     # real agent on another port). Empty sends no CORS headers: the deployed
     # service is reached same-origin through the website's proxy.
     studio_cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Ledger sessions, as comma-separated `principal/conversation_id`, whose
+    # `studio:segment` lease the startup check before `0003_turns.sql` cannot
+    # read and the operator has checked by hand and declared lapsed
+    # (`harness.db.cutover_gates.LIVE_LEDGER_LEASE_GATE`, DFA06).
+    lapsed_ledger_leases: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # The shared cache of the agents' static prompt prefixes; see the class
     # docstring.
     studio_prefix_cache: bool = True
@@ -266,6 +274,19 @@ class Settings(BaseServiceSettings):
     # (`EARLY_MINT_WAIT_S`).
     early_mint: bool = True
     early_mint_wait_s: float = Field(default=3.0, gt=0, allow_inf_nan=False)
+    # Whether `propose_plan` reads the provider scope the user's words state through
+    # dfo-apis' stated-scope route (`PLANNER_STATED_SCOPE`,
+    # `planner.stated_scope.read_stated_scope`). Off, admission applies none, and
+    # a plan needs no answer from the route, which is the override for an apis that
+    # cannot answer it. On, in a turn with words of the user's, a read that still fails
+    # after its own retries ends the planner entry: on `stated_scope_unavailable` where
+    # it can pass later (a timeout, a 5xx, a 408, 425 or 429), and on
+    # `stated_scope_unreadable` where it cannot (a refused request, a 404 Search's
+    # capabilities document does not explain). An apis whose capabilities document
+    # lists no `stated_scope` door answers the route 404 and reads as off.
+    planner_stated_scope: bool = True
+    # The origin of dfo-apis (`DFO_APIS_URL`).
+    dfo_apis_url: str = "http://localhost:8083"
     # The combined server's limits for outside callers; see the class docstring.
     combined_mcp_requests_per_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     combined_mcp_burst: int = Field(default=20, ge=1)
@@ -334,7 +355,7 @@ class Settings(BaseServiceSettings):
             return None
         return value
 
-    @field_validator("studio_cors_origins", mode="before")
+    @field_validator("studio_cors_origins", "lapsed_ledger_leases", mode="before")
     @classmethod
     def _split_list(cls, value: object) -> object:
         if isinstance(value, str):

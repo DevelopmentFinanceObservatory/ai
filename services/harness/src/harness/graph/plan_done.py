@@ -26,10 +26,10 @@ from planner.plan import (
     aligned_pins,
     aligned_stated_pins,
     authored_text,
-    copy_origins,
     load_ask_breakdowns,
     load_asks,
     load_asks_across_years,
+    split_of,
     windowed_pins,
 )
 
@@ -587,12 +587,15 @@ _AUTHORED_FIELDS = frozenset({"step_id", "requirement_id", "detail", "message", 
 
 
 def authored_report(report: Any, plan: Plan) -> Any:
-    """`report`, part of what a run of `plan` reports, with each copy named by the requirement it copies.
+    """`report`, part of what a run of `plan` reports, with each step the model did not
+    write named by the requirement outward text names in its place.
 
     A run executes `plan` as stored, beside the copies the split of
-    whole-history reads added (`Plan.rolling_copies`), so a stop names a
-    copy's step and requirement, which exist only in the stored plan. Each
-    string under a field in `_AUTHORED_FIELDS`, at any depth, reads through
+    whole-history reads added (`Plan.rolling_copies`) and the sums
+    `propose_plan` added over a whole's open side (`Plan.whole_sums`), so a
+    stop names a copy's or a sum's step and requirement, which exist only in
+    the stored plan. Each is named as `planner.plan.HistorySplit.names` maps
+    it: a copy by its origin, a sum by its whole. Each string under a field in `_AUTHORED_FIELDS`, at any depth, reads through
     `planner.plan.authored_text`; every other string is kept as it is. What
     `execute` hands the planner reads through this, and the failure
     `plan_done` hands the orchestrator reads through `shown_failure`. The
@@ -600,19 +603,22 @@ def authored_report(report: Any, plan: Plan) -> Any:
     the copy's ids, which the run's lineage and `_stop_causes` look steps
     up by.
     """
-    if not plan.rolling_copies:
+    if not plan.rolling_copies and not plan.whole_sums:
         return report
-    return _authored(report, copy_origins(plan.rolling_copies))
+    split = split_of(plan)
+    return _authored(report, split.names(), split.summing())
 
 
-def _authored(value: Any, origins: Mapping[str, str], *, names: bool = False) -> Any:
+def _authored(
+    value: Any, origins: Mapping[str, str], sums: frozenset[str], *, names: bool = False
+) -> Any:
     if isinstance(value, str):
-        return authored_text(value, origins) if names else value
+        return authored_text(value, origins, sums=sums) if names else value
     if isinstance(value, list):
-        return [_authored(item, origins, names=names) for item in value]
+        return [_authored(item, origins, sums, names=names) for item in value]
     if isinstance(value, dict):
         return {
-            key: _authored(item, origins, names=key in _AUTHORED_FIELDS)
+            key: _authored(item, origins, sums, names=key in _AUTHORED_FIELDS)
             for key, item in value.items()
         }
     return value

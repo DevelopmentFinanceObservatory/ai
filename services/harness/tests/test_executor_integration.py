@@ -24,6 +24,7 @@ import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from common.call_limit import CallDeadline
 from common.materialisation import FrameRef
 from common.materialisation import get_store as get_frame_store
 from common.row_budget import RowBudget
@@ -37,7 +38,6 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
 )
 from data_mcp import client_holder, frame_materialisation
-from data_mcp.deadline import CallDeadline
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
 from data_mcp.manifest import SeriesStatisticsModel
@@ -432,7 +432,7 @@ def _donor_mint_response(*, spec_id: str, values: dict[str, float]) -> dict[str,
             "identity": {
                 "identity_version": "spec1",
                 "shape": {"id": stat_var, "kind": "stat_var"},
-                "entities": {"donor": [f"country/{code}" for code in ("USA", "GBR", "FRA")]},
+                "entities": {"origin": [f"country/{code}" for code in ("USA", "GBR", "FRA")]},
                 "facets": {"unit": {"ref": "USD", "state": "value"}},
                 "requested_window": {"kind": "all"},
                 "slots": [],
@@ -963,7 +963,7 @@ TOP_DONORS = (
 TOP_DONOR_IDENTITY: dict[str, Any] = {
     "identity_version": "spec1",
     "shape": {"id": "OdaDisbursed", "kind": "stat_var"},
-    "entities": {"donor": [donor.ref for donor in TOP_DONORS]},
+    "entities": {"origin": [donor.ref for donor in TOP_DONORS]},
     "facets": {"unit": {"ref": "USD", "state": "value"}},
     "requested_window": {"kind": "all"},
     "slots": [],

@@ -31,7 +31,7 @@ from compiler.compile import compile_plan
 from compiler.sources import source_from_spec_block
 from compiler.surface import McpSurface, ToolSchema, ToolSurface
 from data_mcp.server import mcp as data_mcp
-from executor.outcomes import Accepted, AnchorResult, EvidenceRecord, StepRecord
+from executor.outcomes import Accepted, AnchorResult, EvidenceRecord, StepRecord, SummedRead
 from harness.conversation import current_conversation_id
 from harness.graph.answer import (
     _carried_parts,
@@ -1496,8 +1496,12 @@ def test_a_join_sum_or_compare_carries_both_sides() -> None:
     assert carried("yearly") == {"left", "right"}
     assert carried("right") == {"right"}
     assert _carried_parts(
-        "yearly", steps_by_id=steps, retrieval_step_ids=frozenset({"left", "right"})
-    ) == (frozenset(), frozenset({"compared"}))
+        "yearly",
+        steps_by_id=steps,
+        retrieval_step_ids=frozenset({"left", "right"}),
+        records={},
+        memo={},
+    ) == ({}, frozenset({"compared"}))
 
 
 def test_a_quotient_and_a_share_carry_both_sides() -> None:
@@ -1585,6 +1589,111 @@ def test_a_card_over_a_sum_counts_the_distinct_stat_vars_under_both_sides(
             frame_bindings={"frame_ref": "left", "denominator_frame_ref": "right"},
         ),
     )
+
+    assert _linked_count(workflow_steps, left=left, right=right, terminal=terminal) == counted
+
+
+# The version dfo-apis renders for an implied sum of the left retrieval's StatVars, which
+# an analysis answer's `stat_vars_summed` names in place of the version the call read
+# (dfo-apis `scripts/local-stack/smoke.py` `check_summed`).
+_LEFT_SUMMED = SummedRead(spec_id="spec_" + "a" * 32, content_version="cv_" + "5" * 32, count=2)
+# A rolling call's anchor root of the left retrieval's dataset, read under another selection.
+_ANCHOR_SUMMED = _LEFT_SUMMED.model_copy(update={"content_version": "cv_" + "6" * 32, "count": 12})
+
+
+@pytest.mark.parametrize(
+    ("terminal", "declared", "counted"),
+    [
+        # The aggregate that summed the retrieval, and a filter over it.
+        ("added", 1, 2),
+        ("added_later", 1, 2),
+        # The aggregate's call also read an anchor root of the dataset summed over
+        # twelve. The reads disagree, so neither is matched.
+        ("anchored", 1, 1),
+        # The sum beside the right retrieval's one StatVar.
+        ("added_beside", 2, 3),
+        # The sum joined to the retrieval kept unsummed by a filter, which dfo-apis
+        # reads without summing: the frame carries A and B as retrieved beside the
+        # sum's ref, so the retrieval counts as retrieved.
+        ("added_and_kept", 3, 3),
+        # A join of a compare over the sum with the retrieval itself. dfo-apis sums
+        # the retrieval under the join too, so the frame carries the compare's ref
+        # and the sum's, and declares 2. The join's read of the retrieval cannot be
+        # told from the one under the compare, so it is left unmatched by design.
+        # The parts then cannot be named, and the count keeps the two refs the
+        # frame declares, short of A, B and X.
+        ("rejoined", 2, 2),
+    ],
+)
+def test_a_card_counts_a_retrieval_an_analysis_call_summed_where_its_sum_reaches(
+    terminal: str, declared: int, counted: int
+) -> None:
+    """The left retrieval holds StatVars A and B unsummed, and the aggregate
+    over it reads it summed into one series. Each call over the retrieval or
+    over a frame computed from it states that read in dfo-apis' form, naming
+    the version rendered for the sum (`stat_vars_summed`). The card counts the
+    retrieval as the two StatVars the sum added only where the frame carries
+    the sum alone."""
+    workflow_steps = (
+        _step("left", "get_data"),
+        _step("right", "get_data"),
+        _step("added", "aggregate", frame_bindings={"frame_ref": "left"}),
+        _step("added_later", "filter", frame_bindings={"frame_ref": "added"}),
+        _step("anchored", "growth", frame_bindings={"frame_ref": "left"}),
+        _step(
+            "added_beside",
+            "join",
+            frame_bindings={"frame_ref": "added", "right_frame_ref": "right"},
+        ),
+        _step(
+            "compared", "compare", frame_bindings={"frame_ref": "added", "right_frame_ref": "right"}
+        ),
+        _step(
+            "rejoined", "join", frame_bindings={"frame_ref": "compared", "right_frame_ref": "left"}
+        ),
+        _step("kept", "filter", frame_bindings={"frame_ref": "left"}),
+        _step(
+            "added_and_kept",
+            "join",
+            frame_bindings={"frame_ref": "added", "right_frame_ref": "kept"},
+        ),
+    )
+
+    assert (
+        _linked_count(
+            workflow_steps,
+            left=(("A", "B"), None),
+            right=(("X",), None),
+            terminal=terminal,
+            declared=declared,
+            # Every call that reads the retrieval under a step other than a filter
+            # reads it summed, itself or through the derived input it computes again.
+            reads={
+                step.id: (_LEFT_SUMMED, _ANCHOR_SUMMED)
+                if step.id == "anchored"
+                else (_LEFT_SUMMED,)
+                for step in workflow_steps[2:]
+                if step.id != "kept"
+            },
+        )
+        == counted
+    )
+
+
+def _linked_count(
+    workflow_steps: Sequence[WorkflowStep],
+    *,
+    left: tuple[tuple[str, ...], int | None],
+    right: tuple[tuple[str, ...], int | None],
+    terminal: str,
+    declared: int = 1,
+    reads: Mapping[str, tuple[SummedRead, ...]] | None = None,
+) -> int | None:
+    """The StatVars the card over `terminal` counts once its frame is linked.
+    The retrievals `left` and `right` each list their StatVars and the count
+    they summed, every step's frame declares one StatVar but `terminal`'s,
+    which declares `declared`, and each step in `reads` states the roots its
+    call read summed."""
     sources = {
         step_id: SelectedSource(
             spec_id="spec_" + spec_char * 32,
@@ -1635,7 +1744,8 @@ def test_a_card_over_a_sum_counts_the_distinct_stat_vars_under_both_sides(
                 attempts=1,
                 frame_ref=frames[step.id],
                 digest="d",
-                stat_var_count=1,
+                stat_var_count=declared if step.id == terminal else 1,
+                stat_vars_summed=(reads or {}).get(step.id, ()),
             )
             for step in workflow_steps
         ),
@@ -1655,13 +1765,10 @@ def test_a_card_over_a_sum_counts_the_distinct_stat_vars_under_both_sides(
         _RecordingSurface(cast("ToolSurface", None), provenance=store), outcome, workflow=workflow
     )
 
-    assert (
-        store.stat_var_count(
-            conversation=current_conversation_id.get(),
-            spec_id=frames[terminal].spec_id,
-            content_version=frames[terminal].content_version,
-        )
-        == counted
+    return store.stat_var_count(
+        conversation=current_conversation_id.get(),
+        spec_id=frames[terminal].spec_id,
+        content_version=frames[terminal].content_version,
     )
 
 
