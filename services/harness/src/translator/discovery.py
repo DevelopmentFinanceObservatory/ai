@@ -92,7 +92,6 @@ it timed out and `discovery_budget_exhausted` otherwise (`_budget_referral`).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import logging
@@ -114,7 +113,6 @@ from compiler.evidence import (
     named_on_open_axes,
     named_refs,
     open_axes_for,
-    requested_unit,
     source_requirement_matches,
 )
 from compiler.shapes import BREAKDOWN_CODE_SYSTEMS
@@ -1325,24 +1323,11 @@ def _unit_phrase(unit: Unit) -> str:
     return f"current {unit.currency}"
 
 
-class PinQuery(NamedTuple):
-    """What a fresh search for a pinned requirement sends of its `unit` and `sources`
-    (`_pin_query`). The default sends both, as for a requirement with no pin."""
-
-    unit: bool = True
-    sources: bool = True
-
-
-# What a search for a requirement with no pin sends: its unit and its stated source.
-SEND_ALL = PinQuery()
-
-
 def search_part(
     requirement: DatasetRequirement,
     variable: str,
     *,
     kept: Sequence[Mapping[str, object]] = (),
-    query: PinQuery = SEND_ALL,
 ) -> dict[str, object]:
     """One `search` part, built from `requirement`'s own fields plus `variable`.
 
@@ -1351,10 +1336,6 @@ def search_part(
     the question names in the user's own words, goes as one included
     `sources` entry, with its chosen reference and exclusion flag when stated.
     A publisher's series code goes as the part's `source_code`.
-
-    `query` says whether the unit and the stated source go (`_pin_query`): a
-    search confirming a pin leaves out what the pin was compiled without, so
-    Search answers the pin itself.
 
     An entity's role goes as the `PARTY_ROLES` word it stands for
     (`party_role`), each a word of `search`'s role lexicon. A role standing
@@ -1391,11 +1372,11 @@ def search_part(
         if requirement.period_end_open
         else f"{requirement.period.start} to {requirement.period.end}"
     )
-    if requirement.unit is not None and query.unit:
+    if requirement.unit is not None:
         part["unit"] = _unit_phrase(requirement.unit)
     if open_roles := requirement_open_roles(requirement):
         part["open_roles"] = open_roles
-    if requirement.source is not None and query.sources:
+    if requirement.source is not None:
         mention: dict[str, object] = {"text": requirement.source}
         if requirement.source_ref is not None:
             mention["ref"] = requirement.source_ref
@@ -3191,52 +3172,6 @@ async def _pin_source(
     return source.model_copy(update={"searched_as": requirement.measure}), honoured
 
 
-def _pin_query(state: SessionState, *, plan: Plan, requirement: DatasetRequirement) -> PinQuery:
-    """What a fresh search for `requirement` sends of its unit and stated source.
-
-    Search writes a stated unit into the identity it compiles (`facets.unit`)
-    and a stated source into its source slot, so a search for a pin compiled
-    without them answers a twin that differs from the pin there alone, and the
-    pin is missing from its sources. A search confirming the pin leaves
-    out what its source on record lacks: the unit where the pin's identity binds
-    none (`compiler.evidence.requested_unit`), and the stated source where the
-    pin's source already confirms it (`compiler.evidence.source_requirement_matches`).
-    The compiler checks the unit against the pin's own (`UNIT_MISMATCH`).
-
-    A search looking for another source sends both: one for a pin admission
-    found narrower than the question (`_narrowed`), one `_source_from_resolve_pin`
-    set aside (`DiscoveryLog.set_aside_pin`), and one whose source does not
-    confirm the stated source, which `_pin_source` searches again by it. So
-    does a search for a pin with no source on record, since nothing says what
-    the pin lacks. The source on record is the block the planner was shown or
-    admission compiled (`_resolve_pin_block`), else the one a search recorded
-    for the pin.
-    """
-    pin = requirement.source_spec_id
-    if pin is None:
-        return SEND_ALL
-    records = _PinRecords(state)
-    log = records.log
-    if (
-        _narrowed(records, requirement)
-        or log.set_aside_pin(requirement_revision(requirement), requirement.id) is not None
-    ):
-        return SEND_ALL
-    source: SelectedSource | None = None
-    block = _resolve_pin_block(records, plan=plan, requirement=requirement)
-    if block is not None:
-        with contextlib.suppress(ValueError):
-            source = source_from_spec_block(block)
-    if source is None:
-        source = log.recorded_source(pin)
-    if source is None:
-        return SEND_ALL
-    stated = requirement.source is not None or requirement.source_code is not None
-    if stated and not source_requirement_matches(requirement=requirement, source=source):
-        return SEND_ALL
-    return PinQuery(unit=requested_unit(source.identity) is not None, sources=not stated)
-
-
 def _holds_closed(requirement: DatasetRequirement, source: SelectedSource) -> bool:
     """Whether `source` fails to leave open a side of a flow `requirement`'s `across` asks every member of."""
     return bool(requirement_open_roles(requirement)) and isinstance(
@@ -3832,8 +3767,7 @@ def build_discover_source(*, surface: ToolSurface) -> Callable[..., Awaitable[di
         """Find what data exists for one dataset requirement.
 
         The search is built from the requirement itself: its measure, its
-        entities and their roles, its period, and its unit if it states one
-        and the pin it confirms, if any, was compiled in a unit (`search_part`).
+        entities and their roles, its period, and its unit if it states one.
         Call this once per dataset requirement. A `definite` answer names the
         one source a retrieval of that requirement may use. `candidates`,
         `no_data` and `unsupported` are not yours to resolve: follow the
@@ -3867,7 +3801,6 @@ def build_discover_source(*, surface: ToolSurface) -> Callable[..., Awaitable[di
             requirement,
             variable,
             kept=() if held is None else _kept_scope(plan, requirement, held),
-            query=_pin_query(state, plan=plan, requirement=requirement),
         )
 
         async def _finish(

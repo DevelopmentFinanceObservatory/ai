@@ -175,17 +175,6 @@ from compiler.surface import ToolSchema, schema_hash_error
 logger = logging.getLogger(__name__)
 
 
-# The unit findings a source converted on fetch can meet: another currency,
-# another price basis or base year, or none stated where constant prices are asked.
-_UNIT_FINDINGS = frozenset(
-    {
-        EvidenceIssueCode.UNIT_MISMATCH,
-        EvidenceIssueCode.UNIT_PRICE_BASIS_MISMATCH,
-        EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
-    }
-)
-
-
 class CompileIssueCode(StrEnum):
     """What stopped a translation from compiling."""
 
@@ -736,19 +725,10 @@ class _Build:
             self._check_whole_sum(operation, requirement, source)
             findings = check_evidence(requirement, evidence_from_source(source))
             for finding in errors(findings):
-                # Discovery searches a pin compiled with no unit without the
-                # requirement's (`translator.discovery._pin_query`), so only a
-                # search with no pin finds the source converted to that unit.
-                repin = (
-                    "; drop the requirement's `source_spec_id` and keep its `unit`, so "
-                    "discovery finds the source in that unit"
-                    if requirement.source_spec_id is not None and finding.code in _UNIT_FINDINGS
-                    else ""
-                )
                 self._issue(
                     CompileIssueCode.SOURCE_UNUSABLE,
                     f"source {source.spec_id} cannot serve requirement {requirement.id!r}: "
-                    f"{finding.detail}{repin}",
+                    f"{finding.detail}",
                     operation_id=operation.id,
                     requirement_id=requirement.id,
                     finding=finding.code,

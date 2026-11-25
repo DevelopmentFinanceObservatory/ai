@@ -2623,62 +2623,6 @@ def _bound_to(**unit: Any) -> dict[str, Any]:
     [
         pytest.param(
             _bound_to(currency="USD", prices="constant", base_year=2024),
-            (),
-            id="pin-in-the-stated-unit",
-        ),
-        pytest.param(
-            _bound_to(currency="USD", prices="current"),
-            (EvidenceIssueCode.UNIT_PRICE_BASIS_MISMATCH,),
-            id="pin-in-current-prices",
-        ),
-        pytest.param(
-            {"unit_ref": "eur", "unit_label": "Euros"},
-            (EvidenceIssueCode.UNIT_MISMATCH, EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED),
-            id="pin-in-another-currency",
-        ),
-    ],
-)
-def test_a_pin_in_another_unit_is_refused_with_the_pin_to_drop(
-    build: Callable[..., CompileResult],
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    source: SourceFactory,
-    source_fields: dict[str, Any],
-    refused_by: tuple[EvidenceIssueCode, ...],
-) -> None:
-    # Discovery searches a pin compiled with no unit without its requirement's,
-    # so the pin's own unit is checked here. A pin in other prices or another currency is
-    # refused, and the fix is to drop the pin so discovery's search, unit
-    # included, finds the converted source.
-    plan = _draft(
-        [decision()],
-        [
-            requirement(
-                unit=Unit(currency="USD", prices="constant", base_year=2024),
-                source_spec_id=SPEC_KENYA,
-            ),
-            derived_requirement(),
-        ],
-    )
-
-    result = build(
-        plan,
-        _translation(_retrieve(), _aggregate()),
-        discovered={"annual_debt_service": source(**source_fields)},
-    )
-
-    assert [(i.code, i.finding) for i in result.issues] == [
-        (Code.SOURCE_UNUSABLE, finding) for finding in refused_by
-    ]
-    assert all("source_spec_id" in i.reason for i in result.issues)
-
-
-@pytest.mark.parametrize(
-    ("source_fields", "refused_by"),
-    [
-        pytest.param(
-            _bound_to(currency="USD", prices="constant", base_year=2024),
             None,
             id="bound-by-request-to-constant-2024",
         ),

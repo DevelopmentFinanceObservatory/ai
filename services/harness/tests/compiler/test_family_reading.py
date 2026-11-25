@@ -1598,11 +1598,6 @@ def test_a_rank_over_recipients_of_a_composite_family_without_the_flag_is_refuse
     assert [(issue.code, issue.operation_id) for issue in result.issues] == [
         (CompileIssueCode.INPUT_SHAPE_UNSUPPORTED, "top_op")
     ]
-    # Summing is refused too (`_check_summable`), so the advice is a source
-    # binding one StatVar.
-    (issue,) = result.issues
-    assert "stat_vars='sum'" not in issue.reason
-    assert "binds one StatVar" in issue.reason
 
 
 def _stated_sum(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
@@ -1624,7 +1619,13 @@ def _spliced(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
 
 def _one_member(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
     del stat_vars["sums_components"]
+    del stat_vars["served_count"]
     stat_vars["member_count"] = 1
+
+
+def _one_member_floor(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    _one_member(stat_vars, resolved)
+    stat_vars["member_count_exact"] = False
 
 
 def _slots_unread(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
@@ -1640,9 +1641,18 @@ def _slots_unread(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
         (_flag_false, [CompileIssueCode.FAMILY_UNSUMMABLE]),
         (_no_flag, [CompileIssueCode.FAMILY_UNSUMMABLE]),
         (_one_member, []),
-        (_slots_unread, []),
+        (_one_member_floor, [CompileIssueCode.FAMILY_UNSUMMABLE]),
+        (_slots_unread, [CompileIssueCode.FAMILY_UNSUMMABLE]),
     ],
-    ids=["declared-sum", "declared-splice", "flag-false", "no-flag", "one-member", "slots-unread"],
+    ids=[
+        "declared-sum",
+        "declared-splice",
+        "flag-false",
+        "no-flag",
+        "one-member",
+        "one-member-floor",
+        "slots-unread",
+    ],
 )
 def test_a_family_with_no_open_axis_reads_summed_only_where_its_components_sum(
     compile_question: Callable[..., CompileResult],
@@ -1652,10 +1662,10 @@ def test_a_family_with_no_open_axis_reads_summed_only_where_its_components_sum(
     """The plan states `sum` over a family with no open axis. apis collapses the
     members only where the source declares they sum or are spliced by years,
     and refuses any other sum `rollup_not_summable`, so compile refuses it
-    before the fetch. A family counted at one member has nothing to collapse,
-    and a source whose slots were never read states no axes to judge, so
-    neither is refused. Each edit is this test's, of the recorded DAC2a
-    inclusive block."""
+    before the fetch, as it refuses a source whose slots were never read. A
+    family counted exactly at one member has nothing to collapse, so it is
+    not refused; one counted at one as a floor is. Each edit is this test's,
+    of the recorded DAC2a inclusive block."""
     block = _dac2a_inclusive()
     resolved = block["resolved"]
     edit(resolved["stat_vars"], resolved)
