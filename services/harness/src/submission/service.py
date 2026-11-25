@@ -6913,7 +6913,7 @@ def _providers_unaligned(
 
     The planner can repair it: declare a share's total the part over every
     provider, donor or recipient (`DatasetRequirement.whole_of`), or pin an input counted on that
-    scope. Declaring each input's own option is named only for a user who asked for
+    scope, as a total over every sector, which no `whole_of` states, is pinned. Declaring each input's own option is named only for a user who asked for
     that input's source, so the planner does not take it as a way past the
     refusal. Where no repair applies, the calculation is declined: `permit`
     records an `unsupported_ask` decline as optional, so the decline is earned
@@ -6928,8 +6928,9 @@ def _providers_unaligned(
         f"{basis.label(target)}, and {basis.requirement_id!r}'s dataset counts "
         f"{basis.label(basis.choice.active)} and is not served that way. Align them: when "
         f"{step.id!r} is a share of a figure in its total over every provider, donor or "
-        "recipient, state that total with `whole_of` naming its part and that axis; otherwise "
-        "pin for "
+        "recipient, state that total with `whole_of` naming its part and that axis. A total "
+        "over every sector takes no `whole_of`: pin it as a total of its own. Otherwise pin "
+        "for "
         f"{basis.requirement_id!r} a dataset counted as {basis.label(target)}. Declare "
         f"each input's own option in `scope_options` only when the user asked for "
         f"{basis.requirement_id!r}'s source as it stands. When none of these applies, record "
@@ -7731,7 +7732,7 @@ def _whole_parts(
                     whole_id=whole.id,
                     part_spec_id=None,
                     reason=f"Search settled {part.id!r} on no one dataset",
-                    cause="part_unpinned",
+                    cause=PART_UNPINNED,
                 )
             )
     return declared
@@ -8516,6 +8517,16 @@ def derived_whole(pin: AlignedPin) -> DerivedWhole | None:
     return scope.derived if scope is not None else None
 
 
+# The causes of a `SHARE_WHOLE_UNDERIVABLE` stated before Search is asked for the
+# whole: the part has no pin (`_declared_wholes`), no definition of its pin is held,
+# or its named sets cannot be read (`planner.source_reads.compile_whole`). Each is
+# the harness's own, so none earns an `unsupported_ask` decline.
+PART_UNPINNED = "part_unpinned"
+PART_UNREAD = "part_unread"
+GROUPS_UNREADABLE = "groups_unreadable"
+UNASKED_WHOLE_CAUSES = frozenset({PART_UNPINNED, PART_UNREAD, GROUPS_UNREADABLE})
+
+
 def share_whole_underivable(
     *,
     whole_id: str,
@@ -8528,18 +8539,20 @@ def share_whole_underivable(
 
     The planner can repair it: drop `whole_of` and leave the whole unpinned,
     so `propose_plan` searches for its total (`pin_by_search`), on the scope
-    an alternative names where Search offers one, or decline the share, a
-    decline the refusal earns (`planner.source_reads.with_source_reads`). `part_spec_id` is the
+    an alternative names where Search offers one, or, where Search refused the
+    whole, decline the share, a decline the refusal earns
+    (`planner.source_reads.with_source_reads`). `part_spec_id` is the
     part's pin, `None` where it has none, `reason` says why no whole was
     compiled, as a clause, and `cause` names that reason as a code: Search's
     own cause for refusing the whole (`part_outside_whole`, `part_is_whole`,
     `whole_moves_provider`, `option_not_covered` and the others its whole
     request states), `None` where an older Search states none; or, before
-    Search is asked,
-    `part_unpinned` (the part has no pin), `part_unread` (no definition of
-    its pin is on record) or `groups_unreadable` (it names a set this release
-    cannot read); or `whole_refused` where Search answers with no one derived
-    whole. `alternatives` are the options Search offers as the whole in place
+    Search is asked, `part_unpinned` (the part has no pin), `part_unread` (no
+    definition of its pin is on record) or `groups_unreadable` (it names a set
+    this release cannot read); or `whole_refused` where Search answers with no
+    one derived whole; or `part_moved` where Search derived the whole of another
+    part, or on another axis. A refusal stated before Search is asked
+    (`UNASKED_WHOLE_CAUSES`) offers no decline. `alternatives` are the options Search offers as the whole in place
     of the one refused, each `(ref, label)`, named as what Search would count;
     the planner cannot ask for one as the whole, so it searches for a total
     counted that way. `detail.requirement_id` names the whole for the
@@ -8555,8 +8568,13 @@ def share_whole_underivable(
         f"{whole_id!r} states `whole_of`, the total Search derives from its part on one "
         f"axis, every other choice held. {reason}.{counted} Drop `whole_of` from "
         f"{whole_id!r}, state the parties its total covers, and leave it unpinned so a "
-        f"search finds that total{' counted that way' if alternatives else ''}; or record "
-        f"the share in `declined` with code {UnsupportedOperation.UNSUPPORTED_ASK.value!r}.",
+        f"search finds that total{' counted that way' if alternatives else ''}"
+        + (
+            "."
+            if cause in UNASKED_WHOLE_CAUSES
+            else "; or record the share in `declined` with code "
+            f"{UnsupportedOperation.UNSUPPORTED_ASK.value!r}."
+        ),
         outcome=Outcome.INVALID_INPUT,
         detail={
             "requirement_id": whole_id,

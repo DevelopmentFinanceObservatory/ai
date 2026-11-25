@@ -2065,7 +2065,8 @@ class DefinitionNotResolvedError(RuntimeError):
     entry having no time left for it (`NoTimeLeftError`). `no_part` is whether
     Search answered with no part. `cause` and `alternatives` are the refusal's
     own cause code and the options it offers in place of the one asked for, each
-    `(ref, label)`, as a whole request's refusal states them.
+    `(ref, label)`, as a whole request's refusal states them. `detail` is the
+    refusal's own words (data-mcp's `fix.detail`), `None` where it states none.
     """
 
     def __init__(
@@ -2079,6 +2080,7 @@ class DefinitionNotResolvedError(RuntimeError):
         no_part: bool = False,
         cause: str | None = None,
         alternatives: tuple[tuple[str, str], ...] = (),
+        detail: str | None = None,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
@@ -2088,6 +2090,7 @@ class DefinitionNotResolvedError(RuntimeError):
         self.no_part = no_part
         self.cause = cause
         self.alternatives = alternatives
+        self.detail = detail
 
 
 class CutCalls:
@@ -2489,6 +2492,7 @@ async def resolve_definition_at(
         fix = fix if isinstance(fix, Mapping) else {}
         cause = fix.get("cause")
         offered = fix.get("alternatives")
+        detail = fix.get("detail")
         raise DefinitionNotResolvedError(
             f"Search no longer resolves it ({code})" if code else "Search no longer resolves it",
             retryable=False,
@@ -2496,6 +2500,7 @@ async def resolve_definition_at(
             code=code,
             cause=cause if isinstance(cause, str) else None,
             alternatives=_offered(offered),
+            detail=detail if isinstance(detail, str) and detail else None,
         )
     part = _answered_part(answer)
     if part is None:

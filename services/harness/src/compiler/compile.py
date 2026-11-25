@@ -1897,7 +1897,10 @@ class _Build:
     def _derived_whole_of(self, part: Mapping[str, object], whole: Mapping[str, object]) -> bool:
         """Whether a requirement of `whole`, the requirement ids a denominator rests
         on, is the declared whole (`planner.plan.WholeOf`) of one of `part`'s, the
-        requirement ids its numerator rests on."""
+        requirement ids its numerator rests on. A plan reads a whole only as the
+        denominator of a share or quotient whose denominator rests on that whole
+        alone and whose numerator rests on its part alone (`planner.plan._whole_read_fault`),
+        so one such requirement settles both operands."""
         return any(
             isinstance(stated := self.plan_requirements.get(requirement_id), DatasetRequirement)
             and stated.whole_of is not None

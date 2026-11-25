@@ -76,7 +76,7 @@ from planner.stated_scope import (
 )
 from planner.tool_results import Outcome, ProblemCode
 from planner.tools import load_pending_ask
-from planner.workflow import ToolId
+from planner.workflow import SUM_OF_MEMBERS, SourceWhole, ToolId
 from submission.service import (
     _ALIGNED_REASONS,
     _scope_words,
@@ -94,6 +94,7 @@ from ..basis_alignment import (
 )
 from ..planner_host import node_ctx
 from ..planner_tools import call_planner_tool
+from ..share_plan import ALL_DONORS, US_DONOR, us_share_of_kenya_oda
 
 _FIXTURES = Path(__file__).parents[1] / "fixtures"
 _RECORDED: dict[str, Any] = json.loads(
@@ -2127,17 +2128,14 @@ _WHOLES: dict[str, Any] = json.loads((_FIXTURES / "share_wholes_through_search.j
 class _Wholes:
     """A tool surface whose `resolve_definition` answers each recorded whole request:
     the case whose `posted` identity, entries and `whole` the call posts, with its
-    whole, or its refusal as data-mcp relays it, `fix` carrying `cause` and
-    `alternatives` where given. Each call's arguments are recorded in `calls`."""
+    whole, or its refusal as data-mcp relays it, `fix` carrying its `detail`, the
+    `cause` it states and `alternatives` where given. Each call's arguments are
+    recorded in `calls`."""
 
     def __init__(
-        self,
-        *cases: Mapping[str, Any],
-        cause: str | None = None,
-        alternatives: Sequence[tuple[str, str]] = (),
+        self, *cases: Mapping[str, Any], alternatives: Sequence[tuple[str, str]] = ()
     ) -> None:
         self.cases = cases
-        self.cause = cause
         self.alternatives = alternatives
         self.calls: list[Mapping[str, Any]] = []
 
@@ -2163,8 +2161,8 @@ class _Wholes:
             )
         refused = case["refused"]
         fix: dict[str, Any] = {"detail": refused["detail"]}
-        if self.cause is not None:
-            fix["cause"] = self.cause
+        if "cause" in refused:
+            fix["cause"] = refused["cause"]["code"]
         if self.alternatives:
             fix["alternatives"] = [{"ref": r, "label": label} for r, label in self.alternatives]
         return ToolCallResult(
@@ -2272,6 +2270,27 @@ async def test_a_stored_plan_with_a_sector_whole_is_planned_again() -> None:
     assert node.state == {"plan": None}
 
 
+@pytest.mark.parametrize("derived", [True, False], ids=["derived", "compiled-before"])
+def test_a_stored_plan_whose_summed_whole_states_no_derived_whole_is_planned_again(
+    decision: Callable[..., Any], derived: bool
+) -> None:
+    """The US share of ODA to Kenya over every donor, approved and compiled with its
+    whole summed over the donors Search leaves open. A plan stored before sources
+    stated Search's derived whole cannot say the side is summed, so it reads as no
+    plan and is planned again; one stating it loads."""
+    whole = (
+        {**ALL_DONORS, "derived_whole": SourceWhole(derivation=SUM_OF_MEMBERS)}
+        if derived
+        else ALL_DONORS
+    )
+    plan = us_share_of_kenya_oda(
+        decision, whole=whole, numerator=US_DONOR, whole_of=True, group_by=None
+    )
+    raw = plan.model_dump_json()
+
+    assert (stored_plan(raw, state_key=PLAN_STATE_KEY) == plan) is derived
+
+
 async def test_a_provider_whole_search_moves_to_all_recipients_says_so() -> None:
     """France's bilateral ODA, on DAC2a to developing countries, as a share of its whole
     over every provider: Search's whole counts total ODA to all recipients (DAC)
@@ -2351,16 +2370,18 @@ async def test_a_donor_whole_holds_the_parts_provider_option_as_search_derives_i
 
 
 @pytest.mark.parametrize(
-    ("case", "axis", "cause", "alternatives", "expected"),
+    ("case", "axis", "alternatives", "expected"),
     [
         # US total ODA already counts every provider: an older Search refuses, stating
-        # no cause, so the refusal carries none.
-        pytest.param("us_total", "provider", None, (), None, id="no-cause"),
-        # Saudi Arabia is no DAC member, so DAC countries' total cannot hold it.
+        # no cause, so the refusal carries none and quotes Search's words.
+        pytest.param("us_total", "provider", (), None, id="no-cause"),
+        # Saudi Arabia is no DAC member, so DAC countries' total cannot hold it: Search
+        # states the cause.
+        pytest.param("saudi_oda", "donor", (), "part_outside_whole", id="cause"),
+        # The same, Search offering every donor's sum in its place.
         pytest.param(
             "saudi_oda",
             "donor",
-            "part_outside_whole",
             (("donor:members", "every donor"),),
             "part_outside_whole",
             id="cause-and-alternatives",
@@ -2370,18 +2391,17 @@ async def test_a_donor_whole_holds_the_parts_provider_option_as_search_derives_i
 async def test_a_whole_search_refuses_is_one_underivable_refusal_with_searchs_cause(
     case: str,
     axis: str,
-    cause: str | None,
     alternatives: tuple[tuple[str, str], ...],
     expected: str | None,
 ) -> None:
     """A whole Search will not derive is refused under `SHARE_WHOLE_UNDERIVABLE`,
-    carrying Search's cause, else its code, and the options it offers in place of the
-    one refused, and nothing is held."""
+    carrying Search's cause, and the options it offers in place of the one refused,
+    and nothing is held. A refusal stating no cause quotes Search's own words."""
     ctx = _Context()
     recorded = _WHOLES[case]
     part = recorded["part"]
     _show(ctx, part)
-    surface = _Wholes(recorded, cause=cause, alternatives=alternatives)
+    surface = _Wholes(recorded, alternatives=alternatives)
     donor = "United States" if case == "us_total" else "Saudi Arabia"
     requirements = [
         _dataset("part", part["spec_id"], "ODA", donor=donor, period=(2019, 2022)),
@@ -2415,6 +2435,10 @@ async def test_a_whole_search_refuses_is_one_underivable_refusal_with_searchs_ca
     counted = " counted that way" if alternatives else ""
     assert f"leave it unpinned so a search finds that total{counted};" in result["message"]
     assert all(f"as {label} instead" in result["message"] for _, label in alternatives)
+    stated = (
+        f": {recorded['refused']['detail'].rstrip('.')}." if expected is None else f" ({expected})."
+    )
+    assert f"over every {axis}{stated}" in result["message"]
     assert not [pin for pin in aligned_pins(ctx.state) if pin.whole_axis == axis]
     assert load_plan(ctx.state) is None
 

@@ -35,8 +35,10 @@ from harness.scope_choices import (
 )
 from harness.tool_contracts import resolver_digest
 from pydantic import JsonValue
-from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from submission.service import (
+    GROUPS_UNREADABLE,
+    PART_UNREAD,
+    UNASKED_WHOLE_CAUSES,
     AlignedPin,
     Realignment,
     ScopeRead,
@@ -55,6 +57,7 @@ from submission.service import (
     stated_compile_unanswered,
     unpinned_wanted,
 )
+from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import (
     SEARCH,
     DefinitionNotResolvedError,
@@ -205,13 +208,12 @@ class _Compiled(NamedTuple):
 # The cause `compile_on_basis` gives where Search refuses stating no code, where it
 # does not answer (which states none), where it answers with no one dataset, where
 # the call cannot reach it for good, and where the pin's record cannot be posted (no
-# choice on the axis, unreadable named sets).
+# choice on the axis, unreadable named sets: `GROUPS_UNREADABLE`).
 _REFUSED = "refused"
 _UNANSWERED = "unanswered"
 _NO_ONE_DATASET = "no_one_dataset"
 _UNREACHABLE = "unreachable"
 _NO_CHOICE = "no_choice_on_record"
-_GROUPS_UNREADABLE = "groups_unreadable"
 
 
 class _Uncompiled(NamedTuple):
@@ -352,7 +354,7 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     if groups is None:
         return unservable(
             f"Search's named sets for {realignment.requirement_id!r}'s dataset are not readable",
-            code=_GROUPS_UNREADABLE,
+            code=GROUPS_UNREADABLE,
         )
     wire_groups = groups
 
@@ -601,12 +603,13 @@ async def compile_whole(
     `SURFACE_UNAVAILABLE` when Search did not answer and can later, or
     `SHARE_WHOLE_UNDERIVABLE` (`submission.service.share_whole_underivable`)
     under the cause Search states for refusing the whole, none where an older
-    Search states none, with
-    the options it offers in its place; under `part_unread` where no block of
-    the part's pin is on record; under `groups_unreadable` where the part names
-    a set whose posted form this release cannot read; and under `whole_refused`
-    where Search answers with no one dataset or with a block stating no derived
-    whole.
+    Search states none, with the options it offers in its place; under
+    `part_unread` where no block of the part's pin is on record; under
+    `groups_unreadable` where the part names a set whose posted form this
+    release cannot read; under `whole_refused` where Search answers with no one
+    dataset or with a block stating no derived whole; and under `part_moved`
+    where the part Search derived the whole from is not the part's compile, or
+    the whole widens another axis (`_whole_fault`).
     """
     part_pin, axis = realignment.spec_id, cast(str, realignment.whole_axis)
 
@@ -637,13 +640,13 @@ async def compile_whole(
         else None
     )
     if block is None or not isinstance(identity, Mapping):
-        return underivable(f"no definition of {part_pin} from Search is held", "part_unread")
+        return underivable(f"no definition of {part_pin} from Search is held", PART_UNREAD)
     # The set on the side the whole widens is left out: Search drops that side's
     # parties for the whole, and compiles the part again from its identity.
     groups = readable_wire_groups(block, leaving_out=WHOLE_COLUMNS.get(axis))
     if groups is None:
         return underivable(
-            f"Search's named sets for {part_pin} are not readable", "groups_unreadable"
+            f"Search's named sets for {part_pin} are not readable", GROUPS_UNREADABLE
         )
     try:
         part, resolved_at = await resolve_definition_at(
@@ -661,8 +664,14 @@ async def compile_whole(
         if exc.retryable:
             return _refusing(_basis_uncompiled(realignment, str(exc)))
         # An older Search refuses a whole stating no cause: the refusal says why in
-        # its words alone, and its code is no cause.
-        stated = f" ({exc.cause})" if exc.cause is not None else f": {exc}"
+        # its words alone (data-mcp's `fix.detail`), and its code is no cause.
+        stated = (
+            f" ({exc.cause})"
+            if exc.cause is not None
+            else f": {exc.detail.rstrip('.')}"
+            if exc.detail is not None
+            else ""
+        )
         return underivable(
             f"Search does not derive the whole of {part_pin} over every {axis}{stated}",
             exc.cause,
@@ -904,12 +913,23 @@ async def with_source_reads(
 
     A declared whole Search does not derive (`SHARE_WHOLE_UNDERIVABLE`) permits an
     `unsupported_ask` decline for the rest of the planner entry, the repair its
-    message names beside a total pinned by search, so the decline is earned.
+    message names beside a total pinned by search, so the decline is earned. A
+    refusal stated before Search is asked (`UNASKED_WHOLE_CAUSES`) earns none.
     """
     result = await _after_source_reads(propose, state=state, surface=surface)
-    if result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value:
+    if (
+        result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value
+        and _whole_cause(result) not in UNASKED_WHOLE_CAUSES
+    ):
         record_optional_decline(state, UnsupportedOperation.UNSUPPORTED_ASK)
     return result
+
+
+def _whole_cause(result: Mapping[str, object]) -> object:
+    """The cause a `SHARE_WHOLE_UNDERIVABLE` answer states (`detail.whole.cause`)."""
+    detail = result.get("detail")
+    whole = detail.get("whole") if isinstance(detail, Mapping) else None
+    return whole.get("cause") if isinstance(whole, Mapping) else None
 
 
 async def _after_source_reads(  # noqa: PLR0911 -- one return per kind of read a refusal asks for

@@ -7613,7 +7613,9 @@ def stored_plan(raw: str | None, *, state_key: str) -> Plan | None:
     """The plan `raw` holds, the text stored under `state_key`; `None` when it holds none.
 
     A plan stored in a shape `Plan` rejects, one a release with other fields
-    wrote, is no plan, and the omission is logged. Its revision cannot be
+    wrote, is no plan, and the omission is logged, as is one whose wholes were
+    compiled before sources stated Search's derived whole
+    (`_wholes_compiled_before_derived`). Its revision cannot be
     computed, so the answer to its approval card names nothing, and its
     workflow cannot run: the question is planned again. A caller that owns
     the slot tells the two `None`s apart by `raw` and clears it.
@@ -7621,10 +7623,39 @@ def stored_plan(raw: str | None, *, state_key: str) -> Plan | None:
     if not raw:
         return None
     try:
-        return Plan.model_validate_json(raw)
+        plan = Plan.model_validate_json(raw)
     except ValidationError as exc:
         warn_left_out(logger, state_key, [exc])
         return None
+    if stale := _wholes_compiled_before_derived(plan):
+        logger.warning(
+            "left out the plan stored under %s: its wholes %s were compiled from sources "
+            "stating no derived whole",
+            state_key,
+            stale,
+        )
+        return None
+    return plan
+
+
+def _wholes_compiled_before_derived(plan: Plan) -> list[str]:
+    """The wholes (`DatasetRequirement.whole_of`) `plan`'s workflow retrieves from a
+    source stating no derived whole (`SelectedSource.derived_whole`), as a plan
+    compiled before sources carried it holds; empty for a plan not compiled.
+
+    Whether such a whole's side is summed can no longer be read (`whole_on_source`,
+    `compiler.compile._Build._check_whole_sum`), so the plan is planned again, as
+    one stored in a shape `Plan` rejects is (`stored_plan`)."""
+    if plan.workflow is None:
+        return []
+    return [
+        requirement.id
+        for requirement in plan.evidence_requirements
+        if isinstance(requirement, DatasetRequirement)
+        and requirement.whole_of is not None
+        and (source := _compiled_source(plan, requirement.id)) is not None
+        and source.derived_whole is None
+    ]
 
 
 def load_plan(state: SessionState) -> Plan | None:

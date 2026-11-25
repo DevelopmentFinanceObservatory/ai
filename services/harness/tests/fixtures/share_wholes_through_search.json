@@ -1,5 +1,5 @@
 {
- "comment": "Search on apis#416 over the dev graph release, 2026-11-24: for each case the part a raw-text query resolved (`part`), the dataset_resubmit entry posted for its whole (`posted`: the part's scope base identity, its entries and `whole`), and Search's answer, the whole's spec (`whole`) or its refusal (`refused`). us_bilateral to saudi_oda were recorded on feat/whole-options 362b8b7d4, france_developing to us_bilateral_to_kenya on whole-refusal-cause dea881585, the latter posting no named sets. Recorded by record_wholes.py; each spec's `resolved.trace` is left out.",
+ "comment": "Search's answers to the share-whole request (`dataset_resubmit` with `whole: {axis}`): for each case, the part a raw-text query resolved (`part`), the entry posted for its whole (`posted`: the part's scope base identity, its scope entries and `whole`), and Search's answer, the whole's spec with its `resolved.scope_choices.derived` (`whole`), or its 422 `requested_option_unavailable` refusal (`refused`). `us_total`'s refusal states no `cause`, as Search did before it named one; `saudi_oda`'s states it as `cause.code`. Each spec's `resolved.trace` is left out.",
  "us_bilateral": {
   "query": "US bilateral ODA net disbursements 2010-2023",
   "part": {
@@ -24884,7 +24884,11 @@
    "detail": "The whole of this part cannot be derived: part_outside_whole.",
    "code": "requested_option_unavailable",
    "pointer": "/input/entries/0/whole",
-   "trace_id": "0bd6892761ef4315a4448977606bc482",
+   "cause": {
+    "code": "part_outside_whole",
+    "entities": [],
+    "truncated": false
+   },
    "capability_version": "cap_890d4521b8bf88ab",
    "retryable": false
   }

@@ -9291,7 +9291,8 @@ async def test_a_declared_whole_over_every_donor_or_recipient_leaves_that_role_o
     population the whole holds, and the caveat names it and what both sides'
     dataset counts alike. The part's named set on the side the whole widens is not
     posted. A part whose named set on another side does not read as a resubmit posts
-    it refuses the whole under the cause `refused`, with no search."""
+    it refuses the whole under the cause `groups_unreadable`, with no search, and
+    earns no decline."""
     block = _us_health_to_africa() if part.startswith("africa") else _us_block(part)
     if part == "africa_unknown_class":
         block["resolved"]["entity_groups"]["destination"]["whole_of"] = ["sovereign_fund"]
@@ -9306,6 +9307,10 @@ async def test_a_declared_whole_over_every_donor_or_recipient_leaves_that_role_o
         assert result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
         assert result["detail"]["whole"]["cause"] == refused
         assert surface.calls == []
+        # Refused before Search is asked: the harness's own fault offers and earns no
+        # decline.
+        assert UnsupportedOperation.UNSUPPORTED_ASK not in load_optional_declines(ctx.state)
+        assert "declined" not in result["message"]
         return
     assert result["outcome"] == Outcome.OK.value, result
     (call,) = surface.calls
