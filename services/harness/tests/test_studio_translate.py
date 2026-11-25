@@ -52,7 +52,7 @@ from harness.scripted_plan import scripted_plan
 from harness.seeds import SEED_STEP_TOOL
 from harness.sentences import DECLINE_REASONS, DROPPED_REASON, failure_sentence
 from harness.settings import Settings
-from harness.studio import _close_work
+from harness.studio import _chip_label, _close_work, _closed_turn
 from harness.studio_state import (
     ConversationState,
     _next_manifest,
@@ -78,6 +78,7 @@ from harness.turn.events import NodeDone, Paused, TurnFailed
 from harness.turn.store import AgentRecord
 from harness.turn_events import PLANNER_ASK
 from harness.wire import (
+    ApplyChoice,
     CompositionActor,
     CompositionManifest,
     MessageComplete,
@@ -89,6 +90,7 @@ from harness.wire import (
     PlanProposed,
     PlanStep,
     StepStatus,
+    Suggestions,
     UnitChoice,
     UnitCurrency,
     UnitOffer,
@@ -3775,14 +3777,41 @@ async def test_a_new_planner_run_after_a_refused_one_starts_its_own_line() -> No
     ]
 
 
-async def _answered(readings: list[dict[str, Any]]) -> tuple[_Translator, list[Any]]:
-    """A translator that closed a turn answering with `readings` and the frames it sent."""
+async def _answered(
+    readings: list[dict[str, Any]],
+    *,
+    text: str = "The US gave $7.9bn.",
+    narrations: Sequence[str] = (),
+    cards: bool = False,
+) -> tuple[_Translator, list[Any]]:
+    """A translator that closed a turn answering with `readings` and the frames it
+    sent. Earlier responses each streamed one of `narrations` beside a call, and with
+    `cards` the turn drew a card. The closing response's `text` is streamed after
+    narrations, and is otherwise held as streamed already."""
     current_conversation_id.set("c1")
     translator = _translator()
     translator._conversation.turn_user_message = "total health aid from the US to Africa"
     translator._conversation.turn_readings = readings
-    translator._final_text = "The US gave $7.9bn."
-    return translator, await translator.finish()
+    frames: list[Any] = []
+    for index, narration in enumerate(narrations):
+        frames += translator._agent_text(narration)
+        call = types.FunctionCall(id=f"call_{index}", name="make_charts", args={"charts": []})
+        translator._agent_response([types.Part(text=narration), types.Part(function_call=call)])
+    if cards:
+        land_component(
+            translator._conversation,
+            {
+                "component_id": "cmp_1",
+                "revision": 1,
+                "type": "line_chart",
+                "payload": {"component": {"title": {"text": "Aid to Kenya"}}},
+            },
+        )
+    if narrations:
+        frames += translator._agent_text(text)
+    else:
+        translator._final_text += text
+    return translator, [*frames, *await translator.finish()]
 
 
 @pytest.mark.parametrize("noted", [False, True], ids=["line-alone", "notes-and-line"])
@@ -3818,6 +3847,60 @@ async def test_the_answer_closes_with_the_code_text_and_the_next_turns_history_l
     assert digest["turns"][-1]["assistant"] == "The US gave $7.9bn."
     assert "Counted as" not in json.dumps(digest)
     assert note not in json.dumps(digest)
+
+
+@pytest.mark.parametrize(
+    ("narrations", "text", "shown"),
+    [
+        pytest.param((), "", "", id="cards-alone"),
+        pytest.param(("Let me chart that.",), "", "Let me chart that.", id="narration"),
+        pytest.param(("Let me chart that.",), " \n", "Let me chart that.", id="whitespace-closing"),
+        pytest.param(
+            ("Let me look.", "Charting now."),
+            "",
+            "Let me look.\n\nCharting now.",
+            id="two-narrations",
+        ),
+    ],
+)
+async def test_a_turn_its_cards_answer_closes_with_the_notes_line_and_chips(
+    monkeypatch: pytest.MonkeyPatch, narrations: tuple[str, ...], text: str, shown: str
+) -> None:
+    """A turn whose agent closed with no text, or whitespace, after drawing a card is
+    answered by the card. It closes with the loose-match notes, the basis line and
+    the chips a turn answered in words closes with, and the chips apply. The user is
+    shown the text streamed beside its calls, a paragraph each, which a reload shows
+    too. A later turn's model reads that the cards answered it, naming them by title."""
+    note = "The series used for health aid is a close match only."
+    monkeypatch.setattr(studio_translate_module, "loose_match_notes", lambda *_, **__: [note])
+    readings = [_fetched(_example_part())]
+    _, worded = await _answered(readings)
+    translator, frames = await _answered(readings, text=text, narrations=narrations, cards=True)
+    conversation = translator._conversation
+
+    complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
+    deltas = "".join(frame.text for frame in frames if isinstance(frame, MessageDelta))
+    chips = next(frame for frame in frames if isinstance(frame, Suggestions))
+    worded_chips = next(frame for frame in worded if isinstance(frame, Suggestions))
+    assert complete.text == "\n\n".join(block for block in (shown, note, _EXAMPLE_LINE) if block)
+    if not text:
+        assert deltas == complete.text
+    stored = conversation.turns[-1]
+    assert (stored.get("match_notes"), stored["basis_line"]) == (note, _EXAMPLE_LINE)
+    assert "Aid to Kenya" in stored["assistant"]
+    assert "cmp_1" not in stored["assistant"]
+    assert _closed_turn(len(conversation.turns), conversation).reply == complete.text
+    digest = conversation.conversation_digest_state()
+    assert digest is not None
+    assert digest["turns"][-1]["assistant"] == stored["assistant"]
+    assert [chip.option_id for chip in chips.items] == [
+        chip.option_id for chip in worded_chips.items
+    ]
+    (chip, *_) = chips.items
+    pick = ApplyChoice(
+        choice_id=chip.choice_id, option_id=chip.option_id, turn=chip.turn, spec_id=chip.spec_id
+    )
+    assert isinstance(_chip_label(conversation, pick), str)
 
 
 async def test_an_answer_using_no_part_with_scope_choices_states_no_basis_line() -> None:

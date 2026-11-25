@@ -255,6 +255,12 @@ def whole_units(offer: UnitOffer) -> dict[str, UnitChoice]:
     return {unit_option_id(unit): unit for unit in units}
 
 
+def whole_unit_options(offer: UnitOffer) -> dict[str, str]:
+    """The options a unit question offering `offer` lists for a page that answers it
+    with a pick, by option id: its whole units (`whole_units`) in the user's words."""
+    return {option_id: unit_words(unit, offer) for option_id, unit in whole_units(offer).items()}
+
+
 def row_units(offer: UnitOffer) -> dict[str, UnitChoice]:
     """The units a plan card's unit row offering `offer` lists as options, by
     option id: its `whole_units`, the start first when they leave it out, as

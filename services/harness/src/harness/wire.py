@@ -41,6 +41,7 @@ from typing import Annotated, Any, Literal, cast, get_args
 
 from common.place_type import PartyClass
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -52,6 +53,8 @@ from pydantic import (
     WrapValidator,
     model_validator,
 )
+from pydantic.json_schema import WithJsonSchema
+from pydantic_core import PydanticCustomError
 
 logger = logging.getLogger(__name__)
 
@@ -377,6 +380,54 @@ MAX_SEED_SPEC_BYTES = 1_048_576
 # `_BoundedTurnRoute`): six seeds at the cap, and room for the rest of the
 # request.
 MAX_TURN_REQUEST_BYTES = MAX_SEEDS * MAX_SEED_SPEC_BYTES + 65_536
+
+# The most characters of the user's own words an interrupt carries: an amendment
+# (`InterruptResponse.payload`) or a free-text answer (`TextAnswer.text`). The planner
+# reads the last 2,000 characters of a turn's words, so this leaves room for any
+# amendment a person types.
+MAX_INTERRUPT_TEXT_CHARS = 16_000
+
+# The validation context key under which an interrupt `/interrupt` stored is rebuilt
+# (`harness.studio._answer_again`). `MAX_INTERRUPT_TEXT_CHARS` holds for a request's
+# own words, and a stored answer is carried whole, whatever its length.
+STORED_INTERRUPT = "stored_interrupt"
+
+# The most free-text answers one interrupt carries: one per question of an
+# elicitation (`ElicitationRequest.questions`).
+_MAX_TEXT_ANSWERS = 3
+
+# The largest `/api/studio/interrupt` body the route reads (`harness.studio`'s
+# `_BoundedInterruptRoute`): room for a free-text answer to each question at the cap,
+# each character escaped as a JSON surrogate pair at worst (12 bytes), and for the
+# rest of the request.
+MAX_INTERRUPT_REQUEST_BYTES = _MAX_TEXT_ANSWERS * MAX_INTERRUPT_TEXT_CHARS * 12 + 65_536
+
+
+def _within_word_cap(value: str | None, info: ValidationInfo) -> str | None:
+    """`value`, refused `string_too_long` past `MAX_INTERRUPT_TEXT_CHARS` unless it is
+    rebuilt from what `/interrupt` stored (`STORED_INTERRUPT`)."""
+    stored = isinstance(info.context, dict) and info.context.get(STORED_INTERRUPT) is True
+    if value is not None and len(value) > MAX_INTERRUPT_TEXT_CHARS and not stored:
+        raise PydanticCustomError(
+            "string_too_long",
+            "String should have at most {max_length} characters",
+            {"max_length": MAX_INTERRUPT_TEXT_CHARS},
+        )
+    return value
+
+
+# The user's own words in an interrupt: an amendment or a free-text answer. The schema
+# states the cap, which `_within_word_cap` applies.
+UserWords = Annotated[
+    str,
+    AfterValidator(_within_word_cap),
+    WithJsonSchema({"type": "string", "maxLength": MAX_INTERRUPT_TEXT_CHARS}),
+]
+
+# The most `client_features` values a request may declare. A client names the
+# question forms it renders, a handful; one this release does not know is ignored
+# (`declared_features`), so the cap leaves room for later forms.
+MAX_CLIENT_FEATURES = 16
 
 # The bounds on what the harness reads of a seed and of Search's answer for
 # it. A seed comes from a browser, and Search's answer for its identity goes
@@ -980,7 +1031,7 @@ class TurnRequest(_WireModel):
     apply_choice: ApplyChoice | None = None
     apply_unit: ApplyUnit | None = None
     after_turn: int | None = Field(default=None, ge=0)
-    client_features: list[str] | None = None
+    client_features: list[str] | None = Field(default=None, max_length=MAX_CLIENT_FEATURES)
 
     @model_validator(mode="after")
     def _a_chip_comes_alone(self) -> TurnRequest:
@@ -1051,7 +1102,12 @@ class TextAnswer(_WireModel):
     """The user answered in their own words (`allow_free_text`)."""
 
     kind: Literal["text"]
-    text: str = Field(min_length=1)
+    text: Annotated[
+        str,
+        Field(min_length=1),
+        AfterValidator(_within_word_cap),
+        WithJsonSchema({"type": "string", "minLength": 1, "maxLength": MAX_INTERRUPT_TEXT_CHARS}),
+    ]
 
 
 class SkippedAnswer(_WireModel):
@@ -1124,7 +1180,7 @@ class InterruptResponse(_WireModel):
     # The amendment text of a plan's `amend`. An elicitation opened before
     # the frame carried `questions` also takes its one answer here: an
     # offered option id, or free text.
-    payload: str | None = None
+    payload: UserWords | None = None
     # An elicitation's `answer`: each question id of the frame to its answer.
     answers: dict[str, ElicitationAnswer] | None = None
     # A plan's `switch`: the scope choice or planner decision, the option it
@@ -1135,7 +1191,7 @@ class InterruptResponse(_WireModel):
     plan_revision: str | None = Field(default=None, min_length=1)
     # A `switch` of a row offering a unit: the unit the user picked.
     unit: UnitChoice | None = None
-    client_features: list[str] | None = None
+    client_features: list[str] | None = Field(default=None, max_length=MAX_CLIENT_FEATURES)
 
     @model_validator(mode="after")
     def _switch_members_come_with_switch(self) -> InterruptResponse:
@@ -1223,6 +1279,13 @@ MutationOperation = Annotated[
 ]
 
 
+# The largest `/api/studio/composition` body the route reads (`harness.studio`'s
+# `_BoundedCompositionRoute`): 1 MiB. The largest request a client sends removes or
+# pins blocks of one canvas, an operation per block. A `remove` or `pin` names one
+# component id in about 60 bytes of JSON, so the cap holds about 17,000 of them.
+MAX_COMPOSITION_REQUEST_BYTES = 1_048_576
+
+
 class CompositionMutation(_WireModel):
     """POST /api/studio/composition -- Pin to Canvas, Reorder, Remove.
     Returns the new manifest. Removing a block does not delete the component.
@@ -1244,6 +1307,13 @@ class CompositionMutation(_WireModel):
     operations: list[MutationOperation] = Field(min_length=1)
     expected_revision: int | None = Field(default=None, ge=1)
 
+
+# The largest `/api/studio/cancel` and `/api/studio/resume` bodies the routes read
+# (`harness.studio`'s `_BoundedCancelRoute` and `_BoundedResumeRoute`): 4 KiB. Each
+# request is its kind, its schema version, a conversation id and a turn index,
+# optional on a cancel, about 100 bytes.
+MAX_CANCEL_REQUEST_BYTES = 4_096
+MAX_RESUME_REQUEST_BYTES = 4_096
 
 # The largest turn index a `turn.cancel` may name: Postgres's `int`, which the
 # store compares it with (`harness.studio_store.StudioStore.request_cancel`).

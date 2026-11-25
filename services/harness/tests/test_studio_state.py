@@ -55,6 +55,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
 )
 from harness.provenance import CardLineage, ProvenanceInput
+from harness.studio import _answers_refusal, _resume_answer
 from harness.studio_edit import _record_revision, _refresh_block
 from harness.studio_state import (
     CANVAS_LISTING_MAX_BYTES,
@@ -85,6 +86,7 @@ from harness.studio_store import (
 )
 from harness.turn.store import TurnStatus, TurnStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
+from harness.unit_offer import whole_unit_options, whole_units
 from harness.wire import (
     AddOp,
     ClientFeature,
@@ -93,9 +95,11 @@ from harness.wire import (
     CompositionBlock,
     CompositionManifest,
     ElicitationInput,
+    ElicitationRequest,
     ErrorCode,
     MessageComplete,
     MutationOp,
+    OptionAnswer,
     PlanProposed,
     UnitOffer,
 )
@@ -114,28 +118,31 @@ from .test_turn_store import ADMITTED_RUN
 
 CONVERSATION = "conv_01test0000"
 
-# A unit question as `/interrupt` keeps it: its input and the offer an answer
-# must lie inside.
+_UNIT_OFFER = UnitOffer.model_validate(
+    {
+        "currencies": [
+            {
+                "code": "USD",
+                "name": "US dollars",
+                "prices": ["current", "constant"],
+                "base_year_min": 2000,
+                "base_year_max": 2023,
+            }
+        ],
+        "presets": ["USD"],
+        "start": {"currency": "USD", "prices": "constant", "base_year": 2023},
+    }
+)
+
+# A unit question as `/interrupt` keeps it: its input, the offer an answer must lie
+# inside, and its whole units, which a page sent it as a pick answers with.
 _UNIT_QUESTION = _PendingQuestion(
     id="q2",
     question="In which prices?",
+    options=dict(whole_unit_options(_UNIT_OFFER)),
     skippable=True,
     input=ElicitationInput.UNIT,
-    unit=UnitOffer.model_validate(
-        {
-            "currencies": [
-                {
-                    "code": "USD",
-                    "name": "US dollars",
-                    "prices": ["current", "constant"],
-                    "base_year_min": 2000,
-                    "base_year_max": 2023,
-                }
-            ],
-            "presets": ["USD"],
-            "start": {"currency": "USD", "prices": "constant", "base_year": 2023},
-        }
-    ),
+    unit=_UNIT_OFFER,
 )
 
 
@@ -213,6 +220,87 @@ def test_land_component_held_when_auto_add_is_off() -> None:
     assert action == "held"
     assert state.composition is None
     assert "cmp_two" in state.components
+
+
+def _titled(component_id: str, title: str | None) -> dict[str, Any]:
+    """`_component` titled `title`, where given, as a chart's payload titles it."""
+    payload = {"payload": {"component": {"title": {"text": title}}}} if title else {}
+    return {**_component(component_id), **payload}
+
+
+@pytest.mark.parametrize(
+    ("titles", "removed", "auto_add", "shown", "named", "unnamed"),
+    [
+        pytest.param(
+            ["Aid to Kenya", "Aid to Ghana"],
+            ["cmp_0"],
+            True,
+            ["cmp_1"],
+            ["Aid to Ghana"],
+            ["Aid to Kenya", "cmp_"],
+            id="a-card-taken-off",
+        ),
+        pytest.param(
+            ["Aid to Kenya", None],
+            [],
+            True,
+            ["cmp_0", "cmp_1"],
+            ["line_chart"],
+            ["cmp_"],
+            id="an-untitled-card",
+        ),
+        pytest.param(
+            ["Aid to Kenya"],
+            [],
+            False,
+            ["cmp_0"],
+            ["Aid to Kenya"],
+            ["cmp_"],
+            id="held-off-the-canvas",
+        ),
+        pytest.param(
+            [f"Aid to country {n}" for n in range(10)],
+            [],
+            True,
+            [f"cmp_{n}" for n in range(10)],
+            ["Aid to country 7", "2 more"],
+            ["Aid to country 8", "cmp_"],
+            id="past-the-card-cap",
+        ),
+        pytest.param(
+            ["Aid " + "x" * 200],
+            [],
+            True,
+            ["cmp_0"],
+            ["Aid xxx"],
+            ["x" * 150],
+            id="a-long-title",
+        ),
+    ],
+)
+def test_a_cards_answer_names_by_title_the_cards_the_user_still_sees(
+    titles: list[str | None],
+    removed: list[str],
+    auto_add: bool,
+    shown: list[str],
+    named: list[str],
+    unnamed: list[str],
+) -> None:
+    """The answer kept for a turn its cards answered names, for a later turn's model,
+    the cards the turn drew that the user still sees, within the digest's bounds on a
+    turn's cards. A card the turn took off again is left out, a card held off the
+    canvas stays, and no component id is named."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.auto_add = auto_add
+    for n, title in enumerate(titles):
+        land_component(state, _titled(f"cmp_{n}", title))
+    remove_cards(state, removed, all_cards=False)
+
+    answer = state.cards_answer()
+
+    assert [card["component_id"] for card in state.turn_cards_shown()] == shown
+    assert all(name in answer for name in named), answer
+    assert not any(name in answer for name in unnamed), answer
 
 
 # --- the canvas digest entry: what each card shows ---------------------------
@@ -1907,6 +1995,59 @@ def test_a_stored_pending_card_keeps_each_decision_s_unit_beside_the_card_and_fr
     stored = [entry["card"], *entry["frames"]]
     assert all("unit" not in d for frame in stored for d in frame.get("decisions") or ())
     assert (restored.card, restored.frames) == (card, (note, card))
+
+
+def test_a_stored_unit_question_is_kept_in_its_whole_units_form() -> None:
+    """A unit question marks the emitted frame with the `unit` input and its offer. An
+    instance rolled back to a model without them, or to one that adds `decisions` to
+    each frame holding units, must still load the stored frame and answer the question.
+    So the frame and the pending question are kept in the form a client that renders
+    no unit question is asked it, a `single_select` over the offer's whole units, the
+    offer under a key of its own, and both are restored on load."""
+    raw = json.loads(
+        (
+            Path(__file__).parent / "wire_fixtures" / "studio" / "event-18-elicitation-unit.json"
+        ).read_text()
+    )
+    asked = ElicitationRequest.model_validate(raw)
+    note = MessageComplete(event="message.complete", seq=4, text="One question first.")
+    offer = asked.questions[0].unit
+    assert offer is not None
+    question = dataclasses.replace(
+        _UNIT_QUESTION, id="q1", unit=offer, options=dict(whole_unit_options(offer))
+    )
+    pending = _PendingInterrupt(
+        adk_id="adk_1",
+        kind="elicitation",
+        frames=(note, asked),
+        questions=(question,),
+        skippable=True,
+    )
+
+    entry = studio_store._serialize_pending({"int_1": pending})["int_1"]
+    restored = studio_store._deserialize_entry(json.loads(json.dumps(entry)))
+
+    whole = list(whole_units(asked.questions[0].unit))
+    (framed,) = [q for frame in entry["frames"] for q in frame.get("questions") or ()]
+    assert "unit" not in framed
+    assert framed["input"] == ElicitationInput.SINGLE_SELECT.value
+    assert [option["id"] for option in framed["options"]] == whole
+    assert framed["allow_free_text"] is False
+    (kept,) = entry["questions"]
+    assert (kept["input"], kept["native_input"]) == ("single_select", "unit")
+    assert list(kept["options"]) == whole
+    assert "frames_units" not in entry
+    assert restored.frames == (note, asked)
+    assert restored.questions == (question,)
+    # A page sent the stored form, as a release with no unit question serves it,
+    # answers with a pick, which reads as that whole unit.
+    pick = OptionAnswer(kind="option", option_id=whole[-1])
+    assert _answers_refusal(restored.questions, {"q1": pick}) is None
+    unit = whole_units(asked.questions[0].unit)[whole[-1]]
+    assert _resume_answer(restored.questions[0], pick) == {
+        "kind": "unit",
+        **unit.model_dump(mode="json", exclude_none=True),
+    }
 
 
 def test_awaiting_answer_excludes_an_entry_marked_resuming() -> None:

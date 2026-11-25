@@ -18,7 +18,7 @@ from harness import planner_adapter
 from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
 from harness.wiring import build_planner, build_stated_scope_reader
-from planner.stated_scope import ApisStatedScopeReader
+from planner.stated_scope import ApisStatedScopeReader, apis_stated_scope_reader
 
 from .planner_host import PlannerHarness
 from .scripted_genai import ScriptedGenai, reply, text_part
@@ -75,9 +75,33 @@ async def test_the_planner_looks_up_each_request_in_the_prefix_cache_it_is_given
     assert prefix_cache.lookups == [(scripted.client, request.model, request.config)]
 
 
-def test_the_stated_scope_reader_is_built_only_while_the_setting_is_on() -> None:
+async def test_the_stated_scope_reader_is_built_only_while_the_setting_is_on() -> None:
     assert build_stated_scope_reader(Settings(planner_stated_scope=False)) is None
-    assert build_stated_scope_reader(Settings(planner_stated_scope=True)) is not None
+    reader = build_stated_scope_reader(Settings(planner_stated_scope=True))
+    assert reader is not None
+    await reader.aclose()
+
+
+async def test_the_stated_scope_reader_needs_no_presentation_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`PRESENTATION_PUBLIC_URL` is presentation-mcp's, and a process that builds only
+    the planner (the planner eval) does not set it."""
+    monkeypatch.delenv("PRESENTATION_PUBLIC_URL", raising=False)
+    monkeypatch.setenv("DFO_APIS_URL", "http://apis.example.test:9123")
+    built: list[str] = []
+
+    def _record(*, base_url: str) -> ApisStatedScopeReader:
+        built.append(base_url)
+        return apis_stated_scope_reader(base_url=base_url)
+
+    monkeypatch.setattr("harness.wiring.apis_stated_scope_reader", _record)
+
+    reader = build_stated_scope_reader(Settings(planner_stated_scope=True))
+
+    assert reader is not None
+    await reader.aclose()
+    assert built == ["http://apis.example.test:9123"]
 
 
 async def test_closing_the_stated_scope_reader_closes_its_client() -> None:

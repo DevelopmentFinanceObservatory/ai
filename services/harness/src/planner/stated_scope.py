@@ -11,10 +11,15 @@ with what is held (`stated_scope_record`, `submission.service._provider_records`
 counted otherwise than the user's words name reads so on the plan card.
 
 A read that fails records nothing, so `propose_plan` admits a plan only on a reading it
-holds. A failure that can pass answers `SURFACE_UNAVAILABLE`, asking the planner to
-propose again. A failure no retry changes (a 404, a refused request) ends the entry on
-`STATED_SCOPE_UNREADABLE`. A turn with no words of the user's, such as a chip's or one
-outside Studio, holds no reading, and admission compares nothing.
+holds. Each read retries on its own (`_READ_ATTEMPTS`), so nothing carries from one read
+to the next. A read that still fails ends the entry: on `STATED_SCOPE_UNAVAILABLE`, which
+asks the user to try again shortly, where the failure can pass, and on
+`STATED_SCOPE_UNREADABLE`, a fault in the system, where it cannot. An apis that serves
+no stated-scope route (`StatedScopeNotServedError`), one deployed before the route or
+rolled back past it, holds no reading of the turn's words, so admission compares
+nothing, as for a turn with no words of the user's, such as a chip's or one outside
+Studio. Only Search's capabilities document can say the route is not served, so a 404
+from a wrong address ends the entry; `PLANNER_STATED_SCOPE=false` turns the read off.
 
 Two more slots hold for the turn: the pins Search refused to compile on a declared
 option (`UNCOMPILED_STATE_KEY`), and the compiles moving a declared option beside a
@@ -25,7 +30,8 @@ proposal does not post again.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from typing import NamedTuple, Protocol
 
 from common.apis_auth import apis_auth_provider
@@ -117,24 +123,93 @@ class StatedScopeRecord(StrictModel):
     readings: dict[str, TextReading]
 
 
+class StatedScopeNotServedError(Exception):
+    """The apis read serves no stated-scope route, as one deployed before the route, or
+    rolled back past it, does: it answered the route 404, and its Search capabilities
+    document lists no live `stated_scope` door."""
+
+
 class StatedScopeReader(Protocol):
     """Search's reader of the scope words of `texts`, one reading per text, in order.
 
-    Raises `LiveApisError` when Search does not answer."""
+    Raises `StatedScopeNotServedError` when the apis read serves no stated-scope route,
+    and `LiveApisError` when Search does not answer otherwise."""
 
     async def __call__(self, texts: Sequence[str]) -> Sequence[TextReading]: ...
 
 
-class ApisStatedScopeReader:
-    """`StatedScopeReader` over dfo-apis' route, through `LiveApisClient`."""
+# The status an apis answers a path it does not route with. The route itself answers
+# none: it reads any text it is given, and refuses a request outside its bounds 400.
+_NOT_SERVED_STATUS = 404
 
-    def __init__(self, client: LiveApisClient) -> None:
+# The door Search's capabilities document lists when the apis serves the route.
+_STATED_SCOPE_DOOR = "stated_scope"
+
+# How long the reader keeps the capabilities document's answer on whether the route
+# is served. Short, so a process sees an apis release or rollback within a minute.
+_DOORS_TTL_S = 60.0
+
+
+class ApisStatedScopeReader:
+    """`StatedScopeReader` over dfo-apis' route, through `LiveApisClient`.
+
+    A 404 from the route reads as the route not served only when Search's capabilities
+    document is read and lists no live `stated_scope` door, as an apis deployed before
+    the route does. That answer is kept for `_DOORS_TTL_S` by `clock`. A 404 the document
+    does not explain, such as a wrong or retired `DFO_APIS_URL` answers, and a document
+    that cannot be read, raise the route's own `LiveApisError`. The reader logs a warning
+    when it first finds the route not served, and again only after a read has succeeded
+    since, so a process reading an apis without the route logs it once."""
+
+    def __init__(
+        self, client: LiveApisClient, *, clock: Callable[[], float] = time.monotonic
+    ) -> None:
         self._client = client
+        self._clock = clock
+        self._served: bool | None = None
+        self._served_expires = float("-inf")
+        self._not_served_logged = False
 
     async def __call__(self, texts: Sequence[str]) -> Sequence[TextReading]:
         """Search's readings of `texts`, in order."""
-        readings = await self._client.read_stated_scopes(texts=texts)
+        try:
+            readings = await self._client.read_stated_scopes(texts=texts)
+        except LiveApisError as exc:
+            if exc.status != _NOT_SERVED_STATUS or await self._route_served():
+                raise
+            if not self._not_served_logged:
+                self._not_served_logged = True
+                logger.warning(
+                    "stated scope not served: apis answered the route %s and lists no %s "
+                    "door; plans are admitted with no stated scope until it serves one",
+                    exc.status,
+                    _STATED_SCOPE_DOOR,
+                )
+            raise StatedScopeNotServedError from exc
+        self._not_served_logged = False
         return [TextReading.of(reading) for reading in readings]
+
+    async def _route_served(self) -> bool:
+        """Whether Search's capabilities document lists a live `stated_scope` door. A
+        failure to read the document that can pass is raised, so the read ends on a
+        retryable refusal; any other reads as served, so the route's 404 stands."""
+        if self._clock() < self._served_expires and self._served is not None:
+            return self._served
+        try:
+            doors = await self._client.read_search_doors()
+        except LiveApisError as exc:
+            logger.error(
+                "stated scope route answered 404 and the search capabilities document "
+                "could not be read: status=%s code=%s",
+                exc.status,
+                exc.code,
+            )
+            if exc.retryable:
+                raise
+            return True
+        self._served = _STATED_SCOPE_DOOR in doors
+        self._served_expires = self._clock() + _DOORS_TTL_S
+        return self._served
 
     async def aclose(self) -> None:
         """Release the client's connection pool."""
@@ -183,11 +258,13 @@ async def read_stated_scope(
     """Read the turn's words with `reader` once a turn, and hold the reading
     (`STATED_SCOPE_STATE_KEY`).
 
-    A turn with no words of the user's holds nothing, so admission compares nothing.
-    Returns `None` once the reading is held. A read Search did not answer holds
-    nothing new and returns the `SURFACE_UNAVAILABLE` refusal where the failure can pass
-    (`LiveApisError.retryable`), and the `STATED_SCOPE_UNREADABLE` refusal, which ends the
-    entry, where no retry changes it.
+    A turn with no words of the user's holds nothing, so admission compares nothing. An
+    apis that serves no stated-scope route (`StatedScopeNotServedError`) holds no
+    reading of them either. Returns `None` once the reading is held, or where none is.
+    A read Search did not answer, after the reader's own retries, holds nothing new and
+    returns the `STATED_SCOPE_UNAVAILABLE` refusal where the failure can pass
+    (`LiveApisError.retryable`) and the `STATED_SCOPE_UNREADABLE` refusal where it
+    cannot. Both end the entry.
     """
     words = _turn_words(current_user_message.get())
     if words is None:
@@ -201,6 +278,9 @@ async def read_stated_scope(
             texts = wanted[start : start + _MAX_TEXTS]
             read = await reader(texts)
             readings.update(zip(texts, read, strict=True))
+    except StatedScopeNotServedError:
+        state[STATED_SCOPE_STATE_KEY] = None
+        return None
     except LiveApisError as exc:
         logger.warning(
             "stated scope not read: status=%s code=%s retryable=%s texts=%d",
@@ -210,25 +290,12 @@ async def read_stated_scope(
             len(wanted),
         )
         if exc.retryable:
-            return stated_scope_unread()
+            return _stated_scope_unavailable(status=exc.status, code=exc.code)
         return _stated_scope_unreadable(status=exc.status, code=exc.code)
     state[STATED_SCOPE_STATE_KEY] = StatedScopeRecord(words=words, readings=readings).model_dump(
         mode="json"
     )
     return None
-
-
-def stated_scope_unread() -> dict[str, object]:
-    """The `SURFACE_UNAVAILABLE` problem for a read of the provider scope the user's
-    words state that did not complete, or for a text admission needs that no reading is
-    held for. The same proposal can succeed later."""
-    return problem(
-        ProblemCode.SURFACE_UNAVAILABLE,
-        "Whose spending the user's words ask for could not be read from Search just now, so "
-        "nothing was recorded; propose the plan again.",
-        outcome=Outcome.REFUSED,
-        detail={"read": "stated_scope"},
-    )
 
 
 def _stated_scope_unreadable(*, status: int | None, code: str | None) -> dict[str, object]:
@@ -240,6 +307,20 @@ def _stated_scope_unreadable(*, status: int | None, code: str | None) -> dict[st
         ProblemCode.STATED_SCOPE_UNREADABLE,
         "Whose spending the user's words ask for cannot be read from Search, and proposing "
         "again fails the same way, so nothing was recorded.",
+        outcome=Outcome.REFUSED,
+        detail={"read": "stated_scope", "status": status, "code": code},
+    )
+
+
+def _stated_scope_unavailable(*, status: int | None, code: str | None) -> dict[str, object]:
+    """The `STATED_SCOPE_UNAVAILABLE` problem for a read that failed in a way that can
+    pass, after the reader's own retries. It ends the entry
+    (`harness.sentences.TERMINAL_PROPOSE_CODES`), and its sentence asks the user to try
+    again shortly. `detail` names the read and Search's answer for the logs."""
+    return problem(
+        ProblemCode.STATED_SCOPE_UNAVAILABLE,
+        "Whose spending the user's words ask for could not be read from Search, which did "
+        "not answer, so nothing was recorded.",
         outcome=Outcome.REFUSED,
         detail={"read": "stated_scope", "status": status, "code": code},
     )
