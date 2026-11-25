@@ -7126,7 +7126,8 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     title = us_2023_block("health")["resolved"]["facets"]["provenance"]["label"]
     assert stated.chosen == f"the {title} total counting bilateral plus imputed multilateral"
     assert stated.rationale.endswith(
-        "The total counts bilateral plus imputed multilateral, the part bilateral flows only."
+        "The total counts bilateral plus imputed multilateral, and the part counts bilateral "
+        "flows only."
     )
 
 
@@ -9169,23 +9170,28 @@ async def _share_over_every(
     *,
     year: int = 2023,
     pooled: bool = True,
+    donor: str | None = None,
+    years: tuple[int, int] | None = None,
 ) -> dict[str, object]:
-    """Propose the part `block` as a share of its whole over every `axis`, a donor or
-    recipient, over `year`, with `surface` answering the whole; `block` is shown. The
-    whole states no entities or `across`, and with `pooled` it is summed by year
-    before the share reads it.
-    The part names its donor by Search's label for it, and Africa as its recipient
-    where `block` names Africa's set there, else Search's label for its recipient."""
+    """Propose the part `block` as a share of its whole over every `axis`, a donor,
+    recipient or provider, over `year`, or `years` where given, with `surface`
+    answering the whole; `block`
+    is shown. The whole states no entities or `across`, and with `pooled` it is
+    summed by year before the share reads it.
+    The part names its donor `donor`, else by Search's label for it, and Africa as
+    its recipient where `block` names Africa's set there, else Search's label for
+    its recipient."""
     _show_blocks(ctx, block)
     resolved = block["resolved"]
     labels = {e["role"]: e["label"] for e in resolved["entities"]}
     held = resolved["scope_choices"]["base"]["identity"]["entities"]
-    named = [Entity(name=labels["origin"], role="donor")]
+    named = [Entity(name=donor or labels["origin"], role="donor")]
     if "destination" in held:
         group = (resolved.get("entity_groups") or {}).get("destination")
         recipient = group["label"] if group else labels["destination"]
         named.append(Entity(name=recipient, role="recipient"))
-    period = Period(start=year, end=year)
+    start, end = years or (year, year)
+    period = Period(start=start, end=end)
     return await call_planner_tool(
         _tools_reading(cast(ToolSurface, surface))["propose_plan"],
         question="What share of the aid came from the United States in 2023?",
@@ -9676,7 +9682,7 @@ def test_a_whole_search_counts_on_another_provider_scope_says_what_each_counts()
 
     assert stated.rationale.endswith(
         "so both sides count the same recipients, sectors and measure basis. The total "
-        "counts bilateral flows only, the part bilateral plus imputed multilateral."
+        "counts bilateral flows only, and the part counts bilateral plus imputed multilateral."
     ), stated.rationale
 
 
@@ -10075,6 +10081,62 @@ async def test_a_donor_whole_searchs_answer_compiles(
     assert compiled.workflow is not None, compiled.issues
 
 
+@pytest.mark.parametrize(
+    ("name", "donor", "refs", "years"),
+    [
+        # Search labels the whole's donor "United States of America".
+        pytest.param("us_bilateral", "United States", ["country/USA"], (2010, 2023), id="us"),
+        # Search labels the whole's donor "Group of Seven".
+        pytest.param("g7_bilateral", "G7", ["GroupOfSeven"], (2015, 2023), id="g7"),
+    ],
+)
+async def test_a_provider_whole_reads_its_parts_names_by_the_refs_search_bound(
+    decision: DecisionFactory, name: str, donor: str, refs: list[str], years: tuple[int, int]
+) -> None:
+    """US and G7 bilateral ODA as shares of their wholes over every provider, the
+    part naming its donor as the planner wrote it, which Search bound to `refs`
+    on the part's search answer and labels otherwise. Search's answer for the whole
+    restates no entity row, so the whole's source carries the part's bound row for
+    the donor it keeps, and the plan compiles."""
+    surface = _SearchWhole(name)
+    ctx = _FakeToolContext()
+    block = json.loads(json.dumps(surface.recorded["part"]))
+    block["_bound_refs"] = [{"identity": donor, "text": donor, "refs": refs}]
+    proposed = await _share_over_every(
+        cast(Any, surface), ctx, block, "provider", decision, years=years, donor=donor
+    )
+    assert proposed["outcome"] == Outcome.OK.value, proposed
+
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    refused = _SearchRefused()
+    discover_source = build_discover_source(surface=cast(ToolSurface, refused))
+    for requirement_id in (_PART, _WHOLE):
+        found = await discover_source(requirement_id=requirement_id, state=ctx.state)
+        assert found["status"] == "definite", (requirement_id, found)
+    shown = held_sources(ctx.state)
+    discovered = {
+        rid: source_from_spec_block(cast(Any, shown[spec_id].spec_block(spec_id)))
+        for rid, spec_id in dict(_pins(ctx)).items()
+        if spec_id is not None
+    }
+    assert discovered[_WHOLE].bound_refs == ()
+    tools = await McpSurface(
+        sources={"data-mcp": data_mcp, "analysis-mcp": analysis_mcp}
+    ).list_tools()
+    translation = build_translation(plan, {rid: s.spec_id for rid, s in discovered.items()})
+    compiled = compile_plan(
+        plan=plan,
+        translation=translation,
+        schemas={tool.name: tool for tool in tools},
+        discovered=discovered,
+    )
+    assert compiled.workflow is not None, compiled.issues
+    (binding,) = [b for b in compiled.workflow.evidence_bindings if b.requirement_id == _WHOLE]
+    whole = compiled.workflow.source_of(binding.step_id)
+    assert [row.refs for row in whole.bound_refs] == [tuple(refs)]
+
+
 def test_a_part_with_no_scope_record_is_named_by_its_option_on_the_wholes_record() -> None:
     """US bilateral ODA over its whole over every provider, the part's block carrying no
     scope record: Search states the part counts bilateral flows, and the whole's record
@@ -10090,7 +10152,7 @@ def test_a_part_with_no_scope_record_is_named_by_its_option_on_the_wholes_record
 
     assert stated.endswith(
         "The total counts bilateral plus core contributions to multilaterals, "
-        "the part bilateral flows only."
+        "and the part counts bilateral flows only."
     ), stated
 
 
@@ -10203,7 +10265,7 @@ def test_a_wholes_caveat_reads_each_blocks_scope_record_once(
     )[_WHOLE]
 
     assert sorted(read) == sorted([part["spec_id"], whole_block["spec_id"]])
-    assert stated.rationale.endswith("the part bilateral flows only."), stated.rationale
+    assert stated.rationale.endswith("and the part counts bilateral flows only."), stated.rationale
 
 
 def test_a_wholes_caveat_names_its_total_by_axis_where_searchs_groups_are_unreadable() -> None:

@@ -66,6 +66,8 @@ def test_entities_phrase_joins_names_in_order_deduplicated() -> None:
     entities = [Entity(name="Kenya"), Entity(name="China"), Entity(name="Kenya")]
     assert phrasing.entities_phrase(entities) == "Kenya and China"
     assert phrasing.entities_phrase([Entity(name="Kenya")]) == "Kenya"
+    # A whole (`whole_of`) states no entity and no `across` word.
+    assert phrasing.entities_phrase([]) == ""
 
 
 def test_entities_phrase_tells_a_sets_members_from_the_set() -> None:

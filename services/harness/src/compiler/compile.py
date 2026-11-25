@@ -376,6 +376,33 @@ def wholes_on_their_sources(
     return wholes
 
 
+def with_part_refs(whole: SelectedSource, part: SelectedSource | None) -> SelectedSource:
+    """`whole`, a whole's source, carrying the rows Search bound for its part's names
+    (`SelectedSource.bound_refs`) on the parties both sources bind.
+
+    Search derives a whole from its part's identity (`dataset_resubmit` with
+    `whole`), and that answer restates no entity row, so the whole's source binds
+    none of the planner's names, and "United States" or "G7" would be matched to
+    the whole's labels ("United States of America", "Group of Seven") by name. A
+    part's row is carried where every ref Search bound for it is a party `whole`
+    binds: an entity's ref, or a set's own ref or published total. That holds on
+    each side the whole keeps the part's parties on, and fails on the side it
+    opens and on a side it rebinds to other parties (DAC2a's all recipients for
+    a part to developing countries), whose names the whole does not read
+    (`planner.plan.whole_on_source`). With no part source, `whole` is as given.
+    """
+    if part is None:
+        return whole
+    held = {entity.ref for entity in whole.entities}
+    held |= {ref for group in whole.groups for ref in (group.ref, group.total) if ref}
+    carried = tuple(
+        row for row in part.bound_refs if row not in whole.bound_refs and held.issuperset(row.refs)
+    )
+    if not carried:
+        return whole
+    return whole.model_copy(update={"bound_refs": (*whole.bound_refs, *carried)})
+
+
 class _Ratio(Enum):
     """The ratio a frame holds (`_Build._ratio_held`), a share in `PERCENT_UNIT` or one with no unit."""
 
@@ -675,6 +702,9 @@ class _Build:
                 else requirement.stat_vars
             )
             source = stat_var_reading(source, requested)
+            stated = self.plan_requirements.get(requirement.id)
+            if isinstance(stated, DatasetRequirement) and stated.whole_of is not None:
+                source = with_part_refs(source, self.discovered.get(stated.whole_of.part))
             self.sources[operation.id] = source
             self._check_summable(operation, requirement, source)
             self._check_breakdown(operation, requirement, source)
