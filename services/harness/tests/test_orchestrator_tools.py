@@ -113,6 +113,8 @@ from planner.plan import (
     SCOPE_UNREAD_BLOCK_KEY,
     AskBreakdown,
     DatasetRequirement,
+    PinSource,
+    ResolvedBy,
     current_earlier_block,
     current_recorded_identity,
 )
@@ -845,6 +847,54 @@ async def test_a_parsed_search_sends_the_users_message_and_the_choices_the_conve
         ],
     )
     assert "context" not in raw
+
+
+@pytest.mark.parametrize(
+    ("members", "resolved_by"),
+    [(True, ResolvedBy.PLANNER_DEFAULT), (None, ResolvedBy.USER)],
+    ids=["members-flag-sent", "no-flag"],
+)
+async def test_a_members_only_region_the_model_flagged_is_the_models_decision(
+    members: bool | None, resolved_by: ResolvedBy
+):
+    """ "What share of G7 aid to developing countries went to Africa?": the model sent
+    "Africa" with `members`, which Search reads as an explicit members-only region
+    choice. The flag is the model's reading, so the plan's decision "Africa's
+    countries only" is the plan's, where the same explicit choice with no flag sent
+    stays the user's."""
+    part = _scoped_part()
+    scope = part["scope"]
+    region = next(choice for choice in scope["choices"] if choice["axis"] == "region")
+    region["provenance"] = "explicit"
+    scope["entries"] = [
+        {
+            **entry,
+            "provenance": "explicit",
+            "origin": {"kind": "text", "text": "Africa", "start": 0, "end": 6},
+        }
+        if entry["axis"] == "region"
+        else entry
+        for entry in scope["entries"]
+    ]
+    spec_id = part["spec_id"]
+    block = {"resolved": {"scope_choices": scope}}
+    resolver = _resolver(_digest({**part, "spec_block": block}))
+    tools, ctx = _tools(resolver)
+    entity: dict[str, Any] = {"text": "Africa", "role": "to"}
+    if members is not None:
+        entity["members"] = members
+
+    await tools["search"](ctx, [{"variable": "aid", "entities": [entity]}])
+
+    stored = ctx.state["orchestrator:specs"][spec_id]
+    decisions = submission_service.scope_choice_decisions(
+        {spec_id: PinSource(block=stored, settled=True)}
+    )
+    (decision,) = [
+        d for d in decisions[spec_id] if d.scope is not None and d.scope.axis == "region"
+    ]
+    assert decision.chosen == "Africa's countries only"
+    assert decision.resolved_by is resolved_by
 
 
 @pytest.mark.parametrize(

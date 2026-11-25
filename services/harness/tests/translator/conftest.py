@@ -146,6 +146,13 @@ def data_server(search_calls: list[dict[str, Any]]) -> FastMCP:
                     "nearest_real": [_spec(SPEC_OTHER, "total debt service paid by Kenya")],
                 },
             )
+        elif variable.startswith("headline"):
+            # Search writes a stated unit into the identity it compiles
+            # (`facets.unit`) and a stated source into its source slot, so
+            # the same ask with either answers a twin spec, SPEC_THIRD, of
+            # SPEC_KENYA, compiled with neither.
+            spec_id = SPEC_THIRD if "unit" in part or "sources" in part else SPEC_KENYA
+            envelope = _envelope("definite", warnings, spec=_spec(spec_id, "headline ODA"))
         elif variable.startswith("aid"):
             envelope = _envelope(
                 "candidates",

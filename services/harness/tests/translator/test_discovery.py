@@ -1956,6 +1956,87 @@ async def test_a_pin_cannot_resurrect_a_no_data_answers_nearest_series(
     assert result["action"]["arguments"]["kind"] == ReferralKind.PINNED_SOURCE_NOT_FOUND.value
 
 
+async def test_a_pin_with_a_stated_unit_is_found_by_its_own_search(
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # A pin Search compiled with no unit, and a requirement stating current
+    # USD (`requirement`'s default). Sent with the unit, Search would answer
+    # a twin differing from the pin in `facets.unit` alone, and the pin would
+    # be referred back as not found. The unit is checked against the pin's
+    # own at compile instead.
+    pinned = requirement(measure="headline net ODA", source_spec_id=SPEC_KENYA)
+    assert pinned.unit is not None
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[pinned, derived_requirement()],
+        )
+    )
+
+    result = await _discover(surface, context)
+
+    assert "action" not in result
+    assert [s["spec_id"] for s in result["sources"]] == [SPEC_KENYA]
+    (call,) = search_calls
+    assert "unit" not in call["parts"][0]
+
+
+@pytest.mark.parametrize(
+    ("stated_source", "sent", "found"),
+    [
+        ("OECD DAC2a", None, True),
+        ("IMF", [{"text": "IMF"}], False),
+    ],
+    ids=["confirmed-by-the-pin", "not-confirmed"],
+)
+async def test_a_pin_whose_source_confirms_the_stated_one_is_searched_without_it(
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    stated_source: str,
+    sent: list[dict[str, str]] | None,
+    found: bool,
+) -> None:
+    # The pin's block, shown over other years, names OECD DAC2A. A stated
+    # source it confirms adds nothing to find, and sent to Search would bind
+    # the twin's source slot, so the search finds the pin. A source it does
+    # not confirm goes, unit included, so Search looks for one that does
+    # (`_pin_source`).
+    pinned = requirement(
+        measure="headline net ODA", source_spec_id=SPEC_KENYA, source=stated_source
+    )
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[pinned, derived_requirement()],
+        )
+    )
+    block = _spec(
+        SPEC_KENYA,
+        "headline ODA",
+        coverage={"kind": "breadth", "has_data": True},
+        facets={"provenance": {"ref": "provenance/OECDDAC2A", "label": "OECD DAC2A"}},
+    )
+    _shown(context, SPEC_KENYA, block)
+
+    result = await _discover(surface, context)
+
+    assert ("action" not in result) is found
+    (call,) = search_calls
+    assert call["parts"][0].get("sources") == sent
+    assert ("unit" in call["parts"][0]) is not found
+
+
 async def test_a_pinned_source_not_found_yields_the_referral_action(
     surface: McpSurface,
     draft: DraftFactory,

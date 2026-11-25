@@ -1598,3 +1598,42 @@ def test_a_rank_over_recipients_of_a_composite_family_without_the_flag_is_refuse
     assert [(issue.code, issue.operation_id) for issue in result.issues] == [
         (CompileIssueCode.INPUT_SHAPE_UNSUPPORTED, "top_op")
     ]
+    # Summing is refused too (`_check_summable`), so the advice is a source
+    # binding one StatVar.
+    (issue,) = result.issues
+    assert "stat_vars='sum'" not in issue.reason
+    assert "binds one StatVar" in issue.reason
+
+
+@pytest.mark.parametrize(
+    ("sums_components", "codes"),
+    [
+        (True, []),
+        (False, [CompileIssueCode.FAMILY_UNSUMMABLE]),
+        (None, [CompileIssueCode.FAMILY_UNSUMMABLE]),
+    ],
+    ids=["declared-sum", "spliced", "no-flag"],
+)
+def test_a_family_with_no_open_axis_reads_summed_only_where_its_components_sum(
+    compile_question: Callable[..., CompileResult],
+    sums_components: bool | None,
+    codes: list[CompileIssueCode],
+) -> None:
+    """The plan states `sum` over a family with no open axis. apis adds the
+    members only where the source declares they sum, and refuses any other
+    sum `rollup_not_summable`, as it refuses a spliced composite whose members
+    serve disjoint years (`sums_components` false), so compile refuses it
+    before the fetch."""
+    block = _dac2a_inclusive(sums_components=sums_components is not None)
+    if sums_components is False:
+        block["resolved"]["stat_vars"]["sums_components"] = False
+    source = source_from_spec_block(block)
+    assert source.open_axes == ()
+
+    result = _compile_explicit_total(
+        compile_question,
+        source,
+        [Entity(name="United States", role="donor"), Entity(name="Kenya", role="recipient")],
+    )
+
+    assert [issue.code for issue in result.issues] == codes

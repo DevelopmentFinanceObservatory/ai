@@ -334,6 +334,7 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             | CompileIssueCode.SUM_UNITS_DIFFER
             | CompileIssueCode.SHARE_UNITS_DIFFER
             | CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE
+            | CompileIssueCode.SHARE_PART_MEMBERS_ONLY
             | CompileIssueCode.WHOLE_SUM_UNMATCHED
             | CompileIssueCode.FRAME_UNITS_DIFFER
             | CompileIssueCode.FRAME_UNIT_FORMS_DIFFER
@@ -447,7 +448,8 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
     ),
     CompileIssueCode.FAMILY_UNSUMMABLE: (
         "set the requirement's `stat_vars` to 'separate', or ask for a measure that names one "
-        "value on each axis the reason lists"
+        "value on each axis the reason lists; where it lists none, ask for a measure whose "
+        "source binds one StatVar"
     ),
     CompileIssueCode.SUM_UNITS_DIFFER: (
         "state the same unit on both sides' requirements, or on neither"
@@ -464,6 +466,11 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "is one measure set against another that does not hold it, replace the share with a "
         "`quotient_of`; otherwise give the denominator entities that hold every party the "
         "numerator names"
+    ),
+    CompileIssueCode.SHARE_PART_MEMBERS_ONLY: (
+        "read the set the numerator names as its published total: leave `members` unset on "
+        "that entity, so Search binds the set's own figure; for its members' figures, state "
+        "them as a breakdown or rank of each member rather than a share of this whole"
     ),
     CompileIssueCode.WHOLE_SUM_UNMATCHED: (
         "propose the plan again with the whole as it stands, so `propose_plan` reads the "

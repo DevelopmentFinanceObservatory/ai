@@ -92,6 +92,7 @@ it timed out and `discovery_budget_exhausted` otherwise (`_budget_referral`).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -1328,6 +1329,8 @@ def search_part(
     variable: str,
     *,
     kept: Sequence[Mapping[str, object]] = (),
+    confirming_pin: bool = False,
+    source_confirmed: bool = False,
 ) -> dict[str, object]:
     """One `search` part, built from `requirement`'s own fields plus `variable`.
 
@@ -1336,6 +1339,18 @@ def search_part(
     the question names in the user's own words, goes as one included
     `sources` entry, with its chosen reference and exclusion flag when stated.
     A publisher's series code goes as the part's `source_code`.
+
+    `confirming_pin` is a search that confirms `requirement`'s pin, rather
+    than one finding a source in place of a pin set aside or one that fails
+    the stated source (`_confirms_pin`). Search writes a stated unit into the
+    identity it compiles (`facets.unit`) and a stated source into its source
+    slot, so a search for a pin compiled without them answers a twin that
+    differs from the pin there alone, and the pin is never found among its
+    sources. Such a search sends no unit, which the compiler checks against
+    the pin's own (`compiler.evidence`, `UNIT_MISMATCH`), and no `sources`
+    when the pin's source on record already confirms the stated one
+    (`source_confirmed`). A pin whose source on record does not confirm it,
+    or that has none on record, is searched by it.
 
     An entity's role goes as the `PARTY_ROLES` word it stands for
     (`party_role`), each a word of `search`'s role lexicon. A role standing
@@ -1372,11 +1387,11 @@ def search_part(
         if requirement.period_end_open
         else f"{requirement.period.start} to {requirement.period.end}"
     )
-    if requirement.unit is not None:
+    if requirement.unit is not None and not confirming_pin:
         part["unit"] = _unit_phrase(requirement.unit)
     if open_roles := requirement_open_roles(requirement):
         part["open_roles"] = open_roles
-    if requirement.source is not None:
+    if requirement.source is not None and not (confirming_pin and source_confirmed):
         mention: dict[str, object] = {"text": requirement.source}
         if requirement.source_ref is not None:
             mention["ref"] = requirement.source_ref
@@ -3172,6 +3187,40 @@ async def _pin_source(
     return source.model_copy(update={"searched_as": requirement.measure}), honoured
 
 
+def _confirms_pin(
+    state: SessionState, *, plan: Plan, requirement: DatasetRequirement
+) -> tuple[bool, bool]:
+    """Whether a fresh search for `requirement` confirms its pin, and whether the pin's
+    source on record confirms the `source` and `source_code` it states.
+
+    The search confirms the pin unless `_source_from_resolve_pin` set the pin's
+    source aside (`DiscoveryLog.set_aside_pin`) or that source does not confirm
+    the stated source (`compiler.evidence.source_requirement_matches`): those
+    searches look for another source, and `search_part` sends them whole. The
+    source on record is the block the planner was shown or admission compiled
+    (`_resolve_pin_block`), else the one a search recorded for the pin.
+    """
+    pin = requirement.source_spec_id
+    if pin is None:
+        return False, False
+    log = load_log(state)
+    if log.set_aside_pin(requirement_revision(requirement), requirement.id) is not None:
+        return False, False
+    source: SelectedSource | None = None
+    block = _resolve_pin_block(_PinRecords(state), plan=plan, requirement=requirement)
+    if block is not None:
+        with contextlib.suppress(ValueError):
+            source = source_from_spec_block(block)
+    if source is None:
+        source = log.recorded_source(pin)
+    if requirement.source is None and requirement.source_code is None:
+        return True, True
+    if source is None:
+        return True, False
+    confirmed = source_requirement_matches(requirement=requirement, source=source)
+    return confirmed, confirmed
+
+
 def _holds_closed(requirement: DatasetRequirement, source: SelectedSource) -> bool:
     """Whether `source` fails to leave open a side of a flow `requirement`'s `across` asks every member of."""
     return bool(requirement_open_roles(requirement)) and isinstance(
@@ -3767,7 +3816,8 @@ def build_discover_source(*, surface: ToolSurface) -> Callable[..., Awaitable[di
         """Find what data exists for one dataset requirement.
 
         The search is built from the requirement itself: its measure, its
-        entities and their roles, its period, and its unit if it states one.
+        entities and their roles, its period, and its unit if it states one
+        and the search does not confirm a pin (`search_part`).
         Call this once per dataset requirement. A `definite` answer names the
         one source a retrieval of that requirement may use. `candidates`,
         `no_data` and `unsupported` are not yours to resolve: follow the
@@ -3797,10 +3847,13 @@ def build_discover_source(*, surface: ToolSurface) -> Callable[..., Awaitable[di
 
         variable = requirement.measure
         held = load_log(state).named_open_pin(requirement)
+        confirming, source_confirmed = _confirms_pin(state, plan=plan, requirement=requirement)
         part = search_part(
             requirement,
             variable,
             kept=() if held is None else _kept_scope(plan, requirement, held),
+            confirming_pin=confirming,
+            source_confirmed=source_confirmed,
         )
 
         async def _finish(

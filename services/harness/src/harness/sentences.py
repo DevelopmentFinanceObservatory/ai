@@ -211,6 +211,10 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE: (
         "a share divides by a total that does not include the part it is a share of"
     ),
+    CompileIssueCode.SHARE_PART_MEMBERS_ONLY: (
+        "a share counts a region's countries alone against a total that also counts the "
+        "region's flows to no single country"
+    ),
     CompileIssueCode.WHOLE_SUM_UNMATCHED: (
         "a total was planned for another dataset than the one it is read from"
     ),
