@@ -1054,6 +1054,13 @@ UNREADABLE_PLAN_NOTE = (
     "the same question. Ask again for any change you wanted."
 )
 
+# What the card of a plan drafted again opens with when the plan the user answered
+# divided by a total an earlier release worked out (`planner.plan.rests_on_stale_whole`).
+STALE_WHOLE_NOTE = (
+    "The plan you were shown divided by a total worked out before an update, so this plan "
+    "asks for that total again, with any change you asked for."
+)
+
 
 # What the closing text opens with when the plan the user held was stored in
 # a shape this release does not read, and the planner drafted no plan in its

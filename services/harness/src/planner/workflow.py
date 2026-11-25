@@ -342,6 +342,12 @@ class SelectedSource(StrictModel):
     `translator.discovery.DiscoveryLog.selectable` does not offer such a
     source to a requirement that states `across`.
 
+    `provider_counted` is the label of the provider option the source counts,
+    the active option of its block's provider scope choice, `None` where the
+    block states none; the plan card names it beside a provider whole
+    (`harness.plan_display`). It is plain text, since the label comes from
+    another service.
+
     `groups` are the named sets the source binds, one per role column at
     most, each read as its published total or as its members
     (`ResolvedGroup`); empty when the block names none.
@@ -449,6 +455,11 @@ class SelectedSource(StrictModel):
         default=(), exclude_if=lambda codes: not codes
     )
     open_entity_axes: Annotated[tuple[OpenEntityAxis, ...] | None, HASHED_WHEN_SET] = None
+    # Left out of every dump while unset, so a source saved without it keeps its
+    # serialised form.
+    provider_counted: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda label: label is None
+    )
     unit_ref: str | None = None
     unit_label: str | None = None
     unit_per_series: Annotated[bool | None, HASHED_WHEN_SET] = None

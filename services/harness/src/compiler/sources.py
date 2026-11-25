@@ -450,6 +450,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             groups=_groups(_mapping(resolved.get("entity_groups"))),
             bound_refs=_BOUND_ENTITIES.validate_python(block.get("_bound_refs", ())),
             open_entity_axes=open_entity_axes_of(resolved),
+            provider_counted=_provider_counted(resolved),
             unit_ref=_text(unit.get("ref")),
             unit_label=_text(unit.get("label")),
             unit_per_series=True if unit.get("selection") == "per_series" else None,
@@ -1158,6 +1159,20 @@ def block_wire_groups(
     return tuple(found)
 
 
+def _provider_counted(resolved: Mapping[str, object]) -> str | None:
+    """The label of the provider option `resolved`, a spec block's `resolved`, counts:
+    the active option of its provider scope choice (`scope_choices.choices`), `None`
+    where it states none."""
+    for choice in _sequence(_mapping(resolved.get("scope_choices")).get("choices")):
+        if not isinstance(choice, Mapping) or choice.get("axis") != "provider":
+            continue
+        active = _text(choice.get("active"))
+        for option in _sequence(choice.get("options")):
+            if isinstance(option, Mapping) and _text(option.get("option_id")) == active:
+                return _text(option.get("label"))
+    return None
+
+
 def readable_wire_groups(
     block: Mapping[str, object], *, leaving_out: str | None = None
 ) -> tuple[ResolvedGroup, ...] | None:
@@ -1245,11 +1260,15 @@ def open_side_column(axes: Iterable[OpenEntityAxis] | None, role: str) -> str | 
 
     A whole (`planner.plan.WholeOf`) opening that side reads it open where Search
     leaves it so, as the CRS does over every donor, and an aggregate sums it
-    (`planner.plan.WholeSum`). Admission reads the axes off Search's block for
-    the whole's pin (`submission.service._whole_sums`) and the compiler off the
-    source it reads for that pin (`compiler.compile._Build._check_whole_sum`),
-    both through `open_entity_axes_of`, which never fails on a block, so a
-    block whose other fields do not read still answers.
+    (`planner.plan.WholeSum`). Admission reads the axes off Search's block for the
+    whole's pin (`submission.service._whole_sums`), `compile_whole` holds them to
+    Search's statement that it summed the side
+    (`planner.source_reads._whole_fault`), and the compiler and the whole's coverage
+    read them off the source the plan retrieves the whole from
+    (`compiler.compile._Build._check_whole_sum`, `planner.plan.whole_on_source`),
+    which every answer for the whole's spec_id states, whole request or not. Axes
+    that were never read (`None`, a source recorded without the field) say
+    nothing of the side, and each reader decides what that means.
     """
     side = flow_side(role)
     if side is None:

@@ -223,8 +223,8 @@ class CompileIssueCode(StrEnum):
     # A share whose denominator shows it does not hold a party its numerator
     # names on a donor or recipient side (`_Build._check_share_holds_part`).
     SHARE_PART_OUTSIDE_WHOLE = "share_part_outside_whole"
-    # A whole whose source leaves the side it opens open with no sum over it in the
-    # plan, or binds that side with one (`_Build._check_whole_sum`).
+    # A whole whose source Search derived summed over the side it opens with no sum
+    # over it in the plan, or as one total with one (`_Build._check_whole_sum`).
     WHOLE_SUM_UNMATCHED = "whole_sum_unmatched"
     FRAME_UNITS_DIFFER = "frame_units_differ"
     FRAME_UNIT_UNBOUND = "frame_unit_unbound"
@@ -367,7 +367,11 @@ def wholes_on_their_sources(
         if not isinstance(part, DatasetRequirement) or part.whole_of is not None:
             continue
         wholes[requirement_id] = whole_on_source(
-            whole, part, discovered.get(requirement_id), summed=requirement_id in summed
+            whole,
+            part,
+            discovered.get(requirement_id),
+            summed=requirement_id in summed,
+            part_source=discovered.get(part.id),
         )
     return wholes
 
@@ -694,9 +698,12 @@ class _Build:
 
         `propose_plan` adds an aggregate summing the side a whole opens exactly
         where Search's compile of the whole leaves that side open
-        (`planner.plan.WholeSum`). A source leaving it open with no sum would
-        hand every reader one row per party there, and a sum over a source
-        binding the side would read a plan admitted against another source.
+        (`planner.plan.WholeSum`), and the source states the same in its open
+        entity axes (`compiler.sources.open_side_column`), which every answer for
+        the whole's spec_id carries. A source leaving the side open with no sum
+        would hand every reader one row per party there, and a sum over a source
+        binding the side would read a plan admitted against another source. A
+        source whose axes were never read says neither, so it is refused too.
         Proposing the plan again derives the sum from the source, so every
         other issue on a step reading the whole waits for that
         (`_reads_unmatched`).
@@ -710,12 +717,19 @@ class _Build:
         role = opened_role(stated, part)
         if role is None:
             return
+        unread = source.open_entity_axes is None
         open_side = open_side_column(source.open_entity_axes, role) is not None
         summed = requirement.id in self.summed
-        if open_side == summed:
+        if open_side == summed and not unread:
             return
-        held = "leaves every party open" if open_side else "binds one total"
-        plan = "no sum over it" if open_side else "a sum over it"
+        held = (
+            "states no open entity axes"
+            if unread
+            else "leaves every party open"
+            if open_side
+            else "binds one total"
+        )
+        plan = "a sum over it" if summed else "no sum over it"
         self.unmatched.add(requirement.id)
         self._issue(
             CompileIssueCode.WHOLE_SUM_UNMATCHED,
@@ -1888,6 +1902,20 @@ class _Build:
         source = self._source_upstream(op_id)
         return _unit_cell(unit, _denoted_unit(source, unit) if source is not None else None)
 
+    def _derived_whole_of(self, part: Mapping[str, object], whole: Mapping[str, object]) -> bool:
+        """Whether a requirement of `whole`, the requirement ids a denominator rests
+        on, is the declared whole (`planner.plan.WholeOf`) of one of `part`'s, the
+        requirement ids its numerator rests on. A plan reads a whole only as the
+        denominator of a share or quotient whose denominator rests on that whole
+        alone and whose numerator rests on its part alone (`planner.plan._whole_read_fault`),
+        so one such requirement settles both operands."""
+        return any(
+            isinstance(stated := self.plan_requirements.get(requirement_id), DatasetRequirement)
+            and stated.whole_of is not None
+            and stated.whole_of.part in part
+            for requirement_id in whole
+        )
+
     def _check_share_holds_part(self, operation: ShareOfOperation) -> None:
         """Report `SHARE_PART_OUTSIDE_WHOLE` for a share whose denominator shows it
         does not hold a party its numerator keeps.
@@ -1911,6 +1939,10 @@ class _Build:
 
         Nothing is checked where either operand's parties are unknown, whether or
         not it names an entity, where either keeps no party on a column, where the
+        denominator rests on a whole Search derived from a requirement the numerator
+        rests on (`planner.plan.WholeOf`) and keeps every party it reads, since
+        Search refuses a whole that does not hold its part (`part_outside_whole`),
+        where the
         denominator's key column does not resolve, or where both rest on the same
         sources and the denominator narrows none; each skip is logged. A party
         nothing shows is inside or outside is not refused. The refusal names
@@ -1952,6 +1984,13 @@ class _Build:
             for key, kept in whole.kept.items()
             if kept != _resolved_refs(whole.sources[key[0]], key[1])
         }
+        if not narrowed and self._derived_whole_of(part.sources, whole.sources):
+            logger.info(
+                "share %r: its denominator is the whole Search derived from its numerator, "
+                "which Search found holds it",
+                operation.id,
+            )
+            return
         if not narrowed and {source.spec_id for source in part.sources.values()} == {
             source.spec_id for source in whole.sources.values()
         }:

@@ -8843,9 +8843,12 @@ def _flow_source(
     *,
     recipients: Sequence[ResolvedEntity],
     groups: Sequence[ResolvedGroup] = (),
+    axes_read: bool = True,
 ) -> SelectedSource:
     """G7 aid to `recipients`, the parties the source binds on `destination` (none
-    where it leaves the side open), with `groups` its named sets there."""
+    where it leaves the side open), with `groups` its named sets there. Its open
+    entity axes are unread (`None`) where `axes_read` is false, as on a source
+    recorded without them."""
     entities = {"origin": [_G7.ref]}
     if recipients:
         entities["destination"] = [entity.ref for entity in recipients]
@@ -8856,6 +8859,8 @@ def _flow_source(
         groups=(_G7_GROUP, *groups),
         identity={"entities": entities},
         open_entity_axes=None
+        if not axes_read
+        else ()
         if recipients
         else (OpenEntityAxis(column="destination", member_count=150),),
     )
@@ -9002,6 +9007,132 @@ def test_a_share_divides_by_a_whole_that_holds_its_part(
     )
 
     assert _codes(result) == codes
+
+
+@pytest.mark.parametrize("declared", [True, False], ids=["search-derived", "planner-pinned"])
+def test_a_share_over_the_whole_search_derived_is_not_checked_again(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    declared: bool,
+) -> None:
+    """G7 aid to Africa over a total whose source holds the DAC's member countries,
+    which hold no African country. Where the total is the whole Search derived from the
+    part (`whole_of`), Search has already found it holds the part, so the compiler does
+    not check it again; a total the planner pinned is refused."""
+    g7 = Entity(name="G7", role="donor")
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[g7, Entity(name="Africa", role="recipient")],
+    )
+    total = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[]
+        if declared
+        else [g7, Entity(name="developing countries (DAC)", role="recipient", members=True)],
+        whole_of=WholeOf(part="aid", axis="recipient") if declared else None,
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="total"),
+    )
+    members = [
+        ResolvedEntity(role="destination", ref="country/USA", label="United States"),
+        ResolvedEntity(role="destination", ref="country/DEU", label="Germany"),
+    ]
+    dac = ResolvedGroup(
+        role="destination", label="developing countries (DAC)", ref="groups/OECD.DAC"
+    )
+
+    result = build(
+        _draft([decision()], [aid, total, share]),
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="fetch"),
+                denominator=Side(input="fetch_total"),
+            ),
+            terminal=["share"],
+        ),
+        discovered={
+            "aid": _flow_source(source, SPEC_KENYA, recipients=[_AFRICA], groups=[_AFRICA_GROUP]),
+            "total": _flow_source(source, SPEC_OTHER, recipients=members, groups=[dac]),
+        },
+    )
+
+    assert (Code.SHARE_PART_OUTSIDE_WHOLE in _codes(result)) is not declared, result.issues
+
+
+@pytest.mark.parametrize("one", [None, "France"], ids=["every-donor-kept", "narrowed-to-france"])
+def test_a_share_over_a_derived_whole_narrowed_to_one_party_is_checked(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    one: str | None,
+) -> None:
+    """US and French aid to Kenya over its whole over every recipient, the aid of both to
+    developing countries. Search found the whole holds the part, so the compiler does not
+    check it again; a denominator narrowed to France is no longer that whole, and
+    holds no US aid, so the share is refused."""
+    donors = [Entity(name="United States", role="donor"), Entity(name="France", role="donor")]
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[*donors, Entity(name="Kenya", role="recipient")],
+    )
+    total = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[],
+        whole_of=WholeOf(part="aid", axis="recipient"),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="total", entity=one),
+    )
+    usa = ResolvedEntity(role="origin", ref="country/USA", label="United States")
+    fra = ResolvedEntity(role="origin", ref="country/FRA", label="France")
+    developing = ResolvedEntity(
+        role="destination", ref="DACDevelopingCountries", label="developing countries (DAC)"
+    )
+
+    def flows(spec_id: str, recipient: ResolvedEntity) -> SelectedSource:
+        return source(
+            spec_id=spec_id,
+            sentence="official development assistance",
+            entities=(usa, fra, recipient),
+            identity={"entities": {"origin": [usa.ref, fra.ref], "destination": [recipient.ref]}},
+            open_entity_axes=(),
+        )
+
+    result = build(
+        _draft([decision()], [aid, total, share]),
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="fetch"),
+                denominator=Side(input="fetch_total", entity=one),
+            ),
+            terminal=["share"],
+        ),
+        discovered={"aid": flows(SPEC_KENYA, _KENYA), "total": flows(SPEC_OTHER, developing)},
+    )
+
+    assert (Code.SHARE_PART_OUTSIDE_WHOLE in _codes(result)) is (one is not None), result.issues
 
 
 _UNITED_STATES = ResolvedEntity(role="destination", ref="country/USA", label="United States")
@@ -9917,6 +10048,76 @@ def test_a_share_reads_its_whole_as_one_total_whichever_way_its_source_serves_it
         ]
 
 
+@pytest.mark.parametrize("summed", [True, False], ids=["summed", "not-summed"])
+def test_a_whole_whose_source_states_no_open_axes_is_refused_either_way(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    summed: bool,
+) -> None:
+    """G7 aid to Kenya over its whole over every recipient, the whole's source
+    recorded without its open entity axes: it says neither that it leaves the
+    recipients open nor that it binds them (`compiler.sources.open_side_column`), so
+    the plan's sum is refused, and so is its absence."""
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[Entity(name="G7", role="donor"), Entity(name="Kenya", role="recipient")],
+    )
+    whole = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[],
+        whole_of=WholeOf(part="aid", axis="recipient"),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="total"),
+    )
+    sums = (WholeSum(whole_id="total", sum_id="total_sum"),) if summed else ()
+    plan = Plan.model_validate(
+        {
+            **_draft([decision()], [aid, whole, share]).model_dump(),
+            "evidence_requirements": with_whole_sums([aid, whole, share], sums),
+            "whole_sums": sums,
+        }
+    )
+    summing = [
+        _aggregate(
+            id="sum_total",
+            requirement_id="total_sum",
+            input="fetch_total",
+            group_by=(GroupBy.PERIOD, GroupBy.ENTITY),
+        )
+    ]
+
+    result = build(
+        plan,
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            *(summing if summed else []),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="fetch"),
+                denominator=Side(input="sum_total" if summed else "fetch_total"),
+            ),
+            terminal=["share"],
+        ),
+        discovered={
+            "aid": _flow_source(source, SPEC_KENYA, recipients=[_KENYA]),
+            "total": _flow_source(source, SPEC_OTHER, recipients=[], axes_read=False),
+        },
+    )
+
+    # An unread source is refused for the aggregate over it too (`SOURCE_UNUSABLE`).
+    assert Code.WHOLE_SUM_UNMATCHED in _codes(result), result.issues
+
+
 @pytest.mark.parametrize(
     ("recipients", "groups", "summed"),
     [
@@ -10202,7 +10403,7 @@ _G7_SHARE_RECORDING = json.loads(
     (_EVALS / "recordings" / "share-g7-africa-of-g7-total-aid.json").read_text()
 )
 _G7_WHOLE_ANSWER = json.loads(
-    (_EVALS / "recordings" / "answers" / "d3625d914901027d.json").read_text()
+    (_EVALS / "recordings" / "answers" / "27a1bf31adac9590.json").read_text()
 )
 
 
@@ -10210,9 +10411,8 @@ def test_a_recorded_g7_share_divides_by_the_whole_its_part_compiles_to(
     build: Callable[..., CompileResult],
 ) -> None:
     # G7 aid to Africa as a share of all G7 aid, the eval task's reference plan, on
-    # the blocks Search answered it with. The whole's definition binds the G7 on
-    # `origin` alone and Search reads its open recipient side as the
-    # developing-countries total, which the whole names by its ref.
+    # the blocks Search answered it with. The whole Search derived binds the G7 on
+    # `origin` and the developing-countries total on `destination`.
     payload = _G7_SHARE_TASK["reference_payload"]
     requirements = TypeAdapter(list[EvidenceRequirement]).validate_python(
         payload["evidence_requirements"]
@@ -10229,7 +10429,7 @@ def test_a_recorded_g7_share_divides_by_the_whole_its_part_compiles_to(
     blocks = _spec_blocks(_G7_SHARE_RECORDING["searches"]) | _spec_blocks(_G7_WHOLE_ANSWER)
     pins = {
         "g7_africa_aid": "spec_2a634c06dc3937cc8692b41d25268397",
-        "g7_total_aid": "spec_66627f5871d4ef51038b5ec8c69948a5",
+        "g7_total_aid": "spec_39ed9e4e43cac5bf1fc156ef783093f0",
     }
     sources = {rid: source_from_spec_block(blocks[spec_id]) for rid, spec_id in pins.items()}
 

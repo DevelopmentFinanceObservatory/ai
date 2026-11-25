@@ -58,7 +58,7 @@ from compiler.sources import open_side_column, source_from_spec_block, warning_c
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from data_mcp.scope import ChoiceProvenance, ScopeAxis
-from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
+from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, WholeAxis
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from planner.operations import Translation
@@ -969,27 +969,32 @@ class DecisionDraft(_Choice):
         return self
 
 
-# What a declared whole leaves open: the part's sector, or the party it names on one
-# side of the flow (`WholeOf.axis`).
-WholeAxis = Literal["sector", "donor", "recipient"]
+# The whole axes that open a side of the flow (`whole_side`). "provider" names none,
+# though `role_party` reads it as the giving side.
+_WHOLE_SIDE_AXES = frozenset({"donor", "recipient"})
+
+
+def whole_side(axis: str) -> Party | None:
+    """The side of the flow a whole over every `axis` opens (`WholeOf.axis`): the
+    giving side for "donor", the receiving one for "recipient", `None` for
+    "provider", whose whole keeps the part's parties."""
+    return role_party(axis) if axis in _WHOLE_SIDE_AXES else None
 
 
 class WholeOf(StrictModel):
-    """The part a dataset requirement is the whole of: that part's own dataset with one scope axis left open.
+    """The part a dataset requirement is the whole of: that part's figure with one axis widened.
 
-    `propose_plan` compiles the whole from the part's pin with `axis` left
-    open and every other choice held, and pins the requirement to it
-    (`submission.service._declared_wholes`). The sector is opened by
-    unbinding the slot the part's sector choice binds; a donor or recipient
-    by dropping the role the part binds there, its region entry and its
-    named set, so Search serves the total that holds the part.
+    `propose_plan` asks Search for the part's whole on `axis`
+    (`planner.source_reads.compile_whole`), which holds every other choice of
+    the part, and pins the requirement to Search's answer
+    (`submission.service._declared_wholes`).
     """
 
     part: Identifier = Field(description="The dataset requirement this one is the whole of.")
     axis: WholeAxis = Field(
         description=(
-            "What the whole leaves open: 'sector' for every sector, 'donor' for every donor, "
-            "'recipient' for every recipient."
+            "What the whole widens: 'provider' for every provider, as all US aid holds US "
+            "bilateral aid, 'donor' for every donor, 'recipient' for every recipient."
         )
     )
 
@@ -1120,11 +1125,10 @@ class DatasetRequirement(TaggedModel):
         default=None,
         exclude_if=lambda whole_of: whole_of is None,
         description=(
-            "Set on the total a share_of or quotient_of divides its part by, the part over "
-            "every sector, donor or recipient: all US aid for US health aid, all aid to Kenya "
-            "for US aid to Kenya. Counted from the part's own dataset, with no search, for the "
-            "part's parties with that side one total, so it states no `entities` or `across`. "
-            "Read only as that denominator."
+            "Set on the total a share_of or quotient_of divides its part by: the total Search "
+            "derives from the part over every provider, donor or recipient, all US aid for US "
+            "bilateral aid, all aid to Kenya for US aid to Kenya. Search derives it with no "
+            "search, so it states no `entities` or `across`. Read only as that denominator."
         ),
     )
     # The provider option the user's words ask this figure to count, which admission
@@ -2591,8 +2595,8 @@ def whole_of_fault(
     """Why the `whole_of` `whole` states cannot be compiled from its part, `None` when
     it can or `whole` states none.
 
-    The whole is compiled from the part's pin with only the part's scope
-    widened, so the part is another dataset requirement, itself no whole.
+    The whole is the total Search derives from the part's pin on one axis,
+    so the part is another dataset requirement, itself no whole.
     A whole over every donor or recipient opens the side the part names a
     party on (`_opened_side_fault`). The whole covers the part's parties
     with that side one total (`whole_read`). It
@@ -2622,8 +2626,8 @@ def _opened_side_fault(
     whole: DatasetRequirement, part: DatasetRequirement, axis: str
 ) -> str | None:
     """Why `part` names no party on the side of the flow `whole` opens over every
-    `axis`, `None` when it does or `axis` is the sector."""
-    side = role_party(axis)
+    `axis`, `None` when it does or `axis` opens no side (`whole_side`)."""
+    side = whole_side(axis)
     if side is None:
         return None
     if _sitting_on(part.entities, side):
@@ -2655,7 +2659,7 @@ def stated_coverage_fault(whole: DatasetRequirement) -> str | None:
     """Why `whole` states who it covers though its `whole_of` derives it, `None` when it
     states nothing or is no whole.
 
-    A whole covers what its part covers with one side left open (`whole_read`),
+    A whole covers what its part covers, widened on its axis (`whole_read`),
     so `entities` or `across` on it could only disagree with that. A proposal
     stating either is refused (`submission.service._Patch`). A plan stored with
     them keeps them and reads them as derived (`without_stated_coverage`).
@@ -2666,9 +2670,9 @@ def stated_coverage_fault(whole: DatasetRequirement) -> str | None:
     if not stated:
         return None
     return (
-        f"{whole.id!r} states `whole_of`, so it covers what its part "
-        f"{whole.whole_of.part!r} covers with the {whole.whole_of.axis} left open as one "
-        f"total; drop its {' and '.join(f'`{field}`' for field in stated)}"
+        f"{whole.id!r} states `whole_of`, so it covers what Search derives from its part "
+        f"{whole.whole_of.part!r}, its total over every {whole.whole_of.axis}; drop its "
+        f"{' and '.join(f'`{field}`' for field in stated)}"
     )
 
 
@@ -2698,9 +2702,9 @@ def whole_read(whole: DatasetRequirement, part: DatasetRequirement) -> DatasetRe
     The whole states no `entities` or `across` of its own. It keeps the part's
     entities and `across` words on every role but the side of the flow its
     `WholeOf.axis` opens, which it reads as one total (`opened_role`). A
-    sector whole opens no side and covers the part's parties exactly.
+    provider whole opens no side and covers the part's parties exactly.
     """
-    side = role_party(whole.whole_of.axis) if whole.whole_of is not None else None
+    side = whole_side(whole.whole_of.axis) if whole.whole_of is not None else None
     return whole.model_copy(
         update={
             "entities": tuple(e for e in part.entities if side is None or not _sits_on(e, side)),
@@ -2711,8 +2715,8 @@ def whole_read(whole: DatasetRequirement, part: DatasetRequirement) -> DatasetRe
 
 def opened_role(whole: DatasetRequirement, part: DatasetRequirement) -> str | None:
     """The role phrase of the party `part` names on the side `whole` opens, the
-    role the whole reads that side's one total under; `None` for a sector whole."""
-    if whole.whole_of is None or (side := role_party(whole.whole_of.axis)) is None:
+    role the whole reads that side's one total under; `None` for a provider whole."""
+    if whole.whole_of is None or (side := whole_side(whole.whole_of.axis)) is None:
         return None
     named = _sitting_on(part.entities, side)
     return named[0].role if named else None
@@ -2738,6 +2742,7 @@ def covered(requirement: DatasetRequirement, plan: Plan) -> DatasetRequirement:
         part,
         _compiled_source(plan, requirement.id),
         summed=any(entry.whole_id == origin for entry in plan.whole_sums),
+        part_source=_compiled_source(plan, part.id),
     )
 
 
@@ -2747,28 +2752,42 @@ def whole_on_source(
     source: SelectedSource | None,
     *,
     summed: bool,
+    part_source: SelectedSource | None = None,
 ) -> DatasetRequirement:
     """`whole`, the whole of `part`, covering what it reads on `source`, the source
     compile retrieves it from, `None` before compile.
 
     It covers its part's parties less the side it opens (`whole_read`), and on
-    that side what the source serves there. Where the source leaves the side
+    that side what the source serves there. Where the source leaves that side
     open (`compiler.sources.open_side_column`), that is the side's word in
-    `across`, one row per party there, which the aggregate `propose_plan`
-    added sums (`WholeSum`). Otherwise it is the parties the source binds
-    there, as entities by their refs, the total Search counts the side as. With no
-    source the side reads open where `summed`, as admission read Search's
-    answer for the whole, and as `whole_read` reads it otherwise. A sector
-    whole opens no side.
+    `across`, one row per party there, which the aggregate `propose_plan` added
+    sums (`WholeSum`). Otherwise it is the parties the source binds there, as
+    entities by their refs, the total Search counts the side as. With no
+    source, or a source whose open axes were never read, the side reads open
+    where `summed`, as admission read Search's answer for the whole, and as
+    `whole_read` reads it otherwise. A provider whole opens no side. On a side
+    the whole does not open, the source's parties replace the part's where it
+    binds parties other than those `part_source`, the source the part is
+    retrieved from, binds there, as DAC2a's provider whole binds all recipients
+    for a part to developing countries; where it binds none there, or the
+    same, or the part's source is unknown, the part's stay as the part names
+    them.
     """
     read = whole_read(whole, part)
     role = opened_role(whole, part)
-    if role is None:
-        return read
-    if source is None:
+    if source is None or source.open_entity_axes is None:
         open_side = summed
     else:
-        open_side = open_side_column(source.open_entity_axes, role) is not None
+        open_side = open_side_column(source.open_entity_axes, role or "") is not None
+    if source is not None and part_source is not None:
+        opened = role_party(role) if role is not None else None
+        for axis in sorted(_WHOLE_SIDE_AXES):
+            side = role_party(axis)
+            bound = _refs_on(source, side)
+            if side != opened and bound and bound != _refs_on(part_source, side):
+                read = _side_on_source(read, part, source, axis)
+    if role is None:
+        return read
     if open_side:
         return read.model_copy(update={"across": (*read.across, role)})
     side = flow_side(role)
@@ -2778,6 +2797,36 @@ def whole_on_source(
         if flow_side(entity.role) == side
     ]
     return read.model_copy(update={"entities": (*read.entities, *held)})
+
+
+def _refs_on(source: SelectedSource, side: Party | None) -> set[str]:
+    """The refs of the entities `source` binds on the side of the flow `side`."""
+    return {entity.ref for entity in source.entities if role_party(entity.role) == side}
+
+
+def _side_on_source(
+    read: DatasetRequirement, part: DatasetRequirement, source: SelectedSource, axis: str
+) -> DatasetRequirement:
+    """`read` covering on the side of the flow `axis` names ("recipient") the parties
+    `source` binds there, as entities by their refs under the role phrase `part` names
+    that side by, else `axis`, in place of the entities and `across` words it held
+    there. An axis naming no side leaves `read` as it is."""
+    side = role_party(axis)
+    if side is None:
+        return read
+    named = _sitting_on(part.entities, side)
+    role = named[0].role if named else axis
+    held = [
+        Entity(name=entity.label, role=role, dcid=entity.ref)
+        for entity in source.entities
+        if role_party(entity.role) == side
+    ]
+    return read.model_copy(
+        update={
+            "entities": (*(e for e in read.entities if not _sits_on(e, side)), *held),
+            "across": tuple(w for w in read.across if across_party(w) != side),
+        }
+    )
 
 
 def _compiled_source(plan: Plan, requirement_id: str) -> SelectedSource | None:
@@ -7126,8 +7175,8 @@ class AlignedPin(StrictModel):
     as a reading of the conversation.
 
     A declared whole (`whole_axis` set, `DatasetRequirement.whole_of`) is
-    the part pinned to `origin` with its choice on `whole_axis` left open
-    and every other choice on the part's options, and moves no option
+    the total Search derives from the part pinned to `origin` on `whole_axis`,
+    every other choice held on the part's options, and moves no option
     (`option_ids` empty, `submission.service.Realignment.whole_axis`).
 
     The warning codes on the origin's record when it was compiled are held
@@ -7152,17 +7201,68 @@ class AlignedPin(StrictModel):
         return block if isinstance(block, Mapping) else None
 
     @property
-    def complete(self) -> bool:
-        """Whether the pin holds what its readers read: a whole's compile its spec
-        block, which says how Search serves the side the whole opens
-        (`submission.service._whole_sums`), so one without is compiled again; any
-        other pin as it is."""
-        return self.whole_axis is None or self.block is not None
+    def current(self) -> bool:
+        """Whether this release reads the pin: any pin but a declared whole, and a
+        whole whose block states the whole Search derived from its part
+        (`resolved.scope_choices.derived`), as the answer to a `whole` request does.
+        A whole compiled by an earlier release, through an identity edit, states
+        none, nor does one held with no block."""
+        if self.whole_axis is None:
+            return True
+        resolved = (self.block or {}).get("resolved")
+        scope = resolved.get("scope_choices") if isinstance(resolved, Mapping) else None
+        return isinstance(scope, Mapping) and isinstance(scope.get("derived"), Mapping)
 
 
 def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
-    """The pins `ALIGNED_PINS_STATE_KEY` holds, oldest first; empty when unset."""
-    return tuple(AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ())
+    """The pins `ALIGNED_PINS_STATE_KEY` holds that this release reads
+    (`AlignedPin.current`), oldest first; empty when unset.
+
+    A declared whole compiled by an earlier release is left out, and the
+    omission is logged at debug level, since every reader of a turn reads the
+    pins again, so every reader holds the same pins: admission asks
+    Search for the whole again (`submission.service._declared_wholes`), and its
+    compile replaces the old pin (`submission.service.save_aligned_pin`).
+    """
+    pins = [AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ()]
+    stale = [pin.spec_id for pin in pins if not pin.current]
+    if stale:
+        logger.debug(
+            "left out %d whole pins of %s that state no derived whole: %s",
+            len(stale),
+            ALIGNED_PINS_STATE_KEY,
+            stale,
+        )
+    return tuple(pin for pin in pins if pin.current)
+
+
+def stale_whole_pins(state: SessionState) -> frozenset[str]:
+    """The spec_ids of the whole pins `ALIGNED_PINS_STATE_KEY` holds that
+    `aligned_pins` leaves out, as compiled by an earlier release
+    (`AlignedPin.current`)."""
+    return frozenset(
+        pin.spec_id
+        for raw in state.get(ALIGNED_PINS_STATE_KEY) or ()
+        if not (pin := AlignedPin.model_validate(raw)).current
+    )
+
+
+def rests_on_stale_whole(plan: Plan, state: SessionState) -> bool:
+    """Whether a whole of `plan` (`DatasetRequirement.whole_of`) is pinned, or
+    retrieved, from a whole pin an earlier release compiled (`stale_whole_pins`),
+    or from a copy of one over another window (`windowed_origins`)."""
+    stale = stale_whole_pins(state)
+    if not stale:
+        return False
+    origins = windowed_origins(state)
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement) or requirement.whole_of is None:
+            continue
+        source = _compiled_source(plan, requirement.id)
+        pinned = {requirement.source_spec_id, source.spec_id if source is not None else None}
+        if any(origins.get(spec_id, spec_id) in stale for spec_id in pinned if spec_id):
+            return True
+    return False
 
 
 def found_sources(state: SessionState) -> dict[str, dict[str, Any]]:
