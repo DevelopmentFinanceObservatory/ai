@@ -503,12 +503,17 @@ _SCRIPTED = (
 _UNKNOWN = (None, None, None, None)
 
 
-# The stalled case waits out a one-second run limit. Allowed one model call, the entry
-# sends a refused proposal, and the turn budget answers the next call itself.
+# The stalled case waits out a one-second run limit. The scripted cases finish in a tenth
+# of a second, and their limit is one a loaded runner cannot reach. Allowed one model call,
+# the entry sends a refused proposal, and the turn budget answers the next call itself.
+_SCRIPTED_LIMIT_S = 60.0
+_STALLED_LIMIT_S = 1.0
+
+
 @pytest.mark.parametrize(
-    ("calls_max", "model_type", "script", "stop", "closed", "usage"),
+    ("calls_max", "model_type", "script", "stop", "closed", "usage", "timeout_s"),
     [
-        ("30", validate.ScriptedModel, ["plan"], "accepted", None, [_SCRIPTED]),
+        ("30", validate.ScriptedModel, ["plan"], "accepted", None, [_SCRIPTED], _SCRIPTED_LIMIT_S),
         (
             "1",
             validate.ScriptedModel,
@@ -516,8 +521,9 @@ _UNKNOWN = (None, None, None, None)
             "turn_model_calls_spent",
             "turn_model_calls_spent",
             [_SCRIPTED],
+            _SCRIPTED_LIMIT_S,
         ),
-        ("30", _StalledModel, ["plan"], "timeout", None, [_UNKNOWN]),
+        ("30", _StalledModel, ["plan"], "timeout", None, [_UNKNOWN], _STALLED_LIMIT_S),
     ],
 )
 async def test_a_record_counts_each_model_call_and_keeps_the_adapters_stop_code(
@@ -528,6 +534,7 @@ async def test_a_record_counts_each_model_call_and_keeps_the_adapters_stop_code(
     stop: str,
     closed: str | None,
     usage: list[tuple[int | None, ...]],
+    timeout_s: float,
 ) -> None:
     monkeypatch.setenv("TURN_MODEL_CALLS_MAX", calls_max)
     entry.quiet_logs()
@@ -539,7 +546,11 @@ async def test_a_record_counts_each_model_call_and_keeps_the_adapters_stop_code(
     model = model_type([[("propose_plan", payloads[name])] for name in script])
 
     run = await entry.run_entry(
-        task, entry.load_recording(task.id), prefix_cache=None, client=model.client, timeout_s=1.0
+        task,
+        entry.load_recording(task.id),
+        prefix_cache=None,
+        client=model.client,
+        timeout_s=timeout_s,
     )
     record = entry.entry_record(
         task=task, run=run, arm="a", rep=1, model="m", revision="r", experiment="e"
