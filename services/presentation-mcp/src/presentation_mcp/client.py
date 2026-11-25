@@ -31,7 +31,7 @@ from typing import Any, Self
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
-from common.caller import ADDRESS_CALLER, current_caller, vouched_caller_headers
+from common.caller import WEBSITE_CALLER, current_caller, vouched_caller_headers
 from common.derived_replay import (
     DEFAULT_RETRY_AFTER_S,
     ReplayBusy,
@@ -972,7 +972,7 @@ class PlatformAssembler:
         """POST `body` to apis' analysis `path` once, for `common.derived_replay`.
         Returns the response whatever its status, or `transient_unavailable` for a
         call that got none. It names the caller and turn as analysis-mcp's own
-        analysis calls do (`vouched_caller_headers`): an `ip:` caller with its
+        analysis calls do (`vouched_caller_headers`): an `ip:` or `user:` caller with its
         surface, user agent and MCP client name, a Studio `conversation:` caller with its turn,
         or the surface shared work serves. It waits as long as a whole
         presentation call may."""
@@ -1040,16 +1040,17 @@ class PlatformAssembler:
         A first-party write, Studio's, carries the publish principal, which
         dfo-apis exempts. An external write carries the caller principal and
         the caller the website named, when this process holds the principal
-        and the request's `x-dfo-caller` is an `ip:` digest
-        (`vouched_caller_headers`, with the surface, user agent and MCP client name), so dfo-apis
-        counts that client. Any other external write carries neither, and
-        dfo-apis counts it against the address it sees for this service.
+        and the request's `x-dfo-caller` is an `ip:` or `user:` digest
+        (`vouched_caller_headers`, with the surface, user agent and MCP client
+        name), so dfo-apis counts that client or account. Any other external
+        write carries neither, and dfo-apis counts it against the address it
+        sees for this service.
         """
         if caller is Caller.FIRST_PARTY:
             principal = self._publish_principal
             return {} if principal is None else {PRINCIPAL_HEADER: principal}
         named = current_caller()
-        if named is None or not ADDRESS_CALLER.fullmatch(named):
+        if named is None or not WEBSITE_CALLER.fullmatch(named):
             return {}
         return vouched_caller_headers(self._caller_principal, caller_required=True)
 
