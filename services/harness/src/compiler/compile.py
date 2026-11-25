@@ -1940,8 +1940,9 @@ class _Build:
         Nothing is checked where either operand's parties are unknown, whether or
         not it names an entity, where either keeps no party on a column, where the
         denominator rests on a whole Search derived from a requirement the numerator
-        rests on (`planner.plan.WholeOf`), since Search refuses a whole that does
-        not hold its part (`part_outside_whole`), where the
+        rests on (`planner.plan.WholeOf`) and keeps every party it reads, since
+        Search refuses a whole that does not hold its part (`part_outside_whole`),
+        where the
         denominator's key column does not resolve, or where both rest on the same
         sources and the denominator narrows none; each skip is logged. A party
         nothing shows is inside or outside is not refused. The refusal names
@@ -1966,13 +1967,6 @@ class _Build:
                 operation.id,
             )
             return
-        if self._derived_whole_of(part.sources, whole.sources):
-            logger.info(
-                "share %r: its denominator is the whole Search derived from its numerator, "
-                "which Search found holds it",
-                operation.id,
-            )
-            return
         keyed_axis = _keyed_axes(operation)[1]
         keyed = (
             self._key_column(operation.denominator, keyed_axis) if keyed_axis is not None else None
@@ -1990,6 +1984,13 @@ class _Build:
             for key, kept in whole.kept.items()
             if kept != _resolved_refs(whole.sources[key[0]], key[1])
         }
+        if not narrowed and self._derived_whole_of(part.sources, whole.sources):
+            logger.info(
+                "share %r: its denominator is the whole Search derived from its numerator, "
+                "which Search found holds it",
+                operation.id,
+            )
+            return
         if not narrowed and {source.spec_id for source in part.sources.values()} == {
             source.spec_id for source in whole.sources.values()
         }:

@@ -10075,6 +10075,25 @@ async def test_a_donor_whole_searchs_answer_compiles(
     assert compiled.workflow is not None, compiled.issues
 
 
+def test_a_part_with_no_scope_record_is_named_by_its_option_on_the_wholes_record() -> None:
+    """US bilateral ODA over its whole over every provider, the part's block carrying no
+    scope record: Search states the part counts bilateral flows, and the whole's record
+    labels that option, so the caveat names what each side counts."""
+    recorded = _SEARCH_WHOLES["us_bilateral"]
+    part = json.loads(json.dumps(recorded["part"]))
+    del part["resolved"]["scope_choices"]
+    whole = recorded["whole"]
+    whole_scope = submission_service.part_scope(whole["spec_id"], whole)
+    assert whole_scope is not None and whole_scope.derived is not None
+
+    stated = submission_service._whole_shares(whole_scope.derived, part, None, whole_scope)
+
+    assert stated.endswith(
+        "The total counts bilateral plus core contributions to multilaterals, "
+        "the part bilateral flows only."
+    ), stated
+
+
 def _bind_donors(block: dict[str, Any]) -> None:
     """`block`, a whole Search states it summed over every donor, edited to bind the
     donors to official donors' (DAC) total."""

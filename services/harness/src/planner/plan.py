@@ -7219,14 +7219,15 @@ def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
     (`AlignedPin.current`), oldest first; empty when unset.
 
     A declared whole compiled by an earlier release is left out, and the
-    omission is logged, so every reader holds the same pins: admission asks
+    omission is logged at debug level, since every reader of a turn reads the
+    pins again, so every reader holds the same pins: admission asks
     Search for the whole again (`submission.service._declared_wholes`), and its
     compile replaces the old pin (`submission.service.save_aligned_pin`).
     """
     pins = [AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ()]
     stale = [pin.spec_id for pin in pins if not pin.current]
     if stale:
-        logger.warning(
+        logger.debug(
             "left out %d whole pins of %s that state no derived whole: %s",
             len(stale),
             ALIGNED_PINS_STATE_KEY,

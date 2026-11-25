@@ -40,6 +40,7 @@ from harness.graph.state import (
     ORCHESTRATOR_REPLANNED_STOP_KEY,
     ORCHESTRATOR_RETRY_NOTE_KEY,
     PICK_REPLAN_KEY,
+    STALE_WHOLE_NOTE,
     UNREADABLE_PLAN_NOTE,
     UNREADABLE_PLAN_UNPLANNED_NOTE,
     conversation_readings,
@@ -118,7 +119,9 @@ async def _draft(
     not read (`readable_plan`) is drafted as a first draft, and the `"ok"`
     edge's plan carries `UNREADABLE_PLAN_NOTE` as `refusal_note`, which Studio
     shows before the plan card, and `"restarted": True`, since its version
-    counts from 1 again. The `"refused"` edge's text opens with
+    counts from 1 again. A plan `approve` cleared for resting on a whole an
+    earlier release compiled (`"stale_whole"`) is drafted the same way, the
+    amendment the user typed on its card kept, under `STALE_WHOLE_NOTE`. The `"refused"` edge's text opens with
     `UNREADABLE_PLAN_UNPLANNED_NOTE`.
 
     The first draft after `plan_done` gave the plan call back carries the
@@ -185,8 +188,12 @@ async def _draft(
     unreadable = bool(payload.get("unreadable_plan")) or bool(
         not is_first_draft and raw and existing is None
     )
+    # `approve` cleared a plan resting on a whole an earlier release compiled
+    # (`planner.plan.rests_on_stale_whole`): the user's amendment of it stands.
+    stale_whole = bool(payload.get("stale_whole"))
     if unreadable:
-        refusal = amendment = None
+        refusal = None
+        amendment = amendment if stale_whole else None
         is_first_draft = True
     resuming = answer is not None
     try:
@@ -278,7 +285,7 @@ async def _draft(
         ]
     if pick is not None:
         _end_pick_entry(ctx)
-    notes = [UNREADABLE_PLAN_NOTE] if unreadable else []
+    notes = [STALE_WHOLE_NOTE if stale_whole else UNREADABLE_PLAN_NOTE] if unreadable else []
     if is_first_draft and (retry := ctx.state.get(ORCHESTRATOR_RETRY_NOTE_KEY)):
         # `plan_done` gave the plan call back after an approved plan stopped.
         # The card says which step stopped and why it needs approving again.

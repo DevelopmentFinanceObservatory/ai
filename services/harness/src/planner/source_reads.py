@@ -214,6 +214,11 @@ class _Compiled(NamedTuple):
     resolved_at: datetime | None
 
 
+# The codes under which Search refuses a scope request, a whole included
+# (`search.scope.compile.RefusalCode`); any other refusal of a whole request is not
+# Search declining to derive it.
+_WHOLE_REFUSALS = frozenset({"requested_option_unavailable", "conflicting_requested_options"})
+
 # The cause `compile_on_basis` gives where Search refuses stating no code, where it
 # does not answer (which states none), where it answers with no one dataset, where
 # the call cannot reach it for good, and where the pin's record cannot be posted (no
@@ -612,11 +617,13 @@ async def compile_whole(
     `SURFACE_UNAVAILABLE` when Search did not answer and can later, or
     `SHARE_WHOLE_UNDERIVABLE` (`submission.service.share_whole_underivable`)
     under the cause Search states for refusing the whole, none where an older
-    Search states none, with the options it offers in its place; under
-    `part_unread` where no block of the part's pin is on record; under
-    `groups_unreadable` where the part names a set whose posted form this
-    release cannot read; under `whole_refused` where Search answers with no one
-    dataset or with a block stating no derived whole; and under `part_moved`
+    Search refuses stating none, with the options it offers in its place (a
+    refusal under one of `_WHOLE_REFUSALS`); under `part_unread` where no block
+    of the part's pin is on record; under `groups_unreadable` where the part
+    names a set whose posted form this release cannot read; under
+    `whole_refused` where the call answers no part, data-mcp refuses it, Search
+    cannot be reached for good, or Search answers with no one dataset or with a
+    block stating no derived whole; and under `part_moved`
     where the part Search derived the whole from is not the part's compile, or
     the whole widens another axis (`_whole_fault`).
     """
@@ -672,20 +679,7 @@ async def compile_whole(
     except DefinitionNotResolvedError as exc:
         if exc.retryable:
             return _refusing(_basis_uncompiled(realignment, str(exc)))
-        # An older Search refuses a whole stating no cause: the refusal says why in
-        # its words alone (data-mcp's `fix.detail`), and its code is no cause.
-        stated = (
-            f" ({exc.cause})"
-            if exc.cause is not None
-            else f": {exc.detail.rstrip('.')}"
-            if exc.detail is not None
-            else ""
-        )
-        return underivable(
-            f"Search does not derive the whole of {part_pin} over every {axis}{stated}",
-            exc.cause,
-            exc.alternatives,
-        )
+        return underivable(*_whole_refusal(exc, part_pin=part_pin, axis=axis))
     spec = part.get("spec") if part.get("status") == "definite" else None
     spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
     whole_scope = part_scope(spec_id, spec) if isinstance(spec_id, str) else None
@@ -729,6 +723,34 @@ async def compile_whole(
         record_spec_searched(into, whole_id, resolved_at)
 
     return hold
+
+
+def _whole_refusal(
+    exc: DefinitionNotResolvedError, *, part_pin: str, axis: str
+) -> tuple[str, str | None, tuple[tuple[str, str], ...]]:
+    """Why `exc`, a whole request for the part pinned `part_pin` over every `axis`
+    failing for good, compiled no whole, as a clause, its `share_whole_underivable`
+    cause and the options offered in its place.
+
+    Search refusing it (`exc.refused`, under one of `_WHOLE_REFUSALS`) states its
+    cause, else, as an older Search does, says why in its words alone (data-mcp's
+    `fix.detail`). Anything else, no part, data-mcp refusing the call or Search
+    unreachable for good, says nothing of whether Search derives the whole, and
+    is `whole_refused`."""
+    if not (exc.refused and exc.code in _WHOLE_REFUSALS):
+        return f"Search answered no whole of {part_pin}: {exc}", WHOLE_REFUSED, ()
+    stated = (
+        f" ({exc.cause})"
+        if exc.cause is not None
+        else f": {exc.detail.rstrip('.')}"
+        if exc.detail is not None
+        else ""
+    )
+    return (
+        f"Search does not derive the whole of {part_pin} over every {axis}{stated}",
+        exc.cause,
+        exc.alternatives,
+    )
 
 
 def _whole_fault(

@@ -9071,6 +9071,70 @@ def test_a_share_over_the_whole_search_derived_is_not_checked_again(
     assert (Code.SHARE_PART_OUTSIDE_WHOLE in _codes(result)) is not declared, result.issues
 
 
+@pytest.mark.parametrize("one", [None, "France"], ids=["every-donor-kept", "narrowed-to-france"])
+def test_a_share_over_a_derived_whole_narrowed_to_one_party_is_checked(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    one: str | None,
+) -> None:
+    """US and French aid to Kenya over its whole over every recipient, the aid of both to
+    developing countries. Search found the whole holds the part, so the compiler does not
+    check it again; a denominator narrowed to France is no longer that whole, and
+    holds no US aid, so the share is refused."""
+    donors = [Entity(name="United States", role="donor"), Entity(name="France", role="donor")]
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[*donors, Entity(name="Kenya", role="recipient")],
+    )
+    total = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[],
+        whole_of=WholeOf(part="aid", axis="recipient"),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="total", entity=one),
+    )
+    usa = ResolvedEntity(role="origin", ref="country/USA", label="United States")
+    fra = ResolvedEntity(role="origin", ref="country/FRA", label="France")
+    developing = ResolvedEntity(
+        role="destination", ref="DACDevelopingCountries", label="developing countries (DAC)"
+    )
+
+    def flows(spec_id: str, recipient: ResolvedEntity) -> SelectedSource:
+        return source(
+            spec_id=spec_id,
+            sentence="official development assistance",
+            entities=(usa, fra, recipient),
+            identity={"entities": {"origin": [usa.ref, fra.ref], "destination": [recipient.ref]}},
+            open_entity_axes=(),
+        )
+
+    result = build(
+        _draft([decision()], [aid, total, share]),
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="fetch"),
+                denominator=Side(input="fetch_total", entity=one),
+            ),
+            terminal=["share"],
+        ),
+        discovered={"aid": flows(SPEC_KENYA, _KENYA), "total": flows(SPEC_OTHER, developing)},
+    )
+
+    assert (Code.SHARE_PART_OUTSIDE_WHOLE in _codes(result)) is (one is not None), result.issues
+
+
 _UNITED_STATES = ResolvedEntity(role="destination", ref="country/USA", label="United States")
 _NIGERIA = ResolvedEntity(role="destination", ref="country/NGA", label="Nigeria")
 _ETHIOPIA = ResolvedEntity(role="destination", ref="country/ETH", label="Ethiopia")

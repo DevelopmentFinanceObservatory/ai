@@ -127,8 +127,10 @@ def decide(
     this release does not read (`readable_plan`) has no revision for the
     answer to name: it routes `amend` with `{"unreadable_plan": True}`, and
     `planner` drafts the question from the start. So does a plan whose share
-    rests on a whole an earlier release compiled (`rests_on_stale_whole`): the
-    whole is asked of Search again, and the user approves the new card.
+    rests on a whole an earlier release compiled (`rests_on_stale_whole`), with
+    `"stale_whole": True` and the user's `answer`, whose amendment the draft
+    keeps: the whole is asked of Search again, and the user approves the new
+    card.
 
     An answer approves when it names the revision and says, under `at`, when
     the user gave it, as an ISO 8601 time with its offset: the studio's
@@ -169,7 +171,7 @@ def decide(
         # is planned again rather than run as the old card showed it.
         logger.warning("plan rests on a whole an earlier release compiled; planning again")
         ctx.state["plan"] = None
-        plan = None
+        return Next("amend", {"unreadable_plan": True, "stale_whole": True, "answer": answer})
     if plan is None:
         # The card the user answered names a plan this release does not
         # read, so the answer approves nothing and amends nothing.

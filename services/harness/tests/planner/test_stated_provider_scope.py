@@ -37,6 +37,7 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness import studio as studio_module
 from harness.conversation import current_user_message
 from harness.graph import approve as approve_module
+from harness.graph import planning as planning_module
 from harness.graph import switch as switch_module
 from harness.graph.answer import stored_run_plan
 from harness.graph.state import readable_plan
@@ -2553,27 +2554,114 @@ def covered_source(plan: Plan, requirement_id: str) -> str:
     return source.spec_id
 
 
-@pytest.mark.parametrize("derived", [False, True], ids=["old-whole-pin", "current-whole-pin"])
-def test_a_plan_over_a_whole_pin_the_previous_release_compiled_is_planned_again_at_approval(
-    derived: bool,
+@pytest.mark.parametrize(
+    ("derived", "amendment"),
+    [(False, None), (False, "only 2020"), (True, None)],
+    ids=["old-whole-pin", "old-whole-pin-amended", "current-whole-pin"],
+)
+async def test_a_plan_over_a_whole_pin_the_previous_release_compiled_is_planned_again_at_approval(
+    derived: bool, amendment: str | None
 ) -> None:
-    """A plan the previous release compiled and showed, approved after the deploy,
+    """A plan the previous release compiled and showed, answered after the deploy,
     whose whole is retrieved from a whole pin that release compiled by editing the
-    part's identity: the approval runs nothing, and the question is planned again,
-    Search deriving the whole. A plan whose whole pin states Search's derived whole
-    is approved as shown."""
+    part's identity: the answer runs nothing, and the question is planned again,
+    Search deriving the whole, with the amendment the user typed on the card and a
+    note saying why. A plan whose whole pin states Search's derived whole is
+    approved as shown."""
     ctx = node_ctx()
     revision = _old_plan_awaiting_approval(ctx.state, derived=derived)
-
-    edge = approve_module.decide(
-        ctx, {"approved": revision, "at": "2026-11-25T10:00:00+00:00"}, early_mints=None
+    answer = (
+        {"approved": None, "amendment": amendment}
+        if amendment
+        else {"approved": revision, "at": "2026-11-25T10:00:00+00:00"}
     )
+
+    edge = approve_module.decide(ctx, answer, early_mints=None)
 
     if derived:
         assert edge.label == "approved"
         return
-    assert (edge.label, edge.output) == ("amend", {"unreadable_plan": True})
+    assert (edge.label, edge.output) == (
+        "amend",
+        {"unreadable_plan": True, "stale_whole": True, "answer": answer},
+    )
     assert ctx.state["plan"] is None
+    # The planner drafts again from the question, the user's amendment kept.
+    drafted: dict[str, Any] = {}
+
+    async def planner(**kwargs: Any) -> dict[str, Any]:
+        drafted.update(kwargs)
+        return {"refused": {"text": "stopped here", "code": "test"}}
+
+    await planning_module._draft(ctx, edge.output, planner=cast(Any, planner), answer=None)
+
+    assert (drafted["prior_plan"], drafted["amendment"]) == (None, amendment)
+
+
+class _WholeUnanswered:
+    """A tool surface whose `resolve_definition` answers a whole request with
+    `answer`, a failure other than Search refusing the whole."""
+
+    def __init__(self, answer: ToolCallResult) -> None:
+        self.answer = answer
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        del arguments, on_progress
+        assert tool.name == "resolve_definition", tool
+        return self.answer
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # data-mcp refuses the call itself, as an older data-mcp without `whole` does.
+        pytest.param(
+            ToolCallResult(
+                is_error=True,
+                structured_content={
+                    "code": "request_invalid",
+                    "retry_mode": "do_not_retry",
+                    "message": "unknown field 'whole'",
+                    "fix": {"detail": "unknown field 'whole'"},
+                },
+            ),
+            id="data-mcp-request-invalid",
+        ),
+        # Search answers with no part.
+        pytest.param(
+            ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": []}}),
+            id="no-part",
+        ),
+    ],
+)
+async def test_a_whole_request_search_never_refused_is_whole_refused_and_earns_no_decline(
+    answer: ToolCallResult,
+) -> None:
+    """US bilateral ODA's whole over every provider, where data-mcp refuses the call or
+    Search answers no part: nothing says Search will not derive the whole, so it is
+    refused under `whole_refused`, saying nothing of Search's derivation, and earns
+    no decline."""
+    ctx = _Context()
+    recorded = _WHOLES["us_bilateral"]
+    _show(ctx, recorded["part"])
+
+    result = await _propose(
+        ctx,
+        _provider_share("us_bilateral", donor="United States", period=(2010, 2023)),
+        words=None,
+        surface=_WholeUnanswered(answer),  # type: ignore[arg-type]
+        answer_mode="computed",
+    )
+
+    assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert result["detail"]["whole"]["cause"] == "whole_refused"
+    assert "Search does not derive" not in result["message"]
+    assert UnsupportedOperation.UNSUPPORTED_ASK not in load_optional_declines(ctx.state)
 
 
 def _without_derived(derived: dict[str, Any]) -> None:

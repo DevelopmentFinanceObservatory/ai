@@ -6913,10 +6913,11 @@ def _providers_unaligned(
     counted on.
 
     The planner can repair it: declare a share's total the part over every
-    provider, donor or recipient (`DatasetRequirement.whole_of`), or pin an input counted on that
-    scope, as a total over every sector, which no `whole_of` states, is pinned. Declaring each input's own option is named only for a user who asked for
-    that input's source, so the planner does not take it as a way past the
-    refusal. Where no repair applies, the calculation is declined: `permit`
+    provider, donor or recipient (`DatasetRequirement.whole_of`), or pin an
+    input counted on that scope. A total over every sector has no `whole_of`,
+    so the planner pins it as a total of its own. Declaring each input's own
+    option is named only for a user who asked for that input's source, so the
+    planner does not take it as a way past the refusal. Where no repair applies, the calculation is declined: `permit`
     records an `unsupported_ask` decline as optional, so the decline is earned
     and a repaired plan owes none. `detail.requirement_id` names the input, as
     every refusal about one requirement does, for its sentence
@@ -8082,8 +8083,11 @@ def _whole_shares(
     named = ", ".join(alike[:-1]) + f" and {alike[-1]}" if len(alike) > 1 else "".join(alike)
     if same or (part is None and whole is None):
         return f", so both sides count the same {named}." if named else "."
+    # A part with no scope record of its own names its option as the whole's
+    # record labels it: both records list every option of the provider choice.
     providers = _providers_counted(
-        _option_of(whole_scope_held, whole), _option_of(part_scope_held, part)
+        _option_of(whole_scope_held, whole),
+        _option_of(part_scope_held, part) or _option_of(whole_scope_held, part),
     )
     said = f" {providers}" if providers is not None else ""
     if named:
