@@ -406,6 +406,21 @@ def test_an_empty_operations_list_is_refused() -> None:
     assert [error["type"] for error in refused.value.errors()] == ["too_short"]
 
 
+def test_a_share_of_phrase_must_be_the_whole_variable() -> None:
+    good = {
+        "variable": "Share of bilateral ODA",
+        "operations": [{"verb": "share_of", "phrase": "share  of bilateral oda"}],
+    }
+    assert SearchPart.model_validate(good).operations is not None
+
+    bad = {
+        "variable": "bilateral share of ODA",
+        "operations": [{"verb": "share_of", "phrase": "share of US ODA was bilateral"}],
+    }
+    with pytest.raises(ValidationError, match="whole `variable` text"):
+        SearchPart.model_validate(bad)
+
+
 def test_to_wire_request_entity_with_no_role_omits_role_text() -> None:
     parts = [SearchPart(variable="x", entities=[SearchEntity(text="Togo")])]
 
