@@ -97,6 +97,7 @@ from planner.shapes import (
 from planner.workflow import (
     ArtifactKind,
     Binding,
+    BoundEntity,
     EvidenceBinding,
     OpenEntityAxis,
     ResolvedEntity,
@@ -126,8 +127,10 @@ from compiler.evidence import (
     check_evidence,
     errors,
     evidence_from_source,
+    held_keys,
     named_members,
     named_refs,
+    party_keys,
     read_source_unit,
     read_unit_dcid,
 )
@@ -376,31 +379,46 @@ def wholes_on_their_sources(
     return wholes
 
 
-def with_part_refs(whole: SelectedSource, part: SelectedSource | None) -> SelectedSource:
-    """`whole`, a whole's source, carrying the rows Search bound for its part's names
-    (`SelectedSource.bound_refs`) on the parties both sources bind.
+def with_part_parties(
+    whole_source: SelectedSource,
+    *,
+    whole: DatasetRequirement,
+    part: DatasetRequirement,
+    part_source: SelectedSource | None,
+) -> SelectedSource:
+    """`whole_source`, the source of a whole, carrying a row (`SelectedSource.bound_refs`)
+    for each party its part names that the whole keeps and the source binds.
 
-    Search derives a whole from its part's identity (`dataset_resubmit` with
-    `whole`), and that answer restates no entity row, so the whole's source binds
-    none of the planner's names, and "United States" or "G7" would be matched to
-    the whole's labels ("United States of America", "Group of Seven") by name. A
-    part's row is carried where every ref Search bound for it is a party `whole`
-    binds: an entity's ref, or a set's own ref or published total. That holds on
-    each side the whole keeps the part's parties on, and fails on the side it
-    opens and on a side it rebinds to other parties (DAC2a's all recipients for
-    a part to developing countries), whose names the whole does not read
-    (`planner.plan.whole_on_source`). With no part source, `whole` is as given.
+    `whole` is the whole as it reads on `whole_source` (`planner.plan.whole_on_source`),
+    `part` its part and `part_source` the part's source. Search derives a whole from
+    its part's identity, and that answer restates no entity row, so a name the part
+    resolved ("United States", "G7") would be matched to the whole's labels ("United
+    States of America", "Group of Seven") by name. Each entity of `part` that `whole`
+    still names, those on the sides it keeps, is resolved on `part_source` by the
+    route the part's own check takes (`party_keys`: a bound row, a label, a ref the
+    graph resolved, a named set), and where `whole_source` binds the same party
+    (`held_keys`) the row names that party under the entity's name and role. The side
+    the whole opens or rebinds to other parties names the whole's own parties, by
+    ref, so it carries nothing. The run-time check reads the approved source, so it
+    reads the same rows. With no part source, `whole_source` is as given.
     """
-    if part is None:
-        return whole
-    held = {entity.ref for entity in whole.entities}
-    held |= {ref for group in whole.groups for ref in (group.ref, group.total) if ref}
-    carried = tuple(
-        row for row in part.bound_refs if row not in whole.bound_refs and held.issuperset(row.refs)
-    )
+    if part_source is None:
+        return whole_source
+    held = held_keys(whole_source)
+    carried: list[BoundEntity] = []
+    for entity in whole.entities:
+        if entity not in part.entities:
+            continue
+        keys = tuple(key for key in party_keys(entity, part_source) if key in held)
+        if keys:
+            row = BoundEntity(
+                identity=entity.dcid or entity.name, text=entity.name, role=entity.role, refs=keys
+            )
+            if row not in whole_source.bound_refs:
+                carried.append(row)
     if not carried:
-        return whole
-    return whole.model_copy(update={"bound_refs": (*whole.bound_refs, *carried)})
+        return whole_source
+    return whole_source.model_copy(update={"bound_refs": (*whole_source.bound_refs, *carried)})
 
 
 class _Ratio(Enum):
@@ -704,7 +722,14 @@ class _Build:
             source = stat_var_reading(source, requested)
             stated = self.plan_requirements.get(requirement.id)
             if isinstance(stated, DatasetRequirement) and stated.whole_of is not None:
-                source = with_part_refs(source, self.discovered.get(stated.whole_of.part))
+                part = self.plan_requirements.get(stated.whole_of.part)
+                if isinstance(part, DatasetRequirement):
+                    source = with_part_parties(
+                        source,
+                        whole=requirement,
+                        part=part,
+                        part_source=self.discovered.get(part.id),
+                    )
             self.sources[operation.id] = source
             self._check_summable(operation, requirement, source)
             self._check_breakdown(operation, requirement, source)

@@ -1525,7 +1525,7 @@ def _fetched(requirement: DatasetRequirement, plan: Plan, concepts: Mapping[str,
     name = concepts[requirement.id]
     if name != _concept(requirement, plan):
         return name
-    return f"{name} for {_parties(requirement, plan)}"
+    return f"{name}{_for(_parties(requirement, plan))}"
 
 
 def _card_filter_label(requirement: FilterRequirement, concept: str) -> str:
@@ -2553,7 +2553,7 @@ def _label_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     measure = requirement.measure
     if source is not None and source.measure_label is not None:
         measure = source.measure_label
-    return f"Fetch {measure} for {_parties(requirement, plan)}"
+    return f"Fetch {measure}{_for(_parties(requirement, plan))}"
 
 
 def _side_groups(source: SelectedSource | None) -> list[tuple[str, str]]:
@@ -2566,6 +2566,12 @@ def _side_groups(source: SelectedSource | None) -> list[tuple[str, str]]:
         for group in (source.groups if source is not None else ())
         if (side := flow_side(group.role)) is not None
     ]
+
+
+def _for(parties: str) -> str:
+    """The clause naming who a retrieval covers, `parties` after "for"; empty where
+    `parties` is, as for a whole that names no party (`entities_phrase`)."""
+    return f" for {parties}" if parties else ""
 
 
 def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | None = None) -> str:
@@ -2766,7 +2772,7 @@ def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     period = f"{requirement.period.start}-{requirement.period.end}" + (
         _FOLLOWING if requirement.period_end_open else ""
     )
-    return ", ".join([f"Retrieves {requirement.measure} for {parties}", period, *clauses]) + "."
+    return ", ".join([f"Retrieves {requirement.measure}{_for(parties)}", period, *clauses]) + "."
 
 
 def _source(
@@ -3002,11 +3008,14 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
     level = kept_level(denominator, plan)
     parties = "; ".join(
         dict.fromkeys(
-            _parties(dataset, plan, level=level) for dataset in datasets_of(denominator, plan)
+            named
+            for dataset in datasets_of(denominator, plan)
+            if (named := _parties(dataset, plan, level=level))
         )
     )
     whole = f"each year's total of {divisor}" if per_year else divisor
-    return f"Share of {measure} {shape}, divided by {whole} ({parties})."
+    held = f" ({parties})" if parties else ""
+    return f"Share of {measure} {shape}, divided by {whole}{held}."
 
 
 def _sentence_quotient_of(requirement: QuotientRequirement, plan: Plan) -> str:

@@ -369,7 +369,12 @@ class SelectedSource(StrictModel):
     carried: a pin copied over another window
     (`translator.discovery._recorded_source`) is resolved again by its
     definition, which restates no entity, so its names match by label and
-    the graph's resolve door alone.
+    the graph's resolve door alone. A whole's source compile reads from a
+    `dataset_resubmit` answer, which restates no entity either, so compile
+    adds one row for each party the whole keeps from its part and binds
+    itself, under the name the part's source resolved it by, whatever route
+    resolved it (`compiler.compile.with_part_parties`). The approved source
+    carries those rows, so the run-time check reads the names the same way.
 
     `code_paths` maps each code the identity binds on a breakdown's code
     system (`compiler.sources.bound_codes`) to its path through the code

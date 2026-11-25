@@ -31,8 +31,14 @@ from typing import Any, cast, override
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
-from compiler.compile import CompileIssueCode, compile_plan
-from compiler.sources import PROVIDER_ACCOUNT, DiscoveryStatus, source_from_spec_block
+from compiler.compile import CompileIssueCode, compile_plan, with_part_parties
+from compiler.evidence import RetrievalEvidence, check_evidence, errors, evidence_from_source
+from compiler.sources import (
+    PROVIDER_ACCOUNT,
+    DiscoveryStatus,
+    outcome_from_envelope,
+    source_from_spec_block,
+)
 from compiler.surface import (
     McpSurface,
     ToolCallResult,
@@ -167,6 +173,7 @@ from planner.plan import (
     search_pin_slot,
     split_of,
     stored_plan,
+    whole_on_source,
     windowed_pins,
 )
 from planner.records import (
@@ -10081,27 +10088,95 @@ async def test_a_donor_whole_searchs_answer_compiles(
     assert compiled.workflow is not None, compiled.issues
 
 
+_G7_MEMBERS = (
+    ("country/CAN", "Canada"),
+    ("country/DEU", "Germany"),
+    ("country/FRA", "France"),
+    ("country/GBR", "United Kingdom"),
+    ("country/ITA", "Italy"),
+    ("country/JPN", "Japan"),
+    ("country/USA", "United States of America"),
+)
+
+
+def _registry_g7(block: dict[str, Any], label: str) -> None:
+    """`block` binding the G7 as a membership registry set read as its members: the
+    set has a registry id and no graph node or published total, labelled `label`."""
+    resolved = block["resolved"]
+    resolved["entities"] = [
+        {"ref": ref, "label": name, "entity_type": "Country", "role": "origin"}
+        for ref, name in _G7_MEMBERS
+    ]
+    resolved["entity_groups"] = {"origin": {"label": label, "group_id": "groups/G7"}}
+    block["definition"]["identity"]["entities"]["origin"] = [ref for ref, _ in _G7_MEMBERS]
+
+
+def _part_source(
+    block: dict[str, Any], route: str, donor: str, refs: list[str]
+) -> SelectedSource | None:
+    """The part's source as discovery records it where the part resolved `donor` by
+    `route`, `None` where the source built from its shown block stands: by the refs
+    the graph resolved the name to (`entity_refs`), or as a pin Search answered again
+    over another window (`translator.discovery._recorded_source`), whose answer
+    restates no entity row, its name then resolved by the graph."""
+    if route == "entity-refs":
+        source = source_from_spec_block(block)
+    elif route == "answered-again":
+        spec = json.loads(json.dumps(block))
+        spec["definition"]["identity"]["requested_window"]["start_year"] += 1
+        part = {"status": "definite", "spec": spec, "entity_refs": []}
+        source = outcome_from_envelope({"parts": [part]}).sources[0]
+    else:
+        return None
+    assert source.bound_refs == ()
+    return source.model_copy(update={"entity_refs": {donor.casefold(): refs[0]}})
+
+
 @pytest.mark.parametrize(
-    ("name", "donor", "refs", "years"),
+    ("name", "route", "donor", "refs", "years"),
     [
         # Search labels the whole's donor "United States of America".
-        pytest.param("us_bilateral", "United States", ["country/USA"], (2010, 2023), id="us"),
+        pytest.param(
+            "us_bilateral", "bound-row", "United States", ["country/USA"], (2010, 2023), id="us"
+        ),
         # Search labels the whole's donor "Group of Seven".
-        pytest.param("g7_bilateral", "G7", ["GroupOfSeven"], (2015, 2023), id="g7"),
+        pytest.param("g7_bilateral", "bound-row", "G7", ["GroupOfSeven"], (2015, 2023), id="g7"),
+        pytest.param(
+            "us_bilateral",
+            "entity-refs",
+            "United States",
+            ["country/USA"],
+            (2010, 2023),
+            id="us-entity-refs",
+        ),
+        pytest.param(
+            "us_bilateral",
+            "answered-again",
+            "United States",
+            ["country/USA"],
+            (2010, 2023),
+            id="us-answered-again",
+        ),
     ],
 )
-async def test_a_provider_whole_reads_its_parts_names_by_the_refs_search_bound(
-    decision: DecisionFactory, name: str, donor: str, refs: list[str], years: tuple[int, int]
+async def test_a_provider_whole_reads_its_parts_names_by_the_party_each_resolved_to(
+    decision: DecisionFactory,
+    name: str,
+    route: str,
+    donor: str,
+    refs: list[str],
+    years: tuple[int, int],
 ) -> None:
     """US and G7 bilateral ODA as shares of their wholes over every provider, the
-    part naming its donor as the planner wrote it, which Search bound to `refs`
-    on the part's search answer and labels otherwise. Search's answer for the whole
-    restates no entity row, so the whole's source carries the part's bound row for
-    the donor it keeps, and the plan compiles."""
+    part naming its donor as the planner wrote it, which the part's source resolves
+    to `refs` by `route`, and which Search labels otherwise on the whole. Search's
+    answer for the whole restates no entity row, so the whole's source carries a row
+    naming the party the part's donor resolved to, and the plan compiles."""
     surface = _SearchWhole(name)
     ctx = _FakeToolContext()
     block = json.loads(json.dumps(surface.recorded["part"]))
-    block["_bound_refs"] = [{"identity": donor, "text": donor, "refs": refs}]
+    if route == "bound-row":
+        block["_bound_refs"] = [{"identity": donor, "text": donor, "refs": refs}]
     proposed = await _share_over_every(
         cast(Any, surface), ctx, block, "provider", decision, years=years, donor=donor
     )
@@ -10120,6 +10195,8 @@ async def test_a_provider_whole_reads_its_parts_names_by_the_refs_search_bound(
         for rid, spec_id in dict(_pins(ctx)).items()
         if spec_id is not None
     }
+    if (part_source := _part_source(block, route, donor, refs)) is not None:
+        discovered[_PART] = part_source
     assert discovered[_WHOLE].bound_refs == ()
     tools = await McpSurface(
         sources={"data-mcp": data_mcp, "analysis-mcp": analysis_mcp}
@@ -10134,7 +10211,95 @@ async def test_a_provider_whole_reads_its_parts_names_by_the_refs_search_bound(
     assert compiled.workflow is not None, compiled.issues
     (binding,) = [b for b in compiled.workflow.evidence_bindings if b.requirement_id == _WHOLE]
     whole = compiled.workflow.source_of(binding.step_id)
-    assert [row.refs for row in whole.bound_refs] == [tuple(refs)]
+    assert [(row.text, row.refs) for row in whole.bound_refs] == [(donor, tuple(refs))]
+
+
+def test_a_provider_whole_reads_a_registry_set_the_part_names_by_its_registry_id() -> None:
+    """G7 bilateral ODA over its whole over every provider, both reading the G7 as a
+    membership registry set's members, which the part labels "G7" and the whole
+    "Group of Seven": the whole's source carries a row naming the set by its registry
+    id, so the whole's "G7" is met at compile and, through the approved source, by a
+    retrieval holding the members."""
+    recorded = _SEARCH_WHOLES["g7_bilateral"]
+    part_block = json.loads(json.dumps(recorded["part"]))
+    whole_block = json.loads(json.dumps(recorded["whole"]))
+    _registry_g7(part_block, "G7")
+    _registry_g7(whole_block, "Group of Seven")
+    period = Period(start=2015, end=2023)
+    part = DatasetRequirement(
+        id="part",
+        decision_ids=["measure"],
+        measure="G7 bilateral ODA",
+        entities=[Entity(name="G7", role="donor")],
+        period=period,
+    )
+    stated = DatasetRequirement(
+        id="whole",
+        decision_ids=["measure"],
+        measure="G7 ODA",
+        period=period,
+        whole_of=WholeOf(part="part", axis="provider"),
+    )
+    part_source = source_from_spec_block(part_block)
+    whole_source = source_from_spec_block(whole_block)
+    whole = whole_on_source(stated, part, whole_source, summed=False, part_source=part_source)
+    assert not errors(check_evidence(part, evidence_from_source(part_source)))
+    assert errors(check_evidence(whole, evidence_from_source(whole_source)))
+
+    approved = with_part_parties(whole_source, whole=whole, part=part, part_source=part_source)
+
+    assert [(row.text, row.refs) for row in approved.bound_refs] == [("G7", ("groups/G7",))]
+    assert not errors(check_evidence(whole, evidence_from_source(approved)))
+    retrieved = RetrievalEvidence(
+        origin="manifest",
+        spec_id=approved.spec_id,
+        has_data=True,
+        entities=approved.entities,
+    )
+    names = {EvidenceIssueCode.ENTITY_MISSING, EvidenceIssueCode.ENTITY_NO_SERIES}
+    assert not [f for f in check_evidence(whole, retrieved, approved=approved) if f.code in names]
+    unapproved = check_evidence(whole, retrieved, approved=whole_source)
+    assert [f.code for f in unapproved if f.code in names] == [EvidenceIssueCode.ENTITY_MISSING]
+
+
+def test_a_donor_whole_carries_no_name_from_the_side_it_opens() -> None:
+    """US bilateral ODA to Kenya over its whole over every donor, the whole's source
+    edited to bind the US among the donors it counts: the whole keeps the part's
+    recipient, so it carries a row for Kenya, and none for the donor the part names on
+    the side the whole opens, though the source binds that party too."""
+    recorded = _SEARCH_WHOLES["us_bilateral_to_kenya"]
+    part_block = json.loads(json.dumps(recorded["part"]))
+    part_block["_bound_refs"] = [
+        {"identity": "United States", "text": "United States", "refs": ["country/USA"]}
+    ]
+    whole_block = json.loads(json.dumps(recorded["whole"]))
+    whole_block["resolved"]["entities"].append(
+        {"ref": "country/USA", "label": "United States of America", "role": "origin"}
+    )
+    part = DatasetRequirement(
+        id="part",
+        decision_ids=["measure"],
+        measure="US aid to Kenya",
+        entities=[
+            Entity(name="United States", role="donor"),
+            Entity(name="Kenya", role="recipient"),
+        ],
+        period=Period(start=2019, end=2019),
+    )
+    stated = DatasetRequirement(
+        id="whole",
+        decision_ids=["measure"],
+        measure="aid to Kenya",
+        period=Period(start=2019, end=2019),
+        whole_of=WholeOf(part="part", axis="donor"),
+    )
+    part_source = source_from_spec_block(part_block)
+    whole_source = source_from_spec_block(whole_block)
+    whole = whole_on_source(stated, part, whole_source, summed=False, part_source=part_source)
+
+    carried = with_part_parties(whole_source, whole=whole, part=part, part_source=part_source)
+
+    assert [(row.text, row.refs) for row in carried.bound_refs] == [("Kenya", ("country/KEN",))]
 
 
 def test_a_part_with_no_scope_record_is_named_by_its_option_on_the_wholes_record() -> None:
