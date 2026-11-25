@@ -10333,8 +10333,8 @@ def test_a_whole_reads_its_parts_names_on_the_view_of_its_source(
 def test_a_whole_reads_the_words_of_the_part_it_is_paired_with() -> None:
     """One whole source and the same part spec found by two searches: one wrote "US",
     the other "United States". The whole meets "United States" on the view with the
-    second part's facts, and not with the first's, so a name follows the search the
-    plan reads, which a row written into the whole's source once would not."""
+    second part's facts, and not with the first's: a name follows the search of the
+    part the whole is paired with."""
     part_us, whole_source = _fixture_sources("us_bilateral", part_rows=[("US", ["country/USA"])])
     part_named, _ = _fixture_sources("us_bilateral", part_rows=[("United States", ["country/USA"])])
     assert part_us.spec_id == part_named.spec_id
@@ -10466,6 +10466,42 @@ _CONGOS = [
     {"ref": "country/COD", "label": "Democratic Republic of the Congo", "role": "destination"},
     {"ref": "country/COG", "label": "Republic of the Congo", "role": "destination"},
 ]
+
+
+@pytest.mark.parametrize(
+    ("whole_row", "expected"),
+    [
+        pytest.param(True, "country/COD", id="whole-row"),
+        pytest.param(False, "country/COG", id="part-row-alone"),
+    ],
+)
+def test_a_wholes_own_row_takes_precedence_over_its_parts(whole_row: bool, expected: str) -> None:
+    """US aid to "Congo" over its whole over every provider, both Congos among the
+    whole's recipients, the part's search binding "Congo" to the Republic of the
+    Congo: where the whole's own row binds "Congo" to the Democratic Republic, the
+    view keeps that row alone and reads that one; with no row of the whole's, it
+    reads the part's."""
+
+    def recipients(block: dict[str, Any]) -> None:
+        block["resolved"]["entities"] += _CONGOS
+
+    def whole_edit(block: dict[str, Any]) -> None:
+        recipients(block)
+        if whole_row:
+            block["_bound_refs"] = [{"identity": "Congo", "text": "Congo", "refs": ["country/COD"]}]
+
+    part_source, whole_source = _fixture_sources(
+        "us_bilateral",
+        part_rows=[("Congo", ["country/COG"])],
+        part_edit=recipients,
+        whole_edit=whole_edit,
+    )
+    view = named_by_part(whole_source, part_source, opened=None)
+
+    found = resolve_name(Entity(name="Congo", role="recipient"), view)
+
+    assert found is not None and found.ref == expected
+    assert len([row for row in view.bound_refs if row.text == "Congo"]) == 1
 
 
 def test_a_whole_reads_a_name_as_the_part_it_is_paired_with_binds_it_now() -> None:

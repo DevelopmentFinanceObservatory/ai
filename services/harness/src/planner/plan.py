@@ -44,6 +44,7 @@ import itertools
 import json
 import logging
 import re
+import weakref
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, MutableMapping, Sequence
 from contextvars import ContextVar
@@ -2839,19 +2840,47 @@ def compiled_source(plan: Plan, requirement_id: str) -> SelectedSource | None:
     compile or where no step retrieves it. A whole's (`DatasetRequirement.whole_of`)
     is viewed with its part's name facts (`compiler.sources.named_by_part`), as
     compile read it, so the names it keeps from its part read as the part's search
-    bound them."""
-    source = _stored_source(plan, requirement_id)
+    bound them. The sources are read once per plan (`_compiled_sources`)."""
+    return _compiled_sources(plan).get(requirement_id)
+
+
+# `_compiled_sources` by the id of the plan it read, with a weak reference to that
+# plan, so a card render reads each plan's sources once and a dropped plan's go.
+_COMPILED_SOURCES: dict[int, tuple[weakref.ref[Plan], dict[str, SelectedSource]]] = {}
+
+
+def _compiled_sources(plan: Plan) -> dict[str, SelectedSource]:
+    """The source `plan`'s workflow retrieves each requirement from, by requirement
+    id, each whole's viewed with its part's (`compiled_source`); empty before
+    compile."""
+    key = id(plan)
+    held = _COMPILED_SOURCES.get(key)
+    if held is not None and held[0]() is plan:
+        return held[1]
+    sources: dict[str, SelectedSource] = {}
+    if plan.workflow is not None:
+        for binding in plan.workflow.evidence_bindings:
+            source = plan.workflow.source_of(binding.step_id)
+            if source is not None:
+                sources.setdefault(binding.requirement_id, source)
     stated = {r.id: r for r in plan.evidence_requirements}
-    whole = stated.get(requirement_id)
-    if source is None or not isinstance(whole, DatasetRequirement) or whole.whole_of is None:
-        return source
-    part = stated.get(whole.whole_of.part)
-    if not isinstance(part, DatasetRequirement) or part.whole_of is not None:
-        return source
-    part_source = _stored_source(plan, part.id)
-    if part_source is None:
-        return source
-    return named_by_part(source, part_source, opened=whole_side(whole.whole_of.axis))
+    viewed = dict(sources)
+    for whole in stated.values():
+        if not isinstance(whole, DatasetRequirement) or whole.whole_of is None:
+            continue
+        part = stated.get(whole.whole_of.part)
+        if not isinstance(part, DatasetRequirement) or part.whole_of is not None:
+            continue
+        whole_source, part_source = sources.get(whole.id), sources.get(part.id)
+        if whole_source is not None and part_source is not None:
+            viewed[whole.id] = named_by_part(
+                whole_source, part_source, opened=whole_side(whole.whole_of.axis)
+            )
+    _COMPILED_SOURCES[key] = (
+        weakref.ref(plan, lambda _, key=key: _COMPILED_SOURCES.pop(key, None)),
+        viewed,
+    )
+    return viewed
 
 
 def _stored_source(plan: Plan, requirement_id: str) -> SelectedSource | None:

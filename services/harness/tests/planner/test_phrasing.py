@@ -69,8 +69,8 @@ def test_entities_phrase_joins_names_in_order_deduplicated() -> None:
 
 
 def test_entities_phrase_is_empty_for_no_entity_and_no_across_word() -> None:
-    """A whole (`whole_of`) states no entity and no `across` word; phrasing it once
-    raised IndexError, which ended a Studio turn as `capability_unavailable`."""
+    """A whole (`whole_of`) states no entity and no `across` word, so its phrase is
+    empty and a caller phrasing a plan's first dataset can drop its "for" clause."""
     assert phrasing.entities_phrase([]) == ""
 
 

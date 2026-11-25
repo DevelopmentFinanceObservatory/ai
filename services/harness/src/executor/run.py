@@ -1617,17 +1617,16 @@ class _Run:
         # reading of it. The `spec_id` the tool answers with
         # (`evidence.spec_id`) plays no part in the lookup. A whole's is viewed with
         # its part's name facts, as compile read it (`sources_named_by_parts`).
-        stored = {
-            b.step_id: workflow.source_of(b.step_id) or self.sources[b.spec_id]
-            for b in workflow.evidence_bindings
-        }
-        by_requirement = {b.requirement_id: stored[b.step_id] for b in workflow.evidence_bindings}
-        named = sources_named_by_parts(self.requirements, by_requirement)
+        # One binding per requirement, as compile enforces.
+        named = sources_named_by_parts(
+            self.requirements,
+            {
+                b.requirement_id: workflow.source_of(b.step_id) or self.sources[b.spec_id]
+                for b in workflow.evidence_bindings
+            },
+        )
         self.approved_source: dict[str, SelectedSource] = {
-            b.step_id: named[b.requirement_id]
-            if by_requirement[b.requirement_id] is stored[b.step_id]
-            else stored[b.step_id]
-            for b in workflow.evidence_bindings
+            b.step_id: named[b.requirement_id] for b in workflow.evidence_bindings
         }
         # Each retrieval's evidence is held to its requirement as the compiler read it
         # on the approved source: a whole (`DatasetRequirement.whole_of`) covering what

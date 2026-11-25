@@ -1309,9 +1309,12 @@ def named_by_part(
     after its own, each row of `part.bound_refs` and each `part.entity_refs` entry
     with a ref among the parties `whole` states (an entity's ref, a set's ref,
     published total or registry id) on a column outside the side `opened`, the side
-    the whole widens (`planner.plan.whole_side`). A part's name for a party the
-    whole does not state, as on the side it opens or a side Search rebinds to other
-    parties, is not carried, and reads on the whole as it does today.
+    the whole widens (`planner.plan.whole_side`). The whole's own facts take
+    precedence: a part row whose identity or words a row of the whole's binds, and a
+    part entry for a name the whole's `entity_refs` holds, are not carried. A part's
+    name for a party the whole does not state, as on the side it opens or a side
+    Search rebinds to other parties, is not carried either, and reads on the whole's
+    own source alone.
     """
     held: set[str] = {
         entity.ref
@@ -1321,8 +1324,15 @@ def named_by_part(
     for group in whole.groups:
         if opened is None or role_party(group.role) != opened:
             held.update(key for key in (group.ref, group.total, group.group_id) if key)
-    rows = list(whole.bound_refs)
-    rows.extend(row for row in part.bound_refs if row not in rows and held.intersection(row.refs))
+    bound = {key.casefold() for row in whole.bound_refs for key in (row.identity, row.text)}
+    rows = [*whole.bound_refs]
+    rows.extend(
+        row
+        for row in part.bound_refs
+        if row.identity.casefold() not in bound
+        and row.text.casefold() not in bound
+        and held.intersection(row.refs)
+    )
     refs = {name: ref for name, ref in part.entity_refs.items() if ref in held}
     return whole.model_copy(
         update={"bound_refs": tuple(rows), "entity_refs": {**refs, **whole.entity_refs}}
