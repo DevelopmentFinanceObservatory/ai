@@ -2142,7 +2142,9 @@ def build_orchestrator_tools(
         user explicitly asks to break down that side: "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
         "entities": [{"text": "Kenya", "role": "debtor"}], "open_roles":
         ["creditor"], "operations": [{"verb": "rank",
-        "phrase": "top 5 creditors", "over": "origin"}]}`. A rank over place,
+        "phrase": "top 5 creditors", "over": "origin"}]}`. With `share_of`,
+        `variable` names the share's numerator measure alone, without the share
+        wording (e.g. 'bilateral ODA'). A rank over place,
         category or year has no flow side. A worldwide country
         ranking is a rank `over` "place" with no entity. A donor or creditor
         ranking uses `origin`; a recipient or debtor ranking uses
