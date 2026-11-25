@@ -1956,6 +1956,15 @@ async def test_a_pin_cannot_resurrect_a_no_data_answers_nearest_series(
     assert result["action"]["arguments"]["kind"] == ReferralKind.PINNED_SOURCE_NOT_FOUND.value
 
 
+@pytest.mark.parametrize(
+    ("pin", "pin_unit", "narrowed", "unit_sent", "found"),
+    [
+        (SPEC_KENYA, None, False, False, True),
+        (SPEC_THIRD, {"currency": "USD", "prices": "current"}, False, True, True),
+        (SPEC_KENYA, None, True, True, False),
+    ],
+    ids=["pin-without-a-unit", "pin-in-the-stated-unit", "narrowed-pin"],
+)
 async def test_a_pin_with_a_stated_unit_is_found_by_its_own_search(
     surface: McpSurface,
     search_calls: list[dict[str, Any]],
@@ -1964,27 +1973,43 @@ async def test_a_pin_with_a_stated_unit_is_found_by_its_own_search(
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
+    pin: str,
+    pin_unit: dict[str, str] | None,
+    narrowed: bool,
+    unit_sent: bool,
+    found: bool,
 ) -> None:
-    # A pin Search compiled with no unit, and a requirement stating current
-    # USD (`requirement`'s default). Sent with the unit, Search would answer
-    # a twin differing from the pin in `facets.unit` alone, and the pin would
-    # be referred back as not found. The unit is checked against the pin's
-    # own at compile instead.
-    pinned = requirement(measure="headline net ODA", source_spec_id=SPEC_KENYA)
+    # A requirement stating current USD (`requirement`'s default), pinned to a
+    # block shown over other years, so discovery searches again. Search writes a
+    # stated unit into the identity it compiles, so a pin compiled without one
+    # is found only by a search without it, and a pin compiled in the unit only
+    # by one with it. The compiler checks the unit against the pin's own. A pin
+    # admission found narrower is searched for a replacement, unit included.
+    pinned = requirement(measure="headline net ODA", source_spec_id=pin)
     assert pinned.unit is not None
     context = context_holding(
         draft(
-            decisions=[pinning_decision(SPEC_KENYA)],
+            decisions=[pinning_decision(pin)],
             evidence_requirements=[pinned, derived_requirement()],
         )
     )
+    block = _spec(pin, "headline ODA", coverage={"kind": "breadth", "has_data": True})
+    if pin_unit is not None:
+        block["definition"]["identity"]["facets"] = {
+            "unit": {"state": "value", "request": pin_unit}
+        }
+    _shown(context, pin, block)
+    if narrowed:
+        save_pin_verdicts(
+            context.state,
+            [PinVerdict(requirement_id="annual_debt_service", spec_id=pin, narrowed=True)],
+        )
 
     result = await _discover(surface, context)
 
-    assert "action" not in result
-    assert [s["spec_id"] for s in result["sources"]] == [SPEC_KENYA]
+    assert ("action" not in result) is found
     (call,) = search_calls
-    assert "unit" not in call["parts"][0]
+    assert ("unit" in call["parts"][0]) is unit_sent
 
 
 @pytest.mark.parametrize(

@@ -400,7 +400,8 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
 
     Takes the block's `spec_id`, what it `resolved` -- sentence, confidence,
     coverage, the counts of its members and how many it serves, whether the
-    mint adds them by a declared composite (`sums_components`), the label,
+    mint adds them by a declared composite (`sums_components`) or splices them
+    by years (`splices_components`), the label,
     size and digest of the binding its `shape` states, the concept it counts
     and the tables it is published in, entities and the named
     sets it binds, the measure it elected and the others it offers, the entity
@@ -444,6 +445,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             stat_var_member_count_exact=_flag(stat_vars.get("member_count_exact")),
             served_count=_count(stat_vars.get("served_count")),
             sums_components=True if stat_vars.get("sums_components") is True else None,
+            splices_components=True if stat_vars.get("splices_components") is True else None,
             shape_member_count=_count(shape.get("member_count")),
             shape_member_digest=_text(shape.get("member_digest")),
             entities=tuple(_entity(entity) for entity in _sequence(resolved.get("entities"))),
@@ -881,13 +883,15 @@ def default_reading(source: SelectedSource) -> StatVarReading:
     A family with no open axis has nothing to sum over, so it reads
     separately, unless apis's mint adds its members by a declared composite
     (`sums_components`), as it adds DAC2a's bilateral and imputed multilateral
-    lines: those members are parts of one figure, whatever its slots bind. A
+    lines, or splices them by years (`splices_components`), as it serves the
+    ONE headline series: those members are parts of one figure, whatever its
+    slots bind. A
     family with any open axis apis may not sum over (a sex, a netting basis)
     reads separately either way, since its members are different measures.
     """
     if not all(axis.summable for axis in source.open_axes):
         return StatVarReading.SEPARATE
-    if source.open_axes or source.sums_components:
+    if source.open_axes or source.sums_components or source.splices_components:
         return StatVarReading.SUM
     return StatVarReading.SEPARATE
 

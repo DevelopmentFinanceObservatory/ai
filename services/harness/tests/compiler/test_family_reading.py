@@ -1605,28 +1605,60 @@ def test_a_rank_over_recipients_of_a_composite_family_without_the_flag_is_refuse
     assert "binds one StatVar" in issue.reason
 
 
+def _stated_sum(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    """Leave the recorded block's `sums_components` as Search states it."""
+
+
+def _no_flag(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    del stat_vars["sums_components"]
+
+
+def _flag_false(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    stat_vars["sums_components"] = False
+
+
+def _spliced(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    del stat_vars["sums_components"]
+    stat_vars["splices_components"] = True
+
+
+def _one_member(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    del stat_vars["sums_components"]
+    stat_vars["member_count"] = 1
+
+
+def _slots_unread(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    del stat_vars["sums_components"]
+    del resolved["slots"]
+
+
 @pytest.mark.parametrize(
-    ("sums_components", "codes"),
+    ("edit", "codes"),
     [
-        (True, []),
-        (False, [CompileIssueCode.FAMILY_UNSUMMABLE]),
-        (None, [CompileIssueCode.FAMILY_UNSUMMABLE]),
+        (_stated_sum, []),
+        (_spliced, []),
+        (_flag_false, [CompileIssueCode.FAMILY_UNSUMMABLE]),
+        (_no_flag, [CompileIssueCode.FAMILY_UNSUMMABLE]),
+        (_one_member, []),
+        (_slots_unread, []),
     ],
-    ids=["declared-sum", "spliced", "no-flag"],
+    ids=["declared-sum", "declared-splice", "flag-false", "no-flag", "one-member", "slots-unread"],
 )
 def test_a_family_with_no_open_axis_reads_summed_only_where_its_components_sum(
     compile_question: Callable[..., CompileResult],
-    sums_components: bool | None,
+    edit: Callable[[dict[str, Any], dict[str, Any]], None],
     codes: list[CompileIssueCode],
 ) -> None:
-    """The plan states `sum` over a family with no open axis. apis adds the
-    members only where the source declares they sum, and refuses any other
-    sum `rollup_not_summable`, as it refuses a spliced composite whose members
-    serve disjoint years (`sums_components` false), so compile refuses it
-    before the fetch."""
-    block = _dac2a_inclusive(sums_components=sums_components is not None)
-    if sums_components is False:
-        block["resolved"]["stat_vars"]["sums_components"] = False
+    """The plan states `sum` over a family with no open axis. apis collapses the
+    members only where the source declares they sum or are spliced by years,
+    and refuses any other sum `rollup_not_summable`, so compile refuses it
+    before the fetch. A family counted at one member has nothing to collapse,
+    and a source whose slots were never read states no axes to judge, so
+    neither is refused. Each edit is this test's, of the recorded DAC2a
+    inclusive block."""
+    block = _dac2a_inclusive()
+    resolved = block["resolved"]
+    edit(resolved["stat_vars"], resolved)
     source = source_from_spec_block(block)
     assert source.open_axes == ()
 
@@ -1637,3 +1669,20 @@ def test_a_family_with_no_open_axis_reads_summed_only_where_its_components_sum(
     )
 
     assert [issue.code for issue in result.issues] == codes
+
+
+def test_a_spliced_family_reads_as_one_series_and_says_it_is_spliced() -> None:
+    """A family the mint splices by years, as it serves the ONE headline ODA
+    series, reads as one figure by the rule, and the card says it is spliced
+    from its indicators. The splice flag is this test's edit of the recorded
+    DAC2a inclusive block."""
+    block = _dac2a_inclusive()
+    _spliced(block["resolved"]["stat_vars"], block["resolved"])
+    source = source_from_spec_block(block)
+
+    read = stat_var_reading(source, None)
+
+    assert source.splices_components is True
+    assert read.stat_var_reading is StatVarReading.SUM
+    assert read.stat_var_reading_set_by is ReadingSetBy.RULE
+    assert _reading_clause(read) == "spliced from its 2 indicators by default"

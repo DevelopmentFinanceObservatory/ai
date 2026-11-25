@@ -334,7 +334,6 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             | CompileIssueCode.SUM_UNITS_DIFFER
             | CompileIssueCode.SHARE_UNITS_DIFFER
             | CompileIssueCode.SHARE_PART_OUTSIDE_WHOLE
-            | CompileIssueCode.SHARE_PART_MEMBERS_ONLY
             | CompileIssueCode.WHOLE_SUM_UNMATCHED
             | CompileIssueCode.FRAME_UNITS_DIFFER
             | CompileIssueCode.FRAME_UNIT_FORMS_DIFFER
@@ -466,11 +465,6 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "is one measure set against another that does not hold it, replace the share with a "
         "`quotient_of`; otherwise give the denominator entities that hold every party the "
         "numerator names"
-    ),
-    CompileIssueCode.SHARE_PART_MEMBERS_ONLY: (
-        "read the set the numerator names as its published total: leave `members` unset on "
-        "that entity, so Search binds the set's own figure; for its members' figures, state "
-        "them as a breakdown or rank of each member rather than a share of this whole"
     ),
     CompileIssueCode.WHOLE_SUM_UNMATCHED: (
         "propose the plan again with the whole as it stands, so `propose_plan` reads the "

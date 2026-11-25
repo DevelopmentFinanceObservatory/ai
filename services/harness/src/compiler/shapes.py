@@ -588,15 +588,19 @@ def unsummable_axes(source: SelectedSource) -> tuple[str, ...] | None:
 
 
 def sum_unstated(source: SelectedSource) -> bool:
-    """Whether `source`'s family has nothing apis may sum it over: no open axis, and no
-    declared composite whose components the mint adds (`sums_components`).
+    """Whether `source`'s family has nothing apis may collapse it over: no open axis, and
+    no declared composite whose components the mint adds (`sums_components`) or
+    splices by years (`splices_components`).
 
     apis collapses a family's members over a summable axis it decodes or by
     the composite's declaration, and refuses any other sum
-    `rollup_not_summable`, as it refuses a spliced composite, whose members
-    each serve their own years.
+    `rollup_not_summable`. A family Search counts at one member has nothing to
+    collapse, and one whose slots were never read (`slot_codes` `None`) states
+    no axes to judge by, so neither is held to this.
     """
-    return not source.open_axes and not source.sums_components
+    if source.stat_var_member_count == 1 or source.slot_codes is None:
+        return False
+    return not source.open_axes and not source.sums_components and not source.splices_components
 
 
 def _separate_measures(source: SelectedSource) -> MeasureCount:

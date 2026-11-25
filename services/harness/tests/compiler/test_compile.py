@@ -2647,8 +2647,8 @@ def test_a_pin_in_another_unit_is_refused_with_the_pin_to_drop(
     source_fields: dict[str, Any],
     refused_by: tuple[EvidenceIssueCode, ...],
 ) -> None:
-    # Discovery searches a pin without its requirement's unit, so the pin's
-    # own unit is checked here. A pin in other prices or another currency is
+    # Discovery searches a pin compiled with no unit without its requirement's,
+    # so the pin's own unit is checked here. A pin in other prices or another currency is
     # refused, and the fix is to drop the pin so discovery's search, unit
     # included, finds the converted source.
     plan = _draft(
@@ -8891,36 +8891,6 @@ _AFRICA_GROUP = ResolvedGroup(
     total="DACAfrica",
     members=("country/ETH", "country/KEN", "country/NGA"),
 )
-# Africa read as its member countries, as Search reads "Africa" sent with
-# `members`: its published total's unallocated flows are left out.
-_AFRICAN_COUNTRIES = [
-    ResolvedEntity(role="destination", ref="country/ETH", label="Ethiopia"),
-    ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
-    ResolvedEntity(role="destination", ref="country/NGA", label="Nigeria"),
-]
-_AFRICA_MEMBERS_GROUP = ResolvedGroup(
-    role="destination",
-    label="Africa",
-    group_id="groups/OECD.DAC.Region.Africa",
-    left_out=("Africa, unallocated by country (DAC)",),
-    sum_differs=True,
-)
-_DEVELOPING_TOTAL = (
-    Entity(name="developing countries (DAC)", role="recipient"),
-    [
-        ResolvedEntity(
-            role="destination", ref="DACDevelopingCountries", label="developing countries (DAC)"
-        )
-    ],
-    [
-        ResolvedGroup(
-            role="destination",
-            label="developing countries (DAC)",
-            ref="DACDevelopingCountries",
-            total="DACDevelopingCountries",
-        )
-    ],
-)
 
 
 def _flow_source(
@@ -9028,12 +8998,6 @@ def _flow_source(
             [],
             id="kenya-over-every-recipient",
         ),
-        pytest.param(
-            ("Africa", [_AFRICA], [_AFRICA_GROUP]),
-            (None, [], []),
-            [],
-            id="africa-total-over-every-recipient",
-        ),
     ],
 )
 def test_a_share_divides_by_a_whole_that_holds_its_part(
@@ -9099,106 +9063,6 @@ def test_a_share_divides_by_a_whole_that_holds_its_part(
     )
 
     assert _codes(result) == codes
-
-
-@pytest.mark.parametrize(
-    ("part", "whole", "codes"),
-    [
-        pytest.param(
-            ([_AFRICA], [_AFRICA_GROUP]),
-            _DEVELOPING_TOTAL,
-            [],
-            id="africa-total-over-developing-countries-total",
-        ),
-        pytest.param(
-            (_AFRICAN_COUNTRIES, [_AFRICA_MEMBERS_GROUP]),
-            _DEVELOPING_TOTAL,
-            [Code.SHARE_PART_MEMBERS_ONLY],
-            id="africa-members-over-developing-countries-total",
-        ),
-        pytest.param(
-            (_AFRICAN_COUNTRIES, [_AFRICA_MEMBERS_GROUP]),
-            (None, [], []),
-            [Code.SHARE_PART_MEMBERS_ONLY],
-            id="africa-members-over-every-recipient",
-        ),
-        pytest.param(
-            (_AFRICAN_COUNTRIES, [_AFRICA_MEMBERS_GROUP]),
-            (
-                Entity(name="Africa", role="recipient", members=True),
-                _AFRICAN_COUNTRIES,
-                [_AFRICA_MEMBERS_GROUP],
-            ),
-            [],
-            id="africa-members-over-africa-members",
-        ),
-    ],
-)
-def test_a_share_of_a_set_read_as_its_members_needs_a_whole_without_its_residuals(
-    build: Callable[..., CompileResult],
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    source: SourceFactory,
-    part: tuple[list[ResolvedEntity], list[ResolvedGroup]],
-    whole: tuple[Entity | None, list[ResolvedEntity], list[ResolvedGroup]],
-    codes: list[Code],
-) -> None:
-    """What share of G7 aid to developing countries went to Africa. Africa read as its
-    54 countries leaves out its unallocated flows, which developing countries' total and
-    a sum over every recipient count, so it reads 19.3% where Africa's own total reads
-    22.6%: refused. Africa's total over either whole compiles, and so do Africa's
-    countries over the same countries."""
-    part_entities, part_groups = part
-    whole_entity, whole_entities, whole_groups = whole
-    g7 = Entity(name="G7", role="donor")
-    aid = requirement(
-        id="aid",
-        measure="official development assistance",
-        entities=[
-            g7,
-            Entity(name="Africa", role="recipient", members=part_groups[0].total is None),
-        ],
-    )
-    total = requirement(
-        id="total",
-        measure="official development assistance",
-        entities=[g7] if whole_entity is None else [g7, whole_entity],
-        across=("recipient",) if whole_entity is None else (),
-    )
-    part_sum = derived_requirement(id="part_sum", input_id="aid")
-    whole_sum = derived_requirement(id="whole_sum", input_id="total")
-    share = ShareOfRequirement(
-        id="share",
-        decision_ids=["measure"],
-        numerator=RequirementSide(input_id="part_sum"),
-        denominator=RequirementSide(input_id="whole_sum"),
-    )
-
-    result = build(
-        _draft([decision()], [aid, total, part_sum, whole_sum, share]),
-        _translation(
-            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
-            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
-            _aggregate(id="part_sum", requirement_id="part_sum", input="fetch"),
-            _aggregate(id="whole_sum", requirement_id="whole_sum", input="fetch_total"),
-            ShareOfOperation(
-                id="share",
-                requirement_id="share",
-                numerator=Side(input="part_sum"),
-                denominator=Side(input="whole_sum"),
-            ),
-            terminal=["share"],
-        ),
-        discovered={
-            "aid": _flow_source(source, SPEC_KENYA, recipients=part_entities, groups=part_groups),
-            "total": _flow_source(
-                source, SPEC_OTHER, recipients=whole_entities, groups=whole_groups
-            ),
-        },
-    )
-
-    assert _codes(result) == codes, result.issues
 
 
 @pytest.mark.parametrize("declared", [True, False], ids=["search-derived", "planner-pinned"])

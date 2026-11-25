@@ -101,7 +101,6 @@ from planner.workflow import (
     EvidenceBinding,
     OpenEntityAxis,
     ResolvedEntity,
-    ResolvedGroup,
     SelectedSource,
     ToolId,
     Workflow,
@@ -238,10 +237,6 @@ class CompileIssueCode(StrEnum):
     # A share whose denominator shows it does not hold a party its numerator
     # names on a donor or recipient side (`_Build._check_share_holds_part`).
     SHARE_PART_OUTSIDE_WHOLE = "share_part_outside_whole"
-    # A share whose numerator reads a set as its members alone, leaving out the
-    # residuals its published total counts, over a whole that counts them
-    # (`_Build._check_share_reads_residuals`).
-    SHARE_PART_MEMBERS_ONLY = "share_part_members_only"
     # A whole whose source Search derived summed over the side it opens with no sum
     # over it in the plan, or as one total with one (`_Build._check_whole_sum`).
     WHOLE_SUM_UNMATCHED = "whole_sum_unmatched"
@@ -741,9 +736,9 @@ class _Build:
             self._check_whole_sum(operation, requirement, source)
             findings = check_evidence(requirement, evidence_from_source(source))
             for finding in errors(findings):
-                # Discovery searches a pin without the requirement's unit
-                # (`translator.discovery.search_part`), so only a search
-                # without the pin finds the source converted to that unit.
+                # Discovery searches a pin compiled with no unit without the
+                # requirement's (`translator.discovery._pin_query`), so only a
+                # search with no pin finds the source converted to that unit.
                 repin = (
                     "; drop the requirement's `source_spec_id` and keep its `unit`, so "
                     "discovery finds the source in that unit"
@@ -932,7 +927,6 @@ class _Build:
                 )
                 self._check_key_axes(operation)
                 self._check_share_holds_part(operation)
-                self._check_share_reads_residuals(operation)
             elif isinstance(operation, QuotientOfOperation):
                 self._check_two_sided(
                     operation.id,
@@ -2146,51 +2140,6 @@ class _Build:
             f"a part of its whole; {'; '.join(repairs)}",
             operation_id=operation.id,
         )
-
-    def _check_share_reads_residuals(self, operation: ShareOfOperation) -> None:
-        """Report `SHARE_PART_MEMBERS_ONLY` for a share whose numerator reads a set as
-        its members alone over a whole that counts the residuals they leave out.
-
-        Search reads a set named with `members` as its member parties and names
-        the residuals its published total counts that they leave out
-        (`ResolvedGroup.left_out`, "Africa, unallocated by country (DAC)"). A
-        whole on that side counts those residuals where it reads a published
-        total of another set (`ResolvedGroup.reads_total`), such as developing
-        countries', or leaves the side open, every party there summed, the
-        unallocated buckets among them. The share would set the members against a
-        total holding flows of the set they leave out, so Africa's 54 countries
-        over developing countries reads 19.3% where Africa's own total reads 22.6%.
-        A whole reading the same set's total, or any set as its members, holds no
-        such residual and is not checked, nor is either side narrowed on that
-        column, nor an operand whose parties are unknown (`_side_parties`).
-        """
-        part = self._side_parties(operation.id, operation.numerator)
-        whole = self._side_parties(operation.id, operation.denominator)
-        if part is None or whole is None:
-            return
-        for column in WHOLE_COLUMNS.values():
-            for part_id, part_source in part.sources.items():
-                group = next((g for g in part_source.groups if g.role == column), None)
-                if group is None or group.reads_total or not group.left_out:
-                    continue
-                if _narrowed_on(part, part_id, column):
-                    continue
-                if not any(
-                    _counts_residuals(whole, whole_id, column, group) for whole_id in whole.sources
-                ):
-                    continue
-                requirement = self.requirements.get(part_id)
-                where = f" in requirement {part_id!r}" if requirement is not None else ""
-                self._issue(
-                    CompileIssueCode.SHARE_PART_MEMBERS_ONLY,
-                    f"operation {operation.id!r} divides {group.label}'s members alone, which "
-                    f"leave out {'; '.join(group.left_out)}, by a whole that counts them, so "
-                    f"the share would leave out part of {group.label}; read {group.label} as "
-                    f"its published total: leave `members` unset on it{where}",
-                    operation_id=operation.id,
-                    requirement_id=part_id,
-                )
-                return
 
     def _side_parties(self, op_id: str, side: Side) -> _Parties | None:
         """The parties `side` of the two-sided operation `op_id` keeps: those of its
@@ -3860,36 +3809,6 @@ def _narrowed_by_side(
 def _resolved_refs(source: SelectedSource, column: str) -> frozenset[str]:
     """The refs of every entity `source` resolves on the role column `column`."""
     return frozenset(entity.ref for entity in source.entities if entity.role == column)
-
-
-def _narrowed_on(parties: _Parties, requirement_id: str, column: str) -> bool:
-    """Whether the plan narrowed the frame `parties` describes on `column` of the
-    source of `requirement_id`: it keeps fewer parties there than the source
-    resolves."""
-    kept = parties.kept.get((requirement_id, column))
-    return kept is not None and kept != _resolved_refs(parties.sources[requirement_id], column)
-
-
-def _counts_residuals(
-    whole: _Parties, requirement_id: str, column: str, group: ResolvedGroup
-) -> bool:
-    """Whether the source of `requirement_id` behind the denominator `whole` counts,
-    on `column`, the residuals `group`, a set read as its members, leaves out, for
-    `_Build._check_share_reads_residuals`: it reads a published total of another
-    set there, or leaves the column open, unnarrowed either way."""
-    source = whole.sources[requirement_id]
-    if _narrowed_on(whole, requirement_id, column):
-        return False
-    held = next((g for g in source.groups if g.role == column), None)
-    if held is not None:
-        same = _group_key(held) is not None and _group_key(held) == _group_key(group)
-        return held.reads_total and not same
-    return any(axis.column == column for axis in source.open_entity_axes or ())
-
-
-def _group_key(group: ResolvedGroup) -> str | None:
-    """The graph node or registry id naming `group`, `None` where Search states neither."""
-    return group.ref or group.group_id
 
 
 def _held_side(

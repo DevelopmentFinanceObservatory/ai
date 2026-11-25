@@ -180,7 +180,7 @@ from harness.reply_figures import (
     with_coordinates,
 )
 from harness.rolling_cards import named_year
-from harness.scope_choices import PartScope, carried_entries, mark_planner_axes, planner_axes
+from harness.scope_choices import PartScope, carried_entries
 from harness.studio_state import CardRemoval, RecallPart, RecallRefusedError
 from harness.tool_contracts import (
     HarnessCode,
@@ -1893,25 +1893,6 @@ def _elected_count(readings: Sequence[SearchReading], offering: SearchReading) -
     return current.spec_id
 
 
-def _mark_members_read(parts: Sequence[SearchPart], digests: Sequence[dict[str, Any]]) -> None:
-    """Mark the region axis of each part digest of `digests` whose part of `parts`
-    sent an entity with `members` as settled by the model (`mark_planner_axes`).
-
-    Search reads a set sent with `members` as an explicit members-only region
-    choice, which a scope decision would state as the user's
-    (`submission.service._scope_decision`). The flag is the model's reading of
-    the question, so the choice is the model's: the plan card states it as the
-    plan's wording, and a later search does not carry it as the user's
-    (`harness.scope_choices.carried_entries`). A search of `text` alone reads
-    the user's words and marks nothing.
-    """
-    for part, part_digest in zip(parts, digests, strict=True):
-        if any(entity.members for entity in part.entities or ()):
-            block = part_digest.get("spec_block")
-            if isinstance(block, Mapping):
-                mark_planner_axes(part_digest, planner_axes(block) | {"region"})
-
-
 def _asked_roles(part: SearchPart) -> list[str]:
     """The flow parties `part` asks for, as `planner.parties.PARTY_ROLES` words.
 
@@ -2265,8 +2246,6 @@ def build_orchestrator_tools(
         # digest is tied to a part, and none records parties asked.
         digests = digest.get("part_digests") or []
         tied = len(parts) == len(digests)
-        if tied:
-            _mark_members_read(parts, digests)
         readings = store_search(
             call.state,
             digest,
