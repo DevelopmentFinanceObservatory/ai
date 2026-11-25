@@ -885,9 +885,9 @@ def default_reading(source: SelectedSource) -> StatVarReading:
     (`sums_components`), as it adds DAC2a's bilateral and imputed multilateral
     lines, or splices them by years (`splices_components`), as it serves the
     ONE headline series: those members are parts of one figure, whatever its
-    slots bind. A
-    family with any open axis apis may not sum over (a sex, a netting basis)
-    reads separately either way, since its members are different measures.
+    slots bind. A family with any open axis apis may not sum over (a sex, a
+    netting basis) reads separately either way, since its members are
+    different measures.
     """
     if not all(axis.summable for axis in source.open_axes):
         return StatVarReading.SEPARATE

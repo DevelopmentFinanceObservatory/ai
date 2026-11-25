@@ -594,15 +594,13 @@ def sum_unstated(source: SelectedSource) -> bool:
 
     apis collapses a family's members over a summable axis it decodes or by
     the composite's declaration, and refuses any other sum
-    `rollup_not_summable`. A family Search counts exactly at one member has
-    nothing to collapse: one it serves (`served_count`), or one confirmed
-    member with the count stated exact. A source whose slots were never read
+    `rollup_not_summable`. A family Search confirms at one member, a count it
+    does not state as a floor (`compiler.sources.stat_var_count_is_floor`),
+    has nothing to collapse. A source whose slots were never read
     (`slot_codes` `None`) states no open axis either, so it is held to this.
     """
-    one_member = source.served_count == 1 or (
-        source.served_count is None
-        and source.stat_var_member_count == 1
-        and source.stat_var_member_count_exact is True
+    one_member = (
+        source.stat_var_member_count == 1 and source.stat_var_member_count_exact is not False
     )
     if one_member or source.sums_components or source.splices_components:
         return False

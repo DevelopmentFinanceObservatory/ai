@@ -1018,6 +1018,24 @@ def _by_party(plan: Plan, decision: Decision) -> str | None:
     return f"by {_joined([*parties, *(['each place named'] if None in kept else [])])}"
 
 
+def _spliced(plan: Plan, decision: Decision) -> str | None:
+    """`StatVarReading.SUM` in words for a family the mint splices by years
+    (`SelectedSource.splices_components`), as `_reading_clause` words it: "spliced
+    into one series" where every source of a dataset requirement citing
+    `decision` splices its family; `None` otherwise, or where none cites it."""
+    if plan.workflow is None:
+        return None
+    cited = {r.id for r in _citing(plan, decision, DatasetRequirement)}
+    sources = [
+        plan.workflow.source_of(binding.step_id)
+        for binding in plan.workflow.evidence_bindings
+        if binding.requirement_id in cited
+    ]
+    if sources and all(s is not None and s.splices_components for s in sources):
+        return "spliced into one series"
+    return None
+
+
 def _by_breakdown(plan: Plan, decision: Decision) -> str | None:
     """`GroupBy.BREAKDOWN` in words: by the dimension every aggregate citing
     `decision` reads a breakdown of (`_breakdown_of`), as the step sentence
@@ -1064,7 +1082,7 @@ _PRICE_WORDS: Mapping[str, _Words] = {
 # case, as every option text the card shows is.
 FIXED_VALUE_WORDS: Mapping[str, Mapping[str, _Words]] = {
     "stat_vars": {
-        StatVarReading.SUM: _Words("summed into one series"),
+        StatVarReading.SUM: _Words("summed into one series", _spliced),
         StatVarReading.SEPARATE: _Words("one series per indicator"),
     },
     "reduction": {
