@@ -54,6 +54,7 @@ from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, over
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
+from compiler.party_names import party_keys, role_fits
 from compiler.sources import open_side_column, source_from_spec_block, warning_code
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
@@ -2771,7 +2772,11 @@ def whole_on_source(
     retrieved from, binds there, as DAC2a's provider whole binds all recipients
     for a part to developing countries; where it binds none there, or the
     same, or the part's source is unknown, the part's stay as the part names
-    them.
+    them. Search derives a whole from its part's identity and restates no entity
+    row for it, so each party the part names that the whole keeps reads as the
+    party `part_source` resolves the name to (`_kept_on_source`): "United States"
+    pinned to `country/USA` and "G7" as the set the source labels "Group of
+    Seven", whatever the whole's own labels or rows say.
     """
     read = whole_read(whole, part)
     role = opened_role(whole, part)
@@ -2786,6 +2791,16 @@ def whole_on_source(
             bound = _refs_on(source, side)
             if side != opened and bound and bound != _refs_on(part_source, side):
                 read = _side_on_source(read, part, source, axis)
+        read = read.model_copy(
+            update={
+                "entities": tuple(
+                    _kept_on_source(entity, source, part_source)
+                    if entity in part.entities
+                    else entity
+                    for entity in read.entities
+                )
+            }
+        )
     if role is None:
         return read
     if open_side:
@@ -2797,6 +2812,36 @@ def whole_on_source(
         if flow_side(entity.role) == side
     ]
     return read.model_copy(update={"entities": (*read.entities, *held)})
+
+
+def _kept_on_source(entity: Entity, source: SelectedSource, part_source: SelectedSource) -> Entity:
+    """`entity`, a party a whole keeps from its part, as the party of `source`, the
+    whole's source, that `part_source`, the part's, resolves its name to
+    (`compiler.party_names.party_keys`), on a column its role allows.
+
+    One entity of `source` with one of those keys pins it by dcid under the part's
+    own name, so the card reads "United States" on both sides. Else a named set of
+    `source` holding one of the keys as its own ref, published total or registry
+    id, or, stating none of them, whose entities on its column are all among the
+    keys (its members), names it by the set's label, `members` kept. Else, as where
+    `part_source` resolves the name to no party, `entity` is as the part names it.
+    """
+    keys = set(party_keys(entity, part_source))
+    if not keys:
+        return entity
+    pinned = [
+        one for one in source.entities if one.ref in keys and role_fits(entity.role, one.role)
+    ]
+    if len(pinned) == 1:
+        return entity.model_copy(update={"dcid": pinned[0].ref})
+    for group in source.groups:
+        if not role_fits(entity.role, group.role):
+            continue
+        own = {key for key in (group.ref, group.total, group.group_id) if key}
+        members = {one.ref for one in source.entities if one.role == group.role}
+        if own & keys or (not own and members and members <= keys):
+            return entity.model_copy(update={"name": group.label, "dcid": None})
+    return entity
 
 
 def _refs_on(source: SelectedSource, side: Party | None) -> set[str]:

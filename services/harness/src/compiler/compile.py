@@ -97,7 +97,6 @@ from planner.shapes import (
 from planner.workflow import (
     ArtifactKind,
     Binding,
-    BoundEntity,
     EvidenceBinding,
     OpenEntityAxis,
     ResolvedEntity,
@@ -124,18 +123,14 @@ from compiler.capabilities import (
 from compiler.evidence import (
     EvidenceIssue,
     UnitReading,
-    bound_refs_of,
     check_evidence,
     errors,
     evidence_from_source,
-    held_keys,
-    named_members,
-    named_refs,
-    party_keys,
     read_source_unit,
     read_unit_dcid,
 )
 from compiler.frame_columns import ROLLING_PARAMETER
+from compiler.party_names import named_members, named_refs
 from compiler.rolling import (
     Root,
     anchor_groups,
@@ -378,53 +373,6 @@ def wholes_on_their_sources(
             part_source=discovered.get(part.id),
         )
     return wholes
-
-
-def with_part_parties(
-    whole_source: SelectedSource,
-    *,
-    whole: DatasetRequirement,
-    part: DatasetRequirement,
-    part_source: SelectedSource | None,
-) -> SelectedSource:
-    """`whole_source`, the source of a whole, carrying a row (`SelectedSource.bound_refs`)
-    for each party its part names that the whole keeps and the source binds.
-
-    `whole` is the whole as it reads on `whole_source` (`planner.plan.whole_on_source`),
-    `part` its part and `part_source` the part's source. Search derives a whole from
-    its part's identity, and that answer restates no entity row, so a name the part
-    resolved ("United States", "G7") would be matched to the whole's labels ("United
-    States of America", "Group of Seven") by name. Each entity of `part` that `whole`
-    still names, those on the sides it keeps, is resolved on `part_source` by the
-    route the part's own check takes (`party_keys`: a bound row, a label, a ref the
-    graph resolved, a named set), and where `whole_source` binds the same party on a
-    column the entity's role allows (`held_keys`) the row names that party under the
-    entity's name and role. A name the whole's source already binds a row for
-    (`bound_refs_of`) reads that row alone, so it gets none. The side
-    the whole opens or rebinds to other parties names the whole's own parties, by
-    ref, so it carries nothing. The run-time check reads the approved source, so it
-    reads the same rows. With no part source, `whole_source` is as given.
-    """
-    if part_source is None:
-        return whole_source
-    carried: list[BoundEntity] = []
-    for entity in whole.entities:
-        if entity not in part.entities or bound_refs_of(entity, whole_source):
-            continue
-        held = held_keys(whole_source, entity.role)
-        keys = tuple(key for key in party_keys(entity, part_source) if key in held)
-        if keys:
-            carried.append(
-                BoundEntity(
-                    identity=entity.dcid or entity.name,
-                    text=entity.name,
-                    role=entity.role,
-                    refs=keys,
-                )
-            )
-    if not carried:
-        return whole_source
-    return whole_source.model_copy(update={"bound_refs": (*whole_source.bound_refs, *carried)})
 
 
 class _Ratio(Enum):
@@ -726,16 +674,6 @@ class _Build:
                 else requirement.stat_vars
             )
             source = stat_var_reading(source, requested)
-            stated = self.plan_requirements.get(requirement.id)
-            if isinstance(stated, DatasetRequirement) and stated.whole_of is not None:
-                part = self.plan_requirements.get(stated.whole_of.part)
-                if isinstance(part, DatasetRequirement) and part.whole_of is None:
-                    source = with_part_parties(
-                        source,
-                        whole=requirement,
-                        part=part,
-                        part_source=self.discovered.get(part.id),
-                    )
             self.sources[operation.id] = source
             self._check_summable(operation, requirement, source)
             self._check_breakdown(operation, requirement, source)
@@ -3132,7 +3070,7 @@ class _Build:
         """The entities of `source` that the entity `requirement` states as `name` names, for `_frame_entity`.
 
         One entity, or a named set's members on its role column
-        (`compiler.evidence.named_members`). `None` when `requirement`
+        (`compiler.party_names.named_members`). `None` when `requirement`
         states no such entity, under `role` when one is given.
         """
         candidates = entities_named(requirement, name, role)
@@ -3669,7 +3607,7 @@ def _names_on_column(
     entity per role column, a donor and its recipient say, is one series,
     which a whole side reads as it is. Two on one column are two series a
     whole side would pool. A set's name counts once
-    (`compiler.evidence.named_members`); its members still reaching the
+    (`compiler.party_names.named_members`); its members still reaching the
     reader are `_labels_on_column`'s to count.
     """
     return [
@@ -3694,7 +3632,7 @@ def _labels_on_column(source: SelectedSource, column: str, kept: set[str]) -> li
 def _surplus_labels(requirement: DatasetRequirement, source: SelectedSource) -> list[str]:
     """The labels of the entities `source` resolves under `requirement`'s role columns that it does not name.
 
-    Named is by ref (`compiler.evidence.named_refs`), so a set's members are
+    Named is by ref (`compiler.party_names.named_refs`), so a set's members are
     named by the set. Distinct case-folded, in the source's order. Entities
     under the other role columns -- the creditor alongside the debtor -- are
     left out, as `_role_columns` leaves their columns out: pooling a debtor

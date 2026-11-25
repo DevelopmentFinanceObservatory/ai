@@ -18,19 +18,16 @@ from compiler.evidence import (
     Severity,
     StatedUnit,
     check_evidence,
-    entity_matches,
     errors,
     evidence_from_manifest,
     evidence_from_source,
     left_out_entities,
-    named_members,
     open_axes_for,
     opens_place_axis,
-    resolve_entity,
-    resolve_name,
     unlabelled_series_cells,
     with_series_labels,
 )
+from compiler.party_names import entity_matches, named_members, resolve_entity, resolve_name
 from compiler.sources import (
     bound_refs,
     member_digest,

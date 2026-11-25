@@ -61,7 +61,8 @@ import typing
 from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 
-from compiler.evidence import open_axes_for, resolve_group, resolve_name
+from compiler.evidence import open_axes_for
+from compiler.party_names import resolve_group, resolve_name
 from compiler.shapes import breakdown_level
 from compiler.sources import stat_var_count
 from planner.parties import across_party, flow_side, party_role, role_party, singular

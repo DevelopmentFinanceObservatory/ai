@@ -33,7 +33,8 @@ from typing import Any, NamedTuple, cast, override
 
 import pytest
 from compiler.compile import CompileIssueCode
-from compiler.evidence import check_evidence, errors, evidence_from_manifest, resolve_name
+from compiler.evidence import check_evidence, errors, evidence_from_manifest
+from compiler.party_names import resolve_name
 from compiler.sources import bound_refs
 from compiler.surface import FixtureSurface, ToolCallResult, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for

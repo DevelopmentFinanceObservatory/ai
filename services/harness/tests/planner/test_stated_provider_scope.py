@@ -2282,7 +2282,8 @@ async def test_a_provider_whole_search_moves_to_all_recipients_says_so() -> None
     """France's bilateral ODA, on DAC2a to developing countries, as a share of its whole
     over every provider: Search's whole counts total ODA to all recipients (DAC)
     (`derived.rebind`), so the caveat names that total and never says both sides
-    count the same recipients, and the whole covers all recipients on its source."""
+    count the same recipients, and the whole covers all recipients on its source and the
+    part's donor, pinned to its ref."""
     ctx = _Context()
     recorded = _WHOLES["france_developing"]
     _show(ctx, recorded["part"])
@@ -2311,9 +2312,9 @@ async def test_a_provider_whole_search_moves_to_all_recipients_says_so() -> None
         summed=False,
         part_source=source_from_spec_block(recorded["part"]),
     )
-    assert [(e.role, e.dcid) for e in read.entities] == [
-        ("donor", None),
-        ("recipient", "DACAllRecipients"),
+    assert [(e.name, e.role, e.dcid) for e in read.entities] == [
+        ("France", "donor", "country/FRA"),
+        ("all recipients (DAC)", "recipient", "DACAllRecipients"),
     ]
 
 

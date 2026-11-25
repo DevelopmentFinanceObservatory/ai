@@ -83,7 +83,8 @@ from planner.shapes import shared as _shared
 from planner.shapes import summed_sides as _summed_sides
 from planner.workflow import Period, SelectedSource
 
-from compiler.evidence import named_members, named_refs, open_axes_for, opens_place_axis
+from compiler.evidence import open_axes_for, opens_place_axis
+from compiler.party_names import named_members, named_refs
 from compiler.sources import bound_codes, cuts_party_totals, stat_var_count
 
 # The code system behind each breakdown dimension: the `get_data` breakdown's
@@ -613,7 +614,7 @@ def _retrieve_resolved(
     """The shape a fresh retrieval carries, with each role wrapped by its source column.
 
     The columns kept are the ones the requirement's own entities name
-    members on (`compiler.evidence.named_members`, a named set's members on
+    members on (`compiler.party_names.named_members`, a named set's members on
     its role column), in the source's order, as `compile._role_columns`
     reads them,
     then the open entity axis `compiler.evidence.open_axes_for` matches to
