@@ -1042,8 +1042,9 @@ class PlatformAssembler:
         the caller the website named, when this process holds the principal
         and the request's `x-dfo-caller` is an `ip:` or `user:` digest
         (`vouched_caller_headers`, with the surface, user agent and MCP client
-        name), so dfo-apis counts that client or account. Any other external write carries neither, and
-        dfo-apis counts it against the address it sees for this service.
+        name), so dfo-apis counts that client or account. Any other external
+        write carries neither, and dfo-apis counts it against the address it
+        sees for this service.
         """
         if caller is Caller.FIRST_PARTY:
             principal = self._publish_principal

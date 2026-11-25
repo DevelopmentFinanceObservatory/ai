@@ -299,8 +299,9 @@ def vouched_caller_headers(
     `MCP_CLIENT_HEADER` when `current_mcp_client` finds the client's name (or
     `invalid`), which only a call whose `clientInfo` reached the server carries.
     dfo-apis counts that client's or account's allowance. For a
-    `CONVERSATION_CALLER` from the harness: `CALLER_PRINCIPAL_HEADER` and `CALLER_HEADER`, and `TURN_HEADER`
-    when `current_turn` names the turn, with no surface, user agent or MCP client, since
+    `CONVERSATION_CALLER` from the harness: `CALLER_PRINCIPAL_HEADER` and
+    `CALLER_HEADER`, and `TURN_HEADER` when `current_turn` names the turn,
+    with no surface, user agent or MCP client, since
     dfo-apis reads Studio from the caller's prefix and the User-Agent is the
     harness's own. For shared work (`current_shared_surface`):
     `CALLER_PRINCIPAL_HEADER` and `SURFACE_HEADER` as the shared surface, with
