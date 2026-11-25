@@ -445,7 +445,7 @@
                   },
                   "whole_of": {
                     "additionalProperties": false,
-                    "description": "Set on the total a share_of or quotient_of divides its part by, the part over every provider, donor or recipient: all US aid for US bilateral aid, all aid to Kenya for US aid to Kenya. Counted from the part's own dataset, with no search, for the part's parties with that side one total, so it states no `entities` or `across`. Read only as that denominator.",
+                    "description": "Set on the total a share_of or quotient_of divides its part by: the total Search derives from the part over every provider, donor or recipient, all US aid for US bilateral aid, all aid to Kenya for US aid to Kenya. Search derives it with no search, so it states no `entities` or `across`. Read only as that denominator.",
                     "properties": {
                       "part": {
                         "pattern": "^[a-z][a-z0-9_]{0,63}$",

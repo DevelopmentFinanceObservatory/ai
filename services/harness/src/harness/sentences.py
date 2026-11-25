@@ -365,7 +365,7 @@ STOP_SENTENCES: Mapping[StopCode | ProblemCode, str] = {
         "was recorded."
     ),
     ProblemCode.SHARE_WHOLE_UNDERIVABLE: (
-        "A share{at} could not be divided by a total from the same dataset as its part, so "
+        "A share{at} could not be divided by the total Search derives from its part, so "
         "nothing was recorded."
     ),
     ProblemCode.PROVIDERS_UNALIGNED: (
@@ -437,7 +437,7 @@ STOP_REASONS: Mapping[StopCode | ProblemCode, str] = {
         "{lead}a share would divide by one of its own parts in place of their total"
     ),
     ProblemCode.SHARE_WHOLE_UNDERIVABLE: (
-        "{lead}a share could not be divided by a total from the same dataset as its part"
+        "{lead}a share could not be divided by the total Search derives from its part"
     ),
     ProblemCode.PROVIDERS_UNALIGNED: (
         "{lead}the figures the plan combines count different providers' spending"

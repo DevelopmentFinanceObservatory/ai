@@ -87,7 +87,6 @@ from harness.scope_choices import (
     ProviderScope,
     ProviderStream,
     ScopeChoice,
-    SlotBinding,
     block_dataset,
     holds_streams,
     option_axis,
@@ -258,7 +257,7 @@ from planner.records import (
 from planner.shapes import PLACE_PHRASE, pooling_remedy
 from planner.stated_scope import StatedScopeRecord, stated_scope_record, stated_uncompiled
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
-from planner.workflow import OpenEntityAxis, SelectedSource
+from planner.workflow import SUM_OF_MEMBERS, OpenEntityAxis, SelectedSource
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError, model_validator
 from pydantic_core import to_jsonable_python
 from translator.discovery import (
@@ -5029,8 +5028,8 @@ class Realignment(NamedTuple):
     alignment moves it there, beside any calculation's move.
 
     With `whole_axis` set, the input is a declared whole
-    (`DatasetRequirement.whole_of`): `spec_id` is its part's pin, compiled
-    with its choice on `whole_axis` left open, `option_ids` is empty, and
+    (`DatasetRequirement.whole_of`): `spec_id` is its part's pin, whose whole
+    Search derives on `whole_axis`, `option_ids` is empty, and
     `requirement_id` and `step_id` both name the whole (`_declared_wholes`).
     """
 
@@ -5541,8 +5540,8 @@ def _aligned_bases(
     guaranteed for it.
 
     A whole the planner declared (`DatasetRequirement.whole_of`) is pinned
-    to its part's dataset with the declared axis left open, compiled with
-    no search and whatever pin the planner wrote on it (`_declared_wholes`).
+    to the total Search derives from its part on the declared axis, asked for
+    with no search whatever pin the planner wrote on it (`_declared_wholes`).
     A part with no pin is searched for first. A declared whole is left
     out of alignment. Its calculation's other inputs are aligned among themselves
     first, and the whole is then compiled from its part's final pin, the
@@ -5550,8 +5549,8 @@ def _aligned_bases(
     Nothing reads a whole but the denominator of a share or quotient of its
     part (`planner.plan.whole_of_fault`), so alignment never reaches it
     through another input. A whole not compiled yet answers `BASES_UNALIGNED` naming it
-    (`Realignment.whole_axis`), and a part Search cannot leave the axis open
-    on answers `SHARE_WHOLE_UNDERIVABLE`. A share
+    (`Realignment.whole_axis`), and a part whose whole Search does not derive
+    answers `SHARE_WHOLE_UNDERIVABLE`. A share
     declaring nothing is left as written, and its inputs are aligned as any
     calculation's are.
 
@@ -7786,8 +7785,9 @@ def _whole_sums(
     returns states) either binds that side to one total, as DAC2a binds
     developing countries, and the whole is read as it is, or leaves it open
     and summed over its members (`sum_of_members`), as the CRS does over
-    every donor. The compiler checks the pair again off the whole's source
-    (`compiler.compile._Build._check_whole_sum`), and refers the whole back
+    every donor. The compiler holds the plan's sum to the same field on the
+    whole's source (`SelectedSource.derived_whole`,
+    `compiler.compile._Build._check_whole_sum`), and refers the whole back
     where they disagree. An open side is summed by period under the first
     free id of `{whole}_sum`, `{whole}_sum_2` and on (`planner.plan.whole_sum`).
     """
@@ -7807,7 +7807,7 @@ def _whole_sums(
         if role is None:
             continue
         derived = derived_whole(pin)
-        if derived is None or derived.kind != "sum_of_members":
+        if derived is None or derived.kind != SUM_OF_MEMBERS:
             continue
         stem = requirement.id[: MAX_IDENTIFIER_CHARS - len("_sum_99")]
         sum_id = next(
@@ -7994,23 +7994,44 @@ def _whole_total(
 ) -> str:
     """The total Search derived (`derived`), `block` the whole's spec block and `scope`
     its scope record, as its caveat names it: on the provider axis the option the
-    whole counts, "total counting bilateral plus core contributions"; a side's
+    whole counts, "total counting bilateral plus core contributions", and the set
+    Search moved another side to beside it, ", for all recipients (DAC)"; a side's
     published total by the set Search binds on that role's column (`WHOLE_COLUMNS`),
     "total for official donors (DAC)", else "total over every donor"; a side summed
     over its members "sum over every donor"."""
     if derived.axis == PROVIDER_AXIS:
         option = _option_of(scope, derived.whole.provider)
-        return (
+        total = (
             f"total counting {option.label}" if option is not None else "total over every provider"
         )
-    if derived.kind == "sum_of_members":
+        rebound = _rebound_axis(derived)
+        if rebound is None:
+            return total
+        label = _group_label(block, WHOLE_COLUMNS[rebound])
+        return f"{total}, for {label if label is not None else f'every {rebound}'}"
+    if derived.kind == SUM_OF_MEMBERS:
         return f"sum over every {derived.axis}"
-    column = WHOLE_COLUMNS.get(derived.axis)
-    label = next(
+    label = _group_label(block, WHOLE_COLUMNS.get(derived.axis))
+    return f"total for {label}" if label is not None else f"total over every {derived.axis}"
+
+
+def _rebound_axis(derived: DerivedWhole) -> str | None:
+    """The donor or recipient axis Search moved beside the axis it derived the whole
+    on (`DerivedWhole.rebind`), as DAC2a's provider whole moves the recipients to all
+    recipients; `None` where it moved none, or one this release does not name."""
+    if derived.rebind is None:
+        return None
+    axis = option_axis(derived.rebind)
+    return axis if axis in WHOLE_COLUMNS else None
+
+
+def _group_label(block: Mapping[str, Any] | None, column: str | None) -> str | None:
+    """The label of the named set `block`, a spec block, states on the role column
+    `column`, `None` where it states none there or its sets do not read."""
+    return next(
         (group.label for group in readable_groups(block or {}) or () if group.role == column),
         None,
     )
-    return f"total for {label}" if label is not None else f"total over every {derived.axis}"
 
 
 def _option_of(scope: PartScope | None, option_id: str | None) -> Option | None:
@@ -8033,16 +8054,21 @@ def _whole_shares(
     `derived` is Search's derived whole, `part_block` the part's spec block, and
     `part_scope_held` and `whole_scope_held` the scope records of the part and the
     whole. It names only what the part's dataset has (`_dataset_holds`), so a DAC1
-    donor total names no recipients or sectors, and the providers only where both
+    donor total names no recipients or sectors, and never the side Search moved
+    beside the widened axis (`DerivedWhole.rebind`), which the total names
+    (`_whole_total`), and the providers only where both
     count the same provider option (`DerivedSide.provider`). Where they count
     different options, or one states none, it says what each counts
     (`_providers_counted`), and where they share nothing else it says they count
     different providers only where both state one. Where nothing is known alike
     and neither states a provider option, it says nothing of what they count."""
+    rebound = _rebound_axis(derived)
+    moved = WHOLE_COLUMNS[rebound] if rebound is not None else None
     alike = [
         name
         for name in _WHOLE_ALIKE[derived.axis]
-        if _dataset_holds(part_block, part_scope_held, name)
+        if (moved is None or _ALIKE_COLUMNS.get(name) != moved)
+        and _dataset_holds(part_block, part_scope_held, name)
     ]
     part, whole = derived.part.provider, derived.whole.provider
     same = part is not None and part == whole
@@ -8462,17 +8488,6 @@ def _pin_block(pin: str, shown: Mapping[str, PinSource]) -> Mapping[str, Any] | 
     return source.spec_block(pin) if source is not None else None
 
 
-def axis_slot(scope: PartScope, axis: str) -> str | None:
-    """The identity slot `scope`'s choice on `axis` binds, `None` when it offers no
-    choice on `axis` binding one slot of its base identity."""
-    choice = next((c for c in scope.choices if c.axis == axis), None)
-    if choice is None:
-        return None
-    slots = {o.binding.slot for o in choice.options if isinstance(o.binding, SlotBinding)}
-    held = {slot.get("property") for slot in scope.base.identity.get("slots") or ()}
-    return next(iter(slots)) if len(slots) == 1 and slots <= held else None
-
-
 def bound_parties(scope: PartScope, column: str) -> tuple[str, ...]:
     """The parties the part `scope` records binds on the role column `column`: those
     of the identity its active options compile to (`PartScope.compiled`), so a party
@@ -8506,37 +8521,42 @@ def share_whole_underivable(
     whole_id: str,
     part_spec_id: str | None,
     reason: str,
-    cause: str,
+    cause: str | None,
     alternatives: Sequence[tuple[str, str]] = (),
 ) -> dict[str, object]:
     """Return the `SHARE_WHOLE_UNDERIVABLE` problem for a declared whole Search does not derive from its part.
 
-    The planner can repair it: pin the part to another dataset, or drop
-    `whole_of` and pin a total of the whole's own. `part_spec_id` is the
+    The planner can repair it: drop `whole_of` and leave the whole unpinned,
+    so `propose_plan` searches for its total (`pin_by_search`), on the scope
+    an alternative names where Search offers one, or decline the share, a
+    decline the refusal earns (`planner.source_reads.with_source_reads`). `part_spec_id` is the
     part's pin, `None` where it has none, `reason` says why no whole was
     compiled, as a clause, and `cause` names that reason as a code: Search's
     own cause for refusing the whole (`part_outside_whole`, `part_is_whole`,
     `whole_moves_provider`, `option_not_covered` and the others its whole
-    request states), else its refusal code; or, before Search is asked,
+    request states), `None` where an older Search states none; or, before
+    Search is asked,
     `part_unpinned` (the part has no pin), `part_unread` (no definition of
     its pin is on record) or `groups_unreadable` (it names a set this release
     cannot read); or `whole_refused` where Search answers with no one derived
     whole. `alternatives` are the options Search offers as the whole in place
-    of the one refused, each `(ref, label)`, which a total of the whole's own
-    can be pinned on. `detail.requirement_id` names the whole for the
+    of the one refused, each `(ref, label)`, named as what Search would count;
+    the planner cannot ask for one as the whole, so it searches for a total
+    counted that way. `detail.requirement_id` names the whole for the
     refusal's sentence (`harness.sentences`).
     """
-    offered = (
-        f" Search derives it counted as {', '.join(label for _, label in alternatives)};"
-        " pin a total of its own on one of these, or"
+    counted = (
+        f" Search would count the whole as {', '.join(label for _, label in alternatives)} instead."
         if alternatives
-        else " Pin the part to another dataset, or"
+        else ""
     )
     return problem(
         ProblemCode.SHARE_WHOLE_UNDERIVABLE,
         f"{whole_id!r} states `whole_of`, the total Search derives from its part on one "
-        f"axis, every other choice held. {reason}.{offered} drop `whole_of` and pin a "
-        f"total for {whole_id!r} of its own.",
+        f"axis, every other choice held. {reason}.{counted} Drop `whole_of` from "
+        f"{whole_id!r}, state the parties its total covers, and leave it unpinned so a "
+        f"search finds that total{' counted that way' if alternatives else ''}; or record "
+        f"the share in `declined` with code {UnsupportedOperation.UNSUPPORTED_ASK.value!r}.",
         outcome=Outcome.INVALID_INPUT,
         detail={
             "requirement_id": whole_id,

@@ -102,6 +102,7 @@ from planner.records import (
 )
 from planner.shapes import pooling_remedy
 from planner.workflow import (
+    SUM_OF_MEMBERS,
     ArtifactKind,
     Binding,
     OpenEntityAxis,
@@ -109,6 +110,7 @@ from planner.workflow import (
     ResolvedEntity,
     ResolvedGroup,
     SelectedSource,
+    SourceWhole,
 )
 from pydantic import TypeAdapter, ValidationError
 from translator.mechanical import build_translation
@@ -8843,9 +8845,13 @@ def _flow_source(
     *,
     recipients: Sequence[ResolvedEntity],
     groups: Sequence[ResolvedGroup] = (),
+    whole: bool = False,
+    kind: str | None = None,
 ) -> SelectedSource:
     """G7 aid to `recipients`, the parties the source binds on `destination` (none
-    where it leaves the side open), with `groups` its named sets there."""
+    where it leaves the side open), with `groups` its named sets there. With `whole`,
+    it is Search's whole over every recipient, which it states summed over its members
+    where it leaves the side open, else a published total, or as `kind` states."""
     entities = {"origin": [_G7.ref]}
     if recipients:
         entities["destination"] = [entity.ref for entity in recipients]
@@ -8858,6 +8864,11 @@ def _flow_source(
         open_entity_axes=None
         if recipients
         else (OpenEntityAxis(column="destination", member_count=150),),
+        derived_whole=SourceWhole(
+            derivation=kind or ("published_total" if recipients else SUM_OF_MEMBERS)
+        )
+        if whole
+        else None,
     )
 
 
@@ -9002,6 +9013,70 @@ def test_a_share_divides_by_a_whole_that_holds_its_part(
     )
 
     assert _codes(result) == codes
+
+
+@pytest.mark.parametrize("declared", [True, False], ids=["search-derived", "planner-pinned"])
+def test_a_share_over_the_whole_search_derived_is_not_checked_again(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    declared: bool,
+) -> None:
+    """G7 aid to Africa over a total whose source holds the DAC's member countries,
+    which hold no African country. Where the total is the whole Search derived from the
+    part (`whole_of`), Search has already found it holds the part, so the compiler does
+    not check it again; a total the planner pinned is refused."""
+    g7 = Entity(name="G7", role="donor")
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[g7, Entity(name="Africa", role="recipient")],
+    )
+    total = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[]
+        if declared
+        else [g7, Entity(name="developing countries (DAC)", role="recipient", members=True)],
+        whole_of=WholeOf(part="aid", axis="recipient") if declared else None,
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="total"),
+    )
+    members = [
+        ResolvedEntity(role="destination", ref="country/USA", label="United States"),
+        ResolvedEntity(role="destination", ref="country/DEU", label="Germany"),
+    ]
+    dac = ResolvedGroup(
+        role="destination", label="developing countries (DAC)", ref="groups/OECD.DAC"
+    )
+
+    result = build(
+        _draft([decision()], [aid, total, share]),
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="fetch"),
+                denominator=Side(input="fetch_total"),
+            ),
+            terminal=["share"],
+        ),
+        discovered={
+            "aid": _flow_source(source, SPEC_KENYA, recipients=[_AFRICA], groups=[_AFRICA_GROUP]),
+            "total": _flow_source(
+                source, SPEC_OTHER, recipients=members, groups=[dac], whole=declared
+            ),
+        },
+    )
+
+    assert (Code.SHARE_PART_OUTSIDE_WHOLE in _codes(result)) is not declared, result.issues
 
 
 _UNITED_STATES = ResolvedEntity(role="destination", ref="country/USA", label="United States")
@@ -9890,7 +9965,9 @@ def test_a_share_reads_its_whole_as_one_total_whichever_way_its_source_serves_it
         ),
         discovered={
             "aid": _flow_source(source, SPEC_KENYA, recipients=[_KENYA]),
-            "total": _flow_source(source, SPEC_OTHER, recipients=recipients, groups=groups),
+            "total": _flow_source(
+                source, SPEC_OTHER, recipients=recipients, groups=groups, whole=True
+            ),
         },
     )
 
@@ -9915,6 +9992,84 @@ def test_a_share_reads_its_whole_as_one_total_whichever_way_its_source_serves_it
             ("donor", False),
             ("recipient", False),
         ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "summed", "codes"),
+    [
+        pytest.param(SUM_OF_MEMBERS, True, [], id="summed-as-search-derived-it"),
+        pytest.param("published_total", False, [], id="read-as-search-derived-it"),
+        pytest.param("published_total", True, [Code.WHOLE_SUM_UNMATCHED], id="summed-against-it"),
+    ],
+)
+def test_a_whole_is_summed_as_search_derived_it_whatever_axes_its_source_leaves_open(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    kind: str,
+    summed: bool,
+    codes: list[Code],
+) -> None:
+    """G7 aid to Kenya over its whole over every recipient, the whole's source leaving
+    the recipients open: the compiler holds the plan's sum to the kind Search states it
+    derived the whole as (`SelectedSource.derived_whole`), the reading admission summed
+    it by, and not to the axes the source leaves open."""
+    aid = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[Entity(name="G7", role="donor"), Entity(name="Kenya", role="recipient")],
+    )
+    whole = requirement(
+        id="total",
+        measure="official development assistance",
+        entities=[],
+        whole_of=WholeOf(part="aid", axis="recipient"),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="total"),
+    )
+    sums = (WholeSum(whole_id="total", sum_id="total_sum"),) if summed else ()
+    plan = Plan.model_validate(
+        {
+            **_draft([decision()], [aid, whole, share]).model_dump(),
+            "evidence_requirements": with_whole_sums([aid, whole, share], sums),
+            "whole_sums": sums,
+        }
+    )
+    summing = [
+        _aggregate(
+            id="sum_total",
+            requirement_id="total_sum",
+            input="fetch_total",
+            group_by=(GroupBy.PERIOD, GroupBy.ENTITY),
+        )
+    ]
+
+    result = build(
+        plan,
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="fetch_total", requirement_id="total", spec_id=SPEC_OTHER),
+            *(summing if summed else []),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="fetch"),
+                denominator=Side(input="sum_total" if summed else "fetch_total"),
+            ),
+            terminal=["share"],
+        ),
+        discovered={
+            "aid": _flow_source(source, SPEC_KENYA, recipients=[_KENYA]),
+            "total": _flow_source(source, SPEC_OTHER, recipients=[], whole=True, kind=kind),
+        },
+    )
+
+    assert _codes(result) == codes, result.issues
 
 
 @pytest.mark.parametrize(
@@ -10004,7 +10159,9 @@ def test_a_planners_pool_over_a_whole_reads_the_sum_where_its_source_leaves_the_
         ),
         discovered={
             "aid": _flow_source(source, SPEC_KENYA, recipients=[_KENYA]),
-            "total": _flow_source(source, SPEC_OTHER, recipients=recipients, groups=groups),
+            "total": _flow_source(
+                source, SPEC_OTHER, recipients=recipients, groups=groups, whole=True
+            ),
         },
     )
 
@@ -10088,6 +10245,7 @@ def test_a_whole_its_source_leaves_open_on_both_sides_is_summed_keeping_the_part
                 spec_id=SPEC_OTHER,
                 entities=(),
                 open_entity_axes=(donors, recipients),
+                derived_whole=SourceWhole(derivation=SUM_OF_MEMBERS),
             ),
         },
     )

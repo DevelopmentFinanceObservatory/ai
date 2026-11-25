@@ -54,11 +54,11 @@ from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, over
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
-from compiler.sources import open_side_column, source_from_spec_block, warning_code
+from compiler.sources import source_from_spec_block, warning_code
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from data_mcp.scope import ChoiceProvenance, ScopeAxis
-from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, WholeAxis
+from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, WholeAxis, option_axis
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from planner.operations import Translation
@@ -141,7 +141,7 @@ from planner.shapes import (
     years_run_out,
 )
 from planner.shapes import rejects as shape_rejects
-from planner.workflow import ResolvedGroup, SelectedSource, Workflow
+from planner.workflow import SUM_OF_MEMBERS, ResolvedGroup, SelectedSource, Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -1125,11 +1125,10 @@ class DatasetRequirement(TaggedModel):
         default=None,
         exclude_if=lambda whole_of: whole_of is None,
         description=(
-            "Set on the total a share_of or quotient_of divides its part by, the part over "
-            "every provider, donor or recipient: all US aid for US bilateral aid, all aid to "
-            "Kenya for US aid to Kenya. Counted from the part's own dataset, with no search, for the "
-            "part's parties with that side one total, so it states no `entities` or `across`. "
-            "Read only as that denominator."
+            "Set on the total a share_of or quotient_of divides its part by: the total Search "
+            "derives from the part over every provider, donor or recipient, all US aid for US "
+            "bilateral aid, all aid to Kenya for US aid to Kenya. Search derives it with no "
+            "search, so it states no `entities` or `across`. Read only as that denominator."
         ),
     )
     # The provider option the user's words ask this figure to count, which admission
@@ -2596,8 +2595,8 @@ def whole_of_fault(
     """Why the `whole_of` `whole` states cannot be compiled from its part, `None` when
     it can or `whole` states none.
 
-    The whole is compiled from the part's pin with only the part's scope
-    widened, so the part is another dataset requirement, itself no whole.
+    The whole is the total Search derives from the part's pin on one axis,
+    so the part is another dataset requirement, itself no whole.
     A whole over every donor or recipient opens the side the part names a
     party on (`_opened_side_fault`). The whole covers the part's parties
     with that side one total (`whole_read`). It
@@ -2660,7 +2659,7 @@ def stated_coverage_fault(whole: DatasetRequirement) -> str | None:
     """Why `whole` states who it covers though its `whole_of` derives it, `None` when it
     states nothing or is no whole.
 
-    A whole covers what its part covers with one side left open (`whole_read`),
+    A whole covers what its part covers, widened on its axis (`whole_read`),
     so `entities` or `across` on it could only disagree with that. A proposal
     stating either is refused (`submission.service._Patch`). A plan stored with
     them keeps them and reads them as derived (`without_stated_coverage`).
@@ -2671,9 +2670,9 @@ def stated_coverage_fault(whole: DatasetRequirement) -> str | None:
     if not stated:
         return None
     return (
-        f"{whole.id!r} states `whole_of`, so it covers what its part "
-        f"{whole.whole_of.part!r} covers with the {whole.whole_of.axis} left open as one "
-        f"total; drop its {' and '.join(f'`{field}`' for field in stated)}"
+        f"{whole.id!r} states `whole_of`, so it covers what Search derives from its part "
+        f"{whole.whole_of.part!r}, its total over every {whole.whole_of.axis}; drop its "
+        f"{' and '.join(f'`{field}`' for field in stated)}"
     )
 
 
@@ -2757,23 +2756,28 @@ def whole_on_source(
     compile retrieves it from, `None` before compile.
 
     It covers its part's parties less the side it opens (`whole_read`), and on
-    that side what the source serves there. Where the source leaves the side
-    open (`compiler.sources.open_side_column`), that is the side's word in
-    `across`, one row per party there, which the aggregate `propose_plan`
-    added sums (`WholeSum`). Otherwise it is the parties the source binds
-    there, as entities by their refs, the total Search counts the side as. With no
-    source the side reads open where `summed`, as admission read Search's
-    answer for the whole, and as `whole_read` reads it otherwise. A provider
-    whole opens no side.
+    that side what the source serves there. Where Search summed that side over
+    its members (`SelectedSource.derived_whole`, `sum_of_members`), that is the
+    side's word in `across`, one row per party there, which the aggregate
+    `propose_plan` added sums (`WholeSum`). Otherwise it is the parties the
+    source binds there, as entities by their refs, the total Search counts the
+    side as. With no source the side reads open where `summed`, as admission
+    read Search's answer for the whole, and as `whole_read` reads it otherwise.
+    A provider whole opens no side. A side Search moved beside the widened axis
+    (`SourceWhole.rebind`), as DAC2a's provider whole moves the recipients to all
+    recipients, reads the parties the source binds there in place of the part's.
     """
     read = whole_read(whole, part)
-    role = opened_role(whole, part)
-    if role is None:
-        return read
     if source is None:
         open_side = summed
     else:
-        open_side = open_side_column(source.open_entity_axes, role) is not None
+        derived = source.derived_whole
+        open_side = derived is not None and derived.derivation == SUM_OF_MEMBERS
+        if derived is not None and derived.rebind is not None:
+            read = _side_on_source(read, part, source, option_axis(derived.rebind))
+    role = opened_role(whole, part)
+    if role is None:
+        return read
     if open_side:
         return read.model_copy(update={"across": (*read.across, role)})
     side = flow_side(role)
@@ -2783,6 +2787,31 @@ def whole_on_source(
         if flow_side(entity.role) == side
     ]
     return read.model_copy(update={"entities": (*read.entities, *held)})
+
+
+def _side_on_source(
+    read: DatasetRequirement, part: DatasetRequirement, source: SelectedSource, axis: str
+) -> DatasetRequirement:
+    """`read` covering on the side of the flow `axis` names ("recipient") the parties
+    `source` binds there, as entities by their refs under the role phrase `part` names
+    that side by, else `axis`, in place of the entities and `across` words it held
+    there. An axis naming no side leaves `read` as it is."""
+    side = role_party(axis)
+    if side is None:
+        return read
+    named = _sitting_on(part.entities, side)
+    role = named[0].role if named else axis
+    held = [
+        Entity(name=entity.label, role=role, dcid=entity.ref)
+        for entity in source.entities
+        if role_party(entity.role) == side
+    ]
+    return read.model_copy(
+        update={
+            "entities": (*(e for e in read.entities if not _sits_on(e, side)), *held),
+            "across": tuple(w for w in read.across if across_party(w) != side),
+        }
+    )
 
 
 def _compiled_source(plan: Plan, requirement_id: str) -> SelectedSource | None:
@@ -7131,8 +7160,8 @@ class AlignedPin(StrictModel):
     as a reading of the conversation.
 
     A declared whole (`whole_axis` set, `DatasetRequirement.whole_of`) is
-    the part pinned to `origin` with its choice on `whole_axis` left open
-    and every other choice on the part's options, and moves no option
+    the total Search derives from the part pinned to `origin` on `whole_axis`,
+    every other choice held on the part's options, and moves no option
     (`option_ids` empty, `submission.service.Realignment.whole_axis`).
 
     The warning codes on the origin's record when it was compiled are held

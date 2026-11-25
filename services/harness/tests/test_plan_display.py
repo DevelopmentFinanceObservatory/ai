@@ -123,6 +123,7 @@ from planner.records import (
     ValueThreshold,
 )
 from planner.workflow import (
+    SUM_OF_MEMBERS,
     ArtifactKind,
     Binding,
     EvidenceBinding,
@@ -130,6 +131,7 @@ from planner.workflow import (
     ReadingSetBy,
     ResolvedEntity,
     SelectedSource,
+    SourceWhole,
     ToolId,
     Workflow,
     WorkflowStep,
@@ -146,6 +148,7 @@ from .share_plan import (
     UGANDA,
     US_DONOR,
     USA_RECEIVING,
+    bilateral_share_of_its_provider_whole,
     us_share_of_kenya_oda,
     us_share_per_recipient,
 )
@@ -3808,6 +3811,11 @@ def test_a_numerator_population_is_the_denominators_by_its_identity_not_its_word
 # payloads carried them: one retrieval and its total; a health share of all
 # US aid; and that share after the user switched its basis to net.
 _RECORDED_PLANS = Path(__file__).parent / "fixtures" / "plan_card_recorded.json"
+# Search's parts and the wholes it derives from them, as dfo-apis answered the `whole`
+# request.
+_SEARCH_WHOLES: dict[str, Any] = json.loads(
+    (Path(__file__).parent / "fixtures" / "share_wholes_through_search.json").read_text()
+)
 
 
 def _recorded_payload(name: str, *, search_labels: bool = True) -> dict[str, Any]:
@@ -3974,46 +3982,55 @@ def test_a_recorded_plan_from_before_searchs_labels_reads_the_labels_search_comp
     )
 
 
-def test_a_declared_whole_is_named_off_its_source_and_never_the_planners_measure() -> None:
-    """The recorded US health share with its total declared the health part over
-    every provider, under the planner's measure "Total aid to health": the whole's
-    labels name what Search states its source fetches, and never that measure."""
-    plan = _recorded_plan("long")
-    plan = Plan.model_validate(
-        {
-            **plan.model_dump(),
-            "evidence_requirements": [
-                r.model_copy(
-                    update={
-                        "measure": "Total aid to health",
-                        "whole_of": WholeOf(part="us_health_aid_raw", axis="provider"),
-                    }
-                )
-                if r.id == "us_total_aid_raw"
-                else r
-                for r in plan.evidence_requirements
-            ],
-        }
+def test_a_declared_whole_is_named_off_its_source_and_never_the_planners_measure(
+    decision: DecisionFactory,
+) -> None:
+    """The bilateral share of US ODA with its total declared the part's whole over
+    every provider, under the planner's measure "Total aid to the world", read from
+    Search's answer for it (`fixtures/share_wholes_through_search.json`): the whole's
+    labels name what Search states its source fetches, and never that measure, and
+    each side names the provider option Search states it counts, so the share never
+    reads as a share of itself."""
+    recorded = _SEARCH_WHOLES["us_bilateral"]
+    plan = bilateral_share_of_its_provider_whole(
+        decision,
+        part=recorded["part"],
+        whole=recorded["whole"],
+        donor="United States",
+        whole_measure="Total aid to the world",
     )
 
     labels = [row["label"] for row in card_rows(plan)]
 
-    total = "official development assistance"
+    part = "official development assistance from United States, bilateral flows only"
+    whole = (
+        "official development assistance from United States, bilateral plus core "
+        "contributions to multilaterals"
+    )
     assert labels == [
-        f"Fetch {_HEALTH} for United States",
-        f"Total {_HEALTH}",
-        f"Fetch {total} for United States",
-        f"Total {total}",
-        f"{_HEALTH[0].upper()}{_HEALTH[1:]} as a share of {total}",
+        f"Fetch {part}",
+        f"Fetch {whole}",
+        f"{part[0].upper()}{part[1:]} as a share of {whole}",
     ]
-    assert not any("Total aid to health" in label for label in labels)
+    assert card_summary(plan) == (
+        "From 2015 to 2023, from the OECD DAC1: net disbursements (bilateral ODA) from "
+        "United States, as a share of net disbursements (official development assistance) "
+        "from United States."
+    )
+
+
+# The DAC2a sources of ODA to Kenya as Search's whole of the US part over every donor:
+# the published total of official donors (DAC), and every donor left open and summed
+# over its members (`SelectedSource.derived_whole`).
+_DAC_DONORS_WHOLE = {**DAC_DONORS, "derived_whole": SourceWhole(derivation="published_total")}
+_ALL_DONORS_WHOLE = {**ALL_DONORS, "derived_whole": SourceWhole(derivation=SUM_OF_MEMBERS)}
 
 
 @pytest.mark.parametrize(
     ("whole", "population", "divided_by"),
     [
-        (DAC_DONORS, "official donors (DAC)", "from official donors (DAC)"),
-        (ALL_DONORS, "140 donors", "from every donor"),
+        (_DAC_DONORS_WHOLE, "official donors (DAC)", "from official donors (DAC)"),
+        (_ALL_DONORS_WHOLE, "140 donors", "from every donor"),
     ],
     ids=["dac_donors", "all_donors"],
 )
@@ -4065,7 +4082,10 @@ def test_a_declared_donor_whole_is_named_by_its_parts_concept_and_the_donors_its
 
 @pytest.mark.parametrize(
     ("whole", "population", "summed"),
-    [(DAC_DONORS, "official donors (DAC)", False), (ALL_DONORS, "140 donors", True)],
+    [
+        (_DAC_DONORS_WHOLE, "official donors (DAC)", False),
+        (_ALL_DONORS_WHOLE, "140 donors", True),
+    ],
     ids=["donors-bound", "donors-open"],
 )
 def test_the_sum_over_a_whole_s_open_side_is_a_card_row_of_its_own(
@@ -4110,11 +4130,18 @@ def test_the_sum_over_a_whole_s_open_side_is_a_card_row_of_its_own(
 @pytest.mark.parametrize(
     ("whole", "donors", "across"),
     [
-        (DAC_DONORS, [("official donors (DAC)", "DACOfficialDonors")], ()),
-        (ALL_DONORS, [], ("donor",)),
+        (_DAC_DONORS_WHOLE, [("official donors (DAC)", "DACOfficialDonors")], ()),
+        (_ALL_DONORS_WHOLE, [], ("donor",)),
         # The donors bound with no entity stated for them. The whole names no donor
         # and leaves no side open, so compile reads no open axis it cannot resolve.
-        ({"entities": DAC_DONORS["entities"][:1]}, [], ()),
+        (
+            {
+                "entities": DAC_DONORS["entities"][:1],
+                "derived_whole": SourceWhole(derivation="published_total"),
+            },
+            [],
+            (),
+        ),
     ],
     ids=["donors-bound", "donors-open", "donors-bound-unstated"],
 )

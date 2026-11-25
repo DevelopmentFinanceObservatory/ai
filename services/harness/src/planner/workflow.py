@@ -239,6 +239,31 @@ class ElectedMeasure(StrictModel):
         return tuple(alternative for alternative in self.alternatives if alternative.axis == "what")
 
 
+# The `SourceWhole.derivation` of a whole Search leaves open on its widened side, to be
+# summed over its members.
+SUM_OF_MEMBERS = "sum_of_members"
+
+
+class SourceWhole(StrictModel):
+    """What Search states of a source it derived as the whole of a part
+    (`resolved.scope_choices.derived`, `harness.scope_choices.DerivedWhole`).
+
+    `derivation` is Search's `kind`: `sum_of_members` where it leaves the widened
+    side open to be summed over its members, else `option` or `published_total`.
+    `rebind` is the side option it moved beside the widened axis, as DAC2a's
+    provider whole moves the recipients to all recipients, `None` where it moved
+    none. `whole_counts` and `part_counts` are the labels of the provider options
+    the whole and its part count, as the whole's scope record labels them, `None`
+    for a side stating none, so the plan card tells a provider whole from its part
+    (`harness.plan_display`). Each is plain text, since the values come from
+    another service."""
+
+    derivation: str
+    rebind: str | None = None
+    whole_counts: str | None = None
+    part_counts: str | None = None
+
+
 class SelectedSource(StrictModel):
     """The dataset definition discovery selected for one retrieval.
 
@@ -341,6 +366,14 @@ class SelectedSource(StrictModel):
     axes were never read, as on a source recorded without the field, and
     `translator.discovery.DiscoveryLog.selectable` does not offer such a
     source to a requirement that states `across`.
+
+    `derived_whole` is what Search states of the source where it derived it as
+    the whole of a part (`SourceWhole`), `None` for any other source. The
+    compiler (`compiler.compile._Build._check_whole_sum`) and the whole's coverage
+    (`planner.plan.whole_on_source`) read whether its widened side is summed off
+    its `derivation`, the field admission sums it by on the whole's block
+    (`submission.service._whole_sums`), so all three read one field of Search's
+    answer.
 
     `groups` are the named sets the source binds, one per role column at
     most, each read as its published total or as its members
@@ -449,6 +482,11 @@ class SelectedSource(StrictModel):
         default=(), exclude_if=lambda codes: not codes
     )
     open_entity_axes: Annotated[tuple[OpenEntityAxis, ...] | None, HASHED_WHEN_SET] = None
+    # Left out of every dump while unset, so a source saved without it keeps its
+    # serialised form.
+    derived_whole: Annotated[SourceWhole | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda whole: whole is None
+    )
     unit_ref: str | None = None
     unit_label: str | None = None
     unit_per_series: Annotated[bool | None, HASHED_WHEN_SET] = None

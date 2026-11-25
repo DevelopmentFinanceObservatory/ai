@@ -2979,8 +2979,8 @@ async def _settled_whole(
 ) -> dict[str, object]:
     """The source of the whole `requirement` from its pin, with no search (`_pin_source`'s `read`).
 
-    `propose_plan` pins a whole to the compile of its part with one side
-    left open (`planner.source_reads.compile_whole`), so that pin is its
+    `propose_plan` pins a whole to the total Search derives from its part on
+    the widened axis (`planner.source_reads.compile_whole`), so that pin is its
     source, whatever it holds on that side: a whole covers what its part
     covers (`planner.plan.whole_read`), and a search for it could only find
     another population. The caller has already referred back a whole with no

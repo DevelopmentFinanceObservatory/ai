@@ -30,10 +30,12 @@ from typing import Any, cast, get_args
 import httpx2
 import pytest
 from common.live_apis import LiveApisClient
+from compiler.sources import source_from_spec_block
 from compiler.surface import ToolCallResult, ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.conversation import current_user_message
 from harness.graph import switch as switch_module
+from harness.graph.state import readable_plan
 from harness.graph.switch import SwitchFailedError
 from harness.plan_display import choice_id
 from harness.planner_adapter import PlannerAdapter
@@ -56,6 +58,7 @@ from planner.plan import (
     save_pin_sources,
     scope_choice_slot,
     stored_plan,
+    whole_on_source,
     windowed_pins,
 )
 from planner.source_reads import _NO_ONE_DATASET, _UNANSWERED
@@ -2080,6 +2083,66 @@ async def test_a_provider_whole_is_the_whole_search_derives_from_its_part(
     assert "The total counts" in caveat.rationale
 
 
+async def test_a_stored_plan_with_a_sector_whole_is_planned_again() -> None:
+    """A plan an earlier release stored with a whole over every sector, an axis Search
+    derives no whole on, reads as no plan: the node reading it clears the slot
+    (`harness.graph.state.readable_plan`), so the question is planned again rather
+    than failing."""
+    ctx = _Context()
+    recorded = _WHOLES["us_bilateral"]
+    _show(ctx, recorded["part"])
+    result = await _propose(
+        ctx,
+        _provider_share("us_bilateral", donor="United States", period=(2010, 2023)),
+        words=None,
+        surface=_Wholes(recorded),  # type: ignore[arg-type]
+        answer_mode="computed",
+    )
+    assert result["outcome"] == Outcome.OK.value, result
+    stored = json.loads(ctx.state[PLAN_STATE_KEY])
+    (whole,) = [r for r in stored["evidence_requirements"] if r.get("whole_of")]
+    whole["whole_of"]["axis"] = "sector"
+    raw = json.dumps(stored)
+    node = SimpleNamespace(state={"plan": raw})
+
+    assert stored_plan(raw, state_key=PLAN_STATE_KEY) is None
+    assert readable_plan(cast(Any, node), raw) is None
+    assert node.state == {"plan": None}
+
+
+async def test_a_provider_whole_search_moves_to_all_recipients_says_so() -> None:
+    """France's bilateral ODA, on DAC2a to developing countries, as a share of its whole
+    over every provider: Search's whole counts total ODA to all recipients (DAC)
+    (`derived.rebind`), so the caveat names that total and never says both sides
+    count the same recipients, and the whole covers all recipients on its source."""
+    ctx = _Context()
+    recorded = _WHOLES["france_developing"]
+    _show(ctx, recorded["part"])
+
+    result = await _propose(
+        ctx,
+        _provider_share("france_developing", donor="France", period=(2019, 2019)),
+        words=None,
+        surface=_Wholes(recorded),  # type: ignore[arg-type]
+        answer_mode="computed",
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (caveat,) = [d for d in plan.decisions if d.caveat == "derived_whole"]
+    assert caveat.chosen.endswith(", for all recipients (DAC)"), caveat.chosen
+    assert "so both sides count the same donors and measure basis." in caveat.rationale
+    whole, part = plan.requirement("total"), plan.requirement("part")
+    assert isinstance(whole, DatasetRequirement)
+    assert isinstance(part, DatasetRequirement)
+    read = whole_on_source(whole, part, source_from_spec_block(recorded["whole"]), summed=False)
+    assert [(e.role, e.dcid) for e in read.entities] == [
+        ("donor", None),
+        ("recipient", "DACAllRecipients"),
+    ]
+
+
 async def test_a_donor_whole_holds_the_parts_provider_option_as_search_derives_it() -> None:
     """The US share of all aid to Kenya, on DAC2a, divides by its part's whole over every
     donor: Search's published total for official donors (DAC), on the part's bilateral
@@ -2128,10 +2191,9 @@ async def test_a_donor_whole_holds_the_parts_provider_option_as_search_derives_i
 @pytest.mark.parametrize(
     ("case", "axis", "cause", "alternatives", "expected"),
     [
-        # US total ODA already counts every provider: Search refuses, stating no cause.
-        pytest.param(
-            "us_total", "provider", None, (), "requested_option_unavailable", id="code-only"
-        ),
+        # US total ODA already counts every provider: an older Search refuses, stating
+        # no cause, so the refusal carries none.
+        pytest.param("us_total", "provider", None, (), None, id="no-cause"),
         # Saudi Arabia is no DAC member, so DAC countries' total cannot hold it.
         pytest.param(
             "saudi_oda",
@@ -2148,7 +2210,7 @@ async def test_a_whole_search_refuses_is_one_underivable_refusal_with_searchs_ca
     axis: str,
     cause: str | None,
     alternatives: tuple[tuple[str, str], ...],
-    expected: str,
+    expected: str | None,
 ) -> None:
     """A whole Search will not derive is refused under `SHARE_WHOLE_UNDERIVABLE`,
     carrying Search's cause, else its code, and the options it offers in place of the
@@ -2186,16 +2248,50 @@ async def test_a_whole_search_refuses_is_one_underivable_refusal_with_searchs_ca
         "cause": expected,
         "alternatives": [{"ref": ref, "label": label} for ref, label in alternatives],
     }
+    # One repair the planner can make: a total found by search, on the scope an
+    # alternative names, or a decline.
+    counted = " counted that way" if alternatives else ""
+    assert f"leave it unpinned so a search finds that total{counted};" in result["message"]
+    assert all(f"as {label} instead" in result["message"] for _, label in alternatives)
     assert not [pin for pin in aligned_pins(ctx.state) if pin.whole_axis == axis]
     assert load_plan(ctx.state) is None
 
 
-async def test_a_whole_search_answers_with_no_derived_block_is_refused_unheld() -> None:
-    """Search's answer for a whole that states no derived whole, as a release before the
-    `whole` request answers, is no whole: refused under `whole_refused` and not held."""
+def _without_derived(derived: dict[str, Any]) -> None:
+    derived.clear()
+
+
+def _of_another_part(derived: dict[str, Any]) -> None:
+    derived["part"]["spec_id"] = f"spec_{'f' * 32}"
+
+
+def _on_another_axis(derived: dict[str, Any]) -> None:
+    derived["axis"] = "donor"
+
+
+@pytest.mark.parametrize(
+    ("edit", "cause"),
+    [
+        # A release before the `whole` request answers with no derived whole.
+        pytest.param(_without_derived, "whole_refused", id="no-derived"),
+        # Search compiled the part posted to another part, so the whole is not its.
+        pytest.param(_of_another_part, "part_moved", id="another-part"),
+        # Search derived the whole on an axis other than the one asked.
+        pytest.param(_on_another_axis, "part_moved", id="another-axis"),
+    ],
+)
+async def test_a_whole_search_answers_for_no_whole_of_the_pinned_part_is_refused_unheld(
+    edit: Callable[[dict[str, Any]], None], cause: str
+) -> None:
+    """Search's answer for US bilateral ODA's whole over every provider, where it states
+    no derived whole, or derives the whole of another part or on another axis, is not
+    the whole of the pinned part: refused under `cause` and not held."""
     ctx = _Context()
     recorded = copy.deepcopy(_WHOLES["us_bilateral"])
-    del recorded["whole"]["resolved"]["scope_choices"]["derived"]
+    scope = recorded["whole"]["resolved"]["scope_choices"]
+    edit(scope["derived"])
+    if not scope["derived"]:
+        del scope["derived"]
     _show(ctx, recorded["part"])
 
     result = await _propose(
@@ -2207,5 +2303,5 @@ async def test_a_whole_search_answers_with_no_derived_block_is_refused_unheld() 
     )
 
     assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
-    assert result["detail"]["whole"]["cause"] == "whole_refused"
+    assert result["detail"]["whole"]["cause"] == cause
     assert not [pin for pin in aligned_pins(ctx.state) if pin.whole_axis == "provider"]

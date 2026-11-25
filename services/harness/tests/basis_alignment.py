@@ -364,13 +364,19 @@ def total_without_bilateral() -> dict[str, Any]:
     return block
 
 
+# The whole `WholeCompiles` answers over every donor or recipient of each health part.
+_WHOLE_OF = {"health": "whole", "health_inclusive": "whole_inclusive"}
+
+
 class WholeCompiles:
     """A tool surface whose `resolve_definition` answers a whole request on the US
-    health part as Search derives it (`whole: {axis: provider}`): the part on
+    health part as Search derives it (`whole: {axis}`, on the axis posted): the part on
     bilateral flows has as its whole the same part on the inclusive scope, the CRS's
     declared provider whole, with `resolved.scope_choices.derived` stating the pair
     (`derived_answer`); the part on the inclusive scope already is its whole, and is
-    refused `requested_option_unavailable`. With `refusal`, every whole request is
+    refused `requested_option_unavailable`. A whole over every donor or recipient
+    answers `US_2023`'s whole of the part on the provider option posted (`_WHOLE_OF`).
+    With `refusal`, every whole request is
     refused so. A compile on a provider option, with no `whole`, answers the health
     part on that option.
     Each call's arguments are recorded in `calls`. With `searched`, its `search`
@@ -410,7 +416,7 @@ class WholeCompiles:
             return ToolCallResult(
                 is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}}
             )
-        assert arguments["whole"] == {"axis": "provider"}, arguments
+        axis = arguments["whole"]["axis"]
         if self.refusal is not None:
             return ToolCallResult(is_error=True, structured_content=dict(self.refusal))
         # The health part takes bilateral flows by default, and posts an entry only
@@ -419,9 +425,23 @@ class WholeCompiles:
             (e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "provider"),
             "provider:bilateral",
         )
-        if provider != "provider:bilateral":
+        if axis != "provider":
+            # A donor or recipient whole: the part on the option posted, and its whole.
+            name = {"provider:bilateral": "health", "provider:inclusive": "health_inclusive"}
+            whole = derived_answer(
+                us_2023_block(name[provider]),
+                us_2023_block(_WHOLE_OF[name[provider]]),
+                axis=axis,
+            )
+        elif provider != "provider:bilateral":
             return ToolCallResult(is_error=True, structured_content=dict(PART_IS_WHOLE))
-        whole = derived_answer(us_2023_block("health"), us_2023_block("health_inclusive"))
+        else:
+            whole = derived_answer(
+                us_2023_block("health"), us_2023_block("health_inclusive"), axis=axis
+            )
+            # Search compiles the part from what is posted, on its default bilateral
+            # flows, the posted base's own compile.
+            whole["resolved"]["scope_choices"]["derived"]["part"]["spec_id"] = arguments["spec_id"]
         part = {"status": "definite", "spec": whole}
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
 

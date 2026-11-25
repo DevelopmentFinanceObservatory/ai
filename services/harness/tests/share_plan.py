@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from compiler.sources import source_from_spec_block
 from planner.operations import (
     AggregateOperation,
     FilterOperation,
@@ -173,6 +174,47 @@ def us_share_of_kenya_oda(
         narrowed_to=None if narrowed_from is None else (narrowed_from, donor),
         narrowing=narrowing,
         then=then,
+    )
+
+
+def bilateral_share_of_its_provider_whole(
+    decision: Callable[..., Decision],
+    *,
+    part: Mapping[str, Any],
+    whole: Mapping[str, Any],
+    donor: str,
+    whole_measure: str = "total ODA",
+) -> Plan:
+    """`donor`'s bilateral ODA as a share of its whole over every provider, compiled:
+    the part read from a source stating what Search's spec block `part` states, and the
+    whole, which states no coverage and the planner's measure `whole_measure`, from
+    one stating what Search's answer for its whole, `whole`, states."""
+    period = Period(start=2015, end=2023)
+    sources = {
+        requirement_id: source_from_spec_block(block).model_dump(
+            exclude={"spec_id", "sentence", "has_data"}
+        )
+        for requirement_id, block in (("us", part), ("total", whole))
+    }
+    return _compiled(
+        decision,
+        question=f"What share of {donor}'s ODA was bilateral?",
+        numerator=DatasetRequirement(
+            id="us",
+            decision_ids=["measure"],
+            measure="bilateral ODA",
+            entities=[Entity(name=donor, role="donor")],
+            period=period,
+        ),
+        whole=DatasetRequirement(
+            id="total",
+            decision_ids=["measure"],
+            measure=whole_measure,
+            period=period,
+            whole_of=WholeOf(part="us", axis="provider"),
+        ),
+        group_by=None,
+        sources=sources,
     )
 
 

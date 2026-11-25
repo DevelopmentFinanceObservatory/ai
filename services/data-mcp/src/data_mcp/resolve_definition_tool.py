@@ -39,6 +39,10 @@ RESUBMIT_READ_TIMEOUT_S = 95.0
 RESUBMIT_CALL_BUDGET_S = 100.0
 
 
+# The axes Search derives a share's whole on (`whole.axis`).
+WHOLE_AXES = ("provider", "donor", "recipient")
+
+
 def resubmit_request(
     *,
     spec_id: str,
@@ -55,7 +59,7 @@ def resubmit_request(
     Search keeps one the graph confirms and names it again. `scope_entries`,
     when given, are compiled over the identity, which is then a scope's
     `base.identity`. `whole`, when given, asks for the whole of the part they
-    compile to.
+    compile to, and posts `scope_entries` beside it, empty where none are given.
     """
     entry: dict[str, Any] = {
         "entry_kind": "identity",
@@ -64,8 +68,10 @@ def resubmit_request(
     }
     if entity_groups:
         entry["entity_groups"] = entity_groups
-    if scope_entries is not None:
-        entry["scope_entries"] = scope_entries
+    if scope_entries is not None or whole is not None:
+        # Search reads a whole beside the entries that compile its part, none
+        # included.
+        entry["scope_entries"] = scope_entries or []
     if whole is not None:
         entry["whole"] = whole
     return {
@@ -120,7 +126,8 @@ async def resolve_definition(
 
     The identity must hash to `spec_id` and take at most 65,536 bytes as
     compact JSON; one that does not refuses `request_invalid` and sends
-    nothing. Search answers with a one-part envelope, whose definitions are
+    nothing, as does a `whole` whose `axis` is not one of `WHOLE_AXES`. Search
+    answers with a one-part envelope, whose definitions are
     stored as `search` stores them. Without `scope_entries`, a `definite`
     part whose spec carries the same spec_id is the identity resolving as
     it did; any other answer says it no longer does. With them, the
@@ -134,6 +141,14 @@ async def resolve_definition(
         The envelope's `status` and the spec_id asked about as structured
         content, and the envelope in `_meta`.
     """
+    if whole is not None and whole.get("axis") not in WHOLE_AXES:
+        return to_tool_result(
+            ToolRefusal.request_invalid(
+                tool="resolve_definition",
+                pointer="/whole/axis",
+                detail=f"a whole widens one of {', '.join(WHOLE_AXES)}, not {whole.get('axis')!r}",
+            )
+        )
     try:
         caller_definition({"schema_version": 1, "spec_id": spec_id, "identity": identity})
     except (IdentityMismatch, IdentityUnusable) as exc:

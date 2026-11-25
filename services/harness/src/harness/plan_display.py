@@ -136,6 +136,7 @@ from planner.records import (
 from planner.shapes import FrameShape, RoleDimension, TimeLabel, ValueKind
 from planner.workflow import ReadingSetBy, SelectedSource, Workflow, WorkflowStep
 
+from harness.scope_choices import PROVIDER_AXIS
 from harness.sentences import DECLINE_REASONS, PlanWords
 
 _REDUCTION_WORDS: dict[Reduction, str] = {
@@ -1175,12 +1176,13 @@ def _concept(
     own source, Search's answer for the whole, and its part's
     (`_entity_whole_concept`), on the sector option the whole cites, else
     its part's, else by its part's `measure`; the parties it reads (`_who`,
-    `_parties`) name the population its source holds there. A plan not
-    compiled reads its source off `sources` (`_source`)."""
-    if requirement.whole_of is not None:
-        part = plan.requirement(requirement.whole_of.part)
-        if not isinstance(part, DatasetRequirement):
-            return requirement.measure
+    `_parties`) name the population its source holds there. A whole whose
+    part is no dataset requirement, which admission refuses
+    (`planner.plan.whole_of_fault`), is named as any requirement is, off its
+    own source, else by its own `measure`. A plan not compiled reads its
+    source off `sources` (`_source`)."""
+    part = plan.requirement(requirement.whole_of.part) if requirement.whole_of is not None else None
+    if isinstance(part, DatasetRequirement):
         sector = _governing(requirement, plan).get("sector") or _governing(part, plan).get("sector")
         return _entity_whole_concept(
             source=_source(requirement.id, plan, sources),
@@ -1318,20 +1320,54 @@ def _namings(
             _concept(dataset, plan, sources=sources),
             _who(dataset, plan, sources=sources),
             dataset.period,
-            _held_options(dataset, plan),
+            _held_options(dataset, plan, sources=sources),
         )
         for dataset in _datasets(plan).values()
     }
 
 
-def _held_options(requirement: DatasetRequirement, plan: Plan) -> tuple[str | None, ...]:
+def _held_options(
+    requirement: DatasetRequirement,
+    plan: Plan,
+    *,
+    sources: Mapping[str, SelectedSource] | None = None,
+) -> tuple[str | None, ...]:
     """The option `requirement` holds on each of `_NAMING_AXES`: the label the
-    scope decision it cites there chose, `None` where it cites none."""
+    scope decision it cites there chose, `None` where it cites none.
+
+    A whole over every provider cites no provider decision of its own, so on
+    the provider axis it holds the option Search states it counts, and its part,
+    where it cites none, the option Search states the part counts
+    (`SelectedSource.derived_whole`), so the card never names a provider share
+    as a share of itself. A plan not compiled reads its sources off `sources`."""
     governing = _governing(requirement, plan)
-    return tuple(
+    held = [
         decision.chosen if (decision := governing.get(axis)) is not None else None
         for axis in _NAMING_AXES
-    )
+    ]
+    if held[0] is None:
+        held[0] = _provider_counted(requirement, plan, sources)
+    return tuple(held)
+
+
+def _provider_counted(
+    requirement: DatasetRequirement,
+    plan: Plan,
+    sources: Mapping[str, SelectedSource] | None,
+) -> str | None:
+    """The provider option Search states `requirement` counts where it is a whole
+    over every provider or the part of one, off the whole's source; `None`
+    otherwise."""
+    for whole in _datasets(plan).values():
+        if whole.whole_of is None or whole.whole_of.axis != PROVIDER_AXIS:
+            continue
+        if requirement.id not in (whole.id, whole.whole_of.part):
+            continue
+        source = _source(whole.id, plan, sources)
+        derived = source.derived_whole if source is not None else None
+        if derived is not None:
+            return derived.whole_counts if requirement.id == whole.id else derived.part_counts
+    return None
 
 
 def _pinned_sources(

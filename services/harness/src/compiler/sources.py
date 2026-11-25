@@ -26,7 +26,6 @@ from typing import Any, NamedTuple, cast
 
 import rfc8785
 from common.place_type import FLOW_ROLE_COLUMNS, IDENTITY_KEY_AXES, PartyClass
-from planner.parties import flow_side
 from planner.records import (
     AmbiguousEntityReading,
     AmbiguousSourceReading,
@@ -47,6 +46,7 @@ from planner.workflow import (
     ResolvedEntity,
     ResolvedGroup,
     SelectedSource,
+    SourceWhole,
 )
 from pydantic import JsonValue, TypeAdapter
 
@@ -450,6 +450,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             groups=_groups(_mapping(resolved.get("entity_groups"))),
             bound_refs=_BOUND_ENTITIES.validate_python(block.get("_bound_refs", ())),
             open_entity_axes=open_entity_axes_of(resolved),
+            derived_whole=_source_whole(resolved),
             unit_ref=_text(unit.get("ref")),
             unit_label=_text(unit.get("label")),
             unit_per_series=True if unit.get("selection") == "per_series" else None,
@@ -1158,6 +1159,34 @@ def block_wire_groups(
     return tuple(found)
 
 
+def _source_whole(resolved: Mapping[str, object]) -> SourceWhole | None:
+    """What `resolved`, a spec block's `resolved`, states of the whole Search derived
+    (`scope_choices.derived`), `None` where it states none or no `kind`. Each side's
+    provider option is labelled as the block's own provider choice labels it."""
+    scope = _mapping(resolved.get("scope_choices"))
+    derived = _mapping(scope.get("derived"))
+    kind = _text(derived.get("kind"))
+    if kind is None:
+        return None
+    labels = {
+        _text(option.get("option_id")): _text(option.get("label"))
+        for choice in _sequence(scope.get("choices"))
+        if isinstance(choice, Mapping) and choice.get("axis") == "provider"
+        for option in _sequence(choice.get("options"))
+        if isinstance(option, Mapping)
+    }
+
+    def counts(side: object) -> str | None:
+        return labels.get(_text(_mapping(side).get("provider")))
+
+    return SourceWhole(
+        derivation=kind,
+        rebind=_text(derived.get("rebind")),
+        whole_counts=counts(derived.get("whole")),
+        part_counts=counts(derived.get("part")),
+    )
+
+
 def readable_wire_groups(
     block: Mapping[str, object], *, leaving_out: str | None = None
 ) -> tuple[ResolvedGroup, ...] | None:
@@ -1235,26 +1264,6 @@ def identity_side(key: str) -> str:
     digits and underscores alone, so the colon keeps a declared role named `place`
     off the place axis."""
     return IDENTITY_KEY_AXES.get(key) or f"{_DECLARED_ROLE_AXIS}{key}"
-
-
-def open_side_column(axes: Iterable[OpenEntityAxis] | None, role: str) -> str | None:
-    """The role column of `axes`, the entity axes a spec block leaves open
-    (`open_entity_axes_of`, `SelectedSource.open_entity_axes`), on the side of the
-    flow `role` names, one row per party there; `None` where none is open there,
-    the block binding that side to a total, or where `role` names no side.
-
-    A whole (`planner.plan.WholeOf`) opening that side reads it open where Search
-    leaves it so, as the CRS does over every donor, and an aggregate sums it
-    (`planner.plan.WholeSum`). Admission reads the axes off Search's block for
-    the whole's pin (`submission.service._whole_sums`) and the compiler off the
-    source it reads for that pin (`compiler.compile._Build._check_whole_sum`),
-    both through `open_entity_axes_of`, which never fails on a block, so a
-    block whose other fields do not read still answers.
-    """
-    side = flow_side(role)
-    if side is None:
-        return None
-    return next((axis.column for axis in axes or () if flow_side(axis.column) == side), None)
 
 
 def source_whole_side(source: SelectedSource, column: str) -> WholeSide | None:

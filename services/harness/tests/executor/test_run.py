@@ -92,7 +92,14 @@ from planner.plan import (
     with_whole_sums,
 )
 from planner.records import Period
-from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
+from planner.workflow import (
+    SUM_OF_MEMBERS,
+    OpenEntityAxis,
+    ResolvedEntity,
+    SelectedSource,
+    SourceWhole,
+    ToolId,
+)
 
 from ..unreachable_surface import unreachable_surface
 from .conftest import (
@@ -1105,7 +1112,7 @@ async def test_a_wholes_retrieval_is_held_to_the_parties_its_part_covers(
     real_schemas: list[ToolSchema],
 ) -> None:
     """The United States' ODA to Kenya as a share of its whole over every donor, whose
-    source binds Kenya and leaves the donors open, so the plan sums them
+    source binds Kenya and which Search summed over the donors, so the plan sums them
     (`Plan.whole_sums`). The whole states no entity, and its retrieval answering
     with Uganda's aid is refused, since the whole covers what its part covers,
     Kenya included."""
@@ -1145,6 +1152,7 @@ async def test_a_wholes_retrieval_is_held_to_the_parties_its_part_covers(
         entities=(kenya,),
         identity={"stat_var": "ODA", "entities": {"destination": [kenya.ref]}},
         open_entity_axes=(OpenEntityAxis(column="origin", member_count=40),),
+        derived_whole=SourceWhole(derivation=SUM_OF_MEMBERS),
     )
     sums = (WholeSum(whole_id="all_oda", sum_id="all_oda_sum"),)
     draft = Plan(

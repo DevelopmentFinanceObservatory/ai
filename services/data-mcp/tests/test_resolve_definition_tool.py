@@ -189,7 +189,10 @@ async def test_scope_entries_are_posted_with_the_base_identity_and_the_compiled_
     assert json.loads(held.canonical_bytes) == spec["definition"]["identity"]
 
 
-async def test_a_whole_request_is_posted_beside_the_scope_entries() -> None:
+@pytest.mark.parametrize("entries", [True, False], ids=["with-entries", "no-entries"])
+async def test_a_whole_request_is_posted_beside_the_scope_entries(entries: bool) -> None:
+    """A whole request posts the part's scope entries beside `whole`, and an empty list
+    where the part has none, since Search reads the whole beside them."""
     posted: list[dict[str, Any]] = []
     (entry,) = _SWITCH["request"]["input"]["entries"]
 
@@ -198,7 +201,7 @@ async def test_a_whole_request_is_posted_beside_the_scope_entries() -> None:
         {
             "spec_id": entry["variable_text"],
             "identity": entry["identity"],
-            "scope_entries": entry["scope_entries"],
+            **({"scope_entries": entry["scope_entries"]} if entries else {}),
             "whole": {"axis": "provider"},
         },
         InMemoryDefinitionStore(),
@@ -206,9 +209,28 @@ async def test_a_whole_request_is_posted_beside_the_scope_entries() -> None:
 
     (sent,) = posted[0]["input"]["entries"]
     assert (sent["scope_entries"], sent["whole"]) == (
-        entry["scope_entries"],
+        entry["scope_entries"] if entries else [],
         {"axis": "provider"},
     )
+
+
+async def test_a_whole_on_an_axis_search_does_not_derive_is_refused_unposted() -> None:
+    posted: list[dict[str, Any]] = []
+    (entry,) = _SWITCH["request"]["input"]["entries"]
+
+    result = await _call(
+        _recorded_answer(posted, _SWITCH["response"]),
+        {
+            "spec_id": entry["variable_text"],
+            "identity": entry["identity"],
+            "whole": {"axis": "sector"},
+        },
+        InMemoryDefinitionStore(),
+    )
+
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "request_invalid"
+    assert posted == []
 
 
 @pytest.mark.parametrize(
