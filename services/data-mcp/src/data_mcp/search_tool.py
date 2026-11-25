@@ -156,8 +156,9 @@ class SearchOperation(BaseModel):
         min_length=1,
         max_length=_MAX_OPERATION_PHRASE_CHARS,
         description=(
-            "the user's wording for it, on one line, e.g. 'top 5 creditors'; for "
-            "`share_of`, the part's whole `variable` text"
+            "the user's wording for it, on one line, e.g. 'top 5 creditors'. With "
+            "`share_of`, `variable` names the share's numerator measure alone, without "
+            "the share wording (e.g. 'bilateral ODA')"
         ),
     )
     over: Literal["place", "origin", "destination", "category", "year"] | None = Field(
@@ -288,20 +289,6 @@ class SearchPart(BaseModel):
             "when the question asks for none"
         ),
     )
-
-    @model_validator(mode="after")
-    def _share_of_phrase_is_the_variable(self) -> Self:
-        whole = " ".join(self.variable.casefold().split())
-        for operation in self.operations or []:
-            phrase = " ".join(operation.phrase.casefold().split())
-            if operation.verb == "share_of" and phrase != whole:
-                raise ValueError(
-                    "a share_of operation's phrase is the part's whole `variable` text: "
-                    f"send phrase {self.variable!r}, and keep the user's wording around "
-                    "the share out of it"
-                )
-        return self
-
     sources: list[SearchSource] | None = Field(
         default=None,
         min_length=1,
@@ -663,8 +650,9 @@ async def search(
     "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
     "entities": [{"text": "Kenya", "role": "debtor"}], "open_roles":
     ["creditor"], "operations": [{"verb": "rank",
-    "phrase": "top 5 creditors", "over": "origin"}]}`. For `share_of`, the
-    phrase is the part's whole `variable` text. A rank over place,
+    "phrase": "top 5 creditors", "over": "origin"}]}`. With `share_of`, `variable`
+    names the share's numerator measure alone, without the share wording (e.g.
+    'bilateral ODA'). A rank over place,
     category or year has no flow side. A worldwide country
     ranking is a rank `over` "place" with no entity. A donor or creditor
     ranking uses `origin`; a recipient or debtor ranking uses `destination`.
