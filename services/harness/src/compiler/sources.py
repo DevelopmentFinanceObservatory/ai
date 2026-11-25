@@ -26,7 +26,7 @@ from typing import Any, NamedTuple, cast
 
 import rfc8785
 from common.place_type import FLOW_ROLE_COLUMNS, IDENTITY_KEY_AXES, PartyClass
-from planner.parties import flow_side
+from planner.parties import Party, flow_side, role_party
 from planner.records import (
     AmbiguousEntityReading,
     AmbiguousSourceReading,
@@ -1292,6 +1292,51 @@ def source_whole_side(source: SelectedSource, column: str) -> WholeSide | None:
             bound.extend(ref for ref in refs if isinstance(ref, str) and ref not in bound)
     group = next((group for group in source.groups if group.role == column), None)
     return WholeSide(bound=tuple(bound), group=group)
+
+
+def named_by_part(
+    whole: SelectedSource, part: SelectedSource, *, opened: Party | None
+) -> SelectedSource:
+    """`whole`, a derived whole's source, viewed with the name facts of `part`, its
+    part's source, on the parties the whole keeps; a view stored nowhere.
+
+    A source holds two kinds of fact: the parties its dataset binds (`entities`,
+    `groups`), which belong to its spec_id, and which ref a request's words mean
+    (`bound_refs`, `entity_refs`), which belong to a search's wording. A whole
+    takes its names from its part and its dataset from a request with no words
+    (`planner.source_reads.compile_whole`), so its own source states the parties
+    and its part's states the names. The view keeps `whole`'s parties and adds,
+    after its own, each row of `part.bound_refs` and each `part.entity_refs` entry
+    with a ref among the parties `whole` states (an entity's ref, a set's ref,
+    published total or registry id) on a column outside the side `opened`, the side
+    the whole widens (`planner.plan.whole_side`). The whole's own facts take
+    precedence: a part row whose identity or words a row of the whole's binds, and a
+    part entry for a name the whole's `entity_refs` holds, are not carried. A part's
+    name for a party the whole does not state, as on the side it opens or a side
+    Search rebinds to other parties, is not carried either, and reads on the whole's
+    own source alone.
+    """
+    held: set[str] = {
+        entity.ref
+        for entity in whole.entities
+        if opened is None or role_party(entity.role) != opened
+    }
+    for group in whole.groups:
+        if opened is None or role_party(group.role) != opened:
+            held.update(key for key in (group.ref, group.total, group.group_id) if key)
+    bound = {key.casefold() for row in whole.bound_refs for key in (row.identity, row.text)}
+    rows = [*whole.bound_refs]
+    rows.extend(
+        row
+        for row in part.bound_refs
+        if row.identity.casefold() not in bound
+        and row.text.casefold() not in bound
+        and held.intersection(row.refs)
+    )
+    refs = {name: ref for name, ref in part.entity_refs.items() if ref in held}
+    return whole.model_copy(
+        update={"bound_refs": tuple(rows), "entity_refs": {**refs, **whole.entity_refs}}
+    )
 
 
 class Containment(NamedTuple):
