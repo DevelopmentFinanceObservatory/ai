@@ -10099,15 +10099,17 @@ _G7_MEMBERS = (
 )
 
 
-def _registry_g7(block: dict[str, Any], label: str) -> None:
-    """`block` binding the G7 as a membership registry set read as its members: the
-    set has a registry id and no graph node or published total, labelled `label`."""
+def _registry_g7(block: dict[str, Any], label: str, group_id: str | None = "groups/G7") -> None:
+    """`block` binding the G7 as a set read as its members, labelled `label`: a
+    membership registry set with the registry id `group_id`, or with none a set
+    known by its label alone, and no graph node or published total either way."""
     resolved = block["resolved"]
     resolved["entities"] = [
         {"ref": ref, "label": name, "entity_type": "Country", "role": "origin"}
         for ref, name in _G7_MEMBERS
     ]
-    resolved["entity_groups"] = {"origin": {"label": label, "group_id": "groups/G7"}}
+    group = {"label": label, **({"group_id": group_id} if group_id else {})}
+    resolved["entity_groups"] = {"origin": group}
     block["definition"]["identity"]["entities"]["origin"] = [ref for ref, _ in _G7_MEMBERS]
 
 
@@ -10214,17 +10216,26 @@ async def test_a_provider_whole_reads_its_parts_names_by_the_party_each_resolved
     assert [(row.text, row.refs) for row in whole.bound_refs] == [(donor, tuple(refs))]
 
 
-def test_a_provider_whole_reads_a_registry_set_the_part_names_by_its_registry_id() -> None:
+@pytest.mark.parametrize(
+    ("group_id", "refs"),
+    [
+        pytest.param("groups/G7", ("groups/G7",), id="registry-id"),
+        pytest.param(None, tuple(ref for ref, _ in _G7_MEMBERS), id="label-only"),
+    ],
+)
+def test_a_provider_whole_reads_a_set_the_part_names_by_its_registry_id_or_members(
+    group_id: str | None, refs: tuple[str, ...]
+) -> None:
     """G7 bilateral ODA over its whole over every provider, both reading the G7 as a
-    membership registry set's members, which the part labels "G7" and the whole
-    "Group of Seven": the whole's source carries a row naming the set by its registry
-    id, so the whole's "G7" is met at compile and, through the approved source, by a
-    retrieval holding the members."""
+    set's members, which the part labels "G7" and the whole "Group of Seven": the
+    whole's source carries a row naming the set by its registry id, or by its members
+    where it states none, so the whole's "G7" is met at compile and, through the
+    approved source, by a retrieval holding the members."""
     recorded = _SEARCH_WHOLES["g7_bilateral"]
     part_block = json.loads(json.dumps(recorded["part"]))
     whole_block = json.loads(json.dumps(recorded["whole"]))
-    _registry_g7(part_block, "G7")
-    _registry_g7(whole_block, "Group of Seven")
+    _registry_g7(part_block, "G7", group_id)
+    _registry_g7(whole_block, "Group of Seven", group_id)
     period = Period(start=2015, end=2023)
     part = DatasetRequirement(
         id="part",
@@ -10248,7 +10259,7 @@ def test_a_provider_whole_reads_a_registry_set_the_part_names_by_its_registry_id
 
     approved = with_part_parties(whole_source, whole=whole, part=part, part_source=part_source)
 
-    assert [(row.text, row.refs) for row in approved.bound_refs] == [("G7", ("groups/G7",))]
+    assert [(row.text, row.refs) for row in approved.bound_refs] == [("G7", refs)]
     assert not errors(check_evidence(whole, evidence_from_source(approved)))
     retrieved = RetrievalEvidence(
         origin="manifest",
@@ -10260,6 +10271,90 @@ def test_a_provider_whole_reads_a_registry_set_the_part_names_by_its_registry_id
     assert not [f for f in check_evidence(whole, retrieved, approved=approved) if f.code in names]
     unapproved = check_evidence(whole, retrieved, approved=whole_source)
     assert [f.code for f in unapproved if f.code in names] == [EvidenceIssueCode.ENTITY_MISSING]
+
+
+def _us_provider_pair(
+    part_entity: Entity,
+    part_bound: list[str],
+    edit: Callable[[dict[str, Any]], None],
+    *,
+    recipients: Sequence[dict[str, Any]] = (),
+) -> tuple[SelectedSource, DatasetRequirement, DatasetRequirement, SelectedSource]:
+    """US bilateral ODA over its whole over every provider, the part naming
+    `part_entity`, which its search answer bound to `part_bound`, its source binding
+    `recipients` too, and the whole's block edited by `edit`: the whole's source, the
+    whole as it reads there, the part and the part's source."""
+    recorded = _SEARCH_WHOLES["us_bilateral"]
+    part_block = json.loads(json.dumps(recorded["part"]))
+    part_block["_bound_refs"] = [
+        {"identity": part_entity.name, "text": part_entity.name, "refs": part_bound}
+    ]
+    if part_entity.role == "recipient" and not recipients:
+        recipients = [{"ref": part_bound[0], "label": part_entity.name, "role": "destination"}]
+    part_block["resolved"]["entities"] += list(recipients)
+    whole_block = json.loads(json.dumps(recorded["whole"]))
+    edit(whole_block)
+    period = Period(start=2010, end=2023)
+    part = DatasetRequirement(
+        id="part",
+        decision_ids=["measure"],
+        measure="US bilateral ODA",
+        entities=[Entity(name="United States", role="donor"), part_entity],
+        period=period,
+    )
+    stated = DatasetRequirement(
+        id="whole",
+        decision_ids=["measure"],
+        measure="US ODA",
+        period=period,
+        whole_of=WholeOf(part="part", axis="provider"),
+    )
+    part_source = source_from_spec_block(part_block)
+    whole_source = source_from_spec_block(whole_block)
+    whole = whole_on_source(stated, part, whole_source, summed=False, part_source=part_source)
+    return whole_source, whole, part, part_source
+
+
+def test_a_whole_keeps_its_own_row_for_a_name_it_binds() -> None:
+    """A part naming "Congo" as a recipient, bound to the Democratic Republic of the
+    Congo, over a whole whose own search answer bound "Congo" to the Republic of the
+    Congo, both Congos among its recipients: the whole's row names the party, so no
+    second row makes the name ambiguous, and the whole's check meets it."""
+
+    congos = [
+        {"ref": "country/COD", "label": "Democratic Republic of the Congo", "role": "destination"},
+        {"ref": "country/COG", "label": "Republic of the Congo", "role": "destination"},
+    ]
+
+    def edit(block: dict[str, Any]) -> None:
+        block["resolved"]["entities"] += congos
+        block["_bound_refs"] = [{"identity": "Congo", "text": "Congo", "refs": ["country/COG"]}]
+
+    congo = Entity(name="Congo", role="recipient")
+    whole_source, whole, part, part_source = _us_provider_pair(
+        congo, ["country/COD"], edit, recipients=congos
+    )
+    assert congo in whole.entities
+
+    carried = with_part_parties(whole_source, whole=whole, part=part, part_source=part_source)
+
+    assert [(row.text, row.refs) for row in carried.bound_refs] == [("Congo", ("country/COG",))]
+    findings = errors(check_evidence(whole, evidence_from_source(carried)))
+    assert [f.code for f in findings if f.required == "Congo"] == []
+
+
+def test_a_whole_carries_no_name_its_source_binds_on_another_side() -> None:
+    """A part naming the United States as a recipient over a whole whose source binds
+    the US only as the donor: the recipient name is not met by the donor, so the
+    whole carries a row for the donor alone."""
+    recipient = Entity(name="United States", role="recipient")
+    whole_source, whole, part, part_source = _us_provider_pair(
+        recipient, ["country/USA"], lambda block: None
+    )
+
+    carried = with_part_parties(whole_source, whole=whole, part=part, part_source=part_source)
+
+    assert [(row.text, row.role) for row in carried.bound_refs] == [("United States", "donor")]
 
 
 def test_a_donor_whole_carries_no_name_from_the_side_it_opens() -> None:

@@ -582,7 +582,9 @@ def resolve_group(
     Matches `Entity.name` against the set's `label`, case-folded, or names
     the set whose ref, published total or registry id Search bound for the
     rows it names (`bound_refs_of`), so "G7" names the set Search labels
-    "Group of Seven". A stated role has to name the set's role
+    "Group of Seven". A set stating none of the three is named where Search
+    bound the rows for every entity the source resolves on its column, its
+    members (`_members_bound`). A stated role has to name the set's role
     column or sit on its side of the flow (`donor` and `origin`), so "G7"
     asked for as a recipient is not the G7 whose members give.
     """
@@ -596,10 +598,22 @@ def resolve_group(
             or group.ref in bound
             or group.total in bound
             or group.group_id in bound
+            or _members_bound(group, source, bound)
         )
         and _role_fits(entity.role, group.role)
     ]
     return matches[0] if len(matches) == 1 else None
+
+
+def _members_bound(
+    group: ResolvedGroup, source: SelectedSource | RetrievalEvidence, bound: Sequence[str]
+) -> bool:
+    """Whether `group`, a set stating no ref, published total or registry id, has
+    every entity `source` resolves on its column, at least one, among `bound`."""
+    if group.ref or group.total or group.group_id:
+        return False
+    members = {one.ref for one in source.entities if one.role == group.role}
+    return bool(members) and members.issubset(bound)
 
 
 def named_members(
@@ -630,22 +644,26 @@ def named_refs(entities: Sequence[Entity], source: SelectedSource | RetrievalEvi
 def party_keys(entity: Entity, source: SelectedSource | RetrievalEvidence) -> tuple[str, ...]:
     """The keys of the one party `source` resolves `entity` to, by the route the
     entity check takes: the named set it names (`resolve_group`), by the set's own
-    ref, published total and registry id, else the ref of the one entity it names
+    ref, published total and registry id, or by its members' refs (`named_members`)
+    where it states none of the three; else the ref of the one entity it names
     (`resolve_name`: by the row Search bound, by label, or by the ref the graph
-    resolved the name to). Empty when it resolves none, and for a set stating none
-    of the three."""
+    resolved the name to). Empty when it resolves none."""
     if (group := resolve_group(entity, source)) is not None:
-        return tuple(dict.fromkeys(key for key in (group.ref, group.total, group.group_id) if key))
+        keys = [key for key in (group.ref, group.total, group.group_id) if key]
+        return tuple(dict.fromkeys(keys or (one.ref for one in named_members(entity, source))))
     resolved = resolve_name(entity, source)
     return () if resolved is None else (resolved.ref,)
 
 
-def held_keys(source: SelectedSource | RetrievalEvidence) -> set[str]:
-    """The keys of every party `source` binds: each entity's ref, and each named
-    set's own ref, published total and registry id (`party_keys`)."""
-    keys = {entity.ref for entity in source.entities}
+def held_keys(source: SelectedSource | RetrievalEvidence, role: str | None) -> set[str]:
+    """The keys of every party `source` binds on a role column the requirement's
+    `role` phrase allows (`_role_fits`), every column where it is `None`: each
+    entity's ref, and each named set's own ref, published total and registry id
+    (`party_keys`)."""
+    keys = {entity.ref for entity in source.entities if _role_fits(role, entity.role)}
     for group in source.groups:
-        keys.update(key for key in (group.ref, group.total, group.group_id) if key)
+        if _role_fits(role, group.role):
+            keys.update(key for key in (group.ref, group.total, group.group_id) if key)
     return keys
 
 

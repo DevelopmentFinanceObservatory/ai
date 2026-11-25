@@ -124,6 +124,7 @@ from compiler.capabilities import (
 from compiler.evidence import (
     EvidenceIssue,
     UnitReading,
+    bound_refs_of,
     check_evidence,
     errors,
     evidence_from_source,
@@ -396,26 +397,31 @@ def with_part_parties(
     States of America", "Group of Seven") by name. Each entity of `part` that `whole`
     still names, those on the sides it keeps, is resolved on `part_source` by the
     route the part's own check takes (`party_keys`: a bound row, a label, a ref the
-    graph resolved, a named set), and where `whole_source` binds the same party
-    (`held_keys`) the row names that party under the entity's name and role. The side
+    graph resolved, a named set), and where `whole_source` binds the same party on a
+    column the entity's role allows (`held_keys`) the row names that party under the
+    entity's name and role. A name the whole's source already binds a row for
+    (`bound_refs_of`) reads that row alone, so it gets none. The side
     the whole opens or rebinds to other parties names the whole's own parties, by
     ref, so it carries nothing. The run-time check reads the approved source, so it
     reads the same rows. With no part source, `whole_source` is as given.
     """
     if part_source is None:
         return whole_source
-    held = held_keys(whole_source)
     carried: list[BoundEntity] = []
     for entity in whole.entities:
-        if entity not in part.entities:
+        if entity not in part.entities or bound_refs_of(entity, whole_source):
             continue
+        held = held_keys(whole_source, entity.role)
         keys = tuple(key for key in party_keys(entity, part_source) if key in held)
         if keys:
-            row = BoundEntity(
-                identity=entity.dcid or entity.name, text=entity.name, role=entity.role, refs=keys
+            carried.append(
+                BoundEntity(
+                    identity=entity.dcid or entity.name,
+                    text=entity.name,
+                    role=entity.role,
+                    refs=keys,
+                )
             )
-            if row not in whole_source.bound_refs:
-                carried.append(row)
     if not carried:
         return whole_source
     return whole_source.model_copy(update={"bound_refs": (*whole_source.bound_refs, *carried)})
@@ -723,7 +729,7 @@ class _Build:
             stated = self.plan_requirements.get(requirement.id)
             if isinstance(stated, DatasetRequirement) and stated.whole_of is not None:
                 part = self.plan_requirements.get(stated.whole_of.part)
-                if isinstance(part, DatasetRequirement):
+                if isinstance(part, DatasetRequirement) and part.whole_of is None:
                     source = with_part_parties(
                         source,
                         whole=requirement,
