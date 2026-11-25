@@ -6511,6 +6511,10 @@ class _PartAndWholeCompiles:
             identity["entities"] = {
                 role: refs for role, refs in identity["entities"].items() if role != "origin"
             }
+            # Search leaves the donors open: it binds none and states the side open.
+            resolved = whole["resolved"]
+            resolved["entities"] = [e for e in resolved["entities"] if e["role"] != "origin"]
+            resolved["role_axis_facts"] = [{"role": "origin", "member_count": 35}]
             whole["spec_id"] = whole["definition"]["spec_id"] = spec_id
             scope = whole["resolved"]["scope_choices"]
             scope["id"] = scope["base"]["spec_id"] = scope["compiled"]["spec_id"] = spec_id

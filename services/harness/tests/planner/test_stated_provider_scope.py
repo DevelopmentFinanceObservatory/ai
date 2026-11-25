@@ -31,11 +31,14 @@ from typing import Any, cast, get_args
 import httpx2
 import pytest
 from common.live_apis import LiveApisClient
-from compiler.sources import source_from_spec_block
+from compiler.sources import open_side_column, source_from_spec_block
 from compiler.surface import ToolCallResult, ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from harness import studio as studio_module
 from harness.conversation import current_user_message
+from harness.graph import approve as approve_module
 from harness.graph import switch as switch_module
+from harness.graph.answer import stored_run_plan
 from harness.graph.state import readable_plan
 from harness.graph.switch import SwitchFailedError
 from harness.plan_display import choice_id
@@ -45,17 +48,22 @@ from harness.sentences import FAILURE_CLASS, TERMINAL_PROPOSE_CODES, FailureClas
 from harness.settings import Settings
 from harness.turn.store import AgentRecord
 from planner.plan import (
+    ALIGNED_PINS_STATE_KEY,
     PLAN_STATE_KEY,
     AlignedPin,
     DatasetRequirement,
     PinSource,
+    Plan,
+    PlanStatus,
     ProviderOptionId,
     ResolvedBy,
     ScopeWords,
     UnsupportedOperation,
     aligned_pins,
+    covered,
     load_optional_declines,
     load_plan,
+    plan_revision,
     save_pin_sources,
     scope_choice_slot,
     stored_plan,
@@ -76,7 +84,7 @@ from planner.stated_scope import (
 )
 from planner.tool_results import Outcome, ProblemCode
 from planner.tools import load_pending_ask
-from planner.workflow import SUM_OF_MEMBERS, SourceWhole, ToolId
+from planner.workflow import ToolId
 from submission.service import (
     _ALIGNED_REASONS,
     _scope_words,
@@ -94,7 +102,6 @@ from ..basis_alignment import (
 )
 from ..planner_host import node_ctx
 from ..planner_tools import call_planner_tool
-from ..share_plan import ALL_DONORS, US_DONOR, us_share_of_kenya_oda
 
 _FIXTURES = Path(__file__).parents[1] / "fixtures"
 _RECORDED: dict[str, Any] = json.loads(
@@ -2270,27 +2277,6 @@ async def test_a_stored_plan_with_a_sector_whole_is_planned_again() -> None:
     assert node.state == {"plan": None}
 
 
-@pytest.mark.parametrize("derived", [True, False], ids=["derived", "compiled-before"])
-def test_a_stored_plan_whose_summed_whole_states_no_derived_whole_is_planned_again(
-    decision: Callable[..., Any], derived: bool
-) -> None:
-    """The US share of ODA to Kenya over every donor, approved and compiled with its
-    whole summed over the donors Search leaves open. A plan stored before sources
-    stated Search's derived whole cannot say the side is summed, so it reads as no
-    plan and is planned again; one stating it loads."""
-    whole = (
-        {**ALL_DONORS, "derived_whole": SourceWhole(derivation=SUM_OF_MEMBERS)}
-        if derived
-        else ALL_DONORS
-    )
-    plan = us_share_of_kenya_oda(
-        decision, whole=whole, numerator=US_DONOR, whole_of=True, group_by=None
-    )
-    raw = plan.model_dump_json()
-
-    assert (stored_plan(raw, state_key=PLAN_STATE_KEY) == plan) is derived
-
-
 async def test_a_provider_whole_search_moves_to_all_recipients_says_so() -> None:
     """France's bilateral ODA, on DAC2a to developing countries, as a share of its whole
     over every provider: Search's whole counts total ODA to all recipients (DAC)
@@ -2317,7 +2303,13 @@ async def test_a_provider_whole_search_moves_to_all_recipients_says_so() -> None
     whole, part = plan.requirement("total"), plan.requirement("part")
     assert isinstance(whole, DatasetRequirement)
     assert isinstance(part, DatasetRequirement)
-    read = whole_on_source(whole, part, source_from_spec_block(recorded["whole"]), summed=False)
+    read = whole_on_source(
+        whole,
+        part,
+        source_from_spec_block(recorded["whole"]),
+        summed=False,
+        part_source=source_from_spec_block(recorded["part"]),
+    )
     assert [(e.role, e.dcid) for e in read.entities] == [
         ("donor", None),
         ("recipient", "DACAllRecipients"),
@@ -2443,6 +2435,147 @@ async def test_a_whole_search_refuses_is_one_underivable_refusal_with_searchs_ca
     assert load_plan(ctx.state) is None
 
 
+@pytest.mark.parametrize(
+    "name", [name for name, case in _WHOLES.items() if isinstance(case, dict) and "whole" in case]
+)
+def test_how_search_states_it_derived_a_whole_is_what_its_block_serves(name: str) -> None:
+    """Every whole Search answered the `whole` request with: where it states it summed
+    a donor or recipient side over its members, the block leaves that side open, and
+    where it states a published total or an option, the block binds it
+    (`compiler.sources.open_side_column`), so the source built from any answer for
+    the whole's spec_id reads the side as Search derived it. Where Search moved a side
+    beside the widened axis (`rebind`), the block binds that total there."""
+    whole = _WHOLES[name]["whole"]
+    resolved = whole["resolved"]
+    derived = resolved["scope_choices"]["derived"]
+    source = source_from_spec_block(_drop_derived(whole))
+
+    if derived["axis"] in ("donor", "recipient"):
+        opened = open_side_column(source.open_entity_axes, derived["axis"])
+        assert (opened is not None) is (derived["kind"] == "sum_of_members"), name
+    if derived.get("rebind"):
+        axis, total = derived["rebind"].split(":")
+        column = "destination" if axis == "recipient" else "origin"
+        assert [e.ref for e in source.entities if e.role == column] == [total]
+
+
+def _drop_derived(block: dict[str, Any]) -> dict[str, Any]:
+    """`block` with no `resolved.scope_choices.derived`."""
+    stated = copy.deepcopy(block)
+    del stated["resolved"]["scope_choices"]["derived"]
+    return stated
+
+
+# Two approved plans for the US share of ODA to Kenya over every donor, as the release
+# before Search's `whole` request stored them: one summing an open donor side, one
+# reading official donors' published total.
+_OLD_PLANS: dict[str, Any] = json.loads((_FIXTURES / "plans_before_search_wholes.json").read_text())
+
+
+class _Ledger:
+    """A run ledger holding `raw` as the plan of every revision."""
+
+    def __init__(self, raw: str) -> None:
+        self.raw = raw
+
+    async def plan(self, revision: str) -> str:
+        del revision
+        return self.raw
+
+
+@pytest.mark.parametrize(
+    ("name", "across", "dcids"),
+    [
+        pytest.param("summed", ("donor",), [], id="summed"),
+        pytest.param("published", (), ["DACOfficialDonors"], id="published"),
+    ],
+)
+async def test_a_plan_the_previous_release_stored_loads_and_reads_its_whole(
+    monkeypatch: pytest.MonkeyPatch, name: str, across: tuple[str, ...], dcids: list[str]
+) -> None:
+    """An approved plan the release before Search's `whole` request stored, its whole's
+    source stating no derived whole: the session's plan, the run's plan and the
+    approval the turn took all load it, and its whole reads the donor side as its
+    source serves it, open where the plan sums it, else official donors' total."""
+    raw = _OLD_PLANS[name]
+    plan = stored_plan(raw, state_key=PLAN_STATE_KEY)
+    assert plan is not None
+    run_plan = await stored_run_plan(cast(Any, _Ledger(raw)), run_id="run", revision="r")
+    assert run_plan == plan
+    monkeypatch.setattr(studio_module, "plan_approved", lambda card, **_: card)
+    card = SimpleNamespace(revision=plan_revision(plan))
+    taken = studio_module._taken_approval(
+        cast(Any, SimpleNamespace(turn_approved=[], turn_choice_baseline={})),
+        cast(Any, SimpleNamespace(state={"plan": raw})),
+        cast(Any, card),
+    )
+    assert taken is card
+
+    whole = covered(plan.requirement("all_oda"), plan)
+    assert whole.across == across
+    assert [e.dcid for e in whole.entities if e.role == "donor"] == dcids
+
+
+def _old_plan_awaiting_approval(state: dict[str, Any], *, derived: bool) -> str:
+    """The summed plan of `_OLD_PLANS` stored in `state`, a turn's graph state,
+    awaiting approval, beside the whole pin its whole is retrieved from, as the
+    release before Search's `whole` request held it, or as this release holds it
+    with `derived`. Its revision."""
+    plan = Plan.model_validate_json(_OLD_PLANS["summed"]).model_copy(
+        update={"status": PlanStatus.PENDING_APPROVAL, "approved_at": None}
+    )
+    state["plan"] = plan.model_dump_json()
+    whole = _WHOLES["us_health_kenya"]["whole"]
+    block = copy.deepcopy(whole)
+    if not derived:
+        del block["resolved"]["scope_choices"]["derived"]
+    source = covered_source(plan, "all_oda")
+    state[ALIGNED_PINS_STATE_KEY] = [
+        AlignedPin(
+            origin=covered_source(plan, "us"),
+            option_ids=(),
+            spec_id=source,
+            digest={"spec_block": {**block, "spec_id": source}},
+            whole_axis="donor",
+        ).model_dump(mode="json")
+    ]
+    return plan_revision(plan)
+
+
+def covered_source(plan: Plan, requirement_id: str) -> str:
+    """The spec_id `plan`'s workflow retrieves `requirement_id` from."""
+    assert plan.workflow is not None
+    (step_id,) = [
+        b.step_id for b in plan.workflow.evidence_bindings if b.requirement_id == requirement_id
+    ]
+    source = plan.workflow.source_of(step_id)
+    assert source is not None
+    return source.spec_id
+
+
+@pytest.mark.parametrize("derived", [False, True], ids=["old-whole-pin", "current-whole-pin"])
+def test_a_plan_over_a_whole_pin_the_previous_release_compiled_is_planned_again_at_approval(
+    derived: bool,
+) -> None:
+    """A plan the previous release compiled and showed, approved after the deploy,
+    whose whole is retrieved from a whole pin that release compiled by editing the
+    part's identity: the approval runs nothing, and the question is planned again,
+    Search deriving the whole. A plan whose whole pin states Search's derived whole
+    is approved as shown."""
+    ctx = node_ctx()
+    revision = _old_plan_awaiting_approval(ctx.state, derived=derived)
+
+    edge = approve_module.decide(
+        ctx, {"approved": revision, "at": "2026-11-25T10:00:00+00:00"}, early_mints=None
+    )
+
+    if derived:
+        assert edge.label == "approved"
+        return
+    assert (edge.label, edge.output) == ("amend", {"unreadable_plan": True})
+    assert ctx.state["plan"] is None
+
+
 def _without_derived(derived: dict[str, Any]) -> None:
     derived.clear()
 
@@ -2471,7 +2604,8 @@ async def test_a_whole_search_answers_for_no_whole_of_the_pinned_part_is_refused
 ) -> None:
     """Search's answer for US bilateral ODA's whole over every provider, where it states
     no derived whole, or derives the whole of another part or on another axis, is not
-    the whole of the pinned part: refused under `cause` and not held."""
+    the whole of the pinned part: refused under `cause`, not held, and earning no
+    decline."""
     ctx = _Context()
     recorded = copy.deepcopy(_WHOLES["us_bilateral"])
     scope = recorded["whole"]["resolved"]["scope_choices"]
@@ -2491,3 +2625,5 @@ async def test_a_whole_search_answers_for_no_whole_of_the_pinned_part_is_refused
     assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
     assert result["detail"]["whole"]["cause"] == cause
     assert not [pin for pin in aligned_pins(ctx.state) if pin.whole_axis == "provider"]
+    # The harness's reading of Search's answer, not Search's refusal: no decline.
+    assert UnsupportedOperation.UNSUPPORTED_ASK not in load_optional_declines(ctx.state)

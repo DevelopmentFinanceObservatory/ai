@@ -428,13 +428,13 @@ async def test_a_declared_wholes_dataset_reaches_a_later_turn_under_the_wholes_o
     decision: DecisionFactory,
 ) -> None:
     """Turn 1 reads US aid to health as a share of US total ODA, declared the health
-    part over every sector, so admission compiles the whole from the part. The
+    part over every provider, so admission compiles the whole from the part. The
     compile is no reading of turn 1: it reaches turn 2's ledger as a source the
     translator found, under the words the whole's own requirement states, never
     the part's, and the conversation digest names it by its source."""
     ctx = _FakeToolContext()
     health = us_2023_block("health")
-    whole = us_2023_block("whole")
+    whole = us_2023_block("health_inclusive")
     _show_blocks(ctx, health)
     result = await _us_2023(
         functools.partial(

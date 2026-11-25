@@ -94,11 +94,9 @@ from planner.plan import (
 )
 from planner.records import Period
 from planner.workflow import (
-    SUM_OF_MEMBERS,
     OpenEntityAxis,
     ResolvedEntity,
     SelectedSource,
-    SourceWhole,
     ToolId,
 )
 
@@ -1153,7 +1151,6 @@ async def test_a_wholes_retrieval_is_held_to_the_parties_its_part_covers(
         entities=(kenya,),
         identity={"stat_var": "ODA", "entities": {"destination": [kenya.ref]}},
         open_entity_axes=(OpenEntityAxis(column="origin", member_count=40),),
-        derived_whole=SourceWhole(derivation=SUM_OF_MEMBERS),
     )
     sums = (WholeSum(whole_id="all_oda", sum_id="all_oda_sum"),)
     draft = Plan(

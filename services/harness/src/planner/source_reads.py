@@ -20,7 +20,12 @@ from collections.abc import (
 from datetime import datetime
 from typing import Any, NamedTuple, cast
 
-from compiler.sources import WHOLE_COLUMNS, readable_wire_groups
+from compiler.sources import (
+    WHOLE_COLUMNS,
+    open_entity_axes_of,
+    open_side_column,
+    readable_wire_groups,
+)
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_writes import windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
@@ -37,8 +42,11 @@ from harness.tool_contracts import resolver_digest
 from pydantic import JsonValue
 from submission.service import (
     GROUPS_UNREADABLE,
+    HARNESS_WHOLE_CAUSES,
+    PART_MOVED,
     PART_UNREAD,
-    UNASKED_WHOLE_CAUSES,
+    SUM_OF_MEMBERS,
+    WHOLE_REFUSED,
     AlignedPin,
     Realignment,
     ScopeRead,
@@ -101,6 +109,7 @@ from planner.stated_scope import (
     stated_compile_unreachable,
 )
 from planner.tool_results import Outcome, ProblemCode, problem
+from planner.workflow import OpenEntityAxis
 
 logger = logging.getLogger(__name__)
 
@@ -615,7 +624,7 @@ async def compile_whole(
 
     def underivable(
         reason: str,
-        cause: str | None = "whole_refused",
+        cause: str | None = WHOLE_REFUSED,
         alternatives: Sequence[tuple[str, str]] = (),
     ) -> SourceRead:
         return _refusing(
@@ -681,15 +690,17 @@ async def compile_whole(
     spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
     whole_scope = part_scope(spec_id, spec) if isinstance(spec_id, str) else None
     digest = resolver_digest({"parts": [dict(part)]})
+    answered = digest.get("spec_block")
     fault = _whole_fault(
-        whole_scope if isinstance(digest.get("spec_block"), Mapping) else None,
+        whole_scope if isinstance(answered, Mapping) else None,
         part_pin=part_pin,
         compiled=scope.compiled.spec_id if scope is not None else part_pin,
         axis=axis,
+        open_axes=open_entity_axes_of(_resolved_of(answered)),
     )
     if fault is not None:
-        # A whole held with no block is compiled again on every proposal
-        # (`AlignedPin.complete`), so one is never held.
+        # A whole is held only stating its derived whole, which `aligned_pins`
+        # reads as current.
         return underivable(*fault)
     whole_scope, whole_id = cast(PartScope, whole_scope), cast(str, spec_id)
     # An axis reads as the planner's on the whole only where the whole holds the
@@ -721,25 +732,54 @@ async def compile_whole(
 
 
 def _whole_fault(
-    whole: PartScope | None, *, part_pin: str, compiled: str, axis: str
+    whole: PartScope | None,
+    *,
+    part_pin: str,
+    compiled: str,
+    axis: str,
+    open_axes: Sequence[OpenEntityAxis],
 ) -> tuple[str, str] | None:
     """Why `whole`, the scope record of Search's answer for the whole of the part
     pinned `part_pin` over every `axis`, is no whole of that part, as a clause and
     its `share_whole_underivable` cause; `None` where it is one. `compiled` is the
-    spec_id the part's own record compiles to. An answer with no block or no
-    derived whole is `whole_refused`, and one deriving the whole of another part
-    or on another axis, as a compile of the posted part landing elsewhere after a
-    Search release, is `part_moved`."""
+    spec_id the part's own record compiles to, and `open_axes` the entity axes the
+    answer's block leaves open (`compiler.sources.open_entity_axes_of`).
+
+    An answer with no block or no derived whole is `whole_refused`, and one
+    deriving the whole of another part or on another axis, as a compile of the
+    posted part landing elsewhere after a Search release, is `part_moved`. A
+    donor or recipient whole Search states it summed over its members
+    (`SUM_OF_MEMBERS`) leaves that side open on its block, and one it derived as
+    a total binds it: the plan, the compiler and the whole's coverage read the
+    side off the block's axes (`compiler.sources.open_side_column`), which every
+    answer for the whole's spec_id carries, so an answer whose two statements
+    disagree is `whole_refused`."""
     if whole is None or whole.derived is None:
-        return f"Search answers no one derived whole of {part_pin}", "whole_refused"
+        return f"Search answers no one derived whole of {part_pin}", WHOLE_REFUSED
     derived = whole.derived
     if derived.part.spec_id != compiled or derived.axis != axis:
         return (
             f"Search derived the whole of {derived.part.spec_id} over every "
             f"{derived.axis}, not of {part_pin} over every {axis}",
-            "part_moved",
+            PART_MOVED,
         )
+    if axis in WHOLE_COLUMNS:
+        summed = derived.kind == SUM_OF_MEMBERS
+        if summed != (open_side_column(open_axes, axis) is not None):
+            held = "binds" if summed else "leaves open"
+            return (
+                f"Search derived the whole of {part_pin} as "
+                f"{'a sum over' if summed else 'one total for'} every {axis}, and its "
+                f"answer {held} that side",
+                WHOLE_REFUSED,
+            )
     return None
+
+
+def _resolved_of(block: object) -> Mapping[str, object]:
+    """The `resolved` of `block`, a spec block, empty where it states none."""
+    resolved = block.get("resolved") if isinstance(block, Mapping) else None
+    return cast(Mapping[str, object], resolved) if isinstance(resolved, Mapping) else {}
 
 
 async def run_together[T](calls: Iterable[Awaitable[T]]) -> list[T]:
@@ -914,12 +954,12 @@ async def with_source_reads(
     A declared whole Search does not derive (`SHARE_WHOLE_UNDERIVABLE`) permits an
     `unsupported_ask` decline for the rest of the planner entry, the repair its
     message names beside a total pinned by search, so the decline is earned. A
-    refusal stated before Search is asked (`UNASKED_WHOLE_CAUSES`) earns none.
+    refusal the harness states (`HARNESS_WHOLE_CAUSES`) earns none.
     """
     result = await _after_source_reads(propose, state=state, surface=surface)
     if (
         result.get("code") == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value
-        and _whole_cause(result) not in UNASKED_WHOLE_CAUSES
+        and _whole_cause(result) not in HARNESS_WHOLE_CAUSES
     ):
         record_optional_decline(state, UnsupportedOperation.UNSUPPORTED_ASK)
     return result
@@ -959,9 +999,10 @@ async def _after_source_reads(  # noqa: PLR0911 -- one return per kind of read a
     A pin already compiled on a set of options, or a whole already compiled,
     is asked for once, so a refusal naming one is answered as it stands, and
     inputs sharing a pin and a set of options compile it once
-    (`_alignment_key`). A whole on record with no spec block is compiled
-    again, once a call: a refusal naming a whole this call compiled answers
-    `SHARE_WHOLE_UNDERIVABLE`.
+    (`_alignment_key`). A whole pin an earlier release compiled, whose block
+    states no derived whole, is not on record (`planner.plan.aligned_pins`), so
+    it is compiled again, once a call: a refusal naming a whole this call
+    compiled answers `SHARE_WHOLE_UNDERIVABLE`.
 
     The reads one refusal asks for run at once. Their writes are made in the
     order the refusal names them, up to the first read refused. That refusal
@@ -1023,7 +1064,6 @@ async def _after_source_reads(  # noqa: PLR0911 -- one return per kind of read a
         done = {
             _alignment_key(pin.origin, pin.option_ids, pin.whole_axis)
             for pin in aligned_pins(state)
-            if pin.complete
         }
         keys = [_alignment_key(item.spec_id, item.option_ids, item.whole_axis) for item in wanted]
         if not wanted or any(key in done for key in keys):
@@ -1043,7 +1083,7 @@ async def _after_source_reads(  # noqa: PLR0911 -- one return per kind of read a
                     f"Search's answer for the whole of {again.spec_id} does not say how it "
                     f"serves every {again.whole_axis}"
                 ),
-                cause="whole_refused",
+                cause=WHOLE_REFUSED,
             )
         compiles: dict[tuple[str, tuple[str, ...], str | None], Realignment] = {}
         for key, item in zip(keys, wanted, strict=True):

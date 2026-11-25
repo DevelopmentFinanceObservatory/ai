@@ -54,11 +54,11 @@ from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, over
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
-from compiler.sources import source_from_spec_block, warning_code
+from compiler.sources import open_side_column, source_from_spec_block, warning_code
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from data_mcp.scope import ChoiceProvenance, ScopeAxis
-from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, WholeAxis, option_axis
+from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, WholeAxis
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from planner.operations import Translation
@@ -141,7 +141,7 @@ from planner.shapes import (
     years_run_out,
 )
 from planner.shapes import rejects as shape_rejects
-from planner.workflow import SUM_OF_MEMBERS, ResolvedGroup, SelectedSource, Workflow
+from planner.workflow import ResolvedGroup, SelectedSource, Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -2742,6 +2742,7 @@ def covered(requirement: DatasetRequirement, plan: Plan) -> DatasetRequirement:
         part,
         _compiled_source(plan, requirement.id),
         summed=any(entry.whole_id == origin for entry in plan.whole_sums),
+        part_source=_compiled_source(plan, part.id),
     )
 
 
@@ -2751,31 +2752,40 @@ def whole_on_source(
     source: SelectedSource | None,
     *,
     summed: bool,
+    part_source: SelectedSource | None = None,
 ) -> DatasetRequirement:
     """`whole`, the whole of `part`, covering what it reads on `source`, the source
     compile retrieves it from, `None` before compile.
 
     It covers its part's parties less the side it opens (`whole_read`), and on
-    that side what the source serves there. Where Search summed that side over
-    its members (`SelectedSource.derived_whole`, `sum_of_members`), that is the
-    side's word in `across`, one row per party there, which the aggregate
-    `propose_plan` added sums (`WholeSum`). Otherwise it is the parties the
-    source binds there, as entities by their refs, the total Search counts the
-    side as. With no source the side reads open where `summed`, as admission
-    read Search's answer for the whole, and as `whole_read` reads it otherwise.
-    A provider whole opens no side. A side Search moved beside the widened axis
-    (`SourceWhole.rebind`), as DAC2a's provider whole moves the recipients to all
-    recipients, reads the parties the source binds there in place of the part's.
+    that side what the source serves there. Where the source leaves that side
+    open (`compiler.sources.open_side_column`), that is the side's word in
+    `across`, one row per party there, which the aggregate `propose_plan` added
+    sums (`WholeSum`). Otherwise it is the parties the source binds there, as
+    entities by their refs, the total Search counts the side as. With no
+    source, or a source whose open axes were never read, the side reads open
+    where `summed`, as admission read Search's answer for the whole, and as
+    `whole_read` reads it otherwise. A provider whole opens no side. On a side
+    the whole does not open, the source's parties replace the part's where it
+    binds parties other than those `part_source`, the source the part is
+    retrieved from, binds there, as DAC2a's provider whole binds all recipients
+    for a part to developing countries; where it binds none there, or the
+    same, or the part's source is unknown, the part's stay as the part names
+    them.
     """
     read = whole_read(whole, part)
-    if source is None:
+    role = opened_role(whole, part)
+    if source is None or source.open_entity_axes is None:
         open_side = summed
     else:
-        derived = source.derived_whole
-        open_side = derived is not None and derived.derivation == SUM_OF_MEMBERS
-        if derived is not None and derived.rebind is not None:
-            read = _side_on_source(read, part, source, option_axis(derived.rebind))
-    role = opened_role(whole, part)
+        open_side = open_side_column(source.open_entity_axes, role or "") is not None
+    if source is not None and part_source is not None:
+        opened = role_party(role) if role is not None else None
+        for axis in sorted(_WHOLE_SIDE_AXES):
+            side = role_party(axis)
+            bound = _refs_on(source, side)
+            if side != opened and bound and bound != _refs_on(part_source, side):
+                read = _side_on_source(read, part, source, axis)
     if role is None:
         return read
     if open_side:
@@ -2787,6 +2797,11 @@ def whole_on_source(
         if flow_side(entity.role) == side
     ]
     return read.model_copy(update={"entities": (*read.entities, *held)})
+
+
+def _refs_on(source: SelectedSource, side: Party | None) -> set[str]:
+    """The refs of the entities `source` binds on the side of the flow `side`."""
+    return {entity.ref for entity in source.entities if role_party(entity.role) == side}
 
 
 def _side_on_source(
@@ -7186,17 +7201,67 @@ class AlignedPin(StrictModel):
         return block if isinstance(block, Mapping) else None
 
     @property
-    def complete(self) -> bool:
-        """Whether the pin holds what its readers read: a whole's compile its spec
-        block, which says how Search serves the side the whole opens
-        (`submission.service._whole_sums`), so one without is compiled again; any
-        other pin as it is."""
-        return self.whole_axis is None or self.block is not None
+    def current(self) -> bool:
+        """Whether this release reads the pin: any pin but a declared whole, and a
+        whole whose block states the whole Search derived from its part
+        (`resolved.scope_choices.derived`), as the answer to a `whole` request does.
+        A whole compiled by an earlier release, through an identity edit, states
+        none, nor does one held with no block."""
+        if self.whole_axis is None:
+            return True
+        resolved = (self.block or {}).get("resolved")
+        scope = resolved.get("scope_choices") if isinstance(resolved, Mapping) else None
+        return isinstance(scope, Mapping) and isinstance(scope.get("derived"), Mapping)
 
 
 def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
-    """The pins `ALIGNED_PINS_STATE_KEY` holds, oldest first; empty when unset."""
-    return tuple(AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ())
+    """The pins `ALIGNED_PINS_STATE_KEY` holds that this release reads
+    (`AlignedPin.current`), oldest first; empty when unset.
+
+    A declared whole compiled by an earlier release is left out, and the
+    omission is logged, so every reader holds the same pins: admission asks
+    Search for the whole again (`submission.service._declared_wholes`), and its
+    compile replaces the old pin (`submission.service.save_aligned_pin`).
+    """
+    pins = [AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ()]
+    stale = [pin.spec_id for pin in pins if not pin.current]
+    if stale:
+        logger.warning(
+            "left out %d whole pins of %s that state no derived whole: %s",
+            len(stale),
+            ALIGNED_PINS_STATE_KEY,
+            stale,
+        )
+    return tuple(pin for pin in pins if pin.current)
+
+
+def stale_whole_pins(state: SessionState) -> frozenset[str]:
+    """The spec_ids of the whole pins `ALIGNED_PINS_STATE_KEY` holds that
+    `aligned_pins` leaves out, as compiled by an earlier release
+    (`AlignedPin.current`)."""
+    return frozenset(
+        pin.spec_id
+        for raw in state.get(ALIGNED_PINS_STATE_KEY) or ()
+        if not (pin := AlignedPin.model_validate(raw)).current
+    )
+
+
+def rests_on_stale_whole(plan: Plan, state: SessionState) -> bool:
+    """Whether a whole of `plan` (`DatasetRequirement.whole_of`) is pinned, or
+    retrieved, from a whole pin an earlier release compiled (`stale_whole_pins`),
+    or from a copy of one over another window (`windowed_origins`)."""
+    stale = stale_whole_pins(state)
+    if not stale:
+        return False
+    origins = windowed_origins(state)
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement) or requirement.whole_of is None:
+            continue
+        source = _compiled_source(plan, requirement.id)
+        pinned = {requirement.source_spec_id, source.spec_id if source is not None else None}
+        if any(origins.get(spec_id, spec_id) in stale for spec_id in pinned if spec_id):
+            return True
+    return False
 
 
 def found_sources(state: SessionState) -> dict[str, dict[str, Any]]:
@@ -7613,9 +7678,7 @@ def stored_plan(raw: str | None, *, state_key: str) -> Plan | None:
     """The plan `raw` holds, the text stored under `state_key`; `None` when it holds none.
 
     A plan stored in a shape `Plan` rejects, one a release with other fields
-    wrote, is no plan, and the omission is logged, as is one whose wholes were
-    compiled before sources stated Search's derived whole
-    (`_wholes_compiled_before_derived`). Its revision cannot be
+    wrote, is no plan, and the omission is logged. Its revision cannot be
     computed, so the answer to its approval card names nothing, and its
     workflow cannot run: the question is planned again. A caller that owns
     the slot tells the two `None`s apart by `raw` and clears it.
@@ -7623,39 +7686,10 @@ def stored_plan(raw: str | None, *, state_key: str) -> Plan | None:
     if not raw:
         return None
     try:
-        plan = Plan.model_validate_json(raw)
+        return Plan.model_validate_json(raw)
     except ValidationError as exc:
         warn_left_out(logger, state_key, [exc])
         return None
-    if stale := _wholes_compiled_before_derived(plan):
-        logger.warning(
-            "left out the plan stored under %s: its wholes %s were compiled from sources "
-            "stating no derived whole",
-            state_key,
-            stale,
-        )
-        return None
-    return plan
-
-
-def _wholes_compiled_before_derived(plan: Plan) -> list[str]:
-    """The wholes (`DatasetRequirement.whole_of`) `plan`'s workflow retrieves from a
-    source stating no derived whole (`SelectedSource.derived_whole`), as a plan
-    compiled before sources carried it holds; empty for a plan not compiled.
-
-    Whether such a whole's side is summed can no longer be read (`whole_on_source`,
-    `compiler.compile._Build._check_whole_sum`), so the plan is planned again, as
-    one stored in a shape `Plan` rejects is (`stored_plan`)."""
-    if plan.workflow is None:
-        return []
-    return [
-        requirement.id
-        for requirement in plan.evidence_requirements
-        if isinstance(requirement, DatasetRequirement)
-        and requirement.whole_of is not None
-        and (source := _compiled_source(plan, requirement.id)) is not None
-        and source.derived_whole is None
-    ]
 
 
 def load_plan(state: SessionState) -> Plan | None:

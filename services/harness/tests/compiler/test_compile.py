@@ -102,7 +102,6 @@ from planner.records import (
 )
 from planner.shapes import pooling_remedy
 from planner.workflow import (
-    SUM_OF_MEMBERS,
     ArtifactKind,
     Binding,
     OpenEntityAxis,
@@ -110,7 +109,6 @@ from planner.workflow import (
     ResolvedEntity,
     ResolvedGroup,
     SelectedSource,
-    SourceWhole,
 )
 from pydantic import TypeAdapter, ValidationError
 from translator.mechanical import build_translation
@@ -8845,13 +8843,12 @@ def _flow_source(
     *,
     recipients: Sequence[ResolvedEntity],
     groups: Sequence[ResolvedGroup] = (),
-    whole: bool = False,
-    kind: str | None = None,
+    axes_read: bool = True,
 ) -> SelectedSource:
     """G7 aid to `recipients`, the parties the source binds on `destination` (none
-    where it leaves the side open), with `groups` its named sets there. With `whole`,
-    it is Search's whole over every recipient, which it states summed over its members
-    where it leaves the side open, else a published total, or as `kind` states."""
+    where it leaves the side open), with `groups` its named sets there. Its open
+    entity axes are unread (`None`) where `axes_read` is false, as on a source
+    recorded without them."""
     entities = {"origin": [_G7.ref]}
     if recipients:
         entities["destination"] = [entity.ref for entity in recipients]
@@ -8862,13 +8859,10 @@ def _flow_source(
         groups=(_G7_GROUP, *groups),
         identity={"entities": entities},
         open_entity_axes=None
+        if not axes_read
+        else ()
         if recipients
         else (OpenEntityAxis(column="destination", member_count=150),),
-        derived_whole=SourceWhole(
-            derivation=kind or ("published_total" if recipients else SUM_OF_MEMBERS)
-        )
-        if whole
-        else None,
     )
 
 
@@ -9070,9 +9064,7 @@ def test_a_share_over_the_whole_search_derived_is_not_checked_again(
         ),
         discovered={
             "aid": _flow_source(source, SPEC_KENYA, recipients=[_AFRICA], groups=[_AFRICA_GROUP]),
-            "total": _flow_source(
-                source, SPEC_OTHER, recipients=members, groups=[dac], whole=declared
-            ),
+            "total": _flow_source(source, SPEC_OTHER, recipients=members, groups=[dac]),
         },
     )
 
@@ -9965,9 +9957,7 @@ def test_a_share_reads_its_whole_as_one_total_whichever_way_its_source_serves_it
         ),
         discovered={
             "aid": _flow_source(source, SPEC_KENYA, recipients=[_KENYA]),
-            "total": _flow_source(
-                source, SPEC_OTHER, recipients=recipients, groups=groups, whole=True
-            ),
+            "total": _flow_source(source, SPEC_OTHER, recipients=recipients, groups=groups),
         },
     )
 
@@ -9994,27 +9984,18 @@ def test_a_share_reads_its_whole_as_one_total_whichever_way_its_source_serves_it
         ]
 
 
-@pytest.mark.parametrize(
-    ("kind", "summed", "codes"),
-    [
-        pytest.param(SUM_OF_MEMBERS, True, [], id="summed-as-search-derived-it"),
-        pytest.param("published_total", False, [], id="read-as-search-derived-it"),
-        pytest.param("published_total", True, [Code.WHOLE_SUM_UNMATCHED], id="summed-against-it"),
-    ],
-)
-def test_a_whole_is_summed_as_search_derived_it_whatever_axes_its_source_leaves_open(
+@pytest.mark.parametrize("summed", [True, False], ids=["summed", "not-summed"])
+def test_a_whole_whose_source_states_no_open_axes_is_refused_either_way(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     requirement: RequirementFactory,
     source: SourceFactory,
-    kind: str,
     summed: bool,
-    codes: list[Code],
 ) -> None:
-    """G7 aid to Kenya over its whole over every recipient, the whole's source leaving
-    the recipients open: the compiler holds the plan's sum to the kind Search states it
-    derived the whole as (`SelectedSource.derived_whole`), the reading admission summed
-    it by, and not to the axes the source leaves open."""
+    """G7 aid to Kenya over its whole over every recipient, the whole's source
+    recorded without its open entity axes: it says neither that it leaves the
+    recipients open nor that it binds them (`compiler.sources.open_side_column`), so
+    the plan's sum is refused, and so is its absence."""
     aid = requirement(
         id="aid",
         measure="official development assistance",
@@ -10065,11 +10046,12 @@ def test_a_whole_is_summed_as_search_derived_it_whatever_axes_its_source_leaves_
         ),
         discovered={
             "aid": _flow_source(source, SPEC_KENYA, recipients=[_KENYA]),
-            "total": _flow_source(source, SPEC_OTHER, recipients=[], whole=True, kind=kind),
+            "total": _flow_source(source, SPEC_OTHER, recipients=[], axes_read=False),
         },
     )
 
-    assert _codes(result) == codes, result.issues
+    # An unread source is refused for the aggregate over it too (`SOURCE_UNUSABLE`).
+    assert Code.WHOLE_SUM_UNMATCHED in _codes(result), result.issues
 
 
 @pytest.mark.parametrize(
@@ -10159,9 +10141,7 @@ def test_a_planners_pool_over_a_whole_reads_the_sum_where_its_source_leaves_the_
         ),
         discovered={
             "aid": _flow_source(source, SPEC_KENYA, recipients=[_KENYA]),
-            "total": _flow_source(
-                source, SPEC_OTHER, recipients=recipients, groups=groups, whole=True
-            ),
+            "total": _flow_source(source, SPEC_OTHER, recipients=recipients, groups=groups),
         },
     )
 
@@ -10245,7 +10225,6 @@ def test_a_whole_its_source_leaves_open_on_both_sides_is_summed_keeping_the_part
                 spec_id=SPEC_OTHER,
                 entities=(),
                 open_entity_axes=(donors, recipients),
-                derived_whole=SourceWhole(derivation=SUM_OF_MEMBERS),
             ),
         },
     )

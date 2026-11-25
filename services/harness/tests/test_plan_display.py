@@ -7,6 +7,7 @@ dependency on either, and neither do these tests.
 
 from __future__ import annotations
 
+import copy
 import enum
 import json
 import os
@@ -123,7 +124,6 @@ from planner.records import (
     ValueThreshold,
 )
 from planner.workflow import (
-    SUM_OF_MEMBERS,
     ArtifactKind,
     Binding,
     EvidenceBinding,
@@ -131,7 +131,6 @@ from planner.workflow import (
     ReadingSetBy,
     ResolvedEntity,
     SelectedSource,
-    SourceWhole,
     ToolId,
     Workflow,
     WorkflowStep,
@@ -3982,20 +3981,25 @@ def test_a_recorded_plan_from_before_searchs_labels_reads_the_labels_search_comp
     )
 
 
+@pytest.mark.parametrize("derived", [True, False], ids=["whole-answer", "other-answer"])
 def test_a_declared_whole_is_named_off_its_source_and_never_the_planners_measure(
-    decision: DecisionFactory,
+    decision: DecisionFactory, derived: bool
 ) -> None:
     """The bilateral share of US ODA with its total declared the part's whole over
     every provider, under the planner's measure "Total aid to the world", read from
     Search's answer for it (`fixtures/share_wholes_through_search.json`): the whole's
     labels name what Search states its source fetches, and never that measure, and
-    each side names the provider option Search states it counts, so the share never
-    reads as a share of itself."""
+    each side names the provider option its own source counts, so the share never
+    reads as a share of itself. The whole's source reads the same built from any
+    answer for its spec_id, which states no derived whole."""
     recorded = _SEARCH_WHOLES["us_bilateral"]
+    whole = copy.deepcopy(recorded["whole"])
+    if not derived:
+        del whole["resolved"]["scope_choices"]["derived"]
     plan = bilateral_share_of_its_provider_whole(
         decision,
         part=recorded["part"],
-        whole=recorded["whole"],
+        whole=whole,
         donor="United States",
         whole_measure="Total aid to the world",
     )
@@ -4020,10 +4024,10 @@ def test_a_declared_whole_is_named_off_its_source_and_never_the_planners_measure
 
 
 # The DAC2a sources of ODA to Kenya as Search's whole of the US part over every donor:
-# the published total of official donors (DAC), and every donor left open and summed
-# over its members (`SelectedSource.derived_whole`).
-_DAC_DONORS_WHOLE = {**DAC_DONORS, "derived_whole": SourceWhole(derivation="published_total")}
-_ALL_DONORS_WHOLE = {**ALL_DONORS, "derived_whole": SourceWhole(derivation=SUM_OF_MEMBERS)}
+# the published total of official donors (DAC), which leaves no axis open, and every
+# donor left open and summed over its members.
+_DAC_DONORS_WHOLE = {**DAC_DONORS, "open_entity_axes": ()}
+_ALL_DONORS_WHOLE = ALL_DONORS
 
 
 @pytest.mark.parametrize(
@@ -4137,7 +4141,7 @@ def test_the_sum_over_a_whole_s_open_side_is_a_card_row_of_its_own(
         (
             {
                 "entities": DAC_DONORS["entities"][:1],
-                "derived_whole": SourceWhole(derivation="published_total"),
+                "open_entity_axes": (),
             },
             [],
             (),

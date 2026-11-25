@@ -1336,10 +1336,11 @@ def _held_options(
     scope decision it cites there chose, `None` where it cites none.
 
     A whole over every provider cites no provider decision of its own, so on
-    the provider axis it holds the option Search states it counts, and its part,
-    where it cites none, the option Search states the part counts
-    (`SelectedSource.derived_whole`), so the card never names a provider share
-    as a share of itself. A plan not compiled reads its sources off `sources`."""
+    the provider axis it holds the option its own source counts, and its part,
+    where it cites none, the option the part's source counts
+    (`SelectedSource.provider_counted`), so the card never names a provider
+    share as a share of itself. A plan not compiled reads its sources off
+    `sources`."""
     governing = _governing(requirement, plan)
     held = [
         decision.chosen if (decision := governing.get(axis)) is not None else None
@@ -1355,18 +1356,15 @@ def _provider_counted(
     plan: Plan,
     sources: Mapping[str, SelectedSource] | None,
 ) -> str | None:
-    """The provider option Search states `requirement` counts where it is a whole
-    over every provider or the part of one, off the whole's source; `None`
-    otherwise."""
+    """The provider option `requirement`'s own source counts where it is a whole
+    over every provider or the part of one (`SelectedSource.provider_counted`);
+    `None` otherwise."""
     for whole in _datasets(plan).values():
         if whole.whole_of is None or whole.whole_of.axis != PROVIDER_AXIS:
             continue
-        if requirement.id not in (whole.id, whole.whole_of.part):
-            continue
-        source = _source(whole.id, plan, sources)
-        derived = source.derived_whole if source is not None else None
-        if derived is not None:
-            return derived.whole_counts if requirement.id == whole.id else derived.part_counts
+        if requirement.id in (whole.id, whole.whole_of.part):
+            source = _source(requirement.id, plan, sources)
+            return source.provider_counted if source is not None else None
     return None
 
 

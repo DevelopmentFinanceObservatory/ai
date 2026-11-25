@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from compiler.sources import open_entity_axes_of, open_side_column
 from compiler.surface import ToolCallResult
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from planner.workflow import ToolId
@@ -462,13 +463,24 @@ def derived_answer(
     whole: Mapping[str, Any],
     *,
     axis: str = "provider",
-    kind: str = "option",
+    kind: str | None = None,
 ) -> dict[str, Any]:
     """A copy of `whole`, the spec block of the whole of the spec block `part` on
     `axis`, whose scope states the pair as Search derives it
     (`resolved.scope_choices.derived`, of `kind`): each side's spec_id, its option on
     the axis and on the provider axis, and its parties. A side with no provider choice
-    states no provider option."""
+    states no provider option. Unless `kind` says otherwise, it is Search's own: an
+    option on the provider axis, and on a donor or recipient axis a sum over its
+    members where `whole` leaves that side open, else a published total."""
+    if kind is None:
+        opened = open_side_column(open_entity_axes_of(whole["resolved"]), axis)
+        kind = (
+            "option"
+            if axis == "provider"
+            else "sum_of_members"
+            if opened is not None
+            else "published_total"
+        )
 
     def side(block: Mapping[str, Any], option: str) -> dict[str, Any]:
         scope = (block["resolved"].get("scope_choices") or {}).get("choices") or ()

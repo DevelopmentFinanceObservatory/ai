@@ -9104,6 +9104,16 @@ class _OpenedWholeCompiles:
             resolved["role_axis_facts"] = [
                 {"role": opened, "member_count": 143, "members_available": True}
             ]
+        else:
+            resolved["role_axis_facts"] = [
+                fact for fact in resolved.get("role_axis_facts") or () if fact["role"] != opened
+            ]
+        # A published total binds the opened role, as Search writes it in the
+        # answer's entities.
+        resolved["entities"] += [
+            {"ref": ref, "label": ref, "entity_type": "Place", "role": opened}
+            for ref in self.bound or ()
+        ]
         scope = resolved["scope_choices"]
         scope["id"] = scope["base"]["spec_id"] = scope["compiled"]["spec_id"] = spec_id
         scope["base"]["identity"] = scope["compiled"]["identity"] = identity
@@ -9912,16 +9922,30 @@ async def test_a_whole_stating_no_entity_compiles_from_its_part(
     assert (whole.entities, whole.across) == ((), ())
 
 
-def test_a_part_with_no_scope_record_counts_the_recipients_its_definition_binds() -> None:
+@pytest.mark.parametrize(
+    "providers",
+    [(None, None), ("provider:contributions", "provider:bilateral")],
+    ids=["none-stated", "options-unread"],
+)
+def test_a_part_with_no_scope_record_counts_the_recipients_its_definition_binds(
+    providers: tuple[str | None, str | None],
+) -> None:
     """US health aid to Africa over every donor, its block carrying no scope choices:
     the recipients it binds are those of its definition's identity, so the caveat
-    says both sides count the same recipients."""
+    says both sides count the same recipients. Where Search states each side's
+    provider option but neither scope record reads, nothing is said of providers."""
     part = _us_health_to_africa()
     del part["resolved"]["scope_choices"]
     part["resolved"].pop("role_axis_facts", None)
 
+    whole, held = providers
     side = DerivedSide(spec_id=part["spec_id"], option_id="donor:named", populations={})
-    derived = DerivedWhole(axis="donor", kind="sum_of_members", part=side, whole=side)
+    derived = DerivedWhole(
+        axis="donor",
+        kind="sum_of_members",
+        part=side.model_copy(update={"provider": held}),
+        whole=side.model_copy(update={"provider": whole}),
+    )
 
     assert submission_service._whole_shares(derived, part, None, None) == (
         ", so both sides count the same recipients."
@@ -9954,8 +9978,11 @@ class _SearchWhole:
     """A tool surface whose `resolve_definition` answers the whole request of
     `_SEARCH_WHOLES[name]` as dfo-apis did, once the post is the one recorded."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, *, edit: Callable[[dict[str, Any]], None] | None = None) -> None:
         self.recorded = _SEARCH_WHOLES[name]
+        self.whole = json.loads(json.dumps(self.recorded["whole"]))
+        if edit is not None:
+            edit(self.whole)
         self.calls: list[Mapping[str, Any]] = []
 
     async def list_tools(self) -> list[Any]:
@@ -9969,10 +9996,20 @@ class _SearchWhole:
         self.calls.append(arguments)
         posted = {key: arguments.get(key) for key in ("identity", "scope_entries", "whole")}
         assert posted == self.recorded["posted"]
-        part = {"status": "definite", "spec": json.loads(json.dumps(self.recorded["whole"]))}
+        part = {"status": "definite", "spec": json.loads(json.dumps(self.whole))}
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
 
 
+def _without_derived(block: dict[str, Any]) -> dict[str, Any]:
+    """`block`, a whole's spec block, as an answer for its spec_id other than to the
+    `whole` request states it: with no `resolved.scope_choices.derived`, as
+    `translator.discovery`'s recorded-source read returns it."""
+    stated = json.loads(json.dumps(block))
+    del stated["resolved"]["scope_choices"]["derived"]
+    return stated
+
+
+@pytest.mark.parametrize("derived", [True, False], ids=["whole-answer", "other-answer"])
 @pytest.mark.parametrize("pooled", [True, False], ids=["summed-by-year", "read-directly"])
 @pytest.mark.parametrize(
     ("name", "summed"),
@@ -9986,13 +10023,15 @@ class _SearchWhole:
     ],
 )
 async def test_a_donor_whole_searchs_answer_compiles(
-    decision: DecisionFactory, name: str, summed: bool, pooled: bool
+    decision: DecisionFactory, name: str, summed: bool, pooled: bool, derived: bool
 ) -> None:
     """US aid as a share of its whole over every donor, the whole pinned to Search's
     answer to the `whole` request: admission sums the donor side exactly where
     Search derived the whole summed over its members, the translator takes the pin
-    with no fresh search, and the plan compiles, the compiler reading the same
-    answer, whether the share reads the whole directly or summed by year."""
+    with no fresh search, and the plan compiles, whether the share reads the whole
+    directly or summed by year. The compiler reads the side off the whole's source,
+    which is the same whether it was built from the answer to the `whole` request or
+    from any other answer for its spec_id, which states no derived whole."""
     surface = _SearchWhole(name)
     ctx = _FakeToolContext()
     block = json.loads(json.dumps(surface.recorded["part"]))
@@ -10018,6 +10057,11 @@ async def test_a_donor_whole_searchs_answer_compiles(
         for rid, spec_id in pins.items()
         if spec_id is not None
     }
+    if not derived:
+        whole_spec = cast(str, pins[_WHOLE])
+        discovered[_WHOLE] = source_from_spec_block(
+            _without_derived(cast(Any, shown[whole_spec].spec_block(whole_spec)))
+        )
     tools = await McpSurface(
         sources={"data-mcp": data_mcp, "analysis-mcp": analysis_mcp}
     ).list_tools()
@@ -10029,6 +10073,85 @@ async def test_a_donor_whole_searchs_answer_compiles(
         discovered=discovered,
     )
     assert compiled.workflow is not None, compiled.issues
+
+
+def _bind_donors(block: dict[str, Any]) -> None:
+    """`block`, a whole Search states it summed over every donor, edited to bind the
+    donors to official donors' (DAC) total."""
+    resolved = block["resolved"]
+    resolved["role_axis_facts"] = []
+    resolved["entities"].append(
+        {"ref": "DACOfficialDonors", "label": "official donors", "role": "origin"}
+    )
+
+
+def _open_donors(block: dict[str, Any]) -> None:
+    """`block`, a whole Search states it derived as DAC countries' published total,
+    edited to leave the donors open."""
+    resolved = block["resolved"]
+    resolved["entities"] = [e for e in resolved["entities"] if e["role"] != "origin"]
+    resolved["role_axis_facts"] = [{"role": "origin", "member_count": 30}]
+
+
+@pytest.mark.parametrize(
+    ("name", "edit"),
+    [
+        pytest.param("us_health_kenya", _bind_donors, id="summed-but-bound"),
+        pytest.param("us_dac1", _open_donors, id="published-but-open"),
+    ],
+)
+async def test_a_whole_whose_answer_contradicts_how_search_derived_it_is_refused(
+    decision: DecisionFactory, name: str, edit: Callable[[dict[str, Any]], None]
+) -> None:
+    """Search's answer for US aid's whole over every donor, edited so its block binds
+    the donors where Search states it summed them, or leaves them open where Search
+    states one published total: the plan would read the side off the block, against
+    Search's statement, so the whole is refused under `whole_refused` and not held."""
+    surface = _SearchWhole(name, edit=edit)
+    ctx = _FakeToolContext()
+    block = json.loads(json.dumps(surface.recorded["part"]))
+
+    result = await _share_over_every(
+        cast(Any, surface), ctx, block, "donor", decision, year=2019, pooled=False
+    )
+
+    assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert result["detail"]["whole"]["cause"] == "whole_refused"
+    assert not [pin for pin in aligned_pins(ctx.state) if pin.whole_axis == "donor"]
+    # The harness's own reading earns no decline.
+    assert UnsupportedOperation.UNSUPPORTED_ASK not in load_optional_declines(ctx.state)
+
+
+async def test_a_whole_pin_an_earlier_release_compiled_is_asked_of_search_once(
+    decision: DecisionFactory,
+) -> None:
+    """A session holding US health aid to Kenya's whole over every donor as an
+    earlier release compiled it, by editing the part's identity, its block stating no
+    derived whole: the proposal asks Search for the whole once, admits the plan,
+    and holds Search's answer in its place."""
+    surface = _SearchWhole("us_health_kenya")
+    ctx = _FakeToolContext()
+    block = json.loads(json.dumps(surface.recorded["part"]))
+    old = _without_derived(surface.recorded["whole"])
+    ctx.state[ALIGNED_PINS_STATE_KEY] = [
+        AlignedPin(
+            origin=block["spec_id"],
+            option_ids=(),
+            spec_id=old["spec_id"],
+            digest={"spec_block": old},
+            whole_axis="donor",
+        ).model_dump(mode="json")
+    ]
+
+    result = await _share_over_every(
+        cast(Any, surface), ctx, block, "donor", decision, year=2019, pooled=False
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert len(surface.calls) == 1
+    (held,) = [pin for pin in aligned_pins(ctx.state) if pin.whole_axis == "donor"]
+    assert held.current
+    assert len(ctx.state[ALIGNED_PINS_STATE_KEY]) == 1
 
 
 def test_a_wholes_caveat_reads_each_blocks_scope_record_once(

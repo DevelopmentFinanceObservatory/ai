@@ -95,7 +95,6 @@ from planner.shapes import (
     window_outside,
 )
 from planner.workflow import (
-    SUM_OF_MEMBERS,
     ArtifactKind,
     Binding,
     EvidenceBinding,
@@ -161,6 +160,7 @@ from compiler.sources import (
     cuts_party_totals,
     entity_scopes_disjoint,
     family_overlap,
+    open_side_column,
     parties_outside,
     party_class,
     pinned_stat_var,
@@ -367,7 +367,11 @@ def wholes_on_their_sources(
         if not isinstance(part, DatasetRequirement) or part.whole_of is not None:
             continue
         wholes[requirement_id] = whole_on_source(
-            whole, part, discovered.get(requirement_id), summed=requirement_id in summed
+            whole,
+            part,
+            discovered.get(requirement_id),
+            summed=requirement_id in summed,
+            part_source=discovered.get(part.id),
         )
     return wholes
 
@@ -693,12 +697,13 @@ class _Build:
         """Report a whole whose source and the plan's sum over it disagree.
 
         `propose_plan` adds an aggregate summing the side a whole opens exactly
-        where Search derived the whole summed over that side's members
-        (`planner.plan.WholeSum`), and the source states the same
-        (`SelectedSource.derived_whole`), so both read one field of Search's
-        answer. A summed whole read with no sum would hand every reader one row
-        per party there, and a sum over a whole Search derived as one total
-        would read a plan admitted against another source.
+        where Search's compile of the whole leaves that side open
+        (`planner.plan.WholeSum`), and the source states the same in its open
+        entity axes (`compiler.sources.open_side_column`), which every answer for
+        the whole's spec_id carries. A source leaving the side open with no sum
+        would hand every reader one row per party there, and a sum over a source
+        binding the side would read a plan admitted against another source. A
+        source whose axes were never read says neither, so it is refused too.
         Proposing the plan again derives the sum from the source, so every
         other issue on a step reading the whole waits for that
         (`_reads_unmatched`).
@@ -712,16 +717,19 @@ class _Build:
         role = opened_role(stated, part)
         if role is None:
             return
-        open_side = (
-            source.derived_whole is not None and source.derived_whole.derivation == SUM_OF_MEMBERS
-        )
+        unread = source.open_entity_axes is None
+        open_side = open_side_column(source.open_entity_axes, role) is not None
         summed = requirement.id in self.summed
-        if open_side == summed:
+        if open_side == summed and not unread:
             return
         held = (
-            "Search derived summed over every party" if open_side else "Search derived as one total"
+            "states no open entity axes"
+            if unread
+            else "leaves every party open"
+            if open_side
+            else "binds one total"
         )
-        plan = "no sum over it" if open_side else "a sum over it"
+        plan = "a sum over it" if summed else "no sum over it"
         self.unmatched.add(requirement.id)
         self._issue(
             CompileIssueCode.WHOLE_SUM_UNMATCHED,

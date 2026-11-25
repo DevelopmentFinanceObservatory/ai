@@ -425,11 +425,5 @@
     "input_schema_hash",
     "output_schema_hash",
     "expected_role_keys"
-  ],
-  "planner.workflow.SourceWhole": [
-    "derivation",
-    "part_counts",
-    "rebind",
-    "whole_counts"
   ]
 }
