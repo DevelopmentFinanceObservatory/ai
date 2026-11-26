@@ -1254,9 +1254,8 @@ _TEXT_SEARCH_RAN = "*"
 # A parsed search's part reading that a search with the user's words may
 # answer carries this sentence as `retry_with_text`: every part Search found
 # no data for or could not support (`_RETRY_STATUSES`), except, on the
-# `hydrogen` surface, one whose reason the user's words cannot repair
-# (`_reason_step`) or whose years the data lacks (`_years_unavailable`), with
-# the one delay `_repaired_first` states. A part Search
+# `hydrogen` surface, one whose cause the user's words cannot repair
+# (`_next_step`), with the one delay `_repaired_first` states. A part Search
 # answered, definite or with candidates, offers no such search, whatever it
 # left out.
 RETRY_WITH_TEXT = (
@@ -1283,10 +1282,7 @@ def _repaired_first() -> frozenset[str]:
 # user's own words cannot repair: a place or
 # group the data does not hold (`entity_not_resolved`), a phrase the data does
 # not record (`qualifier_not_bound`), or a window outside the years it covers
-# (the `year_unavailable` departure). A part refused for one of the two reasons
-# is offered no `text` search; the window's step follows the reason's repair. A
-# part with the departure is offered no `text` search whatever its reason, until
-# Search returns it without the departure.
+# (the `year_unavailable` departure). Such a part is offered no `text` search.
 NEXT_STEP_UNRESOLVED_ENTITY = (
     "Search this measure again without the place or group it could not use, or with the "
     "nearest place or group the data holds."
@@ -1303,38 +1299,21 @@ _NEXT_STEPS = {
 }
 
 
-def _names_next_step(reading: Mapping[str, Any]) -> bool:
-    """Whether a part `reading` is one `next_step` may name a search for: one
-    Search found no data for or could not support, on the `hydrogen` surface."""
-    return reading.get("status") in _RETRY_STATUSES and studio_surface().variant == "hydrogen"
-
-
-def _reason_step(reading: Mapping[str, Any]) -> str | None:
-    """The step a part `reading`'s reason names, for a cause the user's own
-    words cannot repair; None when its reason names none."""
-    return _NEXT_STEPS.get(str(reading.get("reason"))) if _names_next_step(reading) else None
-
-
-def _years_unavailable(reading: Mapping[str, Any]) -> bool:
-    """Whether a part `reading` carries a `year_unavailable` departure."""
-    return any(
-        isinstance(departure, Mapping) and departure.get("code") == "year_unavailable"
-        for departure in reading.get("departures") or ()
-    )
-
-
 def _next_step(reading: Mapping[str, Any]) -> str | None:
     """The `next_step` of a part `reading` Search found no data for or could
     not support, for a cause the user's own words cannot repair; None for any
     other reading, and for every reading outside the `hydrogen` surface.
-    The reason's own step comes first, and a part with a `year_unavailable`
-    departure adds the step to the years the data covers."""
-    if not _names_next_step(reading):
+    A window outside the data's years is the step a part with a
+    `year_unavailable` departure takes, whatever its reason."""
+    if reading.get("status") not in _RETRY_STATUSES or studio_surface().variant != "hydrogen":
         return None
-    steps = [_reason_step(reading)]
-    if _years_unavailable(reading):
-        steps.append(NEXT_STEP_YEAR_UNAVAILABLE)
-    return " ".join(step for step in steps if step) or None
+    departures = reading.get("departures") or ()
+    if any(
+        isinstance(departure, Mapping) and departure.get("code") == "year_unavailable"
+        for departure in departures
+    ):
+        return NEXT_STEP_YEAR_UNAVAILABLE
+    return _NEXT_STEPS.get(str(reading.get("reason")))
 
 
 def _add_next_steps(readings: Sequence[dict[str, Any]]) -> None:
@@ -1403,9 +1382,7 @@ def _offer_text_retries(
     When they are not, no reading is offered one once any `text` search has
     run this turn. A reading refused for a reason in `_repaired_first` is
     offered one only when a part with its measure was already refused for
-    that reason this turn, so the parsed repair comes first. On the `hydrogen`
-    surface a reading with a `year_unavailable` departure is offered none, but
-    its refusal is still recorded for the reason above."""
+    that reason this turn, so the parsed repair comes first."""
     searched = set(state.get(_TEXT_SEARCHED_KEY) or ())
     untied_and_searched = not tied and _TEXT_SEARCH_RAN in searched
     keys = [_part_key(part) for part in parts] if tied else None
@@ -1413,7 +1390,7 @@ def _offer_text_retries(
     repaired_first = _repaired_first()
     refused: list[str] = []
     for index, reading in enumerate(readings):
-        if reading.get("status") not in _RETRY_STATUSES or _reason_step(reading):
+        if reading.get("status") not in _RETRY_STATUSES or _next_step(reading):
             continue
         reason = reading.get("reason")
         if reason in repaired_first:
@@ -1421,8 +1398,6 @@ def _offer_text_retries(
             refused.append(repair)
             if repair not in due:
                 continue
-        if _names_next_step(reading) and _years_unavailable(reading):
-            continue
         if untied_and_searched or (keys is not None and keys[index] in searched):
             continue
         reading["retry_with_text"] = RETRY_WITH_TEXT
