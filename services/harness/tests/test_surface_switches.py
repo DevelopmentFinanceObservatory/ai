@@ -34,6 +34,7 @@ from harness.surface import (
     ModelNameRefusedError,
     Surface,
     SurfaceRefusedError,
+    gemini_model_name,
     resolve_surface,
     set_studio_surface,
     studio_surface,
@@ -492,16 +493,16 @@ async def test_minimal_descriptions_are_the_declarations_sent() -> None:
 @pytest.mark.parametrize("name", TOOL_NAMES)
 def test_hydrogen_changes_only_the_texts_it_names(name: str) -> None:
     tool = _tools()[name]
-    default = tool_declaration(tool)
+    flash = tool_declaration(tool)
     hydrogen = tool_declaration(tool, variant="hydrogen")
     params = orchestrator_tools.HYDROGEN_PARAM_DESCRIPTIONS.get(name, {})
 
     assert _without_descriptions(hydrogen.parameters_json_schema) == _without_descriptions(
-        default.parameters_json_schema
+        flash.parameters_json_schema
     )
-    assert hydrogen.description == default.description
+    assert hydrogen.description == flash.description
     changed = set(_descriptions(hydrogen.parameters_json_schema)) - set(
-        _descriptions(default.parameters_json_schema)
+        _descriptions(flash.parameters_json_schema)
     )
     assert changed == set(params.values())
 
@@ -535,3 +536,30 @@ async def test_each_model_call_s_span_names_the_surface_it_was_sent(
         "studio.surface.instruction_hash": _sha(str(config.system_instruction)),
         "studio.surface.declarations_hash": _sha(json.dumps(sent, ensure_ascii=False)),
     }
+
+
+@pytest.mark.parametrize(
+    ("model_name", "sent"),
+    [
+        pytest.param("gemini-3.8-flash", "gemini-3.8-flash", id="gemini"),
+        pytest.param("gemma-4-31b-it", "gemma-4-31b-it", id="gemma-4"),
+        pytest.param("gemma-3-27b-it", None, id="gemma-3"),
+        pytest.param("openai/gpt-4o", None, id="litellm-path"),
+        pytest.param("claude-3-5-sonnet", None, id="claude"),
+        pytest.param("Gemini:gemini-3.8-flash", "gemini-3.8-flash", id="gemini-prefix"),
+        pytest.param("gemini:gemma-3-27b-it", "gemma-3-27b-it", id="gemini-prefix-any-name"),
+        pytest.param("openai:gemini-3.8-flash", None, id="other-prefix"),
+        pytest.param(
+            "projects/p/locations/l/endpoints/e",
+            "projects/p/locations/l/endpoints/e",
+            id="endpoint",
+        ),
+        pytest.param(
+            "projects/p/locations/l/publishers/google/models/gemini-3.8-flash",
+            "projects/p/locations/l/publishers/google/models/gemini-3.8-flash",
+            id="vertex-path",
+        ),
+    ],
+)
+def test_a_name_gemini_serves_is_sent_as_gemini_names_it(model_name: str, sent: str | None) -> None:
+    assert gemini_model_name(model_name) == sent

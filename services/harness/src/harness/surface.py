@@ -17,22 +17,26 @@ or resolved, so a second app cannot change the first one's texts.
 Retiring a model: delete its `MODEL_SURFACES` row and its surface constant,
 every branch and constant a search for its name finds (for Flash, `flash`
 without regard to case), the tests that use its studio fixture, and its
-recorded fixtures. Flash is the only model that takes an explicit cache, so
-retiring it also deletes `harness.prefix_cache` with its wiring. The model's
-history marker stays in `orchestrator.run._STORED_INSTRUCTIONS`, mapped to the
-current instruction, since stored conversations carry it.
+recorded fixtures. Flash is also the only model with full tool descriptions
+and an explicit cache, so retiring it deletes the `"full"` value of
+`ToolDescriptions` with the branch on it in `orchestrator.declarations`, and
+`harness.prefix_cache` with its wiring. Stored conversations carry the
+model's history marker (`orchestrator.run._STORED_INSTRUCTIONS`), so the
+marker keeps an entry in `orchestrator.run._LOADED_INSTRUCTIONS` that loads
+the current instruction.
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 from dataclasses import dataclass
 from typing import Literal
 
 from planner.settings import AgentSettings
 
-from harness.prefix_cache import PrefixCache, gemini_model_name
+from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
 
 # The instruction sets the orchestrator and the planner can run with:
@@ -72,6 +76,32 @@ MODEL_SURFACES: dict[str, Surface] = {
 }
 
 
+# The names Gemini serves: its own models, Gemma 4 and later, the model
+# optimizer, a fine-tuned Vertex AI endpoint and a Vertex AI Gemini resource
+# path.
+_GEMINI_NAMES = re.compile(
+    r"gemini-.*"
+    r"|gemma-4.*"
+    r"|model-optimizer-.*"
+    r"|projects/.+/locations/.+/endpoints/.+"
+    r"|projects/.+/locations/.+/publishers/google/models/gemini.+"
+)
+
+
+def gemini_model_name(model_name: str) -> str | None:
+    """`model_name` as sent to Gemini when Gemini serves it, else None.
+
+    A name with a `Gemini:` class prefix, in any case, names Gemini whatever
+    follows, and is sent without the prefix. A name with any other prefix
+    names another provider's model. An unprefixed name is Gemini's when it
+    matches one of `_GEMINI_NAMES` whole.
+    """
+    prefix, colon, named = model_name.partition(":")
+    if colon:
+        return named if prefix.lower() == "gemini" else None
+    return model_name if _GEMINI_NAMES.fullmatch(model_name) else None
+
+
 class ModelNameRefusedError(RuntimeError):
     """A model setting names no model the Gemini developer API serves."""
 
@@ -83,7 +113,7 @@ class SurfaceRefusedError(RuntimeError):
 
 def resolved_model_name(name: str, *, setting: str = "MODEL_NAME") -> str:
     """`name` as the Gemini developer API is sent it: any `Gemini:` class
-    prefix dropped (`harness.prefix_cache.gemini_model_name`), so the
+    prefix dropped (`gemini_model_name`), so the
     orchestrator and Edit Card call one model under one name.
 
     A leading `models/` is dropped, so `models/gemini-3.8-flash` names the
@@ -174,8 +204,9 @@ def set_studio_surface(surface: Surface | None) -> None:
     with _surface_lock:
         if surface is not None and _surface is not None and _surface != surface:
             raise SurfaceRefusedError(
-                f"The process already runs the {_surface.variant!r} surface, and "
-                f"{surface.variant!r} was set. A process runs one surface."
+                f"The process already runs the {_surface.variant!r} surface, so the "
+                f"{surface.variant!r} surface cannot be set. A process runs one surface; "
+                "set_studio_surface(None) clears it."
             )
         _surface = surface
 
@@ -214,6 +245,7 @@ __all__ = [
     "Surface",
     "SurfaceRefusedError",
     "ToolDescriptions",
+    "gemini_model_name",
     "resolve_surface",
     "resolved_model_name",
     "set_studio_surface",

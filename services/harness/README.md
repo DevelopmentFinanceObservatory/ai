@@ -236,7 +236,7 @@ The migrations, in order: `0001_conversations.sql` (the conversation and run-led
 `Settings` in `harness.settings` extends `BaseServiceSettings` from `common`.
 
 - `port`: Port integer for the HTTP server, defaulting to 8080.
-- `model_name`: Gemini model id the orchestrator and the Edit Card run, `gemini-4-hydrogen` by default. `harness.surface.MODEL_SURFACES` maps each supported model to its surface: `gemini-3.8-flash` to the default instructions and full tool descriptions, `gemini-4-hydrogen` to the Hydrogen instructions and minimal tool descriptions, with no explicit prefix cache because Gemini 4 refuses explicit caches. `create_app` refuses to start on a model the map does not name, or when `MODEL_NAME` and `PLANNER_MODEL_NAME` map to different surfaces. To roll back to Flash, set both to `gemini-3.8-flash`.
+- `model_name`: Gemini model id the orchestrator and the Edit Card run, `gemini-4-hydrogen` by default. `harness.surface.MODEL_SURFACES` maps each supported model to its surface: `gemini-3.8-flash` to the Flash instructions and full tool descriptions, `gemini-4-hydrogen` to the Hydrogen instructions and minimal tool descriptions, with no explicit prefix cache because Gemini 4 refuses explicit caches. `create_app` refuses to start on a model the map does not name, or when `MODEL_NAME` and `PLANNER_MODEL_NAME` map to different surfaces. To roll back to Flash, set both to `gemini-3.8-flash`.
 - `data_mcp_url`: URL for the data MCP service. Defaults to `http://127.0.0.1:{port}/mcp/data/mcp`.
 - `analysis_mcp_url`: URL for the analysis MCP service. Defaults to `http://127.0.0.1:{port}/mcp/analysis/mcp`.
 - `presentation_mcp_url`: URL for the presentation MCP service. Defaults to `http://127.0.0.1:{port}/mcp/presentation/mcp`.

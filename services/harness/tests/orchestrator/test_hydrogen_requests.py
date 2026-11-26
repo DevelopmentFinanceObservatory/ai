@@ -49,7 +49,7 @@ def _dump(request: Any) -> dict[str, Any]:
 
 
 def _hydrogen_hand_back(scenario: str) -> HandBack | None:
-    """ADK's recorded hand-back, with a refused plan's next step in Hydrogen's
+    """Flash's recorded hand-back, with a refused plan's next step in Hydrogen's
     words, as `plan_done` hands it back on that surface."""
     hand_back = hand_back_of(scenario)
     if hand_back is None or hand_back.answers != "plan":
