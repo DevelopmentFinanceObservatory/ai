@@ -35,6 +35,7 @@ from harness.studio_state import (
     TurnUsage,
     history_arm,
 )
+from harness.studio_store import StudioStore, drop_carried_copies_on
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from orchestrator.run import StoredHistory
 from pydantic import ValidationError
@@ -830,3 +831,76 @@ def test_an_unknown_history_setting_is_refused(
     monkeypatch.setenv(name, value)
     with pytest.raises(ValidationError):
         HistorySettings()
+
+
+async def _insert_cursor(
+    engine: AsyncEngine, conversation: int, turn: int, *, status: str, inputs: str, state: str
+) -> None:
+    error = "'{}'" if status == "abandoned" else "NULL"
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO turn_cursors "
+                "(conversation, turn_index, node, status, inputs, state, error) "
+                f"VALUES (:c, :t, 'orchestrate', :s, CAST(:i AS json), CAST(:st AS json), {error})"
+            ),
+            {"c": conversation, "t": turn, "s": status, "i": inputs, "st": state},
+        )
+
+
+async def _closed_cursor_columns(engine: AsyncEngine) -> dict[int, tuple[str, str, str]]:
+    """Each cursor's inputs and state text and its row version stamp (xmin)."""
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            text(
+                "SELECT turn_index, CAST(inputs AS text), CAST(state AS text), xmin::text "
+                "FROM turn_cursors"
+            )
+        )
+        return {row[0]: (row[1], row[2], row[3]) for row in rows}
+
+
+async def test_dropping_carried_copies_strips_the_keys_without_a_jsonb_cast(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A closed cursor whose carried history holds a NUL string (which jsonb
+    refuses) does not fail the claim and is stripped, the paused turn's
+    abandoned run history goes with it, and a cursor without the keys is not
+    rewritten."""
+    await StudioStore(pg_engine).create(_PRINCIPAL, "conv-drop")
+    async with pg_engine.connect() as connection:
+        pk = (
+            await connection.execute(
+                text("SELECT id FROM conversations WHERE conversation_id = 'conv-drop'")
+            )
+        ).scalar_one()
+    nul = json.dumps({"history": "a\u0000b"})
+    await _insert_cursor(
+        pg_engine,
+        pk,
+        1,
+        status="done",
+        inputs=f'{{"message": "hi", "carried_history": {nul}}}',
+        state=f'{{"orchestrator:carried": {nul}, "keep": 1}}',
+    )
+    await _insert_cursor(
+        pg_engine,
+        pk,
+        2,
+        status="abandoned",
+        inputs='{"message": "hi"}',
+        state=f'{{"orchestrator:history": {nul}, "keep": 2}}',
+    )
+    await _insert_cursor(
+        pg_engine, pk, 3, status="done", inputs='{"message": "hi"}', state='{"keep": 3}'
+    )
+    before = await _closed_cursor_columns(pg_engine)
+
+    async with pg_engine.begin() as connection:
+        await drop_carried_copies_on(connection, pk, turn_index=4)
+
+    after = await _closed_cursor_columns(pg_engine)
+    assert json.loads(after[1][0]) == {"message": "hi"}
+    assert json.loads(after[1][1]) == {"keep": 1}
+    assert json.loads(after[2][1]) == {"keep": 2}
+    assert after[3] == before[3]

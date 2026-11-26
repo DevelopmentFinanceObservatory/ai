@@ -127,6 +127,7 @@ from harness.graph.state import (
     NEW_QUESTION_KEY,
     ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_CARRIED_KEY,
+    ORCHESTRATOR_HISTORY_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
@@ -1728,17 +1729,39 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
     conversation.turn_carried = dict(carried) if carried else None
 
 
-# Strips the carried conversation from the conversation's closed cursors
-# before a turn: the one its orchestrator opened from (`TurnInput.carried_history`
-# in `inputs`) and the one it stored (`ORCHESTRATOR_CARRIED_KEY` in `state`).
-_DROP_CARRIED_COPIES = text(
-    "UPDATE turn_cursors SET "
-    "inputs = CAST(CAST(inputs AS jsonb) - 'carried_history' AS json), "
-    "state = CAST(CAST(state AS jsonb) - :carried_key AS json) "
+# The keys `drop_carried_copies_on` strips from the conversation's closed
+# cursors: the conversation a `full` turn's orchestrator opened from
+# (`TurnInput.carried_history`, in `inputs`), and in `state` the one it
+# stored (`ORCHESTRATOR_CARRIED_KEY`) and the run history a paused turn
+# held (`ORCHESTRATOR_HISTORY_KEY`), which an abandoned turn leaves behind.
+_CARRIED_INPUT_KEYS = ("carried_history",)
+_CARRIED_STATE_KEYS = (ORCHESTRATOR_CARRIED_KEY, ORCHESTRATOR_HISTORY_KEY)
+
+# The closed cursors whose columns mention a stripped key. A text match
+# cannot fail on a value jsonb refuses, as a string holding `\u0000`.
+_CARRIED_COPY_ROWS = text(
+    "SELECT id, CAST(inputs AS text) AS inputs, CAST(state AS text) AS state "
+    "FROM turn_cursors "
     "WHERE conversation = :conversation AND turn_index < :turn_index "
     "AND status NOT IN ('running', 'paused') "
-    "AND (CAST(inputs AS jsonb) ? 'carried_history' OR CAST(state AS jsonb) ? :carried_key)"
+    "AND (CAST(inputs AS text) LIKE ANY(:input_patterns) "
+    "OR CAST(state AS text) LIKE ANY(:state_patterns))"
 )
+_WRITE_STRIPPED = text(
+    "UPDATE turn_cursors SET inputs = CAST(:inputs AS json), "
+    "state = CAST(:state AS json) WHERE id = :id"
+)
+
+
+def _stripped(raw: str, keys: tuple[str, ...]) -> str | None:
+    """`raw`, a JSON object's text, without `keys`, or None when it holds
+    none of them. Raises ValueError when it does not parse."""
+    document = json.loads(raw)
+    if not isinstance(document, dict) or not any(key in document for key in keys):
+        return None
+    for key in keys:
+        document.pop(key, None)
+    return json.dumps(document)
 
 
 async def drop_carried_copies_on(
@@ -1752,15 +1775,34 @@ async def drop_carried_copies_on(
     begins, the conversation's record holds the latest chain
     (`ConversationState.carried_history`), the one durable copy, and no
     reader goes back to an earlier cursor's: a turn left open is recorded
-    from its cursor before the next one begins."""
-    await conn.execute(
-        _DROP_CARRIED_COPIES,
+    from its cursor before the next one begins. A cursor that does not
+    parse is logged and left as it is."""
+    rows = await conn.execute(
+        _CARRIED_COPY_ROWS,
         {
             "conversation": conversation,
             "turn_index": turn_index,
-            "carried_key": ORCHESTRATOR_CARRIED_KEY,
+            "input_patterns": [f'%"{key}"%' for key in _CARRIED_INPUT_KEYS],
+            "state_patterns": [f'%"{key}"%' for key in _CARRIED_STATE_KEYS],
         },
     )
+    for cursor_id, inputs, state in rows.all():
+        try:
+            new_inputs = _stripped(inputs, _CARRIED_INPUT_KEYS)
+            new_state = _stripped(state, _CARRIED_STATE_KEYS)
+        except ValueError:
+            logger.warning("studio history: cursor %s does not parse, kept as is", cursor_id)
+            continue
+        if new_inputs is None and new_state is None:
+            continue
+        await conn.execute(
+            _WRITE_STRIPPED,
+            {
+                "id": cursor_id,
+                "inputs": new_inputs if new_inputs is not None else inputs,
+                "state": new_state if new_state is not None else state,
+            },
+        )
 
 
 def set_aside_question(cursor: Cursor) -> str | None:
@@ -2168,17 +2210,23 @@ class StudioStore:
                 if f.name not in _PROCESS_LOCAL_FIELDS:
                     setattr(entry.state, f.name, getattr(durable, f.name))
         entry.baseline = _serialize_durable(entry.state)
+        segment = entry.state.segment
+        # Held by this process, or by none: a paused turn holds no segment.
+        elsewhere = segment is not None and segment.id != entry.held
         if held is not None and held.trace_id == entry.state.trace_id:
-            # Specs and model usage the turn noted after its last save, during
-            # a pause, say, are this process's alone. A turn this instance
-            # holds keeps them, and its next save stores them.
+            # Specs the turn noted after its last save, during a pause, say,
+            # are this process's alone. A turn this instance holds keeps them,
+            # and its next save stores them.
             for spec_id in held.fetched_specs:
                 entry.state.note_spec_use("fetched", spec_id)
             for spec_id in held.drawn_specs:
                 entry.state.note_spec_use("drawn", spec_id)
-            _keep_held_model_usage(entry.state.turn_usage, held)
-        segment = entry.state.segment
-        if segment is None or segment.id != entry.held:
+            # Model usage noted past the last save is this process's only
+            # while no other instance holds the segment; under another's, the
+            # stored figures are the later view.
+            if not elsewhere:
+                _keep_held_model_usage(entry.state.turn_usage, held)
+        if segment is None or elsewhere:
             entry.held = None
         if entry.state.turn_index and not entry.state.turn_recorded:
             entry.state.turn_specs = {}

@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from executor.ledger import PlanApproval, SourcePolicy, Start, idempotency_key, new_run
+from google.genai import types
 from harness.conversation import current_conversation_key
 from harness.run_ledger import StudioRunLedger
 from harness.studio_state import ConversationState, _next_manifest
@@ -206,3 +207,33 @@ async def test_a_claim_racing_a_live_owners_renewal_is_refused(
 
     with pytest.raises(ConversationStale):
         await taker.save(PRINCIPAL, CONVERSATION)
+
+
+async def test_a_load_keeps_the_stored_usage_of_a_turn_another_instance_holds(
+    engines: list[AsyncEngine],
+) -> None:
+    """A noted three model calls it never saved, then lost the segment to B,
+    which noted two and saved. A's next load reads B's two, since A's unsaved
+    calls are its own only while it holds the segment."""
+    clock = await StoreClock.start(engines[0])
+    owner = _store(engines[0], clock=clock)
+    taker = _store(engines[1], clock=clock)
+    state = await owner.create(PRINCIPAL, CONVERSATION)
+    owner.claim_segment(PRINCIPAL, CONVERSATION)
+    state.begin_turn()
+    await owner.save(PRINCIPAL, CONVERSATION)
+    usage = types.GenerateContentResponseUsageMetadata(prompt_token_count=100)
+    for _ in range(3):
+        state.note_model_usage(usage)
+
+    await clock.advance(50)  # past the 45 s TTL
+    adopted = await taker.load(PRINCIPAL, CONVERSATION)
+    assert adopted is not None
+    taker.claim_segment(PRINCIPAL, CONVERSATION)
+    for _ in range(2):
+        adopted.note_model_usage(usage)
+    await taker.save(PRINCIPAL, CONVERSATION)
+
+    reloaded = await owner.load(PRINCIPAL, CONVERSATION)
+    assert reloaded is not None
+    assert (reloaded.turn_usage.model_calls, reloaded.turn_usage.input_tokens) == (2, 200)
