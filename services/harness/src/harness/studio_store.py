@@ -790,6 +790,7 @@ def _turn_usage(value: Any, *, trace_id: str | None) -> TurnUsage:
         account=text("account"),
         visitor=text("visitor"),
         surface=text("surface"),
+        prompt_source=text("prompt_source"),
         fetched_specs=specs("fetched_specs"),
         drawn_specs=specs("drawn_specs"),
     )
@@ -917,6 +918,7 @@ def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
                 "account": usage.account,
                 "visitor": usage.visitor,
                 "surface": usage.surface,
+                "prompt_source": usage.prompt_source,
                 "release": release,
                 "error": line.error,
                 "fetched_specs": list(usage.fetched_specs),
@@ -929,6 +931,7 @@ def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
         session_id=conversation_id,
         user_id=usage.user_id,
         tags=usage.tags,
+        trace_metadata=usage.trace_metadata,
         request=line.request,
         response=line.response,
         error=line.error,

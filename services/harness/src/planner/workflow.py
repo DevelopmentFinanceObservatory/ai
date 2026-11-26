@@ -310,7 +310,12 @@ class SelectedSource(StrictModel):
     declared composite (DAC2a's inclusive scope, bilateral plus imputed
     multilateral lines), however its slots are bound; `None` when the
     envelope states it false or omits it, as Search does for every other
-    family.
+    family. `splices_components` is `True` when
+    `resolved.stat_vars.splices_components` states that the mint serves the
+    family as one series spliced from members that each serve their own years
+    (the ONE headline ODA series, net flows to 2017 and grant equivalents
+    from 2018), so it reads as one figure as a summed composite does; `None`
+    otherwise.
 
     `open_axes` are the slots the family's members vary along, from
     `resolved.slots`: the ones with a constraint property that is not
@@ -429,6 +434,11 @@ class SelectedSource(StrictModel):
     # its serialised form.
     sums_components: Annotated[bool | None, HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda sums: sums is None
+    )
+    # Left out of every dump while unset, so a source saved without it keeps
+    # its serialised form.
+    splices_components: Annotated[bool | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda splices: splices is None
     )
     shape_member_count: int | None = None
     shape_member_digest: str | None = None

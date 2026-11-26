@@ -533,7 +533,9 @@ class TurnUsage:
     the conversation (`harness.conversation.current_conversation_caller`).
     `account` is the website's digest of a signed-in account, `visitor` the
     website's `ip:` caller, and `surface` the turn's `harness.wire.Surface`
-    value; each is `None` when the request named none. `fetched_specs` holds
+    value; each is `None` when the request named none. `prompt_source` is
+    the `harness.wire.PromptSource` value of a turn whose question came from
+    an example the page offered, and `None` for a typed one or a value outside those three. `fetched_specs` holds
     each spec a foreground `get_data` call retrieved and `drawn_specs` each
     spec a card drawn this turn rests on, once each, in the order first used
     (`compiler.surface.current_spec_uses`). `trace_id` is the turn's
@@ -549,6 +551,7 @@ class TurnUsage:
     account: str | None = None
     visitor: str | None = None
     surface: str | None = None
+    prompt_source: str | None = None
     fetched_specs: list[str] = field(default_factory=list)
     drawn_specs: list[str] = field(default_factory=list)
 
@@ -561,6 +564,12 @@ class TurnUsage:
     def tags(self) -> list[str]:
         """The Langfuse tags of the turn: its surface, when it names one."""
         return [self.surface] if self.surface else []
+
+    @property
+    def trace_metadata(self) -> dict[str, str]:
+        """The Langfuse trace metadata of the turn: its `prompt_source`, when
+        it has one."""
+        return {"prompt_source": self.prompt_source} if self.prompt_source else {}
 
     def copy(self) -> TurnUsage:
         """A copy whose spec lists are lists of their own."""
@@ -1523,6 +1532,7 @@ def record_unstreamed_span(
             session_id=conversation_id,
             user_id=usage.user_id if usage is not None else None,
             tags=usage.tags if usage is not None else (),
+            trace_metadata=usage.trace_metadata if usage is not None else None,
         ),
         status=status,
         level="ERROR" if status == "failed" else "WARNING",

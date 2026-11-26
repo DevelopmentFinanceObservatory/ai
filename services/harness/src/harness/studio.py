@@ -2565,6 +2565,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 account=account,
                 visitor=visitor,
                 surface=body.surface.value,
+                prompt_source=body.prompt_source.value if body.prompt_source else None,
             )
             # The claim: the lease, written alone (`StudioStore.claim_turn_lease`),
             # before the turn opens and before the SSE response starts. A

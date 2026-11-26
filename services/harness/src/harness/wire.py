@@ -43,6 +43,7 @@ from common.place_type import PartyClass
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     JsonValue,
@@ -385,6 +386,24 @@ class Surface(StrEnum):
     STUDIO = "studio"
     DOWNLOAD = "download"
     EMBED = "embed"
+
+
+class PromptSource(StrEnum):
+    """Where a turn's question text came from when the user did not type it
+    (`TurnRequest.prompt_source`): `example`, a Studio landing example;
+    `availability`, the button asking what data is available;
+    `search_example`, a Search example handed over to the Studio."""
+
+    EXAMPLE = "example"
+    AVAILABILITY = "availability"
+    SEARCH_EXAMPLE = "search_example"
+
+
+def _known_prompt_source(value: object) -> PromptSource | None:
+    """`value` as a `PromptSource`, or None for anything else, so a value the
+    harness does not know leaves the turn untagged and the request standing."""
+    known = {source.value for source in PromptSource}
+    return PromptSource(value) if isinstance(value, str) and value in known else None
 
 
 # A Search API resolution has at most six parts, and a Studio handoff seeds
@@ -1027,6 +1046,11 @@ class TurnRequest(_WireModel):
     `unit_question` is missing, a `multi_select` one a `single_select` when
     `multi_select` is missing (`harness.studio_translate._asked_question`).
 
+    `prompt_source` names where the question text came from when the user
+    did not type it (`PromptSource`). A value the harness does not know is
+    dropped, as an absent one. The turn's `studio.turn` line and Langfuse
+    trace carry it (`harness.studio_state.TurnUsage.prompt_source`).
+
     `after_turn` is a precondition: the index of the turn this request
     follows, as a state read reports it (0 before the first turn). The
     request is refused 409 `edit_conflict` with `constraint_id`
@@ -1052,6 +1076,11 @@ class TurnRequest(_WireModel):
     apply_unit: ApplyUnit | None = None
     after_turn: int | None = Field(default=None, ge=0)
     client_features: list[str] | None = Field(default=None, max_length=MAX_CLIENT_FEATURES)
+    prompt_source: Annotated[
+        PromptSource | None,
+        BeforeValidator(_known_prompt_source),
+        WithJsonSchema({"enum": [*(source.value for source in PromptSource), None]}),
+    ] = None
 
     @model_validator(mode="after")
     def _a_chip_comes_alone(self) -> TurnRequest:

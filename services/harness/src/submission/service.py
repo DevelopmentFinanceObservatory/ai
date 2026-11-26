@@ -8314,7 +8314,7 @@ def _providers_counted(whole: Option | None, part: Option | None) -> str | None:
         return (
             f"The total counts {whole.label}, and the part does not say which providers it counts."
         )
-    return f"The total counts {whole.label}, the part {part.label}."
+    return f"The total counts {whole.label}, and the part counts {part.label}."
 
 
 def _dataset_holds(block: Mapping[str, Any] | None, scope: PartScope | None, name: str) -> bool:

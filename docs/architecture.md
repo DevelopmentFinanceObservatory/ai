@@ -249,7 +249,9 @@ streamed so far), and, for a turn closed with an error code, that code as its
 status message, at level `WARNING` for a Stop's `cancelled` and a newer
 turn's `abandoned` and `ERROR` for any other code. Its metadata holds
 `dfo.external_id`, the error as `dfo.turn_error` when there is one, and
-`dfo.turn_status` `paused` on a pause. A turn that paused holds a
+`dfo.turn_status` `paused` on a pause. Each segment and outcome of a turn
+whose request named a `prompt_source` sets it on the trace's metadata under
+that key. A turn that paused holds a
 `turn.pause` observation for each pause beside its `turn`, which a reader
 resolves by the rule the log line's dbt model uses: the latest close that is
 not `abandoned`, else the latest close, else the latest pause.

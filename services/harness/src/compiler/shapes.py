@@ -587,6 +587,26 @@ def unsummable_axes(source: SelectedSource) -> tuple[str, ...] | None:
     return tuple(axis.property for axis in source.open_axes if not axis.summable)
 
 
+def sum_unstated(source: SelectedSource) -> bool:
+    """Whether `source`'s family has nothing apis may collapse it over: no open axis, and
+    no declared composite whose components the mint adds (`sums_components`) or
+    splices by years (`splices_components`).
+
+    apis collapses a family's members over a summable axis it decodes or by
+    the composite's declaration, and refuses any other sum
+    `rollup_not_summable`. A family Search confirms at one member, a count it
+    does not state as a floor (`compiler.sources.stat_var_count_is_floor`),
+    has nothing to collapse. A source whose slots were never read
+    (`slot_codes` `None`) states no open axis either, so it is held to this.
+    """
+    one_member = (
+        source.stat_var_member_count == 1 and source.stat_var_member_count_exact is not False
+    )
+    if one_member or source.sums_components or source.splices_components:
+        return False
+    return not source.open_axes
+
+
 def _separate_measures(source: SelectedSource) -> MeasureCount:
     """How many measures a family read separately carries.
 
@@ -631,8 +651,9 @@ def _retrieve_resolved(
     A requirement stating a breakdown keeps its codes' column last
     (`breakdown_column`), a role nothing in the source resolves and so no
     surplus. A family read separately carries the measures its source counts
-    (`_separate_measures`) and the axes it may not be summed over
-    (`unsummable_axes`). A summed family, a breakdown (which sums the family
+    (`_separate_measures`), the axes it may not be summed over
+    (`unsummable_axes`), and whether its source states nothing to sum it
+    over (`sum_unstated`). A summed family, a breakdown (which sums the family
     within each code), and a source binding one StatVar carry one. A source
     that leaves its place axis open carries every level of place
     (`compiler.evidence.opens_place_axis`), and `compiler.evidence` refuses
@@ -738,6 +759,7 @@ def _retrieve_resolved(
         period=retrieved_period(requirement, first_year=first_year),
         measures=_separate_measures(source) if separate else 1,
         unsummable_axes=unsummable_axes(source) if separate else None,
+        sum_unstated=separate and sum_unstated(source),
         end_open=requirement.period_end_open,
     )
     return ResolvedShape(shape=shape, columns=tuple(columns))

@@ -1246,13 +1246,16 @@ def _record_label(record: _ExecutorRecord, plan_labels: Mapping[str, str]) -> st
 
 def _data_phrase(plan: PlannerPlan) -> str | None:
     """The plan's data for the checking line's summary, naming its first
-    dataset: "health spending per person for Kenya and Uganda", with "and N
-    more" for the rest. None for a plan with no dataset."""
+    dataset that is no whole (`whole_of`): "health spending per person for
+    Kenya and Uganda", with "and N more" for the rest. A whole states no
+    entities of its own, so it is named first only in a plan of wholes alone,
+    by its measure. None for a plan with no dataset."""
     datasets = [r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)]
     if not datasets:
         return None
-    first = datasets[0]
-    phrase = f"{first.measure} for {entities_phrase(first.entities, across=first.across)}"
+    first = next((r for r in datasets if r.whole_of is None), datasets[0])
+    named = entities_phrase(first.entities, across=first.across)
+    phrase = f"{first.measure} for {named}" if named else first.measure
     return f"{phrase} and {len(datasets) - 1} more" if len(datasets) > 1 else phrase
 
 

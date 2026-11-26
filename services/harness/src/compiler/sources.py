@@ -26,7 +26,7 @@ from typing import Any, NamedTuple, cast
 
 import rfc8785
 from common.place_type import FLOW_ROLE_COLUMNS, IDENTITY_KEY_AXES, PartyClass
-from planner.parties import flow_side
+from planner.parties import Party, flow_side, role_party
 from planner.records import (
     AmbiguousEntityReading,
     AmbiguousSourceReading,
@@ -400,7 +400,8 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
 
     Takes the block's `spec_id`, what it `resolved` -- sentence, confidence,
     coverage, the counts of its members and how many it serves, whether the
-    mint adds them by a declared composite (`sums_components`), the label,
+    mint adds them by a declared composite (`sums_components`) or splices them
+    by years (`splices_components`), the label,
     size and digest of the binding its `shape` states, the concept it counts
     and the tables it is published in, entities and the named
     sets it binds, the measure it elected and the others it offers, the entity
@@ -444,6 +445,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             stat_var_member_count_exact=_flag(stat_vars.get("member_count_exact")),
             served_count=_count(stat_vars.get("served_count")),
             sums_components=True if stat_vars.get("sums_components") is True else None,
+            splices_components=True if stat_vars.get("splices_components") is True else None,
             shape_member_count=_count(shape.get("member_count")),
             shape_member_digest=_text(shape.get("member_digest")),
             entities=tuple(_entity(entity) for entity in _sequence(resolved.get("entities"))),
@@ -881,13 +883,15 @@ def default_reading(source: SelectedSource) -> StatVarReading:
     A family with no open axis has nothing to sum over, so it reads
     separately, unless apis's mint adds its members by a declared composite
     (`sums_components`), as it adds DAC2a's bilateral and imputed multilateral
-    lines: those members are parts of one figure, whatever its slots bind. A
-    family with any open axis apis may not sum over (a sex, a netting basis)
-    reads separately either way, since its members are different measures.
+    lines, or splices them by years (`splices_components`), as it serves the
+    ONE headline series: those members are parts of one figure, whatever its
+    slots bind. A family with any open axis apis may not sum over (a sex, a
+    netting basis) reads separately either way, since its members are
+    different measures.
     """
     if not all(axis.summable for axis in source.open_axes):
         return StatVarReading.SEPARATE
-    if source.open_axes or source.sums_components:
+    if source.open_axes or source.sums_components or source.splices_components:
         return StatVarReading.SUM
     return StatVarReading.SEPARATE
 
@@ -1292,6 +1296,51 @@ def source_whole_side(source: SelectedSource, column: str) -> WholeSide | None:
             bound.extend(ref for ref in refs if isinstance(ref, str) and ref not in bound)
     group = next((group for group in source.groups if group.role == column), None)
     return WholeSide(bound=tuple(bound), group=group)
+
+
+def named_by_part(
+    whole: SelectedSource, part: SelectedSource, *, opened: Party | None
+) -> SelectedSource:
+    """`whole`, a derived whole's source, viewed with the name facts of `part`, its
+    part's source, on the parties the whole keeps; a view stored nowhere.
+
+    A source holds two kinds of fact: the parties its dataset binds (`entities`,
+    `groups`), which belong to its spec_id, and which ref a request's words mean
+    (`bound_refs`, `entity_refs`), which belong to a search's wording. A whole
+    takes its names from its part and its dataset from a request with no words
+    (`planner.source_reads.compile_whole`), so its own source states the parties
+    and its part's states the names. The view keeps `whole`'s parties and adds,
+    after its own, each row of `part.bound_refs` and each `part.entity_refs` entry
+    with a ref among the parties `whole` states (an entity's ref, a set's ref,
+    published total or registry id) on a column outside the side `opened`, the side
+    the whole widens (`planner.plan.whole_side`). The whole's own facts take
+    precedence: a part row whose identity or words a row of the whole's binds, and a
+    part entry for a name the whole's `entity_refs` holds, are not carried. A part's
+    name for a party the whole does not state, as on the side it opens or a side
+    Search rebinds to other parties, is not carried either, and reads on the whole's
+    own source alone.
+    """
+    held: set[str] = {
+        entity.ref
+        for entity in whole.entities
+        if opened is None or role_party(entity.role) != opened
+    }
+    for group in whole.groups:
+        if opened is None or role_party(group.role) != opened:
+            held.update(key for key in (group.ref, group.total, group.group_id) if key)
+    bound = {key.casefold() for row in whole.bound_refs for key in (row.identity, row.text)}
+    rows = [*whole.bound_refs]
+    rows.extend(
+        row
+        for row in part.bound_refs
+        if row.identity.casefold() not in bound
+        and row.text.casefold() not in bound
+        and held.intersection(row.refs)
+    )
+    refs = {name: ref for name, ref in part.entity_refs.items() if ref in held}
+    return whole.model_copy(
+        update={"bound_refs": tuple(rows), "entity_refs": {**refs, **whole.entity_refs}}
+    )
 
 
 class Containment(NamedTuple):

@@ -1411,7 +1411,8 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
     """The planner asks the user a question while amending a plan, and the
     plan on record is unreadable when the answer resumes it. The `planner`
     node finds that itself: nothing is left to amend, so the planner is handed
-    no amendment and no prior plan, and the card says why."""
+    no prior plan and told to restart, the user's amendment kept, and the card
+    says why."""
     plan = _planner_plan(schemas=real_schemas)
     planner = _AskingOnAmendPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     runner, _ = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
@@ -1424,8 +1425,9 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
     events = await _resume(runner, _PLANNER_ASK, {"answer": "2020"})
 
     assert _pending_interrupt(events) == APPROVE_PAUSE
-    assert planner.calls[2]["amendment"] is None
+    assert planner.calls[2]["amendment"] == "only 2020"
     assert planner.calls[2]["prior_plan"] is None
+    assert planner.calls[2]["restart"] is True
     redrafted = _output_of(events, "planner")
     assert redrafted["refusal_note"] == UNREADABLE_PLAN_NOTE
     assert redrafted["restarted"] is True
