@@ -70,6 +70,7 @@ _RENDER_DATA_PATH = f"{_RENDER_PATH}/data"
 _CAPABILITIES_PATH = "/api/datasets/capabilities"
 _STATED_SCOPE_PATH = "/api/search/stated-scope"
 _SEARCH_CAPABILITIES_PATH = "/api/search/capabilities"
+_SEARCH_OPTIONS_PATH = "/api/search/options"
 
 # The capabilities field naming the engine apis' analysis runner computes with.
 _EXECUTION_IDENTITY_FIELD = "analysis_execution_identity"
@@ -770,6 +771,40 @@ class LiveApisClient:
         if any(reading is None for reading in read):
             raise _invalid(response, "stated scope answer")
         return tuple(reading for reading in read if reading is not None)
+
+    async def read_entity_options(
+        self, *, identity: Mapping[str, Any], role: str
+    ) -> tuple[tuple[tuple[str, str], ...], bool]:
+        """The places of the same kind Search lists for role `role` of
+        `identity` (`POST /api/search/options`, `for: {role, scope: peers}`),
+        each as `(ref, label)`, in the order Search lists them, and whether
+        Search capped the list (`truncated`). A listed entry that names no
+        ref is left out.
+
+        Raises:
+            LiveApisError: apis refused the call, or answered a body with no
+                `options.items` list (`response_invalid`).
+        """
+        response = await self._send(
+            "POST",
+            _SEARCH_OPTIONS_PATH,
+            json={
+                "schema_version": 1,
+                "identity": dict(identity),
+                "for": {"role": role, "scope": "peers"},
+            },
+        )
+        options = _json_object(response, "options answer").get("options")
+        items = options.get("items") if isinstance(options, dict) else None
+        if not isinstance(items, list):
+            raise _invalid(response, "options answer")
+        listed = []
+        for item in items:
+            ref = ((item.get("value") or {}).get("ref") or {}) if isinstance(item, dict) else {}
+            if isinstance(ref, dict) and isinstance(ref.get("ref"), str) and ref["ref"]:
+                listed.append((ref["ref"], str(ref.get("label") or ref["ref"])))
+        assert isinstance(options, dict)
+        return tuple(listed), options.get("truncated") is True
 
     # Wire.
 

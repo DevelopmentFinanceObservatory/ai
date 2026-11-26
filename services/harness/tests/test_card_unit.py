@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
+from common.live_apis import LiveApisError
 from data_mcp.get_data_tool import _SUM_STAT_VARS_GROUPBY, Breakdown
+from harness import place_options
 from harness.card_unit import frame_arguments, retitled, unit_card
 from harness.provenance import CardLineage, ProvenanceInput
 from harness.wire import UnitChoice, UnitCurrency, UnitOffer, UnitPrices
@@ -220,3 +224,87 @@ def test_a_title_names_the_new_unit_where_it_named_the_old(
     title: str, old: UnitChoice, new: UnitChoice, expected: str
 ) -> None:
     assert retitled(title, old=old, new=new, offer=_OFFER) == expected
+
+
+_BASE = "spec_" + "a" * 32
+_BASE_IDENTITY = {
+    "stat_var": "dcid:Aid",
+    "slots": [{"property": "b", "value": 1}, {"property": "a", "value": 2}],
+    "entities": {"destination": ["country/KEN"], "origin": ["country/FRA"]},
+    "requested_window": {"kind": "range", "start_year": 2015, "end_year": 2023},
+}
+
+
+@pytest.mark.parametrize(
+    ("served", "spec_id", "scope"),
+    [
+        (
+            {
+                **_BASE_IDENTITY,
+                "slots": [{"property": "a", "value": 2}, {"property": "b", "value": 1}],
+                "entities": {"destination": ["country/UGA"], "origin": ["country/FRA"]},
+                "requested_window": {"kind": "range", "start_year": 2010, "end_year": 2024},
+            },
+            _BASE,
+            {
+                "entities": {"destination": ["dcid:country/UGA"], "origin": ["dcid:country/FRA"]},
+                "window": {"kind": "range", "start_year": 2010, "end_year": 2024},
+            },
+        ),
+        ({**_BASE_IDENTITY, "stat_var": "dcid:Other"}, _SPEC, None),
+    ],
+    ids=["scoped-retrieval-of-the-block", "another-indicator"],
+)
+def test_a_card_on_a_scoped_retrieval_reads_its_block_with_the_scope(
+    served: dict[str, Any], spec_id: str, scope: dict[str, Any] | None
+) -> None:
+    """A retrieval served under its own spec reads back as the Search block it
+    scoped, with the places and window it changed; one that differs from
+    every block elsewhere reads its own spec."""
+    lineage = _lineage((_SPEC, _CV))
+    (member,) = lineage.lineage
+    member.manifest["definition"]["identity"] = served
+    blocks = {_BASE: {"definition": {"spec_id": _BASE, "identity": _BASE_IDENTITY}}}
+
+    card = unit_card(_component(), lineage, blocks)
+
+    assert card is not None
+    assert (card.spec_id, card.scope) == (spec_id, scope)
+
+
+class _Door:
+    """Search's places door: lists `listed` places, fails with `fail`, and
+    with `stall` waits past the deadline."""
+
+    def __init__(self, listed: int = 2, *, fail: bool = False, stall: bool = False) -> None:
+        self.listed, self.fail, self.stall = listed, fail, stall
+
+    async def __call__(
+        self, *, identity: Mapping[str, Any], role: str
+    ) -> tuple[tuple[tuple[str, str], ...], bool]:
+        del identity, role
+        if self.stall:
+            await asyncio.sleep(60)
+        if self.fail:
+            raise LiveApisError(status=503, code=None, retryable=True)
+        return tuple((f"country/C{n}", f"Place {n}") for n in range(self.listed)), False
+
+
+@pytest.mark.parametrize(
+    "door", [_Door(fail=True), _Door(stall=True)], ids=["door-fails", "door-misses-deadline"]
+)
+async def test_a_place_read_that_fails_or_misses_its_deadline_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, door: _Door
+) -> None:
+    monkeypatch.setattr(place_options, "PLACE_OPTIONS_DEADLINE_S", 0.05)
+
+    with pytest.raises(place_options.PlacesUnavailableError):
+        await place_options.read_role_places(door, identity=_BASE_IDENTITY, role="destination")
+
+
+async def test_a_place_read_keeps_the_cap_and_says_it_cut_the_list() -> None:
+    read = await place_options.read_role_places(
+        _Door(place_options.PLACE_OPTIONS_CAP + 1), identity=_BASE_IDENTITY, role="destination"
+    )
+
+    assert (len(read.places), read.truncated) == (place_options.PLACE_OPTIONS_CAP, True)

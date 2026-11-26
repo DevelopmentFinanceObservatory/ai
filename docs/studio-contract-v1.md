@@ -12,7 +12,7 @@ explains the protocol around them, and `services/harness/tests/test_wire.py`
 pins the two together against the fixtures in
 `services/harness/tests/wire_fixtures/studio/`.
 
-v1 records its design decisions as numbered deltas (1–34; 16 is folded
+v1 records its design decisions as numbered deltas (1–35; 16 is folded
 into 11). The deltas are marked where they apply and listed in the delta
 index at the end.
 
@@ -30,6 +30,7 @@ breaking structural change bumps the version and ships a migration note.
 | POST   | `/api/studio/cancel`      | 204, or 200 for a Stop naming another turn (deltas 14, 32)             |
 | POST   | `/api/studio/composition` | the new composition manifest, as a JSON body                           |
 | GET    | `/api/studio/state`       | the conversation as stored, as a JSON body; takes no lease (delta 26)  |
+| GET    | `/api/studio/places`      | the places a card's role can change to, as a JSON body (delta 35)      |
 
 The Studio's other routes (`/api/sources`, `/api/datasets/{spec_id}`,
 gallery, published views) are website/platform reads served outside the
@@ -867,6 +868,24 @@ Each frame that concerns a plan step names it by the step's own id, `PlanStep.id
 
 A replan or a second plan in the turn can reuse step ids, so a page keys a plan step by the plan's `plan_version_id` and the step id together. A `plan.approved` a client stored earlier, such as one in a chat snapshot, has no `id` on its steps and no `step_ids` on its choices, and the client reads it without them. Each member is left out when it has no value. `schema_version` stays 1.
 
+## A card's years and places, and what a plan decision settles (delta 35, v1.20)
+
+A card drawn from one retrieval can change its years and its places with no model call, through the flow a unit change runs (delta 30), and the changes compose: each change starts from the card's arguments, years and places as the last change left them.
+
+- `component.created` and a state read's stored card gain `card_changes`, `{spec_id, window?, places?}`, set while the card is on the canvas and offers at least one change. `spec_id` is the spec a change names. `window` is `{start_year, end_year, first_year, last_year, missing_years?}`: the years the card draws, and the first and last years the spec holds, with the years inside them that hold no figures (Search's `years_with_data`, else the window its answer serves, with none missing). `start_year` equals `end_year` on a card that shows one year, including one asked for its latest year. It is set when the spec holds more than one year. `places` lists one entry per role whose places the card binds, `{role, multiple, chosen[]}`, each place `{id, label}`: the places the card shows and whether the role takes more than one. It is set only where the deployment reads Search's places door (`STUDIO_PLACE_OPTIONS`, on by default). A card drawn on a derived frame, such as a share or a ranking, has no `card_changes`.
+- `GET /api/studio/places?conversation_id=…&component_id=…&role=…` answers the places the role can change to, read from Search when asked, `{component_id, role, options[], truncated}`: at most 300 places `{id, label}` in Search's order, `truncated` when Search listed more. It is read with no lease, as `/state` is. It refuses an unknown conversation 404 `not_found`, a card off the canvas or offering no change 422 `scope_choice_stale` (pointer `/component_id`), a role the card does not offer 422 `change_not_offered` (pointer `/role`), Search's door failing or taking more than 2 s 503 `transient_unavailable` with `constraint_id` `place_options_unavailable` and `retry_after_seconds`, and a deployment with the door off 503 `capability_unavailable`.
+- `turn.request` gains `apply_change: {component_id, spec_id, change}`, which comes alone, as `apply_unit` does. `change` is `{kind: "window", start_year, end_year}`, with `end_year` equal to or after `start_year` (one year when equal), or `{kind: "places", role, entities[]}`, the place ids for that role, 1 to 50. A places change replaces that role's places and keeps the others.
+- The server refuses a change it cannot apply before the stream starts, `pointer` `/apply_change`: 422 `constraint_violation` with `scope_choice_stale` when the card has left the canvas or no longer reads `spec_id`, `change_not_offered` for years outside `first_year` to `last_year`, the years the card already draws, a role it does not offer, two places for a role whose `multiple` is false, the places the card already shows, or a place Search does not list for the role, and `change_no_data` for years that all fall in `missing_years`; and 503 `transient_unavailable`, `place_options_unavailable`, when Search's list for a places change cannot be read, which the server checks every place against.
+- The stream is a unit change's: `activity.step` frames, a `component.created` for the redrawn card, with `replaces`, the old card's plan, a fresh `unit_change` and `card_changes`, then `composition.updated`, `suggestions` and `done`. A retrieval that holds no figures for the new years or places ends on a failed `activity.step` and a `message.complete` that begins "The card is unchanged.", and the card keeps its slot and its offers; neither frame carries a code for it. The title names the new years where it named a range such as "2015 to 2023" or "2015–2023", and a year left in the title that bounded the old range, outside a unit's words such as "constant 2023 US dollars", names the new start year after "since" or "from", the new end year after "to", "until" or "through", and otherwise the new period ("2010 to 2024", or one year for a one-year period); a year that bounded no end of the old range stays. The title names the new places where it named the old ones. The slot's `meta` words (`subtitle`, `description`, `x_label`, `y_label`) are rewritten the same way, and a word still naming a bound year of the old range or a place the card no longer shows is dropped. A `comparison` layout hint keeps the card. A state read gives the turn's `user_message` as "Change Aid to Kenya to 2010 to 2024.".
+- A state read's `closed_since[]` turns and its open `turn` gain `card_change`, `{component_id, kind, role?}`, on a turn that changed a card in place: the card the `apply_unit` or `apply_change` request named (the one the change replaced), `kind` `unit`, `window` or `places`, and `role` for a change of places. A page rebuilding its transcript shows such a turn as a change on that card. Other turns have none.
+- `plan.proposed.decisions[]` and `plan.approved.choices[]` gain `kind`, what the decision settles, by the first rule that holds: `unit` for a unit question's row, `count` for the row of how pinned sources' flows are counted, the scope choice's axis (`sector`, `region`, `measure_basis`, `provider`), `unit` for a decision fixing the unit or its prices, `years` for one fixing the period or its first or last year, `places` for one fixing the places. It is left out where none holds.
+
+Each member is left out when it has no value. `schema_version` stays 1.
+
+```json
+{"kind": "turn.request", "schema_version": 1, "conversation_id": "sess_01j9zc0000", "apply_change": {"component_id": "cmp_01j9zc3aqw", "spec_id": "spec_8f3a1c5e9d2b4a7c6e0f1a2b3c4d5e6f", "change": {"kind": "window", "start_year": 2010, "end_year": 2024}}}
+```
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -992,3 +1011,4 @@ Fixture values that are samples:
 1. `turn.cancel` gains an optional `turn_index`; a Stop naming another turn than the latest is answered 200 `{"code": "turn_moved", "turn_index"}` and leaves the conversation as it was. A state read's stored card gains `unit_change` and `replaces` (see "A Stop that names its turn, and a stored card's unit and slot").
 1. `turn.request` gains an optional `prompt_source` (`"example"`, `"availability"` or `"search_example"`), which the turn's `studio.turn` line and Langfuse trace metadata carry; any other value is dropped (see "Where a typed question came from").
 1. `component.created.created_from` gains `plan_version_id` and `plan_step_id`, `activity.step` gains `plan_step_id`, `plan.approved.steps[]` gains `id`, and `plan.proposed.decisions[]` and `plan.approved.choices[]` gain `step_ids`, all optional (see "Plan steps on cards, activity lines and choices").
+1. `component.created` and a state read's stored card gain `card_changes`, the years a card can change to and the roles whose places can change; `GET /api/studio/places` reads a role's places on demand; a state read's turns gain `card_change`; `turn.request` gains `apply_change`, which comes alone; `plan.proposed.decisions[]` and `plan.approved.choices[]` gain `kind`, all optional (see "A card's years and places, and what a plan decision settles").

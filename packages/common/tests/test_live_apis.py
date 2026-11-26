@@ -747,6 +747,47 @@ async def test_read_stated_scopes_raises_a_refusal() -> None:
     assert (raised.value.status, raised.value.code) == (400, "request_invalid")
 
 
+# read_entity_options
+
+
+async def test_read_entity_options_posts_the_identity_and_role_and_reads_each_place() -> None:
+    identity = {"stat_var": "dcid:Aid", "entities": {"destination": ["country/KEN"]}}
+    answer = {
+        "options": {
+            "items": [
+                {"value": {"ref": {"ref": "country/KEN", "label": "Kenya"}}},
+                {"value": {"ref": {"ref": "country/UGA"}}},
+                {"value": {"text": "no ref"}},
+            ],
+            "truncated": True,
+        }
+    }
+    calls = Calls(ok(answer))
+
+    async with make_client(calls) as client:
+        listed = await client.read_entity_options(identity=identity, role="destination")
+
+    (request,) = calls.requests
+    assert (request.method, request.url.path) == ("POST", "/api/search/options")
+    assert body_of(request) == {
+        "schema_version": 1,
+        "identity": identity,
+        "for": {"role": "destination", "scope": "peers"},
+    }
+    assert listed == ((("country/KEN", "Kenya"), ("country/UGA", "country/UGA")), True)
+
+
+@pytest.mark.parametrize("answer", [{"options": {}}, {"items": []}], ids=["no-items", "no-options"])
+async def test_read_entity_options_answer_outside_the_contract_is_invalid(answer: object) -> None:
+    calls = Calls(ok(answer))
+
+    async with make_client(calls) as client:
+        with pytest.raises(LiveApisError) as raised:
+            await client.read_entity_options(identity={}, role="destination")
+
+    assert raised.value.code == RESPONSE_INVALID
+
+
 # stream_render_data
 
 

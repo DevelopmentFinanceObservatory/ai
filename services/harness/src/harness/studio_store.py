@@ -198,6 +198,7 @@ _KEY_TURN_PLANS = "turn_plans"
 _KEY_TURN_PROJECTION_ASKED = "turn_projection_asked"
 _KEY_TURN_READINGS = "turn_readings"
 _KEY_TURN_APPLIED_CHOICE = "turn_applied_choice"
+_KEY_TURN_CARD_CHANGE = "turn_card_change"
 _KEY_TURN_CHOICE_BASELINE = "turn_choice_baseline"
 _KEY_TURN_APPROVED = "turn_approved"
 _KEY_TURN_PLAN_FRAMES = "turn_plan_frames"
@@ -222,6 +223,7 @@ _SCALAR_KEYS = frozenset(
         _KEY_TURN_PROJECTION_ASKED,
         _KEY_TURN_READINGS,
         _KEY_TURN_APPLIED_CHOICE,
+        _KEY_TURN_CARD_CHANGE,
         _KEY_TURN_CHOICE_BASELINE,
         _KEY_TURN_APPROVED,
         _KEY_TURN_PLAN_FRAMES,
@@ -666,6 +668,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_TURN_PROJECTION_ASKED: state.turn_projection_asked,
         _KEY_TURN_READINGS: state.turn_readings,
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
+        _KEY_TURN_CARD_CHANGE: state.turn_card_change,
         _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
         _KEY_TURN_APPROVED: state.turn_approved,
         _KEY_TURN_PLAN_FRAMES: state.turn_plan_frames,
@@ -742,6 +745,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_readings = list(value)
         elif key == _KEY_TURN_APPLIED_CHOICE:
             state.turn_applied_choice = dict(value) if value else None
+        elif key == _KEY_TURN_CARD_CHANGE:
+            state.turn_card_change = dict(value) if value else None
         elif key == _KEY_TURN_CHOICE_BASELINE:
             state.turn_choice_baseline = dict(value or {})
         elif key == _KEY_TURN_APPROVED:

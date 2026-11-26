@@ -469,7 +469,8 @@ def _entry(
 def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     """A stored entry holds the id of every series its card draws, past the
     twelve the platform's fact summary lists. No canvas view, recall or
-    manifest states them, and a revised card's ids follow its new payload."""
+    manifest states them, nor the card's plan link or readable arguments,
+    and a revised card's ids follow its new payload."""
     codes = [f"country/P{number:02d}" for number in range(24)]
     series = {code: {"2024": 1.0} for code in codes}
     card = drawn_cards.write_reply(
@@ -478,7 +479,9 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     state = ConversationState(conversation_id=CONVERSATION)
     intent = {"type": "bar_chart", "title": "t", "select": {"observationAbout": codes}}
     plan = PlanLink(plan_version_id="plan_secret", plan_step_id="step_secret")
-    land_component(state, card, intent=intent, plan=plan)
+    land_component(
+        state, card, intent=intent, plan=plan, unit_card={"spec_id": "spec_secret", "args": {}}
+    )
     card_id = card["component_id"]
 
     ids = [drawn_cards.series_id(code) for code in codes]
@@ -500,6 +503,7 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     assert "series_ids" not in model_facing
     assert "drawn_card" not in model_facing
     assert "plan_secret" not in model_facing
+    assert "spec_secret" not in model_facing
     assert ids[11] in model_facing
     assert ids[12] not in model_facing
 

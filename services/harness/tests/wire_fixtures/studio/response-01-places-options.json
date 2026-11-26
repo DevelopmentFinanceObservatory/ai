@@ -1,0 +1,19 @@
+{
+  "component_id": "cmp_01j9zc3aqw",
+  "role": "observationAbout",
+  "options": [
+    {
+      "id": "country/ETH",
+      "label": "Ethiopia"
+    },
+    {
+      "id": "country/KEN",
+      "label": "Kenya"
+    },
+    {
+      "id": "country/UGA",
+      "label": "Uganda"
+    }
+  ],
+  "truncated": false
+}

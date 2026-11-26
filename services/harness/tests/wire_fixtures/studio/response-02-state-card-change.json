@@ -1,0 +1,31 @@
+{
+  "conversation_id": "sess_01j9zc0000",
+  "turn": {
+    "index": 2,
+    "status": "done",
+    "trace_id": "tr_01j9zc7k2m",
+    "user_message": "Change Aid to Kenya to Uganda.",
+    "card_change": {
+      "component_id": "cmp_01j9zc3aqw",
+      "kind": "places",
+      "role": "destination"
+    },
+    "lease_live": false
+  },
+  "closed_since": [
+    {
+      "turn_index": 2,
+      "user_message": "Change Aid to Kenya to Uganda.",
+      "reply": "",
+      "component_ids": [
+        "cmp_01j9zc3aqx"
+      ],
+      "card_change": {
+        "component_id": "cmp_01j9zc3aqw",
+        "kind": "places",
+        "role": "destination"
+      }
+    }
+  ],
+  "closed_total": 2
+}

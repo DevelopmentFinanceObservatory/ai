@@ -79,7 +79,7 @@ from pydantic import ValidationError
 from submission.service import SEARCH_DEFAULT_RATIONALE
 
 from harness import plan_display
-from harness.card_unit import UnitCard, card_unit_change, stored_block, unit_card
+from harness.card_unit import UnitCard, card_changes, card_unit_change, known_blocks, unit_card
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.fatal_codes import stated_refusal, wire_error
 from harness.graph.events import AgentStatus, GraphEvent, PlannerStarted, StepProgress
@@ -1334,6 +1334,36 @@ def _choice_members(
     }
 
 
+def _decision_kind(
+    decision: Decision | None, plan: PlannerPlan, unit_offers: Mapping[str, UnitOffer]
+) -> str | None:
+    """What `decision` settles (`harness.wire.DecisionKind`): `unit` for a unit
+    question's row and a decision fixing the unit or its price basis, `count`
+    for the row of how pinned sources' flows are counted, a scope choice's
+    axis, `years` for a decision fixing the period or its first or last year,
+    `places` for one fixing the places; `None` for any other."""
+    if decision is None:
+        return None
+    fixes = decision.fixes
+    kinds = (
+        (decision.slot in unit_offers, "unit"),
+        (plan_display.count_choice_id(plan, decision) is not None, "count"),
+        (decision.scope is not None, decision.scope.axis if decision.scope else None),
+        (fixes is not None and (fixes.unit is not None or fixes.prices is not None), "unit"),
+        (
+            fixes is not None
+            and (
+                fixes.period is not None
+                or fixes.window_start is not None
+                or fixes.window_end is not None
+            ),
+            "years",
+        ),
+        (fixes is not None and fixes.entities is not None, "places"),
+    )
+    return next((kind for holds, kind in kinds if holds), None)
+
+
 def _unit_members(decision: Decision, offer: UnitOffer) -> dict[str, Any]:
     """The `PlanDecision` members of the row stating a unit question's whole
     unit `decision`: its row id, `offer` as `unit`, and as options the whole
@@ -1449,6 +1479,7 @@ def plan_approved(
             if (held := baseline.get(decision.choice_id)) != labels[decision.choice_id]
             else None,
             step_ids=decision.step_ids,
+            kind=decision.kind,
         )
         for decision in card.decisions or ()
         if decision.choice_id is not None
@@ -1759,10 +1790,14 @@ class _Translator:
         surface_recorder: _RecordingSurface | None = None,
         approving: PlanProposed | None = None,
         restored: Sequence[PlanApproved] = (),
+        places: bool = False,
     ) -> None:
         self._conversation = conversation
         self._recorder = recorder
         self._surface_recorder = surface_recorder
+        # Whether a card offers a change of the places its roles bind, which
+        # Search's places door serves (`harness.place_options`).
+        self._places = places
         # The plan card the user approved on this segment's first answer to
         # its interrupt; `plan.approved` states it once the `approve` node
         # takes the approval, and only then.
@@ -2306,7 +2341,7 @@ class _Translator:
                 # refuses a card off the canvas (`harness.card_unit.unit_move`).
                 lands = record.land and self._conversation.auto_add
                 card = (
-                    self._unit_card(component, record.card_lineage, created=created)
+                    self._changeable_card(component, record.card_lineage, created=created)
                     if lands
                     else None
                 )
@@ -2324,25 +2359,30 @@ class _Translator:
                 )
         return frames
 
-    def _unit_card(
+    def _changeable_card(
         self,
         component: dict[str, Any],
         lineage: CardLineage | None,
         *,
         created: ComponentCreated,
     ) -> UnitCard | None:
-        """The `UnitCard` of `component` when its unit can change, with its
-        `unit_change` set on `created`: a card drawing one retrieval's own
-        frame of a spec whose Search block, this turn's or one an earlier
-        turn kept, converts it (`harness.card_unit`)."""
-        card = unit_card(component, lineage)
+        """The `UnitCard` of `component` when it can change, with its
+        `unit_change` and `card_changes` set on `created`: a card drawing one
+        retrieval's own frame of a spec whose Search block, this turn's or one
+        an earlier turn kept, converts its unit, offers other years, or binds
+        places (`harness.card_unit`)."""
+        c = self._conversation
+        blocks = known_blocks(c.turn_specs, c.turns)
+        card = unit_card(component, lineage, blocks)
         if card is None:
             return None
-        c = self._conversation
-        change = card_unit_change(card, stored_block(c.turn_specs, c.turns, card.spec_id))
-        if change is None:
+        block = blocks.get(card.spec_id)
+        created.unit_change = card_unit_change(card, block)
+        created.card_changes = card_changes(
+            card, block, fact_summary=component.get("fact_summary"), places=self._places
+        )
+        if created.unit_change is None and created.card_changes is None:
             return None
-        created.unit_change = change
         return card
 
     async def _component_frames(
@@ -2661,6 +2701,7 @@ class _Translator:
                             decision.get("resolved_by", ""), "default"
                         ),
                         "step_ids": decision_steps.get(decision["slot"]),
+                        "kind": _decision_kind(held, plan, unit_offers),
                         # A unit row words its choice and alternatives as its options.
                         **_choice_members(
                             held,

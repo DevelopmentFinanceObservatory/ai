@@ -689,6 +689,11 @@ class ConversationState:
     # (`harness.graph.state.ORCHESTRATOR_APPLIED_KEY`). `close_turn` keeps it
     # with the turn's record as `applied_choice`.
     turn_applied_choice: dict[str, Any] | None = None
+    # The card a card change (`apply_unit`, `apply_change`) named and what it
+    # changes, `{"component_id", "kind", "role"?}` as `harness.wire.
+    # CardChangeMark` states it, set by `harness.studio`; `close_turn` keeps
+    # it with the turn's record as `card_change`.
+    turn_card_change: dict[str, Any] | None = None
     # The option label each scope choice of the turn's plan held on the card
     # the user first switched it from, by the row's choice id, kept from the
     # first switch of the turn on (`/interrupt`). `plan.approved` names it
@@ -1197,6 +1202,8 @@ class ConversationState:
             record["plans"] = list(self.turn_plans)
         if self.turn_applied_choice:
             record["applied_choice"] = dict(self.turn_applied_choice)
+        if self.turn_card_change:
+            record["card_change"] = dict(self.turn_card_change)
         # A source only the translator or the canvas found is read here too,
         # so a later turn's planner is shown it beside the ones a search
         # returned (`prior_ledger_state`).
@@ -1440,6 +1447,7 @@ class ConversationState:
         self.turn_readings = []
         self.turn_specs = {}
         self.turn_applied_choice = None
+        self.turn_card_change = None
         self.turn_approved = []
         self.turn_plan_frames = {}
         self.turn_recorded = False
@@ -2289,18 +2297,22 @@ def _replace_block(
     *,
     old_component_id: str,
     component: dict[str, Any],
-    retitle: Callable[[str], str] | None = None,
+    rewrite: Callable[[str], str | None] | None = None,
+    unit: bool = False,
 ) -> bool:
     """Swap the named card's block for `component`, in place. The new block
     keeps the old one's `pinned` flag and card meta (`CardMeta`, the user's
     note and labels), and a layout hint naming the old card names the new one
     in its place, so nothing on the canvas stays on the old id.
 
-    `retitle` marks a unit change: it rewrites the words of the kept meta's
-    subtitle, description and axis labels that name the old unit
-    (`harness.card_unit.retitled`), and a `comparison` hint, which aligns its
-    members' units, drops the card, a hint left with fewer than two members
-    going with it. A `row` hint keeps the card.
+    `rewrite` rewrites the kept meta's subtitle, description and axis labels
+    for a card changed in place: a unit change names the new unit where they
+    named the old (`harness.card_unit.retitled`), and a change of years or
+    places names the new ones, dropping a word that still names the old
+    (`harness.studio_edit._rewritten`). `unit` marks a unit change, whose
+    card a `comparison` hint, which aligns its members' units, drops, a hint
+    left with fewer than two members going with it. A `row` hint keeps the
+    card.
 
     True iff the canvas shows `component` in the slot: a block was
     replaced, or the canvas already held `component`'s block. A card that
@@ -2317,10 +2329,10 @@ def _replace_block(
     new_id = component["component_id"]
     blocks = [block.model_copy(deep=True) for block in previous.blocks]
     meta = blocks[index].meta
-    if meta is not None and retitle is not None:
+    if meta is not None and rewrite is not None:
         meta = meta.model_copy(
             update={
-                name: retitle(text)
+                name: rewrite(text)
                 for name in ("subtitle", "description", "x_label", "y_label")
                 if isinstance(text := getattr(meta, name), str)
             }
@@ -2338,7 +2350,7 @@ def _replace_block(
         hints = [
             hint.model_copy(update={"members": members})
             for hint in hints
-            if len(members := _swapped_members(hint, old_component_id, new_id, retitle)) >= 2
+            if len(members := _swapped_members(hint, old_component_id, new_id, unit=unit)) >= 2
         ]
     conversation.composition = _next_manifest(
         previous, blocks, actor=CompositionActor.MODEL, layout_hints=hints
@@ -2346,12 +2358,10 @@ def _replace_block(
     return True
 
 
-def _swapped_members(
-    hint: LayoutHint, old_id: str, new_id: str, retitle: Callable[[str], str] | None
-) -> list[str]:
+def _swapped_members(hint: LayoutHint, old_id: str, new_id: str, *, unit: bool) -> list[str]:
     """`hint`'s members with `old_id` named `new_id`, or left out of a
-    `comparison` hint when `retitle` marks a unit change."""
-    if retitle is not None and hint.type is LayoutHintType.COMPARISON:
+    `comparison` hint when `unit` marks a unit change."""
+    if unit and hint.type is LayoutHintType.COMPARISON:
         return [member for member in hint.members if member != old_id]
     return [new_id if member == old_id else member for member in hint.members]
 

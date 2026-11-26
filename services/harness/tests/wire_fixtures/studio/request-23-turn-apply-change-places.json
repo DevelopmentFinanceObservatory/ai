@@ -1,0 +1,16 @@
+{
+  "kind": "turn.request",
+  "schema_version": 1,
+  "conversation_id": "sess_01j9zc0000",
+  "apply_change": {
+    "component_id": "cmp_01j9zc3aqw",
+    "spec_id": "spec_8f3a1c5e9d2b4a7c6e0f1a2b3c4d5e6f",
+    "change": {
+      "kind": "places",
+      "role": "observationAbout",
+      "entities": [
+        "country/KEN"
+      ]
+    }
+  }
+}

@@ -33,7 +33,9 @@ the turn, and writes the card to the canvas (`StudioStore.change_canvas`).
 
 from __future__ import annotations
 
+import functools
 import logging
+import re
 from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -46,10 +48,14 @@ from pydantic import BaseModel
 from harness.card_unit import (
     CARD_UNIT_KEY,
     UNIT_GONE_NOTE,
+    ChangeMove,
+    UnitCard,
     UnitMove,
+    card_changes,
     card_unit_change,
+    joined_words,
+    known_blocks,
     retitled,
-    stored_block,
     unit_card,
 )
 from harness.conversation import current_conversation_key
@@ -85,8 +91,10 @@ from harness.wire import (
     ComponentCreated,
     CompositionActor,
     CompositionUpdated,
+    PlacesChange,
     StepProduced,
     StepStatus,
+    WindowChange,
     component_created,
     component_revised,
 )
@@ -201,8 +209,10 @@ async def edit_events(
     conversation: ConversationState,
     component_id: str,
     message: str,
+    places: bool = False,
 ) -> AsyncGenerator[EditEvent]:
-    """The Edit Card route's events: no resolve, no plan.
+    """The Edit Card route's events: no resolve, no plan. A recreated card
+    offers its places where `places` says Search's places door is on.
 
     Failures serialise into the stream as a stream-fatal error frame, as
     they do in a turn, so a malformed model draft cannot end the transport
@@ -214,6 +224,7 @@ async def edit_events(
             conversation=conversation,
             component_id=component_id,
             message=message,
+            places=places,
         ):
             yield event
     except Exception as exc:
@@ -304,55 +315,277 @@ def _closed_frames(conversation: ConversationState, closed: EditClosed) -> list[
     ]
 
 
-async def unit_events(
+async def change_events(
     *,
     recorder: _RecordingExecutor,
     surface: ToolSurface | None,
     conversation: ConversationState,
-    move: UnitMove,
+    move: UnitMove | ChangeMove,
+    places: bool = False,
 ) -> AsyncGenerator[EditEvent]:
-    """The events of a card's unit change (`TurnRequest.apply_unit`), in code
-    with no model call: Search reads the card's spec in the new unit
-    (`harness.unit_switch.resubmit_unit`, through `surface`), `get_data`
-    fetches it with the arguments that shaped the card's frame
-    (`harness.card_unit.UnitCard.args`), and the card is written again from
-    its stored intent on the new frame and takes its own slot, as an Edit
-    Card recreate does. Its title says the new unit where it named the old
-    (`harness.card_unit.retitled`). The new card carries a fresh
-    `unit_change` starting on the new unit.
+    """The events of a card's change in code with no model call: its unit
+    (`TurnRequest.apply_unit`, a `UnitMove`), or its years or places
+    (`TurnRequest.apply_change`, a `ChangeMove`).
 
-    The turn's record names the change and the new spec_id
-    (`ConversationState.turn_user_message`), and the new reading joins the
-    turn's readings with its block, so the next turn's model reads the card
-    in the new unit. A step Search or the platform refuses ends the turn on
-    its sentence, the card unchanged. Failures serialise as `edit_events`'
-    do."""
+    Every change reads the card, reads its data and redraws it
+    (`_change_flow`). A unit change has Search read the card's spec in the
+    new unit (`harness.unit_switch.resubmit_unit`, through `surface`); a
+    change of years or places reads the card's spec over the new `scope`.
+    Either way `get_data` fetches the spec with the arguments that shaped the
+    card's frame (`harness.card_unit.UnitCard.args`) and the scope the card
+    carries, and the card is written again from its stored intent on the new
+    frame and takes its own slot, as an Edit Card recreate does. Its title,
+    and the words of its slot's card meta, say the new unit, years or places
+    where they named the old (`harness.card_unit.retitled`,
+    `_retitled_years`, `_retitled_place`), and a meta word still naming the
+    old years or places after that is dropped (`_rewritten`). The new card
+    carries fresh offers, places among them where `places` says Search's
+    places door is on, and the scope it was fetched over, so a later change
+    keeps this one.
+
+    The turn's record names the change and the spec_id
+    (`ConversationState.turn_user_message`), and a unit change's new reading
+    joins the turn's readings with its block, so the next turn's model reads
+    the card as it now is. A step Search or the platform refuses, and a
+    retrieval that holds no figures, ends the turn on its sentence, the card
+    unchanged. Failures serialise as `edit_events`' do."""
     try:
-        async for event in _unit_flow(
-            recorder=recorder, surface=surface, conversation=conversation, move=move
+        async for event in _change_flow(
+            recorder=recorder,
+            surface=surface,
+            conversation=conversation,
+            move=move,
+            places=places,
         ):
             yield event
     except Exception as exc:
-        logger.exception("studio unit change failed (trace_id=%s)", conversation.trace_id)
+        logger.exception("studio card change failed (trace_id=%s)", conversation.trace_id)
         yield EditFailed(exc)
 
 
-# What a closing message says before the reason for a unit change that did not land.
+# What a closing message says before the reason for a change that did not land.
 _UNIT_UNCHANGED = "The card is unchanged."
+# The step and closing sentence of a retrieval that holds no figures for the
+# years or places asked.
+_NO_DATA = "The data holds no figures for that choice."
 
 
-async def _unit_flow(
+@dataclass(frozen=True)
+class _Read:
+    """What a change reads its data as: the spec and scope `get_data`
+    fetches, the Search blocks and readings it adds to the turn, and its words
+    for the step label and the record ("in constant 2023 US dollars",
+    "for 2010 to 2024")."""
+
+    spec_id: str
+    scope: dict[str, Any] | None
+    specs: dict[str, Any]
+    readings: list[dict[str, Any]]
+    phrase: str
+
+
+async def _read_change(surface: ToolSurface, move: UnitMove | ChangeMove) -> _Read | UnitRefused:
+    """What `move` fetches: a unit change resubmits the card's spec in the new
+    unit and keeps the card's scope; a change of years or places reads the
+    card's spec over its new scope."""
+    if isinstance(move, ChangeMove):
+        return _Read(
+            spec_id=move.card.spec_id,
+            scope=move.scope,
+            specs={},
+            readings=[],
+            phrase=f"for {move.words}",
+        )
+    words = unit_words(move.unit, move.offer)
+    resubmitted = await resubmit_unit(
+        surface,
+        reading=move.reading,
+        block=move.block,
+        unit=move.unit.model_dump(mode="json", exclude_none=True),
+        label=move.title,
+    )
+    if isinstance(resubmitted, UnitRefused):
+        return resubmitted
+    return _Read(
+        spec_id=resubmitted.spec_id,
+        scope=move.card.scope,
+        specs={resubmitted.spec_id: dict(resubmitted.spec)},
+        readings=_read_again(move, resubmitted),
+        phrase=f"in {words[:1].lower()}{words[1:]}",
+    )
+
+
+def _redrawn_intent(
+    stored: Mapping[str, Any], frame_ref: Any, move: UnitMove | ChangeMove
+) -> tuple[dict[str, Any], Callable[[str], str | None]]:
+    """The intent `move` redraws its card from, on `frame_ref`, and how it
+    rewrites the words of the card's meta (`_rewritten`): `None` drops a word
+    that still names the old years or places.
+
+    Every change drops the `order`'s period, since the new frame can hold
+    values at other periods. A change of years or places also drops the
+    intent's `window`, a period pinned on the old frame or a count of latest
+    periods that would override the new years, and a change of places drops
+    each `select` entry naming a place the card no longer shows."""
+    intent = {**stored, "frame_ref": frame_ref}
+    title_words: Callable[[str], str] | None = None
+    match move:
+        case UnitMove():
+
+            def retitle(text: str) -> str:
+                return retitled(text, old=move.served, new=move.unit, offer=move.offer)
+
+        case ChangeMove(change=WindowChange() as change):
+            window = move.offer.window
+            assert window is not None, "a change of years is admitted only on an offer"
+            old, new = (window.start_year, window.end_year), (change.start_year, change.end_year)
+
+            def retitle(text: str) -> str:
+                return _retitled_years(text, old=old, new=new)
+
+            def title_words(text: str) -> str:
+                return _retitled_years(text, old=old, new=new, lone=True)
+
+            def stale(text: str) -> bool:
+                return _names_years(text, old=old, new=new)
+
+            intent.pop("window", None)
+        case ChangeMove(change=PlacesChange() as change):
+            places = next(p for p in move.offer.places or () if p.role == change.role)
+            gone = {o.id for o in places.chosen} - set(change.entities)
+            old_labels, new_labels = list(move.old), list(move.new)
+            left = [label for label in old_labels if label not in new_labels]
+
+            def retitle(text: str) -> str:
+                return _retitled_place(text, old=old_labels, new=new_labels)
+
+            def stale(text: str) -> bool:
+                return any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", text) for w in left)
+
+            intent.pop("window", None)
+            select = intent.get("select")
+            if isinstance(select, Mapping):
+                intent["select"] = {
+                    key: value for key, value in select.items() if not _names_any(value, gone)
+                }
+    if isinstance(stored.get("title"), str):
+        intent["title"] = (title_words or retitle)(stored["title"])
+    held = intent.get("order")
+    if isinstance(held, dict) and "period" in held:
+        intent["order"] = _without_period(held)
+    if isinstance(move, UnitMove):
+        return intent, retitle
+    return intent, functools.partial(_rewritten, retitle=retitle, stale=stale)
+
+
+def _rewritten(
+    text: str, *, retitle: Callable[[str], str], stale: Callable[[str], bool]
+) -> str | None:
+    """`text`, a word of a card's meta, naming the new years or places where
+    it named the old (`retitle`), or `None` when it still names the old ones
+    after that (`stale`), so the card shows what the chart derives from its
+    data in its place."""
+    rewritten = retitle(text)
+    return None if stale(rewritten) else rewritten
+
+
+def _names_years(text: str, *, old: tuple[int, int], new: tuple[int, int]) -> bool:
+    """Whether `text` names a year that bounds `old` and not `new`, outside a
+    unit's words (`_period_year`)."""
+    gone = set(old) - set(new)
+    return any(_period_year(text, year) for year in gone)
+
+
+# The words around a year that make it part of a unit, such as "constant
+# 2023 US dollars" or "2023 prices", where it names a base year.
+_UNIT_BEFORE = re.compile(r"(?:constant|base\s+year)\s+$", re.IGNORECASE)
+_UNIT_AFTER = re.compile(r"^\s+(?:prices|US\s+dollars|dollars|euros|[A-Z]{3}\b)")
+
+
+# The words before a lone year that make it the start or the end of a period.
+_FROM_WORD = re.compile(r"\b(?:since|from)\s+$", re.IGNORECASE)
+_UNTIL_WORD = re.compile(r"\b(?:to|until|through)\s+$", re.IGNORECASE)
+
+
+def _period_year(text: str, year: int) -> list[re.Match[str]]:
+    """Each place `text` names `year` as a period: a standalone year outside
+    a unit's words."""
+    return [
+        m
+        for m in re.finditer(rf"(?<!\d){year}(?!\d)", text)
+        if not _UNIT_BEFORE.search(text[: m.start()]) and not _UNIT_AFTER.match(text[m.end() :])
+    ]
+
+
+def _names_any(value: Any, refs: set[str]) -> bool:
+    """Whether `value`, a `select` entry, names one of the places `refs`."""
+    values = value if isinstance(value, list) else [value]
+    return any(isinstance(v, str) and v.removeprefix("dcid:") in refs for v in values)
+
+
+def _retitled_years(
+    title: str, *, old: tuple[int, int], new: tuple[int, int], lone: bool = False
+) -> str:
+    """`title` with the range `old` it names, "2015 to 2023" or the two years
+    joined by a hyphen or an en dash, naming `new` in the same form. With
+    `lone`, a year left that bounded `old` and names a period, outside a
+    unit's words (`_period_year`), then names the new period: the new start
+    year after "since" or "from", the new end year after "to", "until" or
+    "through", and otherwise the one year when `new` starts and ends on it,
+    else "<start> to <end>". A year that bounded no end of `old` stays, and so
+    does every year when `new` is `old`."""
+    pattern = rf"(?<!\d){old[0]}(\s*[-\u2013]\s*|\s+to\s+){old[1]}(?!\d)"
+    words = str(new[0]) if new[0] == new[1] else f"{new[0]} to {new[1]}"
+
+    def lone_years(text: str) -> str:
+        if not lone or old == new:
+            return text
+        found = sorted(
+            (m for year in dict.fromkeys(old) for m in _period_year(text, year)),
+            key=lambda m: m.start(),
+        )
+        for match in reversed(found):
+            before = text[: match.start()]
+            if _FROM_WORD.search(before):
+                said = str(new[0])
+            elif _UNTIL_WORD.search(before):
+                said = str(new[1])
+            else:
+                said = words
+            text = f"{before}{said}{text[match.end() :]}"
+        return text
+
+    # The ranges are rewritten whole, and the lone years looked for only
+    # between them, so a bound the new range shares is not rewritten twice.
+    parts, at = [], 0
+    for match in re.finditer(pattern, title):
+        parts += [lone_years(title[at : match.start()]), f"{new[0]}{match.group(1)}{new[1]}"]
+        at = match.end()
+    return "".join([*parts, lone_years(title[at:])])
+
+
+def _retitled_place(title: str, *, old: list[str], new: list[str]) -> str:
+    """`title` naming `new` where it names `old`: a swap of one place renames
+    it, and any other change of places names every place shown where the
+    title listed every place it showed before."""
+    said = joined_words(old)
+    if not said:
+        return title
+    pattern = rf"(?<!\w){re.escape(said)}(?!\w)"
+    return re.sub(pattern, lambda _: joined_words(new), title, count=1)
+
+
+async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse the change
     *,
     recorder: _RecordingExecutor,
     surface: ToolSurface | None,
     conversation: ConversationState,
-    move: UnitMove,
+    move: UnitMove | ChangeMove,
+    places: bool,
 ) -> AsyncGenerator[EditEvent]:
-    """`unit_events`' steps, their frames numbered by `edit_event_frames`."""
-    words = unit_words(move.unit, move.offer)
-    in_sentence = words[:1].lower() + words[1:]
+    """`change_events`' steps, their frames numbered by `edit_event_frames`."""
     if surface is None:
-        for event in _close("Changing a card's unit is not enabled on this deployment."):
+        for event in _close("Changing a card in place is not enabled on this deployment."):
             yield event
         return
     described = await recorder(tool="describe_component", args={"component_id": move.component_id})
@@ -363,30 +596,29 @@ async def _unit_flow(
     stored = (described.get("component_body") or {}).get("stored_intent") or {}
     yield _step("u1", "Read the card")
 
-    label = f"Read the data in {in_sentence}"
-    resubmitted = await resubmit_unit(
-        surface,
-        reading=move.reading,
-        block=move.block,
-        unit=move.unit.model_dump(mode="json", exclude_none=True),
-        label=move.title,
-    )
-    if isinstance(resubmitted, UnitRefused):
-        yield _step("u2", label, failed=resubmitted.reason)
-        for event in _close(f"{_UNIT_UNCHANGED} {resubmitted.reason}"):
+    read = await _read_change(surface, move)
+    if isinstance(read, UnitRefused):
+        words = unit_words(move.unit, move.offer) if isinstance(move, UnitMove) else ""
+        label = f"Read the data in {words[:1].lower()}{words[1:]}"
+        yield _step("u2", label, failed=read.reason)
+        for event in _close(f"{_UNIT_UNCHANGED} {read.reason}"):
             yield event
         return
-    fetched = await recorder(
-        tool="get_data", args={"spec_id": resubmitted.spec_id, **move.card.args}
-    )
+    label = f"Read the data {read.phrase}"
+    fetched = await recorder(tool="get_data", args=move.card.fetch_args(read.spec_id, read.scope))
     frame_refs = fetched.get("frame_refs") or []
     if fetched.get("outcome") != "ok" or not frame_refs:
         for event in _refused("u2", label, _UNIT_UNCHANGED, fetched):
             yield event
         return
+    if fetched.get("rows") == 0:
+        yield _step("u2", label, failed=_NO_DATA)
+        for event in _close(f"{_UNIT_UNCHANGED} {_NO_DATA}"):
+            yield event
+        return
     yield _step("u2", label)
 
-    # The card left the canvas while its new unit was read: the change is
+    # The card left the canvas while its data was read: the change is
     # refused as the route refuses a card off the canvas, and nothing is
     # written.
     gone = (_step("u3", "Redraw the card", failed=UNIT_GONE_NOTE), EditClosed(UNIT_GONE_NOTE))
@@ -395,35 +627,23 @@ async def _unit_flow(
             yield event
         return
 
-    def retitle(text: str) -> str:
-        return retitled(text, old=move.served, new=move.unit, offer=move.offer)
-
-    intent = {**stored, "frame_ref": frame_refs[0]}
-    if isinstance(stored.get("title"), str):
-        intent["title"] = retitle(stored["title"])
-    held = intent.get("order")
-    if isinstance(held, dict) and "period" in held:
-        # The new unit can hold values at other periods than the old.
-        intent["order"] = _without_period(held)
+    intent, retitle = _redrawn_intent(stored, frame_refs[0], move)
     written = await recorder(tool="write_component", args={"intent": intent})
     if written.get("outcome") != "ok" or not written.get("component"):
         for event in _refused("u3", "Redraw the card", _UNIT_UNCHANGED, written):
             yield event
         return
-    block = dict(resubmitted.spec)
-    readings = _read_again(move, resubmitted)
-    record_line = f"Changed {move.title} to {in_sentence} ({resubmitted.spec_id})."
-    display_line = f"Change {move.title} to {in_sentence}."
+    shown = read.phrase.removeprefix("in ").removeprefix("for ")
+    record_line = f"Changed {move.title} to {shown} ({read.spec_id})."
+    display_line = f"Change {move.title} to {shown}."
 
     def record(work: ConversationState) -> None:
         work.turn_user_message = record_line
-        work.turn_readings = [*work.turn_readings, *readings]
+        work.turn_readings = [*work.turn_readings, *read.readings]
 
     # The card shows the change; the record keeps the sentence and the
     # spec_id for the next turn's model, and a state read shows neither.
-    closed = EditClosed(
-        f"The card now shows {in_sentence}.", shown=False, user_display=display_line
-    )
+    closed = EditClosed(f"The card now shows {shown}.", shown=False, user_display=display_line)
     yield _swapped(
         recorder,
         conversation,
@@ -432,11 +652,16 @@ async def _unit_flow(
         step_id="u3",
         step_label="Redraw the card",
         closed=closed,
-        specs={resubmitted.spec_id: block},
+        specs=read.specs or None,
         also=record,
-        retitle=retitle,
+        rewrite=retitle,
+        unit=isinstance(move, UnitMove),
+        places=places,
         # The card left the canvas while it was written.
         gone=gone,
+        card=UnitCard(
+            spec_id=read.spec_id, args=move.card.args, scope=read.scope, labels=move.card.labels
+        ),
     )
 
 
@@ -467,6 +692,7 @@ async def _edit_flow(
     conversation: ConversationState,
     component_id: str,
     message: str,
+    places: bool,
 ) -> AsyncGenerator[EditEvent]:
     """Verified platform rules (2026-08-28, hosted dev): a revision may
     change only title/select; type/window/frame_ref edits recreate the
@@ -621,6 +847,7 @@ async def _edit_flow(
         step_id="e2",
         step_label=step_label,
         closed=EditClosed(closing),
+        places=places,
         reframed=_reframes(stored, intent),
     )
 
@@ -636,9 +863,12 @@ def _swapped(
     closed: EditClosed,
     specs: Mapping[str, Any] | None = None,
     also: Callable[[ConversationState], None] | None = None,
-    retitle: Callable[[str], str] | None = None,
+    rewrite: Callable[[str], str | None] | None = None,
+    unit: bool = False,
+    places: bool = False,
     gone: tuple[ActivityStep, EditClosed] | None = None,
     reframed: bool = False,
+    card: UnitCard | None = None,
 ) -> CardSwap:
     """The swap of `component`, a card written to take card
     `old_component_id`'s slot, ending the edit on `closed`: the step
@@ -648,13 +878,17 @@ def _swapped(
     that took the slot names the old card (`REPLACED_CARD_KEY`), as its
     `component.created` does in `replaces`. The new card names the plan step
     the old card's entry names (`PLAN_LINK_KEY`), in its `created_from` and
-    its entry, since it draws that step's result in a new form. A card whose unit can
-    change carries its `unit_change` and keeps its `UnitCard` with its entry
-    (`harness.card_unit`), its Search block read from `specs` and else from
-    the conversation. `also` makes the write's other changes, and `specs`
-    joins the turn's blocks once it commits. `retitle` marks a unit change,
-    which `_replace_block` carries into the slot's card meta and layout
-    hints. Given `gone`, the swap needs the old card's slot: a canvas that
+    its entry, since it draws that step's result in a new form. A card that
+    can change carries its `unit_change` and `card_changes` and keeps its
+    `UnitCard` with its entry (`harness.card_unit`), its Search block read
+    from `specs` and else from the conversation, places among its offers
+    where `places` says Search's places door is on. `card` is the `UnitCard` a
+    change fetched the new card as; without it the card is read off its
+    frame (`unit_card`). `also` makes the write's other changes, and `specs`
+    joins the turn's blocks once it commits. `rewrite` rewrites the words of
+    the slot's card meta for a change of the card in place, and `unit` marks
+    a unit change, which drops the card from a `comparison` hint
+    (`_replace_block`). Given `gone`, the swap needs the old card's slot: a canvas that
     no longer holds it, read under the write's lock, takes only the new
     card's write token, so the conversation keeps the card it wrote off the
     canvas, and the edit ends on `gone`. A `closed` that is shown carries the
@@ -664,13 +898,17 @@ def _swapped(
     created = component_created(component, step_id=step_id, plan=plan)
     token = recorder.write_token(component)
     lineage = recorder.card_lineage(component)
-    card = unit_card(component, lineage)
+    blocks = {**known_blocks(conversation.turn_specs, conversation.turns), **(specs or {})}
+    drawn = unit_card(component, lineage, blocks)
+    card = card if card is not None and drawn is not None else drawn
     if card is not None:
-        block = (specs or {}).get(card.spec_id) or stored_block(
-            conversation.turn_specs, conversation.turns, card.spec_id
-        )
+        block = blocks.get(card.spec_id)
         created.unit_change = card_unit_change(card, block)
-    kept = card.as_json() if card is not None and created.unit_change is not None else None
+        created.card_changes = card_changes(
+            card, block, fact_summary=component.get("fact_summary"), places=places
+        )
+    changes = created.unit_change is not None or created.card_changes is not None
+    kept = card.as_json() if card is not None and changes else None
     runs = card_runs(component, lineage)
     if closed.shown:
         held_line = _held_line(
@@ -706,7 +944,11 @@ def _swapped(
         if also is not None:
             also(work)
         swapped = _replace_block(
-            work, old_component_id=old_component_id, component=component, retitle=retitle
+            work,
+            old_component_id=old_component_id,
+            component=component,
+            rewrite=rewrite,
+            unit=unit,
         )
         if not swapped:
             return SwapLanded.HELD

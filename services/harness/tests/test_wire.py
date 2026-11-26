@@ -39,6 +39,7 @@ from harness.wire import (
     ComponentRevised,
     CompositionMutation,
     CompositionUpdated,
+    ConversationRead,
     Done,
     ElicitationRequest,
     ErrorFrame,
@@ -48,6 +49,7 @@ from harness.wire import (
     OperationAxis,
     OperationVerb,
     OptionAnswer,
+    PlacesOptions,
     PlanApproved,
     PlanDecision,
     PlanOperation,
@@ -96,6 +98,7 @@ EVENT_FIXTURES = {
     "event-20-elicitation-multi-select.json": ElicitationRequest,
     "event-21-elicitation-unit-pick.json": ElicitationRequest,
     "event-22-plan-proposed-unit.json": PlanProposed,
+    "event-23-component-card-changes.json": ComponentCreated,
 }
 
 REQUEST_FIXTURES = {
@@ -120,6 +123,15 @@ REQUEST_FIXTURES = {
     "request-19-turn-client-features.json": TurnRequest,
     "request-20-interrupt-switch-unit.json": InterruptResponse,
     "request-21-cancel-turn.json": CancelRequest,
+    "request-22-turn-apply-change-window.json": TurnRequest,
+    "request-23-turn-apply-change-places.json": TurnRequest,
+}
+
+
+# The answers of the read routes, by fixture.
+RESPONSE_FIXTURES = {
+    "response-01-places-options.json": PlacesOptions,
+    "response-02-state-card-change.json": ConversationRead,
 }
 
 
@@ -130,7 +142,16 @@ def _load(name: str) -> dict:
 def test_every_contract_fixture_is_covered() -> None:
     """A fixture file added to the contract without a pin here fails this test."""
     on_disk = {p.name for p in FIXTURES.glob("*.json")}
-    assert on_disk == set(EVENT_FIXTURES) | set(REQUEST_FIXTURES)
+    assert on_disk == set(EVENT_FIXTURES) | set(REQUEST_FIXTURES) | set(RESPONSE_FIXTURES)
+
+
+@pytest.mark.parametrize("name", sorted(RESPONSE_FIXTURES))
+def test_response_fixture_round_trips_exactly(name: str) -> None:
+    raw = _load(name)
+
+    answer = RESPONSE_FIXTURES[name].model_validate(raw)
+
+    assert answer.model_dump(mode="json", exclude_unset=True) == raw
 
 
 @pytest.mark.parametrize("name", sorted(EVENT_FIXTURES))
@@ -333,8 +354,39 @@ def test_a_cancel_naming_a_turn_out_of_range_is_refused(turn_index: int) -> None
         STUDIO_REQUEST_ADAPTER.validate_python(raw)
 
 
-def test_apply_unit_comes_alone() -> None:
-    raw = {**_load("request-16-turn-apply-unit.json"), "message": "hello"}
+@pytest.mark.parametrize(
+    "fixture", ["request-16-turn-apply-unit.json", "request-22-turn-apply-change-window.json"]
+)
+def test_a_card_change_comes_alone(fixture: str) -> None:
+    raw = {**_load(fixture), "message": "hello"}
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
+def test_apply_unit_and_apply_change_do_not_come_together() -> None:
+    raw = {
+        **_load("request-16-turn-apply-unit.json"),
+        "apply_change": _load("request-22-turn-apply-change-window.json")["apply_change"],
+    }
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"kind": "window", "start_year": 2024, "end_year": 2023},
+        {"kind": "places", "role": "observationAbout", "entities": []},
+        {"kind": "places", "role": "observationAbout", "entities": [""]},
+        {"kind": "breakdown", "level": "sector"},
+    ],
+    ids=["reversed-years", "no-places", "blank-place", "unknown-kind"],
+)
+def test_a_card_change_that_names_no_change_is_refused(change: dict[str, Any]) -> None:
+    raw = _load("request-22-turn-apply-change-window.json")
+    raw["apply_change"]["change"] = change
 
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python(raw)

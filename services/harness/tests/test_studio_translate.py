@@ -109,10 +109,13 @@ from planner.plan import (
     DatasetRequirement,
     Decision,
     DecisionFixes,
+    DecisionScope,
+    Entity,
     PinSource,
     Plan,
     RequirementSide,
     ResolvedBy,
+    ScopeOptionState,
     SessionState,
     ShareOfRequirement,
     Unit,
@@ -624,7 +627,11 @@ def test_the_row_stating_how_a_pin_is_counted_is_a_row_the_card_can_switch() -> 
 
     row = {row.id: row for row in frame.decisions}[counted.slot]
     gross, net = (decision_option_id(label) for label in counted.options)
-    assert (row.choice_id, row.active_option_id) == (f"{dataset.id}:count", gross)
+    assert (row.choice_id, row.active_option_id, row.kind) == (
+        f"{dataset.id}:count",
+        gross,
+        "count",
+    )
     assert row.options == [
         PlanDecisionOption(option_id=gross, label="gross disbursements", status="available"),
         PlanDecisionOption(option_id=net, label="net disbursements", status="available"),
@@ -632,6 +639,45 @@ def test_the_row_stating_how_a_pin_is_counted_is_a_row_the_card_can_switch() -> 
     assert PlanAction.SWITCH in frame.actions
     choices = translator._conversation.pending[frame.interrupt_id].choices
     assert choices[f"{dataset.id}:count"].active == gross
+
+
+@pytest.mark.parametrize(
+    ("fixes", "scope", "kind"),
+    [
+        (DecisionFixes(window_start=2010), None, "years"),
+        (DecisionFixes(entities=(Entity(name="Kenya", role="destination"),)), None, "places"),
+        (
+            DecisionFixes(),
+            DecisionScope(
+                choice_id="spec_x:sector",
+                axis="sector",
+                options=(
+                    ScopeOptionState(option_id="sector:120", status="available"),
+                    ScopeOptionState(option_id="sector:130", status="available"),
+                ),
+            ),
+            "sector",
+        ),
+        (DecisionFixes(measure="gross"), None, None),
+    ],
+    ids=["years", "places", "scope-axis", "other"],
+)
+def test_a_plan_decision_says_what_it_settles(
+    fixes: DecisionFixes, scope: DecisionScope | None, kind: str | None
+) -> None:
+    decision = Decision(
+        slot="d_x",
+        description="A choice.",
+        options=("a", "b"),
+        chosen="a",
+        resolved_by=ResolvedBy.USER,
+        rationale="The user chose it.",
+        fixes=fixes,
+        scope=scope,
+    )
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
+
+    assert studio_translate_module._decision_kind(decision, plan, {}) == kind
 
 
 def test_a_planner_decision_option_keeps_its_id_when_a_replan_reorders_the_options() -> None:
@@ -933,6 +979,7 @@ def test_a_unit_question_s_row_offers_its_unit_and_the_whole_units_beside_it(
         [label for _, label in options],
     )
     assert (rows[own.slot].choice_id, rows[own.slot].unit) == (None, None)
+    assert (unit_row.kind, rows[own.slot].kind) == ("unit", "unit")
     assert PlanAction.SWITCH in card.actions
     (pending,) = translator._conversation.pending.values()
     assert set(pending.choices[decision_choice_id(row)].options) == {o for o, _ in options}

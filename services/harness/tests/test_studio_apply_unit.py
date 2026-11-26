@@ -11,18 +11,21 @@ from __future__ import annotations
 
 import ast
 import copy
+import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
+from common.live_apis import LiveApisError
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from compiler.surface import ProgressCallback, ToolCallResult, ToolId
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.card_unit import UNIT_GONE_NOTE
 from harness.graph.state import frame_id_for
 from harness.provenance import CARD_LINEAGE_KEY, CardLineage, ProvenanceInput
+from harness.studio_edit import _retitled_years
 from harness.studio_state import PLAN_LINK_KEY, DatabaseUnavailable
 from harness.studio_store import StudioStore
 from harness.wire import CompositionManifest, PlanLink
@@ -59,19 +62,31 @@ _CONSTANT_2023 = {"currency": "USD", "prices": "constant", "base_year": 2023}
 _TITLE = "France's aid to Kenya, current US dollars"
 
 
-def _component(component_id: str, ref: Mapping[str, str], title: str) -> dict[str, Any]:
-    """The platform's card `component_id` on frame `ref`, titled `title`."""
+def _component(
+    component_id: str,
+    ref: Mapping[str, str],
+    title: str,
+    window: tuple[int, int] = (2015, 2023),
+) -> dict[str, Any]:
+    """The platform's card `component_id` on frame `ref`, titled `title`,
+    drawing the years `window`."""
     component = copy.deepcopy(COMPONENT)
     component["component_id"] = component_id
     component["payload"] = resolved_revision(
         "stat_card", component_id=component_id, revision=1, frame_ref=dict(ref), title=title
     )
     component["fact_summary"]["component_id"] = component_id
+    component["fact_summary"]["window"] = {"start": str(window[0]), "end": str(window[1])}
     component["provenance"]["inputs"] = [dict(ref)]
     return component
 
 
-def _written(component_id: str, ref: Mapping[str, str], title: str) -> dict[str, Any]:
+def _written(
+    component_id: str,
+    ref: Mapping[str, str],
+    title: str,
+    window: tuple[int, int] = (2015, 2023),
+) -> dict[str, Any]:
     """A `write_component` outcome for that card, with the lineage of the one
     `get_data` retrieval it draws, which summed the spec's StatVars."""
     manifest = {
@@ -87,7 +102,7 @@ def _written(component_id: str, ref: Mapping[str, str], title: str) -> dict[str,
     return {
         "outcome": "ok",
         "frame_refs": [],
-        "component": _component(component_id, ref, title),
+        "component": _component(component_id, ref, title, window),
         CARD_LINEAGE_KEY: lineage,
         WRITE_TOKEN_KEY: "cmw_" + "t" * 22,
     }
@@ -838,3 +853,695 @@ def test_a_card_replaces_another_only_on_the_edit_routes_which_never_pause() -> 
         "harness/studio_edit.py:_swapped",
     }
     assert not named & _PAUSING_FRAMES
+
+
+# --- `apply_change`: a card's years and places, through the unit's own flow --
+
+
+def _change_body(component_id: str, spec_id: str, change: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": "turn.request",
+        "schema_version": 1,
+        "conversation_id": CONVERSATION,
+        "apply_change": {"component_id": component_id, "spec_id": spec_id, "change": dict(change)},
+    }
+
+
+_YEARS = {"kind": "window", "start_year": 2010, "end_year": 2024}
+
+
+class _Changer:
+    """The executor of a chain of changes on one card: each reads the card it
+    is asked of, fetches a frame of its own for each `get_data` call, and
+    redraws the card as the next id, drawing the years the fetch's scope
+    names, else the years the card drew."""
+
+    def __init__(self, *, rows: int = 12) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.rows = rows
+        self.drawn = 1
+        self.title = _TITLE
+        self.window = (2015, 2023)
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], **_: Any) -> dict[str, Any]:
+        self.calls.append({"tool": tool, "args": args})
+        if tool == "describe_component":
+            return _described(args["component_id"], _REF, self.title)
+        if tool == "get_data":
+            window = (args.get("scope") or {}).get("window")
+            if window is not None:
+                self.window = (window["start_year"], window["end_year"])
+            digest = hashlib.sha1(json.dumps(args, sort_keys=True).encode()).hexdigest()
+            ref = {"spec_id": "spec_" + digest[:32], "content_version": "cv_" + "5" * 32}
+            return {"outcome": "ok", "frame_refs": [ref], "summary": "ok", "rows": self.rows}
+        assert tool == "write_component"
+        self.drawn += 1
+        self.title = args["intent"]["title"]
+        return _written(
+            f"cmp_01unit{self.drawn:04d}", args["intent"]["frame_ref"], self.title, self.window
+        )
+
+    def fetched(self) -> list[dict[str, Any]]:
+        return [call["args"] for call in self.calls if call["tool"] == "get_data"]
+
+
+def _changes_app(pg_engine: AsyncEngine) -> Any:
+    return _app(
+        *_first_turn(),
+        resolver=CannedSearch(_ENVELOPE),
+        executor=ScriptedExecutor(_first_results()),
+        tool_surface=_Search(),  # ty: ignore[invalid-argument-type] -- the one tool a unit change reads
+        engine=pg_engine,
+    )
+
+
+async def test_a_card_offers_its_years_and_a_change_of_years_redraws_it_over_them(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The card draws 2015 to 2023 of a spec Search serves from 1978 to 2024.
+    A change of years fetches the spec over the new window, keeps the card's
+    arguments, and redraws the card in its slot, retitled, with both offers."""
+    app = _changes_app(pg_engine)
+    changer = _Changer()
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        offered = _frame(first, "component.created")["card_changes"]
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _YEARS)
+        )
+        read = await client.get(
+            "/api/studio/state", params={"conversation_id": CONVERSATION, "since": 1}, headers=AUTH
+        )
+
+    assert offered == {
+        "spec_id": _SPEC,
+        "window": {"start_year": 2015, "end_year": 2023, "first_year": 1978, "last_year": 2024},
+    }
+    assert changer.fetched() == [
+        {
+            "spec_id": _SPEC,
+            "stat_vars": "sum",
+            "scope": {"window": {"kind": "range", "start_year": 2010, "end_year": 2024}},
+        }
+    ]
+    created = _frame(frames, "component.created")
+    assert (created["component_id"], created["replaces"]) == ("cmp_01unit0002", "cmp_01unit0001")
+    assert created["card_changes"]["window"]["start_year"] == 2010
+    assert created["unit_change"]["spec_id"] == _SPEC
+    assert [f["step_id"] for f in frames if f["event"] == "activity.step"] == ["u1", "u2", "u3"]
+    assert [b["component_id"] for b in _frame(frames, "done")["composition"]["blocks"]] == [
+        "cmp_01unit0002"
+    ]
+    ((card,),) = [closed["cards"] for closed in read.json()["closed_since"]]
+    assert card["card_changes"] == created["card_changes"]
+
+
+_EN_DASH = chr(0x2013)
+
+
+_RANGE = ((2015, 2023), (2010, 2024))
+
+
+@pytest.mark.parametrize(
+    ("title", "years", "retitled"),
+    [
+        (f"Aid to Kenya, 2015{_EN_DASH}2023", _RANGE, f"Aid to Kenya, 2010{_EN_DASH}2024"),
+        ("Aid 2015 to 2023", _RANGE, "Aid 2010 to 2024"),
+        ("Aid, 2015-2023", _RANGE, "Aid, 2010-2024"),
+        ("Aid since 20152023", _RANGE, "Aid since 20152023"),
+        ("Aid to Kenya, 2023", ((2015, 2023), (2010, 2015)), "Aid to Kenya, 2010 to 2015"),
+        ("Aid to Kenya since 2015", _RANGE, "Aid to Kenya since 2010"),
+        ("Aid to Kenya until 2023", _RANGE, "Aid to Kenya until 2024"),
+        ("Aid to Kenya, 2023", ((2023, 2023), (2020, 2020)), "Aid to Kenya, 2020"),
+        (
+            "Aid after the 2008 crisis, 2015 to 2023",
+            _RANGE,
+            "Aid after the 2008 crisis, 2010 to 2024",
+        ),
+        (
+            "Aid 2015 to 2023, constant 2023 US dollars",
+            ((2015, 2023), (2015, 2024)),
+            "Aid 2015 to 2024, constant 2023 US dollars",
+        ),
+    ],
+    ids=[
+        "en-dash",
+        "to",
+        "hyphen",
+        "no-range",
+        "lone-end-year",
+        "lone-start-year-after-since",
+        "lone-end-year-after-until",
+        "single-year-to-single-year",
+        "unrelated-year",
+        "shared-bound-and-base-year",
+    ],
+)
+def test_a_change_of_years_retitles_the_years_the_title_names(
+    title: str, years: tuple[tuple[int, int], tuple[int, int]], retitled: str
+) -> None:
+    old, new = years
+    assert _retitled_years(title, old=old, new=new, lone=True) == retitled
+
+
+class _Places:
+    """Search's options door: the places of the kind each role binds, or a
+    refusal when `down`."""
+
+    def __init__(self, *, down: bool = False) -> None:
+        self.asked: list[str] = []
+        self.down = down
+
+    async def __call__(
+        self, *, identity: Mapping[str, Any], role: str
+    ) -> tuple[tuple[tuple[str, str], ...], bool]:
+        del identity
+        self.asked.append(role)
+        if self.down:
+            raise LiveApisError(status=503, code=None, retryable=True)
+        listed = {
+            "destination": (("country/KEN", "Kenya"), ("country/UGA", "Uganda")),
+            "origin": (("country/FRA", "France"), ("country/DEU", "Germany")),
+        }
+        return listed[role], False
+
+
+_UGANDA = {"kind": "places", "role": "destination", "entities": ["country/UGA"]}
+
+
+def _unit_step(created: Mapping[str, Any]) -> dict[str, Any]:
+    return _apply_body(created["component_id"], created["unit_change"]["spec_id"], _CONSTANT_2023)
+
+
+def _years_step(created: Mapping[str, Any]) -> dict[str, Any]:
+    return _change_body(created["component_id"], created["card_changes"]["spec_id"], _YEARS)
+
+
+def _places_step(created: Mapping[str, Any]) -> dict[str, Any]:
+    return _change_body(created["component_id"], created["card_changes"]["spec_id"], _UGANDA)
+
+
+_STEPS = {"unit": _unit_step, "years": _years_step, "places": _places_step}
+
+
+def _offers(created: Mapping[str, Any], step: str) -> bool:
+    """Whether the card `created` announces offers the change `step`."""
+    changes = created.get("card_changes") or {}
+    return {
+        "unit": "unit_change" in created,
+        "years": "window" in changes,
+        "places": any(p["role"] == "destination" for p in changes.get("places") or ()),
+    }[step]
+
+
+def _kept(fetched: Mapping[str, Any], step: str) -> bool:
+    """Whether the retrieval `fetched` keeps what the change `step` set."""
+    scope = fetched.get("scope") or {}
+    return {
+        "unit": fetched["spec_id"] != _SPEC,
+        "years": scope.get("window") == {"kind": "range", "start_year": 2010, "end_year": 2024},
+        "places": scope.get("entities")
+        == {"destination": ["dcid:country/UGA"], "origin": ["dcid:country/FRA"]},
+    }[step]
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [(a, b) for a in _STEPS for b in _STEPS if a != b],
+)
+async def test_a_second_change_keeps_the_first_and_is_offered_after_it(
+    pg_engine: AsyncEngine, first: str, second: str
+) -> None:
+    """Each change carries the card's scope and spec on: years, places and unit
+    each survive a change of another, and the card offers the second change
+    after the first. The state read marks each change's turn with the card
+    it named and what changed."""
+    app = _changes_app(pg_engine)
+    app.state.studio.place_options = _Places()
+    changer = _Changer()
+    named = []
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        for step in (first, second):
+            created = _frame(frames, "component.created")
+            assert _offers(created, step)
+            named.append(created["component_id"])
+            frames = await _stream(client, "/api/studio/turn", _STEPS[step](created))
+        read = (
+            await client.get(
+                "/api/studio/state",
+                params={"conversation_id": CONVERSATION, "since": 0},
+                headers=AUTH,
+            )
+        ).json()
+
+    marks = {"unit": {"kind": "unit"}, "years": {"kind": "window"}}
+    marks["places"] = {"kind": "places", "role": "destination"}
+    assert [turn.get("card_change") for turn in read["closed_since"]] == [
+        None,
+        {"component_id": named[0], **marks[first]},
+        {"component_id": named[1], **marks[second]},
+    ]
+    assert read["turn"]["card_change"] == {"component_id": named[1], **marks[second]}
+
+    first_fetch, last_fetch = changer.fetched()
+    assert _kept(first_fetch, first)
+    assert _kept(last_fetch, first)
+    assert _kept(last_fetch, second)
+    created = _frame(frames, "component.created")
+    assert _offers(created, first)
+    assert _offers(created, second)
+    assert created["card_changes"]["spec_id"] == last_fetch["spec_id"]
+
+
+async def test_a_card_offers_its_places_and_a_change_swaps_one(pg_engine: AsyncEngine) -> None:
+    """France to Kenya binds one place in each of its roles, and Search is
+    asked for none of them as it draws. A change of the recipient reads
+    Search's places for that role once, resends the provider's place with it,
+    and the title names the new recipient."""
+    app = _changes_app(pg_engine)
+    places = _Places()
+    app.state.studio.place_options = places
+    changer = _Changer()
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        drawn = list(places.asked)
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA)
+        )
+
+    assert drawn == []
+    assert places.asked == ["destination"]
+    assert _frame(first, "component.created")["card_changes"]["places"] == [
+        {
+            "role": "destination",
+            "multiple": False,
+            "chosen": [{"id": "country/KEN", "label": "Kenya"}],
+        },
+        {"role": "origin", "multiple": False, "chosen": [{"id": "country/FRA", "label": "France"}]},
+    ]
+    (fetched,) = changer.fetched()
+    assert fetched["scope"] == {
+        "entities": {"destination": ["dcid:country/UGA"], "origin": ["dcid:country/FRA"]}
+    }
+    created = _frame(frames, "component.created")
+    assert created["replaces"] == "cmp_01unit0001"
+    write = next(call for call in changer.calls if call["tool"] == "write_component")
+    assert write["args"]["intent"]["title"] == "France's aid to Uganda, current US dollars"
+    (destination, _) = created["card_changes"]["places"]
+    assert destination["chosen"] == [{"id": "country/UGA", "label": "Uganda"}]
+
+
+def _places_query(
+    component_id: str = "cmp_01unit0001", role: str = "destination"
+) -> dict[str, str]:
+    return {"conversation_id": CONVERSATION, "component_id": component_id, "role": role}
+
+
+async def test_the_places_a_role_can_change_to_are_read_when_asked(pg_engine: AsyncEngine) -> None:
+    app = _changes_app(pg_engine)
+    places = _Places()
+    app.state.studio.place_options = places
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        read = await client.get("/api/studio/places", params=_places_query(), headers=AUTH)
+
+    assert read.status_code == 200
+    assert read.json() == {
+        "component_id": "cmp_01unit0001",
+        "role": "destination",
+        "options": [
+            {"id": "country/KEN", "label": "Kenya"},
+            {"id": "country/UGA", "label": "Uganda"},
+        ],
+        "truncated": False,
+    }
+    assert places.asked == ["destination"]
+
+
+@pytest.mark.parametrize(
+    ("query", "door", "answer"),
+    [
+        (
+            {"conversation_id": "conv_other"},
+            _Places(),
+            (404, "not_found", None, "/conversation_id"),
+        ),
+        (
+            {"component_id": "cmp_01gone0000"},
+            _Places(),
+            (422, "constraint_violation", "scope_choice_stale", "/component_id"),
+        ),
+        (
+            {"role": "observationAbout"},
+            _Places(),
+            (422, "constraint_violation", "change_not_offered", "/role"),
+        ),
+        (
+            {},
+            _Places(down=True),
+            (503, "transient_unavailable", "place_options_unavailable", "/role"),
+        ),
+        ({}, None, (503, "capability_unavailable", None, None)),
+    ],
+    ids=["unknown-conversation", "card-gone", "role-not-offered", "door-down", "door-off"],
+)
+async def test_a_places_read_that_cannot_answer_is_refused(
+    pg_engine: AsyncEngine,
+    query: dict[str, str],
+    door: _Places | None,
+    answer: tuple[int, str, str | None, str | None],
+) -> None:
+    app = _changes_app(pg_engine)
+    app.state.studio.place_options = door
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        read = await client.get(
+            "/api/studio/places", params={**_places_query(), **query}, headers=AUTH
+        )
+
+    body = read.json()
+    assert (read.status_code, body["error"], body.get("constraint_id"), body.get("pointer")) == (
+        answer
+    )
+
+
+async def test_a_change_of_places_whose_door_cannot_be_read_is_refused(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The places a change names are checked against Search's list before
+    the stream: a door that cannot be read refuses the change, to retry."""
+    app = _changes_app(pg_engine)
+    app.state.studio.place_options = _Places()
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.place_options = _Places(down=True)
+        response = await client.post(
+            "/api/studio/turn", json=_change_body("cmp_01unit0001", _SPEC, _UGANDA), headers=AUTH
+        )
+
+    body = response.json()
+    assert (response.status_code, body["error"], body["constraint_id"], body["pointer"]) == (
+        503,
+        "transient_unavailable",
+        "place_options_unavailable",
+        "/apply_change",
+    )
+    assert len(app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns) == 1
+
+
+async def test_a_card_offers_no_places_with_the_door_off(pg_engine: AsyncEngine) -> None:
+    app = _changes_app(pg_engine)
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        response = await client.post(
+            "/api/studio/turn", json=_change_body("cmp_01unit0001", _SPEC, _UGANDA), headers=AUTH
+        )
+
+    assert "places" not in _frame(first, "component.created")["card_changes"]
+    assert response.json()["constraint_id"] == "change_not_offered"
+
+
+@pytest.mark.parametrize(
+    "entities",
+    [["country/TZA"], ["country/UGA", "country/KEN"], ["country/KEN"]],
+    ids=["unlisted", "two-on-a-one-place-card", "the-place-it-shows"],
+)
+async def test_a_change_of_places_outside_the_offer_is_refused(
+    pg_engine: AsyncEngine, entities: list[str]
+) -> None:
+    app = _changes_app(pg_engine)
+    app.state.studio.place_options = _Places()
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        response = await client.post(
+            "/api/studio/turn",
+            json=_change_body("cmp_01unit0001", _SPEC, {**_UGANDA, "entities": entities}),
+            headers=AUTH,
+        )
+
+    assert response.status_code == 422
+    assert (response.json()["constraint_id"], response.json()["pointer"]) == (
+        "change_not_offered",
+        "/apply_change",
+    )
+
+
+@pytest.mark.parametrize(
+    ("component_id", "spec_id", "change", "constraint"),
+    [
+        ("cmp_01gone0000", _SPEC, _YEARS, "scope_choice_stale"),
+        ("cmp_01unit0001", "spec_" + "f" * 32, _YEARS, "scope_choice_stale"),
+        (
+            "cmp_01unit0001",
+            _SPEC,
+            {"kind": "window", "start_year": 1950, "end_year": 2024},
+            "change_not_offered",
+        ),
+        (
+            "cmp_01unit0001",
+            _SPEC,
+            {"kind": "window", "start_year": 2015, "end_year": 2023},
+            "change_not_offered",
+        ),
+        (
+            "cmp_01unit0001",
+            _SPEC,
+            {"kind": "places", "role": "destination", "entities": ["country/UGA"]},
+            "change_not_offered",
+        ),
+        (
+            "cmp_01unit0001",
+            _SPEC,
+            {"kind": "window", "start_year": 1990, "end_year": 1992},
+            "change_no_data",
+        ),
+    ],
+    ids=[
+        "card-gone",
+        "other-spec",
+        "years-outside",
+        "years-it-shows",
+        "places-unlisted",
+        "no-data",
+    ],
+)
+async def test_a_change_that_cannot_apply_is_refused_before_the_stream_and_the_card_stays(
+    pg_engine: AsyncEngine,
+    component_id: str,
+    spec_id: str,
+    change: dict[str, Any],
+    constraint: str,
+) -> None:
+    """The spec holds no figures from 1990 to 1992 (`years_with_data`)."""
+    envelope = copy.deepcopy(_ENVELOPE)
+    envelope["parts"][0]["spec"]["resolved"]["years_with_data"] = {
+        "start_year": 1978,
+        "end_year": 2024,
+        "gap_years": [1990, 1991, 1992],
+    }
+    app = _app(
+        *_first_turn(),
+        resolver=CannedSearch(envelope),
+        executor=ScriptedExecutor(_first_results(), strict=True),
+        tool_surface=_Search(),  # ty: ignore[invalid-argument-type] -- never called here
+        engine=pg_engine,
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        response = await client.post(
+            "/api/studio/turn", json=_change_body(component_id, spec_id, change), headers=AUTH
+        )
+
+    assert _frame(first, "component.created")["card_changes"]["window"]["missing_years"] == [
+        1990,
+        1991,
+        1992,
+    ]
+    assert response.status_code == 422
+    body = response.json()
+    assert (body["constraint_id"], body["pointer"]) == (constraint, "/apply_change")
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    assert len(conversation.turns) == 1
+    assert [b.component_id for b in conversation.composition.blocks] == ["cmp_01unit0001"]
+
+
+async def test_a_change_whose_data_comes_back_empty_leaves_the_card_and_its_offers(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A retrieval that holds no rows for the new years is refused: no card is
+    written, and the card on the canvas keeps its offers."""
+    app = _changes_app(pg_engine)
+    changer = _Changer(rows=0)
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _YEARS)
+        )
+        read = await client.get(
+            "/api/studio/state", params={"conversation_id": CONVERSATION, "since": 0}, headers=AUTH
+        )
+
+    assert "component.created" not in [f["event"] for f in frames]
+    assert "write_component" not in [call["tool"] for call in changer.calls]
+    failed = [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
+    assert [f["step_id"] for f in failed] == ["u2"]
+    assert _frame(frames, "message.complete")["text"].startswith("The card is unchanged.")
+    first_card = _frame(first, "component.created")
+    (card,) = read.json()["closed_since"][0]["cards"]
+    assert card["component_id"] == "cmp_01unit0001"
+    assert card["card_changes"] == first_card["card_changes"]
+    assert card["unit_change"] == first_card["unit_change"]
+
+
+@pytest.mark.parametrize(
+    ("change", "meta", "rewritten"),
+    [
+        (
+            _YEARS,
+            {
+                "subtitle": "Gross disbursements, 2015 to 2023",
+                "description": "Aid has grown since 2015.",
+                "x_label": "Year",
+                "y_label": "USD, current prices",
+            },
+            {
+                "subtitle": "Gross disbursements, 2010 to 2024",
+                "x_label": "Year",
+                "y_label": "USD, current prices",
+            },
+        ),
+        (
+            _UGANDA,
+            {
+                "subtitle": "What Kenya receives from France",
+                "description": "Kenya's receipts set beside Kenya's needs.",
+                "y_label": "USD, current prices",
+            },
+            {"subtitle": "What Uganda receives from France", "y_label": "USD, current prices"},
+        ),
+    ],
+    ids=["years", "places"],
+)
+async def test_a_change_of_years_or_places_rewrites_the_card_meta_or_drops_a_stale_word(
+    pg_engine: AsyncEngine,
+    change: dict[str, Any],
+    meta: dict[str, str],
+    rewritten: dict[str, str],
+) -> None:
+    """The slot's meta names the new years or places where it named the old,
+    and a word still naming the old ones after that is dropped, so the chart
+    shows what it derives from its data there. A `comparison` hint, which
+    aligns its members' units, keeps a card whose unit did not change. The
+    state read's card states the new card's facts."""
+    app = _two_cards_app(pg_engine)
+    app.state.studio.place_options = _Places()
+    changer = _Changer()
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        arranged = await client.post(
+            "/api/studio/composition",
+            json=_mutation_body(
+                _frame(first, "done")["composition"],
+                [
+                    {"op": "set_card_meta", "component_id": "cmp_01unit0001", "meta": meta},
+                    {
+                        "op": "set_layout_hints",
+                        "layout_hints": [
+                            {"type": "comparison", "members": ["cmp_01unit0001", "cmp_01unit0009"]}
+                        ],
+                    },
+                ],
+            ),
+            headers=AUTH,
+        )
+        assert arranged.status_code == 200
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, change)
+        )
+        read = await client.get(
+            "/api/studio/state", params={"conversation_id": CONVERSATION, "since": 1}, headers=AUTH
+        )
+
+    after = _frame(frames, "done")["composition"]
+    new, _ = after["blocks"]
+    assert (new["component_id"], new["meta"]) == ("cmp_01unit0002", rewritten)
+    assert after["layout_hints"] == [
+        {"type": "comparison", "members": ["cmp_01unit0002", "cmp_01unit0009"]}
+    ]
+    ((card,),) = [closed["cards"] for closed in read.json()["closed_since"]]
+    assert card["fact_summary"] == _frame(frames, "component.created")["fact_summary"]
+    if change is _YEARS:
+        assert card["fact_summary"]["window"] == {"start": "2010", "end": "2024"}
+
+
+def _one_year_app(pg_engine: AsyncEngine, year: int) -> Any:
+    """A first turn drawing France's aid to Kenya in `year` alone."""
+    return _app(
+        *_first_turn(),
+        resolver=CannedSearch(_ENVELOPE),
+        executor=ScriptedExecutor(
+            [
+                {"outcome": "ok", "frame_refs": [_REF], "summary": "fetched"},
+                _VIEW,
+                _written("cmp_01unit0001", _REF, f"Aid to Kenya, {year}", (year, year)),
+            ]
+        ),
+        tool_surface=_Search(),  # ty: ignore[invalid-argument-type] -- the one tool a unit change reads
+        engine=pg_engine,
+    )
+
+
+@pytest.mark.parametrize("latest", [False, True], ids=["one-year", "asked-for-the-latest-year"])
+async def test_a_card_showing_one_year_moves_to_another_year(
+    pg_engine: AsyncEngine, latest: bool
+) -> None:
+    """A card drawing 2023 alone offers its years with `start_year` equal to
+    `end_year`, and a change to 2020 alone fetches that one year as a range.
+    A card asked for its latest year drops that window from its intent, so
+    the redrawn card shows 2020 and not the latest year again."""
+    app = _one_year_app(pg_engine, 2023)
+    changer = _Changer()
+    changer.title = "Aid to Kenya, 2023"
+    if latest:
+        latest_window = {
+            "start": {"anchor": "latest", "offset": 0},
+            "end": {"anchor": "latest", "offset": 0},
+        }
+        described = changer.__call__
+
+        async def answer(*, tool: str, args: dict[str, Any], **kw: Any) -> dict[str, Any]:
+            result = await described(tool=tool, args=args, **kw)
+            if tool == "describe_component":
+                result["component_body"]["stored_intent"]["window"] = latest_window
+            return result
+
+        executor: Any = answer
+    else:
+        executor = changer
+    one_year = {"kind": "window", "start_year": 2020, "end_year": 2020}
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = executor
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, one_year)
+        )
+
+    assert _frame(first, "component.created")["card_changes"]["window"] == {
+        "start_year": 2023,
+        "end_year": 2023,
+        "first_year": 1978,
+        "last_year": 2024,
+    }
+    (fetched,) = changer.fetched()
+    assert fetched["scope"] == {"window": {"kind": "range", "start_year": 2020, "end_year": 2020}}
+    write = next(call for call in changer.calls if call["tool"] == "write_component")
+    assert "window" not in write["args"]["intent"]
+    assert write["args"]["intent"]["title"] == "Aid to Kenya, 2020"
+    window = _frame(frames, "component.created")["card_changes"]["window"]
+    assert (window["start_year"], window["end_year"]) == (2020, 2020)
