@@ -123,6 +123,7 @@ The server answers `/turn`, `/interrupt` and `/resume` with Server-Sent Events. 
 | `apply_unit`      | object \| null                          | optional; a card's unit change; see 4.1.4                                       |
 | `after_turn`      | integer \| null                         | optional; the turn this request follows; see 4.1.3                              |
 | `client_features` | list of string                          | optional; the question forms the page renders; absent keeps the list; see 4.1.5 |
+| `prompt_source`   | string \| null                          | optional; where the page took the question from; see 4.1.6                      |
 
 #### 4.1.1 Seeds from Search
 
@@ -306,6 +307,10 @@ Otherwise the stream runs with no model call: `activity.step` frames, a `compone
 A page that declares no `"unit_question"` gets a unit question as a `single_select` with no `unit` and no free text. Its options are both price bases of the offer's start currency, or, when that currency serves one basis, of the first offered currency that serves both, the start's basis first, such as `USD-constant-2023` "Constant 2023 US dollars" and `USD-current` "Current US dollars". An `option` answer moves the reading to that unit, as a `unit` answer does. A page that declares no `"multi_select"` gets a multi-select question as a `single_select` with the same options and free text, and an `option` answer counts as one tick. A question keeps the form it was sent in, and its answer is checked against that form whatever the answering request declares.
 
 The harness deploys before the website. A harness that predates the field refuses it with 422, and a page opened before the website deployed sends none and gets the `single_select` forms on a conversation no newer page declared features for.
+
+#### 4.1.6 `prompt_source`
+
+`prompt_source` says the page filled in the `message` for the user: `"example"` for a Studio landing example, `"availability"` for the button asking what data is available, and `"search_example"` for a question a Search example chip handed over to the Studio. Send it on the one `turn.request` whose text came from that click, and leave it out when the user typed the question. The server drops any other value and runs the turn. The turn's `studio.turn` log line and Langfuse trace metadata carry it as `prompt_source`, so usage figures can leave example questions out. A harness that predates the field refuses it with 422, so the harness deploys before the website sends it.
 
 ### 4.2 `interrupt.response` → POST `/api/studio/interrupt`
 

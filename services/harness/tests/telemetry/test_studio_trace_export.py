@@ -152,11 +152,12 @@ async def _approve_a_planned_turn(
     surface: ScriptedSurface | None = None,
     open_auth: bool = False,
     after_each: Callable[[], None] = lambda: None,
+    turn_members: dict[str, Any] | None = None,
 ) -> list[dict]:
     """Ask the planned studio `QUESTION` with `headers` beside the bearer
-    token, approve the plan it proposes with `interrupt_headers`, and return
-    the frames of the approval's stream. `after_each` runs once each
-    response has ended."""
+    token and `turn_members` in the request body, approve the plan it
+    proposes with `interrupt_headers`, and return the frames of the
+    approval's stream. `after_each` runs once each response has ended."""
     app = _planned_app(engine, surface, open_auth=open_auth)
     base = {"schema_version": 1, "conversation_id": CONVERSATION}
     async with httpx2.AsyncClient(
@@ -169,6 +170,7 @@ async def _approve_a_planned_turn(
                 **base,
                 "kind": "turn.request",
                 "message": QUESTION,
+                **(turn_members or {}),
             },
             headers,
         )
@@ -286,6 +288,45 @@ async def test_a_studio_turn_names_who_asked_it_on_its_trace_and_its_log_line(
     assert line["caller"].startswith("conversation:")
     assert surface.fetched
     assert line["fetched_specs"] == list(dict.fromkeys(surface.fetched))
+
+
+@pytest.mark.parametrize(
+    ("members", "prompt_source"),
+    [
+        ({"prompt_source": "example"}, "example"),
+        ({"prompt_source": "availability"}, "availability"),
+        ({"prompt_source": "search_example"}, "search_example"),
+        ({"prompt_source": "typed"}, None),
+        ({"prompt_source": ["example"]}, None),
+        ({"prompt_source": None}, None),
+        ({}, None),
+    ],
+    ids=["example", "availability", "search-example", "unknown", "not-a-string", "null", "absent"],
+)
+async def test_a_studio_turn_names_where_its_question_came_from(
+    fake_langfuse: Any,
+    caplog: pytest.LogCaptureFixture,
+    pg_engine: AsyncEngine,
+    members: dict[str, Any],
+    prompt_source: str | None,
+) -> None:
+    """The `/turn` request's `prompt_source`, when it is one the harness
+    knows, is the turn's `studio.turn` line's `prompt_source` and its
+    Langfuse trace metadata's, on both segments and the close, kept through
+    the approval's `/interrupt`, which sends none. Any other value is dropped
+    and the turn still runs."""
+    init_telemetry(service_name="harness")
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        await _approve_a_planned_turn(pg_engine, headers={}, turn_members=members)
+
+    (line,) = _turn_lines(caplog)
+    assert line["prompt_source"] == prompt_source
+    spans = fake_langfuse.spans()
+    traced = [*_closes(spans), *(span for span in spans if span.name == "turn.segment")]
+    assert len(traced) == 3
+    assert [_attribute(span, "langfuse.trace.metadata.prompt_source") for span in traced] == [
+        prompt_source
+    ] * 3
 
 
 async def test_an_open_studio_names_nobody_whatever_the_headers_say(
