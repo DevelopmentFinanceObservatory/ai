@@ -278,8 +278,6 @@ _NOT_DRAFTED_CODES = frozenset(
         ProblemCode.ASK_ROLE_DROPPED,
         ProblemCode.RESULT_SCOPE_UNSTATED,
         ProblemCode.PERIOD_REDUCTION_UNSTATED,
-        ProblemCode.PERIOD_PARTIAL_UNNAMED,
-        ProblemCode.PERIOD_PROJECTED_UNASKED,
         ProblemCode.BASIS_UNKNOWN,
         ProblemCode.SCOPE_UNREAD,
         ProblemCode.MEASURE_FIXED_BY_PIN,
@@ -409,6 +407,15 @@ STOP_SENTENCES: Mapping[StopCode | ProblemCode, str] = {
     ProblemCode.USER_PICK_NOT_HELD: (
         "The plan did not keep the option picked on the plan card, so nothing was recorded."
     ),
+    ProblemCode.PERIOD_PARTIAL_UNNAMED: (
+        "The plan reads a year its source has reported only in part, which the user did not "
+        "name, so nothing was recorded. End its years at the newest complete year unless the "
+        "user names that year."
+    ),
+    ProblemCode.PERIOD_PROJECTED_UNASKED: (
+        "The plan reads projected years the user did not ask about, so nothing was recorded. "
+        "End its years at the newest actual year unless the user asks about projections."
+    ),
     **dict.fromkeys(_NOT_DRAFTED_CODES, _NOT_DRAFTED),
 }
 
@@ -471,6 +478,13 @@ STOP_REASONS: Mapping[StopCode | ProblemCode, str] = {
         "the plan would have changed a choice already made{at}"
     ),
     ProblemCode.USER_PICK_NOT_HELD: "the plan did not keep the option picked on the plan card",
+    ProblemCode.PERIOD_PARTIAL_UNNAMED: (
+        "the plan reads a year its source has reported only in part, which the request does "
+        "not name"
+    ),
+    ProblemCode.PERIOD_PROJECTED_UNASKED: (
+        "the plan reads projected years the request does not ask about"
+    ),
     **dict.fromkeys(
         _NOT_DRAFTED_CODES,
         "the plan could not be drafted{at}, a fault in the system rather than in the request",
@@ -1015,6 +1029,8 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             HarnessCode.HAND_OFF_PENDING,
             ProblemCode.PLAN_REJECTED,
             ProblemCode.APPROVAL_DECLINED,
+            ProblemCode.PERIOD_PARTIAL_UNNAMED,
+            ProblemCode.PERIOD_PROJECTED_UNASKED,
         }
     ),
     FailureClass.BUDGET_SPENT: frozenset(
