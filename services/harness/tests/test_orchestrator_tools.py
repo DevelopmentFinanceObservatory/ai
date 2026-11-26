@@ -85,6 +85,7 @@ from harness.studio_state import (
     land_component,
     remove_cards,
 )
+from harness.surface import FLASH_SURFACE, HYDROGEN_SURFACE, Surface, set_studio_surface
 from harness.tool_contracts import (
     HarnessCode,
     ResolverError,
@@ -103,7 +104,7 @@ from harness.turn_records import (
 from harness.wire import AddOp, CompositionActor, MutationOp, component_revised
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
-from orchestrator.agent import INSTRUCTION
+from orchestrator.agent import orchestrator_instruction
 from orchestrator.call import OrchestratorCall
 from orchestrator.declarations import tool_declaration
 from planner.parties import PartyRole
@@ -281,7 +282,7 @@ def _word_runs(text: str, length: int = 7) -> set[str]:
 
 
 def test_no_rule_is_stated_in_both_the_instruction_and_a_tool_declaration():
-    instruction = _word_runs(INSTRUCTION)
+    instruction = _word_runs(orchestrator_instruction())
 
     shared = {name: instruction & _word_runs(text) for name, text in _declarations().items()}
 
@@ -293,7 +294,7 @@ def test_a_search_for_names_an_earlier_turn_listed_states_their_side():
     declaration has every name an earlier turn listed sent with its side, and the
     instruction has a refused part sent again with roles before any other retry."""
     assert "`role_not_resolved`" in _declarations()["search"]
-    assert "role_not_resolved" in INSTRUCTION
+    assert "role_not_resolved" in orchestrator_instruction()
 
 
 def test_no_tool_declaration_names_the_implementation_behind_it():
@@ -616,24 +617,29 @@ async def test_a_part_level_role_is_answered_with_the_argument_error():
 _RETRY_PART = {"variable": "climate finance", "entities": [{"text": "Kenya", "role": "to"}]}
 
 
+@pytest.mark.parametrize("surface", [FLASH_SURFACE, HYDROGEN_SURFACE], ids=["flash", "hydrogen"])
 @pytest.mark.parametrize(
-    ("status", "reason", "offered"),
+    ("status", "reason", "offered", "offered_on_hydrogen"),
     [
-        ("no_data", None, True),
-        ("unsupported", None, True),
-        ("no_data", "qualifier_not_bound", True),
-        ("unsupported", "no_observations", True),
-        ("definite", None, False),
-        ("candidates", None, False),
-        ("definite", "qualifier_not_bound", False),
-        ("candidates", "variable_not_resolved", False),
-        ("no_data", "role_not_resolved", False),
-        ("no_data", "entity_not_resolved", False),
+        ("no_data", None, True, True),
+        ("unsupported", None, True, True),
+        # Hydrogen names the next search for a phrase the data does not record.
+        ("no_data", "qualifier_not_bound", True, False),
+        ("unsupported", "no_observations", True, True),
+        ("definite", None, False, False),
+        ("candidates", None, False, False),
+        ("definite", "qualifier_not_bound", False, False),
+        ("candidates", "variable_not_resolved", False, False),
+        ("no_data", "role_not_resolved", False, False),
+        ("no_data", "entity_not_resolved", False, False),
     ],
 )
 async def test_a_parsed_search_offers_a_text_search_on_each_part_it_did_not_answer(
-    status: str, reason: str | None, offered: bool
+    surface: Surface, status: str, reason: str | None, offered: bool, offered_on_hydrogen: bool
 ):
+    set_studio_surface(surface)
+    if surface == HYDROGEN_SURFACE:
+        offered = offered_on_hydrogen
     reading: dict[str, Any] = {"variable": "climate finance", "status": status}
     if reason is not None:
         reading["reason"] = reason
@@ -648,7 +654,57 @@ async def test_a_parsed_search_offers_a_text_search_on_each_part_it_did_not_answ
     assert "retry_with_text" not in ctx.state["orchestrator:searches"][0]
 
 
+_YEARS_OUT = {"code": "year_unavailable", "text": "You asked for 1960 to 1970."}
+
+
+@pytest.mark.parametrize("variant", ["default", "hydrogen"])
+@pytest.mark.parametrize(
+    ("status", "reason", "departures", "step"),
+    [
+        ("no_data", "entity_not_resolved", [], orchestrator_tools.NEXT_STEP_UNRESOLVED_ENTITY),
+        ("no_data", "qualifier_not_bound", [], orchestrator_tools.NEXT_STEP_UNBOUND_QUALIFIER),
+        (
+            "unsupported",
+            "no_observations",
+            [_YEARS_OUT],
+            orchestrator_tools.NEXT_STEP_YEAR_UNAVAILABLE,
+        ),
+        ("no_data", None, [], None),
+        ("definite", "qualifier_not_bound", [_YEARS_OUT], None),
+    ],
+)
+async def test_a_part_the_users_words_cannot_repair_names_its_next_search(
+    variant: str,
+    status: str,
+    reason: str | None,
+    departures: list[dict[str, str]],
+    step: str | None,
+):
+    # Only the hydrogen variant names a next search.
+    set_studio_surface(HYDROGEN_SURFACE if variant == "hydrogen" else FLASH_SURFACE)
+    if variant == "default":
+        step = None
+    reading: dict[str, Any] = {"variable": "climate finance", "status": status}
+    if reason is not None:
+        reading["reason"] = reason
+    if departures:
+        reading["departures"] = departures
+    tools, ctx = _tools(_resolver(_digest(reading, reading, kind="resolution")))
+    other = {**_RETRY_PART, "variable": "aid"}
+
+    # Each is refused twice, so the place repair a `text` search waited for is past.
+    for _ in range(2):
+        found = await tools["search"](ctx, [_RETRY_PART, other])
+
+    assert [part.get("next_step") for part in found["parts"]] == [step, step]
+    if step is not None:
+        assert not any("retry_with_text" in part for part in found["parts"])
+
+
 async def test_a_text_search_is_offered_once_per_part_and_never_on_its_own_result():
+    # Flash offers a `text` search for these reasons; Hydrogen names a next search.
+    set_studio_surface(FLASH_SURFACE)
+
     async def resolver(**call: Any) -> dict[str, Any]:
         # Search reads each part sent as unbound, under the variable it was sent with.
         sent = call["parts"] or [{"variable": "climate finance"}]
@@ -699,6 +755,8 @@ _UNBOUND = {"variable": "climate finance", "status": "no_data", "reason": "quali
 
 @pytest.mark.parametrize("reason", ["entity_not_resolved", "role_not_resolved"])
 async def test_a_part_refused_for_a_place_or_a_role_is_offered_a_text_search_second(reason: str):
+    # Flash offers a `text` search for these reasons; Hydrogen names a next search.
+    set_studio_surface(FLASH_SURFACE)
     refused = {"variable": "climate finance", "status": "no_data", "reason": reason}
     tools, ctx = _tools(_resolver(_digest(refused, kind="resolution")))
     repaired = {**_RETRY_PART, "entities": [{"text": "Kenya", "role": "from"}]}
@@ -724,6 +782,8 @@ async def test_readings_not_tied_to_the_parts_sent_are_offered_a_text_search_unt
 ):
     """Two readings for one part sent tie no reading to a part, so none can
     be told apart from a part a `text` search already ran for."""
+    # Flash offers a `text` search for these reasons; Hydrogen names a next search.
+    set_studio_surface(FLASH_SURFACE)
     tools, ctx = _tools(_resolver(_digest(_UNBOUND, _UNBOUND)))
     if earlier is not None:
         await tools["search"](ctx, **earlier)
@@ -1065,6 +1125,8 @@ async def test_every_part_can_retry_with_text_after_a_corrected_place(surface_na
     """Search cannot place any part, even with the place corrected. The first
     result offers no `text` search, each corrected part's result offers one,
     and the budget runs to one for every part."""
+    # Flash offers a `text` search for these reasons; Hydrogen names a next search.
+    set_studio_surface(FLASH_SURFACE)
     parts = [
         {"variable": f"measure {index}", "entities": [{"text": "Keyna"}]}
         for index in range(MAX_PARTS)

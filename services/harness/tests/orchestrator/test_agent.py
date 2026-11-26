@@ -14,7 +14,8 @@ from harness import turn_records
 from harness.gemini_wire import model_retry_options
 from harness.orchestrator_tools import MAX_ASK_QUESTIONS, build_orchestrator_tools
 from harness.prefix_cache import PrefixCache
-from orchestrator.agent import INSTRUCTION, orchestrator_agent
+from harness.surface import FLASH_SURFACE, HYDROGEN_SURFACE, Surface
+from orchestrator.agent import orchestrator_agent, orchestrator_instruction
 from orchestrator.model import orchestrator_model
 from orchestrator.run import Opening, run_orchestrator
 
@@ -128,7 +129,7 @@ async def test_the_model_reads_the_instruction_as_written() -> None:
     strips its trailing newline."""
     request = await _first_request()
 
-    assert request.generate_config.system_instruction == INSTRUCTION.rstrip("\n")
+    assert request.generate_config.system_instruction == orchestrator_instruction().rstrip("\n")
 
 
 async def test_a_turn_with_no_digest_opens_on_the_date_and_the_question() -> None:
@@ -143,13 +144,13 @@ async def test_a_turn_with_no_digest_opens_on_the_date_and_the_question() -> Non
 def test_the_instruction_says_what_the_canvas_digests_focus_card_is():
     """`focus_component_id` is how a card's "Ask follow up" reaches the
     model; unexplained, the model may answer about every card."""
-    assert "focus_component_id" in INSTRUCTION
+    assert "focus_component_id" in orchestrator_instruction()
 
 
 def test_the_instruction_says_when_cards_come_off_and_that_pinned_ones_stay():
     """Cards accumulate across turns. The model takes them off when the user
     asks or the conversation changes subject, and pinned cards stay."""
-    text = " ".join(INSTRUCTION.split())
+    text = " ".join(orchestrator_instruction().split())
     assert "each turn's cards join the ones already on the canvas" in text
     assert "when the conversation turns to another subject" in text
     assert "remove_cards leaves pinned cards on the canvas and names them as kept_pinned" in text
@@ -161,39 +162,95 @@ def test_the_instruction_says_when_cards_come_off_and_that_pinned_ones_stay():
     )
 
 
-def test_the_instruction_keeps_a_measures_creditor_scope_in_the_reply():
-    text = " ".join(INSTRUCTION.split())
-    assert 'debt service "owed to all creditors" is reported in those words' in text
+@pytest.mark.parametrize(
+    ("surface", "rule"),
+    [
+        (FLASH_SURFACE, 'debt service "owed to all creditors" is reported in those words'),
+        (
+            HYDROGEN_SURFACE,
+            "keeping the label's words on whose flows or creditors it covers "
+            '(debt service "owed to all creditors")',
+        ),
+    ],
+    ids=["flash", "hydrogen"],
+)
+def test_the_instruction_keeps_a_measures_creditor_scope_in_the_reply(surface: Surface, rule: str):
+    text = " ".join(orchestrator_instruction(surface).split())
+    assert rule in text
 
 
 def test_the_instruction_lets_a_reply_about_dfo_state_the_figures_explain_dfo_gives():
-    assert "stating only the figures it gives" in INSTRUCTION
-    text = " ".join(INSTRUCTION.split())
+    assert "stating only the figures it gives" in orchestrator_instruction()
+    text = " ".join(orchestrator_instruction().split())
     assert "Do not state a figure in a reply to a greeting or small talk" in text
 
 
-def test_the_instruction_has_a_reply_state_only_the_figures_a_drawn_card_returns():
+@pytest.mark.parametrize(
+    ("surface", "rules"),
+    [
+        (
+            FLASH_SURFACE,
+            [
+                "state only the values its reply_figures list, each with its period",
+                "Name in state_values_for only a series whose value the user asked to be told",
+                "Calling make_charts again for a card already drawn returns its figures for the "
+                "series it names, without drawing it twice",
+                "say what the card holds, its measure, places and years, and state no value",
+                "Close with one conclusion drawn from holds",
+                "compute nothing yourself",
+            ],
+        ),
+        (
+            HYDROGEN_SURFACE,
+            [
+                "state only the values its reply_figures list, each with its period",
+                "Name in state_values_for only a series the user asked a value of",
+                "make_charts on a card already drawn returns its figures without redrawing",
+                "With empty reply_figures, say what the card holds and state no value",
+                "Close with one conclusion from holds",
+                "Compute nothing yourself",
+            ],
+        ),
+    ],
+    ids=["flash", "hydrogen"],
+)
+def test_the_instruction_has_a_reply_state_only_the_figures_a_drawn_card_returns(
+    surface: Surface, rules: list[str]
+):
     """The reply states a drawn card's `reply_figures` and nothing else of
     it, the chart names the series the user asked a value of, an empty list
     gets what the card holds, and the conclusion comes from `holds`."""
-    text = " ".join(INSTRUCTION.split())
-    assert "state only the values its reply_figures list, each with its period" in text
-    assert "Name in state_values_for only a series whose value the user asked to be told" in text
-    assert (
-        "Calling make_charts again for a card already drawn returns its figures for the "
-        "series it names, without drawing it twice" in text
-    )
-    assert "say what the card holds, its measure, places and years, and state no value" in text
-    assert "Close with one conclusion drawn from holds" in text
-    assert "compute nothing yourself" in text
+    text = " ".join(orchestrator_instruction(surface).split())
+    assert [rule for rule in rules if rule not in text] == []
     assert "state its last value and period from the card's facts" not in text
 
 
-def test_the_instruction_tells_the_agent_to_state_the_years_an_event_period_reads_as():
-    text = " ".join(INSTRUCTION.split())
-    assert "names a period by an event or an administration" in text
-    assert "say the data ends earlier and answer with what it holds" in text
-    assert "ask about candidates or prices search left open in one more ask_user call" in text
+@pytest.mark.parametrize(
+    ("surface", "rules"),
+    [
+        (
+            FLASH_SURFACE,
+            [
+                "names a period by an event or an administration",
+                "say the data ends earlier and answer with what it holds",
+                "ask about candidates or prices search left open in one more ask_user call",
+            ],
+        ),
+        (
+            HYDROGEN_SURFACE,
+            [
+                "the period is named by an event or administration, not years",
+                "when they fall after the data, say it ends earlier",
+            ],
+        ),
+    ],
+    ids=["flash", "hydrogen"],
+)
+def test_the_instruction_tells_the_agent_to_state_the_years_an_event_period_reads_as(
+    surface: Surface, rules: list[str]
+):
+    text = " ".join(orchestrator_instruction(surface).split())
+    assert [rule for rule in rules if rule not in text] == []
     assert "the reading search chose" not in text
 
 
@@ -201,7 +258,8 @@ _NUMBER_WORDS = {2: "two", 3: "three", 4: "four"}
 
 
 def test_the_instruction_has_search_elect_the_measure_and_asks_only_what_search_left_open():
-    text = " ".join(INSTRUCTION.split())
+    # The Flash instruction's wording of these rules.
+    text = " ".join(orchestrator_instruction(FLASH_SURFACE).split())
     assert (
         "Put a word for how a flow is counted into `variable` only when the user said it, "
         "and let search elect the rest" in text

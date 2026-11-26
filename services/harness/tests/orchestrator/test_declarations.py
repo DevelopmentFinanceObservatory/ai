@@ -16,6 +16,9 @@ import pytest
 from harness.orchestrator_tools import TOOL_NAMES, build_orchestrator_tools
 from orchestrator.declarations import tool_declaration
 
+# The recorded requests are Flash's bytes (`flash_studio`).
+pytestmark = pytest.mark.usefixtures("flash_studio")
+
 _RECORDED = Path(__file__).parent.parent / "fixtures" / "orchestrator_requests"
 
 

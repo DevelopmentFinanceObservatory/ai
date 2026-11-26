@@ -34,6 +34,7 @@ from mcp import MCPError
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from orchestrator.agent import orchestrator_agent
 from orchestrator.model import orchestrator_model
+from planner.settings import AgentSettings
 from presentation_mcp.server import mcp as presentation_mcp
 from pydantic_ai.models.google import GoogleModel
 from sqlalchemy import make_url
@@ -58,7 +59,6 @@ from harness.live_refresh import build_live_refresh, create_live_refresh_router
 from harness.mcp_client import McpExecutor, McpResolver
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_adapter import content_on_spans
-from harness.prefix_cache import PrefixCache, gemini_model_name
 from harness.provenance import ProvenanceStore
 from harness.run_ledger import StudioRunLedger
 from harness.settings import (
@@ -76,6 +76,12 @@ from harness.studio_state import (
     make_remove_cards,
 )
 from harness.studio_store import StudioStore
+from harness.surface import (
+    resolve_surface,
+    resolved_model_name,
+    set_studio_surface,
+    surface_prefix_cache,
+)
 from harness.turn.loop import Graph
 from harness.turn.store import FrameLineage, TurnStore
 from harness.turn_budget import current_turn_budget
@@ -510,6 +516,13 @@ def create_app(
     init_telemetry(service_name=SERVICE_NAME)
     resolved_settings = settings or Settings()
     model_name = resolved_model_name(resolved_settings.model_name)
+    # The one surface the process runs, which every agent's texts follow
+    # (`harness.surface`). An unmapped model or a mixed pair refuses startup.
+    surface = resolve_surface(
+        model_name=resolved_settings.model_name,
+        planner_model_name=AgentSettings().planner_model_name,
+    )
+    set_studio_surface(surface)
 
     # Every mounted `FastMCP(...)` already carries a `BearerTokenVerifier`:
     # the three singletons from import time (see `common.auth`'s own module
@@ -635,12 +648,14 @@ def create_app(
     # through a separate `McpSurface`. Opens no connection at construction.
     tool_surface = build_tool_surface(settings=resolved_settings)
     # One for the process, shared by the planner and the orchestrator
-    # across every conversation (`harness.prefix_cache`).
-    prefix_cache = PrefixCache() if resolved_settings.studio_prefix_cache else None
+    # across every conversation (`harness.prefix_cache`), when the surface's
+    # model accepts one.
+    prefix_cache = surface_prefix_cache(surface, enabled=resolved_settings.studio_prefix_cache)
     # One for the process, since it holds a connection pool `_lifespan` closes.
     stated_scope = build_stated_scope_reader(resolved_settings)
     app.state.stated_scope = stated_scope
     logger.info("orchestrator thinking level: %s", resolved_settings.orchestrator_thinking_level)
+    logger.info("edit card thinking level: %s", resolved_settings.edit_thinking_level)
 
     @functools.cache
     def genai_client() -> genai.Client:
@@ -692,6 +707,7 @@ def create_app(
                 tools,
                 thinking_level=resolved_settings.orchestrator_thinking_level,
                 include_content=content_on_spans(),
+                surface=surface,
             ),
             model=model,
             tools=tools,
@@ -726,6 +742,7 @@ def create_app(
         edit_model=GeminiEdit(
             model_name=model_name,
             timeout_s=resolved_settings.turn_model_time_s,
+            thinking_level=resolved_settings.edit_thinking_level,
         ),
         tool_surface=tool_surface,
         provenance=provenance,
@@ -772,38 +789,6 @@ def create_app(
         return JSONResponse(status_code=410, content={"detail": _RUN_SSE_GONE})
 
     return app
-
-
-class ModelNameRefusedError(RuntimeError):
-    """`MODEL_NAME` names no model the Gemini developer API serves."""
-
-
-def resolved_model_name(name: str) -> str:
-    """`name` as the Gemini developer API is sent it: any `Gemini:` class
-    prefix dropped (`harness.prefix_cache.gemini_model_name`), so the
-    orchestrator and Edit Card call one model under one name.
-
-    A leading `models/` is dropped, so `models/gemini-3.8-flash` names the
-    same model as its bare name.
-
-    Raises:
-        ModelNameRefusedError: `name` names no Gemini model, names none after its
-            `Gemini:` prefix, or is a Vertex AI resource path, which the
-            developer API serves no model under.
-    """
-    resolved = gemini_model_name(name.removeprefix("models/"))
-    if resolved is not None:
-        resolved = resolved.removeprefix("models/")
-    if not resolved:
-        raise ModelNameRefusedError(f"MODEL_NAME {name!r} names no Gemini model.")
-    if resolved.startswith("projects/"):
-        raise ModelNameRefusedError(
-            f"MODEL_NAME {name!r} is a Vertex AI resource path, and the harness runs on "
-            "the Gemini developer API, which serves no model by that name. Name the "
-            "model as the developer API does: models/... or its bare name, with an "
-            "optional Gemini: prefix."
-        )
-    return resolved
 
 
 # Seconds `uvicorn` waits for open responses after SIGTERM before it cancels

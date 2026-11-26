@@ -35,6 +35,8 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Final, Literal, Protocol
 
+from harness.surface import studio_surface
+
 from planner.parties import across_party, flow_side
 from planner.records import (
     DenominatorScope,
@@ -1915,15 +1917,25 @@ def _several_measures(verb: str, shape: FrameShape) -> str | None:
     if axes is None:
         return (
             f"{reason}; read the family summed (stat_vars='sum') to give it one if it can be "
-            "summed over every axis it varies along, otherwise name one value for each axis "
-            "it cannot"
+            "summed over every axis it varies along, otherwise "
+            + (
+                "set the requirement's `source_code` to the code of one series of the family"
+                if studio_surface().variant == "hydrogen"
+                else "name one value for each axis it cannot"
+            )
         )
     if not axes:
         return f"{reason}; read the family summed (stat_vars='sum') to give it one"
     one_value = "one value for it" if len(axes) == 1 else "one value for each"
+    if studio_surface().variant != "hydrogen":
+        return (
+            f"{reason}; it cannot be summed over {', '.join(axes)}, so the question has to name "
+            f"{one_value}"
+        )
     return (
-        f"{reason}; it cannot be summed over {', '.join(axes)}, so the question has to name "
-        f"{one_value}"
+        f"{reason}; it cannot be summed over {', '.join(axes)}, so read one series: set the "
+        "requirement's `source_code` to the code of one series of the family, or ask the user "
+        f"for {one_value}"
     )
 
 

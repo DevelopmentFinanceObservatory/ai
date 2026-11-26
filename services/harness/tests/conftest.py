@@ -97,6 +97,7 @@ from harness.conversation import (
     current_turn_id,
 )
 from harness.db.migrate import apply_pending
+from harness.surface import FLASH_SURFACE, HYDROGEN_SURFACE, set_studio_surface
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from planner.plan import (
     AggregateRequirement,
@@ -238,6 +239,37 @@ def _no_owed_work_left() -> Iterator[None]:
         with contextlib.suppress(RuntimeError):
             task.cancel()
     turn_loop._OWED_WORK.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_studio_surface() -> Any:
+    """`harness.surface` holds one surface per process, so a surface a test
+    sets, directly or through `create_app` or an eval's studio, must not reach a
+    later test. The next `studio_surface()` resolves it again from settings.
+    """
+    yield
+    set_studio_surface(None)
+
+
+@pytest.fixture
+def flash_studio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the test as a Studio on `gemini-3.8-flash`: both model settings name
+    it and the process surface is Flash's. The recorded orchestrator and planner
+    requests pin Flash's bytes, which a change to the default model must leave
+    alone."""
+    monkeypatch.setenv("MODEL_NAME", "gemini-3.8-flash")
+    monkeypatch.setenv("PLANNER_MODEL_NAME", "gemini-3.8-flash")
+    set_studio_surface(FLASH_SURFACE)
+
+
+@pytest.fixture
+def hydrogen_studio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the test as a Studio on `gemini-4-hydrogen`, the default model, named
+    explicitly so a shell that sets either model setting cannot move what the
+    test measures."""
+    monkeypatch.setenv("MODEL_NAME", "gemini-4-hydrogen")
+    monkeypatch.setenv("PLANNER_MODEL_NAME", "gemini-4-hydrogen")
+    set_studio_surface(HYDROGEN_SURFACE)
 
 
 @pytest.fixture(autouse=True)

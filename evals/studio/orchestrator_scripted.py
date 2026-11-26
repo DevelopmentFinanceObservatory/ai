@@ -64,6 +64,7 @@ from harness.scripted_plan import scripted_fetch_series_stats, scripted_plan
 from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
 from harness.studio_store import StudioStore
+from harness.surface import resolve_surface, set_studio_surface
 from harness.tool_contracts import ResolverError, resolver_digest
 from harness.turn.loop import Graph
 from harness.turn.node import NodeCtx
@@ -73,6 +74,7 @@ from harness.wiring import build_stated_scope_reader, handing_back_planner_failu
 from orchestrator.agent import orchestrator_agent
 from orchestrator.model import orchestrator_model
 from planner.plan import Plan, SessionState, save_plan
+from planner.settings import AgentSettings
 from planner.specs import planner_specs
 from planner.stated_scope import StatedScopeReader
 from planner.tool_spec import ToolSpec
@@ -478,6 +480,13 @@ def _planner_adapter(
 def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) -> FastAPI:
     """The studio for one case, its conversations and turns stored on `engine`."""
     settings = Settings()
+    # The surface the served harness runs `MODEL_NAME` and `PLANNER_MODEL_NAME`
+    # on, which the scripted agents read as served (`harness.surface`).
+    model_surface = resolve_surface(
+        model_name=settings.model_name,
+        planner_model_name=AgentSettings().planner_model_name,
+    )
+    set_studio_surface(model_surface)
     # Closed with the app by `orchestrator_client` (`app.state.stated_scope`).
     stated_scope = build_stated_scope_reader(settings)
     orchestrator_genai = scripted_client(
@@ -529,7 +538,9 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
         )
         return studio_graph(
             planner=planner,
-            orchestrator=orchestrator_agent(tools, include_content=content_on_spans()),
+            orchestrator=orchestrator_agent(
+                tools, include_content=content_on_spans(), surface=model_surface
+            ),
             # One model per orchestrator run, on the turn's budget, as served.
             model=lambda: orchestrator_model(
                 _ORCHESTRATOR_MODEL, client=orchestrator_genai, budget=current_turn_budget.get()

@@ -40,6 +40,7 @@ from compiler.sources import (
 )
 from compiler.surface import ToolSchema
 from harness.plan_display import _reading_clause, card_choice_text
+from harness.surface import FLASH_SURFACE, HYDROGEN_SURFACE, Surface, set_studio_surface
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -876,13 +877,30 @@ def test_a_flow_search_serves_one_member_of_feeds_a_single_measure_verb(
     assert _step_args(result, "oda_op") == _retrieval(source) | {"without_party_totals": True}
 
 
+# How each surface tells the planner to repair a family it cannot sum over one axis.
+_ONE_VALUE_REPAIRS = [
+    pytest.param(FLASH_SURFACE, "so the question has to name one value for it", id="flash"),
+    pytest.param(
+        HYDROGEN_SURFACE,
+        "so read one series: set the requirement's `source_code` to the code of one series of "
+        "the family, or ask the user for one value for it",
+        id="hydrogen",
+    ),
+]
+
+
+@pytest.mark.parametrize(("surface", "repair"), _ONE_VALUE_REPAIRS)
 @pytest.mark.parametrize("confirmed", [1, None], ids=["one-confirmed", "no-count"])
 def test_a_family_whose_membership_is_unsettled_read_separately_is_refused_at_compile_time(
-    compile_question: Callable[..., CompileResult], confirmed: int | None
+    compile_question: Callable[..., CompileResult],
+    confirmed: int | None,
+    surface: Surface,
+    repair: str,
 ) -> None:
     """One member confirmed, or none counted, and no membership settled: more
     members may hold data, so the aggregate is refused as it is for a family
     counted whole, and the reason states no count the source cannot support."""
+    set_studio_surface(surface)
     source = _gross_and_net_kenya_counting(confirmed=confirmed, served=None)
 
     result = _compile_yearly_oda_to_kenya(compile_question, source)
@@ -892,8 +910,7 @@ def test_a_family_whose_membership_is_unsettled_read_separately_is_refused_at_co
     assert issue.operation_id == "yearly_total"
     assert issue.reason.endswith(
         "aggregate reads a single measure; got several, one per StatVar of a family read "
-        "separately; it cannot be summed over nettingBasis, so the question has to name one "
-        "value for it"
+        f"separately; it cannot be summed over nettingBasis, {repair}"
     )
 
 
@@ -969,11 +986,13 @@ def test_a_summable_family_read_separately_and_filtered_is_refused_at_compile_ti
     assert issue.operation_id == "yearly_total"
 
 
+@pytest.mark.parametrize(("surface", "repair"), _ONE_VALUE_REPAIRS)
 def test_a_family_of_two_the_plan_reads_separately_is_refused_at_compile_time(
-    compile_question: Callable[..., CompileResult],
+    compile_question: Callable[..., CompileResult], surface: Surface, repair: str
 ) -> None:
     """Male and female population, read separately and totalled: apis may
     not sum over sex, so the reason asks for one value of it."""
+    set_studio_surface(surface)
     source = _source("male_female_population_nigeria")
     people = _dataset(
         "people",
@@ -997,9 +1016,7 @@ def test_a_family_of_two_the_plan_reads_separately_is_refused_at_compile_time(
     assert issue.code is CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
     assert issue.operation_id == "yearly_total"
     assert "aggregate reads a single measure; got 2" in issue.reason
-    assert "cannot be summed over gender, so the question has to name one value for it" in (
-        issue.reason
-    )
+    assert f"cannot be summed over gender, {repair}" in issue.reason
 
 
 def test_a_separate_reading_of_a_single_stat_var_source_feeds_an_aggregate(

@@ -16788,11 +16788,6 @@ def test_declaring_a_plan_ready_twice_changes_nothing(
 # --- Instruction prose ---------------------------------------------------------------------
 
 
-# The instruction the served planner carries: the translator attached, the
-# skill tools built and the question held by the planner adapter.
-_SERVED_INSTRUCTION = planner_instruction()
-
-
 def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> None:
     """Every `ReferralKind` is named, by its own value, in the planner's instruction,
     unless every referral of it carries its own guidance as `repair` (`REPAIR_OF`).
@@ -16803,10 +16798,11 @@ def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> 
     matches on the string it is sent. A kind in `REPAIR_OF` is told in the
     referral itself, which `Referral` refuses to send without that guidance.
     """
+    instruction = planner_instruction()
     unnamed = [
         kind.value
         for kind in ReferralKind
-        if kind.value not in _SERVED_INSTRUCTION and kind not in REPAIR_OF
+        if kind.value not in instruction and kind not in REPAIR_OF
     ]
     assert unnamed == [], (
         f"referral kinds the planner is never told how to read: {unnamed}. "
@@ -16822,7 +16818,7 @@ def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> 
 def test_the_instruction_has_the_planner_ask_before_proposing_over_an_unmeetable_referral() -> None:
     """`requirement_unmeetable` and `unsupported_ask` name a choice that is the user's, so
     the planner is told to say what cannot be done and ask before it proposes anything."""
-    instruction = _SERVED_INSTRUCTION
+    instruction = planner_instruction()
 
     assert (
         "`unsupported_ask` or `requirement_unmeetable` referral means the requirement cannot be "
@@ -16850,7 +16846,7 @@ def test_across_states_a_party_nobody_named() -> None:
     # `across`'s own description carries the rule, and the instruction points
     # at it. Each column a result's `open_entity_axes` can carry is tied to
     # the party word the plan states.
-    instruction = _SERVED_INSTRUCTION
+    instruction = planner_instruction()
     across = DatasetRequirement.model_fields["across"].description or ""
 
     assert "goes in `across` (see `across`)" in instruction

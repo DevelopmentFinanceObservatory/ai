@@ -32,6 +32,7 @@ from harness.settings import (
 )
 from harness.studio_stream import SHUTDOWN_WAIT_S
 from harness.studio_translate import _RecordingSurface
+from harness.surface import ModelNameRefusedError
 from harness.wire import TURN_INDEX_HEADER
 from mcp import MCPError
 from mcp.shared._httpx_utils import McpHttpClientFactory
@@ -991,7 +992,7 @@ def test_the_model_name_is_resolved_to_the_one_the_developer_api_is_sent(
 def test_a_model_name_the_developer_api_cannot_serve_refuses_startup(
     name: str, pg_database_url: str
 ) -> None:
-    with pytest.raises(server_module.ModelNameRefusedError):
+    with pytest.raises(ModelNameRefusedError):
         create_app(settings=Settings(database_url=pg_database_url, model_name=name))
 
 
@@ -999,10 +1000,10 @@ def test_create_app_gives_the_orchestrator_and_edit_card_one_resolved_model_name
     pg_database_url: str,
 ) -> None:
     app = create_app(
-        settings=Settings(database_url=pg_database_url, model_name="Gemini:gemini-3.8-flash")
+        settings=Settings(database_url=pg_database_url, model_name="Gemini:gemini-4-hydrogen")
     )
 
-    assert app.state.studio.edit_model.model_name == "gemini-3.8-flash"
+    assert app.state.studio.edit_model.model_name == "gemini-4-hydrogen"
 
 
 def test_main_bounds_the_request_drain_so_the_owners_close_before_sigkill(

@@ -23,9 +23,10 @@ from harness.orchestrator_tools import _DRAWN_CARDS_KEY, build_orchestrator_tool
 from harness.prefix_cache import PrefixCache
 from harness.sentences import StopCode, refusal_sentence
 from harness.studio_state import CardRemoval, ConversationState, land_component, remove_cards
+from harness.surface import FLASH_SURFACE, HYDROGEN_SURFACE, Surface, set_studio_surface
 from harness.turn_budget import TurnBudget
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from orchestrator.agent import INSTRUCTION, orchestrator_agent
+from orchestrator.agent import orchestrator_agent, orchestrator_instruction
 from orchestrator.model import orchestrator_model
 from orchestrator.run import (
     Answered,
@@ -272,7 +273,9 @@ async def test_a_raising_tool_is_answered_raised_and_the_run_goes_on(
     scripted = ScriptedGenai([reply(_SEARCH), reply(text_part("Search failed."))])
     tools = build_orchestrator_tools(resolver=broken, executor=_no_executor)
 
-    events, _ = await _run(scripted, tools=tools)
+    # At ERROR, so the surface line the agent logs at INFO when built stays out.
+    with caplog.at_level(logging.ERROR):
+        events, _ = await _run(scripted, tools=tools)
 
     (answered,) = [e for e in events if isinstance(e, ToolsAnswered)]
     sent = json.dumps(scripted.requests[1].content_list[-1].model_dump(mode="json"))
@@ -439,7 +442,20 @@ async def test_a_plan_call_hands_off_and_the_hand_back_answers_it_after_storage(
     assert second[-1] == Answered(text="Kenya ranks 3rd.")
 
 
-async def test_a_stored_history_holds_no_copy_of_the_instruction_and_resumes_as_unstored() -> None:
+@pytest.mark.parametrize(
+    ("surface", "marker", "resumed_on"),
+    [
+        (FLASH_SURFACE, "orchestrator.agent.INSTRUCTION", HYDROGEN_SURFACE),
+        (HYDROGEN_SURFACE, "orchestrator.agent.HYDROGEN_INSTRUCTION", FLASH_SURFACE),
+    ],
+    ids=["flash", "hydrogen"],
+)
+async def test_a_stored_history_holds_no_copy_of_the_instruction_and_resumes_as_unstored(
+    surface: Surface, marker: str, resumed_on: Surface
+) -> None:
+    """A stored request carries its surface's marker in place of the
+    instruction, and loads that surface's instruction back in a process
+    running the other surface."""
     scripted = ScriptedGenai(
         [
             reply(_SEARCH),
@@ -447,7 +463,7 @@ async def test_a_stored_history_holds_no_copy_of_the_instruction_and_resumes_as_
         ]
     )
     orchestrator = orchestrator_agent(
-        build_orchestrator_tools(resolver=_Searches(), executor=_no_executor)
+        build_orchestrator_tools(resolver=_Searches(), executor=_no_executor), surface=surface
     )
     model = orchestrator_model("gemini-test", client=scripted.client, budget=None)
     (handed,) = [
@@ -463,11 +479,18 @@ async def test_a_stored_history_holds_no_copy_of_the_instruction_and_resumes_as_
     ]
     held = handed.history.conversation.messages
     stored = handed.history.model_dump_json()
+    set_studio_surface(resumed_on)
     loaded = StoredHistory.model_validate_json(stored)
 
-    first_line = INSTRUCTION.splitlines()[0]
-    assert sum(first_line in json.dumps(m.instructions) for m in held if m.kind == "request") == 2
-    assert first_line not in stored
+    instruction = orchestrator_instruction(surface).strip()
+    assert [m.instructions for m in held if m.kind == "request"].count(instruction) == 2
+    stored_instructions = [
+        m.get("instructions")
+        for m in json.loads(stored)["conversation"]["messages"]
+        if m["kind"] == "request"
+    ]
+    assert stored_instructions.count(marker) == 2
+    assert instruction.splitlines()[0] not in stored
     assert ModelMessagesTypeAdapter.dump_json(
         loaded.conversation.messages
     ) == ModelMessagesTypeAdapter.dump_json(held)

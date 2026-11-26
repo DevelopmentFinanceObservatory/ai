@@ -182,6 +182,7 @@ from harness.reply_figures import (
 from harness.rolling_cards import named_year
 from harness.scope_choices import PartScope, carried_entries
 from harness.studio_state import CardRemoval, RecallPart, RecallRefusedError
+from harness.surface import studio_surface
 from harness.tool_contracts import (
     HarnessCode,
     ResolverError,
@@ -255,6 +256,46 @@ def _latest_window(periods: int) -> dict[str, dict[str, Any]]:
         "start": {"anchor": "latest", "offset": 1 - periods},
         "end": {"anchor": "latest", "offset": 0},
     }
+
+
+# `Chart.select_json`'s description on the `hydrogen` surface (`harness.surface`,
+# `HYDROGEN_PARAM_DESCRIPTIONS`).
+HYDROGEN_SELECT_JSON_DESCRIPTION = (
+    "a JSON object binding the frame's view to the series to draw. Each key is a "
+    "dimension the view lists, and its value one value the view lists for it, or "
+    'on one dimension a list of them: {"observationAbout": ["country/GHA", '
+    '"country/TGO"]}, {"financingRecipient": "country/MWI"}. Bind every dimension '
+    "the view lists with more than one value to one value, except the one dimension "
+    "the chart compares, which you leave unbound (one series per value) or list. "
+    "{} is accepted only when the view lists a single dimension with more than one "
+    "value. A refusal names the dimensions still to bind: send the select again "
+    "with each bound to a value the view lists. A line_chart "
+    f"draws at most {LINE_CHART_MAX_VALUES} series, and a bar_chart or a table at "
+    f"most {MAX_SERIES_PER_COMPONENT}, a table fewer when its rows over the periods "
+    f"it covers would pass {MAX_TABLE_ROWS:,}. When the compared dimension holds "
+    "more than that, leave it unbound: the chart is cut for display to the largest "
+    "at one period, and its title says how many and when. A cut chart shows; it "
+    "does not answer which are largest, which needs a ranking calculated. Do not "
+    "list a subset you chose to stand in for the largest. A chart with "
+    "latest_periods, or over a frame whose view says rolling, is not cut: list its "
+    "members from a ranking you asked for, at most as many as the chart draws."
+)
+
+# On the `hydrogen` surface (`orchestrator.declarations`): each
+# tool's description edits, as (old, new) pairs each of which matches its
+# full description exactly once, and its parameter descriptions by dotted path.
+HYDROGEN_DESCRIPTION_EDITS: dict[str, tuple[tuple[str, str], ...]] = {
+    "search": (
+        (
+            "says so in `retry_with_text`, what",
+            "says so in `retry_with_text`, a part the user's words cannot repair "
+            "names the search to run in `next_step`, what",
+        ),
+    ),
+}
+HYDROGEN_PARAM_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "make_charts": {"charts.select_json": HYDROGEN_SELECT_JSON_DESCRIPTION},
+}
 
 
 class Chart(BaseModel):
@@ -1222,9 +1263,11 @@ _TEXT_SEARCHED_KEY = "orchestrator:text_searched"
 _TEXT_SEARCH_RAN = "*"
 # A parsed search's part reading that a search with the user's words may
 # answer carries this sentence as `retry_with_text`: every part Search found
-# no data for or could not support (`_RETRY_STATUSES`), with the one delay
-# `_REPAIRED_FIRST` states. A part Search answered, definite or with
-# candidates, offers no such search, whatever it left out.
+# no data for or could not support (`_RETRY_STATUSES`), except, on the
+# `hydrogen` surface, one whose cause the user's words cannot repair
+# (`_next_step`), with the one delay `_repaired_first` states. A part Search
+# answered, definite or with candidates, offers no such search, whatever it
+# left out.
 RETRY_WITH_TEXT = (
     "Search once more for this part alone: `text` set to the user's own words for it, and "
     "this part alone in `parts`."
@@ -1233,9 +1276,64 @@ _RETRY_STATUSES = frozenset({"no_data", "unsupported"})
 # The reasons the instruction repairs with another parsed search first: a place
 # sent as the model reads it, or `role` set on every name. A part refused for
 # one of them is offered the `text` search from its second such refusal in a
-# turn, under the measure it was sent with.
+# turn, under the measure it was sent with. Under `hydrogen`, whose
+# `next_step` repairs a place, only `role` is (`_repaired_first`).
 _REPAIRED_FIRST = frozenset({"entity_not_resolved", "role_not_resolved"})
-# The refusals for a `_REPAIRED_FIRST` reason seen this turn, each as the JSON
+_HYDROGEN_REPAIRED_FIRST = frozenset({"role_not_resolved"})
+
+
+def _repaired_first() -> frozenset[str]:
+    """The reasons repaired with a parsed search first, by the process's surface."""
+    return _HYDROGEN_REPAIRED_FIRST if studio_surface().variant == "hydrogen" else _REPAIRED_FIRST
+
+
+# On the `hydrogen` surface, the next search for a part Search
+# found no data for or could not support, as `next_step`, by the cause the
+# user's own words cannot repair: a place or
+# group the data does not hold (`entity_not_resolved`), a phrase the data does
+# not record (`qualifier_not_bound`), or a window outside the years it covers
+# (the `year_unavailable` departure). Such a part is offered no `text` search.
+NEXT_STEP_UNRESOLVED_ENTITY = (
+    "Search this measure again without the place or group it could not use, or with the "
+    "nearest place or group the data holds."
+)
+NEXT_STEP_UNBOUND_QUALIFIER = (
+    "Search this measure again without the phrases in `unbound_qualifiers`."
+)
+NEXT_STEP_YEAR_UNAVAILABLE = (
+    "Search this part again for the years its year_unavailable departure says the data covers."
+)
+_NEXT_STEPS = {
+    "entity_not_resolved": NEXT_STEP_UNRESOLVED_ENTITY,
+    "qualifier_not_bound": NEXT_STEP_UNBOUND_QUALIFIER,
+}
+
+
+def _next_step(reading: Mapping[str, Any]) -> str | None:
+    """The `next_step` of a part `reading` Search found no data for or could
+    not support, for a cause the user's own words cannot repair; None for any
+    other reading, and for every reading outside the `hydrogen` surface.
+    A window outside the data's years is the step a part with a
+    `year_unavailable` departure takes, whatever its reason."""
+    if reading.get("status") not in _RETRY_STATUSES or studio_surface().variant != "hydrogen":
+        return None
+    departures = reading.get("departures") or ()
+    if any(
+        isinstance(departure, Mapping) and departure.get("code") == "year_unavailable"
+        for departure in departures
+    ):
+        return NEXT_STEP_YEAR_UNAVAILABLE
+    return _NEXT_STEPS.get(str(reading.get("reason")))
+
+
+def _add_next_steps(readings: Sequence[dict[str, Any]]) -> None:
+    """Add `next_step` to each of `readings` `_next_step` names one for."""
+    for reading in readings:
+        if step := _next_step(reading):
+            reading["next_step"] = step
+
+
+# The refusals for a `_repaired_first` reason seen this turn, each as the JSON
 # of the part's measure, as `_words` reads it, and the reason.
 _REFUSED_ONCE_KEY = "orchestrator:search_refused_once"
 
@@ -1292,19 +1390,20 @@ def _offer_text_retries(
     When the readings are `tied` to the `parts` sent, by position, a reading
     whose part a `text` search already ran for this turn is offered none.
     When they are not, no reading is offered one once any `text` search has
-    run this turn. A reading refused for a reason in `_REPAIRED_FIRST` is
+    run this turn. A reading refused for a reason in `_repaired_first` is
     offered one only when a part with its measure was already refused for
     that reason this turn, so the parsed repair comes first."""
     searched = set(state.get(_TEXT_SEARCHED_KEY) or ())
     untied_and_searched = not tied and _TEXT_SEARCH_RAN in searched
     keys = [_part_key(part) for part in parts] if tied else None
     due = list(state.get(_REFUSED_ONCE_KEY) or [])
+    repaired_first = _repaired_first()
     refused: list[str] = []
     for index, reading in enumerate(readings):
-        if reading.get("status") not in _RETRY_STATUSES:
+        if reading.get("status") not in _RETRY_STATUSES or _next_step(reading):
             continue
         reason = reading.get("reason")
-        if reason in _REPAIRED_FIRST:
+        if reason in repaired_first:
             repair = json.dumps([_words(str(reading.get("variable") or "")), reason])
             refused.append(repair)
             if repair not in due:
@@ -2257,6 +2356,7 @@ def build_orchestrator_tools(
             _record_text_searched(call.state, parts)
         else:
             _offer_text_retries(call.state, parts, readings, tied=tied)
+        _add_next_steps(readings)
         found: dict[str, Any] = {"kind": digest.get("kind") or "resolution", "parts": readings}
         if not readings:
             found["status"] = digest.get("status")

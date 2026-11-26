@@ -61,8 +61,8 @@
   },
   {
     "type": "generation",
-    "name": "chat gemini-3.8-flash",
-    "model": "gemini-3.8-flash",
+    "name": "chat gemini-4-hydrogen",
+    "model": "gemini-4-hydrogen",
     "session": "<the session>",
     "agent": "dfo_planner",
     "input": [
@@ -144,8 +144,8 @@
   },
   {
     "type": "generation",
-    "name": "chat gemini-3.8-flash",
-    "model": "gemini-3.8-flash",
+    "name": "chat gemini-4-hydrogen",
+    "model": "gemini-4-hydrogen",
     "session": "<the session>",
     "agent": "dfo_planner",
     "input": [

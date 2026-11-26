@@ -170,10 +170,12 @@ async def run_scenario(
     *,
     budget: TurnBudget | None = None,
     store: bool = True,
+    hand_back: HandBack | None = None,
 ) -> tuple[ScriptedGenai, list[OrchestratorEvent], dict[str, Any]]:
     """Run `scenario`'s turn on the Pydantic AI orchestrator: its first run, and
     when it hands off, a second run from the stored history, serialised to JSON
-    and back when `store`."""
+    and back when `store`. The second run reads `hand_back`, by default the one
+    ADK's recording showed (`hand_back_of`)."""
     scripted = ScriptedGenai(list(replies))
     tools = build_orchestrator_tools(
         resolver=CannedSearch(definite_envelope(), definite_envelope()), executor=_no_executor
@@ -196,7 +198,9 @@ async def run_scenario(
         )
     ]
     handed = [e for e in events if isinstance(e, HandedOff)]
-    if handed and (hand_back := hand_back_of(scenario)) is not None:
+    if hand_back is None:
+        hand_back = hand_back_of(scenario)
+    if handed and hand_back is not None:
         history = handed[0].history
         if store:
             history = type(history).model_validate_json(history.model_dump_json())

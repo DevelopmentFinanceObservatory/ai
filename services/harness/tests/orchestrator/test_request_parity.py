@@ -24,6 +24,9 @@ import pytest
 
 from .pai_runs import SCENARIOS, recorded, run_scenario
 
+# The recorded requests are Flash's bytes (`flash_studio`).
+pytestmark = pytest.mark.usefixtures("flash_studio")
+
 _PLACEHOLDER = base64.b64encode(b"skip_thought_signature_validator").decode()
 
 

@@ -78,7 +78,6 @@ from .scripted_genai import (
     thought_part,
     usage_metadata,
 )
-from .scripted_planner import MODEL as _MODEL
 from .scripted_planner import SIGNED as _SIGNED
 from .scripted_planner import Tools, scripted_planner
 from .session_events import one_answer
@@ -87,6 +86,9 @@ from .test_planner_model import _HangingGenai
 from .test_turn_records import _switchable_scope
 from .turn_driver import numbered_call_ids as _numbered_call_ids
 
+# The planner model the tests name; each that builds a planner on it names it
+# itself, so no test reads the settings for it.
+_MODEL = "gemini-3.8-flash"
 _USAGE = usage_metadata(prompt=120, cached=40, candidates=9, thoughts=4)
 _QUESTION = "kenya debt"
 _REFUSED = {"outcome": "refused", "code": "plan_invalid", "message": "Pin a source."}
@@ -1173,7 +1175,11 @@ def _sse_chunk(
         candidate["continuationToken"] = base64.b64encode(token).decode()
     if finish is not None:
         candidate["finishReason"] = finish
-    body = {"candidates": [candidate], "responseId": response_id, "modelVersion": _MODEL}
+    body = {
+        "candidates": [candidate],
+        "responseId": response_id,
+        "modelVersion": _MODEL,
+    }
     return f"data: {json.dumps(body)}\r\n\r\n".encode()
 
 

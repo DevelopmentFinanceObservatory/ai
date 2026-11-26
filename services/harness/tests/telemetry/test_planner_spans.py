@@ -34,7 +34,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import StatusCode
 from planner.model import planner_model
 from planner.plan import Plan
-from planner.settings import AGENT_NAME
+from planner.settings import AGENT_NAME, AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_spec import Parameter, ToolSpec
 
@@ -52,7 +52,6 @@ from ..test_planner_adapter import _translated_plan
 from ..test_planner_model import MODEL as _PLANNER_MODEL
 from ..test_planner_model import _pai
 from ..test_planner_node import (
-    _MODEL,
     _REFUSED,
     _SIGNED,
     _STREAMED,
@@ -515,11 +514,12 @@ async def test_the_turns_session_and_trace_name_reach_the_planners_spans(
         if _attribute(span, "gen_ai.agent.name") == AGENT_NAME
     ]
 
+    model = AgentSettings().planner_model_name
     assert {scope for scope, _ in exported} == {"pydantic-ai"}
     tools = ["execute_tool propose_plan"] * 2
     assert sorted(span.name for _, span in exported) == [
-        f"chat {_MODEL}",
-        f"chat {_MODEL}",
+        f"chat {model}",
+        f"chat {model}",
         *tools,
         f"invoke_agent {AGENT_NAME}",
     ]
