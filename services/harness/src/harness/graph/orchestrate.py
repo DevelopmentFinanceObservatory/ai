@@ -188,11 +188,12 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
                 result=hand_back.response(),
                 written=tuple(hand_back.written),
             )
+        run_model = model()
         run = run_orchestrator(
             orchestrator,
             state=ctx.state,
             turn_id=turn_id(ctx.key),
-            model=model(),
+            model=run_model,
             opening=opening,
             history=history,
             hand_back=resumed,
@@ -203,7 +204,9 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
                 return _handed_off(ctx, event)
             if isinstance(event, Answered):
                 if event.history is not None and inputs.history == "full":
-                    ctx.state[ORCHESTRATOR_CARRIED_KEY] = carried_record(event.history)
+                    ctx.state[ORCHESTRATOR_CARRIED_KEY] = carried_record(
+                        event.history, model_name=run_model.model_name
+                    )
                 return Next("answered")
             ctx.emit(event)
         raise RuntimeError("the orchestrator's run ended without its reply or a hand-off")
@@ -211,17 +214,27 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
     return Node(run=orchestrate)
 
 
-def carried_record(history: StoredHistory) -> dict[str, Any]:
-    """`history` as `ORCHESTRATOR_CARRIED_KEY` keeps it: the `StoredHistory`
-    JSON text, and the input and output tokens its final call reported, which
-    the next turn holds to `harness.studio_state.CARRIED_HISTORY_TOKEN_CAP`."""
-    final = history.conversation.messages[-1] if history.conversation.messages else None
-    tokens = (
-        final.usage.input_tokens + final.usage.output_tokens
-        if isinstance(final, ModelResponse)
-        else 0
-    )
-    return {"history": history.model_dump_json(), "tokens": tokens}
+def carried_record(history: StoredHistory, *, model_name: str) -> dict[str, Any]:
+    """`history`, written by `model_name`, as `ORCHESTRATOR_CARRIED_KEY` keeps
+    it: the `StoredHistory` JSON text, the model's name, and as `tokens` the
+    largest input plus output tokens any of its responses reported, which the
+    next turn holds to `harness.studio_state.CARRIED_HISTORY_TOKEN_CAP`. A
+    request holds every message before it, so the largest call is the size of
+    the conversation as last sent. A final response the harness wrote, a
+    bound's closing sentence say, reports none, so it does not count. `tokens`
+    is None when no response reported any, which the next turn reads as a
+    conversation it cannot size (`ConversationState.carried_opening`)."""
+    reported = [
+        message.usage.input_tokens + message.usage.output_tokens
+        for message in history.conversation.messages
+        if isinstance(message, ModelResponse)
+    ]
+    tokens = max(reported, default=0)
+    return {
+        "history": history.model_dump_json(),
+        "tokens": tokens or None,
+        "model": model_name,
+    }
 
 
 def _handed_off(ctx: NodeCtx[GraphEvent], handed: HandedOff) -> Next:

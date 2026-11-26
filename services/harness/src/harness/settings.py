@@ -63,9 +63,9 @@ class HistorySettings(BaseServiceSettings):
     """`STUDIO_HISTORY`, read case-insensitively; blank means the default and
     any other value is refused. `STUDIO_HISTORY_FULL_SHARE` is the share of
     conversations `split` assigns the `full` arm, from 0 to 1; blank means the
-    default. A settings class of its own, read once as each turn begins
-    (`harness.studio_state.ConversationState.begin_turn`), and once at startup
-    so a bad value refuses it (`harness.server.create_app`)."""
+    default. A settings class of its own, read once at startup, where a bad
+    value refuses it (`harness.server.create_app`), and handed to every turn's
+    begin through `harness.studio.StudioRunner.history`."""
 
     studio_history: StudioHistorySetting = DEFAULT_STUDIO_HISTORY
     studio_history_full_share: float = Field(
@@ -85,6 +85,14 @@ class HistorySettings(BaseServiceSettings):
         if isinstance(value, str) and not value.strip():
             return DEFAULT_STUDIO_HISTORY_FULL_SHARE
         return value
+
+
+# `STUDIO_HISTORY=digest`, built without reading the environment: the history a
+# turn begins under when its caller names none
+# (`harness.studio_state.ConversationState.begin_turn`).
+DIGEST_HISTORY = HistorySettings.model_construct(
+    studio_history="digest", studio_history_full_share=DEFAULT_STUDIO_HISTORY_FULL_SHARE
+)
 
 
 # How long after its deadline `harness.live_refresh` cancels a refresh, and how

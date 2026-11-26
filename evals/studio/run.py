@@ -1049,14 +1049,20 @@ async def _run_scripted_case(case: dict[str, Any], *, engine: AsyncEngine) -> di
     """One case on its own scripted studio (its scripts are
     consumed as it runs), its conversations stored on `engine`, then the case's
     `checks` over what the models were shown. A model script that ran dry is a
-    contract failure, since the case drove less than it says."""
+    contract failure, since the case drove less than it says. `history` lists
+    the history arms the case's turns ran, as their stored records name them
+    (`_turn_history_arms`)."""
     import orchestrator_scripted  # noqa: PLC0415 -- the harness import chain is slow
 
+    conversation_id = f"eval_{uuid.uuid4().hex[:12]}"
     async with orchestrator_scripted.orchestrator_client(case["scenario"], engine=engine) as (
         client,
         log,
     ):
-        outcome = await run_case(client, case, on_turn=log.mark_turn)
+        outcome = await run_case(
+            client, case, conversation_id=conversation_id, on_turn=log.mark_turn
+        )
+    outcome["history"] = await _turn_history_arms(engine, conversation_id)
     outcome["contract"] += [
         f"the {agent} model's script ran out: the case drove fewer model calls than it needs"
         for agent in sorted(set(log.exhausted))
@@ -1064,6 +1070,28 @@ async def _run_scripted_case(case: dict[str, Any], *, engine: AsyncEngine) -> di
     evidence = checks.Evidence(turn_frames=outcome["turn_frames"], log=log.entries)
     outcome["expectation"] += checks.run_case_checks(case.get("checks", []), evidence)
     return outcome
+
+
+async def _turn_history_arms(engine: AsyncEngine, conversation_id: str) -> list[str]:
+    """The history arms the recorded turns of `conversation_id` ran, each
+    once, sorted (`harness.studio_state.TurnUsage.history`). A turn whose
+    record names no arm counts as `unknown`."""
+    from sqlalchemy import text  # noqa: PLC0415 -- scripted mode only
+
+    async with engine.connect() as conn:
+        records = (
+            await conn.execute(
+                text(
+                    "SELECT t.record FROM conversation_turns t "
+                    "JOIN conversations c ON c.id = t.conversation "
+                    "WHERE c.conversation_id = :id"
+                ),
+                {"id": conversation_id},
+            )
+        ).scalars()
+        return sorted(
+            {(record.get("usage") or {}).get("history") or "unknown" for record in records}
+        )
 
 
 @asynccontextmanager
@@ -1123,6 +1151,7 @@ async def run_suite(
                 "xfail": case.get("xfail"),
                 "contract_violations": [],
                 "expectation_violations": [],
+                "history": None,
             }
             try:
                 if mode == "scripted":
@@ -1134,6 +1163,9 @@ async def run_suite(
                     outcome["expectation"] += _frame_checks(case, outcome)
                 record["contract_violations"] = outcome["contract"]
                 record["expectation_violations"] = outcome["expectation"]
+                # A live server runs the arm its own environment names, which
+                # the runner cannot read.
+                record["history"] = outcome.get("history")
                 record |= {key: outcome[key] for key in _REPLY_RECORD_KEYS}
                 if judge and case.get("rubrics"):
                     try:
@@ -1280,9 +1312,6 @@ def main() -> int:
         print("note: live mode without --judge runs the contract layer only\n")
 
     results, passed = asyncio.run(_main_suite(args))
-    for record in results:
-        # A live server runs the arm its own environment names.
-        record["history"] = args.history if args.mode == "scripted" else None
     counts: dict[str, int] = {}
     for record in results:
         counts[record["status"]] = counts.get(record["status"], 0) + 1

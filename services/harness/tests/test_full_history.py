@@ -26,6 +26,8 @@ from typing import Any
 
 import pytest
 from common.logging import JSON_FIELDS
+from harness.conversation import current_history, current_model_usage
+from harness.graph.orchestrate import carried_record
 from harness.settings import HistorySettings
 from harness.studio_state import (
     CARRIED_HISTORY_TOKEN_CAP,
@@ -34,17 +36,37 @@ from harness.studio_state import (
     history_arm,
 )
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from orchestrator.run import StoredHistory
 from pydantic import ValidationError
+from pydantic_ai import Conversation
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    UserPromptPart,
+)
+from pydantic_ai.usage import RequestUsage
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .scripted_genai import Reply, Request, call_part, text_part, thought_part, usage_metadata
 from .scripted_tools import CannedSearch, definite_envelope
-from .studio_routes import CLIENT_FEATURES, orchestrator_app, stream, studio_client, turn_body
+from .studio_routes import (
+    CLIENT_FEATURES,
+    CONVERSATION,
+    MODEL,
+    orchestrator_app,
+    stream,
+    studio_client,
+    turn_body,
+)
 
 pytestmark = pytest.mark.usefixtures("hydrogen_studio")
 
 _RESET = "studio history: chain reset"
+# The principal the route tests' bearer token signs in as.
+_PRINCIPAL = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
 # Conversation ids `split` assigns the `full` and the `digest` arm at 0.5.
 _FULL_ID = "conv-full"
 _DIGEST_ID = "conv-a"
@@ -103,6 +125,12 @@ _TURN_1 = (
 )
 
 
+# A follow-up's answer, which reports its usage as every Gemini call does.
+_UGANDA = Reply(
+    chunks=[[text_part("Uganda's was 63.")]], usage=usage_metadata(prompt=500, candidates=10)
+)
+
+
 async def _turns(app: Any, *messages: str, conversation_id: str | None = None) -> None:
     ids = {"conversation_id": conversation_id} if conversation_id is not None else {}
     async with studio_client(app) as client:
@@ -131,6 +159,20 @@ def _history_fields(line: dict[str, Any]) -> tuple[Any, ...]:
         line["history_assigned_turn"],
         line["history_chain"],
     )
+
+
+async def _cursor_copies(engine: AsyncEngine) -> list[tuple[int, bool, bool]]:
+    """Each cursor's turn, whether its inputs hold the conversation it opened
+    from, and whether its state holds the one it closed on."""
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            text(
+                "SELECT turn_index, CAST(inputs AS jsonb) ? 'carried_history', "
+                "CAST(state AS jsonb) ? 'orchestrator:carried' FROM turn_cursors "
+                "ORDER BY turn_index"
+            )
+        )
+        return [tuple(row) for row in rows]
 
 
 async def _stored(engine: AsyncEngine, conversation_id: str, key: str) -> Any:
@@ -170,6 +212,15 @@ async def test_a_follow_up_s_first_request_extends_the_previous_turn_s_last_whol
     assert '"turns"' not in tail
     assert question == "And Uganda?"
     assert len(_contents(second)) == len(_contents(last)) + 3
+    # The conversation's row holds the one durable copy of the chain: each
+    # turn's claim drops the copies the earlier turns' cursors held, and the
+    # latest turn's cursor keeps its own until the next turn begins.
+    assert (await _stored(pg_engine, CONVERSATION, "carried_history"))["turn"] == 3
+    assert await _cursor_copies(pg_engine) == [
+        (1, False, False),
+        (2, False, False),
+        (3, True, True),
+    ]
 
 
 @pytest.mark.usefixtures("full_history")
@@ -206,6 +257,13 @@ async def test_the_follow_up_extends_the_turn_another_process_stored(
             "token_cap",
             id="token-cap",
         ),
+        pytest.param(
+            # A turn whose calls reported no usage, as a bound's closing
+            # sentence the harness wrote after no call completed.
+            (Reply(chunks=[[text_part("62 years.")]], usage=None),),
+            "no_usage",
+            id="no-usage",
+        ),
     ],
 )
 async def test_a_turn_with_nothing_to_carry_starts_a_fresh_chain_from_the_digest(
@@ -214,9 +272,7 @@ async def test_a_turn_with_nothing_to_carry_starts_a_fresh_chain_from_the_digest
     turn_1: tuple[Reply, ...],
     reason: str,
 ) -> None:
-    app, model = orchestrator_app(
-        *turn_1, text_part("Uganda's was 63."), text_part("Both rose."), engine=pg_engine
-    )
+    app, model = orchestrator_app(*turn_1, _UGANDA, text_part("Both rose."), engine=pg_engine)
 
     with caplog.at_level(logging.INFO, logger="harness.studio_state"):
         await _turns(app, "Life expectancy in Kenya?", "And Uganda?", "Compare them")
@@ -334,16 +390,33 @@ def test_a_forced_arm_overrides_the_stored_one_and_leaves_it_stored() -> None:
     assert _history(state.turn_usage) == (4, "full", "full", "split", 2)
 
 
-def test_begin_turn_reads_the_setting_from_the_environment(
+def test_begin_turn_reads_no_environment_and_runs_digest_when_named_no_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("STUDIO_HISTORY", " Split ")
-    monkeypatch.setenv("STUDIO_HISTORY_FULL_SHARE", "1")
-    state = ConversationState(conversation_id=_DIGEST_ID)
+    monkeypatch.setenv("STUDIO_HISTORY", "full")
+    state = ConversationState(conversation_id=_FULL_ID)
 
     state.begin_turn()
 
-    assert _history(state.turn_usage) == (1, "full", "full", "split", 1)
+    assert _history(state.turn_usage) == (1, "digest", None, "forced", None)
+
+
+async def test_a_turn_begins_under_the_setting_the_app_read_at_startup(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The app reads `STUDIO_HISTORY` once, as it is built; a later change
+    of the environment reaches no turn."""
+    monkeypatch.setenv("STUDIO_HISTORY", " Split ")
+    monkeypatch.setenv("STUDIO_HISTORY_FULL_SHARE", "1")
+    app, _ = orchestrator_app(engine=pg_engine)
+    monkeypatch.setenv("STUDIO_HISTORY", "digest")
+
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        await _turns(app, "Life expectancy in Kenya?", conversation_id=_DIGEST_ID)
+
+    assert [_history_fields(line) for line in _turn_lines(caplog)] == [
+        (1, "full", "full", "split", 1, "fresh"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -391,34 +464,34 @@ async def test_a_split_conversation_on_the_full_arm_extends_its_previous_turn(
 
 
 async def test_a_forced_digest_opens_a_full_arm_conversation_from_the_digest_and_keeps_its_arm(
-    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Rollback: under `STUDIO_HISTORY=digest` a conversation assigned `full`
     opens from the digest, and its stored arm stays. Back under `split` it
-    is `full` again, on a fresh chain, since the digest turn carried none."""
-    monkeypatch.setenv("STUDIO_HISTORY", "split")
-    app, model = orchestrator_app(
-        *_TURN_1,
-        text_part("Uganda's was 63."),
-        text_part("Both rose."),
-        resolver=CannedSearch(definite_envelope()),
-        engine=pg_engine,
+    is `full` again, on a fresh chain, since the digest turn carried none.
+    Each setting runs on an app of its own, as a restart reads it."""
+    app, _ = orchestrator_app(
+        *_TURN_1, resolver=CannedSearch(definite_envelope()), engine=pg_engine, history=_split()
+    )
+    rolled_back, rolled_back_model = orchestrator_app(
+        _UGANDA, engine=pg_engine, history=HistorySettings(studio_history="digest")
+    )
+    restored, restored_model = orchestrator_app(
+        text_part("Both rose."), engine=pg_engine, history=_split()
     )
     with caplog.at_level(logging.INFO, logger="harness.studio_store"):
         await _turns(app, "Life expectancy in Kenya?", conversation_id=_FULL_ID)
-        monkeypatch.setenv("STUDIO_HISTORY", "digest")
-        await _turns(app, "And Uganda?", conversation_id=_FULL_ID)
-        second = model.requests[-1]
+        await _turns(rolled_back, "And Uganda?", conversation_id=_FULL_ID)
         assert await _stored(pg_engine, _FULL_ID, "history_assignment") == {
             "arm": "full",
             "turn": 1,
         }
-        monkeypatch.setenv("STUDIO_HISTORY", "split")
-        await _turns(app, "Compare them", conversation_id=_FULL_ID)
+        await _turns(restored, "Compare them", conversation_id=_FULL_ID)
 
+    (second,) = rolled_back_model.requests
     assert len(_contents(second)) == 2
     assert '"turns": [' in _opening_texts(second, 2)[0]
-    assert len(_contents(model.requests[-1])) == 2
+    assert len(_contents(restored_model.requests[-1])) == 2
     assert [_history_fields(line) for line in _turn_lines(caplog)] == [
         (1, "full", "full", "split", 1, "fresh"),
         (2, "digest", "full", "forced", 1, None),
@@ -503,12 +576,15 @@ def _answer(frames: list[dict[str, Any]], conversation_id: str) -> dict[str, Any
 
 
 async def test_a_paused_full_turn_resumed_after_a_rollback_keeps_its_arm(
-    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    pg_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    exported_spans: InMemorySpanExporter,
 ) -> None:
     """A `full` turn paused on a question and answered on a second app started
     with `STUDIO_HISTORY=digest` keeps the arm it began with: its run stores
-    its conversation, and its line says `full` and `split`. The turn after it
-    begins under `digest`."""
+    its conversation, and its line and the resumed segment's model spans say
+    `full` and `split`. The turn after it begins under `digest`."""
     monkeypatch.setenv("STUDIO_HISTORY", "split")
     asking = call_part(
         "ask_user",
@@ -528,13 +604,26 @@ async def test_a_paused_full_turn_resumed_after_a_rollback_keeps_its_arm(
         resumed_app, resumed_model = orchestrator_app(
             text_part("Uganda's was 63."), text_part("Both rose."), engine=pg_engine
         )
+        # The in-process transport runs each request in the test's context,
+        # so the arm `/turn` set is cleared, as a request of its own starts.
+        current_history.set(None)
+        exported_spans.clear()
         async with studio_client(resumed_app) as client:
             frames = await stream(client, "/api/studio/interrupt", _answer(paused, _FULL_ID))
         assert frames[-1]["event"] == "done"
+        resumed_spans = {
+            (
+                (span.attributes or {}).get("studio.surface.history"),
+                (span.attributes or {}).get("studio.history.mode"),
+            )
+            for span in exported_spans.get_finished_spans()
+            if span.name.startswith("chat ")
+        }
         carried = await _stored(pg_engine, _FULL_ID, "carried_history")
         await _turns(resumed_app, "Compare them", conversation_id=_FULL_ID)
 
     _assert_extends(model.requests[-1], model.requests[1])
+    assert resumed_spans == {("full", "split")}
     assert carried is not None
     assert carried["turn"] == 2
     assert len(_contents(resumed_model.requests[-1])) == 2
@@ -543,6 +632,168 @@ async def test_a_paused_full_turn_resumed_after_a_rollback_keeps_its_arm(
         (2, "full", "full", "split", 1, "extended"),
         (3, "digest", "full", "forced", 1, None),
     ]
+
+
+def _response(input_tokens: int, output_tokens: int) -> ModelResponse:
+    return ModelResponse(
+        parts=[TextPart("x")],
+        usage=RequestUsage(input_tokens=input_tokens, output_tokens=output_tokens),
+    )
+
+
+@pytest.mark.parametrize(
+    ("responses", "tokens"),
+    [
+        # A final response the harness wrote, a bound's closing sentence,
+        # reports nothing; the call before it sizes the conversation.
+        pytest.param([(9_000, 40), (12_000, 60), (0, 0)], 12_060, id="harness-final"),
+        pytest.param([(0, 0)], None, id="none-reported"),
+    ],
+)
+def test_the_carried_tokens_are_the_largest_call_s_and_none_when_no_call_reported_any(
+    responses: list[tuple[int, int]], tokens: int | None
+) -> None:
+    messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart("Kenya?")])]
+    messages += [_response(*usage) for usage in responses]
+    history = StoredHistory(conversation=Conversation(messages=messages))
+
+    record = carried_record(history, model_name="gemini-test")
+
+    assert (record["tokens"], record["model"]) == (tokens, "gemini-test")
+
+
+async def _edit_carried(engine: AsyncEngine, conversation_id: str, edit: dict[str, Any]) -> None:
+    """Apply `edit` to the carried conversation stored for `conversation_id`."""
+    async with engine.begin() as connection:
+        state = (
+            await connection.execute(
+                text("SELECT turn_state FROM conversations WHERE conversation_id = :id"),
+                {"id": conversation_id},
+            )
+        ).scalar_one()
+        state["carried_history"] |= edit
+        await connection.execute(
+            text(
+                "UPDATE conversations SET turn_state = CAST(:state AS jsonb) "
+                "WHERE conversation_id = :id"
+            ),
+            {"id": conversation_id, "state": json.dumps(state)},
+        )
+
+
+@pytest.mark.parametrize(
+    ("edit", "reason"),
+    [
+        # A deploy that changed the message schema.
+        pytest.param({"history": '{"conversation": 5}'}, "unloadable", id="unloadable"),
+        # Another orchestrator model, whose thought signatures are its own.
+        pytest.param({"model": "gemini-older"}, "model_changed", id="model-changed"),
+    ],
+)
+async def test_a_carried_conversation_the_turn_cannot_extend_opens_from_the_digest(
+    pg_engine: AsyncEngine,
+    caplog: pytest.LogCaptureFixture,
+    edit: dict[str, Any],
+    reason: str,
+) -> None:
+    full = HistorySettings(studio_history="full")
+    app, _ = orchestrator_app(
+        *_TURN_1, resolver=CannedSearch(definite_envelope()), engine=pg_engine, history=full
+    )
+    await _turns(app, "Life expectancy in Kenya?")
+    assert (await _stored(pg_engine, CONVERSATION, "carried_history"))["model"] == MODEL
+    await _edit_carried(pg_engine, CONVERSATION, edit)
+    reloaded, model = orchestrator_app(_UGANDA, engine=pg_engine, history=full)
+
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        async with studio_client(reloaded) as client:
+            frames = await stream(client, "/api/studio/turn", turn_body("And Uganda?"))
+
+    assert frames[-1]["event"] == "done"
+    (request,) = model.requests
+    assert len(_contents(request)) == 2
+    assert '"turns": [' in _opening_texts(request, 2)[0]
+    assert [line["history_chain"] for line in _turn_lines(caplog)] == [f"reset:{reason}"]
+
+
+async def test_a_turn_resumed_on_an_instance_that_carried_an_earlier_turn_carries_its_own(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Turn 1 runs on instance A, which keeps the conversation it carried in
+    process. Turn 2 begins on instance B under a forced `digest`, so its run
+    carries nothing, pauses on a question, and is answered on A. Turn 2's
+    record carries nothing, so turn 3 on A opens a fresh chain from the
+    digest, where A's earlier conversation would extend turn 1 and skip
+    turn 2."""
+    asking = call_part(
+        "ask_user",
+        {"questions": [{"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]},
+    )
+    first, first_model = orchestrator_app(
+        *_TURN_1,
+        _UGANDA,
+        text_part("Both rose."),
+        resolver=CannedSearch(definite_envelope()),
+        engine=pg_engine,
+        history=HistorySettings(studio_history="full"),
+    )
+    second, _ = orchestrator_app(
+        asking, engine=pg_engine, history=HistorySettings(studio_history="digest")
+    )
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        await _turns(first, "Life expectancy in Kenya?", conversation_id=_FULL_ID)
+        async with studio_client(second) as client:
+            paused = await stream(
+                client, "/api/studio/turn", turn_body("And Uganda?", conversation_id=_FULL_ID)
+            )
+        assert paused[-1]["event"] == "elicitation.request"
+        async with studio_client(first) as client:
+            frames = await stream(client, "/api/studio/interrupt", _answer(paused, _FULL_ID))
+        assert frames[-1]["event"] == "done"
+        assert await _stored(pg_engine, _FULL_ID, "carried_history") is None
+        await _turns(first, "Compare them", conversation_id=_FULL_ID)
+
+    assert len(_contents(first_model.requests[-1])) == 2
+    assert [
+        (line["turn"], line["history"], line["history_chain"]) for line in _turn_lines(caplog)
+    ] == [
+        (1, "full", "fresh"),
+        (2, "digest", None),
+        (3, "full", "reset:previous_turn_carried_none"),
+    ]
+
+
+async def test_a_load_keeps_the_model_usage_its_turn_noted_since_the_last_save(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A call the paused turn noted on this instance after its last save
+    survives the load `/interrupt` starts with, and the closed line counts
+    it with both segments."""
+    asking = call_part(
+        "ask_user",
+        {"questions": [{"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]},
+    )
+    app, _ = orchestrator_app(
+        Reply(chunks=[[asking]], usage=usage_metadata(prompt=700, candidates=10)),
+        Reply(chunks=[[text_part("A it is.")]], usage=usage_metadata(prompt=900, candidates=20)),
+        engine=pg_engine,
+    )
+    store = app.state.studio.store
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        async with studio_client(app) as client:
+            paused = await stream(client, "/api/studio/turn", turn_body("Compare them"))
+            assert paused[-1]["event"] == "elicitation.request"
+            conversation = store.current(_PRINCIPAL, CONVERSATION)
+            conversation.note_model_usage(usage_metadata(prompt=50, candidates=5))
+            loaded = await store.load(_PRINCIPAL, CONVERSATION)
+            assert loaded is not None
+            assert (loaded.turn_usage.model_calls, loaded.turn_usage.input_tokens) == (2, 750)
+            current_model_usage.set(None)
+            frames = await stream(client, "/api/studio/interrupt", _answer(paused, CONVERSATION))
+    assert frames[-1]["event"] == "done"
+
+    (line,) = _turn_lines(caplog)
+    assert (line["model_calls"], line["input_tokens"], line["output_tokens"]) == (3, 1_650, 35)
 
 
 @pytest.mark.parametrize(

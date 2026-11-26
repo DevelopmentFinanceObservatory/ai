@@ -37,7 +37,7 @@ from harness.scripted import (
     scripted_publish_result,
 )
 from harness.scripted_plan import scripted_fetch_series_stats
-from harness.settings import Settings
+from harness.settings import HistorySettings, Settings
 from harness.studio import StudioRunner, create_studio_router
 from harness.studio_state import make_recall_part
 from harness.studio_store import StudioStore
@@ -120,6 +120,7 @@ def orchestrator_app(
     stated_scope: StatedScopeReader | None = None,
     heartbeat_seconds: float | None = None,
     provenance: ProvenanceStore | None = None,
+    history: HistorySettings | None = None,
 ) -> tuple[FastAPI, ScriptLlm]:
     """The studio routes on the turn graph, and the agent's model client.
 
@@ -146,7 +147,9 @@ def orchestrator_app(
     `heartbeat_seconds`, the server's interval by default. The turn store
     keeps the lineage `provenance` holds of each frame a turn names, none
     by default. `stated_scope` reads the user's words for the turn's licence
-    and admission, none by default.
+    and admission, none by default. Every turn begins under `history`, read
+    from the environment as the app is built by default, as the server reads
+    it at startup.
     """
     if store is None:
         if engine is None:
@@ -205,6 +208,8 @@ def orchestrator_app(
         early_mints=early_mints,
         run_ledger=ledger if isinstance(ledger, StudioRunLedger) else None,
         **({"heartbeat_seconds": heartbeat_seconds} if heartbeat_seconds is not None else {}),
+        history=history if history is not None else HistorySettings(),
+        model_name=MODEL,
     )
     app = FastAPI()
     app.state.studio = studio

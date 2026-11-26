@@ -104,7 +104,7 @@ from harness.graph.state import (
 from harness.provenance import ProvenanceStore
 from harness.run_ledger import ApprovedRun, StudioRunLedger
 from harness.seeds import seeds_slot
-from harness.settings import Settings
+from harness.settings import HistorySettings, Settings
 from harness.studio_edit import (
     CardSwap,
     EditClosed,
@@ -143,6 +143,7 @@ from harness.studio_store import (
     TurnMoved,
     TurnStanding,
     asked_for_question,
+    drop_carried_copies_on,
     pause_entry,
     record_closed_turn,
     retry_delays,
@@ -711,11 +712,17 @@ def _turn_refusal_or_chip(
 
 
 def _turn_opening(
-    conversation: ConversationState, body: TurnRequest, chip_label: str | None
+    conversation: ConversationState,
+    body: TurnRequest,
+    chip_label: str | None,
+    *,
+    model_name: str,
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
     """What the turn `body` begins on `conversation`, the working copy the
     begin-turn save stores, opens its cursor with: its inputs, its state and
-    the user's text its transcript starts on."""
+    the user's text its transcript starts on. `model_name` is the
+    orchestrator's model, which a carried conversation must have been
+    written by (`ConversationState.carried_opening`)."""
     focus = (
         body.component_ref.component_id
         if body.component_ref is not None
@@ -740,7 +747,7 @@ def _turn_opening(
     # reads the whole digest either way. The arm is the one `begin_turn`
     # fixed for the turn.
     arm = conversation.turn_usage.history or "digest"
-    carried = conversation.carried_opening() if arm == "full" else None
+    carried = conversation.carried_opening(model_name=model_name) if arm == "full" else None
     inputs = TurnInput(
         message=text,
         history=arm,
@@ -981,7 +988,11 @@ class StudioRunner:
     graph's ledger, through which `/interrupt` admits an approved plan's run
     in the save that records the approval
     (`harness.run_ledger.StudioRunLedger.admit_with_approval`); with none, `execute`
-    admits every run.
+    admits every run. `history` is the process's `STUDIO_HISTORY` setting, read
+    once at startup, from which each turn's begin fixes its history arm
+    (`ConversationState.begin_turn`). `model_name` names the orchestrator's
+    model, as the graph's model factory builds it, which a `full` turn's
+    carried conversation must have been written by.
     """
 
     def __init__(
@@ -997,7 +1008,11 @@ class StudioRunner:
         early_mints: EarlyMints | None = None,
         heartbeat_seconds: float = HEARTBEAT_INTERVAL_S,
         run_ledger: StudioRunLedger | None = None,
+        history: HistorySettings,
+        model_name: str,
     ) -> None:
+        self.history = history
+        self.model_name = model_name
         self.edit_model = edit_model
         # The bare surface a card's unit change re-reads its spec through
         # (`harness.studio_edit.unit_events`), off the Activity feed.
@@ -2737,7 +2752,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # An unrecorded previous turn this closes as `abandoned` rides the
             # claim save, which writes its line once it commits
             # (`StudioStore.save`).
-            work.begin_turn(usage, trace_id=begun.trace_id)
+            work.begin_turn(usage, trace_id=begun.trace_id, history=studio.history)
             begun = work
             # The turn's MCP clients name its id (`current_caller_turn`), and
             # so do the in-process dfo-apis calls.
@@ -2789,8 +2804,14 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             work.turns[left_record]["error"] = ErrorCode.CANCELLED.value
                     else:
                         await abandon_on(conn, left_open, segment_id=segment_id)
+                # The turn left open is recorded on `work` by now, so the
+                # record this save stores is the one durable copy of the
+                # carried conversation.
+                await drop_carried_copies_on(conn, pk, turn_index=work.turn_index)
                 if not editing:
-                    inputs, state, text = _turn_opening(work, body, chip_label)
+                    inputs, state, text = _turn_opening(
+                        work, body, chip_label, model_name=studio.model_name
+                    )
                     opened.append(
                         await open_turn_on(
                             conn,

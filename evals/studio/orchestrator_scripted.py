@@ -61,7 +61,7 @@ from harness.scripted import (
     use_compiled_proposals,
 )
 from harness.scripted_plan import scripted_fetch_series_stats, scripted_plan
-from harness.settings import Settings
+from harness.settings import HistorySettings, Settings
 from harness.studio import StudioRunner, create_studio_router
 from harness.studio_store import StudioStore
 from harness.surface import resolve_surface, set_studio_surface
@@ -563,6 +563,8 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
         store=store,
         turns=TurnStore(engine, clock=store.now),
         tool_surface=surface,
+        history=HistorySettings(),
+        model_name=_ORCHESTRATOR_MODEL,
     )
     app = FastAPI()
     app.state.settings = settings

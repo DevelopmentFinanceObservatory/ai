@@ -42,7 +42,7 @@ Each key resolves in order: a value already in `.env`, then an exported shell va
 MODEL_NAME=gemini-3.8-flash PLANNER_MODEL_NAME=gemini-3.8-flash just dev
 ```
 
-A local harness runs Studio under `STUDIO_HISTORY=split`, the code default, so a new conversation takes the `digest` or the `full` history arm by a hash of its id. Set `STUDIO_HISTORY=digest` or `full` to run one arm; [services/harness/README.md](../services/harness/README.md) describes both arms and the setting.
+`just dev` runs Studio under `STUDIO_HISTORY=split`, the code default, so a new conversation takes the `digest` or the `full` history arm by a hash of its id. `just studio-live` runs `digest` unless the shell or `.env` sets `STUDIO_HISTORY`. Set `STUDIO_HISTORY=digest` or `full` to run one arm; [services/harness/README.md](../services/harness/README.md) describes both arms and the setting.
 
 With any Langfuse credential missing, the run starts anyway. Traces go to `OTEL_EXPORTER_OTLP_ENDPOINT` when it is set, and tracing is off otherwise. `/healthz` reports the resolved state as `telemetry: langfuse`, `otel` or `off`.
 

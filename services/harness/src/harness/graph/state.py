@@ -122,9 +122,9 @@ ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
 ORCHESTRATOR_HISTORY_KEY = "orchestrator:history"
 # On a turn of the `full` history arm (`TurnInput.history`), the
 # orchestrator's conversation once its run closed on the turn's reply,
-# `{"history", "tokens"}`: the `orchestrator.run.StoredHistory` JSON as text,
-# so a JSONB column cannot reorder its keys, and the tokens its final call
-# reported
+# `{"history", "tokens", "model"}`: the `orchestrator.run.StoredHistory` JSON
+# as text, so a JSONB column cannot reorder its keys, the tokens its largest
+# call reported, and the model that wrote it
 # (`harness.graph.orchestrate.carried_record`). Written by the `orchestrate`
 # node and kept with the conversation for the next turn's opening
 # (`harness.studio_store.keep_turn_records`).

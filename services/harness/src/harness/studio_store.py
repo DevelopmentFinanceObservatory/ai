@@ -793,6 +793,30 @@ def _history_assignment(value: Any) -> dict[str, Any] | None:
     return {"arm": arm, "turn": turn}
 
 
+# The `TurnUsage` fields that sum the turn's model calls
+# (`ConversationState.note_model_usage`).
+_MODEL_USAGE_FIELDS = (
+    "model_calls",
+    "input_tokens",
+    "cached_tokens",
+    "output_tokens",
+    "thinking_tokens",
+)
+
+
+def _keep_held_model_usage(usage: TurnUsage, held: TurnUsage) -> None:
+    """Keep on `usage`, a turn's usage as a load read it, the model usage
+    `held`, the same turn's usage this process held, counted past it, as
+    calls noted after this process's last save do. Counts only grow, so the
+    side that counted more calls is the later view of the turn: this
+    process's unsaved calls, or another instance's segment since this
+    process last saved. All five figures come from that side, so they
+    describe the same calls."""
+    if held.model_calls > usage.model_calls:
+        for name in _MODEL_USAGE_FIELDS:
+            setattr(usage, name, getattr(held, name))
+
+
 def _turn_usage(value: Any, *, trace_id: str | None) -> TurnUsage:
     """The `TurnUsage` of the turn `trace_id` a stored `turn_usage` holds. A
     value that is not an object, or names another turn's trace id, reads as
@@ -1681,8 +1705,10 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
     conversation's licence that read left (`ConversationState.licence`), and
     on the `full` history arm the orchestrator's conversation as the turn's
     reply left it (`ConversationState.turn_carried`). Each key holds the
-    whole value, so the latest write replaces. The blocks stay in process
-    (`turn_specs`) until the turn closes."""
+    whole value, so the latest write replaces. The carried conversation is
+    set whether or not `state` holds one, so a turn resumed on an instance
+    that carried an earlier turn closes on its own cursor's, or none. The
+    blocks stay in process (`turn_specs`) until the turn closes."""
     if LICENCE_STATE_KEY in state:
         conversation.licence = dict(state[LICENCE_STATE_KEY] or {}) or None
     if ORCHESTRATOR_PLAN_RECORDS_KEY in state:
@@ -1698,8 +1724,43 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
         conversation.turn_specs = dict(state[ORCHESTRATOR_SPECS_KEY] or {})
     if ORCHESTRATOR_APPLIED_KEY in state:
         conversation.turn_applied_choice = dict(state[ORCHESTRATOR_APPLIED_KEY] or {})
-    if ORCHESTRATOR_CARRIED_KEY in state:
-        conversation.turn_carried = dict(state[ORCHESTRATOR_CARRIED_KEY])
+    carried = state.get(ORCHESTRATOR_CARRIED_KEY)
+    conversation.turn_carried = dict(carried) if carried else None
+
+
+# Strips the carried conversation from the conversation's closed cursors
+# before a turn: the one its orchestrator opened from (`TurnInput.carried_history`
+# in `inputs`) and the one it stored (`ORCHESTRATOR_CARRIED_KEY` in `state`).
+_DROP_CARRIED_COPIES = text(
+    "UPDATE turn_cursors SET "
+    "inputs = CAST(CAST(inputs AS jsonb) - 'carried_history' AS json), "
+    "state = CAST(CAST(state AS jsonb) - :carried_key AS json) "
+    "WHERE conversation = :conversation AND turn_index < :turn_index "
+    "AND status NOT IN ('running', 'paused') "
+    "AND (CAST(inputs AS jsonb) ? 'carried_history' OR CAST(state AS jsonb) ? :carried_key)"
+)
+
+
+async def drop_carried_copies_on(
+    conn: AsyncConnection, conversation: int, *, turn_index: int
+) -> None:
+    """Drop the carried conversations the closed cursors of the
+    `conversations` row `conversation` before turn `turn_index` hold, on
+    `conn` in the caller's transaction. A `full` turn's cursor keeps the
+    conversation it opened from and the one it closed on, each up to the
+    carried chain's cap, and closed cursors are kept. Once a later turn
+    begins, the conversation's record holds the latest chain
+    (`ConversationState.carried_history`), the one durable copy, and no
+    reader goes back to an earlier cursor's: a turn left open is recorded
+    from its cursor before the next one begins."""
+    await conn.execute(
+        _DROP_CARRIED_COPIES,
+        {
+            "conversation": conversation,
+            "turn_index": turn_index,
+            "carried_key": ORCHESTRATOR_CARRIED_KEY,
+        },
+    )
 
 
 def set_aside_question(cursor: Cursor) -> str | None:
@@ -2108,13 +2169,14 @@ class StudioStore:
                     setattr(entry.state, f.name, getattr(durable, f.name))
         entry.baseline = _serialize_durable(entry.state)
         if held is not None and held.trace_id == entry.state.trace_id:
-            # Specs the turn noted after its last save, during a pause, say,
-            # are this process's alone. A turn this instance holds keeps them,
-            # and its next save stores them.
+            # Specs and model usage the turn noted after its last save, during
+            # a pause, say, are this process's alone. A turn this instance
+            # holds keeps them, and its next save stores them.
             for spec_id in held.fetched_specs:
                 entry.state.note_spec_use("fetched", spec_id)
             for spec_id in held.drawn_specs:
                 entry.state.note_spec_use("drawn", spec_id)
+            _keep_held_model_usage(entry.state.turn_usage, held)
         segment = entry.state.segment
         if segment is None or segment.id != entry.held:
             entry.held = None

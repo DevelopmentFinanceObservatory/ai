@@ -516,9 +516,9 @@ def create_app(
     # planner reads as it is built (`harness.planner_adapter.PlannerAdapter`).
     init_telemetry(service_name=SERVICE_NAME)
     resolved_settings = settings or Settings()
-    # Each turn reads `STUDIO_HISTORY` as it begins; an unknown value or a
-    # share outside [0, 1] refuses startup here instead.
-    HistorySettings()
+    # Read once: an unknown value or a share outside [0, 1] refuses startup,
+    # and every turn begins under this one reading (`StudioRunner.history`).
+    history = HistorySettings()
     model_name = resolved_model_name(resolved_settings.model_name)
     # The one surface the process runs, which every agent's texts follow
     # (`harness.surface`). An unmapped model or a mixed pair refuses startup.
@@ -754,6 +754,8 @@ def create_app(
         provenance=provenance,
         early_mints=early_mints,
         run_ledger=run_ledger,
+        history=history,
+        model_name=model_name,
     )
     app.state.studio = studio
     app.include_router(create_studio_router(studio, settings=resolved_settings))
