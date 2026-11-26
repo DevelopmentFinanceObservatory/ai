@@ -198,6 +198,19 @@ def test_a_field_added_since_the_base_format_enters_the_revision_once_set() -> N
     assert "limit" not in revision_content(requirement.model_copy(update={"limit": None}))
 
 
+@pytest.mark.parametrize(("field", "value"), [("named_years", (2025,)), ("projection_asked", True)])
+def test_the_users_asked_years_enter_the_revision_once_held(field: str, value: object) -> None:
+    recorded = _RECORDED["aggregate"]
+    plan = Plan.model_validate(recorded["plan"])
+
+    held = plan.model_copy(update={field: value})
+
+    assert plan_revision(plan) == recorded["revision"]
+    assert field not in plan.model_dump()
+    assert plan_revision(held) != recorded["revision"]
+    assert plan_revision(Plan.model_validate_json(held.model_dump_json())) == plan_revision(held)
+
+
 def test_a_qualified_strict_place_level_enters_a_plan_revision_only_when_stated() -> None:
     legacy = PlaceLevel(level=PlaceType.COUNTRY)
     qualified = PlaceLevel(level=PlaceType.COUNTRY, role="recipient", strict=True)

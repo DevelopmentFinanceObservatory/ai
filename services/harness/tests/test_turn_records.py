@@ -26,6 +26,7 @@ from harness.scope_choices import (
     ServedScope,
     served_facts,
 )
+from harness.tool_contracts import reading_facts
 from harness.turn_records import (
     PlanAsk,
     PlanRecord,
@@ -636,6 +637,39 @@ def test_reading_reads_the_structured_fields_a_part_adds() -> None:
         "open donor/creditor/exporter (75 members)"
     )
     assert lines[-1] == "   fetch refused: frame_too_large"
+
+
+def test_a_reading_keeps_and_renders_the_years_its_read_held_back() -> None:
+    """The held-back runs on a block's coverage reach the stored reading and its
+    rendering, so a later turn's model sees projections exist, and whether the
+    read served them."""
+    runs = [
+        {"kind": "partial", "source": "dfo/crs", "start_year": 2025, "end_year": 2025},
+        {
+            "kind": "projected",
+            "served": True,
+            "source": "dfo/ids",
+            "start_year": 2026,
+            "end_year": 2030,
+        },
+    ]
+    block = {"spec_id": "spec_ids", "resolved": {"coverage": {"kind": "bare", "held_back": runs}}}
+
+    reading = SearchReading.from_part(
+        {"variable": "debt service", "status": "definite", "spec_id": "spec_ids"}
+        | reading_facts(block)
+    )
+    stored = SearchReading.model_validate(reading.model_dump(mode="json"))
+
+    assert [(run.kind, run.start_year, run.end_year) for run in stored.held_back] == [
+        ("partial", 2025, 2025),
+        ("projected", 2026, 2030),
+    ]
+    assert render_readings([stored], budget=10_000).text.splitlines()[2] == (
+        "   coverage bare; held: 2025 partial, left out; held: 2026-2030 projected, served"
+    )
+    unheld = {**block, "resolved": {"coverage": {"kind": "bare"}}}
+    assert "held_back" not in reading_facts(unheld)
 
 
 def _scoped_part() -> dict[str, Any]:

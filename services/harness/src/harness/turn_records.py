@@ -23,10 +23,17 @@ still over budget after the last level is cut with
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal, NamedTuple, cast
 
+from common.held_back import HeldBack
+from common.held_note import (
+    NO_PROJECTIONS_NOTE,
+    held_fact_line,
+    held_period_facts,
+    held_period_notes,
+)
 from common.place_type import FLOW_ROLE_COLUMNS
 from compiler.evidence import read_unit_currency, read_unit_dcid
 from compiler.sources import PROVIDER_ACCOUNT, block_concept_label, stat_var_count, warning_code
@@ -75,6 +82,7 @@ from harness.scope_choices import (
     dropped_changed_nothing,
 )
 from harness.tool_contracts import reading_facts, requested_range, series_description
+from harness.wire import SuggestionItem
 
 # Where a source or reading came from: the orchestrator's `search`, the
 # translator's own discovery, or a dataset the user brought from Search
@@ -751,7 +759,11 @@ class SearchReading(StrictModel):
     `entity_groups_unreadable` is true when the part's block named sets whose
     posted identity this release could not read (`compiler.sources.block_wire_groups`), so
     `entity_groups` is empty without the part having none, and that resubmit
-    refuses. It is stored and not rendered, as is `observed_at`.
+    refuses. It is stored and not rendered, as is `observed_at`. `held_back`
+    is each run of partial or projected years the part's read reached
+    (`resolved.coverage.held_back`), rendered as the data line a get_data
+    digest gives it (`common.held_note.held_fact_line`), such as
+    "held: 2026-2030 projected (World Bank IDS), left out".
     """
 
     text: str | None
@@ -799,6 +811,7 @@ class SearchReading(StrictModel):
     entity_groups_unreadable: bool = Field(
         default=False, exclude_if=lambda unreadable: not unreadable
     )
+    held_back: tuple[HeldBack, ...] = Field(default=(), exclude_if=lambda runs: not runs)
     origin: Origin = "search"
     observed_at: datetime | None = None
 
@@ -839,8 +852,8 @@ class SearchReading(StrictModel):
         Besides the keys `_part_summary` writes, reads the keys
         `harness.tool_contracts.reading_facts` writes and `asked_roles` and
         `open_roles` (`harness.orchestrator_tools`) when present, `scope`
-        among them, `planner_axes`, `entity_groups` and
-        `entity_groups_unreadable` too. A `no_data` part's `reason` is the
+        among them, `planner_axes`, `entity_groups`,
+        `entity_groups_unreadable` and `held_back` too. A `no_data` part's `reason` is the
         reading's `refusal_code`, and `counted_as`, `alternatives` and
         `other_prices` are `harness.tool_contracts.measure_choice`'s.
         """
@@ -909,6 +922,7 @@ class SearchReading(StrictModel):
             planner_axes=tuple(part.get("planner_axes") or ()),
             entity_groups=tuple(part.get("entity_groups") or ()),
             entity_groups_unreadable=part.get("entity_groups_unreadable") is True,
+            held_back=tuple(part.get("held_back") or ()),
             origin=origin,
             observed_at=observed_at,
         )
@@ -1473,6 +1487,129 @@ def basis_line(
     return f"{_BASIS_LEAD}{'; '.join(pieces)}."
 
 
+# The keys of a `turn_components` entry stating the card's partial and
+# projected runs (`harness.studio_state.card_runs`): every run its manifests
+# state, from its own first year, as `HeldPeriod` JSON with `source` and
+# `reached`. Also whether any manifest states a projected run (`None` for a
+# card read from no manifest, whose runs are unknown) and the spec_ids its
+# data reads (`harness.wire.Provenance.inputs`).
+TURN_CARD_RUNS = "runs"
+TURN_CARD_PROJECTED = "projected"
+TURN_CARD_SPECS = "specs"
+
+
+def held_back_line(cards: Sequence[Mapping[str, Any]], *, projection_asked: bool) -> str | None:
+    """The sentences saying the turn's cards drew, or stopped short of,
+    partial or projected years: each run a card reaches (`_said_runs`) said
+    once across the cards, in the words `common.held_note` gives it, the
+    runs a card drew first (`common.held_note.held_period_notes`). A run is
+    worded from its own first year, so a card drawing part of a projected
+    run names the latest reported year before it, and a drawn run ends where
+    the card's window ends. Where the turn's own words asked about
+    projections (`projection_asked`) and no card's manifests state a
+    projected run, or may (`TURN_CARD_PROJECTED`, true or `None`),
+    `NO_PROJECTIONS_NOTE` follows. `None` when there is nothing to say, and
+    always for a turn that drew no card.
+
+    Args:
+        cards: The cards the turn drew that the user still sees
+            (`harness.studio_state.ConversationState.turn_cards_shown`).
+        projection_asked: Whether the turn's own words asked about
+            projections.
+    """
+    if not cards:
+        return None
+    notes = held_period_notes(_said_runs(cards, projection_asked=projection_asked))
+    if projection_asked and not any(TURN_CARD_PROJECTED in card for card in cards):
+        notes.append(NO_PROJECTIONS_NOTE)
+    return " ".join(notes) or None
+
+
+def projection_chip(
+    cards: Sequence[Mapping[str, Any]],
+    *,
+    block_of: Callable[[str], Mapping[str, Any] | None],
+    projection_asked: bool = False,
+) -> SuggestionItem | None:
+    """The chip that asks for the projected years a card of the turn left
+    out (`_said_runs`), where no card drew and reaches a projected run of the
+    same source (`source`): "Show projections for 2026 to 2030", sending
+    "Show projected {part} for 2026 to 2030" with what the card's data
+    counts as its spec block names it (`_block_name`, the first of the
+    spec_ids of the first card leaving the run out, `TURN_CARD_SPECS`, whose
+    block `block_of` finds and names), or sending the label where none does.
+    The first such run gives it, its years merged across the cards as the
+    closing line merges them (`common.held_note.held_period_facts`); `None`
+    when there is none.
+
+    Args:
+        cards: The cards the turn drew that the user still sees.
+        block_of: The spec block of a spec_id, `None` where none is held.
+        projection_asked: Whether the turn's own words asked about
+            projections.
+    """
+    said = [
+        (card, run)
+        for card in cards
+        for run in _said_runs([card], projection_asked=projection_asked)
+        if run.get("status") == "projected"
+    ]
+    drawn = {run.get("source") for _, run in said if run.get("served")}
+    left_out = [(card, run) for card, run in said if run.get("source") not in drawn]
+    fact = next(iter(held_period_facts(run for _, run in left_out)), None)
+    if fact is None:
+        return None
+    card = next(card for card, run in left_out if str(run.get("source") or "") == fact.source)
+    years = fact.start if fact.start == fact.end else f"{fact.start} to {fact.end}"
+    label = f"Show projections for {years}"
+    name = next(
+        (
+            named
+            for spec_id in card.get(TURN_CARD_SPECS) or ()
+            if (named := _block_name(block_of(str(spec_id))))
+        ),
+        None,
+    )
+    return SuggestionItem(
+        label=label, prompt=f"Show projected {name} for {years}" if name else label
+    )
+
+
+def _said_runs(
+    cards: Sequence[Mapping[str, Any]], *, projection_asked: bool
+) -> list[Mapping[str, Any]]:
+    """The runs of `cards` the reply speaks of, a served run ending where its
+    card's drawn years end (`studio_state.card_runs`): each run a card's
+    window reaches (`reached`), and, on a turn whose own words asked about
+    projections, each projected run a card left out wherever its window
+    ends."""
+    return [
+        run
+        for card in cards
+        for run in _card_runs(card)
+        if run.get("reached")
+        or (projection_asked and run.get("status") == "projected" and not run.get("served"))
+    ]
+
+
+def _card_runs(card: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The runs a turn card states (`TURN_CARD_RUNS`)."""
+    runs = card.get(TURN_CARD_RUNS)
+    return [run for run in runs if isinstance(run, Mapping)] if isinstance(runs, list) else []
+
+
+def _block_name(block: Mapping[str, Any] | None) -> str | None:
+    """What `block` counts, as Search labels it (`_served_name`), else its
+    measure label, else the name of the dataset it counts from; `None` when
+    it states none of them."""
+    measure = ((block or {}).get("resolved") or {}).get("measure_label")
+    return (
+        _served_name(block)
+        or (measure if isinstance(measure, str) and measure else None)
+        or block_dataset(block).name
+    )
+
+
 # The axis a count chip names: a part's other ways of counting its flow
 # (`SearchReading.alternatives`), which Search offers as datasets of their own
 # rather than as a scope choice of the part. No scope axis
@@ -1736,16 +1873,9 @@ def part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
 
 
 def _unworded_name(block: Mapping[str, Any] | None) -> str:
-    """A part's name with none of its own words: what `block` measures, else the name of
-    the dataset it counts from (`BlockDataset.name`), else "these figures"."""
-    resolved = (block or {}).get("resolved") or {}
-    measure = resolved.get("measure_label")
-    return (
-        _served_name(block)
-        or (measure if isinstance(measure, str) and measure else None)
-        or block_dataset(block).name
-        or "these figures"
-    )
+    """A part's name with none of its own words: what `block` counts
+    (`_block_name`), else "these figures"."""
+    return _block_name(block) or "these figures"
 
 
 def _served_name(block: Mapping[str, Any] | None) -> str | None:
@@ -2169,6 +2299,7 @@ def _reading_facts(reading: SearchReading) -> str:
     for axis in reading.open_axes:
         members = f" ({axis.members:,} members)" if axis.members is not None else ""
         facts.append(f"open {column_party_roles(axis.column)}{members}")
+    facts.extend(held_fact_line(run) for run in reading.held_back)
     return "; ".join(facts)
 
 

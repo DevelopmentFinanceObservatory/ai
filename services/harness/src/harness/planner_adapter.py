@@ -997,10 +997,11 @@ class PlannerAdapter:
     async def _stated_scope_line(self, state: SessionState, shown: Mapping[str, PinSource]) -> str:
         """The brief's line on the provider option the turn's words state
         (`submission.service.stated_scope_line`), read at entry through the
-        stated-scope reader, each text once a turn (`read_stated_scope`). A read
-        Search does not answer, and any fault reading or rendering it, renders
-        nothing. `propose_plan` reads again, and the plan card names a figure the
-        plan counts otherwise."""
+        stated-scope reader (`read_stated_scope`). A read Search does not answer,
+        and any fault reading or rendering it, renders nothing. `propose_plan` reads
+        the words again only after a first failure that can pass (a 5xx or a
+        timeout); otherwise it answers the refusal held for the turn, and the plan
+        card names a figure the plan counts otherwise."""
         if self._stated_scope is None:
             return ""
         try:
@@ -1008,8 +1009,7 @@ class PlannerAdapter:
                 return ""
             return stated_scope_line(stated_scope_record(state), shown)
         except Exception:
-            # The line is a hint. `propose_plan` reads the words again, so a fault
-            # here costs only the line.
+            # The line is a hint, so a fault here costs only the line.
             logger.exception("stated scope line not rendered")
             return ""
 
@@ -1902,9 +1902,11 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
         # digest leaves them out.
         "rolling_copies",
         "first_years",
-        # Code writes it from the user's words (`Plan.scope_words`), so the digest
-        # leaves it out.
+        # Code writes these from the user's words (`Plan.scope_words`,
+        # `Plan.named_years`, `Plan.projection_asked`), so the digest leaves them out.
         "scope_words",
+        "named_years",
+        "projection_asked",
         # The asks section marks each ask the user removed (`_asks_section`).
         "dropped_asks",
     }

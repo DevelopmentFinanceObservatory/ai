@@ -18,6 +18,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from common.held_back import held_back_of, served_window
+from common.held_note import held_fact_line, include_hint, reached_runs
 from common.refusal import detail_sentence
 from common.skills import ordered_skill_ids
 
@@ -541,7 +543,7 @@ def _spec_lines(spec: Mapping[str, Any]) -> tuple[str, str]:
 
 
 def _spec_block(spec: Mapping[str, Any]) -> str:
-    """A definite part's full block: sentence, spec_id, confidence, coverage, measure, measure choice, scope choices, dropped scope entries, entities, facets, facet options."""
+    """A definite part's full block: sentence, spec_id, confidence, coverage, measure, measure choice, scope choices, dropped scope entries, entities, facets, facet options, held-back years."""
     headline, confidence_line = _spec_lines(spec)
     lines = [headline, confidence_line]
     measure = _measure_line(spec)
@@ -560,7 +562,18 @@ def _spec_block(spec: Mapping[str, Any]) -> str:
     if facets:
         lines.append(_facets_line(facets))
     lines.extend(_facet_options_lines(resolved.get("facet_options") or []))
+    lines.extend(_held_back_lines(resolved.get("coverage") or {}))
     return "\n".join(lines)
+
+
+def _held_back_lines(coverage: Mapping[str, Any]) -> list[str]:
+    """One data line per partial or projected run the part's coverage states
+    that its window reaches (`common.held_note.reached_runs`), served or
+    left out (`common.held_note.held_fact_line`), then the line naming the
+    window member get_data serves the runs left out under (`include_hint`)."""
+    runs = reached_runs(coverage)
+    hint = include_hint(runs)
+    return [*(held_fact_line(run) for run in runs), *([hint] if hint else [])]
 
 
 def _spec_summary(number: int, spec: Mapping[str, Any]) -> str:
@@ -970,8 +983,14 @@ def _coverage_line(coverage: Mapping[str, Any]) -> str:
 
 
 def _coverage_exact_line(coverage: Mapping[str, Any], data_word: str) -> str:
+    """The observation count and window of an exact coverage, the window ending
+    at the newest complete year where runs left out hold its last years
+    (`common.held_back.served_window`)."""
     count = coverage.get("observation_count")
-    window = _window_text(coverage.get("window"))
+    window = coverage.get("window")
+    if isinstance(window, Mapping):
+        window = served_window(window, held_back_of(coverage))
+    window = _window_text(window)
     lead = f"{count} observations" if count is not None else "observations"
     prefix = f"{lead}, {window}" if window else lead
     return f"{prefix} · {data_word}"

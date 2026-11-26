@@ -97,6 +97,12 @@ class ProblemCode(StrEnum):
     WHOLE_IS_ITS_MEMBER = "whole_is_its_member"
     RESULT_SCOPE_UNSTATED = "result_scope_unstated"
     PERIOD_REDUCTION_UNSTATED = "period_reduction_unstated"
+    # A plan reading a year a source holds back that the user's words do not
+    # license: a partly reported one they did not name, or a projected one
+    # when they neither named it nor asked about the future
+    # (`submission.service._held_back_years_read`).
+    PERIOD_PARTIAL_UNNAMED = "period_partial_unnamed"
+    PERIOD_PROJECTED_UNASKED = "period_projected_unasked"
     USER_DECISION_CONTRADICTED = "user_decision_contradicted"
     USER_DECISION_DROPPED = "user_decision_dropped"
     SHARED_DECISION_CONTRADICTED = "shared_decision_contradicted"

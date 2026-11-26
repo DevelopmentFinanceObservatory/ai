@@ -45,11 +45,12 @@ from harness.graph import answer as answer_module
 from harness.graph.answer import answer_frames, link_evidence_to_terminal_frames
 from harness.graph.execute import _failed_step, _mark_masked_step_failed
 from harness.mcp_client import McpExecutor, _envelope_partial_period, _wire_provenance
-from harness.provenance import ProvenanceInput, ProvenanceStore
+from harness.provenance import ProvenanceInput, ProvenanceStore, merged_manifest
 from harness.scripted import SCRIPTED_SPEC
 from harness.scripted import ScriptedSurface as ScriptedToolSurface
 from harness.settings import Settings
 from harness.studio_translate import _RecordingSurface
+from harness.wire import Freshness, HeldPeriod
 from planner.plan import (
     DatasetRequirement,
     Decision,
@@ -473,6 +474,7 @@ async def test_a_single_source_chain_states_exactly_its_one_retrievals_provenanc
             "data_through": "2024",
             "last_refreshed": "2019-05-01",
             "partial_period": False,
+            "held": [],
         },
         "warnings": [
             {"code": "coverage_gap", "severity": "warn", "message": "2023's figure is provisional"}
@@ -598,6 +600,7 @@ async def test_a_single_retrieval_with_no_creation_time_reads_as_refreshed_today
         "data_through": "2024",
         "last_refreshed": _today_utc(),
         "partial_period": False,
+        "held": [],
     }
 
 
@@ -786,6 +789,7 @@ async def test_a_join_of_two_different_source_retrievals_states_both(
         "data_through": "2022",
         "last_refreshed": "2019-05-01",
         "partial_period": False,
+        "held": [],
     }
     assert provenance["warnings"] == [
         {
@@ -882,6 +886,7 @@ async def test_a_join_input_that_states_no_creation_date_or_end_year_leaves_them
         "data_through": "",
         "last_refreshed": "",
         "partial_period": False,
+        "held": [],
     }
 
 
@@ -1149,6 +1154,7 @@ async def test_a_compare_or_share_of_over_two_retrievals_states_both(
         "data_through": "2022",
         "last_refreshed": "2019-05-01",
         "partial_period": False,
+        "held": [],
     }
 
 
@@ -1497,3 +1503,429 @@ def test_the_wire_freshness_states_the_partial_period_the_card_states(
     )
 
     assert provenance["freshness"]["partial_period"] is partial
+
+
+_HELD_MANIFEST_BASE: dict[str, Any] = {
+    "citation": {"text": "T", "sources": [{"ref": "dfo/crs", "label": "CRS"}]},
+}
+
+
+def _served_run(kind: str, start: int, end: int, **extra: Any) -> dict[str, Any]:
+    """A CRS `held_back` run the read served."""
+    return {
+        "kind": kind,
+        "served": True,
+        "source": "dfo/crs",
+        "source_name": "CRS",
+        "start_year": start,
+        "end_year": end,
+        **extra,
+    }
+
+
+def _freshness_of(manifest: dict[str, Any], *, partial_period: bool = False) -> Freshness:
+    lineage = (ProvenanceInput("spec_a", "v1", manifest),)
+    provenance = _wire_provenance(
+        frame_ref={"spec_id": "spec_a", "content_version": "v1"},
+        lineage=lineage,
+        manifest=manifest,
+        platform_facts={},
+        partial_period=partial_period,
+    )
+    return Freshness.model_validate(provenance["freshness"])
+
+
+def test_a_served_partial_entry_states_its_share_basis_and_against() -> None:
+    share = {"basis": "value", "share": 0.001, "against": 2024}
+    manifest = {
+        **_HELD_MANIFEST_BASE,
+        "coverage": {
+            "window": {"start_year": 2000, "end_year": 2025},
+            "held_back": [_served_run("partial", 2025, 2025, reported_share=share)],
+        },
+        "incomplete_after": [
+            {
+                "provenance": "dfo/crs",
+                "source": "dfo/crs",
+                "status": "partial",
+                "partial_period": "2025",
+                "reported_share": {"basis": "value", "share": 0.001, "against": 2024},
+            }
+        ],
+    }
+
+    freshness = _freshness_of(manifest)
+
+    assert freshness.held == [
+        HeldPeriod(
+            status="partial",
+            start="2025",
+            end="2025",
+            served=True,
+            source_name="CRS",
+            share=0.001,
+            basis="value",
+            against="2024",
+        )
+    ]
+    assert freshness.partial_period is True
+    assert freshness.data_through == "2025"
+
+
+def test_a_held_back_projected_run_states_a_served_false_entry() -> None:
+    manifest = {
+        **_HELD_MANIFEST_BASE,
+        "coverage": {
+            "window": {"start_year": 2000, "end_year": 2025},
+            "held_back": [
+                {
+                    "kind": "projected",
+                    "source": "wb/ids",
+                    "source_name": "World Bank",
+                    "start_year": 2026,
+                    "end_year": 2030,
+                }
+            ],
+        },
+    }
+
+    freshness = _freshness_of(manifest)
+
+    assert freshness.held == [
+        HeldPeriod(
+            status="projected", start="2026", end="2030", served=False, source_name="World Bank"
+        )
+    ]
+    assert freshness.partial_period is False
+    assert freshness.data_through == "2025"
+
+
+def test_a_frame_with_projected_rows_reads_data_through_as_the_last_actual_year() -> None:
+    manifest = {
+        **_HELD_MANIFEST_BASE,
+        "coverage": {
+            "window": {"start_year": 2000, "end_year": 2030},
+            "held_back": [_served_run("projected", 2026, 2030)],
+        },
+        "incomplete_after": [
+            {"source": "dfo/crs", "status": "projected", "partial_period": "2026"}
+        ],
+    }
+
+    freshness = _freshness_of(manifest)
+
+    assert freshness.data_through == "2025"
+    assert freshness.held == [
+        HeldPeriod(status="projected", start="2026", end="2030", served=True, source_name="CRS")
+    ]
+    assert freshness.partial_period is False
+
+
+def test_a_manifest_stating_no_held_period_yields_an_empty_held_list() -> None:
+    manifest = {
+        **_HELD_MANIFEST_BASE,
+        "coverage": {"window": {"end_year": 2024}},
+        "incomplete_after": [{"status": "unmarked"}],
+    }
+
+    freshness = _freshness_of(manifest)
+
+    assert freshness.held == []
+    assert freshness.data_through == "2024"
+
+
+def test_a_card_over_two_retrievals_labels_the_held_periods_of_both() -> None:
+    def member(spec_id: str, ref: str, label: str, **extra: Any) -> ProvenanceInput:
+        return ProvenanceInput(
+            spec_id,
+            "v1",
+            {
+                "citation": {"text": label, "sources": [{"ref": ref, "label": label}]},
+                "coverage": {"window": {"end_year": 2025}, **extra},
+            },
+        )
+
+    served_partial = member(
+        "spec_a",
+        "dfo/crs",
+        "CRS",
+        held_back=[
+            _served_run(
+                "partial",
+                2025,
+                2025,
+                reported_share={"basis": "series", "share": 0.12, "against": 2024},
+            )
+        ],
+    )
+    served_partial.manifest["incomplete_after"] = [
+        {
+            "source": "dfo/crs",
+            "status": "partial",
+            "partial_period": "2025",
+            "reported_share": {"basis": "series", "share": 0.12, "against": 2024},
+        }
+    ]
+    held_projection = member(
+        "spec_b",
+        "wb/ids",
+        "World Bank",
+        held_back=[
+            {
+                "kind": "projected",
+                "source": "wb/ids",
+                "source_name": "World Bank",
+                "start_year": 2026,
+                "end_year": 2030,
+            }
+        ],
+    )
+    lineage = (served_partial, held_projection)
+    manifest = merged_manifest(lineage)
+
+    provenance = _wire_provenance(
+        frame_ref={"spec_id": "spec_a", "content_version": "v1"},
+        lineage=lineage,
+        manifest=manifest,
+        platform_facts={},
+    )
+    freshness = Freshness.model_validate(provenance["freshness"])
+
+    assert freshness.held == [
+        HeldPeriod(
+            status="partial",
+            start="2025",
+            end="2025",
+            served=True,
+            source_name="CRS",
+            share=0.12,
+            basis="series",
+            against="2024",
+        ),
+        HeldPeriod(
+            status="projected", start="2026", end="2030", served=False, source_name="World Bank"
+        ),
+    ]
+    assert freshness.partial_period is True
+    assert freshness.data_through == "2025"
+
+
+def test_a_served_projected_run_ends_at_the_newest_projected_year_each_frame_holds() -> None:
+    """A served projected run ends where its retrieval's frame ends it. That is
+    the served `held_back` run apis states, past a window reaching further, and
+    on a card merging a shorter retrieval, past the merged window's end."""
+    projected = {
+        "provenance": "wb/ids",
+        "source": "wb/ids",
+        "status": "projected",
+        "partial_period": "2026",
+    }
+    ids = ProvenanceInput(
+        "spec_ids",
+        "v1",
+        {
+            "citation": {"text": "IDS", "sources": [{"ref": "wb/ids", "label": "World Bank"}]},
+            "coverage": {
+                "window": {"start_year": 2020, "end_year": 2040},
+                "held_back": [
+                    {
+                        "kind": "projected",
+                        "served": True,
+                        "source": "wb/ids",
+                        "source_name": "World Bank",
+                        "start_year": 2026,
+                        "end_year": 2030,
+                    }
+                ],
+            },
+            "incomplete_after": [projected],
+        },
+    )
+    crs = ProvenanceInput(
+        "spec_crs",
+        "v1",
+        {
+            "citation": {"text": "CRS", "sources": [{"ref": "dfo/crs", "label": "CRS"}]},
+            "coverage": {"window": {"start_year": 2020, "end_year": 2024}},
+        },
+    )
+    served = HeldPeriod(
+        status="projected", start="2026", end="2030", served=True, source_name="World Bank"
+    )
+
+    for lineage in ((ids,), (ids, crs)):
+        provenance = _wire_provenance(
+            frame_ref={"spec_id": "spec_ids", "content_version": "v1"},
+            lineage=lineage,
+            manifest=merged_manifest(lineage),
+            platform_facts={},
+        )
+        freshness = Freshness.model_validate(provenance["freshness"])
+        assert freshness.held == [served]
+    assert freshness.data_through == "2024"
+
+
+@pytest.mark.parametrize(
+    ("drawn", "held", "partial"),
+    [
+        pytest.param(
+            {"start": "2015", "end": "2028"},
+            [("partial", "2025", "2025"), ("projected", "2026", "2028")],
+            True,
+            id="cut-to-the-drawn-end",
+        ),
+        pytest.param({"start": "2015", "end": "2020"}, [], False, id="drawn-before-both"),
+        pytest.param(
+            {"start": "2026", "end": "2026"},
+            [("projected", "2026", "2026")],
+            False,
+            id="one-projected-year",
+        ),
+        pytest.param(
+            None,
+            [("partial", "2025", "2025"), ("projected", "2026", "2030")],
+            True,
+            id="no-window-stated",
+        ),
+        pytest.param(
+            {"start": "2028", "end": "2030"},
+            [("projected", "2028", "2030")],
+            False,
+            id="projected-years-only",
+        ),
+    ],
+)
+def test_served_periods_describe_the_periods_the_card_draws(
+    drawn: dict[str, str] | None, held: list[tuple[str, str, str]], partial: bool
+) -> None:
+    """A frame serving partial 2025 and projected 2026 to 2030 labels only the
+    years the card draws, and `partial_period` follows the drawn years.
+    `data_through` is the latest reported year, 2025, on a card drawing
+    projected years only too."""
+    manifest = {
+        **_HELD_MANIFEST_BASE,
+        "coverage": {
+            "window": {"start_year": 2000, "end_year": 2030},
+            "held_back": [
+                _served_run("partial", 2025, 2025),
+                _served_run("projected", 2026, 2030),
+            ],
+        },
+        "incomplete_after": [
+            {"source": "dfo/crs", "status": "partial", "partial_period": "2025"},
+            {"source": "dfo/crs", "status": "projected", "partial_period": "2026"},
+        ],
+    }
+    lineage = (ProvenanceInput("spec_a", "v1", manifest),)
+
+    provenance = _wire_provenance(
+        frame_ref={"spec_id": "spec_a", "content_version": "v1"},
+        lineage=lineage,
+        manifest=manifest,
+        platform_facts={},
+        drawn=drawn,
+    )
+    freshness = Freshness.model_validate(provenance["freshness"])
+
+    assert [(entry.status, entry.start, entry.end) for entry in freshness.held] == held
+    assert all(entry.served for entry in freshness.held)
+    assert freshness.partial_period is partial
+    assert freshness.data_through == "2025"
+
+
+@pytest.mark.parametrize(
+    ("drawn", "listed"),
+    [
+        pytest.param({"start": "2015", "end": "2025"}, True, id="ends-the-year-before"),
+        pytest.param({"start": "2015", "end": "2024"}, False, id="ends-earlier"),
+        pytest.param(None, True, id="no-window-stated"),
+    ],
+)
+def test_a_run_left_out_is_listed_only_where_the_drawn_years_run_on_into_it(
+    drawn: dict[str, str] | None, listed: bool
+) -> None:
+    """apis states a run whatever the read's window, so a card drawn to 2024
+    lists no projected run from 2026. Its figures stop short of the newest
+    actual year, and the reply has nothing to say of the run."""
+    manifest = {
+        **_HELD_MANIFEST_BASE,
+        "coverage": {
+            "window": {"start_year": 2000, "end_year": 2025},
+            "held_back": [
+                {"kind": "projected", "source": "wb/ids", "start_year": 2026, "end_year": 2030}
+            ],
+        },
+    }
+    lineage = (ProvenanceInput("spec_a", "v1", manifest),)
+
+    provenance = _wire_provenance(
+        frame_ref={"spec_id": "spec_a", "content_version": "v1"},
+        lineage=lineage,
+        manifest=manifest,
+        platform_facts={},
+        drawn=drawn,
+    )
+
+    held = Freshness.model_validate(provenance["freshness"]).held
+    assert [(entry.start, entry.end, entry.served) for entry in held] == (
+        [("2026", "2030", False)] if listed else []
+    )
+
+
+def test_a_card_over_two_retrievals_lists_each_held_period_once() -> None:
+    """Two retrievals serving CRS's partial 2025 give one row, and one that
+    left it out adds none, since a run is one per kind and source."""
+    citation = {"text": "CRS", "sources": [{"ref": "dfo/crs", "label": "CRS"}]}
+    drew = ProvenanceInput(
+        "spec_a",
+        "v1",
+        {
+            "citation": citation,
+            "coverage": {
+                "window": {"end_year": 2025},
+                "held_back": [_served_run("partial", 2025, 2025)],
+            },
+            "incomplete_after": [
+                {
+                    "provenance": "dfo/crs",
+                    "stat_vars": ["dcid:A"],
+                    "status": "partial",
+                    "partial_period": "2025",
+                    "reported_share": "unknown",
+                }
+            ],
+        },
+    )
+    also_drew = ProvenanceInput(
+        "spec_b",
+        "v1",
+        {
+            **drew.manifest,
+            "incomplete_after": [{**drew.manifest["incomplete_after"][0], "stat_vars": ["dcid:B"]}],
+        },
+    )
+    left_out = ProvenanceInput(
+        "spec_c",
+        "v1",
+        {
+            "citation": citation,
+            "coverage": {
+                "window": {"end_year": 2024},
+                "held_back": [
+                    {"kind": "partial", "source": "dfo/crs", "start_year": 2025, "end_year": 2025}
+                ],
+            },
+        },
+    )
+    lineage = (drew, also_drew, left_out)
+
+    provenance = _wire_provenance(
+        frame_ref={"spec_id": "spec_a", "content_version": "v1"},
+        lineage=lineage,
+        manifest=merged_manifest(lineage),
+        platform_facts={},
+    )
+
+    assert Freshness.model_validate(provenance["freshness"]).held == [
+        HeldPeriod(status="partial", start="2025", end="2025", served=True, source_name="CRS")
+    ]

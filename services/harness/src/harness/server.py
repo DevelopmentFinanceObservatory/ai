@@ -674,6 +674,7 @@ def create_app(
             canvas_series=make_canvas_series(store),
             canvas_cards=make_canvas_cards(store),
             remove_cards=make_remove_cards(store),
+            stated_scope=stated_scope,
         )
         return studio_graph(
             # A planner that cannot plan hands its reason back to the agent
@@ -711,6 +712,7 @@ def create_app(
             publisher=executor.publish_result,
             max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,
             early_mints=early_mints,
+            stated_scope=stated_scope,
         )
 
     studio = StudioRunner(

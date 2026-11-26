@@ -109,6 +109,7 @@ from common.telemetry import deploy_release, record_turn_outcome, start_telemetr
 from compiler.surface import transient
 from executor.ledger import RunStatus
 from fastapi.responses import JSONResponse
+from planner.stated_scope import LICENCE_STATE_KEY, STATED_SCOPE_STATE_KEY, StatedScopeRecord
 from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -187,12 +188,14 @@ _KEY_LATEST_PLAN_VERSION = "latest_plan_version"
 _KEY_AUTO_ADD = "auto_add"
 _KEY_CLIENT_FEATURES = "client_features"
 _KEY_TIMED_OUT_CALLS = "timed_out_calls"
+_KEY_LICENCE = "licence"
 _KEY_TURN_USER_MESSAGE = "turn_user_message"
 _KEY_TURN_USER_WORDS = "turn_user_words"
 _KEY_TURN_FINAL_TEXT = "turn_final_text"
 _KEY_TURN_COMPONENTS = "turn_components"
 _KEY_TURN_RECORDED = "turn_recorded"
 _KEY_TURN_PLANS = "turn_plans"
+_KEY_TURN_PROJECTION_ASKED = "turn_projection_asked"
 _KEY_TURN_READINGS = "turn_readings"
 _KEY_TURN_APPLIED_CHOICE = "turn_applied_choice"
 _KEY_TURN_CHOICE_BASELINE = "turn_choice_baseline"
@@ -208,12 +211,14 @@ _SCALAR_KEYS = frozenset(
         _KEY_AUTO_ADD,
         _KEY_CLIENT_FEATURES,
         _KEY_TIMED_OUT_CALLS,
+        _KEY_LICENCE,
         _KEY_TURN_USER_MESSAGE,
         _KEY_TURN_USER_WORDS,
         _KEY_TURN_FINAL_TEXT,
         _KEY_TURN_COMPONENTS,
         _KEY_TURN_RECORDED,
         _KEY_TURN_PLANS,
+        _KEY_TURN_PROJECTION_ASKED,
         _KEY_TURN_READINGS,
         _KEY_TURN_APPLIED_CHOICE,
         _KEY_TURN_CHOICE_BASELINE,
@@ -649,12 +654,14 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_AUTO_ADD: state.auto_add,
         _KEY_CLIENT_FEATURES: sorted(state.client_features),
         _KEY_TIMED_OUT_CALLS: sorted(state.timed_out_calls),
+        _KEY_LICENCE: state.licence,
         _KEY_TURN_USER_MESSAGE: state.turn_user_message,
         _KEY_TURN_USER_WORDS: state.turn_user_words,
         _KEY_TURN_FINAL_TEXT: state.turn_final_text,
         _KEY_TURN_COMPONENTS: state.turn_components,
         _KEY_TURN_RECORDED: state.turn_recorded,
         _KEY_TURN_PLANS: state.turn_plans,
+        _KEY_TURN_PROJECTION_ASKED: state.turn_projection_asked,
         _KEY_TURN_READINGS: state.turn_readings,
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
         _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
@@ -712,6 +719,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.client_features = declared_features(list(value or ()))
         elif key == _KEY_TIMED_OUT_CALLS:
             state.timed_out_calls = set(value)
+        elif key == _KEY_LICENCE:
+            state.licence = dict(value) if value else None
         elif key == _KEY_TURN_USER_MESSAGE:
             state.turn_user_message = value
         elif key == _KEY_TURN_USER_WORDS:
@@ -724,6 +733,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_recorded = value
         elif key == _KEY_TURN_PLANS:
             state.turn_plans = list(value)
+        elif key == _KEY_TURN_PROJECTION_ASKED:
+            state.turn_projection_asked = value is True
         elif key == _KEY_TURN_READINGS:
             state.turn_readings = list(value)
         elif key == _KEY_TURN_APPLIED_CHOICE:
@@ -1589,11 +1600,20 @@ async def _insert_card_lineage(conn: AsyncConnection, pk: int, row: Mapping[str,
 def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any]) -> None:
     """Keep the plan records, search readings, spec blocks and applied chip
     `state`, a turn's state, holds, for `ConversationState.close_turn` to
-    store with the turn. Each key holds the turn's whole value, so the latest
-    write replaces. The blocks stay in process (`turn_specs`) until the turn
-    closes."""
+    store with the turn, whether the read of the turn's own words asked about
+    projections (`ConversationState.turn_projection_asked`), and the
+    conversation's licence that read left (`ConversationState.licence`). Each key holds the
+    whole value, so the latest write replaces. The blocks stay in process
+    (`turn_specs`) until the turn closes."""
+    if LICENCE_STATE_KEY in state:
+        conversation.licence = dict(state[LICENCE_STATE_KEY] or {}) or None
     if ORCHESTRATOR_PLAN_RECORDS_KEY in state:
         conversation.turn_plans = list(state[ORCHESTRATOR_PLAN_RECORDS_KEY] or [])
+    if STATED_SCOPE_STATE_KEY in state:
+        raw = state[STATED_SCOPE_STATE_KEY]
+        record = StatedScopeRecord.model_validate(raw) if raw else None
+        reading = record.readings.get(record.words) if record is not None else None
+        conversation.turn_projection_asked = reading is not None and reading.projection
     if ORCHESTRATOR_SEARCHES_KEY in state:
         conversation.turn_readings = list(state[ORCHESTRATOR_SEARCHES_KEY] or [])
     if ORCHESTRATOR_SPECS_KEY in state:

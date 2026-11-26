@@ -18,8 +18,9 @@ it and get back a `Manifest` with every artifact's URL gone and
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
+from common.held_back import HeldBack, ReportedShare, valid_entries
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -113,6 +114,25 @@ def _is_none(value: object) -> bool:
     return value is None
 
 
+class IncompleteAfter(BaseModel):
+    """How complete a group of a frame's rows is, the rows of `provenance` whose
+    stat var is one of `stat_vars`.
+
+    `partial` rows at or after `partial_period` hold part of their source's data,
+    and `reported_share` says how much of `reported_share.against` they hold so
+    far when apis could compare. A `projected` entry's `partial_period` is its
+    first projected period. `unknown` and `unmarked` say nothing is known or
+    marked."""
+
+    model_config = _UNSEEN_FIELDS_ARE_DROPPED
+    provenance: str | None = None
+    stat_vars: list[str] = Field(default_factory=list)
+    source: str | None = None
+    status: Literal["partial", "projected", "unknown", "unmarked"]
+    partial_period: str | None = None
+    reported_share: ReportedShare | None = None
+
+
 class CoverageModel(BaseModel):
     """What a mint served: its rows, counted dimensions and window.
 
@@ -131,6 +151,7 @@ class CoverageModel(BaseModel):
     recent_years: list[YearCoverage] | None = Field(default=None, exclude_if=_is_none)
     elected_year: int | None = Field(default=None, exclude_if=_is_none)
     fullest_year: YearCoverage | None = Field(default=None, exclude_if=_is_none)
+    held_back: list[HeldBack] = Field(default_factory=list, exclude_if=lambda v: not v)
 
 
 class CitationSource(BaseModel):
@@ -342,6 +363,37 @@ class Manifest(BaseModel):
     warnings: list[WarningModel] = Field(default_factory=list)
     artifacts: list[ArtifactEntry]
     series_count: int | None = None
+    incomplete_after: list[IncompleteAfter] = Field(
+        default_factory=list, exclude_if=lambda v: not v
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_unreadable_held_entries(cls, data: object) -> object:
+        """`data` with each `coverage.held_back` and `incomplete_after` entry outside
+        the contract dropped, with a warning naming the spec_id
+        (`common.held_back.valid_entries`).
+
+        apis can add a status or kind before this service reads it, and one such
+        entry must not refuse the rows the rest of the manifest serves.
+        """
+        if not isinstance(data, Mapping):
+            return data
+        definition = data.get("definition")
+        label = definition.get("spec_id") if isinstance(definition, Mapping) else None
+        label = label if isinstance(label, str) else None
+        out = dict(data)
+        if isinstance(entries := out.get("incomplete_after"), list):
+            out["incomplete_after"] = valid_entries(
+                IncompleteAfter, entries, field="incomplete_after", label=label
+            )
+        coverage = out.get("coverage")
+        if isinstance(coverage, Mapping) and isinstance(entries := coverage.get("held_back"), list):
+            out["coverage"] = {
+                **coverage,
+                "held_back": valid_entries(HeldBack, entries, field="held_back", label=label),
+            }
+        return out
 
     @model_validator(mode="after")
     def _attach_artifact_resource_uris(self) -> Manifest:

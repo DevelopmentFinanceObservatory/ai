@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any
 
+from common.held_note import held_fact_line, reached_runs
 from common.skills import ordered_skill_ids
 from compiler.sources import (
     DESCRIBED_SHAPE_KIND,
@@ -430,6 +431,8 @@ def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     apply and the sentence of the match it found without them), and, when
     search states any, its `departures`, each a `code` and
     the `text` saying how the answer differs from what was asked. A
+    `definite` part whose window reaches a partly reported or projected run
+    carries `held`, a data line each (`_held_lines`). A
     `definite` part binding a named set as its published total carries
     `group_readings`, a sentence each saying so (`_total_readings`). A
     `definite` part whose count Search elected beside others carries
@@ -552,7 +555,11 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     what a resubmit posts of it (`compiler.sources.readable_wire_groups`), which a
     later resubmit of the reading, such as a chip's, posts again. Where what one
     posts is not readable they are none, with a warning logged, and
-    `entity_groups_unreadable` is true, and that resubmit refuses. These are keys
+    `entity_groups_unreadable` is true, and that resubmit refuses. `held_back`
+    is each run of partial or projected years the read's window reaches,
+    served or left out, a served run ending where the window does
+    (`resolved.coverage.held_back`, `common.held_note.reached_runs`), as JSON,
+    and is left out when there are none. These are keys
     `harness.turn_records.SearchReading.from_part` reads, and the
     orchestrator's search result shows the model none of them. The block's
     per-year counts (`resolved.headline.recent_years`) are left out, since a
@@ -564,8 +571,10 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     requested = _identity(spec).get("requested_window")
     facts = _wide_facts(spec)
     groups = readable_wire_groups(spec)
+    coverage = resolved.get("coverage") or {}
+    held_back = [run.model_dump(mode="json") for run in reached_runs(coverage)]
     return {
-        "coverage_kind": (resolved.get("coverage") or {}).get("kind"),
+        "coverage_kind": coverage.get("kind"),
         "requested_window_kind": requested.get("kind") if isinstance(requested, Mapping) else None,
         "entity_roles": facts["entity_roles"],
         "open_entity_axes": facts["open_entity_axes"],
@@ -573,6 +582,7 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
         "planner_axes": sorted(planner_axes(spec)),
         "entity_groups": [group.model_dump(mode="json") for group in groups or ()],
         "entity_groups_unreadable": groups is None,
+        **({"held_back": held_back} if held_back else {}),
     }
 
 
@@ -656,6 +666,8 @@ def _part_summary(envelope: dict[str, Any], part: dict[str, Any]) -> dict[str, A
     ]
     if departures:
         summary["departures"] = departures
+    if digest["status"] == "definite" and (held := _held_lines(part.get("spec") or {})):
+        summary["held"] = held
     if digest["status"] == "definite" and (readings := _total_readings(part.get("spec") or {})):
         summary["group_readings"] = readings
     if digest["status"] == "definite":
@@ -663,6 +675,17 @@ def _part_summary(envelope: dict[str, Any], part: dict[str, Any]) -> dict[str, A
         if codes := source_codes(part.get("spec") or {}):
             summary["source_codes"] = codes
     return summary
+
+
+def _held_lines(spec: Mapping[str, Any]) -> list[str]:
+    """One data line (`common.held_note.held_fact_line`) per partial or
+    projected run the block's coverage states that its window reaches
+    (`common.held_note.reached_runs`), served or left out. These are the lines
+    data-mcp's Search digest shows, without the line naming the `include` that
+    serves a run left out, since Studio's `fetch` sets `include` from the
+    user's words (`harness.orchestrator_tools._licensed_window`)."""
+    coverage = (spec.get("resolved") or {}).get("coverage") or {}
+    return [held_fact_line(run) for run in reached_runs(coverage)]
 
 
 def measure_choice(spec: Mapping[str, Any]) -> dict[str, Any]:
