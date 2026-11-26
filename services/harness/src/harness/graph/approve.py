@@ -125,12 +125,12 @@ def decide(
     `PlannerModel` drafts one. A plan is keyed on `plan_revision(plan)`, a
     content hash that changes with every amendment. A plan stored in a shape
     this release does not read (`readable_plan`) has no revision for the
-    answer to name: it routes `amend` with `{"unreadable_plan": True}`, and
-    `planner` drafts the question from the start. So does a plan whose share
-    rests on a whole an earlier release compiled (`rests_on_stale_whole`), with
-    `"stale_whole": True` and the user's `answer`, whose amendment the draft
-    keeps: the whole is asked of Search again, and the user approves the new
-    card.
+    answer to name: it routes `amend` with `{"unreadable_plan": True}` and the
+    user's `answer`, and `planner` drafts the question from the start, keeping
+    the amendment the answer carries. So does a plan whose share rests on a
+    whole an earlier release compiled (`rests_on_stale_whole`), with
+    `"stale_whole": True` as well: the whole is asked of Search again, and the
+    user approves the new card.
 
     An answer approves when it names the revision and says, under `at`, when
     the user gave it, as an ISO 8601 time with its offset: the studio's
@@ -174,8 +174,9 @@ def decide(
         return Next("amend", {"unreadable_plan": True, "stale_whole": True, "answer": answer})
     if plan is None:
         # The card the user answered names a plan this release does not
-        # read, so the answer approves nothing and amends nothing.
-        return Next("amend", {"unreadable_plan": True})
+        # read, so the answer approves nothing, and the question is planned
+        # again with the amendment it carries.
+        return Next("amend", {"unreadable_plan": True, "answer": answer})
     switch = answer.get("switch")
     if isinstance(switch, dict):
         pick = decision_pick(

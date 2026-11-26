@@ -1051,7 +1051,7 @@ def conversation_readings(state: SessionState) -> list[dict[str, Any]]:
 # shape this release does not read, and the question was planned again.
 UNREADABLE_PLAN_NOTE = (
     "The plan you were shown could not be read after an update, so this is a new plan for "
-    "the same question. Ask again for any change you wanted."
+    "the same question, with any change you asked for."
 )
 
 # What the card of a plan drafted again opens with when the plan the user answered

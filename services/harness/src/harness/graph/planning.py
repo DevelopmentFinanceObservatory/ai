@@ -116,12 +116,14 @@ async def _draft(
     an earlier run of the plan call computed (`ORCHESTRATOR_KEPT_ASKS_KEY`).
 
     An amendment or a replan of a plan stored in a shape this release does
-    not read (`readable_plan`) is drafted as a first draft, and the `"ok"`
-    edge's plan carries `UNREADABLE_PLAN_NOTE` as `refusal_note`, which Studio
-    shows before the plan card, and `"restarted": True`, since its version
-    counts from 1 again. A plan `approve` cleared for resting on a whole an
-    earlier release compiled (`"stale_whole"`) is drafted the same way, the
-    amendment the user typed on its card kept, under `STALE_WHOLE_NOTE`. The `"refused"` edge's text opens with
+    not read (`readable_plan`) is drafted as a first draft, the amendment the
+    user typed on its card kept, and the `"ok"` edge's plan carries
+    `UNREADABLE_PLAN_NOTE` as `refusal_note`, which Studio shows before the
+    plan card, and `"restarted": True`, since its version counts from 1
+    again. The planner is told to `restart`, so it clears its own record of
+    the plan before drafting. A plan `approve` cleared for resting on a whole
+    an earlier release compiled (`"stale_whole"`) is drafted the same way,
+    under `STALE_WHOLE_NOTE`. The `"refused"` edge's text opens with
     `UNREADABLE_PLAN_UNPLANNED_NOTE`.
 
     The first draft after `plan_done` gave the plan call back carries the
@@ -182,18 +184,18 @@ async def _draft(
     # The plan this entry amends or replans could not be read: found so
     # by `approve` or `execute`, which cleared it, or here, on the resume
     # of a question asked while amending it. Nothing is left to amend or
-    # to replan from, so the question is drafted from the start and the
-    # card says why. A first draft never read the plan on record, and
-    # says nothing of one it cannot read.
+    # to replan from, so the question is drafted from the start, with the
+    # amendment the user typed on its card, and the card says why. A first
+    # draft never read the plan on record, and says nothing of one it
+    # cannot read.
     unreadable = bool(payload.get("unreadable_plan")) or bool(
         not is_first_draft and raw and existing is None
     )
     # `approve` cleared a plan resting on a whole an earlier release compiled
-    # (`planner.plan.rests_on_stale_whole`): the user's amendment of it stands.
+    # (`planner.plan.rests_on_stale_whole`).
     stale_whole = bool(payload.get("stale_whole"))
     if unreadable:
         refusal = None
-        amendment = amendment if stale_whole else None
         is_first_draft = True
     resuming = answer is not None
     try:
@@ -232,6 +234,7 @@ async def _draft(
         conversation_digest=_digest(ctx, "conversation_digest"),
         pick=pick,
         answer=answer,
+        restart=unreadable,
     )
     failed: SwitchFailedError | None = None
     try:
