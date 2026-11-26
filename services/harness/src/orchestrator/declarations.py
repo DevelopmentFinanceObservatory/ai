@@ -51,7 +51,7 @@ _KEPT_FULL: set[str] = set()
 def tool_declaration(
     tool: FunctionType,
     *,
-    variant: PromptVariant = "default",
+    variant: PromptVariant = "flash",
     descriptions: ToolDescriptions = "full",
 ) -> types.FunctionDeclaration:
     """The declaration of `tool`, from its name, docstring and parameters,
@@ -70,9 +70,9 @@ def tool_declaration(
         declaration.parameters_json_schema = create_model(
             f"{name}Params", **fields
         ).model_json_schema()
-    if variant == "hydrogen":
+    if variant != "flash":
         declaration = _hydrogen(declaration)
-    if descriptions == "minimal":
+    if descriptions != "full":
         return _minimal(declaration)
     return declaration
 

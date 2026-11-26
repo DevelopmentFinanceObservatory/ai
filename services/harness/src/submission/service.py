@@ -5896,12 +5896,12 @@ def _aligned_bases(
                 step_id=step.id,
                 requirement_id=requirement_id,
                 reason=(
-                    f"Search settles {requirement_id!r} on no one dataset, so how it is "
-                    "counted cannot be matched to the other inputs'"
-                    if studio_surface().variant == "hydrogen"
-                    else f"Search settles {requirement_id!r} on no one dataset "
+                    f"Search settles {requirement_id!r} on no one dataset "
                     f"({unsettled[requirement_id].status}), so how it is counted cannot be "
                     "matched to the other inputs'"
+                    if studio_surface().variant == "flash"
+                    else f"Search settles {requirement_id!r} on no one dataset, so how it is "
+                    "counted cannot be matched to the other inputs'"
                 ),
             )
         for requirement_id in sorted(unsearched.keys() & under):

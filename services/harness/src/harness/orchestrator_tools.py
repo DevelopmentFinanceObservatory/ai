@@ -1364,13 +1364,15 @@ _RETRY_STATUSES = frozenset({"no_data", "unsupported"})
 # one of them is offered the `text` search from its second such refusal in a
 # turn, under the measure it was sent with. Under `hydrogen`, whose
 # `next_step` repairs a place, only `role` is (`_repaired_first`).
-_REPAIRED_FIRST = frozenset({"entity_not_resolved", "role_not_resolved"})
+_FLASH_REPAIRED_FIRST = frozenset({"entity_not_resolved", "role_not_resolved"})
 _HYDROGEN_REPAIRED_FIRST = frozenset({"role_not_resolved"})
 
 
 def _repaired_first() -> frozenset[str]:
     """The reasons repaired with a parsed search first, by the process's surface."""
-    return _HYDROGEN_REPAIRED_FIRST if studio_surface().variant == "hydrogen" else _REPAIRED_FIRST
+    return (
+        _FLASH_REPAIRED_FIRST if studio_surface().variant == "flash" else _HYDROGEN_REPAIRED_FIRST
+    )
 
 
 # On the `hydrogen` surface, the next search for a part Search found no data
@@ -1401,7 +1403,7 @@ def _next_step(reading: Mapping[str, Any]) -> str | None:
     other reading, and for every reading outside the `hydrogen` surface.
     A window outside the data's years is the step a part with a
     `year_unavailable` departure takes, whatever its reason."""
-    if reading.get("status") not in _RETRY_STATUSES or studio_surface().variant != "hydrogen":
+    if reading.get("status") not in _RETRY_STATUSES or studio_surface().variant == "flash":
         return None
     departures = reading.get("departures") or ()
     if any(

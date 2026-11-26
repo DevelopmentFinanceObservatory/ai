@@ -62,7 +62,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_INSTRUCTION = """\
+FLASH_INSTRUCTION = """\
 You are the analyst behind DFO Studio, the Development Finance Observatory's
 chat and canvas. You answer questions about development, development finance
 and the open data DFO holds, from what your tools return. Decline any other
@@ -605,7 +605,7 @@ translation, data view, chart preparation or limit on your calls.
 
 # Each instruction set's orchestrator instruction (`harness.surface.PromptVariant`).
 INSTRUCTIONS: dict[PromptVariant, str] = {
-    "default": DEFAULT_INSTRUCTION,
+    "flash": FLASH_INSTRUCTION,
     "hydrogen": HYDROGEN_INSTRUCTION,
 }
 
@@ -750,7 +750,7 @@ def _tool_function(function: FunctionType) -> Callable[..., Awaitable[dict[str, 
 
 
 __all__ = [
-    "DEFAULT_INSTRUCTION",
+    "FLASH_INSTRUCTION",
     "HYDROGEN_INSTRUCTION",
     "INSTRUCTIONS",
     "Orchestrator",

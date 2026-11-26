@@ -670,7 +670,7 @@ async def test_a_parsed_search_offers_a_text_search_on_each_part_it_did_not_answ
 _YEARS_OUT = {"code": "year_unavailable", "text": "You asked for 1960 to 1970."}
 
 
-@pytest.mark.parametrize("variant", ["default", "hydrogen"])
+@pytest.mark.parametrize("variant", ["flash", "hydrogen"])
 @pytest.mark.parametrize(
     ("status", "reason", "departures", "step"),
     [
@@ -694,8 +694,8 @@ async def test_a_part_the_users_words_cannot_repair_names_its_next_search(
     step: str | None,
 ):
     # Only the hydrogen variant names a next search.
-    set_studio_surface(HYDROGEN_SURFACE if variant == "hydrogen" else FLASH_SURFACE)
-    if variant == "default":
+    set_studio_surface(FLASH_SURFACE if variant == "flash" else HYDROGEN_SURFACE)
+    if variant == "flash":
         step = None
     reading: dict[str, Any] = {"variable": "climate finance", "status": status}
     if reason is not None:

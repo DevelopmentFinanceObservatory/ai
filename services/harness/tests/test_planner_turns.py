@@ -30,6 +30,7 @@ from harness.prefix_cache import PrefixCache, prefix_key
 from harness.scripted import _compiled_proposal, instruction_text
 from harness.sentences import StopCode
 from harness.settings import Settings
+from harness.surface import ModelNameRefusedError
 from harness.turn_budget import TurnBudget
 from harness.turn_events import PLANNER_ASK
 from planner.call import PlannerCall
@@ -203,7 +204,7 @@ async def test_a_planned_turns_config_is_sent_in_wire_order(
 
 
 def test_the_planner_refuses_a_model_that_is_not_gemini() -> None:
-    with pytest.raises(ValueError, match="Gemini model only"):
+    with pytest.raises(ModelNameRefusedError, match="PLANNER_MODEL_NAME"):
         PlannerAdapter(
             settings=Settings(),
             agent_settings=AgentSettings(planner_model_name="claude-3-5-sonnet"),
@@ -277,7 +278,7 @@ def test_the_planner_refuses_a_model_that_would_call_vertex_ai(
 
 @pytest.mark.parametrize(
     ("model_name", "refused"),
-    [("claude-3-5-sonnet", ValueError), (_VERTEX_MODEL, RuntimeError)],
+    [("claude-3-5-sonnet", ModelNameRefusedError), (_VERTEX_MODEL, RuntimeError)],
     ids=["not-gemini", "vertex-resource-path"],
 )
 def test_the_planners_model_is_refused_before_the_adapter_builds_anything(

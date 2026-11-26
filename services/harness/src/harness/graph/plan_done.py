@@ -904,14 +904,15 @@ def _aligned_bases(state: SessionState) -> dict[str, AlignedBasis]:
 def _refusal_step() -> str:
     """What the orchestrator does after the planner refused, worded for
     the process's surface (`harness.surface`)."""
-    if studio_surface().variant == "hydrogen":
+    if studio_surface().variant == "flash":
         return (
-            "Fetch the series the question rests on, by the spec_ids search returned, and "
-            "chart them labelled as what they are; then say which calculation could not be "
-            "made."
+            "Answer with search and fetch where you can, and say plainly what could not be "
+            "calculated."
         )
     return (
-        "Answer with search and fetch where you can, and say plainly what could not be calculated."
+        "Fetch the series the question rests on, by the spec_ids search returned, and "
+        "chart them labelled as what they are; then say which calculation could not be "
+        "made."
     )
 
 

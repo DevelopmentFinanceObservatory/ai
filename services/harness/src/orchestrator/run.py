@@ -98,7 +98,7 @@ _DIGESTS_INSTRUCTIONS = "The turn's date and digests."
 # its own marker, so a turn stored under one surface loads its own instruction
 # back whatever surface the process that resumes it runs.
 _STORED_INSTRUCTIONS: dict[str, str] = {
-    INSTRUCTIONS["default"].strip(): "orchestrator.agent.INSTRUCTION",
+    INSTRUCTIONS["flash"].strip(): "orchestrator.agent.INSTRUCTION",
     INSTRUCTIONS["hydrogen"].strip(): "orchestrator.agent.HYDROGEN_INSTRUCTION",
 }
 _LOADED_INSTRUCTIONS = {marker: text for text, marker in _STORED_INSTRUCTIONS.items()}

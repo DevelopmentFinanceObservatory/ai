@@ -11,7 +11,7 @@ from __future__ import annotations
 from harness.surface import PromptVariant, studio_surface
 from harness.turn_events import PLANNER_ASK
 
-_PLANNING = (
+_FLASH_PLANNING = (
     "You are the Planner Agent for the Development Finance Observatory. "
     "Given a development finance question, draft a methodological plan. "
     "State each real decision (a measure no pinned source settles, "
@@ -237,7 +237,7 @@ _PLANNING = (
 # What each `propose_plan` call states about which plan it means: the
 # orchestrator's brief fixes the turn's question, so a call patches the plan
 # or reports a different question. What each argument does is on the argument.
-_VERSIONING = (
+_FLASH_VERSIONING = (
     "Call `propose_plan` once with the complete first draft, and again, "
     "patching it through `amends_version`, whenever the user asks for a "
     "change. This turn's question is fixed, so when the user's reply asks "
@@ -247,7 +247,7 @@ _VERSIONING = (
 )
 
 # How to read skills through `get_skill`, which the planner carries.
-_SKILLS = (
+_FLASH_SKILLS = (
     'The search readings close with a "Skills named" line listing, by id, '
     "the skills that apply to them. When a skill bears on the question, "
     "call `get_skill` with its id before you draft, and let what it says "
@@ -261,7 +261,7 @@ _SKILLS = (
 
 # What to do once a plan is recorded: `propose_plan` has a translator carry it
 # out and answers with its verdict under `translation`.
-_TRANSLATING = (
+_FLASH_TRANSLATING = (
     "`source_name_ambiguous` means Search could not choose which "
     "publisher or table a source wording names. The user is asked which "
     "they meant, and their answer names one of the offered refs. State it "
@@ -360,7 +360,7 @@ _TRANSLATING = (
 )
 
 
-_CLOSING = (
+_FLASH_CLOSING = (
     "Every tool answers with an `outcome`, a `code` and sometimes an "
     "`action`. Follow the action and do not guess at the message. Nothing "
     "runs until the user approves a compiled plan. Call `reject_plan` "
@@ -644,7 +644,11 @@ _HYDROGEN_CLOSING = (
 
 
 _INSTRUCTIONS: dict[PromptVariant, str] = {
-    "default": _PLANNING + _VERSIONING + _SKILLS + _TRANSLATING + _CLOSING,
+    "flash": _FLASH_PLANNING
+    + _FLASH_VERSIONING
+    + _FLASH_SKILLS
+    + _FLASH_TRANSLATING
+    + _FLASH_CLOSING,
     "hydrogen": (
         _HYDROGEN_PLANNING
         + _HYDROGEN_VERSIONING

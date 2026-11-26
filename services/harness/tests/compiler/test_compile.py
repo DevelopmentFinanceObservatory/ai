@@ -2170,7 +2170,7 @@ def test_a_source_that_cannot_serve_the_requirement_is_reported_with_the_finding
     assert "no entity named 'Uganda'" in unusable.reason
 
 
-@pytest.mark.parametrize(("variant", "issues"), [("hydrogen", 1), ("default", 3)])
+@pytest.mark.parametrize(("variant", "issues"), [("hydrogen", 1), ("flash", 3)])
 def test_every_entity_the_source_lacks_is_reported_in_one_issue(
     variant: str,
     issues: int,
@@ -2182,7 +2182,7 @@ def test_every_entity_the_source_lacks_is_reported_in_one_issue(
     # The referral closes on one issue, so a name per issue would cost the
     # planner a plan round for each name the source lacks. Only the hydrogen
     # variant joins them.
-    set_studio_surface(HYDROGEN_SURFACE if variant == "hydrogen" else FLASH_SURFACE)
+    set_studio_surface(FLASH_SURFACE if variant == "flash" else HYDROGEN_SURFACE)
     names = ("Uganda", "Vatican City", "North America")
     plan = _draft(
         [decision()],

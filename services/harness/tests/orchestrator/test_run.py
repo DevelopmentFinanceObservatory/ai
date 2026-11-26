@@ -479,6 +479,8 @@ async def test_a_stored_history_holds_no_copy_of_the_instruction_and_resumes_as_
     ]
     held = handed.history.conversation.messages
     stored = handed.history.model_dump_json()
+    # The turn ran on `surface`; a process runs one, so clear it to resume on another.
+    set_studio_surface(None)
     set_studio_surface(resumed_on)
     loaded = StoredHistory.model_validate_json(stored)
 

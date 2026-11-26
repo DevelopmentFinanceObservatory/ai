@@ -1678,17 +1678,17 @@ def test_a_family_with_an_unsummable_axis_is_told_to_name_one_value_for_it(surfa
 @pytest.mark.parametrize(
     ("variant", "unsummable_axes", "sum_unstated", "repair"),
     [
-        ("default", None, True, "read a measure whose source binds one StatVar"),
+        ("flash", None, True, "read a measure whose source binds one StatVar"),
         ("hydrogen", None, True, "read a measure whose source binds one StatVar"),
         ("hydrogen", ("gender",), True, "read a measure whose source binds one StatVar"),
-        ("default", None, False, "otherwise name one value for each axis it cannot"),
+        ("flash", None, False, "otherwise name one value for each axis it cannot"),
         (
             "hydrogen",
             None,
             False,
             "otherwise set the requirement's `source_code` to the code of one series",
         ),
-        ("default", ("gender",), False, "so the question has to name one value for it"),
+        ("flash", ("gender",), False, "so the question has to name one value for it"),
         (
             "hydrogen",
             ("gender",),
@@ -1702,7 +1702,7 @@ def test_a_family_s_repair_by_variant_keeps_the_unstated_sum_repair(
 ):
     # The hydrogen wording changes the summable-family repairs only. A family
     # whose source states no sum keeps its own repair under either variant.
-    set_studio_surface(HYDROGEN_SURFACE if variant == "hydrogen" else FLASH_SURFACE)
+    set_studio_surface(FLASH_SURFACE if variant == "flash" else HYDROGEN_SURFACE)
     shape = dataclasses.replace(
         _shape(roles=(_role(),), measures=2, unsummable_axes=unsummable_axes),
         sum_unstated=sum_unstated,

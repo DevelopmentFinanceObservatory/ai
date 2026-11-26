@@ -98,7 +98,7 @@ QUESTIONS = {
 
 
 def recorded(scenario: str) -> list[dict[str, Any]]:
-    return json.loads((RECORDED / f"adk_{scenario}.json").read_text())
+    return json.loads((RECORDED / f"flash_{scenario}.json").read_text())
 
 
 def definite_envelope(spec_id: str = SCRIPTED_SPEC) -> dict[str, Any]:

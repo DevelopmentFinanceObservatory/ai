@@ -16510,7 +16510,7 @@ def _undescribed_properties(schema: dict[str, Any]) -> list[str]:
 def test_propose_plans_declaration_describes_every_field() -> None:
     # Every argument and every property of every model `propose_plan`'s
     # declaration carries has a description, so the model sees what each
-    # field means without it having to live in `_PLANNING` prose.
+    # field means without it having to live in `_FLASH_PLANNING` prose.
     # `_undescribed_properties` walks `$defs`, the shape the model
     # is actually sent. The fields every requirement kind shares are described once,
     # on the `evidence_requirements` argument. `scope_options` carries none: its enum
@@ -16808,7 +16808,7 @@ def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> 
     ]
     assert unnamed == [], (
         f"referral kinds the planner is never told how to read: {unnamed}. "
-        "Name each one in `_TRANSLATING` and say what the planner does about it."
+        "Name each one in `_FLASH_TRANSLATING` and say what the planner does about it."
     )
     for kind in REPAIR_OF:
         valid = _referral_of(kind, "a")
@@ -16944,7 +16944,7 @@ def test_planner_instruction_carries_no_sentinel_range() -> None:
     # With no `window` on the envelope, the period is a decision like any
     # other, so "time window" stays in the opening decision list and the
     # instruction states no sentinel fallback range for it. "source" is not
-    # in that same list any more (`_PLANNING`'s own opening enumeration):
+    # in that same list any more (`_FLASH_PLANNING`'s own opening enumeration):
     # unlike the window, a verbatim source pin needs no `Decision`, so the
     # instruction states its own carve-out for it separately, not grouped
     # with the window's.

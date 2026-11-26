@@ -131,6 +131,42 @@ def test_the_process_surface_is_resolved_from_the_model_settings_once(monkeypatc
     assert studio_surface() == FLASH_SURFACE
 
 
+def test_a_process_runs_one_surface_and_setting_it_again_is_a_no_op() -> None:
+    set_studio_surface(FLASH_SURFACE)
+    set_studio_surface(FLASH_SURFACE)
+
+    with pytest.raises(SurfaceRefusedError, match="one surface"):
+        set_studio_surface(HYDROGEN_SURFACE)
+    assert studio_surface() == FLASH_SURFACE
+
+    set_studio_surface(None)
+    set_studio_surface(HYDROGEN_SURFACE)
+    assert studio_surface() == HYDROGEN_SURFACE
+
+
+def test_a_surface_resolved_from_settings_is_the_one_a_later_set_must_match(monkeypatch) -> None:
+    monkeypatch.setenv("MODEL_NAME", _HYDROGEN)
+    monkeypatch.setenv("PLANNER_MODEL_NAME", _HYDROGEN)
+    set_studio_surface(None)
+    assert studio_surface() == HYDROGEN_SURFACE
+
+    with pytest.raises(SurfaceRefusedError, match="one surface"):
+        set_studio_surface(FLASH_SURFACE)
+
+
+def test_a_second_app_on_another_surface_is_refused_and_one_on_the_same_surface_builds(
+    monkeypatch, pg_database_url
+) -> None:
+    monkeypatch.setenv("PLANNER_MODEL_NAME", _HYDROGEN)
+    create_app(settings=Settings(database_url=pg_database_url, model_name=_HYDROGEN))
+    create_app(settings=Settings(database_url=pg_database_url, model_name=_HYDROGEN))
+
+    monkeypatch.setenv("PLANNER_MODEL_NAME", _FLASH)
+    with pytest.raises(SurfaceRefusedError, match="one surface"):
+        create_app(settings=Settings(database_url=pg_database_url, model_name=_FLASH))
+    assert studio_surface() == HYDROGEN_SURFACE
+
+
 _IMPORT_UNDER_AN_UNMAPPED_MODEL = """
 import harness.server, orchestrator.agent, orchestrator.run, planner.instruction
 from harness.surface import SurfaceRefusedError, studio_surface
@@ -320,7 +356,7 @@ def _without_descriptions(node: Any) -> Any:
     return node
 
 
-@pytest.mark.parametrize("variant", ["default", "hydrogen"])
+@pytest.mark.parametrize("variant", ["flash", "hydrogen"])
 @pytest.mark.parametrize("name", TOOL_NAMES)
 def test_minimal_descriptions_replace_every_text_and_keep_the_schema(name, variant) -> None:
     tool = _tools()[name]
@@ -386,7 +422,7 @@ def test_minimal_texts_keep_the_rules_the_answer_depends_on(name, path, rule) ->
     assert all(rule in text for text in texts)
 
 
-@pytest.mark.parametrize("variant", ["default", "hydrogen"])
+@pytest.mark.parametrize("variant", ["flash", "hydrogen"])
 @pytest.mark.parametrize(
     ("path", "rule"),
     [

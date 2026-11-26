@@ -270,7 +270,7 @@ def _unusable_findings(
     first, so the referral that closes on it names every entity the source
     lacks and one amendment can fix them all.
     """
-    if studio_surface().variant != "hydrogen":
+    if studio_surface().variant == "flash":
         return [(f.code, f.detail) for f in findings]
     missing = [f.detail for f in findings if f.code is EvidenceIssueCode.ENTITY_MISSING]
     joined: list[tuple[EvidenceIssueCode, str]] = []

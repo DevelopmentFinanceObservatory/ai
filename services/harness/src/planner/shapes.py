@@ -1919,15 +1919,15 @@ def _several_measures(verb: str, shape: FrameShape) -> str | None:
             f"{reason}; read the family summed (stat_vars='sum') to give it one if it can be "
             "summed over every axis it varies along, otherwise "
             + (
-                "set the requirement's `source_code` to the code of one series of the family"
-                if studio_surface().variant == "hydrogen"
-                else "name one value for each axis it cannot"
+                "name one value for each axis it cannot"
+                if studio_surface().variant == "flash"
+                else "set the requirement's `source_code` to the code of one series of the family"
             )
         )
     if not axes:
         return f"{reason}; read the family summed (stat_vars='sum') to give it one"
     one_value = "one value for it" if len(axes) == 1 else "one value for each"
-    if studio_surface().variant != "hydrogen":
+    if studio_surface().variant == "flash":
         return (
             f"{reason}; it cannot be summed over {', '.join(axes)}, so the question has to name "
             f"{one_value}"

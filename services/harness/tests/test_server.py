@@ -1006,6 +1006,31 @@ def test_create_app_gives_the_orchestrator_and_edit_card_one_resolved_model_name
     assert app.state.studio.edit_model.model_name == "gemini-4-hydrogen"
 
 
+@pytest.mark.parametrize("name", ["models/gemini-4-hydrogen", "Gemini:models/gemini-4-hydrogen"])
+def test_create_app_runs_the_planner_and_orchestrator_on_one_resolved_model_name(
+    name: str, pg_database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every name `resolved_model_name` accepts starts the server, and the
+    planner and the orchestrator reach the model under the one resolved name."""
+    monkeypatch.setenv("PLANNER_MODEL_NAME", name)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    graph: dict[str, Any] = {}
+    orchestrated: list[str] = []
+    monkeypatch.setattr(server_module, "studio_graph", lambda **kwargs: graph.update(kwargs))
+    monkeypatch.setattr(
+        server_module,
+        "orchestrator_model",
+        lambda model_name, **kwargs: orchestrated.append(model_name),
+    )
+
+    app = create_app(settings=Settings(database_url=pg_database_url, model_name=name))
+    graph["model"]()
+
+    assert graph["planner"]._planner._model_name == "gemini-4-hydrogen"
+    assert orchestrated == ["gemini-4-hydrogen"]
+    assert app.state.studio.edit_model.model_name == "gemini-4-hydrogen"
+
+
 def test_main_bounds_the_request_drain_so_the_owners_close_before_sigkill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,6 +1,6 @@
 """The Gemini requests the orchestrator sends on the Hydrogen surface, against recorded ones.
 
-`fixtures/orchestrator_requests/adk_*.json` pin Flash's bytes
+`fixtures/orchestrator_requests/flash_*.json` pin Flash's bytes
 (`test_request_parity.py`, `test_declarations.py`). `hydrogen_*.json` beside them
 pin Hydrogen's: each scenario of `pai_runs.SCENARIOS` replayed with the same model
 replies, search results and hand-back, the refused plan's next step worded as
@@ -56,11 +56,15 @@ def _hydrogen_hand_back(scenario: str) -> HandBack | None:
         return hand_back
     surface = studio_surface()
     try:
+        # A process runs one surface; clear it to read each surface's wording.
+        set_studio_surface(None)
         set_studio_surface(FLASH_SURFACE)
         flash = _refusal_step()
+        set_studio_surface(None)
         set_studio_surface(HYDROGEN_SURFACE)
         hydrogen = _refusal_step()
     finally:
+        set_studio_surface(None)
         set_studio_surface(surface)
     text = hand_back.result["result"]
     assert text.count(flash) == 1

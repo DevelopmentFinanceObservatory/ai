@@ -11,6 +11,16 @@ resolves it from `MODEL_NAME` and `PLANNER_MODEL_NAME` and sets it, and so do
 the evals that assemble a studio of their own. Startup refuses a model the map
 does not name, and two models on different surfaces, since the texts one
 surface words its own way pass between the planner and the orchestrator.
+`set_studio_surface` refuses a surface that differs from the one already set
+or resolved, so a second app cannot change the first one's texts.
+
+Retiring a model: delete its `MODEL_SURFACES` row and its surface constant,
+every branch and constant a search for its name finds (for Flash, `flash`
+without regard to case), the tests that use its studio fixture, and its
+recorded fixtures. Flash is the only model that takes an explicit cache, so
+retiring it also deletes `harness.prefix_cache` with its wiring. The model's
+history marker stays in `orchestrator.run._STORED_INSTRUCTIONS`, mapped to the
+current instruction, since stored conversations carry it.
 """
 
 from __future__ import annotations
@@ -26,11 +36,11 @@ from harness.prefix_cache import PrefixCache, gemini_model_name
 from harness.settings import Settings
 
 # The instruction sets the orchestrator and the planner can run with:
-# `default`, the instructions written for `gemini-3.8-flash`, and `hydrogen`,
+# `flash`, the instructions written for `gemini-3.8-flash`, and `hydrogen`,
 # the set written for `gemini-4-hydrogen` (`orchestrator.agent.INSTRUCTIONS`,
 # `planner.instruction.planner_instruction`). `hydrogen` also words some tool
 # descriptions, tool results and referrals its own way.
-type PromptVariant = Literal["default", "hydrogen"]
+type PromptVariant = Literal["flash", "hydrogen"]
 
 # The orchestrator's tool and parameter descriptions: `full`, as the tools'
 # docstrings and fields state them, or `minimal`, as
@@ -49,7 +59,7 @@ class Surface:
     explicit_cache: bool
 
 
-FLASH_SURFACE = Surface(variant="default", tool_descriptions="full", explicit_cache=True)
+FLASH_SURFACE = Surface(variant="flash", tool_descriptions="full", explicit_cache=True)
 # Gemini 4 answers a request for an explicit cache with 400 "Explicit caching
 # is not supported".
 HYDROGEN_SURFACE = Surface(variant="hydrogen", tool_descriptions="minimal", explicit_cache=False)
@@ -151,9 +161,22 @@ def studio_surface() -> Surface:
 
 def set_studio_surface(surface: Surface | None) -> None:
     """Make `surface` the process's surface. With None, the next
-    `studio_surface()` resolves it again from settings."""
+    `studio_surface()` resolves it again from settings.
+
+    A process runs one surface: setting the surface already set, or already
+    resolved by `studio_surface()`, changes nothing.
+
+    Raises:
+        SurfaceRefusedError: A different surface is already set or resolved.
+            Clear it with None first.
+    """
     global _surface  # noqa: PLW0603 -- the one process-wide surface
     with _surface_lock:
+        if surface is not None and _surface is not None and _surface != surface:
+            raise SurfaceRefusedError(
+                f"The process already runs the {_surface.variant!r} surface, and "
+                f"{surface.variant!r} was set. A process runs one surface."
+            )
         _surface = surface
 
 
