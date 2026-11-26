@@ -144,7 +144,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
             ToolOutput(extract=Extract.SPEC_IDS_FROM_ENVELOPE, artifact=ArtifactKind.SPEC_ID),
         ),
         implementation_version="1",
-        input_schema_hash="9f13372a4424a8ddd80cef2e6c480c03e0f52a6188d848a5691fcb846f322061",
+        input_schema_hash="a99df6575184216d19463a197c2a035b65152d870419884d304f5f03c10fa308",
         # Above data-mcp's `Settings.upstream_read_timeout_s` (50 s), itself above
         # the apis service's 45 s search deadline, so a slow search returns the apis service's own
         # 503 or 504 as a typed refusal before this call times out.
@@ -160,13 +160,13 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
     # The harness's own read: `harness.graph`'s `seed` node resolves each seed's
     # identity again through Search, as does `translator.discovery` for a seed's
     # identity over a plan's years, and the `switch` node compiles a switched
-    # scope choice through it (`scope_entries`). data-mcp stores the definition
-    # as it answers.
+    # scope choice through it (`scope_entries`), as `planner.source_reads.compile_whole`
+    # asks for a share's whole (`whole`). data-mcp stores the definition as it answers.
     ToolCapability(
         tool=_data("resolve_definition"),
         phase=Phase.DISCOVERY,
         implementation_version="1",
-        input_schema_hash="f09505e5a81c2e5fdead829347a5b4fac8298a65ebebc2a953d690d6d4ce2e8d",
+        input_schema_hash="6c782e3000144c3e2e74b79d063016cb765b1d5965f5d7a0fb0964197fcbf389",
         # Above data-mcp's resubmit budget
         # (`data_mcp.resolve_definition_tool.RESUBMIT_CALL_BUDGET_S`, 100 s), itself
         # above the apis service's 90 s deadline for a resubmit whose member walk reads a

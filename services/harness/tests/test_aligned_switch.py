@@ -807,7 +807,7 @@ def _closed_share(kind: str) -> _ClosedShare:
     equivalents, compiled gross. `searched-total`: `basis` with the total pinned to
     nothing, which `propose_plan` searches for (`planner.source_reads.pin_by_search`) and
     Search answers with the total. `whole`: US health aid Search found over 2023, read
-    over 2022, as a share of its whole over every sector, compiled from it
+    over 2022, as a share of its whole over every donor, compiled from it
     (`planner.source_reads.compile_whole`)."""
     ctx = _FakeToolContext()
     if kind == "whole":
@@ -828,7 +828,7 @@ def _closed_share(kind: str) -> _ClosedShare:
                 "measure": "US total ODA",
                 "source_spec_id": None,
                 "entities": (),
-                "whole_of": WholeOf(part="health", axis="sector"),
+                "whole_of": WholeOf(part="health", axis="donor"),
             }
         )
         return _ClosedShare(

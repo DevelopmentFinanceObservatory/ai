@@ -151,9 +151,9 @@ class Settings(FrameServiceSettings):
     and `carried_entries`, and is on by default.
 
     `dfo_caller_principal` (`DFO_CALLER_PRINCIPAL`) is the secret dfo-apis shares
-    with the website. Every dfo-apis call carries it beside an `ip:<digest>` caller
-    the website named, or a harness `conversation:` caller
-    (`common.caller.vouched_caller_headers`). dfo-apis spends an `ip:` caller's pin
+    with the website. Every dfo-apis call carries it beside an `ip:<digest>` or
+    `user:<digest>` caller the website named, or a harness `conversation:` caller
+    (`common.caller.vouched_caller_headers`). dfo-apis spends an `ip:` or `user:` caller's pin
     allowance on `export_data`, and logs each caller's reads. A `conversation:`
     caller is logged as Studio and counted against this service's address. Unset
     or blank, no caller is sent.

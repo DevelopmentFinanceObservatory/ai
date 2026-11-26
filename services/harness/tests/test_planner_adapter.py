@@ -178,8 +178,8 @@ from .basis_alignment import (
     TOTAL_NET,
     US_2023,
     BasisCompiles,
-    WholeCompiles,
     basis_block,
+    derived_answer,
 )
 from .compiler.test_evidence import _manifest, _series_stats, _stat
 from .planner_host import PlannerHarness, in_node, node_ctx, pauses, planner_answers, planner_calls
@@ -6472,22 +6472,58 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
     assert health_basis[1] == total_basis[1]
 
 
-class _PartAndWholeCompiles(WholeCompiles):
-    """`WholeCompiles`, whose resubmit of the US health part itself (its sector
-    bound) answers the part as dev Search recorded it on the provider posted."""
+# The spec_id Search answers the US health part's whole over every donor with, by the
+# provider option the part counts.
+_DONOR_WHOLES = {
+    "provider:bilateral": f"spec_{'b' * 32}",
+    "provider:inclusive": f"spec_{'c' * 32}",
+}
 
-    @override
+
+class _PartAndWholeCompiles:
+    """A tool surface for the US health part in 2023. A resubmit of the part answers it
+    as dev Search recorded it on the provider posted. A whole request over every donor
+    (`whole`) answers the part on that provider with its donor left open, under
+    `_DONOR_WHOLES`' spec_id, its scope stating the pair (`derived_answer`). Each
+    call's arguments are recorded in `calls`."""
+
+    def __init__(self) -> None:
+        self.calls: list[Mapping[str, Any]] = []
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
     async def call_tool(
         self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
     ) -> ToolCallResult:
-        (sector,) = [s for s in arguments["identity"]["slots"] if s["property"] == "crsPurpose"]
-        if sector["binding"]["state"] == "unbound":
-            return await super().call_tool(tool=tool, arguments=arguments)
+        del tool, on_progress
         self.calls.append(arguments)
         provider = [e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "provider"]
-        part = US_2023["health_inclusive" if provider == ["provider:inclusive"] else "health"]
+        option = provider[0] if provider else "provider:bilateral"
+        part = US_2023["health_inclusive" if option == "provider:inclusive" else "health"]
+        if "whole" not in arguments:
+            answered = self.answered(part)
+        else:
+            assert arguments["whole"] == {"axis": "donor"}, arguments
+            whole = copy.deepcopy(part["spec"])
+            spec_id = _DONOR_WHOLES[option]
+            identity = whole["definition"]["identity"]
+            identity["entities"] = {
+                role: refs for role, refs in identity["entities"].items() if role != "origin"
+            }
+            # Search leaves the donors open: it binds none and states the side open.
+            resolved = whole["resolved"]
+            resolved["entities"] = [e for e in resolved["entities"] if e["role"] != "origin"]
+            resolved["role_axis_facts"] = [{"role": "origin", "member_count": 35}]
+            whole["spec_id"] = whole["definition"]["spec_id"] = spec_id
+            scope = whole["resolved"]["scope_choices"]
+            scope["id"] = scope["base"]["spec_id"] = scope["compiled"]["spec_id"] = spec_id
+            answered = {
+                "status": "definite",
+                "spec": derived_answer(part["spec"], whole, axis="donor", kind="sum_of_members"),
+            }
         return ToolCallResult(
-            is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [self.answered(part)]}}
+            is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [answered]}}
         )
 
     def answered(self, part: dict[str, Any]) -> dict[str, Any]:
@@ -6531,7 +6567,7 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
     calls: list[int],
     concept: str | None,
 ) -> None:
-    """US health aid in 2023 as a share of its declared whole, switched on the plan
+    """US health aid in 2023 as a share of its declared whole over every donor, switched on the plan
     card to bilateral plus imputed multilateral aid, back to bilateral, and to the
     inclusive scope again. Each switch posts the part, and the revision compiles
     the whole from Search's answer. A resubmit the turn already made is not posted
@@ -6572,7 +6608,7 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
         decisions=[decision()],
         evidence_requirements=[
             part,
-            dataset("total", whole_of=WholeOf(part="health", axis="sector")),
+            dataset("total", whole_of=WholeOf(part="health", axis="donor")),
             ShareOfRequirement(
                 id="share",
                 decision_ids=["measure"],
@@ -6637,15 +6673,8 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
     # The draft compiles the whole. Each switch posts the part, and a new whole once.
     assert result["calls"] == calls
     # The plan reads the inclusive whole, compiled from the part Search answered.
-    assert result["whole"] == US_2023["whole_inclusive"]["spec"]["spec_id"]
-    whole = [
-        call
-        for call in compiles.calls
-        if any(
-            slot["property"] == "crsPurpose" and slot["binding"]["state"] == "unbound"
-            for slot in call["identity"]["slots"]
-        )
-    ][-1]
+    assert result["whole"] == _DONOR_WHOLES["provider:inclusive"]
+    whole = [call for call in compiles.calls if "whole" in call][-1]
     (provider,) = [e for e in whole["scope_entries"] if e["axis"] == "provider"]
     assert provider.get("concept") == concept
 

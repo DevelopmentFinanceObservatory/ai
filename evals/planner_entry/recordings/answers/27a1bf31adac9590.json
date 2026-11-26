@@ -8,15 +8,15 @@
       },
       "org.one.dfo/search_envelope": {
         "diagnostics": {
-          "engine_build": "6d0835248dbc7e8c27c69eb3f35a78c232351af4",
+          "engine_build": "unknown",
           "timed_out": false,
           "timing_ms": {
             "by_step": {
               "coverage": 0
             },
-            "total": 177
+            "total": 85
           },
-          "trace_id": "215b7ed2842a4c57a4c2e5717fff507c",
+          "trace_id": "db656b4df5e040718dd9881fcea04a3a",
           "warnings": []
         },
         "kind": "resolution",
@@ -36,6 +36,9 @@
               "definition": {
                 "identity": {
                   "entities": {
+                    "destination": [
+                      "DACDevelopingCountries"
+                    ],
                     "origin": [
                       "GroupOfSeven"
                     ]
@@ -90,7 +93,7 @@
                   ]
                 },
                 "schema_version": 1,
-                "spec_id": "spec_66627f5871d4ef51038b5ec8c69948a5"
+                "spec_id": "spec_39ed9e4e43cac5bf1fc156ef783093f0"
               },
               "resolved": {
                 "alternative_measures": [
@@ -207,7 +210,7 @@
                     "start_year": 1960
                   }
                 },
-                "coverage_stamp": "860f403d263f3638d66bddbac61c88a64e4547fde8d831505d582ff18781ffad",
+                "coverage_stamp": "2c15d791bbe8e59b84876cc361227cf5b834d4883651f7394abaf1481d43ca63",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
@@ -887,7 +890,7 @@
                   "sums_components": true
                 },
                 "trace": {
-                  "capability_version": "cap_b1f3369f84d185f6",
+                  "capability_version": "cap_890d4521b8bf88ab",
                   "query_qualifiers": [],
                   "requested_window": {
                     "end_year": 2024,
@@ -2989,14 +2992,15 @@
                 },
                 "unresolved_slots": []
               },
-              "spec_id": "spec_66627f5871d4ef51038b5ec8c69948a5"
+              "spec_id": "spec_39ed9e4e43cac5bf1fc156ef783093f0"
             },
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 9,
+                "answer": 11,
                 "as_composite": 0,
                 "bind": 0,
+                "composite_continuation": 4,
                 "detect_edits": 0,
                 "finalize_preview": 0,
                 "finalize_related": 0,
@@ -3004,16 +3008,16 @@
                 "finalize_wholes": 0,
                 "ground_convert": 0,
                 "ground_facets": 0,
-                "ground_gates": 6,
+                "ground_gates": 3,
                 "ground_related": 0,
                 "ground_units": 0,
-                "materialise": 28,
-                "options": 3,
+                "materialise": 13,
+                "options": 2,
                 "phase_build_bindings": 0,
                 "phase_build_shape": 0,
                 "phase_detect_edits": 0,
                 "phase_finalize": 0,
-                "phase_ground_build": 111,
+                "phase_ground_build": 36,
                 "phase_materialise": 0,
                 "phase_reread_arcs": 0,
                 "phase_resolve_survivors": 0,
@@ -3021,15 +3025,15 @@
                 "phase_where_places": 0,
                 "reread_arcs": 0,
                 "resolve_survivors": 0,
-                "served_entry": 0,
-                "shape": 0,
+                "served_entry": 1,
+                "shape": 1,
                 "validate": 0,
                 "walk": 1,
-                "where_places": 1
+                "where_places": 0
               },
-              "total": 159
+              "total": 72
             },
-            "variable_text": "spec_66627f5871d4ef51038b5ec8c69948a5",
+            "variable_text": "spec_39ed9e4e43cac5bf1fc156ef783093f0",
             "warnings": []
           }
         ],
@@ -3242,10 +3246,10 @@
       }
     },
     "structured_content": {
-      "spec_id": "spec_66627f5871d4ef51038b5ec8c69948a5",
+      "spec_id": "spec_39ed9e4e43cac5bf1fc156ef783093f0",
       "status": "definite"
     },
-    "text": "Search resolved the identity of spec_66627f5871d4ef51038b5ec8c69948a5: definite."
+    "text": "Search resolved the identity of spec_39ed9e4e43cac5bf1fc156ef783093f0: definite."
   },
-  "call": "resolve_definition {\"entity_groups\":{\"origin\":{\"label\":\"Group of Seven\",\"ref\":\"GroupOfSeven\"}},\"identity\":{\"entities\":{\"origin\":[\"GroupOfSeven\"]},\"facets\":{\"provenance\":{\"ref\":\"provenance/ONEDAC2aBilateral\",\"state\":\"value\"}},\"identity_version\":\"spec1\",\"requested_window\":{\"end_year\":2024,\"kind\":\"range\",\"start_year\":1960},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialFlow\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"DAC2aAidType206\",\"state\":\"value\"},\"property\":\"dac2aAidType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"dacTypeOfFinance\"},{\"binding\":{\"ref\":\"Disbursement\",\"state\":\"value\"},\"property\":\"financialFlowType\"},{\"binding\":{\"ref\":\"Net\",\"state\":\"value\"},\"property\":\"nettingBasis\"}]},\"spec_id\":\"spec_66627f5871d4ef51038b5ec8c69948a5\"}"
+  "call": "resolve_definition {\"entity_groups\":{\"origin\":{\"label\":\"Group of Seven\",\"ref\":\"GroupOfSeven\"}},\"identity\":{\"entities\":{\"destination\":[\"DACDevelopingCountries\"],\"origin\":[\"GroupOfSeven\"]},\"facets\":{\"provenance\":{\"ref\":\"provenance/ONEDAC2aBilateral\",\"state\":\"value\"}},\"identity_version\":\"spec1\",\"requested_window\":{\"end_year\":2024,\"kind\":\"range\",\"start_year\":1960},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialFlow\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"DAC2aAidType206\",\"state\":\"value\"},\"property\":\"dac2aAidType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"dacTypeOfFinance\"},{\"binding\":{\"ref\":\"Disbursement\",\"state\":\"value\"},\"property\":\"financialFlowType\"},{\"binding\":{\"ref\":\"Net\",\"state\":\"value\"},\"property\":\"nettingBasis\"}]},\"spec_id\":\"spec_39ed9e4e43cac5bf1fc156ef783093f0\"}"
 }

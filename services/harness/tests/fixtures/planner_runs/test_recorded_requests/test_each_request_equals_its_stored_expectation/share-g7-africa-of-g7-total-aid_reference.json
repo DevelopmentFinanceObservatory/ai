@@ -173,7 +173,7 @@
           "entities": null,
           "across": null,
           "measure": null,
-          "source_spec_id": "spec_66627f5871d4ef51038b5ec8c69948a5",
+          "source_spec_id": "spec_39ed9e4e43cac5bf1fc156ef783093f0",
           "stat_vars": null,
           "reduction": null,
           "group_by": null,
@@ -249,7 +249,7 @@
         "source_ref": null,
         "source_exclude": false,
         "source_code": null,
-        "source_spec_id": "spec_66627f5871d4ef51038b5ec8c69948a5",
+        "source_spec_id": "spec_39ed9e4e43cac5bf1fc156ef783093f0",
         "coverage": {
           "on_missing": "report_gaps"
         },

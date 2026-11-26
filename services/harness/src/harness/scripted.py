@@ -386,11 +386,13 @@ class ScriptedPlannerModel:
         conversation_digest: dict[str, Any] | None = None,
         pick: DecisionPick | None = None,
         answer: dict[str, Any] | None = None,
+        restart: bool = False,
     ) -> dict[str, Any]:
         # No model runs, so nothing is recorded or emitted, and no ask is
         # ever answered. It drafts the same canned plan whatever the
-        # readings name.
+        # readings name, and keeps no record of its own for `restart` to clear.
         del ctx, readings, refusal, amendment, canvas_digest, conversation_digest, pick, answer
+        del restart
         plan = scripted_plan(question, spec_id=None)
         if prior_plan is not None:
             prior_version = int(prior_plan.get("version", 1))

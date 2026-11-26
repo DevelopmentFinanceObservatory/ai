@@ -56,6 +56,9 @@ from fastmcp.tools import Tool, ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+# Imported for its registration of the frame store's content_version deriver, which
+# `_build_store` needs when `frame_store_verify_content_version` is set.
+import analysis_mcp.frame_ref_resolution  # noqa: F401
 from analysis_mcp.fixtures import seed_fixture_store
 from analysis_mcp.result import IMPLEMENTATION_VERSIONS, VERB_OUTPUT_SCHEMA
 from analysis_mcp.rolling_tool import RESOLVE_ANCHOR_OUTPUT_SCHEMA, RESOLVE_ANCHOR_VERSION

@@ -1051,7 +1051,14 @@ def conversation_readings(state: SessionState) -> list[dict[str, Any]]:
 # shape this release does not read, and the question was planned again.
 UNREADABLE_PLAN_NOTE = (
     "The plan you were shown could not be read after an update, so this is a new plan for "
-    "the same question. Ask again for any change you wanted."
+    "the same question, with any change you typed."
+)
+
+# What the card of a plan drafted again opens with when the plan the user answered
+# divided by a total an earlier release worked out (`planner.plan.rests_on_stale_whole`).
+STALE_WHOLE_NOTE = (
+    "The plan you were shown divided by a total worked out before an update, so this plan "
+    "asks for that total again, with any change you typed."
 )
 
 
@@ -1061,6 +1068,14 @@ UNREADABLE_PLAN_NOTE = (
 UNREADABLE_PLAN_UNPLANNED_NOTE = (
     "The plan you were shown could not be read after an update, and the question could not "
     "be planned again."
+)
+
+# What the closing text opens with when `approve` dropped the plan the user held
+# for resting on a stale whole (`STALE_WHOLE_NOTE`), and the planner drafted no
+# plan in its place.
+STALE_WHOLE_UNPLANNED_NOTE = (
+    "The plan you were shown divided by a total worked out before an update, and the "
+    "question could not be planned again."
 )
 
 

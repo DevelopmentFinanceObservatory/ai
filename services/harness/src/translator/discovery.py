@@ -2063,7 +2063,10 @@ class DefinitionNotResolvedError(RuntimeError):
     `code` is that code, `None` when the refusal states none or nothing was
     refused. `not_issued` is whether the call was never made, the planner
     entry having no time left for it (`NoTimeLeftError`). `no_part` is whether
-    Search answered with no part.
+    Search answered with no part. `cause` and `alternatives` are the refusal's
+    own cause code and the options it offers in place of the one asked for, each
+    `(ref, label)`, as a whole request's refusal states them. `detail` is the
+    refusal's own words (data-mcp's `fix.detail`), `None` where it states none.
     """
 
     def __init__(
@@ -2075,6 +2078,9 @@ class DefinitionNotResolvedError(RuntimeError):
         code: str | None = None,
         not_issued: bool = False,
         no_part: bool = False,
+        cause: str | None = None,
+        alternatives: tuple[tuple[str, str], ...] = (),
+        detail: str | None = None,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
@@ -2082,6 +2088,9 @@ class DefinitionNotResolvedError(RuntimeError):
         self.code = code
         self.not_issued = not_issued
         self.no_part = no_part
+        self.cause = cause
+        self.alternatives = alternatives
+        self.detail = detail
 
 
 class CutCalls:
@@ -2417,6 +2426,7 @@ async def resolve_definition_at(
     groups: Sequence[ResolvedGroup] = (),
     scope_entries: Sequence[Mapping[str, Any]] = (),
     compile_scope: bool = False,
+    whole: Mapping[str, str] | None = None,
 ) -> tuple[Mapping[str, Any], datetime | None]:
     """The part the Search API resolves `identity` to now, through data-mcp's `resolve_definition`, and the time that call was made.
 
@@ -2438,7 +2448,8 @@ async def resolve_definition_at(
     compile to, under that identity's own spec_id. `compile_scope` posts
     them even when there are none, so Search states the identity's scope
     choices on its answer, which it states on a resubmit only where entries
-    are posted.
+    are posted. `whole`, `{axis, option_id?}`, asks Search for the whole of
+    the part those entries compile to, and the part answered is that whole.
 
     data-mcp stores the definition the part carries, on the service `surface`
     reaches, which is the one whose `get_data` retrieves it. The part is
@@ -2453,8 +2464,10 @@ async def resolve_definition_at(
     arguments: dict[str, object] = {"spec_id": spec_id, "identity": dict(identity)}
     if groups:
         arguments["entity_groups"] = wire_groups(groups)
-    if scope_entries or compile_scope:
+    if scope_entries or compile_scope or whole is not None:
         arguments["scope_entries"] = [dict(entry) for entry in scope_entries]
+    if whole is not None:
+        arguments["whole"] = dict(whole)
 
     def call() -> Awaitable[ToolCallResult]:
         return call_within_entry(
@@ -2475,11 +2488,19 @@ async def resolve_definition_at(
             )
         stated = refusal.get("upstream_code") or refusal.get("code")
         code = str(stated) if stated else None
+        fix = refusal.get("fix")
+        fix = fix if isinstance(fix, Mapping) else {}
+        cause = fix.get("cause")
+        offered = fix.get("alternatives")
+        detail = fix.get("detail")
         raise DefinitionNotResolvedError(
             f"Search no longer resolves it ({code})" if code else "Search no longer resolves it",
             retryable=False,
             refused=True,
             code=code,
+            cause=cause if isinstance(cause, str) else None,
+            alternatives=_offered(offered),
+            detail=detail if isinstance(detail, str) and detail else None,
         )
     part = _answered_part(answer)
     if part is None:
@@ -2487,6 +2508,18 @@ async def resolve_definition_at(
             "Search returns nothing for it", retryable=False, no_part=True
         )
     return part, at
+
+
+def _offered(raw: object) -> tuple[tuple[str, str], ...]:
+    """The `(ref, label)` of each item of `raw`, a refusal's `fix.alternatives` as
+    data-mcp relays Search's, that states both as strings; the others are left out."""
+    pairs: list[tuple[str, str]] = []
+    for item in raw if isinstance(raw, list) else ():
+        fields = dict(item) if isinstance(item, Mapping) else {}
+        ref, label = fields.get("ref"), fields.get("label")
+        if isinstance(ref, str) and isinstance(label, str):
+            pairs.append((ref, label))
+    return tuple(pairs)
 
 
 class PartFault(StrEnum):
@@ -2951,8 +2984,8 @@ async def _settled_whole(
 ) -> dict[str, object]:
     """The source of the whole `requirement` from its pin, with no search (`_pin_source`'s `read`).
 
-    `propose_plan` pins a whole to the compile of its part with one side
-    left open (`planner.source_reads.compile_whole`), so that pin is its
+    `propose_plan` pins a whole to the total Search derives from its part on
+    the widened axis (`planner.source_reads.compile_whole`), so that pin is its
     source, whatever it holds on that side: a whole covers what its part
     covers (`planner.plan.whole_read`), and a search for it could only find
     another population. The caller has already referred back a whole with no

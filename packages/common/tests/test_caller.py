@@ -21,6 +21,7 @@ from common.caller import (
     SURFACE_HEADER,
     TURN_HEADER,
     USER_AGENT_HEADER,
+    WEBSITE_CALLER,
     conversation_caller,
     current_caller,
     current_mcp_client,
@@ -170,6 +171,31 @@ def test_a_conversation_caller_is_a_fixed_length_digest_of_the_key() -> None:
     assert conversation_caller("u/a") != conversation_caller("u/b")
 
 
+@pytest.mark.parametrize("caller", ["ip:" + "0" * 32, "user:" + "0123456789abcdef" * 2])
+def test_website_caller_matches_the_forms_dfo_apis_accepts(caller: str) -> None:
+    assert WEBSITE_CALLER.fullmatch(caller)
+
+
+@pytest.mark.parametrize(
+    "caller",
+    [
+        "key:" + "0" * 32,
+        "conversation:" + "0" * 32,
+        "ip:" + "0" * 31,
+        "user:" + "0" * 31,
+        "user:" + "0" * 33,
+        "user:" + "g" * 32,
+        "user:" + "A" * 32,
+        "user:" + "0" * 32 + "\n",
+        " user:" + "0" * 32,
+        "user:edge",
+        "",
+    ],
+)
+def test_website_caller_rejects_every_other_form(caller: str) -> None:
+    assert WEBSITE_CALLER.fullmatch(caller) is None
+
+
 def _user_agent_of(user_agent: str) -> str | None:
     scope = {"type": "http", "headers": [(b"user-agent", user_agent.encode("latin-1"))]}
     with set_http_request(Request(scope)):
@@ -197,6 +223,7 @@ def test_no_user_agent_outside_a_request() -> None:
 
 
 _ADDRESS = "ip:" + "0" * 32
+_ACCOUNT = "user:" + "0123456789abcdef" * 2
 _CONVERSATION = conversation_caller("u/c1")
 
 
@@ -226,24 +253,40 @@ _CONVERSATION = conversation_caller("u/c1")
             "p",
             {CALLER_PRINCIPAL_HEADER: "p", CALLER_HEADER: _ADDRESS, SURFACE_HEADER: "mcp"},
         ),
+        (
+            _ACCOUNT,
+            "claude-user/1.0 (+https://claude.ai)",
+            "p",
+            {
+                CALLER_PRINCIPAL_HEADER: "p",
+                CALLER_HEADER: _ACCOUNT,
+                SURFACE_HEADER: "mcp",
+                USER_AGENT_HEADER: "claude-user/1.0 (+https://claude.ai)",
+            },
+        ),
         (_ADDRESS, "claude-user/1.0", None, {}),
+        (_ACCOUNT, "claude-user/1.0", None, {}),
         (_CONVERSATION, "claude-user/1.0", None, {}),
         ("conversation:u/c1", "claude-user/1.0", "p", {}),
         ("user:edge", "claude-user/1.0", "p", {}),
+        ("key:" + "0" * 32, "claude-user/1.0", "p", {}),
         (None, "claude-user/1.0", "p", {}),
     ],
     ids=[
         "mcp-client",
         "studio",
         "no-user-agent",
+        "account",
         "address-unset",
+        "account-unset",
         "conversation-unset",
         "malformed-conversation",
         "other-kind",
+        "key-kind",
         "no-caller",
     ],
 )
-def test_the_vouched_headers_name_an_address_or_conversation_caller(
+def test_the_vouched_headers_name_a_website_or_conversation_caller(
     caller: str | None, user_agent: str | None, principal: str | None, sent: dict[str, str]
 ) -> None:
     """dfo-apis reads Studio from a `conversation:` prefix, so that caller sends
@@ -445,6 +488,7 @@ def test_shared_work_names_its_surface_and_no_caller(
         (_CONVERSATION, False, None, "studio"),
         (_ADDRESS, False, None, "mcp"),
         (_ADDRESS, True, "studio", "mcp"),
+        (_ACCOUNT, False, None, "mcp"),
         ("user:edge", False, None, None),
         (None, False, None, None),
         (None, False, "studio", None),
@@ -454,6 +498,7 @@ def test_shared_work_names_its_surface_and_no_caller(
         "conversation",
         "address",
         "address-beside-a-surface-header",
+        "account",
         "other-kind",
         "no-caller",
         "header-off-loopback",

@@ -2925,7 +2925,8 @@
               }
             ]
           },
-          "ledger": []
+          "ledger": [],
+          "derived": null
         },
         "origin": "search",
         "observed_at": null
@@ -3211,7 +3212,8 @@
             },
             "components": []
           },
-          "ledger": []
+          "ledger": [],
+          "derived": null
         },
         "origin": "search",
         "observed_at": "<time>"

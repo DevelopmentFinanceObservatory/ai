@@ -1705,6 +1705,11 @@ async def test_a_whole_is_settled_only_on_a_pin_compiled_from_its_parts_dataset(
         )
     else:
         block = json.loads(json.dumps(_G7_EVERY_RECIPIENT_BLOCK))
+        # Search's answer to the `whole` request states the whole it derived.
+        block["resolved"].setdefault("scope_choices", {})["derived"] = {
+            "axis": "recipient",
+            "kind": "published_total",
+        }
         if pinned in {"compiled-block-unreadable", "unreadable-from-another-dataset"}:
             block["resolved"]["entity_groups"]["destination"]["whole_of"] = ["sovereign_fund"]
         save_aligned_pin(

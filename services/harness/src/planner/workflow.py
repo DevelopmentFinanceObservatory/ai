@@ -310,7 +310,12 @@ class SelectedSource(StrictModel):
     declared composite (DAC2a's inclusive scope, bilateral plus imputed
     multilateral lines), however its slots are bound; `None` when the
     envelope states it false or omits it, as Search does for every other
-    family.
+    family. `splices_components` is `True` when
+    `resolved.stat_vars.splices_components` states that the mint serves the
+    family as one series spliced from members that each serve their own years
+    (the ONE headline ODA series, net flows to 2017 and grant equivalents
+    from 2018), so it reads as one figure as a summed composite does; `None`
+    otherwise.
 
     `open_axes` are the slots the family's members vary along, from
     `resolved.slots`: the ones with a constraint property that is not
@@ -341,6 +346,12 @@ class SelectedSource(StrictModel):
     axes were never read, as on a source recorded without the field, and
     `translator.discovery.DiscoveryLog.selectable` does not offer such a
     source to a requirement that states `across`.
+
+    `provider_counted` is the label of the provider option the source counts,
+    the active option of its block's provider scope choice, `None` where the
+    block states none; the plan card names it beside a provider whole
+    (`harness.plan_display`). It is plain text, since the label comes from
+    another service.
 
     `groups` are the named sets the source binds, one per role column at
     most, each read as its published total or as its members
@@ -424,6 +435,11 @@ class SelectedSource(StrictModel):
     sums_components: Annotated[bool | None, HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda sums: sums is None
     )
+    # Left out of every dump while unset, so a source saved without it keeps
+    # its serialised form.
+    splices_components: Annotated[bool | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda splices: splices is None
+    )
     shape_member_count: int | None = None
     shape_member_digest: str | None = None
     entities: tuple[ResolvedEntity, ...] = ()
@@ -449,6 +465,11 @@ class SelectedSource(StrictModel):
         default=(), exclude_if=lambda codes: not codes
     )
     open_entity_axes: Annotated[tuple[OpenEntityAxis, ...] | None, HASHED_WHEN_SET] = None
+    # Left out of every dump while unset, so a source saved without it keeps its
+    # serialised form.
+    provider_counted: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda label: label is None
+    )
     unit_ref: str | None = None
     unit_label: str | None = None
     unit_per_series: Annotated[bool | None, HASHED_WHEN_SET] = None

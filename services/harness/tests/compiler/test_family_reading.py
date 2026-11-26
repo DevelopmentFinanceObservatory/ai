@@ -39,7 +39,7 @@ from compiler.sources import (
     stat_var_reading,
 )
 from compiler.surface import ToolSchema
-from harness.plan_display import _reading_clause
+from harness.plan_display import _reading_clause, card_choice_text
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -1598,3 +1598,153 @@ def test_a_rank_over_recipients_of_a_composite_family_without_the_flag_is_refuse
     assert [(issue.code, issue.operation_id) for issue in result.issues] == [
         (CompileIssueCode.INPUT_SHAPE_UNSUPPORTED, "top_op")
     ]
+
+
+def _stated_sum(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    """Leave the recorded block's `sums_components` as Search states it."""
+
+
+def _no_flag(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    del stat_vars["sums_components"]
+
+
+def _flag_false(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    stat_vars["sums_components"] = False
+
+
+def _spliced(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    del stat_vars["sums_components"]
+    stat_vars["splices_components"] = True
+
+
+def _one_member(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    del stat_vars["sums_components"]
+    del stat_vars["served_count"]
+    stat_vars["member_count"] = 1
+
+
+def _one_member_unstated(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    _one_member(stat_vars, resolved)
+    del stat_vars["member_count_exact"]
+
+
+def _one_member_floor(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    _one_member(stat_vars, resolved)
+    stat_vars["member_count_exact"] = False
+
+
+def _slots_unread(stat_vars: dict[str, Any], resolved: dict[str, Any]) -> None:
+    del stat_vars["sums_components"]
+    del resolved["slots"]
+
+
+@pytest.mark.parametrize(
+    ("edit", "codes"),
+    [
+        (_stated_sum, []),
+        (_spliced, []),
+        (_flag_false, [CompileIssueCode.FAMILY_UNSUMMABLE]),
+        (_no_flag, [CompileIssueCode.FAMILY_UNSUMMABLE]),
+        (_one_member, []),
+        (_one_member_unstated, []),
+        (_one_member_floor, [CompileIssueCode.FAMILY_UNSUMMABLE]),
+        (_slots_unread, [CompileIssueCode.FAMILY_UNSUMMABLE]),
+    ],
+    ids=[
+        "declared-sum",
+        "declared-splice",
+        "flag-false",
+        "no-flag",
+        "one-member",
+        "one-member-exactness-unstated",
+        "one-member-floor",
+        "slots-unread",
+    ],
+)
+def test_a_family_with_no_open_axis_reads_summed_only_where_its_components_sum(
+    compile_question: Callable[..., CompileResult],
+    edit: Callable[[dict[str, Any], dict[str, Any]], None],
+    codes: list[CompileIssueCode],
+) -> None:
+    """The plan states `sum` over a family with no open axis. apis collapses the
+    members only where the source declares they sum or are spliced by years,
+    and refuses any other sum `rollup_not_summable`, so compile refuses it
+    before the fetch, as it refuses a source whose slots were never read. A
+    family counted exactly at one member has nothing to collapse, so it is
+    not refused; one counted at one as a floor is. Each edit is this test's,
+    of the recorded DAC2a inclusive block."""
+    block = _dac2a_inclusive()
+    resolved = block["resolved"]
+    edit(resolved["stat_vars"], resolved)
+    source = source_from_spec_block(block)
+    assert source.open_axes == ()
+
+    result = _compile_explicit_total(
+        compile_question,
+        source,
+        [Entity(name="United States", role="donor"), Entity(name="Kenya", role="recipient")],
+    )
+
+    assert [issue.code for issue in result.issues] == codes
+
+
+def test_a_spliced_family_reads_as_one_series_and_says_it_is_spliced() -> None:
+    """A family the mint splices by years, as it serves the ONE headline ODA
+    series, reads as one figure by the rule, and the card says it is spliced
+    from its indicators. The splice flag is this test's edit of the recorded
+    DAC2a inclusive block."""
+    block = _dac2a_inclusive()
+    _spliced(block["resolved"]["stat_vars"], block["resolved"])
+    source = source_from_spec_block(block)
+
+    read = stat_var_reading(source, None)
+
+    assert source.splices_components is True
+    assert read.stat_var_reading is StatVarReading.SUM
+    assert read.stat_var_reading_set_by is ReadingSetBy.RULE
+    assert _reading_clause(read) == "spliced from its 2 indicators by default"
+
+
+@pytest.mark.parametrize(
+    ("edit", "words"),
+    [(_spliced, "spliced into one series"), (_stated_sum, "summed into one series")],
+    ids=["spliced", "summed"],
+)
+def test_the_cards_sum_option_says_how_the_family_becomes_one_series(
+    compile_question: Callable[..., CompileResult],
+    edit: Callable[[dict[str, Any], dict[str, Any]], None],
+    words: str,
+) -> None:
+    """The decision fixing `stat_vars='sum'` reads as the source collapses the
+    family: spliced by years, or summed."""
+    block = _dac2a_inclusive()
+    edit(block["resolved"]["stat_vars"], block["resolved"])
+    source = source_from_spec_block(block)
+    entities = [Entity(name="United States", role="donor"), Entity(name="Kenya", role="recipient")]
+
+    result = _compile_explicit_total(compile_question, source, entities)
+
+    assert result.workflow is not None, result.issues
+    oda = _dataset(
+        "oda",
+        entities,
+        Period(start=2000, end=2024),
+        decision_ids=["measure", "read_as_total"],
+        stat_vars=StatVarReading.SUM,
+    )
+    plan = Plan(
+        question="a question about a family of StatVars",
+        decisions=(_WHAT, _READ_AS_TOTAL),
+        evidence_requirements=[oda, _yearly_total("oda")],
+        status=PlanStatus.DRAFT,
+        translation=Translation(
+            operations=[
+                RetrieveOperation(id="oda_op", requirement_id="oda", spec_id=source.spec_id),
+                _yearly_total_op("oda_op"),
+            ],
+            terminal=["yearly_total"],
+        ),
+        workflow=result.workflow,
+    )
+    shown = card_choice_text("sum", plan, options=_READ_AS_TOTAL.options, decision=_READ_AS_TOTAL)
+    assert shown == words

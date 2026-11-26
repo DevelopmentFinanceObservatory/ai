@@ -13,12 +13,14 @@ from __future__ import annotations
 import asyncio
 import random
 import ssl
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
 
+import executor.run as executor_run
 import httpx2
 import pyarrow as pa
 import pytest
@@ -93,7 +95,13 @@ from planner.plan import (
     with_whole_sums,
 )
 from planner.records import Period
-from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
+from planner.workflow import (
+    BoundEntity,
+    OpenEntityAxis,
+    ResolvedEntity,
+    SelectedSource,
+    ToolId,
+)
 
 from ..unreachable_surface import unreachable_surface
 from .conftest import (
@@ -1106,7 +1114,7 @@ async def test_a_wholes_retrieval_is_held_to_the_parties_its_part_covers(
     real_schemas: list[ToolSchema],
 ) -> None:
     """The United States' ODA to Kenya as a share of its whole over every donor, whose
-    source binds Kenya and leaves the donors open, so the plan sums them
+    source binds Kenya and which Search summed over the donors, so the plan sums them
     (`Plan.whole_sums`). The whole states no entity, and its retrieval answering
     with Uganda's aid is refused, since the whole covers what its part covers,
     Kenya included."""
@@ -1196,6 +1204,107 @@ async def test_a_wholes_retrieval_is_held_to_the_parties_its_part_covers(
     assert isinstance(outcome, Refused), outcome
     assert (outcome.refusal, outcome.requirement_id) == (RefusalKind.REQUIREMENT_UNMET, "all_oda")
     assert "entity_no_series" in [issue.code.value for issue in outcome.issues]
+
+
+@pytest.mark.parametrize("paired", [True, False], ids=["viewed", "pairing-bypassed"])
+async def test_a_provider_wholes_retrieval_reads_its_donor_through_its_part(
+    decision: Callable[..., Decision],
+    source: Callable[..., SelectedSource],
+    manifest_for: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    monkeypatch: pytest.MonkeyPatch,
+    paired: bool,
+) -> None:
+    """US bilateral ODA as a share of its whole over every provider. The part's search
+    bound "United States" to `country/USA`, which its source labels "USA"; the
+    whole's source, Search's answer to a request with no words, labels it "United
+    States of America" and binds no row. The run checks the whole's retrieval on its
+    approved source viewed with its part's name facts, so the donor is met; with the
+    pairing bypassed it is not, and the run refuses `requirement_unmet`."""
+    usa = ResolvedEntity(role="origin", ref="country/USA", label="USA")
+    period = Period(start=2015, end=2024)
+    identity = {"stat_var": "ODA", "entities": {"origin": [usa.ref]}}
+    part = DatasetRequirement(
+        id="us_bilateral",
+        decision_ids=["measure"],
+        measure="bilateral ODA",
+        entities=[Entity(name="United States", role="donor")],
+        period=period,
+    )
+    whole = DatasetRequirement(
+        id="us_total",
+        decision_ids=["measure"],
+        measure="total ODA",
+        period=period,
+        whole_of=WholeOf(part="us_bilateral", axis="provider"),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="us_bilateral"),
+        denominator=RequirementSide(input_id="us_total"),
+    )
+    part_source = source(
+        entities=(usa,),
+        identity=identity,
+        bound_refs=(BoundEntity(identity="United States", text="United States", refs=(usa.ref,)),),
+    )
+    whole_source = source(
+        spec_id=SPEC_POPULATION,
+        entities=(usa.model_copy(update={"label": "United States of America"}),),
+        identity=identity,
+    )
+    draft = Plan(
+        question="What share of US ODA was bilateral?",
+        decisions=[decision()],
+        evidence_requirements=[part, whole, share],
+        status=PlanStatus.DRAFT,
+    )
+    translation = Translation(
+        operations=[
+            RetrieveOperation(id="part", requirement_id="us_bilateral", spec_id=SPEC_KENYA),
+            RetrieveOperation(id="whole", requirement_id="us_total", spec_id=SPEC_POPULATION),
+            ShareOfOperation(
+                id="share",
+                requirement_id="share",
+                numerator=Side(input="part"),
+                denominator=Side(input="whole"),
+            ),
+        ],
+        terminal=["share"],
+    )
+    compiled = compile_plan(
+        plan=draft,
+        translation=translation,
+        schemas={schema.name: schema for schema in real_schemas},
+        discovered={"us_bilateral": part_source, "us_total": whole_source},
+    )
+    assert compiled.workflow is not None, compiled.issues
+    stored = compiled.workflow.source_of("whole")
+    assert stored is not None and stored.bound_refs == ()
+    plan = draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
+    if not paired:
+        monkeypatch.setattr(
+            executor_run, "sources_named_by_parts", lambda requirements, sources: dict(sources)
+        )
+    surface = _BySpecSurface(
+        real_schemas,
+        {SPEC_KENYA: manifest_for(part_source), SPEC_POPULATION: manifest_for(whole_source)},
+    )
+    surface.queues["share_of"] = deque([ok(RESULT_FRAME)])
+
+    outcome = await _run(plan, surface=surface, sleep=_Sleeps())
+
+    if paired:
+        assert isinstance(outcome, Accepted), outcome
+    else:
+        assert isinstance(outcome, Refused), outcome
+        assert (outcome.refusal, outcome.requirement_id) == (
+            RefusalKind.REQUIREMENT_UNMET,
+            "us_total",
+        )
 
 
 async def test_one_entity_short_of_the_period_is_not_hidden_by_anothers_reach(

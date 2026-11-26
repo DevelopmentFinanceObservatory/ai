@@ -391,9 +391,49 @@ class LedgerStep(StrictModel):
     revision: int
 
 
+# The axes a share's whole can open, as Search's `whole` request names them: whose
+# spending it counts, or the donor or recipient side of the flow.
+WholeAxis = Literal["provider", "donor", "recipient"]
+
+
+class DerivedSide(StrictModel):
+    """One figure of a whole Search derived from its part (`DerivedWhole`): its
+    spec_id, the option it holds on the derived axis and on the provider axis
+    (`None` where it has no provider axis), and the dcids each flow side names, by
+    role key, a side left open absent. A side axis's option names a party, as
+    `donor:DACOfficialDonors`, so it reads as text."""
+
+    spec_id: str
+    option_id: str
+    provider: OptionId | None = None
+    populations: dict[str, tuple[str, ...]]
+
+
+class DerivedWhole(StrictModel):
+    """The whole Search derived from a part (`resolved.scope_choices.derived`): the
+    part's choices held and `axis` switched to the whole's option.
+
+    `kind` is `option` for a provider option counting every stream the part counts,
+    `published_total` for a side's published total, `sum_of_members` for a side left
+    open and summed over its `members`, the parties the open side holds. `years` are
+    the years both figures serve, where both state their periods. `alternatives` are
+    the other options whose whole derives, and `rebind` the recipient option a
+    provider whole takes beside its own, where its dataset declares one."""
+
+    axis: WholeAxis
+    kind: Literal["option", "published_total", "sum_of_members"]
+    part: DerivedSide
+    whole: DerivedSide
+    years: tuple[YearSpan, ...] | None = None
+    members: tuple[str, ...] | None = None
+    alternatives: tuple[str, ...] = ()
+    rebind: str | None = None
+
+
 class PartScope(StrictModel):
     """Every scope choice of one part, the entries that settled them and the
-    identity they compile to. `id` is the spec_id of `base`."""
+    identity they compile to. `id` is the spec_id of `base`. `derived` states the
+    part a whole was derived from, on a whole's answer alone."""
 
     id: str
     base: ScopeDefinition
@@ -403,6 +443,7 @@ class PartScope(StrictModel):
     choices: tuple[ScopeChoice, ...]
     compiled: CompiledScope
     ledger: tuple[LedgerStep, ...] = ()
+    derived: DerivedWhole | None = None
 
     @field_validator("entries", "ledger", mode="before")
     @classmethod

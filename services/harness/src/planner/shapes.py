@@ -301,6 +301,9 @@ class FrameShape:
     may not sum over (empty when it may sum over every one), or `None` where
     no source is known to say; a single-measure verb's refusal reads it to
     say whether summing the family would give it one measure.
+    `sum_unstated` is whether that family's source states nothing apis may
+    sum it over, no open axis and no declared sum of its components
+    (`compiler.shapes.sum_unstated`), so no reading gives it one measure.
 
     `mixed_levels` is whether the frame holds places at more than one level:
     a retrieval that names no place holds every place with data, the world,
@@ -353,6 +356,7 @@ class FrameShape:
     limited: bool
     roots: tuple[Identifier, ...]
     unsummable_axes: tuple[str, ...] | None = None
+    sum_unstated: bool = False
     retrieval: bool = False
     composed_unit: bool = False
     drift: PeriodDrift = FIXED
@@ -1113,6 +1117,7 @@ def retrieved(
     period: Period,
     measures: MeasureCount,
     unsummable_axes: tuple[str, ...] | None = None,
+    sum_unstated: bool = False,
     end_open: bool = False,
 ) -> FrameShape:
     """The shape a fresh `get_data` retrieval carries.
@@ -1124,7 +1129,8 @@ def retrieved(
     filtered the retrieval yet. The caller's own `role` and `breakdown`
     values are kept, and this function states which requirement a role
     belongs to and whether it is narrowed.
-    `measures` and `unsummable_axes` are the caller's (see `FrameShape`).
+    `measures`, `unsummable_axes` and `sum_unstated` are the caller's (see
+    `FrameShape`).
     Each role states whether a place-level filter may read it
     (`level_filterable`) and whether it holds places at every level
     (`mixed_levels`). The plan marks every open role filterable and none
@@ -1149,6 +1155,7 @@ def retrieved(
         limited=False,
         roots=(requirement_id,),
         unsummable_axes=unsummable_axes,
+        sum_unstated=sum_unstated,
         drift=PeriodDrift(end=EndDrift.DATA if end_open else EndDrift.FIXED),
     )
 
@@ -1229,6 +1236,7 @@ def aggregated(
         limited=shape.limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
+        sum_unstated=shape.sum_unstated,
         composed_unit=shape.composed_unit,
         drift=drift,
         span_of=_span_of(time, shape, step_id),
@@ -1282,6 +1290,7 @@ def grown(
         limited=shape.limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
+        sum_unstated=shape.sum_unstated,
         composed_unit=shape.composed_unit and change is GrowthChange.ABSOLUTE,
         drift=replace(windowed(shape, window, rolling)[1], decided_by_data=False),
         span_of=step_id,
@@ -1357,6 +1366,7 @@ def ranked(
         limited=limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
+        sum_unstated=shape.sum_unstated,
         composed_unit=shape.composed_unit,
         drift=drift,
         span_of=_span_of(TimeLabel.SPAN, shape, step_id) if window is None else step_id,
@@ -1668,6 +1678,7 @@ def filtered(
         limited=shape.limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
+        sum_unstated=shape.sum_unstated,
         composed_unit=shape.composed_unit,
         drift=drift,
         span_of=shape.span_of,
@@ -1883,7 +1894,10 @@ def _several_measures(verb: str, shape: FrameShape) -> str | None:
     whose source lists none of its StatVars or one of a capped list (`SEVERAL`). It advises reading the family summed where
     apis may sum it over every axis it varies along
     (`FrameShape.unsummable_axes`), names the axes it may not sum over
-    otherwise, and puts the advice as a condition where neither is known.
+    otherwise, and puts the advice as a condition where neither is known. A
+    family whose source states nothing to sum it over (`FrameShape.sum_unstated`)
+    is pointed at a measure whose source binds one StatVar, since a sum of it is
+    refused too.
     """
     if shape.measures is None or shape.measures == 1 or shape.summed_on_read:
         return None
@@ -1891,6 +1905,12 @@ def _several_measures(verb: str, shape: FrameShape) -> str | None:
         f"{verb} reads a single measure; got {shape.measures}, one per StatVar of a family "
         "read separately"
     )
+    if shape.sum_unstated:
+        return (
+            f"{reason}; its source states no axis its StatVars vary along and no sum of its "
+            "components, so they cannot be summed either; read a measure whose source binds "
+            "one StatVar"
+        )
     axes = shape.unsummable_axes
     if axes is None:
         return (
