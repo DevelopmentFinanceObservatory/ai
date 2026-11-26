@@ -278,6 +278,8 @@ _NOT_DRAFTED_CODES = frozenset(
         ProblemCode.ASK_ROLE_DROPPED,
         ProblemCode.RESULT_SCOPE_UNSTATED,
         ProblemCode.PERIOD_REDUCTION_UNSTATED,
+        ProblemCode.PERIOD_PARTIAL_UNNAMED,
+        ProblemCode.PERIOD_PROJECTED_UNASKED,
         ProblemCode.BASIS_UNKNOWN,
         ProblemCode.SCOPE_UNREAD,
         ProblemCode.MEASURE_FIXED_BY_PIN,

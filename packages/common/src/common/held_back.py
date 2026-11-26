@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 
 
 class ReportedShare(BaseModel):
-    """What fraction (`share`, 0 to 1) of year `against` a partial period holds,
-    compared on one `value` or on the `series` count."""
+    """What fraction (`share`) of year `against` a partial period holds,
+    compared on one `value` or on the `series` count: 0 or more, and above 1
+    when the partial period already exceeds `against`."""
 
     model_config = ConfigDict(extra="ignore")
     basis: Literal["value", "series"]
