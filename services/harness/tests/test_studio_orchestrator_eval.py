@@ -16,14 +16,13 @@ import importlib.util
 import json
 import sys
 from collections import Counter
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import pytest
-from common.live_apis import StatedScopeEntry, StatedScopeReading
 from google.genai import types
 from harness.planner_run import failed_tool_answer
 from harness.reply_figures import card_result
@@ -31,7 +30,6 @@ from harness.studio_state import ConversationState
 from harness.studio_translate import _RecordingExecutor, _Translator
 from orchestrator.run import ModelResponded, ToolsAnswered
 from planner.skills import GET_SKILL
-from planner.stated_scope import TextReading
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .scripted_tools import (
@@ -67,59 +65,22 @@ def _suite() -> dict[str, Any]:
     return json.loads(CASES_PATH.read_text())
 
 
-class _CannedStatedScope:
-    """Search's reader of stated scope answering each text as dfo-apis' route did
-    (`fixtures/stated_scope_readings.json`), recording each call's texts in `calls`. A
-    text with no recorded answer fails the test: the eval reads no live route."""
-
-    def __init__(self) -> None:
-        self.calls: list[list[str]] = []
-        recorded = json.loads((FIXTURES / "stated_scope_readings.json").read_text())
-        self._readings = recorded["readings"]
-
-    async def __call__(self, texts: Sequence[str]) -> list[TextReading]:
-        self.calls.append(list(texts))
-        missing = [text for text in texts if text not in self._readings]
-        assert not missing, f"no recorded stated-scope reading for {missing}"
-        return [TextReading.of(_reading(self._readings[text])) for text in texts]
-
-    async def aclose(self) -> None:
-        return None
-
-
-def _reading(answer: dict[str, Any]) -> StatedScopeReading:
-    """The client's reading of one recorded route answer."""
-    return StatedScopeReading(
-        entries=tuple(
-            StatedScopeEntry(
-                axis=entry["axis"], option_id=entry["option_id"], words=entry["origin"]["text"]
-            )
-            for entry in answer["entries"]
-        ),
-        total=answer["total"],
-        sums_providers=answer["sums_providers"],
-        mentions=tuple(answer["mentions"]),
-    )
-
-
 @pytest.fixture(autouse=True)
-def stated_scope(monkeypatch: pytest.MonkeyPatch) -> _CannedStatedScope:
-    """The reader every studio the eval builds reads the stated scope through, in place
-    of the live route production's planner reads (`build_stated_scope_reader`).
+def stated_scope(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The one canned reader every studio the eval builds reads the stated scope
+    through, shared so a test reads its `calls`.
 
     Patched on the module `run.py` imports, the one `sys.modules` holds: `_load`
     executes a fresh copy on every call and registers only the first."""
-    canned = _CannedStatedScope()
-    _load("orchestrator_scripted")
+    module = _load("orchestrator_scripted")
+    canned = module.CannedStatedScope()
     monkeypatch.setattr(
         sys.modules["orchestrator_scripted"], "build_stated_scope_reader", lambda settings: canned
     )
     return canned
 
 
-async def test_scripted_cases_report_as_marked(
-    pg_engine: AsyncEngine, stated_scope: _CannedStatedScope
-) -> None:
+async def test_scripted_cases_report_as_marked(pg_engine: AsyncEngine, stated_scope: Any) -> None:
     _load("orchestrator_scripted")
     run = _load("run")
 
