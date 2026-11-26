@@ -40,7 +40,7 @@ from harness.graph import approve as approve_module
 from harness.graph import planning as planning_module
 from harness.graph import switch as switch_module
 from harness.graph.answer import stored_run_plan
-from harness.graph.state import readable_plan
+from harness.graph.state import ORCHESTRATOR_BRIEF_KEY, readable_plan
 from harness.graph.switch import SwitchFailedError
 from harness.plan_display import choice_id
 from harness.planner_adapter import PlannerAdapter
@@ -103,6 +103,8 @@ from ..basis_alignment import (
 )
 from ..planner_host import node_ctx
 from ..planner_tools import call_planner_tool
+from ..scripted_genai import ScriptedGenai, call_part, reply, text_part
+from ..scripted_planner import SIGNED, scripted_planner
 
 _FIXTURES = Path(__file__).parents[1] / "fixtures"
 _RECORDED: dict[str, Any] = json.loads(
@@ -2596,6 +2598,68 @@ async def test_a_plan_over_a_whole_pin_the_previous_release_compiled_is_planned_
     await planning_module._draft(ctx, edge.output, planner=cast(Any, planner), answer=None)
 
     assert (drafted["prior_plan"], drafted["amendment"]) == (None, amendment)
+
+
+def _sector_plan_awaiting_approval(state: dict[str, Any]) -> None:
+    """The summed plan of `_OLD_PLANS` stored in `state`, a turn's graph state,
+    awaiting approval with its whole taken over every sector, as the release
+    before Search's `whole` request held a sector share, a shape this release's
+    `Plan` rejects."""
+    stored = json.loads(_OLD_PLANS["summed"])
+    stored.update(status=PlanStatus.PENDING_APPROVAL.value, approved_at=None)
+    (whole,) = [r for r in stored["evidence_requirements"] if r.get("whole_of")]
+    whole["whole_of"]["axis"] = "sector"
+    state["plan"] = json.dumps(stored)
+
+
+@pytest.mark.parametrize("stored", ["sector-whole", "donor-whole"])
+async def test_an_amended_plan_the_previous_release_left_pending_is_drafted_again_with_the_amendment(
+    stored: str, decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """A plan the release before Search's `whole` request left awaiting approval,
+    with the planner's own record of it, amended after the deploy. The plan is a
+    sector share, whose stored shape this release rejects, or a donor share over a
+    whole that release compiled. The real `PlannerAdapter` drafts the question
+    again from the start. Its model is shown the user's amendment, and the fresh draft its
+    `propose_plan` makes, stating no `amends_version`, is recorded in place of the
+    old plan."""
+    ctx = node_ctx()
+    if stored == "sector-whole":
+        _sector_plan_awaiting_approval(ctx.state)
+    else:
+        _old_plan_awaiting_approval(ctx.state, derived=False)
+    ctx.state[PLAN_STATE_KEY] = ctx.state["plan"]
+    ctx.state[ORCHESTRATOR_BRIEF_KEY] = "kenya debt"
+    amendment = "only 2020"
+    proposal = {
+        "question": "kenya debt",
+        "answer_mode": "computed",
+        "decisions": [decision().model_dump(mode="json")],
+        "evidence_requirements": [
+            requirement().model_dump(mode="json"),
+            derived_requirement().model_dump(mode="json"),
+        ],
+    }
+    scripted = ScriptedGenai(
+        [
+            reply(call_part("propose_plan", proposal, id="call-1", signature=SIGNED)),
+            reply(text_part("done")),
+        ]
+    )
+
+    edge = approve_module.decide(ctx, {"approved": None, "amendment": amendment}, early_mints=None)
+    await planning_module._draft(ctx, edge.output, planner=scripted_planner(scripted), answer=None)
+
+    brief = "\n".join(
+        part.text or ""
+        for content in scripted.requests[0].content_list
+        if content.role == "user"
+        for part in content.parts or ()
+    )
+    assert amendment in brief
+    drafted = load_plan(ctx.state)
+    assert drafted is not None
+    assert (drafted.question, drafted.version, drafted.previous_version) == ("kenya debt", 1, None)
 
 
 class _WholeUnanswered:

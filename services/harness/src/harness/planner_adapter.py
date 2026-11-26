@@ -439,6 +439,7 @@ class PlannerAdapter:
         conversation_digest: dict[str, Any] | None = None,
         pick: DecisionPick | None = None,
         answer: dict[str, Any] | None = None,
+        restart: bool = False,
     ) -> dict[str, Any]:
         # `readings` is the search readings of the conversation's earlier
         # turns and then this turn's, as `harness.orchestrator_tools` stores
@@ -501,7 +502,14 @@ class PlannerAdapter:
             for operation in _earned_by_refusal(refusal):
                 record_unsupported(state, operation)
             clear_compile_failures(ctx.state)
-            if prior_plan is None and refusal is None and amendment is None:
+            if restart or (prior_plan is None and refusal is None and amendment is None):
+                # `restart` names an entry that drafts the question again
+                # because the graph's plan could not be read or rests on a
+                # stale whole (`harness.graph.planning`). Its amendment
+                # stands, and the record this adapter kept of the discarded
+                # plan goes, else `propose_plan` would read the fresh draft
+                # as an amendment of a plan the user never sees again.
+                #
                 # This shape -- no `prior_plan`, no `refusal`, no
                 # `amendment` -- names a genuine first-draft entry: the
                 # graph's planner node passes exactly this after
