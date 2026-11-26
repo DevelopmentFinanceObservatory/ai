@@ -2,7 +2,8 @@
 
 `step_rows`, `requirement_rows`, `operation_rows` and `ask_rows` are pure
 functions from `planner.plan.Plan` to plain dicts, `shown_decisions` the
-decisions the card and the plan record list, `with_source_names` a
+decisions the card and the plan record list, `decision_steps` the card
+steps each of them applies to, `with_source_names` a
 decision's text with each spec_id in it named in words, `shown_plan` the plan
 as the model wrote it with the compiled parts folded to match, and
 `answer_scopes` how many figures each answering requirement's result gives,
@@ -1904,6 +1905,46 @@ def with_source_names(text: str, plan: Plan) -> str:
     sources = plan.workflow.sources if plan.workflow is not None else ()
     names = {source.spec_id: source.provenance_label or source.sentence for source in sources}
     return _SPEC_ID.sub(lambda match: names.get(match.group(), "another source"), text)
+
+
+def decision_steps(plan: Plan) -> dict[str, list[str]]:
+    """The plan card's steps each listed decision applies to, by the decision's slot.
+
+    A decision applies to the steps carrying out a requirement that cites it,
+    a cited slot standing for the listed decision stating it as in
+    `requirement_rows`, and to every step reading their results, directly or
+    through other steps. Steps are the card's (`card_rows`), in its order: a
+    rolling copy is left out, and a step reading through one is kept. A
+    decision no requirement cites applies to the whole plan and names every
+    step. Requires a compiled plan, as `card_rows` does.
+    """
+    assert plan.translation is not None, "decision_steps needs a plan carrying a translation"
+    assert plan.workflow is not None, "decision_steps needs a plan carrying a workflow"
+    listed = _listed_slots(plan)
+    requirement_of = {
+        operation.id: operation.requirement_id for operation in plan.translation.operations
+    }
+    citing: dict[str, set[str]] = defaultdict(set)
+    for requirement in plan.evidence_requirements:
+        for slot in requirement.decision_ids:
+            if slot in listed:
+                citing[listed[slot]].add(requirement.id)
+    shown = shown_plan(plan).workflow
+    card = [step.id for step in shown.steps] if shown is not None else []
+    steps: dict[str, list[str]] = {}
+    for slot in dict.fromkeys(listed.values()):
+        if not citing[slot]:
+            steps[slot] = card
+            continue
+        reached: set[str] = set()
+        # The workflow lists a step after every step it reads, so one pass
+        # reaches every reader.
+        for step in plan.workflow.steps:
+            reads = any(b.from_step in reached for b in step.bindings.values())
+            if reads or requirement_of.get(step.operation_id) in citing[slot]:
+                reached.add(step.id)
+        steps[slot] = [step_id for step_id in card if step_id in reached]
+    return steps
 
 
 def requirement_rows(plan: Plan) -> list[dict[str, object]]:

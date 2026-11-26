@@ -90,6 +90,7 @@ from harness.graph.state import (
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
     card_unit_offers,
+    frame_id_for,
 )
 from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
@@ -159,6 +160,7 @@ from harness.wire import (
     PlanAsk,
     PlanDecision,
     PlanDecisionOption,
+    PlanLink,
     PlanMoved,
     PlanOperation,
     PlanProposed,
@@ -1446,6 +1448,7 @@ def plan_approved(
             changed_from=held
             if (held := baseline.get(decision.choice_id)) != labels[decision.choice_id]
             else None,
+            step_ids=decision.step_ids,
         )
         for decision in card.decisions or ()
         if decision.choice_id is not None
@@ -1459,7 +1462,7 @@ def plan_approved(
         title=card.title,
         summary=card.summary,
         steps=[
-            PlanApprovedStep(label=step.label, gives_answer=step.gives_answer)
+            PlanApprovedStep(id=step.id, label=step.label, gives_answer=step.gives_answer)
             for step in card.steps
         ],
         choices=choices,
@@ -1969,6 +1972,7 @@ class _Translator:
                 )
             frames.extend(self._close_status())
         elif node == "execute":
+            self._remember_plan_frames(output)
             # The run's records came with this event, so a line still
             # running belongs to a step that recorded nothing.
             frames.extend(self._close_unrecorded_steps(output))
@@ -1984,6 +1988,35 @@ class _Translator:
             self._answer_step = self._answer_detail = None
             self._wire_step_ids.clear()
         return frames
+
+    def _remember_plan_frames(self, output: Mapping[str, Any]) -> None:
+        """Keep the plan and plan step of each final frame the `execute`
+        node's `output` hands back (`frame_refs`, with `frame_ref_steps`
+        beside them), in the turn's map of plan frames
+        (`ConversationState.turn_plan_frames`), so a card drawn on one names
+        them. The plan is the wire id of the run's `plan_version`; a run
+        whose version the turn gave no card keeps nothing."""
+        plan_version_id = self._conversation.plan_version_ids.get(output.get("plan_version"))
+        if plan_version_id is None:
+            return
+        steps = output.get("frame_ref_steps") or ()
+        for ref, step in zip(output.get("frame_refs") or (), steps, strict=True):
+            if step.get("is_final_step") and step.get("step_id"):
+                self._conversation.turn_plan_frames[frame_id_for(ref)] = PlanLink(
+                    plan_version_id=plan_version_id, plan_step_id=str(step["step_id"])
+                )
+
+    def _plan_of(self, record: _ExecutorRecord) -> PlanLink | None:
+        """The plan step whose frame the card `record` wrote draws: the one
+        the turn's map of plan frames holds for the write's `intent.frame_ref`,
+        or `None` for a card on any other frame."""
+        if record.tool != "write_component":
+            return None
+        intent = record.args.get("intent")
+        ref = intent.get("frame_ref") if isinstance(intent, dict) else None
+        if not isinstance(ref, dict):
+            return None
+        return self._conversation.turn_plan_frames.get(frame_id_for(ref))
 
     def _planner_call_status(self, name: str) -> list[ActivityStep]:
         """The status line for one of the planner's own calls. A
@@ -2139,6 +2172,7 @@ class _Translator:
             status=StepStatus.RUNNING,
             tool=tool or None,
             detail=_plan_step_detail(progress),
+            plan_step_id=step,
         )
 
     def _close_unrecorded_steps(self, output: Mapping[str, Any]) -> list[ActivityStep]:
@@ -2160,8 +2194,9 @@ class _Translator:
                 tool=tool or None,
                 detail=failure_detail({"code": code, "retry_mode": RetryMode.DO_NOT_RETRY.value}),
                 duration_ms=int((now - started) * 1000),
+                plan_step_id=plan_step,
             )
-            for step_id, label, tool, started in self._running_plan_steps.values()
+            for plan_step, (step_id, label, tool, started) in self._running_plan_steps.items()
         ]
         self._running_plan_steps.clear()
         return frames
@@ -2228,8 +2263,9 @@ class _Translator:
                 # `McpExecutor` refuses a card that fails this contract
                 # (`stored_card_unreadable`). A bare executor's card is logged
                 # and left off the wire here.
+                plan = self._plan_of(record)
                 try:
-                    created = component_created(component, step_id=step_id)
+                    created = component_created(component, step_id=step_id, plan=plan)
                 except ValidationError as fault:
                     log_unreadable_card(
                         logger, component, fault, where="record_frames", frame=step_id
@@ -2262,6 +2298,7 @@ class _Translator:
                         if isinstance(component, dict) and created is not None
                         else None
                     ),
+                    plan_step_id=record.step_id,
                 )
             )
             if isinstance(component, dict) and created is not None:
@@ -2282,6 +2319,7 @@ class _Translator:
                         write_token=record.write_token,
                         card_lineage=record.card_lineage,
                         unit_card=card,
+                        plan=plan,
                     )
                 )
         return frames
@@ -2317,6 +2355,7 @@ class _Translator:
         write_token: str | None = None,
         card_lineage: CardLineage | None = None,
         unit_card: UnitCard | None = None,
+        plan: PlanLink | None = None,
     ) -> list[Any]:
         """Frames for `component`, which passed the `component.created` wire
         contract (`created` is the frame `_record_frames` built from it).
@@ -2333,7 +2372,7 @@ class _Translator:
         itself, also only `component.created`, and writes the card's entry
         with no block. The card's `write_token` is kept with it, in its
         write, and its `card_lineage` commits in that write, as does its
-        `unit_card` with its entry. A card that does not land keeps its token
+        `unit_card` and `plan` with its entry. A card that does not land keeps its token
         in the conversation for the closing write, and stores no lineage."""
         created.seq = self._conversation.next_seq()
         if not land:
@@ -2346,6 +2385,7 @@ class _Translator:
             write_token=write_token,
             card_lineage=card_lineage,
             unit_card=unit_card,
+            plan=plan,
         )
         if landed != "created":
             return [created]
@@ -2360,6 +2400,7 @@ class _Translator:
         write_token: str | None,
         card_lineage: CardLineage | None = None,
         unit_card: UnitCard | None = None,
+        plan: PlanLink | None = None,
     ) -> Literal["created", "held"]:
         """`harness.studio_state.land_component` on the current
         conversation, inside the store's card write
@@ -2383,6 +2424,7 @@ class _Translator:
                 intent=intent,
                 unit_card=unit_card.as_json() if unit_card is not None else None,
                 lineage=card_lineage,
+                plan=plan,
             )
 
         return await self._recorder.store.change_canvas(
@@ -2594,6 +2636,7 @@ class _Translator:
                 )
                 for row in plan_display.ask_rows(plan)
             ]
+            decision_steps = plan_display.decision_steps(plan)
             decisions = [
                 PlanDecision.model_validate(
                     {
@@ -2617,6 +2660,7 @@ class _Translator:
                         "resolved_by": _RESOLVED_BY_TO_WIRE.get(
                             decision.get("resolved_by", ""), "default"
                         ),
+                        "step_ids": decision_steps.get(decision["slot"]),
                         # A unit row words its choice and alternatives as its options.
                         **_choice_members(
                             held,

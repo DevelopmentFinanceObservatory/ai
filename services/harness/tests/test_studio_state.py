@@ -100,6 +100,7 @@ from harness.wire import (
     MessageComplete,
     MutationOp,
     OptionAnswer,
+    PlanLink,
     PlanProposed,
     UnitOffer,
 )
@@ -476,10 +477,12 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     )
     state = ConversationState(conversation_id=CONVERSATION)
     intent = {"type": "bar_chart", "title": "t", "select": {"observationAbout": codes}}
-    land_component(state, card, intent=intent)
+    plan = PlanLink(plan_version_id="plan_secret", plan_step_id="step_secret")
+    land_component(state, card, intent=intent, plan=plan)
     card_id = card["component_id"]
 
     ids = [drawn_cards.series_id(code) for code in codes]
+    assert state.components[card_id]["plan_link"] == plan
     assert state.canvas_series_ids() == ids
     assert state.canvas_cards() == [
         {"component_id": card_id, "intent": intent, "revision": card["revision"]}
@@ -496,6 +499,7 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     )
     assert "series_ids" not in model_facing
     assert "drawn_card" not in model_facing
+    assert "plan_secret" not in model_facing
     assert ids[11] in model_facing
     assert ids[12] not in model_facing
 
@@ -1523,10 +1527,12 @@ def test_begin_turn_clears_the_previous_turns_plans_and_readings():
     state.turn_plans = [_PLAN_JSON]
     state.turn_readings = [_READING_JSON]
     state.turn_specs = {"spec_a": {}}
+    state.turn_plan_frames = {"f1": PlanLink(plan_version_id="plan_a", plan_step_id="s1")}
 
     state.begin_turn()
 
     assert (state.turn_plans, state.turn_readings, state.turn_specs) == ([], [], {})
+    assert state.turn_plan_frames == {}
 
 
 def test_begin_turn_and_a_new_plan_lineage_reset_the_lineage_fields_together():
@@ -4461,16 +4467,19 @@ def test_a_pending_plan_saved_before_step_labels_were_kept_loads_with_none() -> 
     assert (pending.questions, pending.legacy) == ((), False)
 
 
-def test_a_turns_choice_baseline_reloads_on_another_instance() -> None:
+def test_a_turns_choice_baseline_and_plan_frames_reload_on_another_instance() -> None:
     """The labels `plan.approved` names as `changed_from` are durable, so an
-    approve answered on another instance states them."""
+    approve answered on another instance states them, and so is the turn's
+    map of plan frames, so a card drawn on another instance names its plan."""
     state = ConversationState(conversation_id=CONVERSATION)
     state.turn_choice_baseline = {"aid:sector": "health (CRS 120)"}
+    state.turn_plan_frames = {"f1a2b3c": PlanLink(plan_version_id="plan_a", plan_step_id="s2")}
     reloaded = ConversationState(conversation_id=CONVERSATION)
 
     studio_store._apply_delta(reloaded, studio_store._serialize_durable(state))
 
     assert reloaded.turn_choice_baseline == state.turn_choice_baseline
+    assert reloaded.turn_plan_frames == state.turn_plan_frames
 
 
 def test_a_pending_ask_saved_before_questions_were_kept_loads_as_one_legacy_question() -> None:

@@ -45,7 +45,11 @@
         "Both"
       ],
       "reason": "The question asks what actually fell, which is cash out the door.",
-      "resolved_by": "default"
+      "resolved_by": "default",
+      "step_ids": [
+        "s2",
+        "s3"
+      ]
     },
     {
       "id": "d2",
@@ -55,7 +59,11 @@
         "Current USD"
       ],
       "reason": "A multi-year comparison across 2016\u20132024 needs inflation held still.",
-      "resolved_by": "default"
+      "resolved_by": "default",
+      "step_ids": [
+        "s2",
+        "s3"
+      ]
     }
   ],
   "actions": [

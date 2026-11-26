@@ -1164,11 +1164,20 @@ async def test_plan_proposed_pauses_and_approve_resumes_on_a_new_stream() -> Non
     assert [step["label"] for step in approved["steps"]] == [
         step["label"] for step in plan["steps"]
     ]
+    # Each plan step's Activity line names it by the id the cards give it.
+    step_ids = [step["id"] for step in plan["steps"]]
+    assert [step["id"] for step in approved["steps"]] == step_ids
+    ran = [f for f in second if f["event"] == "activity.step" and "plan_step_id" in f]
+    assert {f["plan_step_id"] for f in ran} == set(step_ids)
     # The plan's own two steps ran through `tool_surface`, invisibly to this
     # `executor`: it saw the hand-back describe the plan's frame, then the chart.
     assert [c["tool"] for c in executor.calls] == ["describe_frame", "write_component"]
     created = _frame(second, "component.created")
     assert created["component_id"] == "cmp_01test0001"
+    # The chart draws the frame of the plan's answering step.
+    answering = next(step["id"] for step in plan["steps"] if step.get("gives_answer"))
+    assert created["created_from"]["plan_version_id"] == plan["plan_version_id"]
+    assert created["created_from"]["plan_step_id"] == answering
     updated = _frame(second, "composition.updated")
     assert updated["manifest"]["counts"] == {
         "all": 1,

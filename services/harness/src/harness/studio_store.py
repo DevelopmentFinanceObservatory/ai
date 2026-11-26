@@ -200,6 +200,7 @@ _KEY_TURN_READINGS = "turn_readings"
 _KEY_TURN_APPLIED_CHOICE = "turn_applied_choice"
 _KEY_TURN_CHOICE_BASELINE = "turn_choice_baseline"
 _KEY_TURN_APPROVED = "turn_approved"
+_KEY_TURN_PLAN_FRAMES = "turn_plan_frames"
 _KEY_TURN_USAGE = "turn_usage"
 _SCALAR_KEYS = frozenset(
     {
@@ -223,6 +224,7 @@ _SCALAR_KEYS = frozenset(
         _KEY_TURN_APPLIED_CHOICE,
         _KEY_TURN_CHOICE_BASELINE,
         _KEY_TURN_APPROVED,
+        _KEY_TURN_PLAN_FRAMES,
         _KEY_TURN_USAGE,
     }
 )
@@ -666,6 +668,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
         _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
         _KEY_TURN_APPROVED: state.turn_approved,
+        _KEY_TURN_PLAN_FRAMES: state.turn_plan_frames,
         _KEY_TURN_USAGE: dataclasses.asdict(state.turn_usage),
     }
     for index, turn in enumerate(state.turns):
@@ -743,6 +746,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_choice_baseline = dict(value or {})
         elif key == _KEY_TURN_APPROVED:
             state.turn_approved = list(value or ())
+        elif key == _KEY_TURN_PLAN_FRAMES:
+            state.turn_plan_frames = dict(value or {})
         elif key == _KEY_TURN_USAGE:
             pass  # after the loop, once `trace_id` holds its value from this delta
         elif key.startswith(_TURN_ITEM_PREFIX):

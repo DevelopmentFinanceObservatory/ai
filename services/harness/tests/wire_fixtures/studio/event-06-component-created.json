@@ -95,6 +95,8 @@
   },
   "created_from": {
     "step_id": "s2",
-    "message_seq": 0
+    "message_seq": 0,
+    "plan_version_id": "plan_01j9ze2k7c",
+    "plan_step_id": "s3"
   }
 }

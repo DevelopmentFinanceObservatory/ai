@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -22,9 +23,10 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.card_unit import UNIT_GONE_NOTE
 from harness.graph.state import frame_id_for
 from harness.provenance import CARD_LINEAGE_KEY, CardLineage, ProvenanceInput
-from harness.studio_state import DatabaseUnavailable
+from harness.studio_state import PLAN_LINK_KEY, DatabaseUnavailable
 from harness.studio_store import StudioStore
-from harness.wire import CompositionManifest
+from harness.wire import CompositionManifest, PlanLink
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .resolved_revision import resolved_revision
@@ -202,6 +204,16 @@ async def test_a_unit_change_redraws_the_card_in_its_slot_and_records_the_new_sp
         await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
         new_spec: str | None = None
         first_calls = len(executor.calls)
+        # As a card drawn on a plan step's frame stores it.
+        plan = PlanLink(plan_version_id="plan_a", plan_step_id="sum")
+        async with pg_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE conversation_components SET entry = entry || CAST(:link AS jsonb) "
+                    "WHERE component_id = 'cmp_01unit0001'"
+                ),
+                {"link": json.dumps({PLAN_LINK_KEY: plan})},
+            )
 
         async def answer(*, tool: str, args: dict[str, Any], **_: Any) -> dict[str, Any]:
             nonlocal new_spec
@@ -246,13 +258,15 @@ async def test_a_unit_change_redraws_the_card_in_its_slot_and_records_the_new_sp
     assert created["unit_change"]["offer"]["start"] == _CONSTANT_2023
     produced = [f for f in frames if f["event"] == "activity.step" and f.get("produced")]
     assert [f["step_id"] for f in produced] == ["u3"]
-    assert created["created_from"]["step_id"] == "u3"
+    # The redrawn card names the plan step the card it replaced came from.
+    assert created["created_from"] == {"step_id": "u3", **plan}
     manifest = _frame(frames, "done")["composition"]
     assert [block["component_id"] for block in manifest["blocks"]] == ["cmp_01unit0002"]
     assert [f["event"] for f in frames[-2:]] == ["suggestions", "done"]
     assert "message.complete" not in [f["event"] for f in frames]
 
     conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    assert conversation.components["cmp_01unit0002"][PLAN_LINK_KEY] == plan
     record = conversation.turns[-1]
     assert record["user"] == (f"Changed {_TITLE} to constant 2023 US dollars ({new_spec}).")
     assert record["assistant"] == "The card now shows constant 2023 US dollars."

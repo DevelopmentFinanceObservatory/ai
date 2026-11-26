@@ -12,7 +12,7 @@ explains the protocol around them, and `services/harness/tests/test_wire.py`
 pins the two together against the fixtures in
 `services/harness/tests/wire_fixtures/studio/`.
 
-v1 records its design decisions as numbered deltas (1–32; 16 is folded
+v1 records its design decisions as numbered deltas (1–34; 16 is folded
 into 11). The deltas are marked where they apply and listed in the delta
 index at the end.
 
@@ -856,6 +856,17 @@ A release from before this delta refuses `prompt_source` with a 422, as it refus
 {"kind": "turn.request", "schema_version": 1, "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E", "message": "How much aid did Kenya receive in 2023?", "prompt_source": "example"}
 ```
 
+## Plan steps on cards, activity lines and choices (delta 34, v1.19)
+
+Each frame that concerns a plan step names it by the step's own id, `PlanStep.id`, so a page lists a plan's cards under it and joins its steps, Activity lines and choices without matching labels.
+
+- `component.created.created_from` gains `plan_version_id` and `plan_step_id` on a card drawn from a plan step's result: the plan's `plan_version_id`, as `plan.proposed` and `plan.approved` carry it, and the step's `id`. The harness keeps, for the turn, the plan and step of each final frame a plan run hands back, and names them on a card the agent draws on that frame. A card drawn on any other frame, such as one the agent fetched itself, names neither. A card that takes another card's slot (`replaces`: a unit change, an Edit Card rebuild) names the plan of the card it replaced. A card drawn on the frame of a run an earlier turn left unfinished, which a later turn carries on, names no plan. `step_id` is the `activity.step` line that wrote the card.
+- `activity.step` gains `plan_step_id` on a line that runs a plan step. A line of the agent's own work, such as a status line or a chart it draws, has none.
+- `plan.approved.steps[]` gains `id`, the step's `PlanStep.id` on the approved card, so an approved step and its Activity lines share one id.
+- `plan.proposed.decisions[]` and `plan.approved.choices[]` gain `step_ids`, the ids of the plan steps the decision applies to: the steps carrying out a requirement that cites it and every step reading their results. A decision no requirement cites applies to the whole plan and names every step.
+
+A replan or a second plan in the turn can reuse step ids, so a page keys a plan step by the plan's `plan_version_id` and the step id together. A `plan.approved` a client stored earlier, such as one in a chat snapshot, has no `id` on its steps and no `step_ids` on its choices, and the client reads it without them. Each member is left out when it has no value. `schema_version` stays 1.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -980,3 +991,4 @@ Fixture values that are samples:
 1. `plan.proposed.decisions[]` gains `unit` on the row stating a unit question's whole unit, whose `options` are whole units; `interrupt.response` gains `unit` on a `switch` (see "A unit row on the plan card").
 1. `turn.cancel` gains an optional `turn_index`; a Stop naming another turn than the latest is answered 200 `{"code": "turn_moved", "turn_index"}` and leaves the conversation as it was. A state read's stored card gains `unit_change` and `replaces` (see "A Stop that names its turn, and a stored card's unit and slot").
 1. `turn.request` gains an optional `prompt_source` (`"example"`, `"availability"` or `"search_example"`), which the turn's `studio.turn` line and Langfuse trace metadata carry; any other value is dropped (see "Where a typed question came from").
+1. `component.created.created_from` gains `plan_version_id` and `plan_step_id`, `activity.step` gains `plan_step_id`, `plan.approved.steps[]` gains `id`, and `plan.proposed.decisions[]` and `plan.approved.choices[]` gain `step_ids`, all optional (see "Plan steps on cards, activity lines and choices").

@@ -57,6 +57,7 @@ from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.provenance import CARD_FRAME_KEY, CardLineage
 from harness.scope_choices import mark_planner_axes
 from harness.studio_state import (
+    PLAN_LINK_KEY,
     REPLACED_CARD_KEY,
     ConversationState,
     _block_index,
@@ -645,7 +646,9 @@ def _swapped(
     `component.created` naming that step, and the write that swaps it in,
     with its digest entry, turn line and write token. The entry of a card
     that took the slot names the old card (`REPLACED_CARD_KEY`), as its
-    `component.created` does in `replaces`. A card whose unit can
+    `component.created` does in `replaces`. The new card names the plan step
+    the old card's entry names (`PLAN_LINK_KEY`), in its `created_from` and
+    its entry, since it draws that step's result in a new form. A card whose unit can
     change carries its `unit_change` and keeps its `UnitCard` with its entry
     (`harness.card_unit`), its Search block read from `specs` and else from
     the conversation. `also` makes the write's other changes, and `specs`
@@ -657,7 +660,8 @@ def _swapped(
     canvas, and the edit ends on `gone`. A `closed` that is shown carries the
     held line (`_held_line`), `reframed` saying whether the new card draws
     another window or frame than the old."""
-    created = component_created(component, step_id=step_id)
+    plan = (conversation.components.get(old_component_id) or {}).get(PLAN_LINK_KEY)
+    created = component_created(component, step_id=step_id, plan=plan)
     token = recorder.write_token(component)
     lineage = recorder.card_lineage(component)
     card = unit_card(component, lineage)
@@ -686,6 +690,8 @@ def _swapped(
         entry = _digest_entry(component)
         if kept is not None:
             entry[CARD_UNIT_KEY] = kept
+        if plan is not None:
+            entry[PLAN_LINK_KEY] = plan
         work.components[created.component_id] = entry
         work.turn_components.append(
             _turn_component_entry(

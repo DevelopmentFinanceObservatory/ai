@@ -42,6 +42,7 @@ from harness.plan_display import (
     count_options,
     decision_choice_id,
     decision_option_id,
+    decision_steps,
     listed_together,
     operation_rows,
     pinned_choice_id,
@@ -973,6 +974,34 @@ def test_the_yearly_and_cumulative_shares_of_one_pair_read_as_six_different_sent
     assert "each year's total of" in sentences["share_yearly"]
     assert "one total" not in sentences["share_yearly"]
     assert "as one figure overall" in sentences["share_total"]
+
+
+def test_a_decision_names_the_steps_of_the_requirements_citing_it_and_their_readers(
+    decision: DecisionFactory,
+) -> None:
+    """`measure` is cited by the retrieval, which the total reads; `window` by
+    the total alone; `chart` by no requirement, so it applies to the whole plan."""
+    plan = _retrieve_then_aggregate_plan(decision)
+    dataset, totals = plan.evidence_requirements
+    plan = plan.model_copy(
+        update={
+            "decisions": [
+                decision(),
+                decision(slot="window", description="Which years to total."),
+                decision(slot="chart", description="How to draw it."),
+            ],
+            "evidence_requirements": [
+                dataset,
+                totals.model_copy(update={"decision_ids": ["window"]}),
+            ],
+        }
+    )
+
+    assert decision_steps(plan) == {
+        "measure": ["annual_debt_service", "annual_totals"],
+        "window": ["annual_totals"],
+        "chart": ["annual_debt_service", "annual_totals"],
+    }
 
 
 def test_a_steps_args_are_the_workflow_steps_args_dict_unchanged(
