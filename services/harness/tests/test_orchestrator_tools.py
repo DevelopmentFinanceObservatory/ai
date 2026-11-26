@@ -659,18 +659,48 @@ _YEARS_OUT = {"code": "year_unavailable", "text": "You asked for 1960 to 1970."}
 
 @pytest.mark.parametrize("variant", ["default", "hydrogen"])
 @pytest.mark.parametrize(
-    ("status", "reason", "departures", "step"),
+    ("status", "reason", "departures", "step", "retried"),
     [
-        ("no_data", "entity_not_resolved", [], orchestrator_tools.NEXT_STEP_UNRESOLVED_ENTITY),
-        ("no_data", "qualifier_not_bound", [], orchestrator_tools.NEXT_STEP_UNBOUND_QUALIFIER),
+        (
+            "no_data",
+            "entity_not_resolved",
+            [],
+            orchestrator_tools.NEXT_STEP_UNRESOLVED_ENTITY,
+            False,
+        ),
+        (
+            "no_data",
+            "qualifier_not_bound",
+            [],
+            orchestrator_tools.NEXT_STEP_UNBOUND_QUALIFIER,
+            False,
+        ),
+        # A window outside the data's years adds its step to the reason's own.
+        (
+            "no_data",
+            "entity_not_resolved",
+            [_YEARS_OUT],
+            f"{orchestrator_tools.NEXT_STEP_UNRESOLVED_ENTITY} "
+            f"{orchestrator_tools.NEXT_STEP_YEAR_UNAVAILABLE}",
+            False,
+        ),
+        # A reason the user's words may repair keeps its `text` search beside it.
         (
             "unsupported",
             "no_observations",
             [_YEARS_OUT],
             orchestrator_tools.NEXT_STEP_YEAR_UNAVAILABLE,
+            True,
         ),
-        ("no_data", None, [], None),
-        ("definite", "qualifier_not_bound", [_YEARS_OUT], None),
+        (
+            "no_data",
+            "role_not_resolved",
+            [_YEARS_OUT],
+            orchestrator_tools.NEXT_STEP_YEAR_UNAVAILABLE,
+            True,
+        ),
+        ("no_data", None, [], None, True),
+        ("definite", "qualifier_not_bound", [_YEARS_OUT], None, False),
     ],
 )
 async def test_a_part_the_users_words_cannot_repair_names_its_next_search(
@@ -679,11 +709,13 @@ async def test_a_part_the_users_words_cannot_repair_names_its_next_search(
     reason: str | None,
     departures: list[dict[str, str]],
     step: str | None,
+    retried: bool,
 ):
     # Only the hydrogen variant names a next search.
     set_studio_surface(HYDROGEN_SURFACE if variant == "hydrogen" else FLASH_SURFACE)
     if variant == "default":
         step = None
+        retried = status in {"no_data", "unsupported"}
     reading: dict[str, Any] = {"variable": "climate finance", "status": status}
     if reason is not None:
         reading["reason"] = reason
@@ -697,8 +729,7 @@ async def test_a_part_the_users_words_cannot_repair_names_its_next_search(
         found = await tools["search"](ctx, [_RETRY_PART, other])
 
     assert [part.get("next_step") for part in found["parts"]] == [step, step]
-    if step is not None:
-        assert not any("retry_with_text" in part for part in found["parts"])
+    assert ["retry_with_text" in part for part in found["parts"]] == [retried, retried]
 
 
 async def test_a_text_search_is_offered_once_per_part_and_never_on_its_own_result():

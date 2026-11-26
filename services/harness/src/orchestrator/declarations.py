@@ -10,10 +10,9 @@ cleans it. The declarations are pinned byte for byte by the requests
 recorded in `tests/fixtures/orchestrator_requests`
 (`tests/orchestrator/test_declarations.py`).
 
-With `variant="hydrogen"` (`harness.surface.Surface`), the description edits
-and parameter descriptions `harness.orchestrator_tools` states for it
-(`HYDROGEN_DESCRIPTION_EDITS`, `HYDROGEN_PARAM_DESCRIPTIONS`) replace the
-tool's own. With `descriptions="minimal"`, the tool's description and each
+With `variant="hydrogen"` (`harness.surface.Surface`), the parameter
+descriptions `harness.orchestrator_tools` states for it
+(`HYDROGEN_PARAM_DESCRIPTIONS`) replace the tool's own. With `descriptions="minimal"`, the tool's description and each
 parameter description come from `orchestrator.minimal_surface`, and the
 name, types, enums, required fields and structure stay as built. A text the
 minimal surface lacks keeps the full one, logged once per process, unless
@@ -63,8 +62,6 @@ def tool_declaration(
     Raises:
         TypeError: A parameter is positional-only, `*args` or `**kwargs`, which
             no model call can fill by name.
-        ValueError: A `hydrogen` description edit does not match the tool's
-            description exactly once.
     """
     name = tool.__name__
     declaration = types.FunctionDeclaration(name=name, description=inspect.getdoc(tool) or None)
@@ -82,25 +79,16 @@ def tool_declaration(
 
 def _hydrogen(declaration: types.FunctionDeclaration) -> types.FunctionDeclaration:
     """`declaration` with `harness.orchestrator_tools`' `hydrogen` texts in
-    place of the parts of its description and the parameter descriptions they
-    name; everything else stays as built."""
+    place of the parameter descriptions they name; everything else stays as
+    built."""
     tools = importlib.import_module("harness.orchestrator_tools")
     name = declaration.name or ""
-    description = declaration.description or ""
-    for old, new in tools.HYDROGEN_DESCRIPTION_EDITS.get(name, ()):
-        if description.count(old) != 1:
-            raise ValueError(
-                f"{name}: the hydrogen edit of {old!r} matches it {description.count(old)} times"
-            )
-        description = description.replace(old, new)
     schema = declaration.parameters_json_schema
     texts = tools.HYDROGEN_PARAM_DESCRIPTIONS.get(name)
     if texts and isinstance(schema, dict):
         schema = copy.deepcopy(schema)
         _describe(schema, "", texts, schema.get("$defs", {}), name, set(), set(), partial=True)
-    return declaration.model_copy(
-        update={"description": description or None, "parameters_json_schema": schema}
-    )
+    return declaration.model_copy(update={"parameters_json_schema": schema})
 
 
 def _minimal(declaration: types.FunctionDeclaration) -> types.FunctionDeclaration:

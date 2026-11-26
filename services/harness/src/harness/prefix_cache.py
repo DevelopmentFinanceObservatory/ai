@@ -11,7 +11,9 @@ INVALID_ARGUMENT). The contents, thought signatures included, travel on the
 request as before. `harness.gemini_wire.GeminiStream` is that stream.
 
 `harness.server.create_app` builds one `PrefixCache` per process and hands it
-to the model constructors. Each Cloud Run instance creates its own cache per
+to the model constructors when `STUDIO_PREFIX_CACHE` is on and the model's
+surface allows an explicit cache (`harness.surface.surface_prefix_cache`);
+`gemini-4-hydrogen` takes none. Each Cloud Run instance creates its own cache per
 prefix, once per `CACHE_TTL_S`. A changed prompt or model is a new key, and
 the old cache expires on its TTL.
 

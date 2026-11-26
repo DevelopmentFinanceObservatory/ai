@@ -10,6 +10,7 @@ pinned byte for byte by the recorded requests in
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import logging
@@ -231,17 +232,41 @@ def test_the_server_builds_a_prefix_cache_only_for_a_model_that_takes_one(
     assert counted_prefix_cache.built == built
 
 
-@pytest.mark.parametrize(("model", "built"), [(_FLASH, 1), (_HYDROGEN, 0)])
+@pytest.mark.parametrize(
+    ("model", "arms", "built"),
+    [
+        (_FLASH, [], 1),
+        (_HYDROGEN, [], 0),
+        # An arm with edits keeps a cache of its own beside the shared one.
+        (_FLASH, ["baseline", "edited"], 2),
+        (_HYDROGEN, ["baseline", "edited"], 0),
+    ],
+)
 async def test_the_planner_entry_eval_builds_a_prefix_cache_only_for_a_model_that_takes_one(
-    monkeypatch, tmp_path, counted_prefix_cache, model, built
+    monkeypatch, tmp_path, counted_prefix_cache, model, arms, built
 ) -> None:
     monkeypatch.setenv("MODEL_NAME", model)
     monkeypatch.setenv("PLANNER_MODEL_NAME", model)
+    edited = dataclasses.replace(
+        planner_entry_run.ARMS["baseline"], name="edited", edits=(lambda request: None,)
+    )
+    monkeypatch.setitem(planner_entry_run.ARMS, "edited", edited)
+    # The eval names `PrefixCache` itself, so a cache it builds around the gate counts too.
+    monkeypatch.setattr(planner_entry_run, "PrefixCache", _CountedPrefixCache)
+    asked: list[Surface] = []
+
+    def gated(surface: Surface, *, enabled: bool) -> Any:
+        asked.append(surface)
+        return surface_prefix_cache(surface, enabled=enabled)
+
+    monkeypatch.setattr(planner_entry_run, "surface_prefix_cache", gated)
     args = argparse.Namespace(out=tmp_path, run_timeout=1.0, concurrency=1, passes=1, reps=1)
 
-    assert await planner_entry_run.run_all(args, [], []) == 0
+    assert await planner_entry_run.run_all(args, [], arms) == 0
 
-    assert studio_surface() == resolve_surface(model_name=model, planner_model_name=model)
+    surface = resolve_surface(model_name=model, planner_model_name=model)
+    assert studio_surface() == surface
+    assert asked == [surface]
     assert counted_prefix_cache.built == built
 
 
@@ -375,7 +400,7 @@ def test_minimal_make_charts_keeps_the_full_chart_texts(variant, path, rule) -> 
     tool = _tools()["make_charts"]
     minimal = tool_declaration(tool, variant=variant, descriptions="minimal")
 
-    # The variant's full text: v2's select_json under hydrogen.
+    # The variant's full text: HYDROGEN_SELECT_JSON_DESCRIPTION under hydrogen.
     assert _texts_at(minimal, path) == _texts_at(tool_declaration(tool, variant=variant), path)
     assert all(rule in text for text in _texts_at(minimal, path))
 
@@ -433,28 +458,16 @@ def test_hydrogen_changes_only_the_texts_it_names(name: str) -> None:
     tool = _tools()[name]
     default = tool_declaration(tool)
     hydrogen = tool_declaration(tool, variant="hydrogen")
-    edits = orchestrator_tools.HYDROGEN_DESCRIPTION_EDITS.get(name, ())
     params = orchestrator_tools.HYDROGEN_PARAM_DESCRIPTIONS.get(name, {})
 
     assert _without_descriptions(hydrogen.parameters_json_schema) == _without_descriptions(
         default.parameters_json_schema
     )
-    assert (hydrogen.description != default.description) == bool(edits)
-    for _, new in edits:
-        assert new in (hydrogen.description or "")
+    assert hydrogen.description == default.description
     changed = set(_descriptions(hydrogen.parameters_json_schema)) - set(
         _descriptions(default.parameters_json_schema)
     )
     assert changed == set(params.values())
-
-
-def test_a_hydrogen_edit_that_no_longer_matches_is_refused(monkeypatch) -> None:
-    monkeypatch.setattr(
-        orchestrator_tools, "HYDROGEN_DESCRIPTION_EDITS", {"search": (("no such text", "x"),)}
-    )
-
-    with pytest.raises(ValueError, match="matches it 0 times"):
-        tool_declaration(_tools()["search"], variant="hydrogen")
 
 
 # --- fingerprint ---------------------------------------------------------------------

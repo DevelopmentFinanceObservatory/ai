@@ -87,8 +87,8 @@ def revision() -> str:
 def experiment(arm: str, *, model: str, revision: str, run_timeout: float) -> str:
     """A digest of everything a run of `arm` is treated with besides its task: the arm,
     the model, the code at `revision`, the turn budget each request runs under
-    (`harness.turn_budget.TurnBudget`), the prefix cache, `PLANNER_RUNNER`, and the
-    eval's own time limit. Records of one arm in one run share it."""
+    (`harness.turn_budget.TurnBudget`), the prefix cache, the planner's thinking level,
+    `PLANNER_RUNNER`, and the eval's own time limit. Records of one arm in one run share it."""
     settings = Settings()
     treatment = {
         "arm": arm,
@@ -101,6 +101,7 @@ def experiment(arm: str, *, model: str, revision: str, run_timeout: float) -> st
         "model_first_chunk_s": settings.model_first_chunk_s,
         "prefix_cache": settings.studio_prefix_cache and studio_surface().explicit_cache,
         "planner_runner": PLANNER_RUNNER,
+        "planner_thinking_level": AgentSettings().planner_thinking_level,
     }
     return hashlib.sha256(json.dumps(treatment, sort_keys=True).encode()).hexdigest()[:16]
 

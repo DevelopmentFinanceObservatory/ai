@@ -36,10 +36,10 @@ Secrets come from Secret Manager in `dev-fin-observatory`:
 
 Everything else (`MODEL_NAME`, `DFO_APIS_URL`, `LANGFUSE_BASE_URL`, `PORT`) is a committed default in `.env.example`, so git distributes it. `just env` carries new keys into an existing `.env` on the next run, and `just doctor` reports when yours has fallen behind.
 
-Each key resolves in order: a value already in `.env`, then an exported shell variable, then Secret Manager. Existing values survive, so re-running `just env` after an edit is safe, and a one-off override needs no file edit:
+Each key resolves in order: a value already in `.env`, then an exported shell variable, then Secret Manager. Existing values survive, so re-running `just env` after an edit is safe, and a one-off override needs no file edit. Set `MODEL_NAME` and `PLANNER_MODEL_NAME` together, since the harness refuses two models on different surfaces:
 
 ```bash
-MODEL_NAME=gemini-3-pro just dev
+MODEL_NAME=gemini-3.8-flash PLANNER_MODEL_NAME=gemini-3.8-flash just dev
 ```
 
 With any Langfuse credential missing, the run starts anyway. Traces go to `OTEL_EXPORTER_OTLP_ENDPOINT` when it is set, and tracing is off otherwise. `/healthz` reports the resolved state as `telemetry: langfuse`, `otel` or `off`.

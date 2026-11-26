@@ -1230,6 +1230,16 @@ async def test_a_resume_under_another_experiment_is_refused(tmp_path: Path) -> N
         await run.run_all(args, [task], ["baseline"])
 
 
+def test_a_run_at_another_planner_thinking_level_is_another_experiment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def digest(level: str) -> str:
+        monkeypatch.setenv("PLANNER_THINKING_LEVEL", level)
+        return run.experiment("baseline", model="m", revision="r", run_timeout=300.0)
+
+    assert digest("LOW") != digest("HIGH")
+
+
 def _requirement_kinds(annotation: Any) -> set[str]:
     fields = getattr(annotation, "model_fields", None)
     if fields is not None:
